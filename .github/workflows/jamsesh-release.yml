@@ -33,10 +33,13 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 120
     env:
-      STAGE: ${{ runner.temp }}/jamsesh-stage
       VERSION: 0.1.${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
+
+      # The runner's temp folder isn't known at job level, so the staging folder is set here.
+      - name: Choose the staging folder
+        run: echo "STAGE=$RUNNER_TEMP/jamsesh-stage" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
