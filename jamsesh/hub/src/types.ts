@@ -279,6 +279,21 @@ export interface Settings {
   gatewayKeySource: "settings" | "env" | "none";
 }
 
+/** An agent asking to build its branch on the host. Nothing runs until a person approves it. */
+export interface BuildRequest {
+  id: string;
+  agentId: string;
+  agentName: string;
+  ownerName: string;
+  repo: string;
+  branch: string;
+  command: string;
+  open?: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  createdAt: number;
+  decidedBy?: string;
+}
+
 export interface HubState {
   session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string }[] };
   settings: Settings;
@@ -295,6 +310,7 @@ export interface HubState {
   shares: Share[];
   annotations: Annotation[];
   facts: Fact[];
+  buildRequests: BuildRequest[];
   digest: string;
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
 }

@@ -2057,3 +2057,95 @@ html[data-layout] .shr-scrim {
 .connect-app:hover {
   color: var(--text);
 }
+
+/* ---- Host build requests: an agent asks, a person answers (by voice or here) ---- */
+.build-requests {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: grid;
+  gap: 10px;
+  width: min(560px, calc(100vw - 32px));
+}
+.build-request {
+  background: var(--panel-2);
+  border: 1px solid rgba(245, 177, 76, 0.45);
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  display: grid;
+  gap: 10px;
+}
+.build-request-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 15px;
+  line-height: 1.4;
+}
+.build-request-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f5b14c;
+  flex: none;
+  transform: translateY(-1px);
+  animation: pulse 1.4s infinite;
+}
+.build-request-branch {
+  color: var(--muted);
+}
+.build-request-cmd {
+  display: block;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.build-request-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.build-request-say {
+  flex: 1;
+  color: var(--muted);
+  font-size: 13px;
+}
+.build-request-say b {
+  color: var(--text);
+}
+/* On the big screen: readable from across the room. */
+.build-requests.big {
+  top: auto;
+  bottom: clamp(24px, 4vh, 48px);
+  width: min(880px, calc(100vw - 64px));
+}
+.build-requests.big .build-request {
+  padding: 22px 26px;
+  gap: 14px;
+  border-radius: 22px;
+}
+.build-requests.big .build-request-head {
+  font-size: clamp(20px, 1.7vw, 30px);
+}
+.build-requests.big .build-request-cmd {
+  font-size: clamp(14px, 1.1vw, 18px);
+  padding: 10px 14px;
+}
+.build-requests.big .build-request-say {
+  font-size: clamp(16px, 1.3vw, 22px);
+}
+@media (max-width: 720px) {
+  .build-requests {
+    top: 112px;
+  }
+}

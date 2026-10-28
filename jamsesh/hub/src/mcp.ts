@@ -164,6 +164,20 @@ const JAM_TOOLS = [
     },
   },
   {
+    name: "jam_host_preview",
+    description:
+      "Ask the room to build your pushed branch on the host Mac and open it there: a desktop app, or an iPhone build in the Simulator. Nothing runs until a person in the room approves (they say \"approve\" or press Approve); you get a message with the answer. Push your branch first: the host clones your repository's remote. Use jam_devserver instead for anything that runs in a browser.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "The build command, run in the repository root on the host, for example 'npm ci && npm run tauri build -- --debug'" },
+        open: { type: "string", description: "What to open when it finishes: a path in the repository (for example 'src-tauri/target/debug/bundle/macos/App.app'), or 'simulator:<path to .app>' for an iPhone build" },
+        branch: { type: "string", description: "Defaults to the branch you joined with" },
+      },
+      required: ["command"],
+    },
+  },
+  {
     name: "jam_post_image",
     description:
       "Post a screenshot to the big screen and the session (for example your running build, to compare with its mockup). Prefer the HTTP upload in the skill for large files; base64 PNG or JPEG here is fine under 3 MB.",
@@ -438,6 +452,21 @@ export class McpEndpoint {
       case "jam_agents": {
         this.requireAgent(ctx);
         return text(this.roster());
+      }
+      case "jam_host_preview": {
+        const agent = this.requireAgent(ctx);
+        if (!s.settings().hostControl) return text("Host control is turned off on the host, so it can't build previews. Use jam_devserver for a web build, or ask the room to turn host control on.");
+        const r = this.hub.host.request({
+          agentId: agent.id,
+          agentName: agent.name,
+          ownerName: agent.ownerName,
+          repo: agent.repo,
+          branch: String(args.branch ?? agent.branch ?? ""),
+          command: String(args.command ?? ""),
+          open: args.open ? String(args.open) : undefined,
+        });
+        if (typeof r === "string") return text(r);
+        return text(`Asked the room (request ${r.id}). The host announces it and waits for a person to approve. You'll get a message with the answer; carry on meanwhile.`);
       }
       case "jam_devserver": {
         const agent = this.requireAgent(ctx);

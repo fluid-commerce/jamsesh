@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { bus } from "./bus";
 import { config } from "./config";
 import type { Session } from "./session";
+import type { BuildRequest } from "./types";
+
+const REQUEST_TTL_MS = 10 * 60_000;
 
 export interface HostAction {
   action: "open_app" | "open_url" | "arrange" | "simulator" | "shell" | "focus_jamsesh" | "windows";
@@ -85,6 +88,9 @@ export class HostControl {
   displays: Display[] = [];
   bigScreen: BigScreen | null = null;
   private builds = new Map<string, { started: number; label: string }>();
+  private requests = new Map<string, BuildRequest>();
+  /** Set by the hub: tell the room and the agent when a request arrives or is decided. */
+  onRequest: (r: BuildRequest) => void = () => {};
 
   constructor(private session: Session) {
     if (process.platform === "darwin") {
@@ -207,6 +213,49 @@ export class HostControl {
     }
     this.log(`Arranged ${apps.join(", ")} ${layout} on ${target.name}.`);
     return problems.length ? `Arranged with problems: ${problems.join("; ")}` : `Arranged ${apps.join(", ")} on ${target.name} (${w}×${h} each).`;
+  }
+
+  /** Requests the room hasn't answered, plus ones decided in the last minute (for the screens). */
+  buildRequests(): BuildRequest[] {
+    const now = Date.now();
+    return [...this.requests.values()].filter((r) => r.status === "pending" || now - r.createdAt < REQUEST_TTL_MS + 60_000).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  pendingRequests() {
+    return [...this.requests.values()].filter((r) => r.status === "pending");
+  }
+
+  /** An agent asks to build on the host. Nothing runs until a person approves it. */
+  request(r: Omit<BuildRequest, "id" | "status" | "createdAt">): BuildRequest | string {
+    if (!/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(r.repo)) return "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
+    if (!r.command.trim()) return "Give the build command.";
+    const dup = this.pendingRequests().find((p) => p.agentId === r.agentId);
+    if (dup) return `You already have a build request waiting for the room (${dup.id}).`;
+    const req: BuildRequest = { ...r, id: `build-${Math.random().toString(36).slice(2, 7)}`, status: "pending", createdAt: Date.now() };
+    this.requests.set(req.id, req);
+    setTimeout(() => {
+      if (req.status !== "pending") return;
+      req.status = "expired";
+      this.onRequest(req);
+    }, REQUEST_TTL_MS).unref?.();
+    this.onRequest(req);
+    return req;
+  }
+
+  /**
+   * A person approved or denied a request (by voice through the brain, or a button). `saidAt` is
+   * when they said it: words only count for requests that were already waiting then.
+   */
+  decide(id: string, approve: boolean, by: string, saidAt = Date.now()): string {
+    const req = this.requests.get(id) ?? this.pendingRequests().find((r) => r.id.endsWith(id));
+    if (!req) return "There's no build request with that id.";
+    if (req.status !== "pending") return `That request was already ${req.status}.`;
+    if (req.createdAt > saidAt) return `${by} spoke before this request arrived, so it's still waiting for an answer.`;
+    req.status = approve ? "approved" : "denied";
+    req.decidedBy = by;
+    this.onRequest(req);
+    if (!approve) return `Denied ${req.agentName}'s build.`;
+    return this.preview({ repo: req.repo, branch: req.branch, command: req.command, open: req.open, by: `${req.agentName} (approved by ${by})` });
   }
 
   /**

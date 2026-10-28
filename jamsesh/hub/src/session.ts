@@ -21,7 +21,7 @@ import type {
   Share,
   Stage,
   Workstream,
-} from "./types";
+ BuildRequest } from "./types";
 
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
@@ -117,6 +117,9 @@ export class Session {
 
   // ---- state for the views ----
 
+  /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
+  buildRequests: () => BuildRequest[] = () => [];
+
   state(): HubState {
     return {
       session: { name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
@@ -134,6 +137,7 @@ export class Session {
       shares: this.shares(),
       annotations: this.annotations(),
       facts: this.facts(),
+      buildRequests: this.buildRequests(),
       digest: this.store.digest("session")?.text ?? "",
       brain: this.brainStatus,
     };

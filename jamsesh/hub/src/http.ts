@@ -469,6 +469,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json(Object.keys(s.saveLayout(String(body.name))));
   }
 
+  // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.
+  m = path.match(/^\/build-requests\/([\w-]+)$/);
+  if (m && req.method === "POST") {
+    if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can approve host builds.", 403);
+    const personId = (paired?.personId ?? body?.personId) as string | undefined;
+    const by = (personId && s.person(personId)?.name) || (isLocal(ip) ? "the host" : "someone in the room");
+    return json({ result: hub.host.decide(m[1], body?.approve === true, by) });
+  }
+
   // The big screen reports its size so the brain can plan layouts for its shape.
   if (path === "/display" && req.method === "POST" && isLocal(ip)) {
     const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0);

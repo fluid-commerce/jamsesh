@@ -17,7 +17,9 @@ import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, Platform, Utterance } from "./types";
+import type { Agent, Annotation, Artifact, BuildRequest, Platform, Utterance } from "./types";
+import { speak } from "./brain/speech";
+import { bus } from "./bus";
 
 /** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
 export interface PointerMark {
@@ -93,6 +95,8 @@ export class Hub {
     this.awake = new KeepAwake(() => this.peopleOnline + this.session.agents().filter((a) => a.status !== "offline" && Date.now() - a.lastSeen < 10 * 60_000).length);
     this.session = new Session(this.store);
     this.host = new HostControl(this.session);
+    this.session.buildRequests = () => this.host.buildRequests();
+    this.host.onRequest = (r) => this.onBuildRequest(r);
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session);
     this.audio = new AudioPipeline(this.session, this.transcriber);
@@ -315,6 +319,24 @@ export class Hub {
     });
     this.brain.artifactsLanded([art]);
     return art;
+  }
+
+  // ---------- host build requests (approved by people, by voice or a button) ----------
+
+  private onBuildRequest(r: BuildRequest) {
+    const s = this.session;
+    const what = `${r.repo.replace(/\.git$/, "").split(/[/:]/).pop()}${r.branch ? ` (${r.branch})` : ""}`;
+    if (r.status === "pending") {
+      s.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${r.agentName} asks to build ${what} on the host: ${r.command}. Say "approve" or "deny".`, relevance: "work", data: { buildRequest: r.id } });
+      // Said out loud: often nobody is at the host to click anything.
+      void speak(s, `${r.agentName} wants to build ${what} on the host. Approve or deny?`, { source: "voice", kind: "answer" });
+    } else {
+      const outcome = r.status === "approved" ? `approved by ${r.decidedBy}; it's building on the host now and opens when it's done` : r.status === "denied" ? `denied by ${r.decidedBy}` : "not answered in 10 minutes, so it expired";
+      if (r.status !== "approved") bus.send({ type: "toast", tone: "info", text: r.status === "denied" ? `Denied ${r.agentName}'s build` : `${r.agentName}'s build request expired`, detail: r.decidedBy ? `By ${r.decidedBy}` : undefined });
+      s.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Your host build request for ${what} was ${outcome}.`, relevance: "work", data: { to: r.agentId, toName: r.agentName, buildRequest: r.id } });
+      s.wake(r.agentId);
+    }
+    bus.changed("session");
   }
 
   // ---------- Claude Code hooks ----------

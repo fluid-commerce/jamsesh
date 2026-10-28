@@ -12,6 +12,7 @@ import { PinLayer, useAnnotateMode, type PinTarget } from "./shared/annotate";
 import { pref } from "./shared/hub";
 import { registerServiceWorker } from "./shared/offline";
 import { ConnectionBanner } from "./shared/ConnectionBanner";
+import { BuildRequests } from "./shared/BuildRequests";
 
 function PinSlot({ target }: { target: PinTarget }) {
   const mode = useAnnotateMode();
@@ -32,5 +33,6 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : isHost ? <HostView /> : <ClientView />}
     {!isConnect && !isSetup && <ConnectionBanner />}
+    {!isConnect && !isSetup && <BuildRequests big={isHost} />}
   </StrictMode>,
 );
