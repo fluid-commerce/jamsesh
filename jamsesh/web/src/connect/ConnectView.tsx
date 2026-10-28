@@ -34,11 +34,16 @@ export function ConnectView() {
     }
   }
 
-  const type = (i: number, v: string) => {
-    const letters = v.toUpperCase().split("").filter((c) => ALPHABET.test(c));
+  // A box holds one character. Typing into a filled box leaves "old+new"; a paste brings the whole code.
+  const type = (i: number, v: string, pasted = false) => {
+    let letters = v.toUpperCase().split("").filter((c) => ALPHABET.test(c));
     if (!letters.length) return;
+    let at = i;
+    if (pasted || letters.length > 2) at = 0;
+    else if (letters.length === 2 && chars[i]) letters = letters.slice(-1);
+    letters = letters.slice(0, 4);
     const nextChars = [...chars];
-    let j = i;
+    let j = at;
     for (const c of letters) if (j < 4) nextChars[j++] = c;
     setChars(nextChars);
     if (nextChars.every(Boolean)) submit(nextChars.join(""));
@@ -55,7 +60,7 @@ export function ConnectView() {
         </svg>
         <h1>Join {info?.name ?? "the session"}</h1>
         <p>Enter the code under the QR code on the big screen. It changes every 30 seconds.</p>
-        <div className={`code-boxes ${state}`} onPaste={(e) => (e.preventDefault(), type(0, e.clipboardData.getData("text")))}>
+        <div className={`code-boxes ${state}`} onPaste={(e) => (e.preventDefault(), type(0, e.clipboardData.getData("text"), true))}>
           {chars.map((c, i) => (
             <input
               key={i}
@@ -63,13 +68,18 @@ export function ConnectView() {
                 boxes.current[i] = el;
               }}
               value={c}
+              type="text"
               inputMode="text"
+              enterKeyHint="go"
               autoCapitalize="characters"
-              autoComplete="one-time-code"
+              autoCorrect="off"
+              autoComplete={i === 0 ? "one-time-code" : "off"}
+              spellCheck={false}
               aria-label={`Code character ${i + 1}`}
-              maxLength={4}
+              maxLength={i === 0 ? 4 : 2}
               disabled={state === "joining"}
               onChange={(e) => type(i, e.target.value)}
+              onFocus={(e) => e.target.select()}
               onKeyDown={(e) => {
                 if (e.key === "Backspace" && !chars[i] && i > 0) {
                   const n = [...chars];
@@ -81,9 +91,29 @@ export function ConnectView() {
             />
           ))}
         </div>
+        <button
+          type="button"
+          className="connect-paste"
+          disabled={state === "joining"}
+          onClick={async () => {
+            try {
+              type(0, await navigator.clipboard.readText(), true);
+            } catch {
+              boxes.current[chars.findIndex((c) => !c) === -1 ? 0 : chars.findIndex((c) => !c)]?.focus();
+            }
+          }}
+        >
+          Paste code
+        </button>
         <div className="connect-status" role="status">
           {state === "joining" ? "Connecting…" : state === "error" ? error : "Letters and numbers only; capitals don't matter."}
         </div>
+        {/* A Mac in a browser (not already inside the app, which shows this page from 127.0.0.1). */}
+        {/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints === 0 && location.hostname !== "127.0.0.1" && (
+          <a className="connect-app" href="/download/mac">
+            On a Mac? Get the JamSesh app
+          </a>
+        )}
       </div>
     </div>
   );

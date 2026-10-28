@@ -106,8 +106,8 @@ export function ConnectionBanner() {
 }
 
 const CSS = `
-.cxb{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:80;display:flex;align-items:center;gap:10px;
-  max-width:calc(100vw - 32px);padding:9px 14px;border-radius:999px;white-space:nowrap;overflow:hidden;
+.cxb{position:fixed;left:50%;bottom:calc(var(--kb,0px) + var(--dock-h,0px) + 18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:80;display:flex;align-items:center;gap:10px;
+  max-width:calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));padding:9px 14px;border-radius:999px;white-space:nowrap;overflow:hidden;
   background:color-mix(in srgb,var(--panel-2) 90%,transparent);backdrop-filter:blur(16px) saturate(1.2);-webkit-backdrop-filter:blur(16px) saturate(1.2);
   border:1px solid var(--line-2);box-shadow:0 14px 44px rgba(0,0,0,.5),0 0 0 1px rgba(0,0,0,.25);
   font-size:13px;line-height:1.2;color:var(--text);animation:cxb-in .38s var(--ease) both;pointer-events:auto}
@@ -120,11 +120,11 @@ const CSS = `
 .cxb-title{flex:none;font-weight:600;letter-spacing:-.005em}
 .cxb-sub,.cxb-meta{color:var(--muted);overflow:hidden;text-overflow:ellipsis;min-width:0}
 .cxb-meta{flex:none;font-family:var(--mono);font-size:11.5px;color:var(--dim);padding-left:10px;border-left:1px solid var(--line-2)}
-.cxb-btn{flex:none;margin-left:4px;padding:7px 13px;border-radius:999px;border:0;background:var(--text);color:var(--bg);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;text-decoration:none;transition:transform .15s var(--ease),opacity .15s}
+.cxb-btn{flex:none;margin-left:4px;padding:7px 13px;min-height:32px;display:inline-flex;align-items:center;border-radius:999px;border:0;background:var(--text);color:var(--bg);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;text-decoration:none;transition:transform .15s var(--ease),opacity .15s}
 .cxb-btn:hover{transform:translateY(-1px);opacity:.92}
 .cxb-btn:focus-visible{outline:2px solid var(--decision);outline-offset:2px}
 @keyframes cxb-in{from{opacity:0;transform:translate(-50%,10px) scale(.97)}to{opacity:1;transform:translate(-50%,0) scale(1)}}
 @keyframes cxb-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,181,74,.45)}50%{box-shadow:0 0 0 6px rgba(255,181,74,0)}}
-@media (max-width:720px){.cxb-sub{display:none}}
+@media (max-width:720px){.cxb-sub{display:none}.cxb{bottom:calc(var(--kb,0px) + var(--dock-h,0px) + 10px)}.cxb-quiet{display:none}}
 @media (prefers-reduced-motion:reduce){.cxb,.cxb-dot{animation:none!important}}
 `;

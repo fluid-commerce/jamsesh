@@ -1,0 +1,42 @@
+[package]
+name = "jamsesh-app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "JamSesh for Mac: host a session or join one"
+
+# Its own workspace: the Mac app isn't part of FigCraft's CI (no wasm, no layering rules).
+[workspace]
+
+[[bin]]
+name = "jamsesh-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync", "process"] }
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1", "server"] }
+http-body-util = "0.1"
+bytes = "1"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-roots", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+mdns-sd = "0.13"
+keyring = { version = "3", features = ["apple-native"] }
+url = "2"
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
+block2 = "0.6"
+
+[profile.release]
+strip = true
+lto = "thin"

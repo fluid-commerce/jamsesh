@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>JamSesh</title>
+    <style>
+      :root {
+        --bg: #0c0d0f;
+        --panel: #16181b;
+        --panel-2: #1c1f23;
+        --panel-3: #24282d;
+        --line: rgba(255, 255, 255, 0.07);
+        --line-2: rgba(255, 255, 255, 0.12);
+        --text: #f3f2ef;
+        --muted: #a3a6ac;
+        --faint: #6d7076;
+        --accent: #3e8bff;
+        --warn: #ff6b5e;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; }
+      main { height: 100%; display: flex; flex-direction: column; padding: 40px 36px 28px; gap: 28px; }
+      header { display: flex; align-items: center; gap: 14px; }
+      header svg { width: 44px; height: 44px; flex: none; }
+      h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }
+      header p { margin: 2px 0 0; color: var(--muted); }
+      h2 { margin: 0 0 10px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
+      .list { display: grid; gap: 8px; }
+      .host { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--panel); color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background 0.12s, border-color 0.12s; }
+      .host:hover { background: var(--panel-2); border-color: rgba(255, 255, 255, 0.2); }
+      .host .dot { width: 8px; height: 8px; border-radius: 50%; background: #45e0a0; box-shadow: 0 0 0 4px rgba(69, 224, 160, 0.14); flex: none; }
+      .host .what { flex: 1; min-width: 0; }
+      .host .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .host .sub { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .host .go { color: var(--muted); font-size: 13px; white-space: nowrap; }
+      .empty { padding: 14px; border-radius: 12px; border: 1px dashed var(--line-2); color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 10px; }
+      .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--muted); animation: spin 0.9s linear infinite; flex: none; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      form { display: flex; gap: 8px; margin-top: 10px; }
+      input { flex: 1; min-width: 0; height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel); color: var(--text); font: inherit; outline: none; user-select: text; -webkit-user-select: text; }
+      input:focus { border-color: var(--accent); }
+      input::placeholder { color: var(--faint); }
+      button.btn { height: 40px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; }
+      button.btn:hover { background: var(--panel-3); }
+      button.primary { background: var(--text); color: #111; border-color: transparent; }
+      button.primary:hover { background: #fff; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .hostcard { margin-top: auto; display: flex; align-items: center; gap: 14px; padding: 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); }
+      .hostcard .what { flex: 1; min-width: 0; }
+      .hostcard .title { font-weight: 600; }
+      .hostcard .sub { color: var(--muted); font-size: 12.5px; }
+      .error { min-height: 20px; color: var(--warn); font-size: 13px; margin-top: 8px; }
+      .busy { position: fixed; inset: 0; display: none; place-items: center; background: rgba(12, 13, 15, 0.86); }
+      .busy.on { display: grid; }
+      .busy div { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="116" fill="#1c1f23" /><circle cx="188" cy="256" r="104" fill="#FF6B4A" /><circle cx="324" cy="256" r="104" fill="#3E8BFF" fill-opacity=".9" /></svg>
+        <div>
+          <h1>JamSesh</h1>
+          <p>Your room, your team, and everyone's agents on one canvas.</p>
+        </div>
+      </header>
+
+      <section>
+        <h2>Join a session</h2>
+        <div class="list" id="hosts"></div>
+        <form id="manual">
+          <input id="addr" placeholder="Or type the address on the big screen" autocomplete="off" spellcheck="false" />
+          <button class="btn" type="submit">Join</button>
+        </form>
+        <div class="error" id="error"></div>
+      </section>
+
+      <div class="hostcard">
+        <div class="what">
+          <div class="title">Host a session on this Mac</div>
+          <div class="sub" id="hostsub">Runs the session here and opens the big screen.</div>
+        </div>
+        <button class="btn" id="host">Host</button>
+      </div>
+    </main>
+    <div class="busy" id="busy"><div><span class="spinner"></span><span id="busytext">Connecting…</span></div></div>
+
+    <script>
+      const invoke = window.__TAURI__.core.invoke;
+      const $ = (id) => document.getElementById(id);
+      let info = null;
+      let found = [];
+
+      function busy(text) {
+        $("busy").classList.toggle("on", !!text);
+        if (text) $("busytext").textContent = text;
+      }
+
+      async function run(text, fn) {
+        $("error").textContent = "";
+        busy(text);
+        try {
+          await fn();
+        } catch (e) {
+          $("error").textContent = String(e);
+        } finally {
+          busy("");
+        }
+      }
+
+      function joinRow(name, sub, url, label) {
+        const b = document.createElement("button");
+        b.className = "host";
+        b.innerHTML = `<span class="dot"></span><span class="what"><div class="name"></div><div class="sub"></div></span><span class="go"></span>`;
+        b.querySelector(".name").textContent = name;
+        b.querySelector(".sub").textContent = sub;
+        b.querySelector(".go").textContent = label;
+        b.onclick = () => run(`Connecting to ${name}…`, () => invoke("join", { url, name }));
+        return b;
+      }
+
+      function render() {
+        const list = $("hosts");
+        list.replaceChildren();
+        const urls = new Set(found.map((h) => h.url));
+        for (const h of found) list.append(joinRow(h.name, [h.session, h.url.replace(/^https?:\/\//, "")].filter(Boolean).join(" · "), h.url, "Join"));
+        if (info?.lastHost && !urls.has(info.lastHost)) {
+          list.append(joinRow(info.lastHostName || info.lastHost.replace(/^https?:\/\//, ""), `Last time · ${info.lastHost.replace(/^https?:\/\//, "")}`, info.lastHost, "Rejoin"));
+        }
+        if (!list.children.length) {
+          const e = document.createElement("div");
+          e.className = "empty";
+          e.innerHTML = `<span class="spinner"></span><span>Looking for sessions on this network…</span>`;
+          list.append(e);
+        }
+      }
+
+      async function poll() {
+        try {
+          const next = await invoke("nearby_hosts");
+          if (JSON.stringify(next) !== JSON.stringify(found)) {
+            found = next;
+            render();
+          }
+        } catch {}
+      }
+
+      $("manual").onsubmit = (e) => {
+        e.preventDefault();
+        const url = $("addr").value.trim();
+        if (!url) return $("addr").focus();
+        run("Connecting…", () => invoke("join", { url, name: null }));
+      };
+      $("host").onclick = () => run("Starting the session…", () => invoke("host_here"));
+
+      (async () => {
+        info = await invoke("start_info");
+        if (!info.canHost) {
+          $("host").disabled = true;
+          $("hostsub").textContent = info.hostProblem;
+        }
+        render();
+        poll();
+        setInterval(poll, 1000);
+      })();
+    </script>
+  </body>
+</html>

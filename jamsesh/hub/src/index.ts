@@ -2,6 +2,7 @@
 import { config } from "./config";
 import { Hub } from "./hub";
 import { startHttp } from "./http";
+import { advertise, stopAdvertising } from "./bonjour";
 
 const args = new Set(process.argv.slice(2));
 const hub = new Hub({ canvas: !args.has("--no-canvas"), whisper: !args.has("--no-whisper") });
@@ -23,7 +24,9 @@ const startSecure = () => {
   }
 };
 startSecure();
-hub.net.onCertChange(startSecure);
+const announce = () => advertise(config.port, { session: hub.session.settings().sessionName, https: hub.net.status().publicUrl });
+hub.net.onCertChange(() => (startSecure(), announce()));
+announce();
 
 console.log(`
   JamSesh is live: ${hub.session.settings().sessionName}
@@ -40,6 +43,7 @@ const shutdown = async () => {
   if (stopping) return process.exit(0);
   stopping = true;
   console.log("Saving the session…");
+  stopAdvertising();
   await hub.shutdown();
   secure?.stop(true);
   server.stop(true);

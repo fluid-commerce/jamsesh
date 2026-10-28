@@ -79,13 +79,17 @@ export function joinScript(hub: Hub, origin?: string, token = "") {
   return `#!/usr/bin/env bash
 # JamSesh: set up this computer's agents for the host at ${HUB} (run by the agent after pairing).
 set -euo pipefail
+# Everything runs inside main, read in full before it starts: piped into bash, a command that
+# reads standard input (claude mcp does) would otherwise swallow the rest of this script.
+main() {
 HUB="${HUB}"
 TOKEN="${token}"
 DIR="$HOME/.jamsesh"
 mkdir -p "$DIR"
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
-[ -n "$TOKEN" ] || { echo "Missing token: pair first at $HUB/agent?c=<code>" >&2; exit 1; }
+# Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
+case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing token: pair first at $HUB/agent?c=<code>" >&2; exit 1; } ;; esac
 NAME="\${JAMSESH_NAME:-}"
 if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(. "$DIR/client.env"; echo "\${JAMSESH_NAME:-}")"; fi
 
@@ -114,7 +118,7 @@ Join the JamSesh room session and work as part of it.
 
 1. Load the jamsesh skill and follow it for the rest of this session.
 2. Find this repository's remote (git remote get-url origin), branch, and what it builds (desktop, mobile, web, backend, or design).
-3. Call jam_join (owner: JAMSESH_NAME from ~/.jamsesh/client.env, harness: claude-code, cwd: this directory). Use this as the focus: $ARGUMENTS
+3. Call jam_join (harness: claude-code, cwd: this directory; add owner only if jam_join asks). Use this as the focus: $ARGUMENTS
 4. Post your repo card with jam_repo_card, jam_claim your workstream, and tell me in two lines who else is here and what's open.
 5. Then do the work. When you're idle, call jam_wait so the room can reach you.
 CMD
@@ -152,11 +156,32 @@ open(path, "w").write(text)
 os.chmod(path, 0o600)
 PY
   curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
-  printf '\\n\\nJoin now: call jam_join (owner from ~/.jamsesh/client.env JAMSESH_NAME, harness codex, cwd this directory), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
+  printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
+  # "connect to jamsesh" in any Codex session: a marked block in Codex's global instructions.
+  python3 - "$HOME/.codex/AGENTS.md" <<'PY'
+import sys, re
+path = sys.argv[1]
+try:
+    text = open(path).read()
+except FileNotFoundError:
+    text = ""
+block = """<!-- jamsesh:start -->
+## JamSesh
+
+When your person says "connect to jamsesh", "join jamsesh", or "join the session", read
+~/.codex/prompts/jamsesh.md and follow it: it connects you to the room session through the
+\`jamsesh\` MCP tools. If those tools fail to connect, tell your person to open the JamSesh app and
+host or join a session.
+<!-- jamsesh:end -->"""
+text = re.sub(r"\\n*<!-- jamsesh:start -->.*?<!-- jamsesh:end -->\\n*", "\\n", text, flags=re.S).rstrip()
+open(path, "w").write((text + "\\n\\n" if text else "") + block + "\\n")
+PY
   ok "Codex: MCP server and /jamsesh prompt"
 else
   skip "Codex isn't installed"
 fi
-echo "Done. Restart Claude Code or Codex (or run /mcp and reconnect jamsesh), then type /jamsesh."
+echo "Done. Restart Claude Code or Codex (or run /mcp and reconnect jamsesh), then tell it: connect to jamsesh."
+}
+main "$@" </dev/null
 `;
 }

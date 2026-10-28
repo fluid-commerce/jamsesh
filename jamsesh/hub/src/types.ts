@@ -158,7 +158,7 @@ export interface DevServer {
   up: boolean;
 }
 
-export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome";
+export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";
 
 /** One cell of a layout the brain (or a person) puts on the big screen. */
 export type Tile =

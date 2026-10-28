@@ -30,7 +30,7 @@ const JAM_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        owner: { type: "string", description: "Your person's first name (who you work for), as they're known in the room" },
+        owner: { type: "string", description: "Your person's first name (who you work for), as they're known in the room. Leave it out when you joined through the JamSesh app; the room already knows whose Mac this is." },
         harness: { type: "string", enum: ["claude-code", "codex", "other"] },
         repo: { type: "string", description: "Repository name or remote URL" },
         branch: { type: "string" },
@@ -39,7 +39,7 @@ const JAM_TOOLS = [
         focus: { type: "string", description: "One line: what you're working on today" },
         name: { type: "string", description: "Optional display name; default is \"<Owner>'s Claude\" or \"<Owner>'s Codex\"" },
       },
-      required: ["owner", "harness", "repo", "cwd", "platform"],
+      required: ["harness", "repo", "cwd", "platform"],
     },
   },
   {
@@ -217,6 +217,8 @@ const JAM_TOOLS = [
   },
 ];
 
+const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+
 export class McpEndpoint {
   private sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; ctx: Ctx }>();
   private canvasTools: { name: string; description?: string; inputSchema?: any }[] = [];
@@ -309,8 +311,14 @@ export class McpEndpoint {
       case "jam_join": {
         // The paired device identifies the machine (an address can change between networks).
         const machine = ctx.device ?? (ctx.ip === "127.0.0.1" || ctx.ip === "::1" ? "host" : ctx.ip);
+        // Through the Mac app, the paired device already belongs to a person.
+        const onHost = ctx.device === "host" || (!ctx.device && machineIsHost(ctx.ip));
+        const ownerId = onHost ? s.store.setting<string>("hostPersonId", "") : ctx.device ? this.hub.auth.list().find((d) => d.id === ctx.device)?.personId : undefined;
+        const pairedOwner = ownerId ? s.person(ownerId)?.name : undefined;
+        const ownerName = String(args.owner || pairedOwner || "");
+        if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
         const { agent, resumed } = s.registerAgent({
-          ownerName: String(args.owner ?? ""),
+          ownerName,
           harness: args.harness ?? "other",
           repo: String(args.repo ?? ""),
           branch: args.branch,
@@ -434,7 +442,9 @@ export class McpEndpoint {
       case "jam_devserver": {
         const agent = this.requireAgent(ctx);
         let url = String(args.url);
-        const remote = agent.machine !== "host" ? agent.machine : "127.0.0.1";
+        // The address this agent reaches the host from (its laptop's LAN address, or the host itself).
+        const ip = ctx.ip.replace(/^::ffff:/, "");
+        const remote = machineIsHost(ip) ? "127.0.0.1" : ip;
         url = url.replace(/\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(?=[:/])/, `//${remote}`);
         if (!/^[a-z]+:\/\//.test(url)) url = url.replace(/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(?=:)/, remote);
         const d = await this.hub.devproxy.register({ agentId: agent.id, name: String(args.name), target: url, platform: args.platform });

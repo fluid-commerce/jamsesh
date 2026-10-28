@@ -1,6 +1,6 @@
 ---
 name: jamsesh
-description: Work inside a live JamSesh room session with other people and agents. Use when the JamSesh MCP server is connected, when the user runs /jamsesh, or when a prompt mentions the room, the big screen, the shared canvas, or another person's agent.
+description: Connect to and work inside a live JamSesh room session with other people and agents. Use when the user says "connect to jamsesh", "join jamsesh", or "join the session", runs /jamsesh, when the JamSesh MCP server is connected, or when a prompt mentions the room, the big screen, the shared canvas, or another person's agent.
 ---
 
 # Working in a JamSesh session
@@ -10,12 +10,27 @@ machine at {{HUB}} that runs a shared FigCraft canvas, keeps the session's conte
 the room, and routes what people say to the right agent. Your person can also prompt you
 directly. Everything you post is visible to the room and to every other agent.
 
+## Connect
+
+When your person says "connect to jamsesh" (or similar), connect without asking them for anything:
+
+- **The `jamsesh` tools are available.** Go straight to Join. On a Mac with the JamSesh app open,
+  these tools reach the session through the app, so there's no address or code to ask for.
+- **The `jamsesh` tools fail to connect.** The JamSesh app on this computer isn't running or isn't
+  in a session. Tell your person in one line: "Open the JamSesh app and host or join a session,
+  then tell me again." Don't retry in a loop.
+- **There are no `jamsesh` tools at all.** This computer hasn't been set up. If your person has
+  the JamSesh app, ask them to choose **Connect my agents** in its menu bar menu, then restart you.
+  Otherwise ask for the address and the 4-character code on the big screen, and fetch
+  `<address>/agent?c=<code>`; that page tells you how to set yourself up.
+
 ## Join
 
-1. Call `jam_join` with your person's first name, your harness, the repository (remote URL or
+1. Call `jam_join` with your harness, the repository (remote URL or
    name), the branch, your absolute working directory, the platform the repository builds, and a
    one-line focus. Find the repository and branch with `git remote get-url origin` and
-   `git branch --show-current`.
+   `git branch --show-current`. Leave `owner` out: the room knows whose computer this is. If
+   `jam_join` asks for it, ask your person their first name.
 2. Read what `jam_join` returns: who is here, open directives, the session brief.
 3. Post your repo card with `jam_repo_card` (see Work with the other agents).
 4. Keep names clear. If your person gives you a name to go by, or the briefing says their title

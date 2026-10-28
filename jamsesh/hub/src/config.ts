@@ -4,6 +4,9 @@ import { join, resolve } from "node:path";
 
 const HOME = process.env.JAMSESH_HOME ?? join(homedir(), ".jamsesh");
 const REPO = resolve(import.meta.dir, "../../..");
+/** Set by the Mac app: the hub's files inside the app bundle (web app, canvas, skill, binaries). */
+const RES = process.env.JAMSESH_RESOURCES;
+const res = (...p: string[]) => (RES ? join(RES, ...p) : undefined);
 
 function firstExisting(...paths: (string | undefined)[]): string | undefined {
   return paths.find((p) => p && existsSync(p));
@@ -77,17 +80,22 @@ export const config = {
   figcraftBin:
     firstExisting(
       process.env.JAMSESH_FIGCRAFT_BIN_DIR && join(process.env.JAMSESH_FIGCRAFT_BIN_DIR, "figcraft-cli"),
+      res("bin", "figcraft-cli"),
       join(HOME, "bin", "figcraft-cli"),
       join(REPO, "target", "release", "figcraft-cli"),
     ) ?? "figcraft-cli",
   figcraftServerBin:
     firstExisting(
       process.env.JAMSESH_FIGCRAFT_BIN_DIR && join(process.env.JAMSESH_FIGCRAFT_BIN_DIR, "figcraft-server"),
+      res("bin", "figcraft-server"),
       join(HOME, "bin", "figcraft-server"),
       join(REPO, "target", "release", "figcraft-server"),
     ) ?? "figcraft-server",
-  webDist: firstExisting(join(REPO, "jamsesh", "web", "dist")),
-  canvasDist: firstExisting(join(HOME, "web-canvas"), join(REPO, "dist", "web")),
+  webDist: firstExisting(res("web"), join(REPO, "jamsesh", "web", "dist")),
+  canvasDist: firstExisting(res("canvas"), join(HOME, "web-canvas"), join(REPO, "dist", "web")),
+  skillFile: firstExisting(res("skill", "SKILL.md"), join(REPO, "jamsesh", "skill", "SKILL.md")) ?? join(REPO, "jamsesh", "skill", "SKILL.md"),
+  /** Where the voiceprint library is installed (the app ships it next to the hub). */
+  nodeModules: firstExisting(res("node_modules")),
   whisperServerBin: firstExisting(process.env.JAMSESH_WHISPER_SERVER, "/opt/homebrew/bin/whisper-server", "/usr/local/bin/whisper-server"),
   whisperModel: firstExisting(
     process.env.JAMSESH_WHISPER_MODEL,
@@ -96,7 +104,7 @@ export const config = {
     join(homedir(), ".cache/whisper-cpp/ggml-medium.en.bin"),
     join(homedir(), ".cache/whisper-cpp/ggml-base.en.bin"),
   ),
-  speakerModel: firstExisting(join(HOME, "models", "wespeaker_en.onnx")),
+  speakerModel: firstExisting(join(HOME, "models", "wespeaker_en.onnx"), res("models", "wespeaker_en.onnx")),
 };
 
 export type Config = typeof config;

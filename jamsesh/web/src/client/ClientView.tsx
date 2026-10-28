@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "../host/HostView";
 import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState } from "../shared/hub";
 import { playChime } from "../shared/sound";
@@ -6,6 +6,7 @@ import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
+import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
 import { Stage } from "../host/Stage";
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
@@ -13,6 +14,7 @@ import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMo
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
+const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 
 type Tab = "canvas" | "screen" | "work" | "pins" | "agents";
 
@@ -25,6 +27,7 @@ export function ClientView() {
   const [enrollAsked, setEnrollAsked] = useState(pref("enrollAsked") === "1");
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const me = state?.people.find((p) => p.id === personId);
+  const layout = useLayout();
 
   useEffect(() => mic.onChange(setMicStatus) as () => void, []);
   // Remote people don't hear the room speaker: the brain's voice and chime play here instead.
@@ -85,6 +88,34 @@ export function ClientView() {
   const mine = new Set(myAgents.map((a) => a.id));
   const pending = state.directives.filter((d) => ["pending", "delivered", "acked"].includes(d.status) && d.targets.some((t) => mine.has(t))).slice(0, 3);
 
+  if (layout !== "desktop") {
+    return (
+      <PhoneClient
+        layout={layout}
+        state={state}
+        me={me}
+        tab={tab}
+        setTab={setTab}
+        micStatus={micStatus}
+        toggleMic={toggleMic}
+        myAgents={myAgents}
+        pending={pending}
+        remote={remote}
+        openProfile={() => setProfile(true)}
+        openSettings={() => setSettings(true)}
+        overlays={
+          <>
+            <Toasts />
+            <ShareRequestPrompt />
+            {profile && <ProfileDrawer me={me} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
+            {!enrollAsked && me.voiceSamples === 0 && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
+            {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
+          </>
+        }
+      />
+    );
+  }
+
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <header className="app-header client-header" style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none" }}>
@@ -93,21 +124,7 @@ export function ClientView() {
           <strong className="wordmark" style={{ fontWeight: 650 }}>JamSesh</strong>
           <span className="chip session-name ellipsis" style={{ maxWidth: 180 }}>{state.settings.sessionName}</span>
         </div>
-        <nav className="header-center row" style={{ gap: 2, background: "var(--panel)", padding: 3, borderRadius: 999, border: "1px solid var(--line)", flex: "none" }}>
-          {(
-            [
-              ["canvas", "Canvas"],
-              ["screen", "Screen"],
-              ["work", "Work"],
-              ["pins", `Pins${state.annotations.filter((a) => a.status === "open").length ? ` · ${state.annotations.filter((a) => a.status === "open").length}` : ""}`],
-              ["agents", "Agents"],
-            ] as const
-          ).map(([t, label]) => (
-            <button key={t} className="btn small" style={{ height: 28, borderColor: "transparent", background: tab === t ? "var(--panel-3)" : "transparent", color: tab === t ? "var(--text)" : "var(--muted)" }} onClick={() => setTab(t)}>
-              {label}
-            </button>
-          ))}
-        </nav>
+        <TabNav state={state} tab={tab} setTab={setTab} />
         <div className="header-right">
           {remote && <span className="badge neutral" title="You're joining remotely: the Screen tab mirrors the big screen">Remote</span>}
           <span className="chip big-screen-chip ellipsis" title="What the big screen shows">
@@ -136,94 +153,311 @@ export function ClientView() {
 
       <main className="client-main" style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>
-          <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
-            <CanvasFrame kind="edit" name={me.name} title="Shared canvas" />
-            <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
-          </div>
-          {tab === "screen" && (
-            <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
-              <Stage state={state} interactive />
-            </div>
-          )}
-          {tab === "work" && <WorkGallery state={state} personId={me.id} />}
-          {tab === "pins" && (
-            <div className="scrollbars-thin" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: 20 }}>
-              <AnnotationsPanel personId={me.id} />
-            </div>
-          )}
-          {tab === "agents" && <AgentsPanel state={state} />}
+          <TabContent tab={tab} state={state} me={me} layout="desktop" />
         </section>
 
         <aside style={{ minHeight: 0, display: "flex", flexDirection: "column", borderLeft: "1px solid var(--line)", background: "var(--bg-2)" }}>
-          <div className="scrollbars-thin" style={{ padding: "12px 14px 6px", borderBottom: "1px solid var(--line)", maxHeight: "42%", overflowY: "auto", flex: "none" }}>
-            <div className="label" style={{ marginBottom: 4 }}>
-              Your agents
-            </div>
-            {myAgents.length === 0 ? (
-              <div className="empty-note" style={{ padding: "6px 0 10px", fontSize: 13 }}>
-                Type <span className="mono">/jamsesh</span> in Claude Code or Codex to connect one.
-              </div>
-            ) : (
-              myAgents.map((a) => <AgentRow key={a.id} agent={a} state={state} compact />)
-            )}
-            {pending.length > 0 && (
-              <div style={{ margin: "6px 0 8px", display: "grid", gap: 6 }}>
-                {pending.map((d) => (
-                  <div key={d.id} style={{ fontSize: 13, padding: "8px 10px", borderRadius: 10, background: "var(--directive-bg)" }}>
-                    <span className="tag" style={{ color: "var(--directive)", fontSize: 11, fontWeight: 650, letterSpacing: ".06em", textTransform: "uppercase" }}>
-                      {modeLabel(d.mode)} · {d.status}
-                    </span>
-                    <div className="clamp" style={{ marginTop: 2 }} title={d.text}>{d.text}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "10px 6px 0" }}>
-            <div className="row between" style={{ padding: "0 8px 6px" }}>
-              <span className="label">The room</span>
-              <span className="chip" style={{ fontSize: 12 }}>Click a name to fix who said it</span>
-            </div>
-            <RoomFeed editable />
-          </div>
-          <SayBox personId={me.id} brainName={state.settings.brainName} />
+          <RoomPanel state={state} me={me} myAgents={myAgents} pending={pending} layout="desktop" />
         </aside>
       </main>
       <Toasts />
       <ShareRequestPrompt />
       {profile && <ProfileDrawer me={me} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
-      {!enrollAsked && me.voiceSamples === 0 && (
-        <>
-          <div className="scrim" />
-          <div className="modal-wrap">
-          <div className="modal" role="dialog" aria-label="Teach JamSesh your voice">
-            <VoiceEnroll me={me} brainName={state.settings.brainName} />
-            <div className="row" style={{ justifyContent: "flex-end", paddingTop: 4 }}>
-              <button className="btn ghost small" onClick={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))}>
-                {me.voiceSamples ? "Done" : "Skip for now"}
-              </button>
-            </div>
-          </div>
-          </div>
-        </>
-      )}
-      {settings && (
-        <SettingsDrawer
-          host={false}
-          onClose={() => setSettings(false)}
-        />
-      )}
+      {!enrollAsked && me.voiceSamples === 0 && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
+      {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
     </div>
   );
 }
 
-function SayBox({ personId, brainName }: { personId: string; brainName: string }) {
+type Tab_ = Tab;
+const TABS: Tab_[] = ["canvas", "screen", "work", "pins", "agents"];
+const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", pins: "Pins", agents: "Agents" };
+
+function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setTab: (t: Tab) => void; phone?: boolean }) {
+  const open = state.annotations.filter((a) => a.status === "open").length;
+  return (
+    <nav className={phone ? "m-tabs" : "header-center row"} aria-label="Views" style={phone ? undefined : { gap: 2, background: "var(--panel)", padding: 3, borderRadius: 999, border: "1px solid var(--line)", flex: "none" }}>
+      {TABS.map((t) => (
+        <button
+          key={t}
+          className={phone ? `m-tab ${tab === t ? "on" : ""}` : "btn small"}
+          style={phone ? undefined : { height: 28, borderColor: "transparent", background: tab === t ? "var(--panel-3)" : "transparent", color: tab === t ? "var(--text)" : "var(--muted)" }}
+          aria-current={tab === t ? "page" : undefined}
+          onClick={() => setTab(t)}
+        >
+          {TAB_LABEL[t]}
+          {t === "pins" && open > 0 && (phone ? <span className="m-tab-count">{open}</span> : ` · ${open}`)}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+function EnrollModal({ me, brainName, done }: { me: HubState["people"][number]; brainName: string; done: () => void }) {
+  return (
+    <>
+      <div className="scrim" />
+      <div className="modal-wrap">
+        <div className="modal" role="dialog" aria-label="Teach JamSesh your voice">
+          <VoiceEnroll me={me} brainName={brainName} />
+          <div className="row" style={{ justifyContent: "flex-end", paddingTop: 4 }}>
+            <button className="btn ghost small modal-skip" onClick={done}>
+              {me.voiceSamples ? "Done" : "Skip for now"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** The five views, the same on every screen size except the Screen tab, which a phone scales down. */
+function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me: HubState["people"][number]; layout: Layout }) {
+  const phone = layout !== "desktop";
+  return (
+    <>
+      <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
+        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" />
+        <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
+      </div>
+      {tab === "screen" &&
+        (phone ? (
+          <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
+        ) : (
+          <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
+            <Stage state={state} interactive />
+          </div>
+        ))}
+      {tab === "work" && <WorkGallery state={state} personId={me.id} />}
+      {tab === "pins" && (
+        <div className="tab-pane scrollbars-thin pins-pane">
+          <AnnotationsPanel personId={me.id} />
+        </div>
+      )}
+      {tab === "agents" && <AgentsPanel state={state} />}
+    </>
+  );
+}
+
+type Person_ = HubState["people"][number];
+
+/** Your agents, what's pending for them, the room's transcript and the typed prompt box. */
+function RoomPanel({ state, me, myAgents, pending, layout, say = true }: { state: HubState; me: Person_; myAgents: HubState["agents"]; pending: HubState["directives"]; layout: Layout; say?: boolean }) {
+  const touch = layout !== "desktop";
+  return (
+    <>
+      <div className="scrollbars-thin" style={{ padding: "12px 14px 6px", borderBottom: "1px solid var(--line)", maxHeight: "42%", overflowY: "auto", flex: "none" }}>
+        <div className="label" style={{ marginBottom: 4 }}>
+          Your agents
+        </div>
+        {myAgents.length === 0 ? (
+          <div className="empty-note" style={{ padding: "6px 0 10px", fontSize: 13 }}>
+            Tell Claude Code or Codex <span className="mono">connect to jamsesh</span> to bring one in.
+          </div>
+        ) : (
+          myAgents.map((a) => <AgentRow key={a.id} agent={a} state={state} compact />)
+        )}
+        {pending.length > 0 && (
+          <div style={{ margin: "6px 0 8px", display: "grid", gap: 6 }}>
+            {pending.map((d) => (
+              <div key={d.id} style={{ fontSize: 13, padding: "8px 10px", borderRadius: 10, background: "var(--directive-bg)" }}>
+                <span className="tag" style={{ color: "var(--directive)", fontSize: 11, fontWeight: 650, letterSpacing: ".06em", textTransform: "uppercase" }}>
+                  {modeLabel(d.mode)} · {d.status}
+                </span>
+                <div className="clamp" style={{ marginTop: 2 }} title={d.text}>{d.text}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", padding: "10px 6px 0" }}>
+        <div className="row between" style={{ padding: "0 8px 6px" }}>
+          <span className="label">The room</span>
+          <span className="chip" style={{ fontSize: 12 }}>{touch ? "Tap" : "Click"} a name to fix who said it</span>
+        </div>
+        <RoomFeed editable />
+      </div>
+      {say && <SayBox personId={me.id} brainName={state.settings.brainName} phone={touch} />}
+    </>
+  );
+}
+
+/** Phone and landscape-phone shell: tabs on top, the mic / record / pin controls in a thumb-height dock. */
+function PhoneClient({
+  layout,
+  state,
+  me,
+  tab,
+  setTab,
+  micStatus,
+  toggleMic,
+  myAgents,
+  pending,
+  remote,
+  openProfile,
+  openSettings,
+  overlays,
+}: {
+  layout: Layout;
+  state: HubState;
+  me: Person_;
+  tab: Tab;
+  setTab: (t: Tab) => void;
+  micStatus: MicStatus;
+  toggleMic: () => void;
+  myAgents: HubState["agents"];
+  pending: HubState["directives"];
+  remote: boolean;
+  openProfile: () => void;
+  openSettings: () => void;
+  overlays: React.ReactNode;
+}) {
+  const [dock, setDock] = useState<HTMLElement | null>(null);
+  const [room, setRoom] = useState(false);
+  const annotate = useAnnotateMode();
+  const land = layout === "landscape";
+  usePhoneChrome(layout, dock);
+  useEffect(() => {
+    if (!room) return;
+    const k = (e: KeyboardEvent) => e.key === "Escape" && setRoom(false);
+    addEventListener("keydown", k);
+    return () => removeEventListener("keydown", k);
+  }, [room]);
+
+  const micBtn = (
+    <button className={`m-act mic-btn ${micStatus.on ? "on" : "muted"}`} onClick={toggleMic} aria-label={micStatus.on ? "Mute your microphone" : "Unmute your microphone"} aria-pressed={micStatus.on}>
+      {micStatus.on ? <MicIcon size={18} /> : <MicOffIcon size={18} />}
+      <span className="m-act-label">{micStatus.on ? (micStatus.speaking ? "Hearing" : "Mic on") : "Muted"}</span>
+      {micStatus.on && <Meter db={micStatus.level} />}
+    </button>
+  );
+  const roomBtn = (
+    <button className="m-act room-btn" onClick={() => setRoom(true)} aria-label="Open the room: transcript, agents and typed prompt">
+      <RoomIcon />
+      <span className="m-act-label">Room</span>
+    </button>
+  );
+
+  return (
+    <div className={`m-app ${land ? "land" : ""}`}>
+      <header className="m-header">
+        <Logo size={26} />
+        {!land && <span className="m-title ellipsis">{state.settings.sessionName}</span>}
+        {land && <TabNav state={state} tab={tab} setTab={setTab} phone />}
+        {land && (
+          <div className="m-header-actions">
+            {micBtn}
+            <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
+            <AnnotateToggle label="Pin" />
+            {roomBtn}
+          </div>
+        )}
+        {!land && remote && <span className="badge neutral m-remote">Remote</span>}
+        <button className="m-icon" onClick={openProfile} aria-label={`Your profile (${me.name})`}>
+          <PhotoAvatar person={me} size={30} />
+        </button>
+        <button className="m-icon" onClick={openSettings} aria-label="Settings">
+          <GearIcon size={20} />
+        </button>
+      </header>
+      {!land && <TabNav state={state} tab={tab} setTab={setTab} phone />}
+      {micStatus.error && <div className="m-error">{micStatus.error}</div>}
+
+      <main className="m-main">
+        <TabContent tab={tab} state={state} me={me} layout={layout} />
+        {annotate.on && (
+          <div className="m-hint" role="status">
+            Tap anywhere to drop a pin
+            <button onClick={() => annotate.set(false)} aria-label="Stop pinning">
+              Done
+            </button>
+          </div>
+        )}
+      </main>
+
+      {!land && (
+        <footer className="m-dock" ref={setDock}>
+          <SayBox personId={me.id} brainName={state.settings.brainName} phone />
+          <div className="m-actions">
+            {micBtn}
+            <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
+            <AnnotateToggle label="Pin" />
+            {roomBtn}
+          </div>
+        </footer>
+      )}
+
+      {room && (
+        <>
+          <div className="m-scrim" onClick={() => setRoom(false)} />
+          <section className="m-sheet" role="dialog" aria-label="The room">
+            <header>
+              <h2>The room</h2>
+              <ShareControls personId={me.id} kinds={typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getDisplayMedia === "function" ? ["screen", "camera"] : ["camera"]} />
+              <button className="m-icon" onClick={() => setRoom(false)} aria-label="Close">
+                <CloseIcon />
+              </button>
+            </header>
+            <div className="m-sheet-body">
+              <RoomPanel state={state} me={me} myAgents={myAgents} pending={pending} layout={layout} />
+            </div>
+          </section>
+        </>
+      )}
+      {overlays}
+    </div>
+  );
+}
+
+/** The big screen, laid out wide and scaled down to the phone so the whole picture fits. Tap to pin. */
+function MirrorStage({ state, personId, scale }: { state: HubState; personId: string; scale: number }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const m = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    m();
+    const ro = new ResizeObserver(m);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const mode = useAnnotateMode();
+  const stage = state.stage;
+  const empty = stage.mode === "welcome" && state.artifacts.length === 0;
+  // Layout stages carry their own pin layers per tile; everything else gets one over the whole picture.
+  const solo = stage.mode === "spotlight" && stage.items.length === 1 ? state.artifacts.find((a) => a.id === stage.items[0]) : undefined;
+  const target = solo
+    ? { kind: (solo.kind === "devserver" ? "web" : "artifact") as "web" | "artifact", ref: solo.kind === "devserver" ? solo.url ?? solo.id : solo.id, label: solo.title }
+    : { kind: "screen" as const, ref: `stage:${stage.mode}`, label: stage.title || "Big screen" };
+  const pinAll = !empty && stage.mode !== "layout";
+  return (
+    <div ref={box} className="m-mirror" data-jam-target={pinAll ? JSON.stringify(target) : undefined}>
+      {empty ? (
+        <div className="m-mirror-empty">
+          <strong>Nothing on the big screen yet</strong>
+          <span>When the room shares work, it mirrors here live. Tap it to pin a note.</span>
+        </div>
+      ) : (
+        size.w > 0 && (
+          <div className="m-mirror-inner" style={{ width: size.w / scale, height: size.h / scale, transform: `scale(${scale})` }}>
+            <Stage state={state} interactive />
+          </div>
+        )
+      )}
+      {pinAll && <PinLayer target={target} personId={personId} enabled={mode.on} />}
+    </div>
+  );
+}
+
+function SayBox({ personId, brainName, phone }: { personId: string; brainName: string; phone?: boolean }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState(true);
+  const input = useRef<HTMLInputElement>(null);
   return (
     <form
-      style={{ padding: 12, borderTop: "1px solid var(--line)" }}
+      className={`say ${phone ? "say-phone" : ""}`}
       onSubmit={async (e) => {
         e.preventDefault();
         if (!text.trim()) return;
@@ -231,22 +465,41 @@ function SayBox({ personId, brainName }: { personId: string; brainName: string }
         await api("/say", { personId, text, direct: ask }).catch(() => {});
         setText("");
         setBusy(false);
+        if (phone) input.current?.blur();
       }}
     >
-      <div className="row" style={{ gap: 4, marginBottom: 8 }}>
+      <div className="say-modes">
         {[
           [true, `Ask ${brainName}`],
           [false, "Say to the room"],
         ].map(([v, label]) => (
-          <button key={String(v)} type="button" className="btn small" style={{ height: 26, background: ask === v ? "var(--panel-3)" : "transparent", borderColor: ask === v ? "var(--line-2)" : "transparent", color: ask === v ? "var(--text)" : "var(--muted)" }} onClick={() => setAsk(v as boolean)}>
+          <button
+            key={String(v)}
+            type="button"
+            className={`say-mode ${ask === v ? "on" : ""}`}
+            aria-pressed={ask === v}
+            // Keep the keyboard up while switching.
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={() => setAsk(v as boolean)}
+          >
             {label as string}
           </button>
         ))}
       </div>
-      <div className="row" style={{ gap: 8 }}>
-        <input className="grow" placeholder={ask ? `Tell ${brainName} what you need…` : "Say something to the room…"} value={text} onChange={(e) => setText(e.target.value)} disabled={busy} />
-        <button className="btn primary small" style={{ height: 38 }} disabled={!text.trim() || busy}>
-          Send
+      <div className="say-row">
+        <input
+          ref={input}
+          className="grow"
+          placeholder={ask ? `Tell ${brainName} what you need…` : "Say something to the room…"}
+          aria-label={ask ? `Type a prompt for ${brainName}` : "Type something to say to the room"}
+          enterKeyHint="send"
+          autoComplete="off"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          disabled={busy}
+        />
+        <button className="btn primary small say-send" disabled={!text.trim() || busy} aria-label="Send">
+          {phone ? <SendIcon /> : "Send"}
         </button>
       </div>
     </form>
@@ -269,10 +522,10 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
   const show = (items: Artifact[], title: string) =>
     api("/stage", { mode: items.length > 1 ? "compare" : "spotlight", items: items.map((i) => i.id), title, by: "Someone in the room" });
   return (
-    <div className="scrollbars-thin" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: 20 }}>
-      <div className="row between" style={{ marginBottom: 16 }}>
+    <div className="tab-pane scrollbars-thin">
+      <div className="row between wrap-row" style={{ marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 650 }}>Everything the room has made</h2>
-        <div className="row" style={{ gap: 4 }}>
+        <div className="row filter-row" style={{ gap: 4 }}>
           {(["all", "mockup", "built"] as const).map((f) => (
             <button key={f} className="btn small" style={{ background: filter === f ? "var(--panel-3)" : undefined }} onClick={() => setFilter(f)}>
               {f === "all" ? "All" : f === "mockup" ? "Mockups" : "Built"}
@@ -283,7 +536,7 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
       {groups.length === 0 && <div className="empty-note">Nothing yet. Frames appear here as agents and people design on the canvas.</div>}
       {groups.map(([title, items]) => (
         <div key={title} style={{ marginBottom: 28 }}>
-          <div className="row between" style={{ marginBottom: 10 }}>
+          <div className="row between wrap-row" style={{ marginBottom: 10 }}>
             <strong style={{ fontWeight: 600 }}>{title}</strong>
             <button className="btn small" onClick={() => show(items.slice(0, 6), title)}>
               Show on big screen
@@ -305,7 +558,7 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
 
 function AgentsPanel({ state }: { state: HubState }) {
   return (
-    <div className="scrollbars-thin" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: 20 }}>
+    <div className="tab-pane scrollbars-thin">
       <h2 style={{ margin: "0 0 12px", fontSize: 20, fontWeight: 650 }}>Agents</h2>
       {state.agents.length === 0 && <div className="empty-note">No agents have joined yet.</div>}
       {state.agents.map((a) => (
@@ -321,12 +574,12 @@ function AgentsPanel({ state }: { state: HubState }) {
         <>
           <h2 style={{ margin: "28px 0 12px", fontSize: 20, fontWeight: 650 }}>Dev servers on the host</h2>
           {state.devservers.map((d) => (
-            <div key={d.id} className="row" style={{ padding: "6px 0" }}>
+            <div key={d.id} className="row dev-row" style={{ padding: "6px 0" }}>
               <span className="dot" style={{ background: d.up ? "var(--built)" : "var(--faint)" }} />
               <a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--text)" }}>
                 {d.name}
               </a>
-              <span className="chip mono">{d.url}</span>
+              <span className="chip mono ellipsis">{d.url}</span>
             </div>
           ))}
         </>
@@ -401,19 +654,19 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
     if (existing) onPick(existing.id);
   }, [existing?.id]);
   return (
-    <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 20 }}>
-      <div style={{ width: "min(440px, 100%)" }}>
+    <div className="onboard">
+      <div className="onboard-card">
         <Logo size={40} />
-        <h1 style={{ fontSize: 34, letterSpacing: "-0.03em", margin: "18px 0 6px" }}>Join {state.settings.sessionName}</h1>
+        <h1 className="onboard-h">Join {state.settings.sessionName}</h1>
         <p style={{ color: "var(--muted)", marginTop: 0 }}>Your name and title tell the room brain who's talking and whose call counts.</p>
         <WhereChooser />
         {state.people.length > 0 && (
           <div style={{ display: "grid", gap: 6, margin: "18px 0" }}>
             {state.people.map((p) => (
-              <button key={p.id} className="btn" style={{ justifyContent: "flex-start", height: 48, gap: 12, paddingLeft: 10, borderRadius: 14 }} onClick={() => onPick(p.id)}>
+              <button key={p.id} className="btn person-pick" onClick={() => onPick(p.id)}>
                 <PhotoAvatar person={p} size={28} />
-                <span>I'm {p.name}</span>
-                {p.role && <span style={{ color: "var(--dim)", marginLeft: "auto", paddingRight: 6 }}>{p.role}</span>}
+                <span className="ellipsis">I'm {p.name}</span>
+                {p.role && <span className="ellipsis" style={{ color: "var(--dim)", marginLeft: "auto", paddingRight: 6, flex: "0 1 auto" }}>{p.role}</span>}
               </button>
             ))}
           </div>
@@ -434,9 +687,9 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
             onPick(p.id);
           }}
         >
-          <input placeholder="Your first name" value={name} onChange={(e) => setName(e.target.value)} autoFocus={!state.people.length} />
-          <input placeholder="Your title (for example designer, engineer, CPO)" value={role} onChange={(e) => setRole(e.target.value)} />
-          <button className="btn primary" style={{ height: 44, justifyContent: "center" }}>
+          <input placeholder="Your first name" value={name} onChange={(e) => setName(e.target.value)} autoFocus={!state.people.length} autoComplete="given-name" autoCapitalize="words" enterKeyHint="next" />
+          <input placeholder="Your title (designer, engineer, CPO)" value={role} onChange={(e) => setRole(e.target.value)} autoCapitalize="sentences" enterKeyHint="go" />
+          <button className="btn primary onboard-go">
             Join the room
           </button>
         </form>

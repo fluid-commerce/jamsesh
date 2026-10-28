@@ -15,10 +15,10 @@ export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainNam
   return (
     <>
       <div className="scrim" onClick={onClose} />
-      <aside className="drawer scrollbars-thin" style={{ width: "min(440px, 100vw)" }}>
+      <aside className="drawer profile-drawer scrollbars-thin" style={{ width: "min(440px, 100vw)" }} role="dialog" aria-label="Your profile">
         <header>
           <h2>Your profile</h2>
-          <button className="btn small" onClick={onClose}>
+          <button className="btn small drawer-done" onClick={onClose}>
             Done
           </button>
         </header>
@@ -38,11 +38,11 @@ export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainNam
           <div className="section">
             <label className="field">
               <span>Name</span>
-              <input defaultValue={me.name} onBlur={(e) => e.target.value.trim() && e.target.value !== me.name && api(`/people/${me.id}`, { name: e.target.value.trim() }, "PATCH")} />
+              <input defaultValue={me.name} autoComplete="given-name" autoCapitalize="words" enterKeyHint="next" onBlur={(e) => e.target.value.trim() && e.target.value !== me.name && api(`/people/${me.id}`, { name: e.target.value.trim() }, "PATCH")} />
             </label>
             <label className="field">
               <span>Title</span>
-              <input defaultValue={me.role} placeholder="For example Design lead, Engineer, CPO" onBlur={(e) => e.target.value !== me.role && api(`/people/${me.id}`, { role: e.target.value.trim() }, "PATCH")} />
+              <input defaultValue={me.role} placeholder="For example Design lead, Engineer, CPO" autoCapitalize="sentences" enterKeyHint="done" onBlur={(e) => e.target.value !== me.role && api(`/people/${me.id}`, { role: e.target.value.trim() }, "PATCH")} />
             </label>
             <p className="help" style={{ margin: 0 }}>
               {brainName} uses your title to weigh calls when people disagree, and agents see it next to your name.
@@ -50,7 +50,7 @@ export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainNam
           </div>
           <div className="section">
             <h3>Where you are</h3>
-            <p className="help">Remote laptops are kept apart from the room's microphones, show the big screen in the Screen tab, and play {brainName}'s voice here.</p>
+            <p className="help">Remote devices are kept apart from the room's microphones, show the big screen in the Screen tab, and play {brainName}'s voice here.</p>
             <WhereChooser compact />
           </div>
           <VoiceEnroll me={me} brainName={brainName} />
@@ -108,7 +108,7 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
     <div className="section">
       <h3>Teach {brainName} your voice</h3>
       <p className="help">
-        Read this out loud at your laptop. It takes ten seconds and makes speaker recognition much better, especially when you walk around the room.
+        Read this out loud. It takes ten seconds and makes speaker recognition much better, especially when you walk around the room.
         {me.voiceSamples ? ` You have ${me.voiceSamples} voice sample${me.voiceSamples === 1 ? "" : "s"} so far.` : ""}
       </p>
       <blockquote style={{ margin: "0 0 14px", padding: "14px 16px", borderRadius: 14, background: "var(--panel)", border: "1px solid var(--line)", fontSize: 17, lineHeight: 1.45, color: state === "recording" ? "var(--text)" : "var(--muted)" }}>

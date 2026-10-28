@@ -114,15 +114,15 @@ export function useAnnotateMode() {
   return { on, set: (v: boolean) => modeStore.set(v), toggle: () => modeStore.set((p) => !p) };
 }
 
-export function AnnotateToggle({ className = "" }: { className?: string }) {
+export function AnnotateToggle({ className = "", label = "Annotate" }: { className?: string; label?: string }) {
   const { on, toggle } = useAnnotateMode();
   return (
-    <button className={`an-toggle ${on ? "on" : ""} ${className}`} aria-pressed={on} onClick={toggle} title="Drop pins on what you see (A)">
+    <button className={`an-toggle ${on ? "on" : ""} ${className}`} aria-pressed={on} onClick={toggle} title="Drop pins on what you see (A)" aria-label={label === "Annotate" ? undefined : "Drop pins on what you see"}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 21s-6.5-5.6-6.5-11A6.5 6.5 0 0 1 12 3.5 6.5 6.5 0 0 1 18.5 10c0 5.4-6.5 11-6.5 11Z" />
         <circle cx="12" cy="10" r="2.3" />
       </svg>
-      Annotate
+      {label}
       <kbd>A</kbd>
     </button>
   );
@@ -219,18 +219,22 @@ function Popover({ anchor, tipH, children, onEnter, onLeave, color }: { anchor: 
         const a = anchor.getBoundingClientRect();
         const w = pop.offsetWidth;
         const h = pop.offsetHeight;
-        const vw = window.innerWidth;
-        const vh = window.innerHeight;
+        // The visible area: on a phone the keyboard shrinks it, so the note always stays above the keys.
+        const vv = window.visualViewport;
+        const ox = vv?.offsetLeft ?? 0;
+        const oy = vv?.offsetTop ?? 0;
+        const vw = ox + (vv?.width ?? window.innerWidth);
+        const vh = oy + (vv?.height ?? window.innerHeight);
         let x = a.left - 28;
         if (a.left + w - 28 > vw - 12) x = a.left - w + 28;
-        x = Math.max(12, Math.min(x, vw - w - 12));
+        x = Math.max(ox + 12, Math.min(x, vw - w - 12));
         let y = a.top + 14;
         let below = true;
-        if (y + h > vh - 12 && a.top - tipH - 14 - h > 8) {
+        if (y + h > vh - 12 && a.top - tipH - 14 - h > oy + 8) {
           y = a.top - tipH - 14 - h;
           below = false;
         }
-        y = Math.max(8, Math.min(y, vh - h - 8));
+        y = Math.max(oy + 8, Math.min(y, vh - h - 8));
         pop.style.translate = `${Math.round(x)}px ${Math.round(y)}px`;
         pop.style.setProperty("--ox", `${Math.round(a.left - x)}px`);
         pop.style.setProperty("--oy", below ? "0px" : `${h}px`);
@@ -263,6 +267,7 @@ function Composer({ color, name, photo, label, onSave, onCancel }: { color: stri
     t.style.height = `${Math.min(180, Math.max(70, t.scrollHeight + 2))}px`;
   }, [text]);
   const save = () => text.trim() && onSave(text.trim());
+  const touch = typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
   return (
     <>
       <div className="an-head">
@@ -279,7 +284,7 @@ function Composer({ color, name, photo, label, onSave, onCancel }: { color: stri
         placeholder="What should change here?"
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+          if (e.key === "Enter" && !e.shiftKey && !touch && !e.nativeEvent.isComposing) {
             e.preventDefault();
             e.stopPropagation();
             save();
@@ -291,9 +296,15 @@ function Composer({ color, name, photo, label, onSave, onCancel }: { color: stri
         }}
       />
       <div className="an-foot">
-        <span className="hint">
-          <kbd className="an-k">Enter</kbd> save · <kbd className="an-k">Esc</kbd> cancel
-        </span>
+        {touch ? (
+          <button className="an-btn ghost" onClick={onCancel}>
+            Cancel
+          </button>
+        ) : (
+          <span className="hint">
+            <kbd className="an-k">Enter</kbd> save · <kbd className="an-k">Esc</kbd> cancel
+          </span>
+        )}
         <button className="an-btn primary" disabled={!text.trim()} onClick={save}>
           Pin it
         </button>
@@ -509,8 +520,8 @@ function Marker({ ann, n, state, pos, open, showCard, hot }: { ann: Annotation; 
       ref={setEl}
       className={`an-pin ${ghost ? "ghost" : ""} ${ann.status === "sent" ? "sent" : ""} ${open ? "open" : ""} ${hot ? "hot" : ""} ${pos.hidden ? "hidden" : ""}`}
       style={{ left: pos.left, top: pos.top, ["--c" as string]: color, ["--ink" as string]: inkFor(color) }}
-      onPointerEnter={() => hoverOn(ann.id)}
-      onPointerLeave={() => hoverOffSoon(ann.id)}
+      onPointerEnter={(e) => e.pointerType === "mouse" && hoverOn(ann.id)}
+      onPointerLeave={(e) => e.pointerType === "mouse" && hoverOffSoon(ann.id)}
     >
       <button className="an-pin-body" aria-label={ghost ? "Pointed here" : `Pin ${n}`} onClick={() => openStore.set(open ? null : ann.id)}>
         <i />
@@ -623,14 +634,14 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
         {editing !== a.id && (
           <div className="an-item-act" onClick={(e) => e.stopPropagation()}>
             {!dot && (
-              <button className="an-ico" title="Edit" onClick={() => setEditing(a.id)}>
+              <button className="an-ico" title="Edit" aria-label="Edit this pin" onClick={() => setEditing(a.id)}>
                 <Icon d={I.edit} />
               </button>
             )}
-            <button className="an-ico" title="Resolve" onClick={() => resolvePin(a)}>
+            <button className="an-ico" title="Resolve" aria-label="Resolve this pin" onClick={() => resolvePin(a)}>
               <Icon d={I.check} />
             </button>
-            <button className="an-ico danger" title="Delete" onClick={() => removePin(a.id)}>
+            <button className="an-ico danger" title="Delete" aria-label="Delete this pin" onClick={() => removePin(a.id)}>
               <Icon d={I.trash} />
             </button>
           </div>
@@ -646,7 +657,10 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
           <div className="an-empty">
             <strong>No pins yet</strong>
             <span>
-              Press <kbd className="an-k">A</kbd> and click anything on screen to leave a note.
+              <span className="an-hint-desk">
+                Press <kbd className="an-k">A</kbd> and click anything on screen to leave a note.
+              </span>
+              <span className="an-hint-touch">Tap Pin, then tap anything on the canvas or the Screen tab to leave a note.</span>
             </span>
           </div>
         )}

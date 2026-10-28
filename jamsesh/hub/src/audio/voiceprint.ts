@@ -1,5 +1,7 @@
 // Voiceprints with a local speaker-embedding model (WeSpeaker ResNet34 through
 // sherpa-onnx). A person's voiceprint is the mean of their labelled samples.
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import { config } from "../config";
 import type { Store } from "../store";
 import type { Pcm } from "./wav";
@@ -12,7 +14,8 @@ function getExtractor(): Extractor | null {
   if (extractor !== undefined) return extractor;
   try {
     if (!config.speakerModel) throw new Error("no speaker model in ~/.jamsesh/models");
-    const sherpa = require("sherpa-onnx-node");
+    // Inside the Mac app the hub is one compiled program; the native library sits beside it.
+    const sherpa = config.nodeModules ? createRequire(join(config.nodeModules, "index.js"))("sherpa-onnx-node") : require("sherpa-onnx-node");
     extractor = new sherpa.SpeakerEmbeddingExtractor({ model: config.speakerModel, numThreads: 2, debug: 0 });
   } catch (e) {
     console.warn("voiceprints off:", e instanceof Error ? e.message : e);

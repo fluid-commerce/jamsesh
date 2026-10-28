@@ -253,6 +253,24 @@ describe("6. show on screen", () => {
     });
   }, T);
 
+  t("show how to join, phone included", async () => {
+    await runScenario("screen: how do I join on my phone", [6], async (r) => {
+      r.say("jonathan", "wait how do I get on this from my phone");
+      await r.settle();
+      expect(r.stage().mode).toBe("join");
+      expect(r.newDirectives()).toHaveLength(0);
+    });
+  }, T);
+
+  t("put the code back up", async () => {
+    await runScenario("screen: put the QR back up", [6], async (r) => {
+      r.say("felipe", "can you put the QR code back up, Dev's still trying to join");
+      await r.settle();
+      expect(r.stage().mode).toBe("join");
+      expect(r.newDirectives()).toHaveLength(0);
+    });
+  }, T);
+
   t("show what everyone's doing", async () => {
     await runScenario("screen: what everyone's doing", [6], async (r) => {
       r.say("felipe", "show me what everyone's doing right now");

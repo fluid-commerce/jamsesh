@@ -11,68 +11,74 @@ the hub, the host and client views, and the agent protocol. The design is in [`S
 
 ## Set up the host
 
-On the Mac mini that drives the big screen:
+JamSesh is one Mac app that either hosts a session or joins one. The Mac that drives the big
+screen (usually a Mac mini) hosts; everyone else joins.
 
-1. Clone the repository and run the installer. It builds FigCraft, the browser canvas, and the web
-   app, and downloads the local whisper and voiceprint models (about 600 MB).
+1. Install **JamSesh for Mac** (`JamSesh_<version>_aarch64.dmg`) and open it. It isn't notarized
+   yet, so the first time macOS refuses to open it: open **System Settings > Privacy & Security**,
+   click **Open Anyway** next to JamSesh, and confirm.
+2. Choose **Host a session on this Mac**. The big screen opens full screen on the display that
+   isn't the Mac's main one (when there is one), your own window opens beside it, and JamSesh stays
+   in the menu bar while it hosts.
+3. In **Set up this Mac**, click **Allow** for each permission. The room brain needs them to run
+   the Mac for the room:
+   - **Microphone:** the room mic.
+   - **Accessibility** and **Automation:** arranging app windows on the displays.
+   - **Screen Recording:** sharing this screen. JamSesh reopens once to turn it on.
+   - Optional: **Camera** for photos, and **Xcode** for building previews and the iPhone Simulator.
 
-   ```bash
-   git clone https://github.com/fluid-commerce/jamsesh.git ~/jamsesh && ~/jamsesh/jamsesh/install.sh
-   ```
+   Open the same list later from the menu bar: **Set up this Mac…**
+4. Choose **Connect my agents** when JamSesh offers it, so Claude Code and Codex on this Mac can
+   join too.
+5. In your JamSesh window, open **Settings** (the gear, or press `,`) and paste your Vercel AI
+   Gateway key. Add the people in the room with their titles; titles decide whose call wins when
+   instructions conflict.
 
-2. Start the session. The big screen opens in a full-screen window.
+The app carries everything the host needs, so the host Mac doesn't need this repository. Speech
+is transcribed through the gateway, or on the Mac when whisper.cpp is installed
+(`brew install whisper-cpp`). The Mac stays awake while people or agents are connected, and
+JamSesh never turns off a keep-awake you set yourself.
 
-   ```bash
-   jamsesh host
-   ```
+There's no JamSesh server on the internet: everyone connects to the host. To develop JamSesh, run
+the host from a checkout with `./jamsesh/install.sh` and `jamsesh host`, and rebuild the app with
+`jamsesh/app/bundle-hub.sh` then `cargo tauri build` in `jamsesh/app/src-tauri`.
 
-3. Open **Settings** (the gear, or press `,`) and paste your Vercel AI Gateway key. Add the people in
-   the room with their roles; roles decide whose call wins when instructions conflict.
-4. Click **Room mic** to let the host's microphone listen too.
+## Join a session
 
-The welcome screen shows how to join: a QR code, the host's address, and a 4-character code that
-changes every 30 seconds.
+- **On a Mac:** open JamSesh and choose the session under **Join a session**; JamSesh finds hosts on
+  the same network. Type the 4-character code from the big screen once. After that the Mac
+  reconnects on its own. Get the app from the link on the host's connect page, or from whoever
+  hosts.
+- **On a phone:** point the camera at the QR code on the big screen and tap the link. Phones get a
+  layout for touch: a mic for the room, the big screen mirrored, pins, prompts, and your profile.
+  Phones can only use their microphone over HTTPS, so set up remote access (below) if phones should
+  listen.
+- **In any browser:** open the address on the big screen and type the code.
 
-The first time, macOS asks whether `bun` may accept incoming network connections. Allow it, or
-laptops can't connect.
+If someone asks "how do I join?", "what's the code?", or "how do I get on with my phone?", the
+room brain puts a full-screen join guide on the big screen: the QR code, the address, the code,
+and steps for phones, laptops, and agents.
 
-The machine that runs `jamsesh host` is the host. Everything else connects to it; there's no
-JamSesh server on the internet. The host keeps itself awake while people or agents are connected,
-and it never turns off a keep-awake you set yourself.
+## Bring your agents
 
-## Connect a laptop
-
-People connect in a browser; agents connect themselves. Nobody runs a script.
-
-**Your JamSesh window.** Scan the QR code on the big screen, or open the address it shows and type
-the 4-character code. The host remembers that browser, so it reconnects on its own after a
-dropped connection, a closed lid, or a restart. To make it an app on your dock, use your browser's
-**Install** option.
-
-**Your agent.** In Claude Code or Codex, type the line under the QR code, for example:
+On a Mac with the JamSesh app, after **Connect my agents** (once per Mac), tell Claude Code or
+Codex in any repository:
 
 ```text
-join jamsesh at jam.example.duckdns.org, code K7M2
+connect to jamsesh
 ```
 
-The agent pairs with the host and configures itself on your computer, as follows:
+The agent joins as yours, works out its repository and branch, posts a card describing the
+repository, claims its workstream, and shows up on the big screen. There's no address or code to
+pass: agents reach the session through the app on the same Mac (`http://127.0.0.1:4790`), which
+forwards to whichever host the Mac is connected to. If the app isn't open, the agent asks you to
+open it.
 
-- Adds the `jamsesh` MCP server to Claude Code and Codex, with its own access token.
-- Installs the JamSesh skill and a `/jamsesh` command.
-- Adds two Claude Code hooks: your prompts go into the room's context, and directives from the room
-  reach your agent when it finishes a turn.
+Without the app, type the line under the QR code into the agent instead, for example
+`join jamsesh at jam.example.duckdns.org, code K7M2`. The agent pairs and sets itself up.
 
-Restart the agent, then type the following in each repository you're working in:
-
-```text
-/jamsesh mobile nav refresh
-```
-
-The agent joins, posts a card describing its repository, claims its workstream, and shows up on
-the big screen.
-
-Every paired browser and agent is listed in **Settings > Connected devices**, where the host can
-disconnect any of them.
+Every paired Mac, browser, and agent is listed in **Settings > Connected devices**, where the host
+can disconnect any of them.
 
 ## If the connection drops
 
@@ -213,6 +219,20 @@ mobile side by side". The brain designs its own layouts from any mix of tiles: m
 the live canvas following a person or agent, a browser on any dev server or reference site, shared
 screens and cameras, an agent's activity, and the room feed. For anything else, ask for it
 ("build us a four-way split…"), and the brain builds a custom view.
+
+## Let the brain run the host Mac
+
+With host control on (**Settings**) and the permissions from **Set up this Mac**, the room brain
+can do the following on the host:
+
+- Arrange app windows on any display. It knows each display's resolution, shape, and usable area,
+  and the big screen window's own size, and plans layouts for them.
+- Open apps and URLs, boot the iPhone Simulator, and open a build in it.
+- Build an agent's pushed branch on the host and open it: a desktop app, or an iPhone build in the
+  Simulator. Builds run in the background and the room gets a note when they open.
+- Bring the big screen back to the front.
+
+Ask out loud, for example "put the desktop build next to the Simulator on the TV".
 
 ## Teach it who's talking
 

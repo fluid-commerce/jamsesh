@@ -88,7 +88,7 @@ async function startShare(kind: Share["kind"], shareId?: string): Promise<Share>
   }
 }
 
-export function ShareControls({ personId }: { personId: string }) {
+export function ShareControls({ personId, kinds = ["screen", "camera"] }: { personId: string; kinds?: readonly Share["kind"][] }) {
   const { state } = useHub();
   const pubs = usePublications();
   const [busy, setBusy] = useState<Share["kind"] | null>(null);
@@ -115,7 +115,7 @@ export function ShareControls({ personId }: { personId: string }) {
   const anyLive = pubs.length > 0;
   return (
     <div className="shr-controls" data-live={anyLive || mine.length > 0}>
-      {(["screen", "camera"] as const).map((kind) => {
+      {kinds.map((kind) => {
         const on = !!active(kind);
         return (
           <button
@@ -381,7 +381,7 @@ export function ProfilePhoto({ person, onDone }: { person: Person; onDone?: () =
               {count !== null ? "Hold still…" : "Take photo"}
             </button>
             <button type="button" className="shr-btn ghost" onClick={() => file.current?.click()}>
-              Choose a file
+              Choose a photo
             </button>
           </>
         )}

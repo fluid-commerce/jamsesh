@@ -76,6 +76,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           return Response.redirect(ok ? "/client" : "/connect", 302);
         }
         if (PUBLIC_FILES.test(path) || path === "/connect") return webApp(path);
+        // The Mac app, for people joining from a browser. It holds no secrets.
+        if (path === "/download/mac") {
+          const dmg = [join(config.home, "JamSesh.dmg"), join(config.repo, "jamsesh", "app", "dist", "JamSesh.dmg")].find((f) => existsSync(f));
+          if (!dmg) return new Response("The host doesn't have the Mac app to share yet.", { status: 404 });
+          return new Response(Bun.file(dmg), { headers: { "content-type": "application/x-apple-diskimage", "content-disposition": 'attachment; filename="JamSesh.dmg"' } });
+        }
         if (!ok) {
           if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
           return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
@@ -87,9 +93,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
-        if (path === "/skill.md") return new Response(skillMarkdown(hub), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+        if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
         if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
-        if (path === "/agent/setup.sh") return new Response(joinScript(hub, originOf(req, url), tokenOf(req, url) ?? ""), { headers: { "content-type": "text/x-shellscript" } });
+        if (path === "/agent/setup.sh") {
+          // From the Mac app: agents talk to the app's relay on this computer, which adds the
+          // Mac's credentials, so the script carries no token and survives switching hosts.
+          const relay = Number(url.searchParams.get("relay"));
+          const script = Number.isInteger(relay) && relay > 1023 && relay < 65536 ? joinScript(hub, `http://127.0.0.1:${relay}`, "") : joinScript(hub, originOf(req, url), tokenOf(req, url) ?? "");
+          return new Response(script, { headers: { "content-type": "text/x-shellscript" } });
+        }
         if (path.startsWith("/api/")) return await idempotent(req, path, () => api(hub, req, url, ip));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
@@ -249,8 +261,19 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
 
+  // The paired device making this request (null on the host itself).
+  const paired = isLocal(ip) ? null : hub.auth.check(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token"));
+
+  if (path === "/me") {
+    const personId = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
+    return json({ device: paired && { id: paired.id, kind: paired.kind, label: paired.label }, person: personId ? s.person(personId) ?? null : null });
+  }
+
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
+    if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
+    // The person using the host's own window: agents on the host Mac work for them.
+    if (isLocal(ip) && body.kind !== "host" && body.personId) s.store.setSetting("hostPersonId", String(body.personId));
     const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
     return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
   }
@@ -341,8 +364,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
 
-  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip));
-  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip));
+  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, paired?.id));
+  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, paired?.id));
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");
@@ -444,6 +467,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   if (path === "/layouts" && req.method === "POST") {
     if (!body?.name?.trim()) return bad("name is required");
     return json(Object.keys(s.saveLayout(String(body.name))));
+  }
+
+  // The big screen reports its size so the brain can plan layouts for its shape.
+  if (path === "/display" && req.method === "POST" && isLocal(ip)) {
+    const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0);
+    hub.host.bigScreen = { width: n(body?.width), height: n(body?.height), dpr: n(body?.dpr) || 1, screenX: n(body?.screenX), screenY: n(body?.screenY), at: Date.now() };
+    return json({ ok: true });
   }
 
   if (path === "/brain/digest" && req.method === "POST") return (await hub.brain.digest(true), json({ digest: s.store.digest("session")?.text ?? "" }));

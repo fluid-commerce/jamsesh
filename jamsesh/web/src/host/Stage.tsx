@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
 import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, RoomFeed, ScaledFrame, colorFor, useNow } from "../shared/ui";
-import { JoinCard } from "./JoinCard";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, QR, RoomFeed, ScaledFrame, colorFor, useNow } from "../shared/ui";
+import { CodeRing, JoinCard, primaryAddress, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
@@ -15,6 +15,9 @@ export function Stage({ state, interactive }: { state: HubState; interactive?: b
   switch (stage.mode) {
     case "welcome":
       body = state.artifacts.length ? <Board state={state} onPick={spotlight} /> : <Welcome state={state} />;
+      break;
+    case "join":
+      body = <JoinStage state={state} />;
       break;
     case "spotlight":
       body = <Columns title={stage.title} caption={stage.caption} items={pick(stage.items)} state={state} big />;
@@ -369,6 +372,52 @@ function slim(state: HubState) {
     artifacts: state.artifacts.slice(0, 40).map((a) => ({ ...a, image: a.image ? origin + a.image : null })),
     events: state.events.slice(-60),
   };
+}
+
+/** Everything someone needs to get on, readable from the back of the room. */
+function JoinStage({ state }: { state: HubState }) {
+  const { code, left } = useJoinCode();
+  const addr = primaryAddress(code);
+  const host = addr.url.replace(/^https?:\/\//, "");
+  const c = code?.code ?? "····";
+  return (
+    <div className="join-stage">
+      <div className="join-stage-qr">
+        <QR text={`${addr.url}/connect?c=${code?.code ?? ""}`} size={520} />
+        <div className="join-stage-scan">Point your phone's camera here</div>
+      </div>
+      <div className="join-stage-info">
+        <div className="label">{state.settings.sessionName}</div>
+        <div className="join-stage-code" aria-live="polite">
+          <span className="mono">{c}</span>
+          <CodeRing left={left} size={56} />
+        </div>
+        <div className="join-stage-addr mono">{host}</div>
+        <ol className="join-stage-steps">
+          <li>
+            <b>Phone</b>
+            <span>Open the Camera, point it at the QR code, and tap the link. You're in.</span>
+          </li>
+          <li>
+            <b>Laptop</b>
+            <span>
+              Open JamSesh and choose this session, or go to <span className="mono">{host}</span> in a browser and type the code.
+            </span>
+          </li>
+          <li>
+            <b>Your agent</b>
+            <span>
+              With the JamSesh app open, tell Claude Code or Codex <span className="mono">connect to jamsesh</span>. Without it:{" "}
+              <span className="mono">
+                join jamsesh at {host}, code {c}
+              </span>
+            </span>
+          </li>
+        </ol>
+        <div className="join-stage-foot">The code changes every 30 seconds. Use the one showing now.</div>
+      </div>
+    </div>
+  );
 }
 
 function Welcome({ state }: { state: HubState }) {

@@ -319,16 +319,17 @@ export class Hub {
 
   // ---------- Claude Code hooks ----------
 
-  hookAgent(body: any, ip: string): Agent | undefined {
-    const machine = ip === "127.0.0.1" || ip === "::1" ? "host" : ip;
+  /** `device` is the paired device the hook came from: agents are registered by it (see jam_join). */
+  hookAgent(body: any, ip: string, device?: string | null): Agent | undefined {
+    const machine = device ?? (ip === "127.0.0.1" || ip === "::1" ? "host" : ip);
     if (body?.agentId) return this.session.agent(body.agentId);
     if (typeof body?.cwd === "string") return this.session.findAgentByCwd(body.cwd, machine);
     return undefined;
   }
 
   /** UserPromptSubmit: the prompt goes into context; new room items come back as context. */
-  onPrompt(body: any, ip: string) {
-    const agent = this.hookAgent(body, ip);
+  onPrompt(body: any, ip: string, device?: string | null) {
+    const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
     const prompt = String(body.prompt ?? "").trim();
     if (prompt && !prompt.startsWith("/")) {
@@ -364,8 +365,8 @@ export class Hub {
   }
 
   /** Stop: if the room has work for this agent, keep it going instead of stopping. */
-  onStop(body: any, ip: string) {
-    const agent = this.hookAgent(body, ip);
+  onStop(body: any, ip: string, device?: string | null) {
+    const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
     const last = typeof body.last_assistant_message === "string" ? body.last_assistant_message.trim() : "";
     if (last) this.session.touchAgent(agent.id, { activity: last.split("\n")[0].slice(0, 140) });

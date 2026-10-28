@@ -7,6 +7,8 @@ import { Stage } from "./Stage";
 import { CodeRing, JoinCard, useJoinCode } from "./JoinCard";
 import { fadeOut, playChime } from "../shared/sound";
 import { AnnotateToggle } from "../shared/annotate";
+
+const MODE_LABEL: Record<string, string> = { spotlight: "Spotlight", compare: "Compare", parity: "Parity", custom: "Custom view", layout: "Layout", join: "How to join" };
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
 
 const DEVICE = deviceId("host");
@@ -25,6 +27,26 @@ export function HostView() {
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const now = useNow(1000);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Tell the brain the big screen's size and shape (and which display it's on) so it plans
+  // layouts that fit. Again on every resize, move to another display, and reconnect.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const report = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => void api("/display", { width: innerWidth, height: innerHeight, dpr: devicePixelRatio, screenX: screenX + 1, screenY: screenY + 1 }).catch(() => {}), 400);
+    };
+    report();
+    addEventListener("resize", report);
+    const poll = setInterval(report, 60_000);
+    const off = hub.onReconnect(report);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(poll);
+      removeEventListener("resize", report);
+      off?.();
+    };
+  }, []);
 
   useEffect(() => {
     // First run: offer remote-access setup once (it has "Skip, room only").
@@ -119,8 +141,8 @@ export function HostView() {
             );
           })}
           {!["board", "welcome", "canvas", "agents"].includes(state.stage.mode) && (
-            <button className="btn small" style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent", minWidth: 0 }} onClick={() => api("/stage", { mode: "board", by: "Host" })} title={`${state.stage.title || state.stage.mode}. Back to the board (Esc)`}>
-              <span className="stage-pill">{state.stage.title || state.stage.mode}</span>
+            <button className="btn small" style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent", minWidth: 0 }} onClick={() => api("/stage", { mode: "board", by: "Host" })} title={`${state.stage.title || MODE_LABEL[state.stage.mode] || state.stage.mode}. Back to the board (Esc)`}>
+              <span className="stage-pill">{state.stage.title || MODE_LABEL[state.stage.mode] || state.stage.mode}</span>
               <span aria-hidden style={{ color: "var(--muted)" }}>✕</span>
             </button>
           )}
@@ -177,7 +199,7 @@ export function HostView() {
               Agents {activeAgents.length ? `· ${activeAgents.length}` : ""}
             </div>
             <div style={{ overflowY: "auto", scrollbarWidth: "none" }}>
-              {activeAgents.length === 0 && <div className="empty-note">No agents yet. Type /jamsesh in Claude Code or Codex.</div>}
+              {activeAgents.length === 0 && <div className="empty-note">No agents yet. Tell Claude Code or Codex “connect to jamsesh”.</div>}
               {activeAgents.map((a) => (
                 <AgentRow key={a.id} agent={a} state={state} compact />
               ))}

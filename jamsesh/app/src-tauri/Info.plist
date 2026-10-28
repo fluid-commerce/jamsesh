@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>JamSesh listens to the room so the session's brain hears what people say.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>JamSesh uses the camera for your profile photo and when you share your camera with the room.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>JamSesh finds sessions hosted on your network and connects to them.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_jamsesh._tcp</string>
+  </array>
+</dict>
+</plist>

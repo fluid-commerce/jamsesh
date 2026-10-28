@@ -273,6 +273,7 @@ export class Brain {
       `## Dev servers on the host\n${s.devservers().map((d) => `- ${d.name}: ${d.url}${d.up ? "" : " (down)"}`).join("\n") || "(none)"}`,
       `## Canvas pages (one per workstream)\n${this.pages().map((p) => `- ${p.name} (${p.frames} frames)`).join("\n") || "(starter page only)"}`,
       `## Saved layouts\n${Object.keys(s.savedLayouts()).join(", ") || "(none)"}`,
+      `## Screens\n${this.host.describeScreens() || "(unknown)"}`,
       `## Big screen now\n${stage.mode}${stage.title ? `: ${stage.title}` : ""}${stage.pinned ? " (pinned by a person)" : ""}`,
       `## Room transcript (oldest first)\n${room.map((e) => `[${e.id}] ${e.authorName}${roleOf(s, e)}${e.kind === "prompt" ? " (typed to their agent)" : ""}${e.relevance ? ` {${e.relevance}}` : ""}: ${e.text}`).join("\n")}`,
       batch.length
@@ -353,9 +354,9 @@ export class Brain {
       }),
       show_on_screen: tool({
         description:
-          "Change the big screen. 'board' = live bento of newest work; 'spotlight' = one or two artifacts large; 'compare' = variants side by side (labelled A, B, C); 'parity' = columns, for example desktop beside mobile; 'agents' = every agent's live activity; 'canvas' = the live shared canvas with everyone's cursors; 'custom' = your own HTML (use build_custom_view instead).",
+          "Change the big screen. 'board' = live bento of newest work; 'spotlight' = one or two artifacts large; 'compare' = variants side by side (labelled A, B, C); 'parity' = columns, for example desktop beside mobile; 'agents' = every agent's live activity; 'canvas' = the live shared canvas with everyone's cursors; 'join' = how to join, full screen: a big QR code, the host's address, the 4-character code (it changes every 30 seconds and the screen keeps it current), and steps for phones, laptops and agents. Use 'join' when someone asks how to join or connect, for the code, the QR code, the address, or how to get on with their phone. 'custom' = your own HTML (use build_custom_view instead).",
         inputSchema: z.object({
-          mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas"]),
+          mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas", "join"]),
           title: z.string().optional(),
           caption: z.string().optional(),
           artifactIds: z.array(z.string()).optional(),
@@ -415,9 +416,10 @@ export class Brain {
       }),
       host_action: tool({
         description:
-          "Act on the host machine (the Mac on the big screen): open an app or URL, place windows side by side, boot an iOS Simulator and open a URL or app in it, or run a shell command. Use it when the room asks to see something the board can't show, such as a native desktop app beside an Expo app.",
+          "Act on the host machine (the Mac on the big screen): open an app or URL, place app windows side by side on a display ('arrange', sized to that display; see Screens), list the open windows ('windows'), boot an iOS Simulator and open a URL or app in it, run a shell command, or bring the JamSesh big screen back to the front ('focus_jamsesh'). Use it when the room asks to see something the board can't show, such as a native desktop app beside the iPhone Simulator. Check 'windows' before arranging when you're not sure what's open.",
         inputSchema: z.object({
-          action: z.enum(["open_app", "open_url", "arrange", "simulator", "shell", "focus_jamsesh"]),
+          action: z.enum(["open_app", "open_url", "arrange", "simulator", "shell", "focus_jamsesh", "windows"]),
+          display: z.string().optional().describe("For arrange: a display name from Screens, 'main', or 'big screen' (the default)"),
           app: z.string().optional().describe("App name for open_app, or comma-separated apps for arrange"),
           url: z.string().optional(),
           device: z.string().optional().describe("Simulator device name, for example 'iPhone 17 Pro'"),
@@ -427,6 +429,20 @@ export class Brain {
         execute: async (i) => {
           if (!s.settings().hostControl) return "Host control is turned off in Settings.";
           return host.act(i);
+        },
+      }),
+      build_preview: tool({
+        description:
+          "Build an agent's branch on the host Mac and open it there: a desktop app, a file, or an iPhone build in the Simulator. Use it when the room wants to try a native build on the big screen. It runs in the background and the room gets a note when it opens. Take the repository URL and branch from the agent's repo card; the agent must have pushed the branch. Then arrange it beside what it should be compared with.",
+        inputSchema: z.object({
+          repo: z.string().describe("The repository's remote URL (https or git@)"),
+          branch: z.string().optional(),
+          command: z.string().describe("The build command, run in the checkout, for example 'npm ci && npm run tauri build -- --debug' or an xcodebuild line"),
+          open: z.string().optional().describe("What to open when it finishes: a path in the checkout (a .app), a URL, or 'simulator:<path to .app>'"),
+        }),
+        execute: async (i) => {
+          if (!s.settings().hostControl) return "Host control is turned off in Settings.";
+          return host.preview({ ...i, by: "The room brain" });
         },
       }),
       fix_speaker: tool({
@@ -815,6 +831,7 @@ export function ruleTriage(batch: JamEvent[]): Triage {
     let intent: Triage["lines"][number]["intent"] = "none";
     let relevance: Relevance = "discussion";
     if (/\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t)) intent = "present";
+    if (/\b(qr( code)?|join(ing)? code|what'?s the code|the code again|how (do|can|does) (i|we|you|people|someone|they) (join|connect|get on|get in))\b/.test(t)) intent = "present";
     else if (/\b(let'?s go with|we('re| are) going with|decided|i like (direction|option|variant) [a-z]\b|go with [a-z]\b)/.test(t)) intent = "decision";
     else if (/\b(can you|could you|let'?s (try|build|make|do|ship|add|explore)|try (a|some|out)|make (a|some)|give (me|us)|build|implement|mock up|variants?|options? for)\b/.test(t)) intent = "directive";
     if (/\b(haha|lol|lmao|dude|bro|shut up|your (mom|shirt|face))\b/.test(t) && intent === "none") relevance = "banter";
@@ -829,7 +846,7 @@ const TRIAGE_SYSTEM = `You listen to a room of designers and developers working 
 
 For each new line decide:
 - relevance: "banter" (jokes, teasing, off-topic), "chatter" (filler, "yeah", "hmm"), "discussion" (talking about the work without asking for anything), "work" (asks for or decides something about the work).
-- intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change), "decision" (the team picks a direction: "let's go with B"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "relabel" (someone says who said a previous line: "that was Felipe"), "none".
+- intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change), "decision" (the team picks a direction: "let's go with B"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version", and also how to join: "what's the code?", "put the QR up", "how do I get on with my phone?"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "relabel" (someone says who said a previous line: "that was Felipe"), "none".
 
 Be conservative. Sarcasm and jokes are never directives ("let's just delete the whole app lol" is banter). Musing ("I wonder if...") is discussion unless it ends in an ask. A directive addressed to a person, not an agent ("Felipe, can you grab lunch"), is not work.
 Introductions: fill "introductions" whenever a name and what the person does come up, whether they say it themselves ("I'm Felipe, I run product") or someone else does ("this is Dana, she runs support"). Use the role they gave, and leave out anyone whose name was only mentioned in passing.
@@ -844,6 +861,7 @@ How to route:
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.
 - When people disagree, weigh by role weight (higher wins) and say whose call it was in the rationale. Don't silently drop the other view: mention it.
 - A decision ("I like B", "go with direction A") should usually do three things: record_decision, then an implement directive to the agent that owns it (mentioning the chosen artifact by title), and spotlight the chosen artifact.
+- "How do I join?", "what's the code?", "put the QR up", "how do I get on with my phone?" = show_on_screen with mode "join". Say nothing else about the code out loud: the screen shows it and it changes every 30 seconds.
 - "Bring that up", "show me", "pull up" = show_on_screen. Use search_artifacts if the ids aren't obvious. "That one" usually means what is on screen or the latest artifact.
 - If an agent asked the room a question and someone answered, send an 'answer' directive to that agent.
 - Write directives as complete instructions an agent can act on without hearing the room: include counts, names, constraints, and which mockup.
