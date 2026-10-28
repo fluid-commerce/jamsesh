@@ -17,7 +17,7 @@ On the Mac mini that drives the big screen:
    app, and downloads the local whisper and voiceprint models (about 600 MB).
 
    ```bash
-   git clone git@github.com:fluid-commerce/jamsesh.git ~/jamsesh && ~/jamsesh/jamsesh/install.sh
+   git clone https://github.com/fluid-commerce/jamsesh.git ~/jamsesh && ~/jamsesh/jamsesh/install.sh
    ```
 
 2. Start the session. The big screen opens in a full-screen window.
