@@ -83,12 +83,14 @@ export class Hub {
     this.mcp = new McpEndpoint(this);
     this.autosave = new Autosave(this, dir);
     this.brain.autosave = this.autosave;
+    this.brain.pages = () => this.canvas.pageCache;
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text) => this.brain.agentUpdated(agent, kind, text);
+    this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
     this.brain.relabel = (eventId, name) => {
       const ev = this.store.event(eventId);
       const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });

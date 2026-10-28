@@ -47,6 +47,7 @@ export class Session {
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   onDirective: ((d: Directive) => void) | null = null;
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
+  onClaim: ((agentId: string, workstream: string) => void) | null = null;
 
   constructor(store: Store) {
     this.store = store;
@@ -366,6 +367,7 @@ export class Session {
       ? { ...existing, ownerAgentId: agentId, status: "active", updatedAt: Date.now() }
       : { id: newId("w"), title: t, ownerAgentId: agentId, status: "active", brief: "", updatedAt: Date.now() };
     this.store.put("workstreams", ws);
+    this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
       this.store.addEvent({ kind: "system", authorType: "agent", authorId: agentId, authorName: agent.name, text: `${agent.name} took "${ws.title}".`, workstreamId: ws.id });
     }
@@ -547,6 +549,7 @@ export class Session {
       height: a.height ?? existing?.height ?? null,
       workstreamId: a.workstreamId ?? existing?.workstreamId ?? null,
       note: a.note ?? existing?.note ?? "",
+      page: a.page ?? existing?.page,
     };
     this.store.put("artifacts", art);
     if (!existing && opts.announce !== false) {

@@ -128,6 +128,8 @@ export interface Artifact {
   height: number | null;
   workstreamId: string | null;
   note: string;
+  /** Canvas page the frame is on. */
+  page?: string;
 }
 
 export interface DevServer {
@@ -147,7 +149,7 @@ export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" 
 /** One cell of a layout the brain (or a person) puts on the big screen. */
 export type Tile =
   | { kind: "artifact"; artifactId: string; label?: string }
-  | { kind: "canvas"; follow?: string | null; label?: string }
+  | { kind: "canvas"; follow?: string | null; page?: string | null; label?: string }
   | { kind: "web"; url: string; label?: string }
   | { kind: "screen"; shareId: string; label?: string }
   | { kind: "agent"; agentId: string; label?: string }

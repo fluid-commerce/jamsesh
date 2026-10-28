@@ -42,6 +42,8 @@ export class Brain {
   private lastDigestAt = 0;
   private digestTimer: ReturnType<typeof setInterval>;
   private lastRoomStageAt = 0;
+  /** Set by the hub: the canvas pages. */
+  pages: () => { name: string; frames: number }[] = () => [];
   /** Set by the hub. */
   autosave: import("../autosave").Autosave | null = null;
   /** Set by the hub: reassigns a transcribed line to a person and teaches their voiceprint. */
@@ -265,9 +267,10 @@ export class Brain {
         ? `## Curated knowledge (respect decisions, requirements and constraints when routing)\n${s.facts().filter((f) => f.status === "active").slice(0, 40).map((f) => `- [${f.kind}${f.workstream ? `, ${f.workstream}` : ""}] ${f.text}`).join("\n")}`
         : "",
       `## Recent agent activity\n${updates.map((e) => `- ${e.authorName}: ${e.text.slice(0, 220)}`).join("\n") || "(none)"}`,
-      `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}`).join("\n") || "(none)"}`,
+      `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}${a.page ? `, page ${a.page}` : ""}`).join("\n") || "(none)"}`,
       `## Live shares\n${s.shares().filter((x) => x.status === "live").map((x) => `- ${x.id}: ${x.label}`).join("\n") || "(none)"}`,
       `## Dev servers on the host\n${s.devservers().map((d) => `- ${d.name}: ${d.url}${d.up ? "" : " (down)"}`).join("\n") || "(none)"}`,
+      `## Canvas pages (one per workstream)\n${this.pages().map((p) => `- ${p.name} (${p.frames} frames)`).join("\n") || "(starter page only)"}`,
       `## Saved layouts\n${Object.keys(s.savedLayouts()).join(", ") || "(none)"}`,
       `## Big screen now\n${stage.mode}${stage.title ? `: ${stage.title}` : ""}${stage.pinned ? " (pinned by a person)" : ""}`,
       `## Room transcript (oldest first)\n${room.map((e) => `[${e.id}] ${e.authorName}${roleOf(s, e)}${e.kind === "prompt" ? " (typed to their agent)" : ""}${e.relevance ? ` {${e.relevance}}` : ""}: ${e.text}`).join("\n")}`,
@@ -443,6 +446,7 @@ export class Brain {
                 kind: z.enum(["artifact", "canvas", "web", "screen", "agent", "feed", "html"]),
                 ref: z.string().optional().describe("artifact id, share id, agent id, or URL"),
                 follow: z.string().optional().describe("canvas: name of the person or agent to follow"),
+                page: z.string().optional().describe("canvas: page to show (pages are named after workstreams)"),
                 html: z.string().optional(),
                 label: z.string().optional(),
               }),
@@ -456,7 +460,7 @@ export class Brain {
           const tiles: Tile[] = [];
           for (const t of i.tiles) {
             if (t.kind === "artifact" && t.ref && s.store.get("artifacts", t.ref)) tiles.push({ kind: "artifact", artifactId: t.ref, label: t.label });
-            else if (t.kind === "canvas") tiles.push({ kind: "canvas", follow: t.follow ?? null, label: t.label });
+            else if (t.kind === "canvas") tiles.push({ kind: "canvas", follow: t.follow ?? null, page: t.page ?? null, label: t.label });
             else if (t.kind === "web" && t.ref && /^https?:\/\//.test(t.ref)) {
               // Local addresses must be dev servers the agents registered; don't guess ports.
               const local = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.)/.test(t.ref);

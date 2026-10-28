@@ -4,7 +4,7 @@ import { Canvas } from "../src/canvas/canvas";
 // place() only reads occupied/placed rectangles; no server is needed.
 function canvas(occupied: { x: number; y: number; w: number; h: number }[]) {
   const c = Object.create(Canvas.prototype) as any;
-  c.occupied = occupied.map((r) => ({ ...r, at: Date.now() }));
+  c.occupied = occupied.map((r) => ({ ...r, at: Date.now(), page: "Mobile nav" }));
   c.placed = [];
   return c as Canvas;
 }
@@ -46,4 +46,10 @@ test("frames placed back to back before the next poll don't stack", () => {
 test("children are never moved", () => {
   const c = canvas([{ x: 0, y: 0, w: 390, h: 844 }]);
   expect(c.place("create_node", { type: "text", parent: 5, x: 0, y: 0 }).x).toBe(0);
+});
+
+test("frames on other pages don't push new work aside", () => {
+  const c = canvas([{ x: 0, y: 0, w: 390, h: 844 }]);
+  expect(c.place("create_node", { type: "frame", x: 0, y: 0, width: 390, height: 844 }, "Settings").x).toBe(0);
+  expect(c.place("create_node", { type: "frame", x: 0, y: 0, width: 390, height: 844 }, "Mobile nav").x).toBe(510);
 });

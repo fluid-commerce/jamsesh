@@ -230,8 +230,8 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
     }
     case "canvas":
       return (
-        <TileFrame label={tile.label ?? (tile.follow ? `Canvas · following ${tile.follow}` : "Live canvas")} kind="canvas" target={{ kind: "canvas", ref: "canvas", label: "Canvas" }}>
-          <CanvasFrame kind="view" name="Big screen" title="Live canvas" follow={tile.follow ?? undefined} />
+        <TileFrame label={tile.label ?? (tile.follow ? `Canvas · following ${tile.follow}` : tile.page ? `Canvas · ${tile.page}` : "Live canvas")} kind="canvas" target={{ kind: "canvas", ref: "canvas", label: "Canvas" }}>
+          <CanvasFrame kind="view" name="Big screen" title="Live canvas" follow={tile.follow ?? undefined} page={tile.page ?? undefined} />
         </TileFrame>
       );
     case "web": {

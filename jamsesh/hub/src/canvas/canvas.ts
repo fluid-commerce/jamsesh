@@ -18,6 +18,7 @@ interface FrameInfo {
   width: number;
   height: number;
   section: string | null;
+  page: string;
   hash: string;
   subtree: Set<string>;
 }
@@ -51,9 +52,13 @@ export class Canvas {
   filesDir: string;
   /** Called when new or changed frames have been rendered. */
   onRendered: ((artifactIds: string[]) => void) | null = null;
+  /** Pages from the last poll: the brain and the views list them. */
+  pageCache: { id: string; name: string; frames: number }[] = [];
   /** Top-level frames from the last poll, plus frames placed since, for finding open space. */
-  private occupied: { x: number; y: number; w: number; h: number; at: number }[] = [];
-  private placed: { x: number; y: number; w: number; h: number; at: number }[] = [];
+  private occupied: { x: number; y: number; w: number; h: number; at: number; page: string }[] = [];
+  private placed: { x: number; y: number; w: number; h: number; at: number; page: string }[] = [];
+  /** Which page each agent's participant is on. */
+  private agentPage = new Map<string, string>();
   private activity = new Map<string, { created: number; edited: number; timer: ReturnType<typeof setTimeout> | null }>();
 
   constructor(private session: Session) {
@@ -193,7 +198,8 @@ export class Canvas {
       const doc = await this.host.json("inspect_document", { depth: 64, allPages: true });
       const frames = collectFrames(doc);
       const now = Date.now();
-      this.occupied = frames.filter((f) => !f.section).map((f) => ({ x: f.x, y: f.y, w: f.width, h: f.height, at: now }));
+      this.pageCache = (doc?.pages ?? []).map((p: any) => ({ id: String(p.id), name: String(p.name ?? ""), frames: (p.children ?? []).length }));
+      this.occupied = frames.filter((f) => !f.section).map((f) => ({ x: f.x, y: f.y, w: f.width, h: f.height, at: now, page: f.page }));
       this.placed = this.placed.filter((r) => now - r.at < 15_000);
       const seen = new Set<string>();
       const ready: FrameInfo[] = [];
@@ -253,6 +259,7 @@ export class Canvas {
       height: f.height,
       agentId: agentId ?? existing?.agentId ?? null,
       platform: guessPlatform(f, agent),
+      page: f.page,
     });
     return art.id;
   }
@@ -322,6 +329,8 @@ export class Canvas {
           throw new Error("Couldn't join the canvas session.");
         }
         this.session.touchAgent(agent.id, { canvas: "live" });
+        const ws = this.session.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
+        if (ws) await this.focusAgentPage(agent.id, ws.title).catch(() => {});
       })();
       a = { mcp, ready, lastUsed: Date.now(), dir };
       this.agents.set(agent.id, a);
@@ -345,7 +354,7 @@ export class Canvas {
   /** Forwards a FigCraft tool call for an agent and remembers which nodes it touched. */
   async call(agent: Agent, tool: string, args: any): Promise<ToolResult> {
     const mcp = await this.forAgent(agent);
-    args = this.place(tool, args ?? {});
+    args = this.place(tool, args ?? {}, this.agentPage.get(agent.id));
     const result = await mcp.call(tool, args, 120_000);
     const ids = new Set<string>();
     collectIds(args, ids);
@@ -360,7 +369,7 @@ export class Canvas {
    * Agents often drop new frames at (0, 0) on top of others' work. New top-level frames
    * (alone, or a batch of them, which keep their spacing) move right of the existing work.
    */
-  place(tool: string, args: any): any {
+  place(tool: string, args: any, page?: string): any {
     const isTop = (p: any) => p && !p.parent && /^(frame|section|component)$/i.test(String(p.type ?? ""));
     let targets: any[] = [];
     if (tool === "create_node" && isTop(args)) targets = [args];
@@ -368,7 +377,8 @@ export class Canvas {
     if (!targets.length) return args;
     const rect = (p: any) => ({ x: Number(p.x ?? 0), y: Number(p.y ?? 0), w: Number(p.width ?? 100), h: Number(p.height ?? 100) });
     const rects = targets.map(rect);
-    const taken = [...this.occupied, ...this.placed];
+    const onPage = (r: { page: string }) => !page || r.page === page;
+    const taken = [...this.occupied, ...this.placed].filter(onPage);
     const hit = (r: { x: number; y: number; w: number; h: number }) => taken.some((t) => r.x < t.x + t.w + 40 && r.x + r.w + 40 > t.x && r.y < t.y + t.h + 40 && r.y + r.h + 40 > t.y);
     if (rects.some(hit)) {
       const minX = Math.min(...rects.map((r) => r.x));
@@ -376,7 +386,7 @@ export class Canvas {
       const dx = right + 120 - minX;
       for (const p of targets) p.x = Number(p.x ?? 0) + dx;
     }
-    for (const p of targets) this.placed.push({ ...rect(p), at: Date.now() });
+    for (const p of targets) this.placed.push({ ...rect(p), at: Date.now(), page: page ?? "" });
     return args;
   }
 
@@ -398,6 +408,40 @@ export class Canvas {
           this.session.store.addEvent({ kind: "canvas", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `Canvas: ${parts.join(", ")}.`, relevance: "work" });
         }
       }, 12_000);
+    }
+  }
+
+  private async pagesOf(mcp: FigcraftMcp): Promise<{ id: number; name: string; children: number; current: boolean }[]> {
+    const r = await mcp.command("page.list");
+    return Array.isArray(r) ? r : [];
+  }
+
+  /**
+   * One page per workstream. The first workstream takes over the untouched starter
+   * page instead of leaving an empty "Page 1" behind.
+   */
+  async ensurePage(name: string): Promise<void> {
+    if (!this.host?.alive || !name.trim()) return;
+    const pages = await this.pagesOf(this.host);
+    if (pages.some((p) => p.name.toLowerCase() === name.toLowerCase())) return;
+    const starter = pages.length === 1 && /^page \d+$/i.test(pages[0].name) && pages[0].children === 0 ? pages[0] : null;
+    if (starter) await this.host.command("page.rename", { id: starter.id, name });
+    else await this.host.command("page.add", { name });
+  }
+
+  /** Puts an agent's participant on its workstream's page, so its new frames land there. */
+  async focusAgentPage(agentId: string, name: string) {
+    const a = this.agents.get(agentId);
+    if (!a?.mcp.alive || !name) return;
+    await this.ensurePage(name);
+    for (let i = 0; i < 10; i++) {
+      const page = (await this.pagesOf(a.mcp)).find((p) => p.name.toLowerCase() === name.toLowerCase());
+      if (page) {
+        await a.mcp.command("page.select", { id: page.id });
+        this.agentPage.set(agentId, page.name);
+        return;
+      }
+      await Bun.sleep(300); // the new page is still syncing to this participant
     }
   }
 
@@ -486,6 +530,7 @@ export function toWs(link: string | null): string | null {
 /** Top-level frames (and frames directly inside sections), with a hash of each subtree. */
 export function collectFrames(doc: any): FrameInfo[] {
   const out: FrameInfo[] = [];
+  let pageName = "";
   const visit = (n: any, section: string | null) => {
     const type = String(n.type ?? "").toUpperCase();
     if (type === "SECTION") {
@@ -508,11 +553,15 @@ export function collectFrames(doc: any): FrameInfo[] {
       width: Math.round(n.width ?? n.absoluteBounds?.width ?? 0),
       height: Math.round(n.height ?? n.absoluteBounds?.height ?? 0),
       section,
+      page: pageName,
       hash: createHash("sha1").update(JSON.stringify(n)).digest("hex"),
       subtree,
     });
   };
-  for (const page of doc?.pages ?? []) for (const c of page.children ?? []) visit(c, null);
+  for (const page of doc?.pages ?? []) {
+    pageName = page.name ?? "";
+    for (const c of page.children ?? []) visit(c, null);
+  }
   return out;
 }
 

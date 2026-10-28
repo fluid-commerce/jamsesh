@@ -67,13 +67,19 @@ for everyone, with your name on your cursor.
    `Mobile nav / B: bottom tabs with labels`. Variants of one idea share the workstream part, so
    the big screen shows them side by side as A, B, C. Use real device sizes (390×844 for iPhone,
    1440×900 for desktop).
-3. Put your frames in open space to the right of existing work, in a row, 80 px apart.
-   `canvas_frames` lists what's there.
-4. **Check your work before you announce it.** `canvas_render` each frame and look at it.
+3. **One page per workstream.** When you claim a workstream, JamSesh gives it a canvas page with
+   the same name and puts you on it, so your frames land there. Keep every variant of that
+   workstream side by side on its page. Don't make a page per variant or per screen, and don't
+   draw on another workstream's page. Make a new page only when the room starts a genuinely new
+   area of work (claim it as a workstream, and the page follows), or for throwaway experiments on
+   a page named `Scratch`. `canvas_run_command page.list` shows the pages.
+4. Put your frames in open space to the right of existing work, in a row, 80 px apart.
+   `canvas_frames` lists what's there; JamSesh moves a frame that would land on someone's work.
+5. **Check your work before you announce it.** `canvas_render` each frame and look at it.
    Compare it with the product's real screens (screenshot the running app, or read the
    component code): same type scale, colors, spacing, component shapes. Fix differences and
    render again. A variant that doesn't look like it belongs in the product isn't done.
-5. Then `jam_update` with `done`, naming the frames and what differs between them.
+6. Then `jam_update` with `done`, naming the frames and what differs between them.
 
 ## Build in your repository
 

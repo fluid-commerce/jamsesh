@@ -364,7 +364,88 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
   return <button className={`toggle ${on ? "on" : ""}`} role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)} />;
 }
 
-export function CanvasFrame({ kind, name, title, follow }: { kind: "edit" | "view"; name?: string; title: string; follow?: string }) {
+type PageRow = { id: number; name: string; children: number; current: boolean; divider?: boolean };
+
+/** Pages of the shared canvas: switch between them, and (when editing) add one. */
+function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameElement | null>; canAdd: boolean; page?: string }) {
+  const [pages, setPages] = useState<PageRow[]>([]);
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState("");
+  const wanted = useRef(page);
+  const fc = () => (frame.current?.contentWindow as any)?.figcraft;
+  const refresh = async () => {
+    try {
+      const list = await fc()?.execute("page.list", {});
+      if (Array.isArray(list)) setPages(list.filter((p: PageRow) => !p.divider));
+    } catch {}
+  };
+  useEffect(() => {
+    const t = setInterval(refresh, 2500);
+    refresh();
+    return () => clearInterval(t);
+  }, []);
+  // A layout can ask for a specific page.
+  useEffect(() => {
+    wanted.current = page;
+  }, [page]);
+  useEffect(() => {
+    const w = wanted.current;
+    if (!w || !pages.length) return;
+    const target = pages.find((p) => p.name.toLowerCase() === w.toLowerCase());
+    if (target && !target.current) fc()?.execute("page.select", { id: target.id }).then(refresh).catch(() => {});
+    if (target) wanted.current = undefined;
+  }, [pages]);
+  const current = pages.find((p) => p.current);
+  if (!pages.length) return null;
+  const go = async (id: number) => {
+    await fc()?.execute("page.select", { id }).catch(() => {});
+    setOpen(false);
+    refresh();
+  };
+  const add = async () => {
+    const name = adding.trim();
+    if (!name) return;
+    await fc()?.execute("page.add", { name }).catch(() => {});
+    setAdding("");
+    setOpen(false);
+    refresh();
+  };
+  return (
+    <div className="page-bar">
+      <button className="page-current" onClick={() => setOpen(!open)} aria-expanded={open} title="Canvas pages">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
+        <span className="ellipsis">{current?.name ?? "Pages"}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}><path d="m6 9 6 6 6-6" /></svg>
+      </button>
+      {open && (
+        <>
+          <div style={{ position: "fixed", inset: 0 }} onClick={() => setOpen(false)} />
+          <div className="page-menu" role="menu">
+            {pages.map((p) => (
+              <button key={p.id} role="menuitem" className={`page-item ${p.current ? "on" : ""}`} onClick={() => go(p.id)}>
+                <span className="ellipsis">{p.name}</span>
+                <span className="page-frames">{p.children ? `${p.children} frame${p.children === 1 ? "" : "s"}` : "empty"}</span>
+              </button>
+            ))}
+            {canAdd && (
+              <form
+                className="page-add"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  add();
+                }}
+              >
+                <input placeholder="New page…" value={adding} onChange={(e) => setAdding(e.target.value)} />
+              </form>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string }) {
   const frame = useRef<HTMLIFrameElement>(null);
   // Follow a participant (by name): the canvas shows what they're looking at.
   useEffect(() => {
@@ -402,7 +483,12 @@ export function CanvasFrame({ kind, name, title, follow }: { kind: "edit" | "vie
   if (!link) return <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>{err ?? (status === "failed" ? state?.session.canvas.reason : "Connecting to the canvas…")}</div>;
   const gl = new URLSearchParams(location.search).has("webgl") ? "&webgl" : "";
   const src = `/canvas/?canvas&control${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;
-  return <iframe ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />;
+  return (
+    <>
+      <iframe ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />
+      <PageBar frame={frame} canAdd={kind === "edit"} page={page} />
+    </>
+  );
 }
 
 export function Section({ title, help, children, right }: { title: string; help?: string; children: ReactNode; right?: ReactNode }) {
