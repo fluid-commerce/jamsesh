@@ -1309,8 +1309,11 @@ it.
   people, remote access, disconnecting devices) only with the key. The app starts the hub with its
   key and each window's link id over the hub's stdin. A hub started from a terminal makes its own
   key and prints one host link (good once, for ten minutes); `jamsesh host` opens it as the big
-  screen. A browser on the host without the key sees the session but can't act as a person:
-  restart the host for a new link. Cookies ignore ports, so dev servers open in tiles as
+  screen, and run again while that hub is running it opens a fresh one, minted with a secret in a
+  mode-600 file of the hub's (`host-link.secret`, sent by curl from the file, never as an
+  argument). The app never adopts a hub it didn't start: it says so and asks you to quit that one.
+  The app's own native calls (the agents' credential, the code in the menu bar) send the key too.
+  A browser on the host without the key sees the session but can't act as a person. Cookies ignore ports, so dev servers open in tiles as
   `localhost:<port>`, a different host name, and never receive the key; the relay and the hub also
   strip it from anything they forward. Approving from another machine needs a paired window that
   belongs to a person.

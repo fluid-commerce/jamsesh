@@ -314,7 +314,8 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
     if let Some(old) = inner.relay.take() {
         old.stop();
     }
-    let agents = proxy::post(&origin, "/api/pair/agents", None)
+    // As this app's window: only the app (holding the window key) issues the host's agents credential.
+    let agents = proxy::post_as_window(&origin, "/api/pair/agents")
         .await
         .ok()
         .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
@@ -618,7 +619,8 @@ async fn refresh_tray(app: &AppHandle) {
         format!("{}, {} here", plural(people.len(), "person", "people"), plural(agents, "agent", "agents"))
     });
     let code = match hub_port {
-        Some(p) => proxy::get(p, "/api/pair/code")
+        // As this app's window: the hub shows the code only to the host's own windows.
+        Some(p) => proxy::get_as_window(p, "/api/pair/code")
             .await
             .ok()
             .and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok())

@@ -13,7 +13,7 @@ PORT="${JAMSESH_PORT:-4747}"
 ENV_FILE="$HOME/.jamsesh/client.env"
 
 open_big_screen() {
-  local url="http://127.0.0.1:$PORT/host"
+  local url="${1:-http://127.0.0.1:$PORT/host}"
   local chrome="/Applications/Google Chrome.app"
   if [ -d "$chrome" ]; then
     open -na "$chrome" --args --app="$url" --start-fullscreen --user-data-dir="$HOME/.jamsesh/chrome-host" \
@@ -29,8 +29,21 @@ case "${1:-help}" in
     cd "$DIR"
     if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
       echo "JamSesh is already running on port $PORT."
-      echo "Its terminal shows the one-time host link that makes a browser the host's window (approvals, the pairing code)."
-      [ "${1:-}" = "--no-open" ] || open_big_screen
+      [ "${1:-}" = "--no-open" ] && exit 0
+      # A fresh one-time host link, so the browser is the host's window (approvals, the pairing code).
+      # The secret file is the running hub's own (mode 600); curl reads the header from it, so the
+      # secret never shows in a process list.
+      secret="${JAMSESH_DATA:-${JAMSESH_HOME:-$HOME/.jamsesh}/host}/host-link.secret"
+      link=""
+      if [ -r "$secret" ]; then
+        link="$( (curl -fsS --max-time 3 -X POST -H "@$secret" "http://127.0.0.1:$PORT/api/host-link" 2>/dev/null || true) | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
+      fi
+      if [ -n "$link" ]; then
+        open_big_screen "$link"
+      else
+        echo "Couldn't get a host link from it (was it started by the Mac app?). This browser can watch but not approve or show the code." >&2
+        open_big_screen
+      fi
       exit 0
     fi
     if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then

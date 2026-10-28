@@ -419,10 +419,23 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
     if (queueable) return save(); // keep the work; it sends once this laptop is paired again
     throw new Error("This laptop isn't connected to the session.");
   }
-  const json = await res.json().catch(() => ({}));
+  const text = await res.text().catch(() => "");
+  const json = (() => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {};
+    }
+  })();
   if (!res.ok) {
     // A proxy answering 502/503/504 while the hub restarts is a connection problem.
     if (queueable && [502, 503, 504].includes(res.status)) return save();
+    // The relay moved to another host while this was on its way: the change is still wanted. It
+    // waits in the outbox, with the same idempotency key and host stamp, until its own host is back.
+    if (res.status === 409 && /different JamSesh host/i.test(text)) {
+      if (queueable) return save();
+      throw Object.assign(new Error("That was meant for the host this window was showing; it changed. Try again."), { status: 409 });
+    }
     throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), { status: res.status });
   }
   return json as T;

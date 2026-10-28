@@ -6,7 +6,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::proxy::{healthy, random_hex, window_key};
+use crate::proxy::{get_as_window, healthy, random_hex, window_key};
 
 /// The started hub's stdin: this app's window key, then a one-time link id per window (see
 /// `window_url`). A pipe, not the environment, which other processes on this Mac can list.
@@ -97,12 +97,28 @@ impl Hub {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// Uses a hub that's already running on this Mac, or starts one.
+    /// Starts this app's hub. A hub this app didn't start (one from a terminal) is never adopted:
+    /// the app couldn't give its windows the window key, so they couldn't act as the host's person.
     pub async fn start(log_dir: &Path, resources: Option<&Path>) -> Result<Hub, String> {
-        for port in PORTS {
-            if healthy(&format!("http://127.0.0.1:{port}")).await {
-                return Ok(Hub { port, child: None });
+        // A hub left by this app's last launch stops on its own within seconds (it watches its parent).
+        let mut running = None;
+        for _ in 0..20 {
+            running = None;
+            for port in PORTS {
+                if healthy(&format!("http://127.0.0.1:{port}")).await {
+                    running = Some(port);
+                    break;
+                }
             }
+            if running.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        if let Some(port) = running {
+            return Err(format!(
+                "A JamSesh host is already running on this Mac (port {port}), probably from a terminal. Quit it (Ctrl-C in its terminal) and host from the app, or keep using the host link that terminal printed."
+            ));
         }
         let rt = runtime(resources)?;
         let port = PORTS
@@ -136,16 +152,32 @@ impl Hub {
             .spawn()
             .map_err(|e| format!("Couldn't start the session: {e}"))?;
         let mut child = child;
-        if let (Some(mut pipe), Some(key)) = (child.stdin.take(), window_key())
-            && pipe.write_all(format!("key {key}\n").as_bytes()).is_ok()
-            && let Ok(mut links) = LINKS.lock()
-        {
-            *links = Some(pipe);
-        }
+        let handed = match (child.stdin.take(), window_key()) {
+            (Some(mut pipe), Some(key)) => {
+                pipe.write_all(format!("key {key}\n").as_bytes()).and_then(|_| pipe.flush()).is_ok()
+                    && LINKS.lock().map(|mut links| *links = Some(pipe)).is_ok()
+            }
+            _ => false,
+        };
         let mut hub = Hub { port, child: Some(child) };
+        if !handed {
+            hub.stop();
+            return Err("Couldn't hand the session its window key, so this Mac's windows couldn't act for you. Try hosting again.".into());
+        }
         for _ in 0..120 {
             if healthy(&hub.origin()).await {
-                return Ok(hub);
+                // The hub has the key once it shows the pairing code to this app as one of its windows.
+                for _ in 0..20 {
+                    if matches!(get_as_window(hub.port, "/api/pair/code").await, Ok((s, _)) if s.is_success()) {
+                        return Ok(hub);
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                hub.stop();
+                return Err(format!(
+                    "The session started but didn't accept this app's window key. Details are in {}.",
+                    log_dir.join("hub.log").display()
+                ));
             }
             if let Some(Ok(Some(status))) = hub.child.as_mut().map(|c| c.try_wait()) {
                 return Err(format!("The session stopped while starting ({status}). Details are in {}.", log_dir.join("hub.log").display()));

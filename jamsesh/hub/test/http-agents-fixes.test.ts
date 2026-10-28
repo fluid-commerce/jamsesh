@@ -63,13 +63,13 @@ test("a failed audio upload isn't remembered as received", async () => {
 test("a page on another site can't post as the host's own window", async () => {
   const r = await fetch(`${base}/api/pair/agents`, { method: "POST", headers: { origin: "http://evil.example", "content-type": "text/plain" } });
   expect(r.status).toBe(403);
-  const ok = await fetch(`${base}/api/pair/agents`, { method: "POST", headers: { "content-type": "text/plain" } });
+  const ok = await fetch(`${base}/api/pair/agents`, { method: "POST", headers: { "content-type": "text/plain", ...hostWindow } });
   expect(ok.status).toBe(200);
 });
 
 test("an agents credential is one machine across relaunches, and a new one retires the old", async () => {
-  const a = await fetch(`${base}/api/pair/agents`, { method: "POST" }).then((r) => r.json() as Promise<any>);
-  const b = await fetch(`${base}/api/pair/agents`, { method: "POST" }).then((r) => r.json() as Promise<any>);
+  const a = await fetch(`${base}/api/pair/agents`, { method: "POST", headers: hostWindow }).then((r) => r.json() as Promise<any>);
+  const b = await fetch(`${base}/api/pair/agents`, { method: "POST", headers: hostWindow }).then((r) => r.json() as Promise<any>);
   expect(hub.auth.machineOf(a.deviceId)).toBe("host");
   expect(hub.auth.machineOf(b.deviceId)).toBe("host");
   expect(hub.auth.check(a.token)).toBeNull();

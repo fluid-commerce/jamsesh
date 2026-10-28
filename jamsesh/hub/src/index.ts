@@ -1,5 +1,7 @@
 // jamsesh host: starts the hub on this machine.
-import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "./config";
 import { Hub } from "./hub";
 import { startHttp } from "./http";
@@ -35,6 +37,7 @@ announce();
 
 // From a terminal: one host link, good once for ten minutes, that signs this Mac's browser in as
 // the host's window. Without it the host view is read-only (SPEC 14).
+if (!fromApp) writeLinkSecret();
 const hostLink = fromApp ? `http://127.0.0.1:${config.port}/host` : `http://127.0.0.1:${config.port}/host-window?once=${hub.auth.windows.mint()}&next=%2Fhost`;
 console.log(`
   JamSesh is live: ${hub.session.settings().sessionName}
@@ -45,6 +48,24 @@ console.log(`
 `);
 
 if (args.has("--open")) openBigScreen(hostLink);
+
+/**
+ * A terminal-started hub keeps a secret in a mode-600 file of its own, so `jamsesh host` can get a
+ * fresh host link when this hub is already running (POST /api/host-link). It's written as the
+ * header line curl sends (`curl -H @file`), so the secret never appears in a process's arguments.
+ */
+function writeLinkSecret() {
+  const file = join(config.dataDir, "host-link.secret");
+  try {
+    rmSync(file, { force: true });
+    const secret = randomBytes(32).toString("hex");
+    writeFileSync(file, `x-jam-link-secret: ${secret}\n`, { mode: 0o600, flag: "wx" });
+    hub.auth.windows.linkSecret = secret;
+    process.on("exit", () => rmSync(file, { force: true }));
+  } catch (e) {
+    console.error("host link file:", e instanceof Error ? e.message : e);
+  }
+}
 
 /** The big screen: Chrome in app mode, full screen, with its own profile, or the default browser. */
 function openBigScreen(url: string) {

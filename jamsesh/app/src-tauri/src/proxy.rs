@@ -454,9 +454,27 @@ async fn forward(sh: &Shared, mut req: Request<Incoming>) -> Result<Response<Bod
 
 /// GET a path through the relay (so the token is added). For small JSON and scripts.
 pub async fn get(proxy_port: u16, path: &str) -> Result<(StatusCode, String), String> {
+    get_on(proxy_port, path, false).await
+}
+
+/// GET a path from the hub this app started on 127.0.0.1:`port`, as one of this app's windows (with
+/// the window key the hub got from this app). Native code only: the key never reaches a page.
+pub async fn get_as_window(port: u16, path: &str) -> Result<(StatusCode, String), String> {
+    get_on(port, path, true).await
+}
+
+fn window_cookie() -> Option<String> {
+    window_key().map(|k| format!("{WINDOW_COOKIE}={k}"))
+}
+
+async fn get_on(port: u16, path: &str, window: bool) -> Result<(StatusCode, String), String> {
     let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
-    let uri: Uri = format!("http://127.0.0.1:{proxy_port}{path}").parse().map_err(|e: hyper::http::uri::InvalidUri| e.to_string())?;
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(4), client.get(uri))
+    let mut req = Request::get(format!("http://127.0.0.1:{port}{path}"));
+    if window && let Some(c) = window_cookie() {
+        req = req.header(header::COOKIE, c);
+    }
+    let req = req.body(Empty::<Bytes>::new()).map_err(|e| e.to_string())?;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(4), client.request(req))
         .await
         .map_err(|_| "timed out".to_string())?
         .map_err(|e| e.to_string())?;
@@ -480,14 +498,26 @@ pub async fn post(origin: &str, path: &str, bearer: Option<&str>) -> Result<Stri
     send("POST", origin, path, bearer, "{}").await
 }
 
+/// POST to the hub this app started, as one of this app's windows (see `get_as_window`).
+pub async fn post_as_window(origin: &str, path: &str) -> Result<String, String> {
+    send_on("POST", origin, path, None, "{}", true).await
+}
+
 /// Sends a small JSON body to the host directly (not through a relay), optionally as a paired device.
 pub async fn send(method: &str, origin: &str, path: &str, bearer: Option<&str>, body: &str) -> Result<String, String> {
+    send_on(method, origin, path, bearer, body, false).await
+}
+
+async fn send_on(method: &str, origin: &str, path: &str, bearer: Option<&str>, body: &str, window: bool) -> Result<String, String> {
     let tls = tls_config()?;
     let connector = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config((*tls).clone()).https_or_http().enable_http1().build();
     let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
     let mut req = Request::builder().method(method).uri(format!("{origin}{path}")).header(header::CONTENT_TYPE, "application/json");
     if let Some(t) = bearer {
         req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    if window && let Some(c) = window_cookie() {
+        req = req.header(header::COOKIE, c);
     }
     let req = req.body(Full::new(Bytes::from(body.to_string()))).map_err(|e| e.to_string())?;
     let resp = tokio::time::timeout(std::time::Duration::from_secs(8), client.request(req))

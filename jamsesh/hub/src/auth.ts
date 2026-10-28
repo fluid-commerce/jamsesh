@@ -244,12 +244,29 @@ export class HostWindows {
     return once;
   }
 
+  /**
+   * Like take(), but waits a moment for an id that hasn't arrived yet: the Mac app writes a window's
+   * link id to stdin and opens the window at once, so the window can get here first.
+   */
+  async takeSoon(once: string | null, waitMs = 1500): Promise<string | null> {
+    if (!once) return null;
+    for (let waited = 0; !this.links.has(once) && waited < waitMs; waited += 50) await Bun.sleep(50);
+    return this.take(once);
+  }
+
+  /** A terminal-started hub's secret for minting host links (see `linkFile`), or "" for none. */
+  linkSecret = "";
+
   /** Uses up a one-time link id: the cookie value to set, or null when it's unknown, used or expired. */
   take(once: string | null, now = Date.now()): string | null {
     if (!once) return null;
     const until = this.links.get(once);
     this.links.delete(once);
     return until && until >= now ? this.key : null;
+  }
+
+  matchesSecret(value: string) {
+    return !!this.linkSecret && safeEqual(value, this.linkSecret);
   }
 
   /** Whether a request's `jam_window` cookie is this hub's window key. */

@@ -119,7 +119,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
         // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
         // which tiles open as localhost:<port>.
-        if (path === "/host-window" && local && req.method === "GET") return hostWindowRoute(hub, req, url);
+        if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub, req, url);
+        // A new host link for `jamsesh host` on a hub that's already running (a terminal-started hub
+        // only): the caller proves it's this Mac's user by the secret in a mode-600 file of the hub's.
+        if (path === "/api/host-link" && local && req.method === "POST") {
+          const given = req.headers.get("x-jam-link-secret") ?? "";
+          const secret = hub.auth.windows.linkSecret;
+          if (!secret || !hub.auth.windows.matchesSecret(given)) return bad("Not allowed.", 403);
+          return json({ url: `http://127.0.0.1:${url.port || config.port}/host-window?once=${hub.auth.windows.mint()}&next=%2Fhost` });
+        }
         // Remote-access setup is only for someone at the host.
         if (local && path.startsWith("/api/net/")) {
           // A JSON body only: a form or text post from another site can't change remote access.
@@ -132,6 +140,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // The Mac app's credential for agents on that Mac: separate from the person's window, so
         // nothing an agent sends can approve a build or speak as a person.
         if (path === "/api/pair/agents" && req.method === "POST") {
+          // On the host only the app (it holds the window key) issues the host's agents credential:
+          // anyone else on loopback could otherwise revoke the live one and take its place.
+          if (local && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
           const owner = local ? null : hub.auth.check(tokenOf(req, url), ip);
           if (!local && owner?.kind !== "browser") return bad("Pair this Mac first.", 401);
           const who = owner?.personId ? s.person(owner.personId)?.name : undefined;
@@ -764,13 +775,13 @@ function file(p: string, root: string, cache = false): Response {
 const NOT_THE_HOST_WINDOW = "On the host, do this from the JamSesh window. A host started from a terminal printed a one-time host link: open that (restart the host for a new one).";
 
 /** GET /host-window?once=…&next=/path: a one-time host link (see HostWindows in auth.ts). */
-function hostWindowRoute(hub: Hub, req: Request, url: URL): Response {
+async function hostWindowRoute(hub: Hub, req: Request, url: URL): Promise<Response> {
   const next = url.searchParams.get("next") ?? "/host";
   const target = next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/host";
   const name = (req.headers.get("host") ?? "").replace(/:\d+$/, "");
   // The key lives on 127.0.0.1 only: send localhost (shared with dev tiles) and others there first.
   if (name !== "127.0.0.1") return new Response(null, { status: 302, headers: { location: `http://127.0.0.1:${url.port || config.port}${url.pathname}${url.search}`, "cache-control": "no-store" } });
-  const key = hub.auth.windows.take(url.searchParams.get("once"));
+  const key = await hub.auth.windows.takeSoon(url.searchParams.get("once"));
   const headers = new Headers({ location: target, "cache-control": "no-store", "referrer-policy": "no-referrer" });
   if (key) headers.append("set-cookie", `jam_window=${key}; Path=/; HttpOnly; SameSite=Strict`);
   return new Response(null, { status: 302, headers });

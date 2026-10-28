@@ -22,7 +22,7 @@ const remote = { "x-forwarded-for": "9.9.9.9" };
 const json = { "content-type": "application/json" };
 const chey = hub.session.upsertPerson({ name: "Chey" });
 const felipe = hub.session.upsertPerson({ name: "Felipe" });
-const agent = hub.auth.issue({ kind: "agent", label: "Agents on Mac", ip: "10.0.0.5", ownerDeviceId: "host" });
+const agent = hub.auth.issue({ kind: "agent", label: "Agents on Mac", ip: "10.0.0.5", ownerDeviceId: "dev_mac0" });
 const hostWindow = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
 
 // ---- 1. loopback alone is not a person ----
@@ -65,6 +65,36 @@ test("a one-time host link sets the key HttpOnly on 127.0.0.1, once", async () =
   // Only a path on the hub.
   const off = await fetch(`${base}/host-window?once=${hub.auth.windows.mint()}&next=https%3A%2F%2Fevil.example`, { redirect: "manual" });
   expect(off.headers.get("location")).toBe("/host");
+});
+
+test("only the host's window issues the host's agents credential; a local process can't swap it", async () => {
+  const live = await fetch(`${base}/api/pair/agents`, { method: "POST", headers: hostWindow() }).then((r) => r.json() as Promise<any>);
+  const r = await fetch(`${base}/api/pair/agents`, { method: "POST" });
+  expect(r.status).toBe(403);
+  expect(hub.auth.check(live.token)).not.toBeNull();
+});
+
+test("a window that arrives before its link id still gets the key", async () => {
+  const once = "ef".repeat(16);
+  const opened = fetch(`${base}/host-window?once=${once}&next=%2Fhost`, { redirect: "manual" });
+  await Bun.sleep(100);
+  hub.auth.windows.allow(once); // the app's stdin line lands after the window asked
+  expect((await opened).headers.get("set-cookie") ?? "").toContain("HttpOnly");
+});
+
+test("a terminal-started hub mints a fresh host link only for its secret", async () => {
+  const post = (h: Record<string, string>) => fetch(`${base}/api/host-link`, { method: "POST", headers: h });
+  expect((await post({ "x-jam-link-secret": "" })).status).toBe(403); // none set (app-started)
+  hub.auth.windows.linkSecret = "12".repeat(32);
+  try {
+    expect((await post({ "x-jam-link-secret": "34".repeat(32) })).status).toBe(403);
+    expect((await post({ "x-jam-link-secret": "12".repeat(32), ...remote })).status).not.toBe(200);
+    const { url } = (await (await post({ "x-jam-link-secret": "12".repeat(32) })).json()) as { url: string };
+    const opened = await fetch(url, { redirect: "manual" });
+    expect(opened.headers.get("set-cookie") ?? "").toContain("jam_window=");
+  } finally {
+    hub.auth.windows.linkSecret = "";
+  }
 });
 
 test("the Mac app's key and links arrive over stdin", async () => {
