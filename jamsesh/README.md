@@ -14,9 +14,12 @@ the hub, the host and client views, and the agent protocol. The design is in [`S
 JamSesh is one Mac app that either hosts a session or joins one. The Mac that drives the big
 screen (usually a Mac mini) hosts; everyone else joins.
 
-1. Install **JamSesh for Mac** (`JamSesh_<version>_aarch64.dmg`) and open it. It isn't notarized
-   yet, so the first time macOS refuses to open it: open **System Settings > Privacy & Security**,
-   click **Open Anyway** next to JamSesh, and confirm.
+1. Download
+   [JamSesh.dmg](https://github.com/fluid-commerce/jamsesh/releases/download/jamsesh-latest/JamSesh.dmg)
+   (Macs with Apple Silicon), open it, and drag JamSesh to Applications. Every change to `main`
+   rebuilds it, so the same link always has the newest version; to update, quit JamSesh and
+   replace it. The app isn't notarized yet, so the first time macOS refuses to open it: open
+   **System Settings > Privacy & Security**, click **Open Anyway** next to JamSesh, and confirm.
 2. Choose **Host a session on this Mac**. The big screen opens full screen on the display that
    isn't the Mac's main one (when there is one), your own window opens beside it, and JamSesh stays
    in the menu bar while it hosts.
