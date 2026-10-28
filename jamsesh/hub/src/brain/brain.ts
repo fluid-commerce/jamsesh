@@ -373,13 +373,38 @@ export class Brain {
 
   // ---------- reacting to agents ----------
 
+  /** How long to collect ships before one parity check (tests shorten it). */
+  shipWindowMs = 25_000;
+  private shipped: { agent: Agent; text: string }[] = [];
+  private shipTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Ships within a short window (desktop and mobile often land together) are considered once. */
   agentUpdated(agent: Agent, kind: UpdateKind, text: string) {
-    // Only implemented changes need parity in other repositories; finished mockups don't.
     if (kind !== "shipped") return;
-    const others = this.session.agents().filter((a) => a.id !== agent.id && a.status !== "offline" && a.platform !== agent.platform && a.platform !== "design");
-    if (!others.length) return;
+    this.shipped.push({ agent, text });
+    if (this.shipTimer) clearTimeout(this.shipTimer);
+    this.shipTimer = setTimeout(() => {
+      const batch = this.shipped.splice(0);
+      this.shipTimer = null;
+      this.shippedBatch(batch);
+    }, this.shipWindowMs);
+  }
+
+  private shippedBatch(batch: { agent: Agent; text: string }[]) {
+    const s = this.session;
+    const recentCoordinate = (id: string) =>
+      s.directives().some((d) => d.mode === "coordinate" && d.targets.includes(id) && d.status !== "done" && d.status !== "cancelled" && Date.now() - d.ts < 10 * 60_000);
+    const ids = new Set(batch.map((b) => b.agent.id));
+    const others = s.agents().filter((a) => !ids.has(a.id) && a.status !== "offline" && a.platform !== "design" && !batch.some((b) => b.agent.platform === a.platform));
+    const shippedPlatforms = new Set(batch.map((b) => b.agent.platform));
+    if (!others.length && shippedPlatforms.size < 2) return;
+    if ([...ids, ...others.map((o) => o.id)].every(recentCoordinate)) return;
     this.consider(
-      `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) reported "${kind}": ${text}\nOther platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. Shipped work should reach every platform by default, adapted to that platform's conventions (a desktop sidebar becomes tabs or a drawer on mobile; the feature and information architecture stay the same). Don't wait for the room to ask for parity or to pick a direction. Send one 'coordinate' directive to each other platform's agent and one to ${agent.name}, asking them to align through jam_message, post renders, and compare side by side. Call no_action only when the change is clearly specific to ${agent.platform} (an OS-only integration) or is an internal refactor with no visible result. Put a parity view on screen when both sides have artifacts.`,
+      `Shipped just now:\n${batch.map((b) => `- ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
+        (others.length
+          ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. If the same change belongs in their apps, send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders.`
+          : `Both platforms shipped the same feature. Send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message and fix inconsistencies that aren't deliberate platform differences.`) +
+        ` Don't send a coordinate directive to an agent that already has an open one. Put a parity view on screen when both platforms have built artifacts.`,
     );
   }
 
@@ -494,7 +519,7 @@ How to route:
 - If an agent asked the room a question and someone answered, send an 'answer' directive to that agent.
 - Write directives as complete instructions an agent can act on without hearing the room: include counts, names, constraints, and which mockup.
 - Use host_action only when the room asks to see something outside the board (a native app, a simulator, side-by-side windows).
-- Lines marked "(typed to their agent)" are prompts a person gave their own agent, which is already on it. Don't route them back to that agent. Act on them only when they affect other agents (for example "and tell the mobile agent to match"), or record a decision they state.
+- Lines marked "(typed to their agent)" are prompts a person gave their own agent, which is already on it. Don't route them back to that agent. Act on them only when they affect other agents (for example "and tell the mobile agent to match"): then target ONLY the other agents (mode implement or explore, not coordinate) and tell them to jam_message the typer's agent to stay aligned. Never include the typer's own agent in that directive. Or record a decision they state.
 - When one platform ships something visible (an agent posts "shipped" or "done"), the other platforms' agents should get a 'coordinate' directive so desktop and mobile stay in parity, adapted to each platform. Include the shipping agent in it.
 - Don't repeat a directive that is already open. Don't route banter. If nothing needs doing, call no_action.
 - "That was Felipe" / "Britain said that" right after a line means fix_speaker on that line. It is not banter even if phrased casually.

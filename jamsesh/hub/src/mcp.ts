@@ -285,7 +285,7 @@ export class McpEndpoint {
       case "jam_update": {
         const agent = this.requireAgent(ctx);
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId } });
-        if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirective(args.directiveId, { status: "done", result: args.text });
+        if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
         return text(`Posted (#${ev.id}).${inbox}`);
       }
@@ -308,14 +308,15 @@ export class McpEndpoint {
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
         const out = this.inboxText(agent, true);
-        s.touchAgent(agent.id, { status: out.startsWith("Nothing") ? "waiting" : "working" });
+        const idle = out.startsWith("Nothing new.");
+        s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
         return text(out);
       }
       case "jam_ack": {
         const agent = this.requireAgent(ctx);
         const d = s.store.get("directives", String(args.directiveId));
         if (!d) throw new Error("No directive with that id.");
-        s.setDirective(d.id, { status: args.status, result: args.result ?? d.result });
+        s.setDirectiveFor(d.id, agent.id, args.status, args.result);
         if (args.status === "acked") s.touchAgent(agent.id, { status: "working", activity: d.text.slice(0, 140) });
         if (args.status !== "acked")
           s.store.addEvent({ kind: "update", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `${args.status === "done" ? "Done" : "Dropped"}: ${d.text.slice(0, 120)}${args.result ? `. ${args.result}` : ""}`, relevance: "work", data: { directiveId: d.id, updateKind: args.status } });
@@ -405,7 +406,9 @@ export class McpEndpoint {
       "",
       inbox,
       "",
-      "Read the JamSesh skill now if you haven't (MCP prompt 'jamsesh', or " + `${s.hubUrl}/skill.md). Next: jam_claim your workstream, then work, posting jam_update as you go.`,
+      resumed
+        ? "You've joined before, so the JamSesh skill is in your context already. Next: jam_inbox, then carry on."
+        : `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub).replace(/^---[\s\S]*?---\s*/, "")}`,
     ].join("\n");
   }
 
@@ -454,7 +457,11 @@ export class McpEndpoint {
   inboxText(agent: Agent, mark = true) {
     const s = this.hub.session;
     const { directives, messages } = s.inbox(agent.id, mark);
-    if (!directives.length && !messages.length) return "Nothing new.";
+    if (!directives.length && !messages.length) {
+      const open = s.openFor(agent.id);
+      if (!open.length) return "Nothing new.";
+      return `Nothing new, but you haven't finished: ${open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ")}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
+    }
     const out: string[] = [];
     for (const d of directives) {
       out.push(

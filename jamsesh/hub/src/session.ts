@@ -382,6 +382,7 @@ export class Session {
       rationale: d.rationale ?? "",
       targets: d.targets,
       status: "pending",
+      progress: Object.fromEntries(d.targets.map((t) => [t, "pending" as const])),
       priority: d.priority ?? 1,
       requestedBy: d.requestedBy,
       sourceEventIds: d.sourceEventIds ?? [],
@@ -416,17 +417,39 @@ export class Session {
     return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
   }
 
+  /** One agent's progress on a directive; the directive's status follows the slowest target. */
+  setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
+    const d = this.store.get("directives", id);
+    if (!d) return undefined;
+    const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
+    const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
+    const states = d.targets.map((t) => progress[t] ?? "pending");
+    const finished = states.every((x) => x === "done" || x === "cancelled");
+    const overall = finished ? (states.includes("done") ? "done" : "cancelled") : states.map((x) => order.indexOf(x)).reduce((a, b) => Math.min(a, b)) >= 2 ? "acked" : states.some((x) => x !== "pending") ? "delivered" : "pending";
+    const res = result ? [d.result, `${this.agent(agentId)?.name ?? agentId}: ${result}`].filter(Boolean).join("\n") : d.result;
+    return this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+  }
+
+  /** Directives this agent took but hasn't finished. */
+  openFor(agentId: string) {
+    return this.directives().filter((d) => d.targets.includes(agentId) && ["delivered", "acked"].includes(d.progress?.[agentId] ?? d.status));
+  }
+
   /** Unread work for an agent: directives aimed at it and messages to it. */
   inbox(agentId: string, markDelivered = true) {
+    const mine = (d: Directive) => d.progress?.[agentId] ?? d.status;
     const directives = this.directives()
-      .filter((d) => d.targets.includes(agentId) && (d.status === "pending" || (!markDelivered && d.status === "delivered")))
+      .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const messages = this.store
       .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
       .filter((e) => e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId));
     if (markDelivered) {
-      for (const d of directives) this.setDirective(d.id, { status: "delivered", deliveredAt: Date.now() });
+      for (const d of directives) {
+        this.setDirectiveFor(d.id, agentId, "delivered");
+        this.setDirective(d.id, { deliveredAt: d.deliveredAt ?? Date.now() });
+      }
       if (messages.length) this.store.setSetting(`msgRead:${agentId}`, messages[messages.length - 1].id);
     }
     return { directives, messages };
@@ -434,7 +457,7 @@ export class Session {
 
   hasInbox(agentId: string) {
     const { directives, messages } = this.inbox(agentId, false);
-    return directives.some((d) => d.status === "pending") || messages.length > 0;
+    return directives.some((d) => (d.progress?.[agentId] ?? d.status) === "pending") || messages.length > 0;
   }
 
   wait(agentId: string, timeoutMs: number): Promise<void> {

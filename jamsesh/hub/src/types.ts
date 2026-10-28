@@ -93,6 +93,8 @@ export interface Directive {
   rationale: string;
   targets: string[];
   status: DirectiveStatus;
+  /** Each target agent's own progress; status is done only when every target is. */
+  progress: Record<string, DirectiveStatus>;
   priority: number;
   requestedBy: string;
   sourceEventIds: number[];
