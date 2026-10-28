@@ -52,6 +52,8 @@ export class Auth {
   private perIp = new Map<string, Attempts>();
   private globalFails: number[] = [];
   private lastSeenWrite = 0;
+  /** The host Mac's own windows (see HostWindows). */
+  readonly windows = new HostWindows();
 
   constructor(private store: Store) {
     this.secret = store.setting<string>("pairSecret", "") || randomBytes(32).toString("hex");
@@ -210,6 +212,72 @@ export class Auth {
   list() {
     return [...this.devices.values()].filter((d) => !d.revoked).map(({ tokenHash: _h, ...d }) => d);
   }
+}
+
+/**
+ * The host Mac's own windows (SPEC 14). Loopback is not proof of a person: every process on the
+ * host can reach it. So the host's windows hold this hub's window key in an HttpOnly, SameSite
+ * cookie (`jam_window`) on 127.0.0.1, which page scripts can't read and other sites can't send, and
+ * person-only actions from loopback need it. A window gets the cookie by opening a one-time host
+ * link (`/host-window?once=…`): the Mac app hands the hub its key and a fresh link for each window
+ * over the hub's stdin; a hub started from a terminal prints one link and opens it with --open.
+ */
+export class HostWindows {
+  private key = randomBytes(32).toString("hex");
+  private links = new Map<string, number>();
+
+  /** The Mac app's key for this launch, so the hub and the app's relay share one key on 127.0.0.1. */
+  adopt(key: string) {
+    if (/^[0-9a-f]{64}$/.test(key)) this.key = key;
+  }
+
+  /** Accepts a one-time link id (from the Mac app, or one this hub made), good for ten minutes. */
+  allow(once: string, now = Date.now()) {
+    for (const [k, until] of this.links) if (until < now) this.links.delete(k);
+    if (/^[0-9a-f]{32,64}$/.test(once) && this.links.size < 1000) this.links.set(once, now + 10 * 60_000);
+  }
+
+  /** A new one-time link id. */
+  mint(now = Date.now()) {
+    const once = randomBytes(16).toString("hex");
+    this.allow(once, now);
+    return once;
+  }
+
+  /** Uses up a one-time link id: the cookie value to set, or null when it's unknown, used or expired. */
+  take(once: string | null, now = Date.now()): string | null {
+    if (!once) return null;
+    const until = this.links.get(once);
+    this.links.delete(once);
+    return until && until >= now ? this.key : null;
+  }
+
+  /** Whether a request's `jam_window` cookie is this hub's window key. */
+  matches(value: string | null | undefined) {
+    return !!value && safeEqual(value, this.key);
+  }
+}
+
+/**
+ * The Mac app's side channel (JAMSESH_WINDOW_LINKS=stdin): "key <hex>" once, then "once <hex>" for
+ * each window it opens. Over stdin, not the environment or arguments, which other processes can list.
+ */
+export async function readWindowLinks(windows: HostWindows, input: ReadableStream<Uint8Array> = Bun.stdin.stream()) {
+  let buf = "";
+  const decoder = new TextDecoder();
+  try {
+    for await (const chunk of input as any as AsyncIterable<Uint8Array>) {
+      buf += decoder.decode(chunk, { stream: true });
+      if (buf.length > 64_000) buf = buf.slice(-1000);
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const [kind, value = ""] = buf.slice(0, nl).trim().split(/\s+/, 2);
+        buf = buf.slice(nl + 1);
+        if (kind === "key") windows.adopt(value);
+        else if (kind === "once") windows.allow(value);
+      }
+    }
+  } catch {}
 }
 
 function safeEqual(a: string, b: string) {

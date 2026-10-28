@@ -68,3 +68,49 @@ test("the name as speech-to-text writes it, and the name on its own", async () =
   expect(onlyTheName("JamSesh, bring up the nav", "JamSesh")).toBe(false);
   expect(onlyTheName("hey Pixel", "Pixel")).toBe(true);
 });
+
+// A recorded or "Ask" line goes to brain.direct(); the human verdict must decide there too, with no gateway.
+test("direct (recorded) approvals decide waiting requests with the gateway down", async () => {
+  const { config } = await import("../src/config");
+  const { makeRoom } = await import("./bench");
+  const prev = config.offline;
+  config.offline = true;
+  const room = makeRoom();
+  try {
+    const { hub } = room;
+    const brain = hub.brain as any;
+    const person = room.people.chey;
+    const line = (text: string, saidAt?: number) =>
+      hub.session.store.addEvent({ kind: "speech", authorType: "person", authorId: person.id, authorName: person.name, text, relevance: "work", data: { direct: true, recorded: true, ...(saidAt ? { saidAt } : {}) } });
+    hub.session.updateSettings({ hostControl: true });
+
+    // One shell request: a recorded "approve" runs it.
+    const sh = hub.host.requestShell("true", "JamSesh");
+    if (typeof sh === "string") throw new Error(sh);
+    await brain.direct(line("approve"));
+    expect(hub.host.pendingRequests()).toHaveLength(0);
+
+    // Words that ended before the request was announced don't count.
+    const early = hub.host.requestShell("true", "JamSesh");
+    if (typeof early === "string") throw new Error(early);
+    await brain.direct(line("approve", early.createdAt - 5_000));
+    expect(hub.host.pendingRequests()).toHaveLength(1);
+
+    // A deny from the recording decides it too.
+    await brain.direct(line("deny", early.createdAt + 1_000));
+    expect(hub.host.pendingRequests()).toHaveLength(0);
+
+    // Two waiting: a bare "approve" decides neither; naming one decides only that one.
+    const a = hub.host.request({ agentId: "a1", agentName: "Sam's Claude", ownerName: "Sam", repo: "https://github.com/octocat/Hello-World.git", branch: "master", command: "true" });
+    const b = hub.host.request({ agentId: "a2", agentName: "Dana's Codex", ownerName: "Dana", repo: "https://github.com/octocat/Spoon-Knife.git", branch: "main", command: "true" });
+    if (typeof a === "string" || typeof b === "string") throw new Error("request refused");
+    await brain.direct(line("approve"));
+    expect(hub.host.pendingRequests()).toHaveLength(2);
+    await brain.direct(line("deny Sam's build"));
+    expect(hub.host.pendingRequests().map((r: any) => r.id)).toEqual([b.id]);
+    await new Promise((r) => setTimeout(r, 800)); // the approved `true` finishes and logs before the room's data dir goes
+  } finally {
+    room.stop();
+    config.offline = prev;
+  }
+}, 30_000);

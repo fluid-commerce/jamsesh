@@ -350,7 +350,8 @@ export class McpEndpoint {
         const onHost = ctx.device === "host" || (!ctx.device && machineIsHost(ctx.ip));
         const ownerId = onHost ? s.store.setting<string>("hostPersonId", "") : ctx.device ? this.hub.auth.list().find((d) => d.id === ctx.device)?.personId : undefined;
         const pairedOwner = ownerId ? s.person(ownerId)?.name : undefined;
-        const ownerName = String(args.owner || pairedOwner || "");
+        // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
+        const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
         const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
@@ -362,6 +363,8 @@ export class McpEndpoint {
           platform: args.platform,
           focus: args.focus,
           name: args.name,
+          // A record from an earlier credential of this same Mac (its owner window) can be taken over.
+          sameMachine: (old) => this.hub.auth.machineOf(old) === machine,
         });
         ctx.agentId = agent.id;
         const first = !ctx.skillSent;
@@ -566,12 +569,15 @@ export class McpEndpoint {
       }
       case "canvas_render": {
         const agent = this.requireAgent(ctx);
-        this.canvasNote(agent.id).render = Date.now();
+        // Counts as a look at the canvas (for the "done" check) only once a picture came back, and as
+        // of when it was asked for, so an edit made while it rendered still needs another look.
+        const asked = Date.now();
+        const looked = (r: ToolOut) => (!r.isError && (this.canvasNote(agent.id).render = Math.max(this.canvasNote(agent.id).render, asked)), r);
         // The agent's own copy of the file has its latest edits; the host's can be a moment behind,
         // and a render that misses the edit just made would tell the agent its fix didn't land.
         const own = await this.hub.canvas.call(agent, "screenshot", { ids: [Number(args.frameId)], maxSize: args.maxSize ?? 1600 }).catch(() => null);
-        if (own && !own.isError) return own as ToolOut;
-        return (await this.hub.canvas.renderNode(String(args.frameId), args.maxSize ?? 1600)) as ToolOut;
+        if (own && !own.isError) return looked(own as ToolOut);
+        return looked((await this.hub.canvas.renderNode(String(args.frameId), args.maxSize ?? 1600)) as ToolOut);
       }
     }
     throw new Error(`Unknown tool ${name}`);

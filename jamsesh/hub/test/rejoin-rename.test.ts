@@ -8,18 +8,40 @@ import { Session } from "../src/session";
 import { Store } from "../src/store";
 
 const fresh = () => new Session(new Store(mkdtempSync(join(tmpdir(), "jam-rejoin-"))));
-const join_ = (s: Session, machine: string) =>
-  s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "jamsesh", cwd: "/Users/chey/jamsesh", machine, platform: "desktop" });
+// `sameMachine` stands in for the hub's check (auth.machineOf): dev-old was this Mac's earlier credential.
+const join_ = (s: Session, machine: string, sameMachine?: (m: string) => boolean) =>
+  s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "jamsesh", cwd: "/Users/chey/jamsesh", machine, platform: "desktop", sameMachine });
+const quiet = (s: Session, id: string, ms: number) => s.store.put("agents", { ...s.store.get("agents", id)!, lastSeen: Date.now() - ms });
 
-test("a quiet agent coming back on a new credential takes over its own record", () => {
+test("a quiet agent coming back on a new credential of the same Mac takes over its own record", () => {
   const s = fresh();
   const first = join_(s, "dev-old").agent;
-  s.store.put("agents", { ...s.store.get("agents", first.id)!, lastSeen: Date.now() - 5 * 60_000 });
-  const again = join_(s, "dev-new");
+  quiet(s, first.id, 5 * 60_000);
+  const again = join_(s, "dev-new", (m) => m === "dev-old");
   expect(again.resumed).toBe(true);
   expect(again.agent.id).toBe(first.id);
   expect(again.agent.name).toBe("Chey's Claude");
   expect(s.store.all("agents")).toHaveLength(1);
+});
+
+test("another Mac naming the same owner, harness and folder can't take a record that may still be live", () => {
+  const s = fresh();
+  const victim = join_(s, "mac-a").agent;
+  // Busy for five minutes: quiet, but still live (the UI shows agents offline after 20).
+  quiet(s, victim.id, 5 * 60_000);
+  const thief = join_(s, "mac-b", (m) => m === "mac-b");
+  expect(thief.resumed).toBe(false);
+  expect(thief.agent.id).not.toBe(victim.id);
+  expect(s.agent(victim.id)?.machine).toBe("mac-a");
+});
+
+test("a record gone long enough to show offline can be picked up from another credential", () => {
+  const s = fresh();
+  const old = join_(s, "mac-a").agent;
+  quiet(s, old.id, 21 * 60_000);
+  const back = join_(s, "mac-b", () => false);
+  expect(back.resumed).toBe(true);
+  expect(back.agent.id).toBe(old.id);
 });
 
 test("a live agent with the same folder on another Mac keeps its record", () => {

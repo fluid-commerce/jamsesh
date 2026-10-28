@@ -14,22 +14,29 @@ KC="$DIR/jamsesh-signing.keychain-db"
 PASS_FILE="$DIR/keychain-password"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# One `security` command from stdin; a failure is reported by what the next step finds missing.
+sec() { printf '%s\n' "$1" | security -i >/dev/null; }
+
 set_up() {
   mkdir -p "$DIR" && chmod 700 "$DIR"
   [ -f "$PASS_FILE" ] || (umask 077 && openssl rand -hex 16 > "$PASS_FILE")
+  # The keychain password never goes in a command's arguments (any process can read those): openssl
+  # reads it from the 0600 file, and `security` gets its commands on stdin (`security -i`). The
+  # password is random hex, so it needs no quoting there. macOS's own openssl (LibreSSL) is used because
+  # Homebrew's OpenSSL 3/4 writes .p12 files `security import` rejects as a wrong password.
   local pass; pass="$(cat "$PASS_FILE")"
-  [ -f "$KC" ] || security create-keychain -p "$pass" "$KC"
+  [ -f "$KC" ] || sec "create-keychain -p $pass \"$KC\""
   security set-keychain-settings "$KC" # no auto-lock
-  security unlock-keychain -p "$pass" "$KC"
+  sec "unlock-keychain -p $pass \"$KC\""
   if ! security find-certificate -c "$NAME" "$KC" >/dev/null 2>&1; then
     local tmp; tmp="$(mktemp -d)"
     printf '[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=%s\n[ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=critical,codeSigning\n' "$NAME" > "$tmp/cnf"
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/key.pem" -out "$DIR/cert.pem" -days 3650 -config "$tmp/cnf" 2>/dev/null
-    openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$DIR/cert.pem" -out "$tmp/id.p12" -passout pass:"$pass" -name "$NAME"
-    security import "$tmp/id.p12" -k "$KC" -P "$pass" -T /usr/bin/codesign >/dev/null
+    /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -keyout "$tmp/key.pem" -out "$DIR/cert.pem" -days 3650 -config "$tmp/cnf" 2>/dev/null
+    /usr/bin/openssl pkcs12 -export -inkey "$tmp/key.pem" -in "$DIR/cert.pem" -out "$tmp/id.p12" -passout file:"$PASS_FILE" -name "$NAME"
+    sec "import \"$tmp/id.p12\" -k \"$KC\" -P $pass -T /usr/bin/codesign"
     rm -rf "$tmp"
   fi
-  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pass" "$KC" >/dev/null
+  sec "set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $pass \"$KC\""
   [ -f "$DIR/cert.pem" ] || security find-certificate -c "$NAME" -p "$KC" > "$DIR/cert.pem"
 }
 

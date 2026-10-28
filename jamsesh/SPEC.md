@@ -1281,9 +1281,10 @@ it.
 ## 14. Security
 
 - **Pairing.** Every request needs a paired device's token, except the connect page, `/healthz`,
-  static assets, pairing itself, and the agent intro. Only requests from the host machine itself
-  are trusted without one: loopback requests that no proxy, tunnel, or relay forwarded (a request
-  carrying `X-Forwarded-*`, `Forwarded`, `CF-Connecting-IP`, or `X-Real-IP` is treated as remote).
+  static assets, pairing itself, and the agent intro. Requests from the host machine itself need
+  no token: loopback requests that no proxy, tunnel, or relay forwarded (a request carrying
+  `X-Forwarded-*`, `Forwarded`, `CF-Connecting-IP`, or `X-Real-IP` is treated as remote). Loopback
+  alone only reads, though; acting as a person on the host needs the host window key (below).
   Pairing takes the rotating code (see [4.2](#42-pairing-code)) or a single-use invite code (eight
   characters, ten minutes) that a person or the host creates for someone outside the room.
 - **Host names.** The hub answers only to loopback names, IP addresses, `.local` names, its own
@@ -1294,10 +1295,25 @@ it.
   Keychain, or a mode-600 file. Tokens never go in URLs except the one-time dev-server sign-in.
 - **Two credentials per Mac.** The Mac app holds the person's credential for its window and a
   separate agents' credential (issued from the window, kind `agent`) for everything else that
-  talks to its relay. The relay gives the person's credential only to its own window's requests
-  (a browser's `Origin` and `Sec-Fetch` headers) and the agents' credential to the rest. On the host,
-  the app's relay uses an agents' credential too, so agents on the host Mac aren't treated as the
-  host. Disconnecting a window disconnects the agents' credential issued from it.
+  talks to its relay. On the host, the app's relay uses an agents' credential too, so agents on the
+  host Mac aren't treated as the host. Disconnecting a window disconnects the agents' credential
+  issued from it.
+- **The window key.** Headers prove nothing about who is asking (any process can send `Origin`
+  or `Sec-Fetch-*`), so the app's own windows are told apart by a random key made at each launch.
+  A window gets it by opening a one-time link (`/__jamsesh/window?once=…` on a joined Mac's relay,
+  `/host-window?once=…` on the hub) whose response sets it as an HttpOnly, `SameSite=Strict`
+  `jam_window` cookie on `127.0.0.1`: no page script can read it, no other site can send it, and it
+  never appears in a URL, a file, an argument or the environment. The relay gives the person's
+  credential only to requests that carry the key and the agents' credential to the rest; the hub
+  accepts loopback as a person (speaking, recording, approving, settings, the pairing code,
+  people, remote access, disconnecting devices) only with the key. The app starts the hub with its
+  key and each window's link id over the hub's stdin. A hub started from a terminal makes its own
+  key and prints one host link (good once, for ten minutes); `jamsesh host` opens it as the big
+  screen. A browser on the host without the key sees the session but can't act as a person:
+  restart the host for a new link. Cookies ignore ports, so dev servers open in tiles as
+  `localhost:<port>`, a different host name, and never receive the key; the relay and the hub also
+  strip it from anything they forward. Approving from another machine needs a paired window that
+  belongs to a person.
 - **Revocation.** The host disconnects any device in **Settings > Connected devices**. Its token
   stops working at once and its open live-session connections close.
 - **Host-only.** The gateway key, models, host control, the brain's on/off switch, remote access,
@@ -1307,9 +1323,17 @@ it.
   The brain never runs a shell command or starts a host build on its own word: each one is filed
   as a request, announced, and runs only after a person approves that request by button or by
   an "approve" said after the announcement; agents' messages never approve anything.
-  One limit is inherent: an agent running under your account on your Mac can do anything you can
-  there, including imitating the app's window. The protection is against agents elsewhere, and
-  against an agent being talked into it by text it reads.
+  An agent's owner is its credential's person: the Mac app's agents' credential belongs to the
+  window's person, and `jam_join` ignores an `owner` that names someone else. A rejoin takes over
+  an earlier record only from the same Mac (the same owner window) or once the record has been
+  quiet long enough to show offline (20 minutes).
+- **What is and isn't protected on one Mac.** Protected: agents on other machines; a page in a
+  browser; a local process that just calls the hub or the relay on loopback (it acts as the
+  agents, never as a person); dev content shown in a tile. Not protected: an agent running under
+  your account on your Mac that sets out to get around this. It can read the app's memory or its
+  webview's cookie store, drive the app's windows, or run the command it wanted approved itself.
+  The window key keeps such an agent from approving or speaking for you by accident or because
+  text it read told it to, not from deliberately breaking in to your own account.
 - **Network.** From outside the network, the host is reachable only over HTTPS. The canvas server
   listens on the host only and the hub relays it to paired devices.
 - **Host control** is available only to the host brain, never to client agents' tools.

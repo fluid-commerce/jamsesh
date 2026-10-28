@@ -219,4 +219,21 @@ describe("outbox host safety", () => {
     expect(b.ob.get().pending).toBe(1);
     expect(b.ob.get().items[0].path).toBe("/a");
   });
+
+  test("a 409 from a host switch keeps the call and delivers it once its host is back", async () => {
+    const seen: string[] = [];
+    let relay = "hostB"; // the relay already points at another host when the call goes out
+    const { ob, timers } = make(async (e) => (relay !== e.hostId ? { kind: "otherHost" } : (seen.push(e.path), { kind: "ok" })), { hostId: () => "hostA", canSend: () => true });
+    await ob.enqueue("POST", "/a", {});
+    await settle();
+    expect(seen).toEqual([]);
+    expect(ob.get().pending).toBe(1);
+    expect(ob.get().dropped).toBe(0);
+    expect(timers.length).toBeGreaterThan(0); // retried later with backoff, not in a tight loop
+    relay = "hostA";
+    await ob.kick();
+    expect(seen).toEqual(["/a"]);
+    expect(ob.get().pending).toBe(0);
+    expect(ob.get().synced).toBe(1);
+  });
 });

@@ -1,10 +1,31 @@
 // Host mode: runs the JamSesh hub on this Mac as a child process and stops it on quit.
 use std::fs::{OpenOptions, create_dir_all};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::proxy::healthy;
+use crate::proxy::{healthy, random_hex, window_key};
+
+/// The started hub's stdin: this app's window key, then a one-time link id per window (see
+/// `window_url`). A pipe, not the environment, which other processes on this Mac can list.
+static LINKS: Mutex<Option<ChildStdin>> = Mutex::new(None);
+
+/// Where one of this app's windows opens `path` (with its query) on the hub it started: a one-time
+/// host link that gives the window the window key in an HttpOnly cookie, so it can act as the
+/// host's person (SPEC 14). On a hub this app didn't start, the plain address (a read-only view).
+pub fn window_url(origin: &str, path: &str) -> String {
+    let plain = format!("{origin}{path}");
+    let Ok(mut links) = LINKS.lock() else { return plain };
+    let (Some(pipe), Some(once)) = (links.as_mut(), random_hex(16)) else { return plain };
+    if pipe.write_all(format!("once {once}\n").as_bytes()).and_then(|_| pipe.flush()).is_err() {
+        *links = None;
+        return plain;
+    }
+    let next: String = url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
+    format!("{origin}/host-window?once={once}&next={next}")
+}
 
 pub const PORTS: [u16; 3] = [4747, 4848, 4949];
 
@@ -108,11 +129,19 @@ impl Hub {
             // The hub exits on its own if this app goes away without stopping it.
             .env("JAMSESH_PARENT_PID", std::process::id().to_string())
             .env("JAMSESH_PORT", port.to_string())
-            .stdin(Stdio::null())
+            .env("JAMSESH_WINDOW_LINKS", "stdin")
+            .stdin(Stdio::piped())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err))
             .spawn()
             .map_err(|e| format!("Couldn't start the session: {e}"))?;
+        let mut child = child;
+        if let (Some(mut pipe), Some(key)) = (child.stdin.take(), window_key())
+            && pipe.write_all(format!("key {key}\n").as_bytes()).is_ok()
+            && let Ok(mut links) = LINKS.lock()
+        {
+            *links = Some(pipe);
+        }
         let mut hub = Hub { port, child: Some(child) };
         for _ in 0..120 {
             if healthy(&hub.origin()).await {
@@ -130,6 +159,9 @@ impl Hub {
     /// Asks the hub to save and exit, then waits up to ten seconds.
     pub fn stop(&mut self) {
         let Some(mut child) = self.child.take() else { return };
+        if let Ok(mut links) = LINKS.lock() {
+            *links = None;
+        }
         let _ = Command::new("/bin/kill").args(["-TERM", &child.id().to_string()]).status();
         for _ in 0..100 {
             if let Ok(Some(_)) = child.try_wait() {

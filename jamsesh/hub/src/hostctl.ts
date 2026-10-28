@@ -416,18 +416,13 @@ export class HostControl {
     return this.file(r);
   }
 
-  /** Shell commands waiting for approval (by request id): approving one runs the command, not a build. */
-  private shells = new Set<string>();
-
   /**
    * The brain wants to run a shell command on the host. It waits for a person's approval exactly
    * like a build: announced, then decided by a button or a spoken "approve" or "deny".
    */
   requestShell(command: string, by: string): BuildRequest | string {
     if (!command.trim()) return "Give a command.";
-    const r = this.file({ agentId: "brain", agentName: by, ownerName: "the room", repo: "a shell command", branch: "", command: command.trim(), kind: "shell" });
-    if (typeof r !== "string") this.shells.add(r.id);
-    return r;
+    return this.file({ agentId: "brain", agentName: by, ownerName: "the room", repo: "a shell command", branch: "", command: command.trim(), kind: "shell" });
   }
 
   private file(r: Omit<BuildRequest, "id" | "status" | "createdAt">): BuildRequest | string {
@@ -438,7 +433,6 @@ export class HostControl {
     setTimeout(() => {
       if (req.status !== "pending") return;
       req.status = "expired";
-      this.shells.delete(req.id);
       this.onRequest(req);
     }, REQUEST_TTL_MS).unref?.();
     this.onRequest(req);
@@ -459,7 +453,7 @@ export class HostControl {
     req.status = approve ? "approved" : "denied";
     req.decidedBy = by;
     this.onRequest(req);
-    if (this.shells.delete(req.id)) return approve ? this.runShell(req.command, by) : `Denied the shell command: ${req.command}`;
+    if (req.kind === "shell") return approve ? this.runShell(req.command, by) : `Denied the shell command: ${req.command}`;
     if (!approve) return `Denied ${req.agentName}'s build.`;
     return this.preview({ repo: req.repo, branch: req.branch, command: req.command, open: req.open, by: `${req.agentName} (approved by ${by})` });
   }

@@ -52,10 +52,12 @@ export function localize(url: string) {
   try {
     const u = new URL(url);
     // The host's own browser and the Mac app's window (its relay) are on 127.0.0.1: dev servers are
-    // there too, on the same port (on the host itself, or mirrored by the Mac app to the host).
+    // on this machine too, on the same port (on the host itself, or mirrored by the Mac app to the
+    // host). They open as localhost, another host name: cookies ignore ports, so the window key on
+    // 127.0.0.1 (SPEC 14) never reaches dev content.
     const privateHost = /^(10|127|192\.168|172\.(1[6-9]|2\d|3[01]))\.|\.local$/.test(u.hostname) || u.hostname === "localhost";
     if ((location.hostname === "127.0.0.1" || location.hostname === "localhost") && u.protocol === "http:" && u.port && privateHost) {
-      u.hostname = "127.0.0.1";
+      u.hostname = "localhost";
       return u.toString();
     }
     // On the public HTTPS address, dev servers live on their own subdomain: dev-<port>.<host>.

@@ -20,6 +20,8 @@ afterAll(() => {
 const remote = { "x-forwarded-for": "9.9.9.9" };
 const agent = hub.auth.issue({ kind: "agent", label: "Agents on Mac", ip: "10.0.0.5", ownerDeviceId: "host" });
 const browser = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.6" });
+// The host's own window: it opened a one-time host link, so it holds the window key (SPEC 14).
+const hostWindow = { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` };
 
 test("an agent credential is refused on human routes whether it comes as a header or ?token=", async () => {
   const body = JSON.stringify({ text: "hi", personId: "p1" });
@@ -41,7 +43,7 @@ test("agents can't change people, settings, directives or transcription workers"
 });
 
 test("a worker has to be the caller's own machine, and can't replace the local engine", async () => {
-  const h = { "content-type": "application/json", authorization: `Bearer ${browser.token}` };
+  const h = { "content-type": "application/json", authorization: `Bearer ${browser.token}`, ...hostWindow };
   const post = (b: object) => fetch(`${base}/api/workers`, { method: "POST", headers: h, body: JSON.stringify(b) });
   expect((await post({ id: "local", url: "http://127.0.0.1:9/" })).status).toBe(400);
   // Through the relay the hub can't tell the caller's address.
@@ -50,9 +52,10 @@ test("a worker has to be the caller's own machine, and can't replace the local e
 
 test("a failed audio upload isn't remembered as received", async () => {
   const url = `${base}/api/audio?deviceId=dX&t0=1000&t1=3000`;
-  const send = () => fetch(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array([1, 2, 3]) }).then((r) => r.json() as Promise<any>);
+  const send = () => fetch(url, { method: "POST", headers: { "content-type": "audio/wav", ...hostWindow }, body: new Uint8Array([1, 2, 3]) }).then((r) => r.json() as Promise<any>);
   const first = await send();
   const retry = await send();
+  expect(first.error).toBe("not a WAV file"); // reached the pipeline (the host window may upload)
   expect(first.duplicate).toBeUndefined();
   expect(retry.duplicate).toBeUndefined();
 });

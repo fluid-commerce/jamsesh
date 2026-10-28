@@ -29,6 +29,7 @@ case "${1:-help}" in
     cd "$DIR"
     if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
       echo "JamSesh is already running on port $PORT."
+      echo "Its terminal shows the one-time host link that makes a browser the host's window (approvals, the pairing code)."
       [ "${1:-}" = "--no-open" ] || open_big_screen
       exit 0
     fi
@@ -37,9 +38,9 @@ case "${1:-help}" in
       echo "  JAMSESH_PORT=4848 jamsesh host" >&2
       exit 1
     fi
-    ( for _ in $(seq 1 60); do sleep 0.5; curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; done
-      [ "${1:-}" = "--no-open" ] || open_big_screen ) &
-    exec bun run hub/src/index.ts "$@"
+    # The hub opens the big screen itself, with its one-time host link (SPEC 14).
+    if [ "${1:-}" = "--no-open" ]; then shift; exec bun run hub/src/index.ts "$@"; fi
+    exec bun run hub/src/index.ts --open "$@"
     ;;
   join)
     target="${2:?Usage: jamsesh join <host[:port]>}"

@@ -88,7 +88,7 @@ can disconnect any of them.
 ## If the connection drops
 
 - Your window shows **Reconnecting** and keeps working. Changes you make and lines your mic hears
-  are saved on your laptop and sent, in order and exactly once, when the host is back.
+  are saved on your laptop and sent, in order, when the host is back. Each carries a key so the host applies a resend once, and a change made for one host is kept until that host is back instead of landing on another.
 - Your name, profile, and settings are remembered for each host you've connected to.
 - If the host disconnects your device, your window asks you to connect again with a fresh code.
 

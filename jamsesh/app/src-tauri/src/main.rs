@@ -81,20 +81,17 @@ fn keychain(origin: &str) -> Option<keyring::Entry> {
 
 // ---- windows ----
 
-/// `relay_port`: the window shows the session through this Mac's relay, so it gets the relay's
-/// window key (see proxy.rs) and with it the person's credential.
-fn open_window(app: &AppHandle, label: &str, url: &str, title: &str, relay_port: Option<u16>) -> Result<(), String> {
+/// `url` is a one-time window link (`Proxy::window_url` or `host::window_url`), which gives the
+/// window this launch's window key in an HttpOnly cookie and with it the person's credential.
+/// No page script ever sees the key (there is no initialization script).
+fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.show();
         let _ = w.set_focus();
         return Ok(());
     }
     let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
-    let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed));
-    if let Some(script) = relay_port.and_then(proxy::window_script) {
-        builder = builder.initialization_script(&script);
-    }
-    builder
+    WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
         .title(title)
         // No separate title bar: the window controls sit in the page's own header (centered in
         // its 56 px), with the logo to their right; the header is the drag area.
@@ -193,7 +190,7 @@ fn arrange_screens(app: &AppHandle, origin: &str) -> Result<(), String> {
                     let _ = w.set_simple_fullscreen(true);
                 }
             }
-            None => big_window(app, &label, &format!("{origin}{path}"), Some(at))?,
+            None => big_window(app, &label, &host::window_url(origin, &path), Some(at))?,
         }
     }
     Ok(())
@@ -278,7 +275,7 @@ fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<
         }
         let _ = w.close();
     }
-    let parsed: url::Url = format!("{origin}/host").parse().map_err(|e: url::ParseError| e.to_string())?;
+    let parsed: url::Url = host::window_url(origin, "/host").parse().map_err(|e: url::ParseError| e.to_string())?;
     let w = WebviewWindowBuilder::new(app, "bigscreen", WebviewUrl::External(parsed))
         .title("JamSesh big screen")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -332,7 +329,7 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
         arrange_screens(app, &origin)?;
     } else {
         open_big_screen(app, &origin, false)?;
-        open_window(app, "client", &format!("{origin}/client"), "JamSesh", None)?;
+        open_window(app, "client", &host::window_url(&origin, "/client"), "JamSesh")?;
     }
     close_start(app);
     refresh_tray(app).await;
@@ -388,7 +385,6 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     })
     .await?;
     let url = relay.window_url(if paired { "/client" } else { "/connect?next=%2Fclient" });
-    let relay_port = relay.port;
     let needs_agents = paired && agents.is_none();
     inner.relay = Some(relay);
     inner.cfg.role = Some("join".into());
@@ -401,7 +397,7 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     if let Some(w) = app.get_webview_window("client") {
         let _ = w.close();
     }
-    open_window(app, "client", &url, "JamSesh", Some(relay_port))?;
+    open_window(app, "client", &url, "JamSesh")?;
     close_start(app);
     refresh_tray(app).await;
     if needs_agents && let Some(tok) = token {
@@ -465,7 +461,7 @@ fn open_remote_setup(app: &AppHandle, origin: &str) {
         let _ = w.set_focus();
         return;
     }
-    if let Ok(url) = format!("{origin}/setup?app").parse::<url::Url>() {
+    if let Ok(url) = host::window_url(origin, "/setup?app").parse::<url::Url>() {
         let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)).title("Remote access").inner_size(900.0, 820.0).build();
     }
 }
@@ -702,13 +698,13 @@ fn on_menu(app: &AppHandle, id: &str) {
         let state = app.state::<Arc<App>>().inner().clone();
         let (role, hub_origin, relay, userless) = {
             let inner = state.inner.lock().await;
-            let relay = inner.relay.as_ref().map(|r| (r.window_url("/client"), r.port));
+            let relay = inner.relay.as_ref().map(|r| r.window_url("/client"));
             (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.cfg.userless)
         };
         match id.as_str() {
             "open" => match (role.as_deref(), hub_origin, relay) {
-                (Some("host"), Some(o), _) => drop(open_window(&app, "client", &format!("{o}/client"), "JamSesh", None)),
-                (Some("join"), _, Some((u, port))) => drop(open_window(&app, "client", &u, "JamSesh", Some(port))),
+                (Some("host"), Some(o), _) => drop(open_window(&app, "client", &host::window_url(&o, "/client"), "JamSesh")),
+                (Some("join"), _, Some(u)) => drop(open_window(&app, "client", &u, "JamSesh")),
                 _ => open_start(&app),
             },
             "bigscreen" | "nextdisplay" => {
@@ -817,7 +813,7 @@ fn set_userless(app: &AppHandle, on: bool, origin: Option<&str>) {
             }
         }
         let _ = open_big_screen(app, origin, false);
-        let _ = open_window(app, "client", &format!("{origin}/client"), "JamSesh", None);
+        let _ = open_window(app, "client", &host::window_url(origin, "/client"), "JamSesh");
     }
 }
 

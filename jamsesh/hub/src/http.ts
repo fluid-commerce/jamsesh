@@ -19,7 +19,7 @@ const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
-const HUMAN_ONLY = /^\/(say|audio|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|photo))?)?|settings|directives(\/[\w-]+)?|workers|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -30,7 +30,7 @@ function hostIdOf(hub: Hub) {
 }
 
 /** Human-only paths whose personId is the person acted on, not the caller. */
-const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request)$/;
+const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request|devices)$/;
 /** Settings only the host machine may change (SPEC 14, host-only). */
 const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled"] as const;
 
@@ -96,6 +96,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       const ip = relayed && isLocal(peer) ? "relayed" : peer;
       const path = url.pathname;
       const local = isLocal(ip);
+      // On the host, loopback alone isn't a person (every process here reaches it): the host's own
+      // windows also carry the hub's window key (SPEC 14, HostWindows in auth.ts).
+      const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
       if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
       try {
@@ -113,10 +116,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         // The host's own windows are trusted without a token, so a page on another site can't post as them.
         if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
+        // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
+        // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
+        // which tiles open as localhost:<port>.
+        if (path === "/host-window" && local && req.method === "GET") return hostWindowRoute(hub, req, url);
         // Remote-access setup is only for someone at the host.
         if (local && path.startsWith("/api/net/")) {
           // A JSON body only: a form or text post from another site can't change remote access.
           if (req.method !== "GET" && !(req.headers.get("content-type") ?? "").includes("application/json")) return bad("Send JSON.", 415);
+          if (req.method !== "GET" && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
           const r = await hub.net.routes(req, url);
           if (r) return r;
         }
@@ -133,7 +141,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const r = hub.auth.issue({ kind: "agent", label: `${who ? `${who}'s agents` : "Agents"} on ${owner?.label.split(" · ")[0] ?? "the host"}`, personId, ip, ownerDeviceId: owner?.id ?? "host" });
           return json({ token: r.token, deviceId: r.device.id });
         }
-        if (path === "/api/pair/code") return local ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad("Only the host shows the code.", 403);
+        // The code pairs a person's window, so only the host's own windows read it (not any process on the host).
+        if (path === "/api/pair/code") return hostWindow ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad(local ? NOT_THE_HOST_WINDOW : "Only the host shows the code.", 403);
         if (path === "/api/pair/info") {
           // A stable id for this host, so a window that reaches several hosts at one address (the Mac
           // app's relay) keeps each host's identity and unsent changes apart.
@@ -192,7 +201,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
           const meant = req.headers.get("x-jam-host");
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
-          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device));
+          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
         }
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
@@ -356,7 +365,7 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   return md(agentGuide(origin, r.token));
 }
 
-async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null): Promise<Response> {
+async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
@@ -369,6 +378,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // window always acts as its own person, whatever the request says.
   if (req.method !== "GET" && HUMAN_ONLY.test(path)) {
     if (paired?.kind === "agent") return bad("That's for people; agents use their jam_ tools.", 403);
+    // On the host, only its own windows act as a person: not another process that reaches loopback.
+    if (isLocal(ip) && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
     // Except where personId names someone else: the speaker a line is corrected to, the person asked to share.
     if (paired?.personId && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
   }
@@ -382,7 +393,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!body?.deviceId) return bad("deviceId is required");
     if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
     // The person using the host's own window: agents on the host Mac work for them.
-    if (isLocal(ip) && body.kind !== "host" && body.personId) {
+    if (hostWindow && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
@@ -642,16 +653,17 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/paired" && req.method === "GET") return json(hub.auth.list());
   m = path.match(/^\/paired\/([\w-]+)$/);
   if (m && req.method === "DELETE") {
-    if (!isLocal(ip)) return bad("Only the host can disconnect devices.", 403);
+    if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can disconnect devices.", 403);
     return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
   }
 
   // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.
   m = path.match(/^\/build-requests\/([\w-]+)$/);
   if (m && req.method === "POST") {
-    if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can approve host builds.", 403);
+    // A person's window: the host's own (window key), or a paired window that belongs to a person.
+    if (!hostWindow && (paired?.kind !== "browser" || !paired.personId)) return bad("Only people in the session can approve host builds. Pick who you are in this window first.", 403);
     const personId = (paired?.personId ?? body?.personId) as string | undefined;
-    const by = (personId && s.person(personId)?.name) || (isLocal(ip) ? "the host" : "someone in the room");
+    const by = (personId && s.person(personId)?.name) || (hostWindow ? "the host" : "someone in the room");
     return json({ result: hub.host.decide(m[1], body?.approve === true, by) });
   }
 
@@ -747,6 +759,21 @@ function file(p: string, root: string, cache = false): Response {
   else headers["cache-control"] = "no-cache";
   if (full.endsWith(".webmanifest")) headers["content-type"] = "application/manifest+json";
   return new Response(Bun.file(full), { headers });
+}
+
+const NOT_THE_HOST_WINDOW = "On the host, do this from the JamSesh window. A host started from a terminal printed a one-time host link: open that (restart the host for a new one).";
+
+/** GET /host-window?once=…&next=/path: a one-time host link (see HostWindows in auth.ts). */
+function hostWindowRoute(hub: Hub, req: Request, url: URL): Response {
+  const next = url.searchParams.get("next") ?? "/host";
+  const target = next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/host";
+  const name = (req.headers.get("host") ?? "").replace(/:\d+$/, "");
+  // The key lives on 127.0.0.1 only: send localhost (shared with dev tiles) and others there first.
+  if (name !== "127.0.0.1") return new Response(null, { status: 302, headers: { location: `http://127.0.0.1:${url.port || config.port}${url.pathname}${url.search}`, "cache-control": "no-store" } });
+  const key = hub.auth.windows.take(url.searchParams.get("once"));
+  const headers = new Headers({ location: target, "cache-control": "no-store", "referrer-policy": "no-referrer" });
+  if (key) headers.append("set-cookie", `jam_window=${key}; Path=/; HttpOnly; SameSite=Strict`);
+  return new Response(null, { status: 302, headers });
 }
 
 function cookie(req: Request, name: string) {

@@ -227,7 +227,7 @@ export class DevProxy {
   }
 }
 
-/** Passes a request to the dev server and its answer back, without the room's credentials. */
+/** Passes a request to the dev server and its answer back, without the room's credentials (or the host window key). */
 async function forward(req: Request, target: string, path: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const h of HOP) headers.delete(h);
@@ -237,7 +237,7 @@ async function forward(req: Request, target: string, path: string): Promise<Resp
   if (auth && /^Bearer\s+jst_/i.test(auth)) headers.delete("authorization");
   const cookie = headers.get("cookie");
   if (cookie) {
-    const kept = cookie.split(/;\s*/).filter((c) => !c.startsWith("jam_token="));
+    const kept = cookie.split(/;\s*/).filter((c) => !c.startsWith("jam_token=") && !c.startsWith("jam_window="));
     if (kept.length) headers.set("cookie", kept.join("; "));
     else headers.delete("cookie");
   }

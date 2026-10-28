@@ -23,6 +23,9 @@ import type {
   Workstream,
  BuildRequest, ScreenInfo } from "./types";
 
+/** An agent quiet this long shows as offline (and its record can be taken over by a rejoin). */
+export const AGENT_OFFLINE_MS = 20 * 60_000;
+
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
   router: "anthropic/claude-sonnet-5.5",
@@ -324,7 +327,7 @@ export class Session {
     const now = Date.now();
     return this.store
       .all("agents")
-      .map((a) => (a.status !== "offline" && now - a.lastSeen > 20 * 60_000 ? { ...a, status: "offline" as const } : a))
+      .map((a) => (a.status !== "offline" && now - a.lastSeen > AGENT_OFFLINE_MS ? { ...a, status: "offline" as const } : a))
       .sort((a, b) => a.joinedAt - b.joinedAt);
   }
 
@@ -342,17 +345,23 @@ export class Session {
     platform?: Platform;
     focus?: string;
     name?: string;
+    /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
+    sameMachine?: (machine: string) => boolean;
   }): { agent: Agent; resumed: boolean; quietMs: number | null } {
     const owner = this.personByName(info.ownerName) ?? (info.ownerName ? this.upsertPerson({ name: info.ownerName }) : undefined);
     const agents = this.store.all("agents");
-    // The same agent coming back on a new credential (the Mac's identity changed) takes over its
-    // own quiet record, name and workstreams included, instead of joining as "… 2". A live agent
-    // with the same folder on another Mac keeps its record.
+    // The same agent coming back on a new credential takes over its own quiet record, name and
+    // workstreams included, instead of joining as "… 2": when the old record's machine is this Mac
+    // under an earlier credential, or the record has been gone long enough to show as offline.
+    // The owner, harness and folder are the caller's word, so they alone never hand over a record
+    // that may still be live (an agent busy for a minute is still live).
+    const now = Date.now();
     const existing =
       agents.find((a) => a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
-            .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && Date.now() - a.lastSeen > 60_000)
+            .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && now - a.lastSeen > 60_000)
+            .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
     const harnessLabel = info.harness === "codex" ? "Codex" : info.harness === "claude-code" ? "Claude" : "Agent";

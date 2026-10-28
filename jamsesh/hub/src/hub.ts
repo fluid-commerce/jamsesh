@@ -317,7 +317,7 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      data: { direct: true, recorded: true, saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
     });
     // One spoken line: it can be relabelled from the prompt, like any line in the feed.
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });

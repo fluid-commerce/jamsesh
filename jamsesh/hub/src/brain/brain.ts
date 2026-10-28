@@ -228,6 +228,10 @@ export class Brain {
     if (this.stopped || !this.session.settings().brainEnabled) return;
     // Heard you: an instant chime for spoken requests, before any thinking.
     if (!ev.data.typed) chime(this.session, ev.data.deviceId);
+    // A person's "approve" or "deny" for a waiting host request is decided from their words, before
+    // any model routing, so it works with the gateway down. A recording counts from when it ended.
+    const saidAt = Number(ev.data.saidAt);
+    if (this.decideByVoice([Number.isFinite(saidAt) && saidAt > 0 ? { ...ev, ts: saidAt } : ev])) return;
     return this.exclusive(() => this.directPass(ev, extra));
   }
 

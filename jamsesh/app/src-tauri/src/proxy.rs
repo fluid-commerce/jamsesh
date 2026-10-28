@@ -61,36 +61,36 @@ impl Upstream {
 // can reach the relay on 127.0.0.1 and send any headers it likes, so headers such as Origin or
 // Sec-Fetch-* prove nothing. The relay adds the person's credential only to requests that carry
 // this launch's window key in the `jam_window` cookie; everything else gets the agents' credential,
-// which can't approve builds or speak as a person. The key is random per launch, lives only in this
-// process, and reaches the app's own webview through an initialization script (never a URL, a file
-// or a log). The relay strips the cookie before forwarding, so neither the host nor a dev server it
-// mirrors sees it. Out of scope: a process that reads this app's memory or its webview's cookie jar
-// can already do anything the person can.
+// which can't approve builds or speak as a person. The key is random per launch and lives only in
+// this process. The app's window gets it from a relay response (`window_start`, reached through a
+// one-time link the app makes for each window it opens), as an HttpOnly, SameSite=Strict cookie on
+// 127.0.0.1: no page script can read it, and no other site can send it. Cookies ignore ports, so
+// dev servers are mirrored for the window as `localhost:<port>` (another host name, so they never
+// receive it), and the relay and the hub strip it before forwarding anything. Out of scope: a
+// process that reads this app's memory or its webview's cookie jar can already do anything the
+// person can.
 
 const WINDOW_COOKIE: &str = "jam_window";
 /// Where the app's own window starts (see `Proxy::window_url`).
 const WINDOW_START: &str = "/__jamsesh/window";
 
-/// This launch's window key (64 hex characters). None if the system has no randomness, and then no
-/// request gets the person's credential.
-fn window_key() -> Option<&'static str> {
-    static KEY: OnceLock<Option<String>> = OnceLock::new();
-    KEY.get_or_init(|| {
-        let mut bytes = [0u8; 32];
-        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).ok()?;
-        Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
-    })
-    .as_deref()
+/// `n` random bytes as hex, or None if the system has no randomness.
+pub fn random_hex(n: usize) -> Option<String> {
+    let mut bytes = vec![0u8; n];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes)).ok()?;
+    Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The initialization script for the app's own windows: puts the window key in a cookie, on the
-/// relay's address only.
-pub fn window_script(relay_port: u16) -> Option<String> {
-    let key = window_key()?;
-    Some(format!(
-        "if (location.protocol === 'http:' && location.host === '127.0.0.1:{relay_port}') document.cookie = '{WINDOW_COOKIE}={key}; path=/; SameSite=Strict';"
-    ))
+/// This launch's window key (64 hex characters), shared by the relay and a hub this app starts
+/// (`host::window_url`). None if the system has no randomness, and then no request gets the
+/// person's credential.
+pub fn window_key() -> Option<&'static str> {
+    static KEY: OnceLock<Option<String>> = OnceLock::new();
+    KEY.get_or_init(|| random_hex(32)).as_deref()
 }
+
+/// How long a one-time window link stays good.
+const LINK_LIFE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Whether a request carries this launch's window key. Removes the key from its cookies either way.
 fn take_window_key(headers: &mut HeaderMap) -> bool {
@@ -120,21 +120,35 @@ fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// The page the app's window opens at. The initialization script has set the key by the time this
-/// runs, so the navigation on to `next` (a path on the relay) carries it from its first request.
-fn window_start(query: Option<&str>) -> Response<Body> {
-    let next = query
-        .into_iter()
-        .flat_map(|q| url::form_urlencoded::parse(q.as_bytes()))
-        .find(|(k, _)| k == "next")
-        .map(|(_, v)| v.into_owned())
-        .filter(|n| n.starts_with('/') && !n.starts_with("//") && !n.starts_with("/\\"))
-        .unwrap_or_else(|| "/client".into());
-    let target = serde_json::to_string(&next).unwrap_or_else(|_| "\"/client\"".into()).replace('<', "\\u003c");
-    let html = format!("<!doctype html><meta charset=\"utf-8\"><title>JamSesh</title><script>location.replace({target})</script>");
-    let mut r = Response::new(Full::new(Bytes::from(html)).map_err(|never| match never {}).boxed());
-    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
-    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+/// The page the app's window opens at (`Proxy::window_url`): a one-time link that sets the window
+/// key as an HttpOnly cookie and goes on to `next` (a path on the relay). A used, unknown or
+/// expired link goes on without it (the window then acts with the agents' credential).
+/// `on_relay`: asked for at 127.0.0.1:<relay port> itself, so the cookie can't land on another host
+/// name (localhost is where dev tiles live).
+fn window_start(sh: &Shared, query: Option<&str>, on_relay: bool) -> Response<Body> {
+    let param =
+        |name: &str| query.into_iter().flat_map(|q| url::form_urlencoded::parse(q.as_bytes())).find(|(k, _)| k == name).map(|(_, v)| v.into_owned());
+    let next = param("next").filter(|n| n.starts_with('/') && !n.starts_with("//") && !n.starts_with("/\\")).unwrap_or_else(|| "/client".into());
+    let fresh = on_relay
+        && param("once").is_some_and(|once| {
+            let Ok(mut links) = sh.links.lock() else { return false };
+            links.retain(|_, made| made.elapsed() < LINK_LIFE);
+            links.remove(&once).is_some()
+        });
+    let mut r = Response::new(Empty::<Bytes>::new().map_err(|never| match never {}).boxed());
+    *r.status_mut() = StatusCode::FOUND;
+    let h = r.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&next) {
+        h.insert(header::LOCATION, v);
+    }
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    if fresh
+        && let Some(key) = window_key()
+        && let Ok(v) = HeaderValue::from_str(&format!("{WINDOW_COOKIE}={key}; Path=/; HttpOnly; SameSite=Strict"))
+    {
+        h.insert(header::SET_COOKIE, v);
+    }
     r
 }
 
@@ -148,6 +162,8 @@ struct Shared {
     client: HttpsClient,
     tls: Arc<rustls::ClientConfig>,
     on_token: Box<dyn Fn(String) + Send + Sync>,
+    /// One-time window links this relay made (`Proxy::window_url`), and when.
+    links: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 pub struct Proxy {
@@ -160,11 +176,20 @@ impl Proxy {
     pub fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
     }
-    /// Where the app's own window opens to show `path`: a start page that takes the window key
-    /// first. Open it with `window_script(port)` as the window's initialization script.
+    /// Where the app's own window opens to show `path`: a one-time link to the start page, which
+    /// gives the window the key (see `window_start`). Each call makes a new link.
     pub fn window_url(&self, path: &str) -> String {
         let next: String = url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
-        self.url(&format!("{WINDOW_START}?next={next}"))
+        let once = random_hex(16).filter(|once| {
+            let Ok(mut links) = self.shared.links.lock() else { return false };
+            links.retain(|_, made| made.elapsed() < LINK_LIFE);
+            links.insert(once.clone(), std::time::Instant::now());
+            true
+        });
+        match once {
+            Some(once) => self.url(&format!("{WINDOW_START}?once={once}&next={next}")),
+            None => self.url(&format!("{WINDOW_START}?next={next}")),
+        }
     }
     pub fn set_agents_token(&self, token: Option<String>) {
         if let Ok(mut t) = self.shared.agents.write() {
@@ -176,9 +201,10 @@ impl Proxy {
     }
 
     /// Mirrors one of the host's dev-server ports at 127.0.0.1:<port> on this Mac, so a dev tile in
-    /// the window can keep its port. As on the relay, the window's requests carry the person's
-    /// token and everything else the agents' token. Over the public address the host routes dev servers by name (dev-<port>.<host>).
-    /// Fails if this Mac already uses that port.
+    /// the window can keep its port. Dev content is never the person: every request carries the
+    /// agents' token, and the window opens it as localhost:<port> (web `localize`), a different host
+    /// name from the relay's, so it never gets the window key either. Over the public address the
+    /// host routes dev servers by name (dev-<port>.<host>). Fails if this Mac already uses that port.
     pub async fn mirror(&self, port: u16) -> Result<Proxy, String> {
         let up = &self.shared.up;
         let dev = if up.tls {
@@ -187,9 +213,8 @@ impl Proxy {
         } else {
             Upstream { origin: format!("http://{}:{port}", up.host), host: up.host.clone(), port, tls: false }
         };
-        let token = self.shared.token.read().ok().and_then(|t| t.clone());
         let agents = self.shared.agents.read().ok().and_then(|t| t.clone());
-        bind(dev, token, agents, port, true, |_| {}).await
+        bind(dev, None, agents, port, true, |_| {}).await
     }
 }
 
@@ -248,6 +273,7 @@ async fn bind(
         client,
         tls,
         on_token: Box::new(on_token),
+        links: Default::default(),
     });
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let sh = shared.clone();
@@ -381,7 +407,8 @@ async fn forward(sh: &Shared, mut req: Request<Incoming>) -> Result<Response<Bod
     let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
     let upgrade = req.headers().contains_key(header::UPGRADE);
     if req.uri().path() == WINDOW_START {
-        return Ok(window_start(req.uri().query()));
+        let on_relay = req.headers().get(header::HOST).and_then(|h| h.to_str().ok()) == Some(sh.local.as_str());
+        return Ok(window_start(sh, req.uri().query(), on_relay));
     }
 
     if upgrade {
@@ -508,25 +535,44 @@ mod tests {
     }
 
     #[test]
-    fn the_key_is_random_and_only_set_on_the_relay() {
+    fn the_key_is_random() {
         let key = window_key().unwrap();
         assert_eq!(key.len(), 64);
-        let script = window_script(4790).unwrap();
-        assert!(script.contains("location.host === '127.0.0.1:4790'"));
-        assert!(script.contains(key));
+        assert_ne!(random_hex(16), random_hex(16));
     }
 
     #[tokio::test]
-    async fn the_start_page_only_goes_on_to_a_path_on_the_relay() {
-        async fn target(q: Option<&str>) -> String {
-            let body = window_start(q).into_body().collect().await.unwrap().to_bytes();
-            String::from_utf8(body.to_vec()).unwrap()
+    async fn a_window_link_sets_an_httponly_key_once_and_only_goes_on_to_a_path_on_the_relay() {
+        let host = echo_host().await;
+        let relay = start(Upstream::parse(&format!("http://127.0.0.1:{host}")).unwrap(), None, None, 0, |_| {}).await.unwrap();
+        let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
+        let open = |url: String, host_name: Option<String>| {
+            let client = client.clone();
+            async move {
+                let mut req = Request::get(url);
+                if let Some(h) = host_name {
+                    req = req.header(header::HOST, h);
+                }
+                let r = client.request(req.body(Empty::<Bytes>::new()).unwrap()).await.unwrap();
+                let get = |n: header::HeaderName| r.headers().get(n).map(|v| v.to_str().unwrap().to_string());
+                (get(header::LOCATION), get(header::SET_COOKIE))
+            }
+        };
+        let link = relay.window_url("/connect?next=%2Fclient");
+        let (to, cookie) = open(link.clone(), None).await;
+        assert_eq!(to.as_deref(), Some("/connect?next=%2Fclient"));
+        let cookie = cookie.unwrap();
+        assert!(cookie.starts_with(&format!("jam_window={}", window_key().unwrap())));
+        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+        // Used up: the same link again goes on without the key.
+        assert_eq!(open(link, None).await.1, None);
+        // A guessed link, or one opened under another host name (localhost is the dev tiles'), gets no key.
+        assert_eq!(open(relay.url("/__jamsesh/window?once=00112233445566778899aabbccddeeff"), None).await.1, None);
+        assert_eq!(open(relay.window_url("/client"), Some(format!("localhost:{}", relay.port))).await.1, None);
+        for (q, want) in [("next=https%3A%2F%2Fevil.example", "/client"), ("next=%2F%2Fevil.example", "/client"), ("", "/client")] {
+            assert_eq!(open(relay.url(&format!("/__jamsesh/window?{q}")), None).await.0.as_deref(), Some(want));
         }
-        assert!(target(Some("next=%2Fconnect%3Fnext%3D%252Fclient")).await.contains(r#"location.replace("/connect?next=%2Fclient")"#));
-        assert!(target(Some("next=https%3A%2F%2Fevil.example")).await.contains(r#"location.replace("/client")"#));
-        assert!(target(Some("next=%2F%2Fevil.example")).await.contains(r#"location.replace("/client")"#));
-        assert!(!target(Some("next=%2F%3C%2Fscript%3E")).await.contains("</script>\")"));
-        assert!(target(None).await.contains(r#"location.replace("/client")"#));
+        relay.stop();
     }
 
     /// A fake host that answers with the Authorization and Cookie headers it got.
@@ -577,5 +623,43 @@ mod tests {
         ask("/pair", &spoofed).await;
         assert_eq!(ask("/api/me", &[("cookie", format!("jam_window={key}"))]).await, "Bearer PERSON | -");
         relay.stop();
+    }
+
+    /// For a real browser (see the report): a relay and one dev-port mirror in front of a fake host
+    /// on this Mac's LAN address (`JAM_TEST_LAN_IP`), which echoes the Authorization and Cookie
+    /// headers it gets. Prints the ports and a window link, then serves for `JAM_TEST_SECS`.
+    #[tokio::test]
+    #[ignore]
+    async fn serve_relay_for_a_browser() {
+        let ip = std::env::var("JAM_TEST_LAN_IP").unwrap();
+        let echo = |listener: TcpListener| {
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let svc = hyper::service::service_fn(|req: Request<Incoming>| async move {
+                            let h = |n: header::HeaderName| req.headers().get(n).and_then(|v| v.to_str().ok()).unwrap_or("-").to_string();
+                            let body = format!("<!doctype html><title>echo</title><pre>{} | {}</pre>", h(header::AUTHORIZATION), h(header::COOKIE));
+                            let mut r = Response::new(Full::new(Bytes::from(body)));
+                            r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+                            Ok::<_, Infallible>(r)
+                        });
+                        let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), svc).await;
+                    });
+                }
+            });
+        };
+        let host = TcpListener::bind((ip.as_str(), 0)).await.unwrap();
+        let host_port = host.local_addr().unwrap().port();
+        echo(host);
+        let dev = TcpListener::bind((ip.as_str(), 0)).await.unwrap();
+        let dev_port = dev.local_addr().unwrap().port();
+        echo(dev);
+        let relay = start(Upstream::parse(&format!("http://{ip}:{host_port}")).unwrap(), Some("PERSON".into()), Some("AGENTS".into()), 0, |_| {})
+            .await
+            .unwrap();
+        let mirror = relay.mirror(dev_port).await.unwrap();
+        println!("RELAY={} MIRROR={} LINK={}", relay.port, mirror.port, relay.window_url("/whoami"));
+        let secs = std::env::var("JAM_TEST_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+        tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
     }
 }

@@ -137,7 +137,7 @@ export interface OutboxEntry {
   serverFails: number;
 }
 
-export type SendResult = { kind: "ok" } | { kind: "drop"; status: number } | { kind: "retry"; server?: boolean } | { kind: "unauthorized" };
+export type SendResult = { kind: "ok" } | { kind: "drop"; status: number } | { kind: "retry"; server?: boolean } | { kind: "unauthorized" } | { kind: "otherHost" };
 
 export interface OutboxView {
   idem: string;
@@ -290,6 +290,7 @@ export class Outbox {
         }
         const host = this.d.hostId?.() ?? "";
         const skipped = new Set<OutboxEntry>();
+        let mismatched = false;
         for (;;) {
           // Calls stamped for another host stay put; they only replay to the host they were made for.
           const e = this.entries.find((x) => !skipped.has(x));
@@ -311,11 +312,19 @@ export class Outbox {
             this.onUnauthorized?.();
             return; // resumes on the next kick() after the device is paired again
           }
+          if (r.kind === "otherHost") {
+            // The relay moved to another host while this was in flight: the change is still wanted,
+            // so it stays queued for its stamped host. Backoff and the age cap bound the retries.
+            skipped.add(e);
+            mismatched = true;
+            continue;
+          }
           await this.remove(e, r.kind === "ok" ? "synced" : "dropped");
           this.attempt = 0;
           if (r.kind === "ok") this.onSynced?.(e);
           this.publish();
         }
+        if (mismatched) this.schedule();
       } while (this.again);
     } finally {
       this.flushing = false;
@@ -361,6 +370,8 @@ export async function sendEntry(e: OutboxEntry): Promise<SendResult> {
       // A proxy answering 502/503/504 while the hub is down is a connection problem, not the call's fault.
       return { kind: "retry", server: res.status === 500 };
     }
+    // The hub answers 409 (plain text) when x-jam-host names another host; other 409s are real refusals.
+    if (res.status === 409 && e.hostId && /different JamSesh host/i.test(await res.text().catch(() => ""))) return { kind: "otherHost" };
     return { kind: "drop", status: res.status };
   } catch {
     return { kind: "retry" };
