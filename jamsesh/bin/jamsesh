@@ -5,6 +5,7 @@
 #   jamsesh off | on             pause or resume this laptop's hooks
 #   jamsesh status               what's running
 #   jamsesh key                  set the Vercel AI Gateway key for this machine
+#   jamsesh new                  start the next session fresh (the last one is archived, not deleted)
 set -euo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
@@ -67,7 +68,21 @@ case "${1:-help}" in
   key)
     exec "$DIR/scripts/set-gateway-key.sh"
     ;;
+  new)
+    if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+      echo "Stop the running host first (Ctrl+C in its terminal)." >&2
+      exit 1
+    fi
+    data="${JAMSESH_DATA:-$HOME/.jamsesh/host}"
+    if [ -d "$data" ]; then
+      archive="$data-$(date +%Y-%m-%d-%H%M)"
+      mv "$data" "$archive"
+      echo "Archived the last session to $archive. The next 'jamsesh host' starts fresh."
+    else
+      echo "No session to archive."
+    fi
+    ;;
   *)
-    sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'
+    sed -n '2,8p' "$SELF" | sed 's/^# \{0,1\}//'
     ;;
 esac
