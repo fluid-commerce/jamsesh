@@ -75,6 +75,45 @@ The agent joins, claims its workstream, and shows up on the big screen.
 6. If the change belongs on another platform too, the brain asks both agents to coordinate, and
    they present desktop beside mobile.
 
+## Talk to the brain
+
+The brain is called JamSesh until you rename it in **Settings > Room brain**. There are three ways
+to address it directly instead of just talking in the room:
+
+- Say its name: "JamSesh, put the mobile build next to the mockup."
+- In your JamSesh window, type in the **Ask JamSesh** box.
+- Press **Record prompt** (or `R`), talk while pointing at things on screen, then stop. Your words
+  and where you pointed (frames you hovered or clicked, while saying "this one") go to the brain as
+  one prompt.
+
+The brain learns how the room wants it to behave. Tell it ("JamSesh, keep it short and only talk
+when someone asks you something"), and it keeps that note for the session. The notes are listed in
+Settings, where you can remove them.
+
+## Annotate
+
+Press **Annotate** (or `A`) and click anywhere on the canvas, a mockup, a dev server, or a shared
+screen to drop a pin with a note. Pins are shared across the room. **Send to JamSesh** bundles every
+open pin into one prompt, and the brain sends each group to the agent that owns that work. Pins on
+the canvas also become FigCraft comments, so agents see them in the file.
+
+## Share a screen or camera
+
+In your JamSesh window, **Share screen** or **Camera** puts your screen or camera on the big screen;
+the brain finds it a place. The brain (or anyone, from Settings > People) can also ask you to
+share, and your window asks you first.
+
+## Your profile
+
+Click your name in your JamSesh window to set your photo (from your camera), your title, and to
+teach JamSesh your voice by reading one sentence. Titles decide whose call wins when people
+disagree. Agents can set their own name and their person's name and title with `jam_rename`.
+
+## Mute
+
+Press `M` (or click the mic button) to mute or unmute your laptop at any time. On the host, `M`
+mutes the room mic.
+
 ## Use the big screen
 
 | Key | View |
@@ -87,8 +126,10 @@ The agent joins, claims its workstream, and shows up on the big screen.
 | `,` | Settings |
 
 Out loud also works: "bring up the nav options", "show me what everyone's doing", "put desktop and
-mobile side by side". For anything else, ask for it ("build us a four-way split…"), and the brain
-builds a custom view.
+mobile side by side". The brain designs its own layouts from any mix of tiles: mockups and builds,
+the live canvas following a person or agent, a browser on any dev server or reference site, shared
+screens and cameras, an agent's activity, and the room feed. For anything else, ask for it
+("build us a four-way split…"), and the brain builds a custom view.
 
 ## Teach it who's talking
 

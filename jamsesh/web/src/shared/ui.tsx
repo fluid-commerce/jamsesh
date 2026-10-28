@@ -361,8 +361,11 @@ export function CanvasFrame({ kind, name, title, follow }: { kind: "edit" | "vie
       if (!fc || done) return;
       try {
         const peers = await fc.execute("collab.peers", {});
-        const want = follow.toLowerCase();
-        const peer = (peers?.peers ?? []).find((p: any) => String(p.name ?? "").toLowerCase().includes(want) || want.includes(String(p.name ?? "").toLowerCase().split(" ")[0]));
+        const want = follow.toLowerCase().trim();
+        const list: any[] = peers?.peers ?? [];
+        const name = (p: any) => String(p.name ?? "").toLowerCase().trim();
+        // Exact name first ("Chey's Claude" is not "Chey"), then a name containing what was asked.
+        const peer = list.find((p) => name(p) === want) ?? list.find((p) => name(p).includes(want)) ?? list.find((p) => want.includes(name(p)) && name(p).length > 2);
         if (peer) {
           await fc.execute("collab.follow", { client: peer.client ?? peer.id });
           done = true;
