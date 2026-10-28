@@ -6,7 +6,7 @@ import { z } from "zod";
 import { bus } from "../bus";
 import type { Session, UpdateKind } from "../session";
 import { shortRepo } from "../session";
-import type { Agent, Artifact, JamEvent, Relevance } from "../types";
+import type { Agent, Artifact, JamEvent, Relevance, Share, Tile } from "../types";
 import { describeError, model } from "./llm";
 import { speak } from "./speech";
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
@@ -73,6 +73,10 @@ export class Brain {
   /** A new room line (speech or typed). Batches lines that arrive together. */
   hear(ev: JamEvent) {
     if (this.stopped || !this.session.settings().brainEnabled) return;
+    if (addressesBrain(ev.text, this.session.settings().brainName)) {
+      this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true } });
+      return void this.direct(ev);
+    }
     this.pending.push(ev);
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), TRIAGE_DEBOUNCE_MS);
@@ -138,7 +142,7 @@ export class Brain {
       const tools = this.tools(batch);
       await generateText({
         model: m,
-        system: ROUTER_SYSTEM,
+        system: this.system(),
         prompt: this.situation(batch, triage),
         tools,
         stopWhen: isStepCount(6),
@@ -153,6 +157,68 @@ export class Brain {
     }
   }
 
+  /** Someone spoke to the brain directly (its name, Ask, or a recorded prompt). Always acts or answers. */
+  async direct(ev: JamEvent, extra = "") {
+    if (this.stopped) return;
+    const m = model(this.session, "router");
+    if (!m) return this.ruleRoute([ev], ruleTriage([ev]));
+    // Wait out a pass already running, so two passes don't act on the same lines.
+    for (let i = 0; this.busy && i < 60; i++) await Bun.sleep(250);
+    this.busy = true;
+    this.session.setBrain("thinking");
+    bus.send({ type: "thinking", on: true, label: `${this.session.settings().brainName} is on it` });
+    try {
+      await generateText({
+        model: m,
+        system: this.system(),
+        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room in one or two sentences. If it's feedback about how you behave, call remember_feedback. Always do something visible: act, answer, or say briefly why you won't.`,
+        tools: this.tools([ev]),
+        stopWhen: isStepCount(8),
+      });
+      this.session.setBrain("ready");
+    } catch (e) {
+      this.session.setBrain("ready", describeError(e));
+      console.error("direct:", describeError(e));
+    } finally {
+      this.busy = false;
+      bus.send({ type: "thinking", on: false });
+    }
+  }
+
+  /** Someone started sharing a screen or camera: find it a place on the big screen. */
+  async placeShare(share: Share) {
+    const s = this.session;
+    const stage = s.stage();
+    if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
+      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
+      return;
+    }
+    const m = model(s, "presenter");
+    const fallback = () => {
+      const keep: Tile[] = stage.mode === "layout" ? stage.layout?.tiles ?? [] : stage.items.slice(0, 2).map((id): Tile => ({ kind: "artifact", artifactId: id }));
+      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: ([{ kind: "screen", shareId: share.id, label: share.label }] as Tile[]).concat(keep).slice(0, 4) } }, "JamSesh");
+    };
+    if (!m) return fallback();
+    try {
+      const r = await generateText({
+        model: m,
+        system: this.system(),
+        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout, next to whatever it's most useful beside (for example the mockup it should match, or the other platform's build). Keep it big enough to read.`,
+        tools: { set_layout: this.tools([]).set_layout },
+        stopWhen: isStepCount(2),
+      });
+      if (!r.steps.some((st) => st.toolCalls.length)) fallback();
+    } catch {
+      fallback();
+    }
+  }
+
+  /** The system prompt: the router's rules, the brain's name, and what the room told it about itself. */
+  system() {
+    const { brainName, brainNotes } = this.session.settings();
+    return `${ROUTER_SYSTEM.replaceAll("JamSesh", brainName === "JamSesh" ? "JamSesh" : `JamSesh (the room calls you "${brainName}")`)}${brainNotes.length ? `\n\nWhat this room has told you about how to behave (follow it):\n${brainNotes.map((n) => `- ${n}`).join("\n")}` : ""}`;
+  }
+
   /** Something happened outside the room that may need coordination, such as a shipped change. */
   async consider(note: string) {
     const m = model(this.session, "router");
@@ -160,7 +226,7 @@ export class Brain {
     try {
       await generateText({
         model: m,
-        system: ROUTER_SYSTEM,
+        system: this.system(),
         prompt: `${this.situation([], null)}\n\n## Event to consider\n${note}\n\nAct only if this needs coordination between agents (for example the same change in another repository). Otherwise call no_action.`,
         tools: this.tools([]),
         stopWhen: isStepCount(4),
@@ -192,6 +258,8 @@ export class Brain {
       digest ? `## Session brief\n${digest}` : "",
       `## Recent agent activity\n${updates.map((e) => `- ${e.authorName}: ${e.text.slice(0, 220)}`).join("\n") || "(none)"}`,
       `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}`).join("\n") || "(none)"}`,
+      `## Live shares\n${s.shares().filter((x) => x.status === "live").map((x) => `- ${x.id}: ${x.label}`).join("\n") || "(none)"}`,
+      `## Dev servers on the host\n${s.devservers().map((d) => `- ${d.name}: ${d.url}${d.up ? "" : " (down)"}`).join("\n") || "(none)"}`,
       `## Big screen now\n${stage.mode}${stage.title ? `: ${stage.title}` : ""}${stage.pinned ? " (pinned by a person)" : ""}`,
       `## Room transcript (oldest first)\n${room.map((e) => `[${e.id}] ${e.authorName}${roleOf(s, e)}${e.kind === "prompt" ? " (typed to their agent)" : ""}${e.relevance ? ` {${e.relevance}}` : ""}: ${e.text}`).join("\n")}`,
       batch.length
@@ -350,6 +418,74 @@ export class Brain {
         inputSchema: z.object({ lineId: z.number().int(), person: z.string().describe("The person's name") }),
         execute: async ({ lineId, person }) => this.relabel?.(lineId, person) ?? "Speaker fixing isn't available.",
       }),
+      set_layout: tool({
+        description:
+          "Design the big screen yourself: a grid of tiles. Tile kinds: artifact (an artifact id), canvas (the live canvas, optionally following a person or agent by name so it shows what they're looking at), web (any URL: a dev server on the host, a reference site the room asked for), screen (a live screen or camera share by share id), agent (one agent's live activity), feed (the room transcript), html (your own self-contained HTML). Leave grid out and JamSesh picks a bento for the tile count; give grid (CSS columns, rows, and one grid-area per tile) for a specific arrangement.",
+        inputSchema: z.object({
+          title: z.string().optional(),
+          caption: z.string().optional(),
+          tiles: z
+            .array(
+              z.object({
+                kind: z.enum(["artifact", "canvas", "web", "screen", "agent", "feed", "html"]),
+                ref: z.string().optional().describe("artifact id, share id, agent id, or URL"),
+                follow: z.string().optional().describe("canvas: name of the person or agent to follow"),
+                html: z.string().optional(),
+                label: z.string().optional(),
+              }),
+            )
+            .min(1)
+            .max(9),
+          grid: z.object({ columns: z.string(), rows: z.string(), areas: z.array(z.string()) }).optional(),
+          pin: z.boolean().optional(),
+        }),
+        execute: async (i) => {
+          const tiles: Tile[] = [];
+          for (const t of i.tiles) {
+            if (t.kind === "artifact" && t.ref && s.store.get("artifacts", t.ref)) tiles.push({ kind: "artifact", artifactId: t.ref, label: t.label });
+            else if (t.kind === "canvas") tiles.push({ kind: "canvas", follow: t.follow ?? null, label: t.label });
+            else if (t.kind === "web" && t.ref && /^https?:\/\//.test(t.ref)) tiles.push({ kind: "web", url: t.ref, label: t.label });
+            else if (t.kind === "screen" && t.ref && s.store.get("shares", t.ref)) tiles.push({ kind: "screen", shareId: t.ref, label: t.label });
+            else if (t.kind === "agent" && t.ref && s.agent(t.ref)) tiles.push({ kind: "agent", agentId: t.ref, label: t.label });
+            else if (t.kind === "feed") tiles.push({ kind: "feed", label: t.label });
+            else if (t.kind === "html" && t.html) tiles.push({ kind: "html", html: t.html, label: t.label });
+          }
+          if (!tiles.length) return "None of those tiles resolved. Use artifact ids, share ids and agent ids from the lists, or full URLs.";
+          const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
+          this.lastRoomStageAt = Date.now();
+          s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain");
+          return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out.` : ""}`;
+        },
+      }),
+      request_share: tool({
+        description: "Ask someone to share their screen or camera from their JamSesh window (they confirm on their device). Use it when the room wants to see something on a person's machine.",
+        inputSchema: z.object({ person: z.string(), kind: z.enum(["screen", "camera"]), reason: z.string() }),
+        execute: async ({ person, kind, reason }) => {
+          const p = s.personByName(person);
+          if (!p) return `No one named ${person}.`;
+          const share = s.requestShare(p.id, kind, reason, "Room brain");
+          return share ? `Asked ${p.name}; it appears on screen when they accept.` : `${p.name} has no JamSesh window open.`;
+        },
+      }),
+      remember_feedback: tool({
+        description: "Someone gave you feedback about how you behave (talk less, be bolder, don't interrupt, call me Chey, always ask before building). Save it as a short instruction to yourself; it applies for the rest of the session.",
+        inputSchema: z.object({ note: z.string().describe("An instruction to yourself, imperative, one line") }),
+        execute: async ({ note }) => {
+          const notes = [...s.settings().brainNotes, note.trim()].slice(-30);
+          s.updateSettings({ brainNotes: notes });
+          return "Noted.";
+        },
+      }),
+      forget_feedback: tool({
+        description: "Remove a saved behavior note that someone takes back.",
+        inputSchema: z.object({ contains: z.string().describe("Words from the note to drop") }),
+        execute: async ({ contains }) => {
+          const before = s.settings().brainNotes;
+          const after = before.filter((n) => !n.toLowerCase().includes(contains.toLowerCase()));
+          s.updateSettings({ brainNotes: after });
+          return before.length === after.length ? "No matching note." : "Dropped.";
+        },
+      }),
       no_action: tool({
         description: "Nothing to do: the lines are discussion, banter, or already handled.",
         inputSchema: z.object({ reason: z.string() }),
@@ -492,6 +628,15 @@ export class Brain {
 }
 
 const STOPWORDS = new Set(["the", "and", "for", "option", "options", "variant", "variants", "version", "versions", "one", "ones", "all", "that", "this", "our", "real", "quick", "please", "up", "can", "you", "again"]);
+
+/** "JamSesh, …", "hey jam sesh", or the room's own name for the brain anywhere in the line. */
+export function addressesBrain(text: string, name: string) {
+  const flat = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const t = flat(text);
+  const n = flat(name);
+  if (n.length >= 3 && t.includes(n)) return true;
+  return n === "jamsesh" && /\b(jam ?sesh|jam ?session|jamsesh)\b/i.test(text) && /^(hey|ok|okay|yo|so)?\s*,?\s*jam/i.test(text.trim());
+}
 
 function similar(a: string, b: string) {
   const x = new Set(terms(a));

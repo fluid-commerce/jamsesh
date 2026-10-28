@@ -34,6 +34,13 @@ class HubClient {
   private toastId = 0;
   private pings: { offset: number; rtt: number }[] = [];
   speakListeners = new Set<SpeakListener>();
+  /** Every raw message from the hub (WebRTC signaling, share requests, …). */
+  messageListeners = new Set<(m: any) => void>();
+
+  onMessage(fn: (m: any) => void) {
+    this.messageListeners.add(fn);
+    return () => this.messageListeners.delete(fn);
+  }
   deviceId = "";
 
   start(deviceId: string) {
@@ -66,7 +73,11 @@ class HubClient {
       this.set({ connected: false });
       setTimeout(() => this.connect(), Math.min(5000, 500 * 2 ** this.retry++));
     };
-    ws.onmessage = (e) => this.onMessage(JSON.parse(e.data));
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      for (const fn of this.messageListeners) fn(m);
+      this.handle(m);
+    };
   }
 
   private syncClock() {
@@ -84,7 +95,7 @@ class HubClient {
     return Date.now() + this.snap.clockOffset;
   }
 
-  private onMessage(m: BusMessage | { type: "pong"; t: number; now: number }) {
+  private handle(m: BusMessage | { type: "pong"; t: number; now: number }) {
     const s = this.snap.state;
     switch (m.type) {
       case "pong": {
@@ -125,6 +136,9 @@ class HubClient {
         return this.set({ thinking: m.on ? m.label ?? "Thinking" : null });
       case "level":
         return this.set({ levels: { ...this.snap.levels, [m.deviceId]: m.level } });
+      case "rtc":
+      case "share-request":
+        return;
       case "speak":
         this.set({ speaking: m.text });
         for (const fn of this.speakListeners) fn(m);

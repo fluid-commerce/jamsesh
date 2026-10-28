@@ -11,6 +11,9 @@ import type { BusMessage, Stage } from "./types";
 
 type WsData = { deviceId: string | null };
 
+/** Open sockets by device, for relaying WebRTC signaling between devices. */
+const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
+
 const json = (v: unknown, status = 200) => Response.json(v, { status, headers: { "cache-control": "no-store" } });
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
 
@@ -84,6 +87,11 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;
+        if (ws.data.deviceId) {
+          const set = sockets.get(ws.data.deviceId) ?? new Set();
+          set.add(ws);
+          sockets.set(ws.data.deviceId, set);
+        }
       },
       message(ws: ServerWebSocket<WsData>, raw) {
         try {
@@ -91,11 +99,22 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
           if (m.type === "level" && ws.data.deviceId) {
             bus.send({ type: "level", deviceId: ws.data.deviceId, level: m.level });
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
+          else if (m.type === "rtc" && ws.data.deviceId && typeof m.to === "string") {
+            const msg = JSON.stringify({ type: "rtc", from: ws.data.deviceId, to: m.to, data: m.data });
+            for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
+          }
         } catch {}
       },
       close(ws: ServerWebSocket<WsData>) {
         (ws as any).off?.();
-        if (ws.data.deviceId) s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
+        if (ws.data.deviceId) {
+          sockets.get(ws.data.deviceId)?.delete(ws);
+          if (!sockets.get(ws.data.deviceId)?.size) {
+            sockets.delete(ws.data.deviceId);
+            s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
+            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id);
+          }
+        }
       },
     },
   });
@@ -157,7 +176,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   if (path === "/say" && req.method === "POST") {
     if (!body?.text?.trim()) return bad("text is required");
-    return json(hub.typed(body.personId ?? null, body.text));
+    return json(hub.typed(body.personId ?? null, body.text, !!body.direct));
   }
 
   if (path === "/settings" && req.method === "POST") {
@@ -218,6 +237,58 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json({ peers: await host?.command("collab.peers"), doc: await host?.json("inspect_document", { depth: 2, allPages: true }) });
   }
 
+  // ---- shares (screens and cameras) ----
+  if (path === "/shares" && req.method === "POST") {
+    if (!body?.deviceId) return bad("deviceId is required");
+    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", body.shareId, body.label);
+    hub.brain.placeShare(share);
+    return json(share);
+  }
+  if (path === "/shares/request" && req.method === "POST") {
+    const p = s.person(body?.personId) ?? s.personByName(String(body?.name ?? ""));
+    if (!p) return bad("Who should share? Give personId or name.");
+    const share = s.requestShare(p.id, body?.kind === "camera" ? "camera" : "screen", String(body?.reason ?? ""), body?.by ?? "Someone in the room");
+    return share ? json(share) : bad(`${p.name} has no JamSesh window open.`, 409);
+  }
+  m = path.match(/^\/shares\/([\w-]+)(\/decline)?$/);
+  if (m && (req.method === "DELETE" || (req.method === "POST" && m[2]))) {
+    s.endShare(m[1], m[2] ? "declined" : "ended");
+    return json({ ok: true });
+  }
+
+  // ---- annotations ----
+  if (path === "/annotations" && req.method === "POST") {
+    if (!body?.target?.kind || typeof body.x !== "number") return bad("target and x, y are required");
+    const ann = s.addAnnotation({ personId: body.personId ?? null, authorName: body.authorName, target: body.target, x: body.x, y: body.y, text: String(body.text ?? ""), source: body.source === "pointer" ? "pointer" : "pin" });
+    if (ann.target.kind === "canvas" && ann.target.canvasX != null) hub.canvas.comment(ann).catch(() => {});
+    return json(ann);
+  }
+  if (path === "/annotations/send" && req.method === "POST") {
+    const ev = hub.sendAnnotations(body?.personId ?? null, body?.ids, String(body?.text ?? ""));
+    return ev ? json(ev) : bad("No open annotations to send.");
+  }
+  m = path.match(/^\/annotations\/([\w-]+)$/);
+  if (m && req.method === "PATCH") return json(s.store.patch("annotations", m[1], { text: body?.text, status: body?.status }));
+  if (m && req.method === "DELETE") return (s.store.remove("annotations", m[1]), json({ ok: true }));
+
+  // ---- profile photos ----
+  m = path.match(/^\/people\/([\w-]+)\/photo$/);
+  if (m && req.method === "POST") {
+    const bytes: Uint8Array = body?.__raw ?? (body?.__form?.get("file") instanceof Blob ? new Uint8Array(await (body.__form.get("file") as Blob).arrayBuffer()) : new Uint8Array());
+    return json(await hub.savePhoto(m[1], bytes));
+  }
+
+  // ---- prompts addressed to the brain ----
+  if (path === "/prompt-window/start" && req.method === "POST") {
+    if (!body?.deviceId) return bad("deviceId is required");
+    hub.promptStart(String(body.deviceId), Number(body.t0) || Date.now());
+    return json({ ok: true });
+  }
+  if (path === "/prompt-window" && req.method === "POST") {
+    if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+    return json(await hub.promptWindow({ deviceId: body.deviceId, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
+  }
+
   if (path === "/brain/digest" && req.method === "POST") return (await hub.brain.digest(true), json({ digest: s.store.digest("session")?.text ?? "" }));
 
   return bad("not found", 404);
@@ -227,7 +298,7 @@ async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
   if (type.includes("application/json")) return req.json().catch(() => ({}));
   if (type.includes("multipart/form-data")) return { __form: await req.formData() };
-  if (type.includes("audio/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
+  if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
   return null;
 }
 

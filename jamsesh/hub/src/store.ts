@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { bus } from "./bus";
 import type {
   Agent,
+  Annotation,
   Artifact,
   Device,
   DevServer,
@@ -13,6 +14,7 @@ import type {
   JamEvent,
   Person,
   Relevance,
+  Share,
   Utterance,
   Workstream,
 } from "./types";
@@ -26,6 +28,8 @@ type Collections = {
   artifacts: Artifact;
   devservers: DevServer;
   utterances: Utterance;
+  shares: Share;
+  annotations: Annotation;
 };
 export type CollectionName = keyof Collections;
 

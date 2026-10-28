@@ -11,7 +11,41 @@ import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Artifact, Platform, Utterance } from "./types";
+import type { Agent, Annotation, Artifact, Platform, Utterance } from "./types";
+
+/** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
+export interface PointerMark {
+  t: number;
+  kind: "dwell" | "click" | "drag" | "move";
+  x: number;
+  y: number;
+  dur?: number;
+  target: Annotation["target"];
+  word?: string;
+}
+
+function where(x: number, y: number) {
+  const v = y < 0.33 ? "top" : y > 0.66 ? "bottom" : "middle";
+  const h = x < 0.33 ? "left" : x > 0.66 ? "right" : "center";
+  return v === "middle" && h === "center" ? "the center" : `${v} ${h}`;
+}
+
+/** Ties each pointer moment to the word being said at that time (words spread evenly over a line). */
+export function describePointer(marks: PointerMark[], lines: Utterance[]): string[] {
+  return marks
+    .filter((m) => m.kind !== "move")
+    .map((m) => {
+      const u = lines.find((l) => m.t >= l.t0 - 300 && m.t <= l.t1 + 300);
+      if (u) {
+        const words = u.text.split(/\s+/);
+        const i = Math.max(0, Math.min(words.length - 1, Math.floor(((m.t - u.t0) / Math.max(1, u.t1 - u.t0)) * words.length)));
+        m.word = words.slice(Math.max(0, i - 2), i + 3).join(" ");
+      }
+      const what = `${m.target.kind} "${m.target.label}"${m.target.nodeId ? ` (node ${m.target.nodeId})` : ""}`;
+      const action = m.kind === "click" ? "clicked" : m.kind === "drag" ? "dragged across" : `held on${m.dur ? ` for ${(m.dur / 1000).toFixed(1)}s` : ""}`;
+      return `${action} ${what} at ${where(m.x, m.y)}${m.word ? ` while saying “…${m.word}…”` : ""}`;
+    });
+}
 
 export interface HubOptions {
   canvas?: boolean;
@@ -74,9 +108,27 @@ export class Hub {
     this.devproxy.stop();
   }
 
+  /** Devices recording a prompt for the brain right now, with when they started. */
+  private promptMode = new Map<string, number>();
+
+  promptStart(deviceId: string, t0: number) {
+    this.promptMode.set(deviceId, t0);
+  }
+
+  private inPrompt(u: Utterance) {
+    for (const [deviceId, t0] of this.promptMode) if (u.t1 >= t0 - 500 && u.devices.some((d) => d.deviceId === deviceId)) return true;
+    return false;
+  }
+
   /** A transcribed line from the room (new, or updated after a late copy or a label). */
   private roomLine(u: Utterance, isNew: boolean) {
     const s = this.session;
+    if (isNew && this.inPrompt(u)) {
+      // Part of a recorded prompt: the prompt goes to the brain whole when recording stops.
+      const ev = s.store.addEvent({ kind: "speech", authorType: "person", authorId: u.personId, authorName: u.speakerName, text: u.text, ts: u.t0, relevance: "work", data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, forBrain: true } });
+      s.store.put("utterances", { ...u, eventId: ev.id });
+      return;
+    }
     if (isNew) {
       const ev = s.store.addEvent({
         kind: "speech",
@@ -94,8 +146,8 @@ export class Hub {
     if (u.eventId) s.store.updateEvent(u.eventId, { text: u.text, authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
   }
 
-  /** Typed into the room (the client view's box, or the host's). Treated like speech. */
-  typed(personId: string | null, text: string) {
+  /** Typed into the room (the client view's box, or the host's). Treated like speech; direct goes straight to the brain. */
+  typed(personId: string | null, text: string, direct = false) {
     const p = this.session.person(personId);
     const ev = this.session.store.addEvent({
       kind: "speech",
@@ -103,10 +155,83 @@ export class Hub {
       authorId: p?.id ?? null,
       authorName: p?.name ?? "Someone",
       text: text.trim(),
-      data: { typed: true },
+      relevance: direct ? "work" : null,
+      data: { typed: true, direct },
     });
-    this.brain.hear(ev);
+    if (direct) this.brain.direct(ev);
+    else this.brain.hear(ev);
     return ev;
+  }
+
+  /**
+   * Record-to-prompt finished: everything this device heard in the window, plus where
+   * the person pointed while talking, goes to the brain as one prompt.
+   */
+  async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+    const s = this.session;
+    // Wait for the window's last words to come back from transcription.
+    const deadline = Date.now() + 7000;
+    let lines: Utterance[] = [];
+    let stable = 0;
+    while (Date.now() < deadline) {
+      const now = s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.devices.some((d) => d.deviceId === w.deviceId));
+      stable = now.length === lines.length && Date.now() > w.t1 + 2500 ? stable + 1 : 0;
+      lines = now;
+      if (stable >= 2) break;
+      await Bun.sleep(400);
+    }
+    this.promptMode.delete(w.deviceId);
+    lines.sort((a, b) => a.t0 - b.t0);
+    const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
+    const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
+    const marks = describePointer(w.pointer, lines);
+    for (const m of w.pointer.filter((m) => m.kind !== "move")) {
+      s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" });
+    }
+    if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
+    const ev = s.store.addEvent({
+      kind: "speech",
+      authorType: "person",
+      authorId: person?.id ?? null,
+      authorName: person?.name ?? "Someone",
+      text: said || "(pointed without speaking)",
+      relevance: "work",
+      data: { direct: true, recorded: true, pointer: marks },
+    });
+    this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
+    return { ok: true, eventId: ev.id, text: said, pointed: marks };
+  }
+
+  /** All open annotations (or the given ones) go to the brain as one prompt. */
+  sendAnnotations(personId: string | null, ids?: string[], note = "") {
+    const s = this.session;
+    const open = s.annotations().filter((a) => a.status === "open" && (!ids?.length || ids.includes(a.id)));
+    if (!open.length) return null;
+    const p = s.person(personId);
+    const lines = open.map((a, i) => `${i + 1}. ${a.authorName} on ${a.target.kind} "${a.target.label}"${a.target.nodeId ? ` (node ${a.target.nodeId})` : ""} at ${where(a.x, a.y)}: ${a.text || "(no note)"}`);
+    const ev = s.store.addEvent({
+      kind: "speech",
+      authorType: "person",
+      authorId: p?.id ?? null,
+      authorName: p?.name ?? "Someone",
+      text: `${note ? `${note}\n` : ""}Annotations from the room (${open.length}):\n${lines.join("\n")}`,
+      relevance: "work",
+      data: { direct: true, annotations: open.map((a) => a.id) },
+    });
+    for (const a of open) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
+    this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed.");
+    return ev;
+  }
+
+  async savePhoto(personId: string, bytes: Uint8Array) {
+    const p = this.session.person(personId);
+    if (!p) throw new Error("No such person.");
+    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
+    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
+    if (!isJpeg && !isPng) throw new Error("Send a JPEG or PNG.");
+    const file = `${personId}-${Date.now()}.${isJpeg ? "jpg" : "png"}`;
+    await Bun.write(join(this.uploadsDir, file), bytes);
+    return this.session.setPhoto(personId, `/renders/uploads/${file}`);
   }
 
   async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform }): Promise<Artifact> {

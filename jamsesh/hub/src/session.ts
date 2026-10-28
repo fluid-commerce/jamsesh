@@ -5,6 +5,7 @@ import { config } from "./config";
 import { newId, PALETTE, Store } from "./store";
 import type {
   Agent,
+  Annotation,
   Artifact,
   CanvasInfo,
   Device,
@@ -16,6 +17,7 @@ import type {
   Person,
   Platform,
   Settings,
+  Share,
   Stage,
   Workstream,
 } from "./types";
@@ -66,6 +68,8 @@ export class Session {
     const keyInSettings = !!s.setting<string>("gatewayKey", "");
     return {
       sessionName: s.setting("sessionName", "Jam session"),
+      brainName: s.setting("brainName", "JamSesh"),
+      brainNotes: s.setting<string[]>("brainNotes", []),
       brainEnabled: s.setting("brainEnabled", true),
       voiceReplies: s.setting("voiceReplies", true),
       voice: s.setting("voice", "nova"),
@@ -82,7 +86,7 @@ export class Session {
   }
 
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl"] as const;
+    const allowed = ["sessionName", "brainName", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl"] as const;
     for (const k of allowed) if (patch[k] !== undefined) this.store.setSetting(k, patch[k]);
     if (patch.models) this.store.setSetting("models", { ...this.store.setting("models", {}), ...patch.models });
     if (patch.gatewayKey !== undefined) this.store.setSetting("gatewayKey", patch.gatewayKey.trim());
@@ -106,6 +110,8 @@ export class Session {
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
       utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0).slice(-200),
       stage: this.stage(),
+      shares: this.shares(),
+      annotations: this.annotations(),
       digest: this.store.digest("session")?.text ?? "",
       brain: this.brainStatus,
     };
@@ -131,6 +137,10 @@ export class Session {
         return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0).slice(-200) };
       case "digest":
         return { key, value: this.store.digest("session")?.text ?? "" };
+      case "shares":
+        return { key, value: this.shares() };
+      case "annotations":
+        return { key, value: this.annotations() };
       case "settings":
         return { key, value: this.settings() };
       case "session":
@@ -548,6 +558,78 @@ export class Session {
       });
     }
     return art;
+  }
+
+  // ---- screen and camera shares ----
+
+  shares(): Share[] {
+    return this.store.all("shares").filter((x) => x.status === "live" || (x.status === "requested" && Date.now() - x.startedAt < 120_000)).sort((a, b) => a.startedAt - b.startedAt);
+  }
+
+  devicesOf(personId: string) {
+    return this.store.all("devices").filter((d) => d.personId === personId && d.kind === "client" && Date.now() - d.lastSeen < 10 * 60_000);
+  }
+
+  /** The host asks someone to share; their JamSesh window asks them first. */
+  requestShare(personId: string, kind: Share["kind"], reason: string, by: string): Share | null {
+    const person = this.person(personId);
+    const devices = this.devicesOf(personId);
+    if (!person || !devices.length) return null;
+    const share: Share = { id: newId("sh"), deviceId: devices[0].id, personId, personName: person.name, kind, label: `${person.name}'s ${kind}`, status: "requested", reason, startedAt: Date.now() };
+    this.store.put("shares", share);
+    bus.send({ type: "share-request", shareId: share.id, deviceIds: devices.map((d) => d.id), kind, reason, by });
+    return share;
+  }
+
+  /** A device starts sharing, on its own or in answer to a request. */
+  startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string): Share {
+    const device = this.store.get("devices", deviceId);
+    const person = this.person(device?.personId);
+    const existing = shareId ? this.store.get("shares", shareId) : undefined;
+    const share: Share = {
+      id: existing?.id ?? newId("sh"),
+      deviceId,
+      personId: person?.id ?? null,
+      personName: person?.name ?? device?.label ?? "Someone",
+      kind,
+      label: label || `${person?.name ?? "Someone"}'s ${kind}`,
+      status: "live",
+      reason: existing?.reason ?? "",
+      startedAt: Date.now(),
+    };
+    this.store.put("shares", share);
+    this.store.addEvent({ kind: "system", authorType: "person", authorId: share.personId, authorName: share.personName, text: `${share.personName} is sharing their ${kind}.`, data: { shareId: share.id } });
+    return share;
+  }
+
+  endShare(id: string, status: Share["status"] = "ended") {
+    const sh = this.store.get("shares", id);
+    if (!sh) return;
+    this.store.put("shares", { ...sh, status });
+    const st = this.stage();
+    if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
+      const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
+      this.setStage(tiles.length ? { ...st, layout: { tiles } } : { mode: "board" }, "JamSesh");
+    }
+  }
+
+  // ---- annotations ----
+
+  annotations(): Annotation[] {
+    return this.store.all("annotations").filter((a) => a.status !== "done").sort((a, b) => a.ts - b.ts);
+  }
+
+  addAnnotation(a: Omit<Annotation, "id" | "ts" | "status" | "promptEventId" | "authorName"> & { authorName?: string }): Annotation {
+    const person = this.person(a.personId);
+    const ann: Annotation = { ...a, id: newId("pin"), ts: Date.now(), authorName: person?.name ?? a.authorName ?? "Someone", status: "open", promptEventId: null };
+    this.store.put("annotations", ann);
+    return ann;
+  }
+
+  // ---- people ----
+
+  setPhoto(personId: string, url: string | null) {
+    return this.store.patch("people", personId, { photo: url });
   }
 
   // ---- dev servers ----

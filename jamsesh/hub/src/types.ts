@@ -10,6 +10,8 @@ export interface Person {
   hasVoiceprint: boolean;
   voiceSamples: number;
   createdAt: number;
+  /** Profile photo URL (from the person's camera), or null. */
+  photo?: string | null;
 }
 
 export interface Device {
@@ -140,7 +142,59 @@ export interface DevServer {
   up: boolean;
 }
 
-export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "welcome";
+export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome";
+
+/** One cell of a layout the brain (or a person) puts on the big screen. */
+export type Tile =
+  | { kind: "artifact"; artifactId: string; label?: string }
+  | { kind: "canvas"; follow?: string | null; label?: string }
+  | { kind: "web"; url: string; label?: string }
+  | { kind: "screen"; shareId: string; label?: string }
+  | { kind: "agent"; agentId: string; label?: string }
+  | { kind: "html"; html: string; label?: string }
+  | { kind: "feed"; label?: string };
+
+export interface Layout {
+  tiles: Tile[];
+  /** CSS grid; omitted = JamSesh picks a bento for the tile count. */
+  grid?: { columns: string; rows: string; areas: string[] };
+}
+
+/** A live screen or camera someone shares from their device. */
+export interface Share {
+  id: string;
+  deviceId: string;
+  personId: string | null;
+  personName: string;
+  kind: "screen" | "camera";
+  label: string;
+  status: "requested" | "live" | "ended" | "declined";
+  reason: string;
+  startedAt: number;
+}
+
+export interface Annotation {
+  id: string;
+  ts: number;
+  personId: string | null;
+  authorName: string;
+  target: {
+    kind: "canvas" | "artifact" | "web" | "screen";
+    /** artifact id, URL, or share id; for canvas, the frame name when known. */
+    ref: string;
+    label: string;
+    nodeId?: string | null;
+    canvasX?: number | null;
+    canvasY?: number | null;
+  };
+  /** Position inside the target, 0..1. */
+  x: number;
+  y: number;
+  text: string;
+  source: "pin" | "pointer";
+  status: "open" | "sent" | "done";
+  promptEventId: number | null;
+}
 
 export interface Stage {
   mode: StageMode;
@@ -149,6 +203,7 @@ export interface Stage {
   items: string[];
   /** For parity: [left items, right items]. */
   columns?: { label: string; items: string[] }[];
+  layout?: Layout;
   html?: string;
   pinned: boolean;
   since: number;
@@ -172,6 +227,10 @@ export interface Utterance {
 
 export interface Settings {
   sessionName: string;
+  /** What the room calls the brain; saying it addresses the brain directly. */
+  brainName: string;
+  /** What the room told the brain about how to behave, kept across the session. */
+  brainNotes: string[];
   brainEnabled: boolean;
   voiceReplies: boolean;
   voice: string;
@@ -202,6 +261,8 @@ export interface HubState {
   events: JamEvent[];
   utterances: Utterance[];
   stage: Stage;
+  shares: Share[];
+  annotations: Annotation[];
   digest: string;
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
 }
@@ -224,4 +285,6 @@ export type BusMessage =
   | { type: "toast"; text: string; tone: "info" | "directive" | "decision" | "warn"; detail?: string }
   | { type: "speak"; audio: string | null; text: string; mime: string }
   | { type: "level"; deviceId: string; level: number }
-  | { type: "thinking"; on: boolean; label?: string };
+  | { type: "thinking"; on: boolean; label?: string }
+  | { type: "rtc"; from: string; to: string; data: any }
+  | { type: "share-request"; shareId: string; deviceIds: string[]; kind: "screen" | "camera"; reason: string; by: string };

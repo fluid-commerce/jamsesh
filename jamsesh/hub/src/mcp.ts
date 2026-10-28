@@ -41,6 +41,19 @@ const JAM_TOOLS = [
     },
   },
   {
+    name: "jam_rename",
+    description:
+      "Set your own display name (what the room and other agents call you, for example \"Pixel\") and/or your person's name and title, so names stay clear. Use it when your person tells you what to call you or corrects their own name or title.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Your new display name" },
+        owner: { type: "string", description: "Your person's name as the room knows them" },
+        ownerTitle: { type: "string", description: "Your person's position or title, for example CPO or Senior designer" },
+      },
+    },
+  },
+  {
     name: "jam_context",
     description:
       "Refresh yourself on the session: the running brief, your workstream's brief, decisions, open directives, recent room conversation, and other agents' recent updates. Call at the start of every new leg of work.",
@@ -275,6 +288,29 @@ export class McpEndpoint {
         ctx.agentId = agent.id;
         return text(this.briefing(agent, resumed));
       }
+      case "jam_rename": {
+        const agent = this.requireAgent(ctx);
+        const fields: Partial<Agent> = {};
+        if (args.owner || args.ownerTitle) {
+          const cur = s.person(agent.ownerId);
+          const p = cur
+            ? s.upsertPerson({ id: cur.id, name: args.owner ?? cur.name, role: args.ownerTitle ?? cur.role })
+            : s.upsertPerson({ name: args.owner ?? agent.ownerName, role: args.ownerTitle });
+          fields.ownerId = p.id;
+          fields.ownerName = p.name;
+        }
+        if (args.name?.trim()) {
+          const taken = s.agents().find((a) => a.id !== agent.id && a.name.toLowerCase() === String(args.name).trim().toLowerCase());
+          if (taken) throw new Error(`${taken.name} is already taken by ${taken.ownerName}'s agent; pick another name.`);
+          fields.name = String(args.name).trim().slice(0, 40);
+        }
+        const before = agent.name;
+        s.touchAgent(agent.id, fields);
+        s.store.put("agents", { ...s.agent(agent.id)! });
+        const now = s.agent(agent.id)!;
+        s.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: now.name, text: `${before !== now.name ? `${before} is now ${now.name}` : now.name} (${now.ownerName}${s.person(now.ownerId)?.role ? `, ${s.person(now.ownerId)!.role}` : ""}'s agent).` });
+        return text(`You are ${now.name}, working for ${now.ownerName}${s.person(now.ownerId)?.role ? ` (${s.person(now.ownerId)!.role})` : ""}.`);
+      }
       case "jam_context":
         return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10));
       case "jam_search": {
@@ -396,7 +432,8 @@ export class McpEndpoint {
     const s = this.hub.session;
     const inbox = this.inboxText(agent, false);
     return [
-      `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}).`,
+      `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${s.person(agent.ownerId)?.role ? ` (${s.person(agent.ownerId)!.role})` : ""}. The room brain is called "${s.settings().brainName}".`,
+      s.person(agent.ownerId)?.role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
       `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} "${s.hubUrl}/api/upload?code=${s.code}"`,
       "",
@@ -417,8 +454,8 @@ export class McpEndpoint {
     const ws = s.store.all("workstreams").filter((w) => w.status === "active");
     const agents = s.agents().filter((a) => a.status !== "offline");
     return [
-      "People:",
-      ...s.people().map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""}`),
+      "People (name, title, whose call counts more when people disagree):",
+      ...s.people().map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ", (no title yet)"}${p.weight > 1 ? ` (weight ${p.weight})` : ""}${s.agents().filter((a) => a.ownerId === p.id && a.status !== "offline").length ? `; agents: ${s.agents().filter((a) => a.ownerId === p.id && a.status !== "offline").map((a) => a.name).join(", ")}` : ""}`),
       "Agents:",
       ...agents.map(
         (a) =>

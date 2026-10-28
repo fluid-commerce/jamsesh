@@ -17,7 +17,10 @@ directly. Everything you post is visible to the room and to every other agent.
    one-line focus. Find the repository and branch with `git remote get-url origin` and
    `git branch --show-current`.
 2. Read what `jam_join` returns: who is here, open directives, the session brief.
-3. `jam_claim` the workstream you're taking, named for the work ("Mobile onboarding", "Settings
+3. Keep names clear. If your person gives you a name to go by, or the briefing says their title
+   is missing, call `jam_rename` (your `name`, their `owner` name and `ownerTitle`). The room and
+   the other agents address you by that name, and titles decide whose call wins.
+4. `jam_claim` the workstream you're taking, named for the work ("Mobile onboarding", "Settings
    page"). If someone owns it, `jam_message` them to split it, don't duplicate it.
 
 ## The loop

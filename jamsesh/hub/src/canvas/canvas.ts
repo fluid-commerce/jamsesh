@@ -401,6 +401,12 @@ export class Canvas {
     }
   }
 
+  /** A pin on the canvas becomes a FigCraft comment, so agents see it in the file too. */
+  async comment(a: import("../types").Annotation) {
+    if (!this.host || a.target.canvasX == null || a.target.canvasY == null) return;
+    await this.host.command("comment.add", { x: a.target.canvasX, y: a.target.canvasY, text: `${a.text || "📍"}`, anchor: a.target.nodeId ? Number(a.target.nodeId) : true, author: a.authorName });
+  }
+
   /** Leaves and rejoins the session file, for when the host's copy fell behind. */
   async resync(why: string) {
     const link = this.session.canvas.editLink;
