@@ -697,8 +697,9 @@ export class Brain {
       if (f && f.status === "active") s.store.put("facts", { ...f, status: "superseded", note: r.reason, updatedAt: now });
     }
     for (const a of output.add) {
-      // Paraphrases of what's already known are duplicates, not new knowledge.
-      if ([...active, ...s.facts().filter((f) => f.status === "active")].some((f) => (f.kind === a.kind || f.kind === "decision" || a.kind === "decision") && similar(f.text, a.text) > 0.55)) continue;
+      // Paraphrases of what's already known are duplicates, not new knowledge. Items that
+      // differ in their specifics (option A versus B, 16 versus 24 px) never are.
+      if ([...active, ...s.facts().filter((f) => f.status === "active")].some((f) => f.kind === a.kind && sameSpecifics(f.text, a.text) && similar(f.text, a.text) > 0.55)) continue;
       s.store.put("facts", {
         id: newId("fact"),
         ts: now,
@@ -751,6 +752,15 @@ export function addressesBrain(text: string, name: string) {
   const n = flat(name);
   if (n.length >= 3 && t.includes(n)) return true;
   return n === "jamsesh" && /\b(jam ?sesh|jam ?session|jamsesh)\b/i.test(text) && /^(hey|ok|okay|yo|so)?\s*,?\s*jam/i.test(text.trim());
+}
+
+/** Variant letters, numbers and hex colors: the details that make two similar sentences different. */
+export function sameSpecifics(a: string, b: string) {
+  const specifics = (t: string) =>
+    new Set([...t.matchAll(/(?:\b(?:option|direction|variant|version)\s+([A-Z])\b)|\b([A-Z])\b(?=[:)\s,.])|(#[0-9a-f]{3,8})\b|\b(\d+(?:\.\d+)?)(?=px|pt|%|ms|\b)/gi)].map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4]).toLowerCase()));
+  const x = specifics(a);
+  const y = specifics(b);
+  return x.size === y.size && [...x].every((v) => y.has(v));
 }
 
 function similar(a: string, b: string) {
