@@ -41,7 +41,12 @@ JamSesh never turns off a keep-awake you set yourself.
 
 There's no JamSesh server on the internet: everyone connects to the host. To develop JamSesh, run
 the host from a checkout with `./jamsesh/install.sh` and `jamsesh host`, and rebuild the app with
-`jamsesh/app/bundle-hub.sh` then `cargo tauri build` in `jamsesh/app/src-tauri`.
+`jamsesh/app/bundle-hub.sh` then `cargo tauri build` in `jamsesh/app/src-tauri`. On a Mac you
+rebuild often, sign each build with `jamsesh/app/sign-local.sh <path to JamSesh.app>` before
+installing it: a build signed the default (ad-hoc) way is a new app to macOS, so it loses the
+microphone, screen recording and accessibility permissions until someone at the Mac allows them
+again. The first run sets up the signing identity and prints one command to trust it, which asks
+for your password once.
 
 ## Join a session
 
