@@ -20,7 +20,7 @@ const triageSchema = z.object({
       id: z.number().describe("The event id of the line"),
       relevance: z.enum(["banter", "chatter", "discussion", "work"]),
       intent: z
-        .enum(["none", "directive", "decision", "present", "question", "introduce"])
+        .enum(["none", "directive", "decision", "present", "question", "introduce", "relabel"])
         .describe("What the line asks of the room or its agents"),
       confidence: z.number().min(0).max(1),
     }),
@@ -40,6 +40,8 @@ export class Brain {
   private lastDigestAt = 0;
   private digestTimer: ReturnType<typeof setInterval>;
   private lastRoomStageAt = 0;
+  /** Set by the hub: reassigns a transcribed line to a person and teaches their voiceprint. */
+  relabel: ((eventId: number, personName: string) => string) | null = null;
 
   constructor(
     private session: Session,
@@ -326,6 +328,12 @@ export class Brain {
           return host.act(i);
         },
       }),
+      fix_speaker: tool({
+        description:
+          "Someone said who spoke a line ('that was Felipe', 'no, Britain said that'). Reassign that transcript line (by its [id]) to the person; JamSesh learns their voice from it. Usually the line just before the correction.",
+        inputSchema: z.object({ lineId: z.number().int(), person: z.string().describe("The person's name") }),
+        execute: async ({ lineId, person }) => this.relabel?.(lineId, person) ?? "Speaker fixing isn't available.",
+      }),
       no_action: tool({
         description: "Nothing to do: the lines are discussion, banter, or already handled.",
         inputSchema: z.object({ reason: z.string() }),
@@ -469,11 +477,11 @@ const TRIAGE_SYSTEM = `You listen to a room of designers and developers working 
 
 For each new line decide:
 - relevance: "banter" (jokes, teasing, off-topic), "chatter" (filler, "yeah", "hmm"), "discussion" (talking about the work without asking for anything), "work" (asks for or decides something about the work).
-- intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change), "decision" (the team picks a direction: "let's go with B"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "none".
+- intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change), "decision" (the team picks a direction: "let's go with B"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "relabel" (someone says who said a previous line: "that was Felipe"), "none".
 
 Be conservative. Sarcasm and jokes are never directives ("let's just delete the whole app lol" is banter). Musing ("I wonder if...") is discussion unless it ends in an ask. A directive addressed to a person, not an agent ("Felipe, can you grab lunch"), is not work.
 Introductions: fill "introductions" whenever a name and what the person does come up, whether they say it themselves ("I'm Felipe, I run product") or someone else does ("this is Dana, she runs support"). Use the role they gave, and leave out anyone whose name was only mentioned in passing.
-Set actionable to true only when at least one line is a directive, decision, present, or question with confidence above 0.55.`;
+Set actionable to true only when at least one line is a directive, decision, present, question, or relabel with confidence above 0.55.`;
 
 const ROUTER_SYSTEM = `You are the room brain for JamSesh, a live session where several people and their coding agents (Claude Code and Codex, one or more per person) work together. Agents run on people's laptops in different repositories. You route what the room says to the right agents and keep the big screen useful.
 
@@ -489,6 +497,7 @@ How to route:
 - Lines marked "(typed to their agent)" are prompts a person gave their own agent, which is already on it. Don't route them back to that agent. Act on them only when they affect other agents (for example "and tell the mobile agent to match"), or record a decision they state.
 - When one platform ships something visible (an agent posts "shipped" or "done"), the other platforms' agents should get a 'coordinate' directive so desktop and mobile stay in parity, adapted to each platform. Include the shipping agent in it.
 - Don't repeat a directive that is already open. Don't route banter. If nothing needs doing, call no_action.
+- "That was Felipe" / "Britain said that" right after a line means fix_speaker on that line. It is not banter even if phrased casually.
 - Speak (say_to_room) only when someone addresses you directly ("hey brain", "JamSesh, ...") or asks a question only you can answer. Keep it to one sentence.`;
 
 const DIGEST_SYSTEM = `You keep the running brief of a live design-and-build session, for agents that join late or start a new leg of work. Update the previous brief with the new events. Structure:

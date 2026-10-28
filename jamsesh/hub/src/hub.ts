@@ -49,6 +49,13 @@ export class Hub {
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text) => this.brain.agentUpdated(agent, kind, text);
+    this.brain.relabel = (eventId, name) => {
+      const ev = this.store.event(eventId);
+      const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });
+      if (!ev?.data.utteranceId) return "That line wasn't spoken, so there's no voice to learn.";
+      this.audio.assign(ev.data.utteranceId, person.id);
+      return `Line ${eventId} is now ${person.name}'s.`;
+    };
   }
 
   async start() {

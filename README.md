@@ -1,3 +1,7 @@
+> [!IMPORTANT]
+> **This is JamSesh**, Fluid's fork of FigCraft for room sessions with people and coding agents.
+> Start at [`jamsesh/README.md`](jamsesh/README.md). FigCraft's own README follows.
+
 <p align="center">
   <a href="https://getartcraft.com/">
     <picture>
