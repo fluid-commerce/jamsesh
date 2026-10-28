@@ -81,6 +81,11 @@ export class AudioPipeline {
     return Math.min(MAX_SETTLE_MS, BASE_SETTLE_MS + worst * 1.25);
   }
 
+  /** Utterances still waiting out their settle window or being transcribed. */
+  get pending() {
+    return this.open.length + this.finalized.filter((g) => g.busy).length;
+  }
+
   deviceLag(deviceId: string) {
     return this.lag.get(deviceId) ?? 0;
   }

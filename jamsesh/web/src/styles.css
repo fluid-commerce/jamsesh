@@ -716,3 +716,20 @@ textarea:focus {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+.tile {
+  container-type: inline-size;
+}
+
+@container (max-width: 380px) {
+  .tile .meta {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .tile .meta .title {
+    flex: 1 0 calc(100% - 24px);
+  }
+  .tile .meta .chip:first-of-type {
+    margin-left: 18px;
+  }
+}

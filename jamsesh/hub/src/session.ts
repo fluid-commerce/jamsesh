@@ -49,7 +49,8 @@ export class Session {
     this.store = store;
     this.code = store.setting("sessionCode", "") || makeCode();
     store.setSetting("sessionCode", this.code);
-    for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "offline", canvas: "none" }, false);
+    // Agents outlive a hub restart: they reconnect on their next call, and directives wait in their inbox.
+    for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     bus.resolver = (key) => this.resolve(key);
   }

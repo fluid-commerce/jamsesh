@@ -198,7 +198,8 @@ export class McpEndpoint {
       s.ctx.ip = ip;
       return s.transport.handleRequest(req);
     }
-    if (req.method !== "POST") return new Response("Unknown MCP session", { status: 404 });
+    // An unknown session (the hub restarted): 404 tells the client to start a new one.
+    if (sid || req.method !== "POST") return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
     const ctx: Ctx = { agentId: null, ip };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
@@ -241,7 +242,7 @@ export class McpEndpoint {
 
   private requireAgent(ctx: Ctx): Agent {
     const a = this.hub.session.agent(ctx.agentId);
-    if (!a) throw new Error("Call jam_join first.");
+    if (!a) throw new Error("Call jam_join first. (If you were already in the session, the hub restarted: call jam_join again with the same details to pick up where you left off.)");
     this.hub.session.touchAgent(a.id);
     return a;
   }
