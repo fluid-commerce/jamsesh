@@ -153,9 +153,15 @@ export class Canvas {
     await host.command("pref.userName", { name: "JamSesh" });
     const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
     if (saved) {
-      await host.command("collab.join", { link: saved.edit });
+      // The saved links name the LAN address, but the server listens on loopback only (and the
+      // address may have changed since): rejoin through loopback and announce today's address.
+      await host.command("collab.join", { link: this.loopLink(saved.edit) });
       const ok = await waitLive(host, 15_000);
-      if (ok) return this.announce(saved.edit, saved.view);
+      if (ok) {
+        const links = { edit: this.lanLink(this.loopLink(saved.edit)), view: this.lanLink(this.loopLink(saved.view)) };
+        this.session.store.setSetting("canvasLinks", links);
+        return this.announce(links.edit, links.view);
+      }
       console.warn("canvas: saved file is gone, publishing a new one");
       await host.command("collab.leave", {}).catch(() => {});
     }
@@ -177,6 +183,11 @@ export class Canvas {
   /** Links from a server on 127.0.0.1 name this machine's LAN address instead, so clients can use them. */
   private lanLink(link: string) {
     return link.replace(/host=(127\.0\.0\.1|localhost)(:\d+)/, `host=${config.publicHost}$2`);
+  }
+
+  /** The same link through loopback on the server's current port, the way the host reaches it. */
+  loopLink(link: string) {
+    return link.replace(/host=[^&:]+:\d+/, `host=127.0.0.1:${this.port}`);
   }
 
   private announce(edit: string, view: string) {

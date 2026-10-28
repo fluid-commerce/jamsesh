@@ -63,6 +63,8 @@ export interface HubOptions {
   teamDir?: string;
 }
 
+const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)>/;
+
 export class Hub {
   store: Store;
   session: Session;
@@ -282,6 +284,7 @@ export class Hub {
     const open = this.promptMode.get(w.deviceId);
     if (open) open.t1 = w.t1;
     // SPEC 11.3: answer within about 7 s, before the client gives up waiting.
+    // Words still in transcription after that reach the feed as ordinary room speech (the window is closed by then).
     const deadline = Date.now() + 7000;
     const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
@@ -403,9 +406,12 @@ export class Hub {
     const s = this.session;
     const what = `${r.repo.replace(/\.git$/, "").split(/[/:]/).pop()}${r.branch ? ` (${r.branch})` : ""}`;
     if (r.status === "pending") {
-      s.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${r.agentName} asks to build ${what} on the host: ${r.command}. Say "approve" or "deny".`, relevance: "work", data: { buildRequest: r.id } });
-      // Said out loud: often nobody is at the host to click anything.
-      const ask = `${r.agentName} wants to build ${what} on the host. Approve or deny?`;
+      const shell = r.kind === "shell";
+      s.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: shell ? `${r.agentName} asks to run a command on the host: ${r.command}. Say "approve" or "deny".` : `${r.agentName} asks to build ${what} on the host: ${r.command}. Say "approve" or "deny".`, relevance: "work", data: { buildRequest: r.id } });
+      // Said out loud: often nobody is at the host to click anything. A long command is on screen, not read out.
+      const ask = shell
+        ? `${r.agentName} wants to run ${r.command.length <= 40 ? `"${r.command}"` : "a command"} on the host. Approve or deny?`
+        : `${r.agentName} wants to build ${what} on the host. Approve or deny?`;
       void speak(s, ask, { source: "voice", kind: "request" });
       // Once more after a minute if nobody answered (people may have been mid-conversation).
       setTimeout(() => r.status === "pending" && void speak(s, `Still waiting: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
@@ -430,6 +436,8 @@ export class Hub {
 
   /** UserPromptSubmit: the prompt goes into context; new room items come back as context. */
   onPrompt(body: any, ip: string, device?: string | null) {
+    // The harness's own injected text (subagent reports, command output), which older hook scripts still forward.
+    if (HARNESS_TEXT.test(String(body?.prompt ?? ""))) return {};
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
     const prompt = String(body.prompt ?? "").trim();

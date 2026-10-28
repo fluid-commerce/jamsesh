@@ -33,10 +33,14 @@ export function ClientView() {
   const me = state?.people.find((p) => p.id === personId);
   const layout = useLayout();
 
-  useEffect(() => mic.onChange(setMicStatus) as () => void, []);
+  useEffect(() => {
+    const off = mic.onChange(setMicStatus);
+    return () => void off();
+  }, []);
   // Remote people don't hear the room speaker: the brain's voice and chime play here instead.
   const myDevice = state?.devices.find((d) => d.id === DEVICE);
-  const remote = myDevice?.location === "remote";
+  // What this person picked in the room-or-remote chooser wins over the hub's network guess.
+  const remote = myDevice?.location === "remote" && pref("location") !== "room";
   useEffect(() => {
     mic.remote = remote;
     if (!remote) return;
@@ -62,13 +66,19 @@ export function ClientView() {
     };
   }, [remote]);
   // Heard you: the chime also plays on the laptop that spoke or recorded.
-  useEffect(() => hub.onMessage((m) => m.type === "chime" && m.deviceId === hub.deviceId && playChime()) as () => void, []);
+  useEffect(() => {
+    const off = hub.onMessage((m) => m.type === "chime" && m.deviceId === hub.deviceId && playChime());
+    return () => void off();
+  }, []);
   useEffect(() => {
     if (!me) return;
-    const location = pref("location") || undefined;
+    // Never leave it to the hub's guess on the host Mac itself (loopback is always in the room).
+    const location = pref("location") || (/^(127\.0\.0\.1|localhost|\[::1\])$/.test(window.location.hostname) ? "room" : undefined);
     api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on, location }).catch(() => {});
   }, [me?.id, micStatus.on]);
-  useEffect(() => setPref("tab", tab), [tab]);
+  useEffect(() => {
+    setPref("tab", tab);
+  }, [tab]);
   // M mutes or unmutes from anywhere outside a text field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -125,8 +135,8 @@ export function ClientView() {
           <>
             <Toasts />
             <ShareRequestPrompt />
-            {profile && <ProfileDrawer me={me} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
-            {!enrollAsked && me.voiceSamples === 0 && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
+            {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
+            {!enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
             {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
           </>
         }
@@ -178,8 +188,8 @@ export function ClientView() {
       </main>
       <Toasts />
       <ShareRequestPrompt />
-      {profile && <ProfileDrawer me={me} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
-      {!enrollAsked && me.voiceSamples === 0 && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
+      {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
+      {!enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
       {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
     </div>
   );
@@ -653,7 +663,13 @@ export function WhereChooser({ compact }: { compact?: boolean }) {
   const [onHost, setOnHost] = useState(false);
   useEffect(() => {
     api<{ onHost: boolean }>("/me")
-      .then((m) => setOnHost(!!m.onHost))
+      .then((m) => {
+        setOnHost(!!m.onHost);
+        if (m.onHost) {
+          setPref("location", "room"); // the host Mac's own window is always in the room
+          api("/devices", { deviceId: DEVICE, location: "room" }).catch(() => {});
+        }
+      })
       .catch(() => {});
   }, []);
   const guess = state?.devices.find((d) => d.id === DEVICE)?.location;

@@ -372,7 +372,9 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
   const events = (state?.events ?? []).filter((e) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind))));
   const last = events[events.length - 1]?.id;
-  useEffect(() => end.current?.scrollIntoView({ block: "end", behavior: "smooth" }), [last]);
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  }, [last]);
   if (!state) return null;
   return (
     <div className="feed" style={{ flex: 1, fontSize: big ? 17 : 14 }}>
@@ -433,7 +435,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
           </span>
         )}
         {e.kind === "message" && <span className="tag" style={{ color: "var(--dim)", marginRight: 8 }}>to {e.data.toName}</span>}
-        {e.text}
+        {e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
@@ -495,6 +497,16 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
 
 // ---------- agents ----------
 
+/** Agent text arrives as markdown; these small surfaces show it as plain words. */
+export function stripMd(t: string): string {
+  return t
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w*])/g, "$1$2")
+    .replace(/`+([^`]*)`+/g, "$1")
+    .replace(/^\s{0,3}(#{1,6}|>|[-*+])\s+/gm, "");
+}
+
 export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubState; compact?: boolean }) {
   const now = useNow(5000);
   const color = colorFor(state, { agentId: agent.id });
@@ -518,7 +530,7 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
         <div className="ellipsis" style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>
           {compact ? `${agent.platform} · ${repo} · ` : ""}
           {statusText(agent)}
-          {agent.activity && agent.status !== "offline" ? ` · ${agent.activity}` : ""}
+          {agent.activity && agent.status !== "offline" ? ` · ${stripMd(agent.activity)}` : ""}
         </div>
         {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
       </div>

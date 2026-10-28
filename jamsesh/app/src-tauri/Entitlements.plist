@@ -9,5 +9,9 @@
   <true/>
   <key>com.apple.security.automation.apple-events</key>
   <true/>
+  <!-- The bundled hub is a compiled Bun program: its JavaScript engine needs JIT memory, and under
+       the hardened runtime it dies at launch ("Ran out of executable memory") without this. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
 </dict>
 </plist>

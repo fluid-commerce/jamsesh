@@ -104,7 +104,10 @@ function releaseHotkeys() {
   if (--hotkeyRefs === 0) hotkeyOff?.();
 }
 function useHotkeys() {
-  useEffect(() => (installHotkeys(), releaseHotkeys), []);
+  useEffect(() => {
+    installHotkeys();
+    return () => releaseHotkeys();
+  }, []);
 }
 
 /** The app-wide Annotate switch. `A` toggles it, `Esc` leaves it. */

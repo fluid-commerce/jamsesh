@@ -30,19 +30,27 @@ const memory = new Map<string, Identity>();
 // The host this window talks to. In the Mac app every host is reached at the same local address
 // (its relay), so the host's own id keeps identities apart; set before anything reads them.
 let hostKey = "";
-export function setHostKey(id: string) {
+let hostConfirmed = false;
+/** `confirmed` is false when the id came from the remembered copy because the hub didn't answer. */
+export function setHostKey(id: string, confirmed = true) {
   if (!id || hostKey) return;
   hostKey = id;
-  // First time with ids: the identity saved under the plain address belongs to the first host seen
-  // here, once. Another host reached at the same address (the Mac app's relay) starts fresh.
+  hostConfirmed = confirmed;
+  if (!confirmed) return; // never migrate the legacy identity on an unverified guess
   const moved = `jamsesh.identityMoved::${location.origin}`;
   const plain = lsGet(storageKey(location.origin));
-  if (plain && !lsGet(moved) && !lsGet(storageKey(`${location.origin}#${id}`))) {
+  if (plain && !lsGet(moved)) {
     try {
-      localStorage.setItem(storageKey(`${location.origin}#${id}`), plain);
+      // The legacy identity belongs to the first host that sees it, even if that host already has its own.
+      if (!lsGet(storageKey(`${location.origin}#${id}`))) localStorage.setItem(storageKey(`${location.origin}#${id}`), plain);
       localStorage.setItem(moved, id);
     } catch {}
   }
+}
+export const isHostConfirmed = () => hostConfirmed;
+export function confirmHostKey(id: string): boolean {
+  if (id && id === hostKey) hostConfirmed = true;
+  return hostConfirmed;
 }
 export const currentHostKey = () => hostKey;
 const origin = () => (typeof location === "undefined" ? "" : hostKey ? `${location.origin}#${hostKey}` : location.origin);

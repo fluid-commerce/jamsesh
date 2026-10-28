@@ -24,8 +24,15 @@ const HALLUCINATIONS = [
   /subtitles by|amara\.org|transcribed by/i,
 ];
 
-/** Video-outro lines whisper invents from noise; nobody says these in a working session. */
-const NEVER_SAID = /next video|like and subscribe|see you (in the )?next (one|time)|thanks for watching|don'?t forget to subscribe|welcome to the show|^\s*\*[^*]+\*\s*$/i;
+const OUTRO = "next video|like and subscribe|see you (in the )?next (one|time)|thanks for watching|don'?t forget to subscribe|welcome to the show";
+/** Video-outro phrase anywhere in a line: believed only on weak audio, since "let's look at the next video" is real. */
+const OUTRO_ANYWHERE = new RegExp(OUTRO, "i");
+/** A line that is only the outro: the phrase, maybe after filler and a stock lead-in ("I'm going to go to the next video."). */
+const OUTRO_ONLY = new RegExp(
+  `^\\s*(?:(?:ok(?:ay)?|so|and|well|um|uh|alright|all right|right|now)[,.]?\\s+)*(?:(?:i'?m |we'?re |i |we )?(?:going to |gonna |will |'ll )?(?:go to|move on to|move onto|head to|jump to|see you in|on to|onto)(?: the)? |see you |until )?(?:${OUTRO})(?:[\\s,.!]+(?:everyone|guys|folks|bye|thanks|thank you))*[.!\\s]*$`,
+  "i",
+);
+const SOUND_DESCRIPTION = /^\s*\*[^*]+\*\s*$/;
 
 /**
  * Whisper invents "Thank you." or a lone full stop for silence and steady noise, at any
@@ -39,7 +46,8 @@ export function cleanTranscript(text: string, durationSec: number, snr = Infinit
   const words = t.toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
   const known = new Set(names.flatMap((n) => n.toLowerCase().split(/[^\p{L}\p{N}']+/u)).filter(Boolean));
   if (known.size && words.length && words.every((w) => known.has(w))) return "";
-  if (NEVER_SAID.test(t)) return "";
+  if (SOUND_DESCRIPTION.test(t) || OUTRO_ONLY.test(t)) return "";
+  if (OUTRO_ANYWHERE.test(t) && (durationSec < 3 || snr < CLEAN_VOICE_SNR)) return "";
   if (HALLUCINATIONS.some((r) => r.test(t)) && (durationSec < 3 || snr < CLEAN_VOICE_SNR)) return "";
   return t;
 }

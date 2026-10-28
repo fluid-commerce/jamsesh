@@ -330,7 +330,11 @@ export function ProfilePhoto({ person, onDone }: { person: Person; onDone?: () =
     return () => stream.current?.getTracks().forEach((t) => t.stop());
   }, [openCamera]);
 
-  useEffect(() => () => void (shot && URL.revokeObjectURL(shot.url)), [shot]);
+  useEffect(() => {
+    return () => {
+      if (shot) URL.revokeObjectURL(shot.url);
+    };
+  }, [shot]);
 
   const keep = (canvas: HTMLCanvasElement) => {
     canvas.toBlob(

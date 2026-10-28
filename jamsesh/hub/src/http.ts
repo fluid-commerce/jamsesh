@@ -20,6 +20,19 @@ const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ er
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
 const HUMAN_ONLY = /^\/(say|audio|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|photo))?)?|settings|directives(\/[\w-]+)?|workers|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
+
+/** A stable id for this host (what /api/pair/info returns), made on first use. */
+function hostIdOf(hub: Hub) {
+  let hostId = hub.session.store.setting<string>("hostId", "");
+  if (!hostId) hub.session.store.setSetting("hostId", (hostId = crypto.randomUUID().slice(0, 12)));
+  return hostId;
+}
+
+/** Human-only paths whose personId is the person acted on, not the caller. */
+const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request)$/;
+/** Settings only the host machine may change (SPEC 14, host-only). */
+const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled"] as const;
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
@@ -124,9 +137,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/api/pair/info") {
           // A stable id for this host, so a window that reaches several hosts at one address (the Mac
           // app's relay) keeps each host's identity and unsent changes apart.
-          let hostId = s.store.setting<string>("hostId", "");
-          if (!hostId) s.store.setSetting("hostId", (hostId = crypto.randomUUID().slice(0, 12)));
-          return json({ name: s.settings().sessionName, brainName: s.settings().brainName, hostId });
+          return json({ name: s.settings().sessionName, brainName: s.settings().brainName, hostId: hostIdOf(hub) });
         }
         if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
         if (path === "/collab" || path.startsWith("/collab/")) {
@@ -177,7 +188,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const script = Number.isInteger(relay) && relay > 1023 && relay < 65536 ? joinScript(hub, `http://127.0.0.1:${relay}`, "") : joinScript(hub, originOf(req, url), tokenOf(req, url) ?? "");
           return new Response(script, { headers: { "content-type": "text/x-shellscript" } });
         }
-        if (path.startsWith("/api/")) return await idempotent(hub, req, path, () => api(hub, req, url, ip, device));
+        if (path.startsWith("/api/")) {
+          // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
+          const meant = req.headers.get("x-jam-host");
+          if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device));
+        }
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
@@ -343,7 +359,7 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
 async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
-  const body = req.method === "POST" || req.method === "PATCH" ? await readBody(req) : null;
+  const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
@@ -353,7 +369,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // window always acts as its own person, whatever the request says.
   if (req.method !== "GET" && HUMAN_ONLY.test(path)) {
     if (paired?.kind === "agent") return bad("That's for people; agents use their jam_ tools.", 403);
-    if (paired?.personId && body && typeof body === "object" && "personId" in body) body.personId = paired.personId;
+    // Except where personId names someone else: the speaker a line is corrected to, the person asked to share.
+    if (paired?.personId && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
   }
 
   if (path === "/me") {
@@ -432,7 +449,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/settings" && req.method === "POST") {
-    if (!isLocal(ip) && (body?.gatewayKey !== undefined || body?.models !== undefined || body?.hostControl !== undefined)) return bad("Change the gateway key, models and host control on the host itself.", 403);
+    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control and the brain's on/off switch on the host itself.", 403);
     s.updateSettings(body ?? {});
     hub.brain.refreshStatus();
     return json(s.settings());
@@ -645,6 +662,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const screen = /^[\w-]{1,32}$/.test(String(body?.screen ?? "")) ? String(body.screen) : "main";
     if (screen === "main") hub.host.bigScreen = info;
     s.reportScreen(screen, info);
+    return json({ ok: true });
+  }
+  // A user-less big-screen window closed: it stops being a place to put things (main always stays).
+  if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
+    const screen = String(body?.screen ?? "");
+    if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);
     return json({ ok: true });
   }
 

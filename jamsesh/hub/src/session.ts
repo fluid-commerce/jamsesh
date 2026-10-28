@@ -288,6 +288,11 @@ export class Session {
       const updated = this.store.put("agents", { ...a, ownerName: name, name: next });
       if (next !== a.name) this.onAgentRenamed?.(updated, a.name);
     }
+    // Their windows too: a label made from the old name ("Felipe's laptop") takes the new one.
+    for (const d of this.store.all("devices").filter((x) => x.personId === person.id)) {
+      const m = d.label.match(/^(.+)'s (.+)$/);
+      if (m && defaults.includes(m[1].toLowerCase())) this.store.put("devices", { ...d, label: `${first(name)}'s ${m[2]}` });
+    }
   }
 
   removePerson(id: string) {
@@ -337,11 +342,19 @@ export class Session {
     platform?: Platform;
     focus?: string;
     name?: string;
-  }): { agent: Agent; resumed: boolean } {
+  }): { agent: Agent; resumed: boolean; quietMs: number | null } {
     const owner = this.personByName(info.ownerName) ?? (info.ownerName ? this.upsertPerson({ name: info.ownerName }) : undefined);
-    const existing = this.store
-      .all("agents")
-      .find((a) => a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness);
+    const agents = this.store.all("agents");
+    // The same agent coming back on a new credential (the Mac's identity changed) takes over its
+    // own quiet record, name and workstreams included, instead of joining as "… 2". A live agent
+    // with the same folder on another Mac keeps its record.
+    const existing =
+      agents.find((a) => a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
+      (info.cwd && owner
+        ? agents
+            .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && Date.now() - a.lastSeen > 60_000)
+            .sort((a, b) => b.lastSeen - a.lastSeen)[0]
+        : undefined);
     const harnessLabel = info.harness === "codex" ? "Codex" : info.harness === "claude-code" ? "Claude" : "Agent";
     const ownerFirst = (owner?.name ?? info.ownerName ?? "Someone").split(/\s+/)[0];
     const sameOwner = this.store.all("agents").filter((a) => a.ownerId === owner?.id && a.id !== existing?.id && a.harness === info.harness);
@@ -377,7 +390,7 @@ export class Session {
       text: `${agent.name} ${existing ? "rejoined" : "joined"}: ${shortRepo(agent.repo)}${agent.branch ? ` @ ${agent.branch}` : ""}${agent.focus ? `, ${agent.focus}` : ""}.`,
       data: { platform: agent.platform },
     });
-    return { agent, resumed: !!existing };
+    return { agent, resumed: !!existing, quietMs: existing ? Date.now() - existing.lastSeen : null };
   }
 
   touchAgent(id: string, fields: Partial<Agent> = {}) {
@@ -822,6 +835,15 @@ export class Session {
     const known = this.bigScreens.has(id);
     this.bigScreens.set(id, { id, ...info });
     if (!known) bus.changed("screens");
+  }
+
+  /** A big-screen window closed (the host app says so): it stops being a place to show things now,
+   *  not 3 minutes later. The main screen always stays. */
+  removeScreen(id: string) {
+    if (id === "main" || !this.bigScreens.delete(id)) return;
+    clearTimeout(this.screenReverts.get(id));
+    this.screenReverts.delete(id);
+    bus.changed("screens");
   }
 
   screens(): ScreenInfo[] {

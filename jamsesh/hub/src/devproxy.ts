@@ -6,6 +6,7 @@
 // bearer header such as the Mac app's relay adds).
 import { createHash } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
+import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { newId } from "./store";
 import type { Session } from "./session";
@@ -21,6 +22,8 @@ interface WsData {
   protocols: string[];
   up?: WebSocket;
   queue: (string | Uint8Array)[];
+  /** The paired device that opened it (none from the host itself), so revoking it closes the socket. */
+  deviceId?: string;
 }
 
 const HOP = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length"];
@@ -28,12 +31,23 @@ const HOP = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorizat
 export class DevProxy {
   private listeners = new Map<string, Server<WsData>>();
   private downSince = new Map<string, number>();
-  private tokenCache: { at: number; hashes: Set<string> } = { at: 0, hashes: new Set() };
+  private tokenCache: { at: number; hashes: Map<string, string> } = { at: 0, hashes: new Map() };
+  /** Open WebSockets on every dev port. */
+  private sockets = new Set<ServerWebSocket<WsData>>();
+  private offRevoked: () => void;
 
   /** Ports on this machine that are the hub's own (it, the canvas): a dev port can't point at them. */
   private reserved = new Set<number>([config.port, config.figcraftPort]);
 
-  constructor(private session: Session) {}
+  constructor(private session: Session) {
+    // Disconnecting a device takes it off the dev ports at once: no cached token, no open sockets.
+    this.offRevoked = bus.on((msg) => {
+      const m = msg as { type: string; deviceId?: string };
+      if (m.type !== "revoked" || !m.deviceId) return;
+      this.tokenCache.at = 0;
+      for (const ws of this.sockets) if (ws.data.deviceId === m.deviceId) ws.close(4401, "disconnected");
+    });
+  }
 
   reserve(port: number) {
     this.reserved.add(port);
@@ -92,16 +106,25 @@ export class DevProxy {
 
   /** Whether a request may use a dev port: from the host itself, or from a paired device. */
   allowed(req: Request, ip: string): boolean {
-    if (isLoopback(ip)) return true;
+    return this.who(req, ip) !== null;
+  }
+
+  /** Who may use a dev port: "" for the host itself, a paired device's id, or null for nobody. */
+  who(req: Request, ip: string): string | null {
+    if (isLoopback(ip)) return "";
     // The dev app may send its own Authorization header, so try the cookie's token too.
     const tokens = [req.headers.get("authorization")?.replace(/^Bearer\s+/i, ""), cookieValue(req.headers.get("cookie"), "jam_token")].filter((t): t is string => !!t);
-    if (!tokens.length) return false;
+    if (!tokens.length) return null;
     const now = Date.now();
     if (now - this.tokenCache.at > 3000) {
-      const devices = this.session.store.setting<{ tokenHash: string; revoked: boolean }[]>("pairedDevices", []);
-      this.tokenCache = { at: now, hashes: new Set(devices.filter((x) => !x.revoked).map((x) => x.tokenHash)) };
+      const devices = this.session.store.setting<{ id: string; tokenHash: string; revoked: boolean }[]>("pairedDevices", []);
+      this.tokenCache = { at: now, hashes: new Map(devices.filter((x) => !x.revoked).map((x) => [x.tokenHash, x.id])) };
     }
-    return tokens.some((t) => this.tokenCache.hashes.has(createHash("sha256").update(t).digest("hex")));
+    for (const t of tokens) {
+      const id = this.tokenCache.hashes.get(createHash("sha256").update(t).digest("hex"));
+      if (id !== undefined) return id;
+    }
+    return null;
   }
 
   private async listen(d: DevServer) {
@@ -113,19 +136,21 @@ export class DevProxy {
       idleTimeout: 120,
       async fetch(req, srv) {
         const ip = srv.requestIP(req)?.address ?? "";
-        if (!proxy.allowed(req, ip)) return denied(req);
+        const deviceId = proxy.who(req, ip);
+        if (deviceId === null) return denied(req);
         const url = new URL(req.url);
         const path = `${url.pathname}${url.search}`;
         if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
           const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((p) => p.trim()).filter(Boolean);
           const headers = protocols.length ? { "sec-websocket-protocol": protocols[0] } : undefined;
-          if (srv.upgrade(req, { data: { path, protocols, queue: [] }, headers })) return undefined;
+          if (srv.upgrade(req, { data: { path, protocols, queue: [], deviceId: deviceId || undefined }, headers })) return undefined;
           return new Response("expected a WebSocket", { status: 400 });
         }
         return forward(req, target, path);
       },
       websocket: {
         open(ws: ServerWebSocket<WsData>) {
+          proxy.sockets.add(ws);
           const up = new WebSocket(`ws://${target}${ws.data.path}`, { protocols: ws.data.protocols.slice(0, 1), headers: { origin: `http://${target}` } } as any);
           up.binaryType = "arraybuffer";
           ws.data.up = up;
@@ -144,6 +169,7 @@ export class DevProxy {
           else ws.data.queue.push(out);
         },
         close(ws) {
+          proxy.sockets.delete(ws);
           try {
             ws.data.up?.close();
           } catch {}
@@ -196,6 +222,7 @@ export class DevProxy {
   }
 
   stop() {
+    this.offRevoked();
     for (const id of [...this.listeners.keys()]) this.close(id);
   }
 }

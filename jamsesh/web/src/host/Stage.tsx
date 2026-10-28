@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
 import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, RecordCatch, RoomFeed, ScaledFrame, Slot, artifactTarget, colorFor, tileSlots, useNow, type SlotTarget } from "../shared/ui";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, RecordCatch, RoomFeed, ScaledFrame, Slot, artifactTarget, colorFor, stripMd, tileSlots, useNow, type SlotTarget } from "../shared/ui";
 
 export { tileSlots };
 
@@ -176,7 +176,7 @@ function Agents({ state }: { state: HubState }) {
                 {updates.map((u) => (
                   <div key={u.id} className="row" style={{ fontSize: 14, gap: 8 }}>
                     <span className="chip mono" style={{ width: 34, color: "var(--dim)", fontSize: 12 }}>{ago(u.ts, now)}</span>
-                    <span className="grow" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--muted)" }}>{u.text}</span>
+                    <span className="grow" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--muted)" }}>{stripMd(u.text)}</span>
                   </div>
                 ))}
               </div>
@@ -348,7 +348,7 @@ function AgentCard({ agent: a, state }: { agent: HubState["agents"][number]; sta
         {updates.map((u) => (
           <div key={u.id} className="row" style={{ fontSize: 14, gap: 8 }}>
             <span className="chip mono" style={{ width: 34, color: "var(--dim)", fontSize: 12 }}>{ago(u.ts, now)}</span>
-            <span className="grow" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--muted)" }}>{u.text}</span>
+            <span className="grow" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--muted)" }}>{stripMd(u.text)}</span>
           </div>
         ))}
       </div>

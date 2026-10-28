@@ -13,6 +13,7 @@ import { PinLayer, useAnnotateMode, type PinTarget } from "./shared/annotate";
 import { pref } from "./shared/hub";
 import { registerServiceWorker } from "./shared/offline";
 import { ConnectionBanner } from "./shared/ConnectionBanner";
+import { ErrorBoundary } from "./shared/ErrorBoundary";
 import { BuildRequests } from "./shared/BuildRequests";
 
 function PinSlot({ target }: { target: PinTarget }) {
@@ -41,8 +42,14 @@ if ("__TAURI_INTERNALS__" in window) {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : extraScreen ? <ExtraScreen id={extraScreen} /> : isHost ? <HostView /> : <ClientView />}
-    {!isConnect && !isSetup && <ConnectionBanner />}
+    <ErrorBoundary>
+      {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : extraScreen ? <ExtraScreen id={extraScreen} /> : isHost ? <HostView /> : <ClientView />}
+    </ErrorBoundary>
+    {!isConnect && !isSetup && (
+      <ErrorBoundary label="The connection banner">
+        <ConnectionBanner />
+      </ErrorBoundary>
+    )}
     {!isConnect && !isSetup && !extraScreen && <BuildRequests big={isHost} />}
   </StrictMode>,
 );

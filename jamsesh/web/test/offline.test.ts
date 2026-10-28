@@ -191,3 +191,32 @@ describe("audio buffer", () => {
     expect(posted).toEqual([1000]);
   });
 });
+
+describe("outbox host safety", () => {
+  test("nothing replays while the host is unconfirmed", async () => {
+    const seen: string[] = [];
+    let confirmed = false;
+    const { ob } = make(async (e) => (seen.push(e.path), { kind: "ok" }), { hostId: () => "hostA", canSend: () => confirmed });
+    await ob.enqueue("POST", "/say", { t: 1 });
+    await settle();
+    expect(seen).toHaveLength(0);
+    confirmed = true;
+    await ob.kick();
+    expect(seen).toEqual(["/say"]);
+  });
+
+  test("calls stamped for another host never replay", async () => {
+    const seen: string[] = [];
+    let host = "hostA";
+    const { ob } = make(async (e) => (seen.push(e.path), { kind: "ok" }), { hostId: () => host, canSend: () => false });
+    await ob.enqueue("POST", "/a", {});
+    host = "hostB";
+    const b = make(async (e) => (seen.push(e.path), { kind: "ok" }), { hostId: () => host, canSend: () => true });
+    await b.ob.load();
+    await b.ob.enqueue("POST", "/b", {});
+    await settle();
+    expect(seen).toEqual(["/b"]);
+    expect(b.ob.get().pending).toBe(1);
+    expect(b.ob.get().items[0].path).toBe("/a");
+  });
+});

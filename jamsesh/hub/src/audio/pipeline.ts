@@ -261,8 +261,8 @@ export class AudioPipeline {
     // a few knocks and clicks.
     // A noise floor near digital silence (a muted or paused mic) makes any room tone look like a
     // clear voice; then only a plainly loud segment counts.
-    const brokenFloor = best.levelDb - best.snr < BROKEN_FLOOR_DB && best.levelDb < LOUD_DB;
-    if (brokenFloor || best.levelDb < MIN_SPEECH_DB || best.snr < MIN_SPEECH_SNR || best.active < MIN_ACTIVE || (best.active > STEADY_ACTIVE && best.snr < STEADY_SNR)) {
+    // pickBest prefers copies that pass this gate, so a rejected best means every copy fails it.
+    if (!speechLike(best)) {
       g.finalizedWith = best.id;
       return;
     }
@@ -537,9 +537,19 @@ function speechDb(s: Segment) {
   return Math.max(s.levelDb - 10, 10 * Math.log10(Math.max(p, 1e-12)));
 }
 
-/** The clearest copy: signal-to-noise first, then loudness. */
+/** Whether a copy holds a voice rather than silence, steady noise or a few knocks. */
+function speechLike(s: Segment) {
+  const brokenFloor = s.levelDb - s.snr < BROKEN_FLOOR_DB && s.levelDb < LOUD_DB;
+  return !(brokenFloor || s.levelDb < MIN_SPEECH_DB || s.snr < MIN_SPEECH_SNR || s.active < MIN_ACTIVE || (s.active > STEADY_ACTIVE && s.snr < STEADY_SNR));
+}
+
+/**
+ * The clearest copy: signal-to-noise first, then loudness. Copies the quality gate would reject
+ * (a mic reading a broken floor as huge SNR) never beat one it accepts.
+ */
 export function pickBest(segments: Segment[]): Segment {
-  return [...segments].sort((a, b) => b.snr * 0.7 + b.levelDb * 0.3 - (a.snr * 0.7 + a.levelDb * 0.3))[0];
+  const ok = segments.filter(speechLike);
+  return [...(ok.length ? ok : segments)].sort((a, b) => b.snr * 0.7 + b.levelDb * 0.3 - (a.snr * 0.7 + a.levelDb * 0.3))[0];
 }
 
 const round = (n: number) => Math.round(n * 10) / 10;

@@ -22,3 +22,13 @@ test("sound descriptions in asterisks are dropped (seen on the host: *sad music*
   expect(cleanTranscript("Welcome to the show.", 2, 40)).toBe("");
   expect(cleanTranscript("Show the *new* nav", 2, 40)).toBe("Show the *new* nav");
 });
+
+test("real sentences that mention outro phrases survive clean audio; the bare outro does not", () => {
+  expect(cleanTranscript("Let's look at the next video in the playlist.", 4, 30)).toBe("Let's look at the next video in the playlist.");
+  expect(cleanTranscript("Can you put the next video on the big screen?", 4, 30)).toBe("Can you put the next video on the big screen?");
+  expect(cleanTranscript("Make the thanks for watching card bigger.", 4, 30)).toBe("Make the thanks for watching card bigger.");
+  expect(cleanTranscript("Okay, see you next time.", 3.5, 40)).toBe("");
+  expect(cleanTranscript("Don't forget to subscribe", 4, 40)).toBe("");
+  // Weak audio still drops the substring form.
+  expect(cleanTranscript("Let's look at the next video", 4, 5)).toBe("");
+});

@@ -289,13 +289,9 @@ export class HostControl {
           return this.click(a.x, a.y, a.app);
         case "type_text":
           return this.typeText(a.text, a.app);
-        case "shell": {
-          if (!this.session.settings().hostControl) return "Host control is turned off in Settings.";
-          if (!a.command) return "Give a command.";
-          const r = await run(["/bin/zsh", "-lc", a.command], 60_000);
-          this.log(`Ran on the host: ${a.command}`);
-          return `exit ${r.code}\n${r.out.slice(-4000)}`;
-        }
+        case "shell":
+          // Never directly: a shell command waits for a person's approval (requestShell, then decide).
+          return "Shell commands run only after a person in the room approves them.";
         case "focus_jamsesh": {
           // The Mac app brings its big screen forward when it's reopened; without the app, a browser.
           const app = await run(["open", "-b", "com.fluidcommerce.jamsesh"]);
@@ -413,10 +409,28 @@ export class HostControl {
     return [...this.requests.values()].filter((r) => r.status === "pending");
   }
 
-  /** An agent asks to build on the host. Nothing runs until a person approves it. */
+  /** An agent (or the brain) asks to build on the host. Nothing runs until a person approves it. */
   request(r: Omit<BuildRequest, "id" | "status" | "createdAt">): BuildRequest | string {
     if (!/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(r.repo)) return "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
     if (!r.command.trim()) return "Give the build command.";
+    return this.file(r);
+  }
+
+  /** Shell commands waiting for approval (by request id): approving one runs the command, not a build. */
+  private shells = new Set<string>();
+
+  /**
+   * The brain wants to run a shell command on the host. It waits for a person's approval exactly
+   * like a build: announced, then decided by a button or a spoken "approve" or "deny".
+   */
+  requestShell(command: string, by: string): BuildRequest | string {
+    if (!command.trim()) return "Give a command.";
+    const r = this.file({ agentId: "brain", agentName: by, ownerName: "the room", repo: "a shell command", branch: "", command: command.trim(), kind: "shell" });
+    if (typeof r !== "string") this.shells.add(r.id);
+    return r;
+  }
+
+  private file(r: Omit<BuildRequest, "id" | "status" | "createdAt">): BuildRequest | string {
     const dup = this.pendingRequests().find((p) => p.agentId === r.agentId);
     if (dup) return `You already have a build request waiting for the room (${dup.id}).`;
     const req: BuildRequest = { ...r, id: `build-${Math.random().toString(36).slice(2, 7)}`, status: "pending", createdAt: Date.now() };
@@ -424,6 +438,7 @@ export class HostControl {
     setTimeout(() => {
       if (req.status !== "pending") return;
       req.status = "expired";
+      this.shells.delete(req.id);
       this.onRequest(req);
     }, REQUEST_TTL_MS).unref?.();
     this.onRequest(req);
@@ -444,8 +459,18 @@ export class HostControl {
     req.status = approve ? "approved" : "denied";
     req.decidedBy = by;
     this.onRequest(req);
+    if (this.shells.delete(req.id)) return approve ? this.runShell(req.command, by) : `Denied the shell command: ${req.command}`;
     if (!approve) return `Denied ${req.agentName}'s build.`;
     return this.preview({ repo: req.repo, branch: req.branch, command: req.command, open: req.open, by: `${req.agentName} (approved by ${by})` });
+  }
+
+  /** An approved shell command, in the background (60 seconds at most); the room sees how it ended. */
+  private runShell(command: string, by: string): string {
+    this.log(`Running on the host (approved by ${by}): ${command}`);
+    void run(["/bin/zsh", "-lc", command], 60_000)
+      .then((r) => this.log(`Shell command finished with exit ${r.code}: ${command}${r.out.trim() ? `\n${r.out.slice(-600)}` : ""}`))
+      .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`));
+    return `Running on the host: ${command}`;
   }
 
   /**

@@ -6,7 +6,7 @@ import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
-export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainName: string; onClose: () => void }) {
+export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person; brainName: string; onClose: () => void; micError?: string | null }) {
   const [photo, setPhoto] = useState(false);
   useEffect(() => {
     const close = (e: KeyboardEvent) => e.key === "Escape" && !photo && onClose();
@@ -54,7 +54,7 @@ export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainNam
             <p className="help">Remote devices are kept apart from the room's microphones, show the big screen in the Screen tab, and play {brainName}'s voice here.</p>
             <WhereChooser compact />
           </div>
-          <VoiceEnroll me={me} brainName={brainName} />
+          <VoiceEnroll me={me} brainName={brainName} micError={micError} />
         </div>
       </aside>
     </>
@@ -66,14 +66,14 @@ const SENTENCE =
   "This is my voice. When I ask for something to go up on the big screen, or to send a change to my agent, this is how I sound. I talk like this while I work, so here is me describing what I see: the layout, the colors, the spacing, and what I would change next on this screen.";
 
 /** Read one sentence; the hub turns it into a voiceprint so lines are attributed right from the start. */
-export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }) {
+export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName: string; micError?: string | null }) {
   const [state, setState] = useState<"idle" | "recording" | "saving" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
   const [secs, setSecs] = useState(0);
   const rec = useRef<{ stop: () => void } | null>(null);
 
   // Over plain http (the default LAN join address) the browser has no mic API at all.
-  const blocked = mediaAvailable()?.replace("Sharing", "Reading aloud") ?? ("getUserMedia" in (navigator.mediaDevices ?? {}) ? null : "This page can't use the microphone. Open the host's secure address.");
+  const blocked = micError || (mediaAvailable()?.replace("Sharing", "Reading aloud") ?? ("getUserMedia" in (navigator.mediaDevices ?? {}) ? null : "This page can't use the microphone. Open the host's secure address."));
 
   const start = async () => {
     if (blocked) return setState("error"), setMsg(blocked);

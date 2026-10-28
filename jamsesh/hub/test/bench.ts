@@ -74,8 +74,8 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
   // Trace every router tool call so failures show what the model actually did.
   const trace: string[] = [];
   const origTools = brain.tools.bind(brain);
-  brain.tools = (batch: JamEvent[]) => {
-    const tools = origTools(batch);
+  brain.tools = (batch: JamEvent[], pass: { effects: number }) => {
+    const tools = origTools(batch, pass);
     for (const [name, t] of Object.entries<any>(tools)) {
       const exec = t.execute;
       t.execute = async (input: any, o: any) => {

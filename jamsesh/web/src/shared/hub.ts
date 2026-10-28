@@ -1,7 +1,7 @@
 // Live connection to the hub: one WebSocket carries the whole session state and
 // every change after it. Components read it through useHub().
 import { useSyncExternalStore } from "react";
-import { readDeviceId, readPref, writePref } from "./identity";
+import { currentHostKey, isHostConfirmed, readDeviceId, readPref, writePref } from "./identity";
 import { markContact, onContact, outbox, uuid } from "./offline";
 import type { BusMessage, HubState, JamEvent, Stage, Utterance } from "../../../hub/src/types";
 
@@ -385,6 +385,8 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
     return { ok: true, queued: true, idem } as unknown as T;
   };
 
+  // Older persisted calls must be loaded first, or they could replay over this newer one.
+  if (queueable) await outbox.load();
   // Keep order: nothing jumps ahead of calls that are still waiting to go out.
   if (queueable && (outbox.get().pending > 0 || navigator.onLine === false)) return save();
   if (navigator.onLine === false) throw new OfflineError();
@@ -400,6 +402,7 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
       headers: {
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(idem ? { "x-jam-idem": idem, "x-jam-queued-at": String(Date.now()) } : {}),
+        ...(mutating && isHostConfirmed() && currentHostKey() ? { "x-jam-host": currentHostKey() } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });

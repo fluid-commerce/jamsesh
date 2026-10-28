@@ -918,9 +918,10 @@ Every client window and the big screen capture audio; it's consolidated on the h
 Transcription mode is `auto`, `local`, or `gateway` (**Settings > Transcription**). In `auto` the
 engines are tried least-busy first, local before remote [B28]:
 
-1. **Host whisper.cpp** (`whisper-server` on `127.0.0.1:8178`), with the model downloaded on first
-   use (large-v3-turbo, quantized). The prompt carries the session's vocabulary: JamSesh, FigCraft,
-   canvas, mockup, variant, and the names of people and agents.
+1. **Host whisper.cpp** (`whisper-server` on `127.0.0.1:8178`), using a model already on the Mac
+   (large-v3-turbo, quantized, which `install.sh` downloads; the app doesn't download one). The
+   prompt carries only the brain's name: people's names in the prompt made whisper invent lines
+   made of just those names in quiet stretches.
 2. **Client workers.** A JamSesh for Mac client with whisper.cpp offers itself as a transcription
    worker to the host, which uses it when the host is busy [B28b].
 3. **The gateway** (`openai/gpt-transcribe`).
@@ -1244,9 +1245,11 @@ and click and type in apps it opened, to walk the room through a build [B44, B45
   the end of the output).
 
 A build an agent asks for goes through approval first (see [8.11](#811-build-approvals)). A build
-the brain starts on its own initiative, and any `shell` command, also needs a person: the brain
-asks the room, and a person approves the same way. A person asking for it out loud is that
-approval.
+the brain starts, and any `shell` command, also needs a person: the brain files it as a request,
+says it out loud ("JamSesh wants to run … on the host. Approve or deny?"), and a person approves
+the same way, by voice or button. Asking for it isn't approval: the request still waits for an
+"approve" said after it was announced, so nothing someone said in passing, and nothing the model
+decides, can start a command.
 
 ### 13.4 Displays
 
@@ -1301,8 +1304,9 @@ it.
   and the pairing code can only be read or changed on the host. Keys never leave the host.
 - **People versus agents.** Only people approve host builds and speak as people: agent credentials
   can't call the approval endpoint or `/api/say`, and a window can only speak as its own person.
-  The brain runs shell commands and starts host builds only when a person's own line asked for it
-  (said to the brain, recorded, or heard as a request); agents' messages never trigger them.
+  The brain never runs a shell command or starts a host build on its own word: each one is filed
+  as a request, announced, and runs only after a person approves that request by button or by
+  an "approve" said after the announcement; agents' messages never approve anything.
   One limit is inherent: an agent running under your account on your Mac can do anything you can
   there, including imitating the app's window. The protection is against agents elsewhere, and
   against an agent being talked into it by text it reads.
@@ -1319,7 +1323,8 @@ it.
 JamSesh uses the computers in the room [B28]:
 
 - **Host:** speech-to-text (whisper.cpp) and speaker embeddings (sherpa-onnx) run locally [B28a].
-  The speaker model ships with the app; the speech model downloads on first use.
+  The speaker model ships with the app; the speech model comes from `brew install whisper-cpp`
+  or `install.sh`, and without one speech goes through the gateway.
 - **Clients:** a JamSesh for Mac client with spare capacity runs whisper.cpp and offers itself to
   the host as a transcription worker (`POST /api/workers`) [B28b].
 - **Brain:** the brain's language models run on the gateway, where the best model for each job is

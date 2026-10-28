@@ -31,10 +31,16 @@ function Card({ r }: { r: BuildRequest }) {
     <div className="build-request">
       <div className="build-request-head">
         <span className="build-request-dot" />
-        <span>
-          <b>{r.agentName}</b> wants to build <b>{repo}</b>
-          {r.branch ? <span className="build-request-branch"> · {r.branch}</span> : null} on the host
-        </span>
+        {r.kind === "shell" ? (
+          <span>
+            <b>{r.agentName}</b> wants to run a command on the host
+          </span>
+        ) : (
+          <span>
+            <b>{r.agentName}</b> wants to build <b>{repo}</b>
+            {r.branch ? <span className="build-request-branch"> · {r.branch}</span> : null} on the host
+          </span>
+        )}
       </div>
       <code className="build-request-cmd">{r.command}</code>
       {err && <div className="build-request-err" role="alert">{err}</div>}

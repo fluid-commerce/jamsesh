@@ -864,12 +864,20 @@ textarea:focus {
 .client-header .an-toggle {
   white-space: nowrap;
 }
+.app-header.client-header .header-right {
+  flex: 0 1 auto;
+}
+.client-header button.big-screen-chip.release {
+  overflow: hidden;
+}
 .client-header .big-screen-chip {
+  min-width: 0;
   max-width: 220px;
   display: inline-block;
 }
 .client-header button.big-screen-chip.release {
   max-width: 340px;
+  flex: 0 1 auto;
   display: inline-flex;
   gap: 8px;
   height: 28px;
@@ -881,6 +889,10 @@ textarea:focus {
 }
 .client-header button.big-screen-chip.release:hover {
   border-color: var(--directive);
+}
+.bsc-what {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .bsc-back {
   flex: none;
@@ -1063,6 +1075,11 @@ select {
 @media (max-width: 1560px) {
   .client-header.remote span.big-screen-chip,
   .client-header.remote .me-name {
+    display: none;
+  }
+}
+@media (max-width: 1500px) {
+  .client-header .session-name {
     display: none;
   }
 }

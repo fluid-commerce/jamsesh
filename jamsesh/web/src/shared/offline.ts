@@ -3,7 +3,7 @@
 //
 // The outbox sends every queued call with an `x-jam-idem` header. The hub dedupes on it,
 // so a call that reached the hub but whose response was lost can be retried safely.
-import { currentHostKey } from "./identity";
+import { confirmHostKey, currentHostKey, isHostConfirmed } from "./identity";
 import { useSyncExternalStore } from "react";
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,8 @@ export interface OutboxEntry {
   path: string;
   body?: unknown;
   createdAt: number;
+  /** The host this call was made for; it only replays to that host. */
+  hostId?: string;
   /** Consecutive HTTP 5xx answers; a call the hub keeps choking on is dropped. */
   serverFails: number;
 }
@@ -174,6 +176,10 @@ export interface OutboxDeps {
   clearTimer?: (t: unknown) => void;
   maxItems?: number;
   maxAgeMs?: number;
+  /** Host the page is bound to; stamped on every queued call. */
+  hostId?: () => string;
+  /** Resolves true once the destination host is confirmed; nothing replays until then. */
+  canSend?: () => Promise<boolean> | boolean;
 }
 
 const EMPTY: OutboxSnapshot = { pending: 0, flushing: false, items: [], synced: 0, dropped: 0 };
@@ -239,7 +245,7 @@ export class Outbox {
   /** Queue a call. Resolves once it is durable. */
   async enqueue(method: string, path: string, body?: unknown, idem: string = uuid()): Promise<OutboxEntry> {
     await this.load();
-    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0 };
+    const e: OutboxEntry = { idem, method, path, body, createdAt: this.now(), serverFails: 0, hostId: this.d.hostId?.() ?? "" };
     e.seq = await this.d.table.add(e);
     this.entries.push(e);
     this.entries.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
@@ -278,8 +284,20 @@ export class Outbox {
       do {
         this.again = false;
         await this.prune();
-        while (this.entries.length) {
-          const e = this.entries[0];
+        if (this.d.canSend && !(await Promise.resolve(this.d.canSend()).catch(() => false))) {
+          if (this.entries.length) this.schedule();
+          return;
+        }
+        const host = this.d.hostId?.() ?? "";
+        const skipped = new Set<OutboxEntry>();
+        for (;;) {
+          // Calls stamped for another host stay put; they only replay to the host they were made for.
+          const e = this.entries.find((x) => !skipped.has(x));
+          if (!e) break;
+          if (e.hostId && host && e.hostId !== host) {
+            skipped.add(e);
+            continue;
+          }
           const r = await this.d.send(e);
           if (r.kind === "retry") {
             if (r.server && ++e.serverFails >= SERVER_FAIL_LIMIT) {
@@ -332,6 +350,7 @@ export async function sendEntry(e: OutboxEntry): Promise<SendResult> {
         ...(e.body === undefined ? {} : { "content-type": "application/json" }),
         "x-jam-idem": e.idem,
         "x-jam-queued-at": String(e.createdAt),
+        ...(e.hostId ? { "x-jam-host": e.hostId } : {}),
       },
       body: e.body === undefined ? undefined : JSON.stringify(e.body),
     });
@@ -360,7 +379,18 @@ function markContact() {
 }
 export { markContact };
 
-export const outbox = new Outbox({ table: idbTable<OutboxEntry>("outbox"), send: sendEntry });
+/** True once /api/pair/info names the host this page was booted for (retried while unconfirmed). */
+export async function hostVerified(): Promise<boolean> {
+  if (isHostConfirmed()) return true;
+  try {
+    const r = await fetch("/api/pair/info", { signal: AbortSignal.timeout(2500) });
+    return confirmHostKey(String((await r.json()).hostId ?? ""));
+  } catch {
+    return false;
+  }
+}
+
+export const outbox = new Outbox({ table: idbTable<OutboxEntry>("outbox"), send: sendEntry, hostId: currentHostKey, canSend: hostVerified });
 
 if (typeof window !== "undefined") {
   void outbox.load().then(() => (outbox.get().pending ? outbox.kick() : undefined));

@@ -96,3 +96,31 @@ test("with no engine and no gateway the room says it can't hear", () => {
 test("whisper noise is still cleaned", () => {
   expect(cleanTranscript("Thank you.", 1)).toBe("");
 });
+
+test("onPrompt drops the harness's own injected text", () => {
+  const { hub, s } = room();
+  const { agent } = s.registerAgent({ ownerName: "Maya", harness: "claude-code", repo: "r", machine: "host" });
+  expect(hub.onPrompt({ agentId: agent.id, prompt: "fix the nav" }, "127.0.0.1")).toBeDefined();
+  const before = s.store.recentEvents({ kinds: ["prompt"], limit: 50 }).length;
+  expect(before).toBe(1);
+  for (const p of ["<task-notification>report /Users/x/y</task-notification>", "  \n<system-reminder>x</system-reminder>", "<bash-stdout>ok</bash-stdout>"]) {
+    expect(hub.onPrompt({ agentId: agent.id, prompt: p }, "127.0.0.1")).toEqual({});
+  }
+  expect(s.store.recentEvents({ kinds: ["prompt"], limit: 50 }).length).toBe(before);
+  hub.stop();
+});
+
+test("words transcribed after the window answered reach the feed as room speech, not nowhere", async () => {
+  const { hub, s, maya } = room();
+  const t0 = Date.now() - 3000;
+  hub.promptStart("mayaLaptop", t0);
+  line(hub, "put the nav up", maya.id, "mayaLaptop", t0 + 500);
+  (hub as any).audio.pendingFor = () => 1;
+  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 2000, pointer: [] });
+  expect((r as any).text).toBe("put the nav up");
+  // The last words finish after the window closed.
+  line(hub, "and make it blue", maya.id, "mayaLaptop", t0 + 1800);
+  const speech = s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
+  expect(speech).toContain("and make it blue");
+  hub.stop();
+}, 15_000);

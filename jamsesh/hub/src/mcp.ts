@@ -352,7 +352,7 @@ export class McpEndpoint {
         const pairedOwner = ownerId ? s.person(ownerId)?.name : undefined;
         const ownerName = String(args.owner || pairedOwner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
-        const { agent, resumed } = s.registerAgent({
+        const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
           harness: args.harness ?? "other",
           repo: cleanRepo(String(args.repo ?? "")),
@@ -366,6 +366,9 @@ export class McpEndpoint {
         ctx.agentId = agent.id;
         const first = !ctx.skillSent;
         ctx.skillSent = true;
+        // Back within half an hour is a reconnect (the app or the host restarted): the agent still
+        // has the skill and the context in its conversation, so don't send it all again.
+        if (resumed && quietMs !== null && quietMs < 30 * 60_000) return text(this.rejoinBriefing(agent, ctx.origin));
         return text(this.briefing(agent, resumed, first, ctx.origin));
       }
       case "jam_rename": {
@@ -562,7 +565,12 @@ export class McpEndpoint {
         return json(await this.hub.canvas.frames());
       }
       case "canvas_render": {
-        this.canvasNote(this.requireAgent(ctx).id).render = Date.now();
+        const agent = this.requireAgent(ctx);
+        this.canvasNote(agent.id).render = Date.now();
+        // The agent's own copy of the file has its latest edits; the host's can be a moment behind,
+        // and a render that misses the edit just made would tell the agent its fix didn't land.
+        const own = await this.hub.canvas.call(agent, "screenshot", { ids: [Number(args.frameId)], maxSize: args.maxSize ?? 1600 }).catch(() => null);
+        if (own && !own.isError) return own as ToolOut;
         return (await this.hub.canvas.renderNode(String(args.frameId), args.maxSize ?? 1600)) as ToolOut;
       }
     }
@@ -612,6 +620,19 @@ export class McpEndpoint {
       fullSkill
         ? `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub, origin).replace(/^---[\s\S]*?---\s*/, "")}`
         : "You already have the JamSesh skill from this conversation. Next: jam_inbox, then carry on. When you go idle, keep calling jam_wait.",
+    ].join("\n");
+  }
+
+  /** A reconnect: who you are, where uploads go now, and what's new; the rest is already known. */
+  rejoinBriefing(agent: Agent, origin = this.hub.session.hubUrl) {
+    return [
+      `Reconnected to "${this.hub.session.settings().sessionName}" as ${agent.name} (agent id ${agent.id}); your workstreams and directives are as you left them.`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload"`,
+      "",
+      this.inboxText(agent, false),
+      "",
+      "Call jam_context if you need the room's latest; otherwise carry on, and keep calling jam_wait when idle.",
+      "If this is a new conversation and you don't have the JamSesh skill yet, read it first: the MCP prompt 'jamsesh', or GET /skill.md.",
     ].join("\n");
   }
 

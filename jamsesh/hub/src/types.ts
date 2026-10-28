@@ -293,6 +293,8 @@ export interface BuildRequest {
   repo: string;
   branch: string;
   command: string;
+  /** A build from an agent's repository, or a shell command the brain wants to run. */
+  kind?: "build" | "shell";
   open?: string;
   status: "pending" | "approved" | "denied" | "expired";
   createdAt: number;
