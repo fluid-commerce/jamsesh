@@ -350,7 +350,7 @@ export class Mic {
     } catch (e) {
       this.teardown();
       const msg = e instanceof Error ? e.message : String(e);
-      this.emit({ on: false, error: msg });
+      this.emit({ on: false, error: micProblem(e) });
       // Permission refusals won't fix themselves by retrying; anything else might.
       if (this.wanted && this.tries > 0 && !/NotAllowed|Permission|denied/i.test(`${(e as Error)?.name} ${msg}`)) this.scheduleRetry();
       throw e;
@@ -504,4 +504,15 @@ export function encodeWav(samples: Float32Array): ArrayBuffer {
   v.setUint32(40, samples.length * 2, true);
   for (let i = 0; i < samples.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, samples[i])) * 32767, true);
   return buf;
+}
+
+/** What went wrong with the mic, as a sentence that says what to do (browsers give terse names). */
+export function micProblem(e: unknown) {
+  const name = (e as Error)?.name ?? "";
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/NotAllowed|Permission|denied/i.test(`${name} ${msg}`)) return "The microphone is blocked for JamSesh. Allow it (System Settings > Privacy & Security > Microphone, or this site's settings in your browser), then try again.";
+  if (/NotFound|Overconstrained|Requested device not found/i.test(`${name} ${msg}`)) return "No microphone found. Plug one in or choose an input in System Settings > Sound, then try again.";
+  if (/NotReadable|in use|Could not start/i.test(`${name} ${msg}`)) return "Another app is using the microphone. Close it or choose another input, then try again.";
+  if (/NotSupported|not supported|mediaDevices/i.test(`${name} ${msg}`)) return "This window can't use a microphone. Open JamSesh in the Mac app or on the host's secure address.";
+  return `The microphone didn't start: ${msg}`;
 }

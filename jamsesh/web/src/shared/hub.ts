@@ -436,7 +436,7 @@ export function connectUrl() {
   return `/connect?next=${encodeURIComponent(location.pathname + location.search)}`;
 }
 
-export function deviceId(kind: "host" | "client") {
+export function deviceId(kind: string) {
   return readDeviceId(kind);
 }
 

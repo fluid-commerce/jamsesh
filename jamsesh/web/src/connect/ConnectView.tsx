@@ -9,6 +9,9 @@ export function ConnectView() {
   const wanted = params.get("next") ?? "";
   const next = /^\/(?![/\\])/.test(wanted) ? wanted : "/client";
   const fromLink = useRef(!!params.get("c"));
+  // An invite link carries an 8-character code (single use, ten minutes) instead of the 4-character one.
+  const linkCode = (params.get("c") ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const invite = linkCode.length === 8 ? linkCode : "";
   const [chars, setChars] = useState<string[]>(() => (params.get("c") ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).split("").concat(["", "", "", ""]).slice(0, 4));
   const [state, setState] = useState<"idle" | "joining" | "error">("idle");
   const [error, setError] = useState("");
@@ -17,7 +20,8 @@ export function ConnectView() {
 
   useEffect(() => {
     fetch("/api/pair/info").then((r) => r.json()).then(setInfo).catch(() => {});
-    if (chars.join("").length === 4) submit(chars.join(""));
+    if (invite) submit(invite);
+    else if (chars.join("").length === 4) submit(chars.join(""));
     else boxes.current[chars.findIndex((c) => !c)]?.focus();
   }, []);
 
@@ -32,7 +36,8 @@ export function ConnectView() {
       if (!r.ok) {
         // A code from a scanned or saved link is old by the time it is used: say so, rather than blame the typing.
         const stale = fromLink.current && r.status !== 429;
-        throw new Error(stale ? "That code has expired. Codes change every 30 seconds: scan the big screen again, or type the code showing now." : (j.error ?? "That didn't work."));
+        const why = code.length === 8 ? "That invite has expired or was already used. Ask for a new one, or type the code on the big screen." : "That code has expired. Codes change every 30 seconds: scan the big screen again, or type the code showing now.";
+        throw new Error(stale ? why : (j.error ?? "That didn't work."));
       }
       location.replace(next);
     } catch (e) {
@@ -47,6 +52,8 @@ export function ConnectView() {
   const type = (i: number, v: string, pasted = false) => {
     let letters = v.toUpperCase().split("").filter((c) => ALPHABET.test(c));
     if (!letters.length) return;
+    // A pasted invite code (eight characters) goes in whole.
+    if (letters.length === 8) return void submit(letters.join(""));
     let at = i;
     if (pasted || letters.length > 2) at = 0;
     else if (letters.length === 2 && chars[i]) letters = letters.slice(-1);

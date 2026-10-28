@@ -381,7 +381,7 @@ export class Hub {
       s.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Your host build request for ${what} was ${outcome}.`, relevance: "work", data: { to: r.agentId, toName: r.agentName, buildRequest: r.id } });
       s.wake(r.agentId);
     }
-    bus.changed("session");
+    bus.changed("buildRequests");
   }
 
   // ---------- Claude Code hooks ----------

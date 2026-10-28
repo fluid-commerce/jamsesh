@@ -178,6 +178,10 @@ export class Session {
         return { key: "session", value: this.state().session };
       case "brain":
         return { key, value: this.brainStatus };
+      case "screens":
+        return { key, value: this.screens() };
+      case "buildRequests":
+        return { key, value: this.buildRequests() };
       default:
         return null;
     }
@@ -774,7 +778,7 @@ export class Session {
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage">) {
     const known = this.bigScreens.has(id);
     this.bigScreens.set(id, { id, ...info });
-    if (!known) bus.changed("session");
+    if (!known) bus.changed("screens");
   }
 
   screens(): ScreenInfo[] {
@@ -802,7 +806,7 @@ export class Session {
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...next, since: Date.now(), by };
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
-      bus.changed("session");
+      bus.changed("screens");
       clearTimeout(this.screenReverts.get(screen));
       if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome")
         this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), 6 * 60_000));
@@ -810,6 +814,7 @@ export class Session {
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
+    if (this.bigScreens.size > 1) bus.changed("screens");
     if (this.stageRevert) clearTimeout(this.stageRevert);
     this.stageRevert = null;
     if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome") {

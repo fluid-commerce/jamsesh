@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ClientView } from "./client/ClientView";
 import { HostView } from "./host/HostView";
+import { ExtraScreen } from "./host/ExtraScreen";
 import { ConnectView } from "./connect/ConnectView";
 import { SetupView } from "./setup/SetupView";
 import { deviceId, hub } from "./shared/hub";
@@ -23,9 +24,11 @@ tileSlots.screen = (share) => <ShareTile share={share} />;
 tileSlots.render = (target) => <PinSlot target={target as PinTarget} />;
 
 const isHost = location.pathname.startsWith("/host");
+// A user-less host's other displays: /host?screen=screen-2 and so on.
+const extraScreen = isHost ? new URLSearchParams(location.search).get("screen") : null;
 const isConnect = location.pathname.startsWith("/connect");
 const isSetup = location.pathname.startsWith("/setup");
-if (!isConnect && !isSetup) hub.start(deviceId(isHost ? "host" : "client"));
+if (!isConnect && !isSetup) hub.start(deviceId(extraScreen ? extraScreen : isHost ? "host" : "client"));
 
 registerServiceWorker();
 
@@ -38,8 +41,8 @@ if ("__TAURI_INTERNALS__" in window) {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : isHost ? <HostView /> : <ClientView />}
+    {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : extraScreen ? <ExtraScreen id={extraScreen} /> : isHost ? <HostView /> : <ClientView />}
     {!isConnect && !isSetup && <ConnectionBanner />}
-    {!isConnect && !isSetup && <BuildRequests big={isHost} />}
+    {!isConnect && !isSetup && !extraScreen && <BuildRequests big={isHost} />}
   </StrictMode>,
 );
