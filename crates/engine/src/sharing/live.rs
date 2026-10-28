@@ -345,7 +345,12 @@ pub fn display_name(prefs: &crate::Prefs) -> String {
 
 /// Initials for an avatar ("Ada Lovelace" → "AL"; "?" for none).
 pub fn initials(name: &str) -> String {
-    let mut out: String = name.split_whitespace().filter_map(|w| w.chars().next()).take(2).collect();
+    // First letter of each word, skipping words that start with punctuation ("Chey (desktop)" → "CD").
+    let mut out: String = name
+        .split_whitespace()
+        .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
+        .take(2)
+        .collect();
     if out.is_empty() {
         out.push('?');
     }

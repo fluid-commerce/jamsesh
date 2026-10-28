@@ -13,6 +13,8 @@ interface FrameInfo {
   id: string;
   name: string;
   type: string;
+  x: number;
+  y: number;
   width: number;
   height: number;
   section: string | null;
@@ -49,6 +51,9 @@ export class Canvas {
   filesDir: string;
   /** Called when new or changed frames have been rendered. */
   onRendered: ((artifactIds: string[]) => void) | null = null;
+  /** Top-level frames from the last poll, plus frames placed since, for finding open space. */
+  private occupied: { x: number; y: number; w: number; h: number; at: number }[] = [];
+  private placed: { x: number; y: number; w: number; h: number; at: number }[] = [];
   private activity = new Map<string, { created: number; edited: number; timer: ReturnType<typeof setTimeout> | null }>();
 
   constructor(private session: Session) {
@@ -165,6 +170,8 @@ export class Canvas {
       const doc = await this.host.json("inspect_document", { depth: 64, allPages: true });
       const frames = collectFrames(doc);
       const now = Date.now();
+      this.occupied = frames.filter((f) => !f.section).map((f) => ({ x: f.x, y: f.y, w: f.width, h: f.height, at: now }));
+      this.placed = this.placed.filter((r) => now - r.at < 15_000);
       const seen = new Set<string>();
       const ready: FrameInfo[] = [];
       for (const f of frames) {
@@ -315,7 +322,8 @@ export class Canvas {
   /** Forwards a FigCraft tool call for an agent and remembers which nodes it touched. */
   async call(agent: Agent, tool: string, args: any): Promise<ToolResult> {
     const mcp = await this.forAgent(agent);
-    const result = await mcp.call(tool, args ?? {}, 120_000);
+    args = this.place(tool, args ?? {});
+    const result = await mcp.call(tool, args, 120_000);
     const ids = new Set<string>();
     collectIds(args, ids);
     for (const c of result.content) if (c.type === "text") collectIdsFromText(c.text, ids);
@@ -323,6 +331,30 @@ export class Canvas {
     for (const id of ids) this.touched.set(id, { agentId: agent.id, at: now });
     this.noteActivity(agent, tool, args);
     return result;
+  }
+
+  /**
+   * Agents often drop new frames at (0, 0) on top of others' work. New top-level frames
+   * (alone, or a batch of them, which keep their spacing) move right of the existing work.
+   */
+  place(tool: string, args: any): any {
+    const isTop = (p: any) => p && !p.parent && /^(frame|section|component)$/i.test(String(p.type ?? ""));
+    let targets: any[] = [];
+    if (tool === "create_node" && isTop(args)) targets = [args];
+    else if (tool === "batch" && Array.isArray(args.commands)) targets = args.commands.filter((c: any) => c?.command === "node.create" && isTop(c.params)).map((c: any) => c.params);
+    if (!targets.length) return args;
+    const rect = (p: any) => ({ x: Number(p.x ?? 0), y: Number(p.y ?? 0), w: Number(p.width ?? 100), h: Number(p.height ?? 100) });
+    const rects = targets.map(rect);
+    const taken = [...this.occupied, ...this.placed];
+    const hit = (r: { x: number; y: number; w: number; h: number }) => taken.some((t) => r.x < t.x + t.w + 40 && r.x + r.w + 40 > t.x && r.y < t.y + t.h + 40 && r.y + r.h + 40 > t.y);
+    if (rects.some(hit)) {
+      const minX = Math.min(...rects.map((r) => r.x));
+      const right = Math.max(...taken.map((t) => t.x + t.w));
+      const dx = right + 120 - minX;
+      for (const p of targets) p.x = Number(p.x ?? 0) + dx;
+    }
+    for (const p of targets) this.placed.push({ ...rect(p), at: Date.now() });
+    return args;
   }
 
   private noteActivity(agent: Agent, tool: string, args: any) {
@@ -426,6 +458,8 @@ export function collectFrames(doc: any): FrameInfo[] {
       id: String(n.id),
       name: n.name ?? "Frame",
       type,
+      x: Math.round(n.absoluteBounds?.x ?? n.x ?? 0),
+      y: Math.round(n.absoluteBounds?.y ?? n.y ?? 0),
       width: Math.round(n.width ?? n.absoluteBounds?.width ?? 0),
       height: Math.round(n.height ?? n.absoluteBounds?.height ?? 0),
       section,
