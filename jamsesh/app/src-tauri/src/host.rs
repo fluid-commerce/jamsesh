@@ -12,6 +12,20 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Whether Claude Code or Codex is on this Mac. Their CLIs are often off PATH: the Claude desktop
+/// app keeps its own copy of Claude Code, and nvm and Volta keep theirs in their own folders. The
+/// agent setup script (install-scripts.ts) looks in the same places.
+pub fn has_agent() -> bool {
+    let h = home();
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_env()).collect();
+    dirs.extend([h.join(".claude/local"), h.join(".volta/bin")]);
+    let children = |dir: PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect::<Vec<_>>();
+    dirs.extend(children(h.join(".nvm/versions/node")).into_iter().map(|v| v.join("bin")));
+    let bundled = children(h.join("Library/Application Support/Claude/claude-code")).into_iter().flat_map(children);
+    dirs.extend(bundled.map(|b| b.join("claude.app/Contents/MacOS")));
+    h.join(".codex").is_dir() || dirs.iter().any(|d| ["claude", "codex"].iter().any(|b| d.join(b).is_file()))
+}
+
 /// Apps opened from Finder get a bare PATH; the hub and its tools need the usual places.
 pub fn path_env() -> String {
     let h = home();

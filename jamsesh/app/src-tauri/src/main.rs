@@ -325,10 +325,6 @@ async fn fetch_agents_token(app: &AppHandle, origin: &str, person_token: &str) {
     }
 }
 
-fn has_agent_cli() -> bool {
-    host::path_env().split(':').any(|d| ["claude", "codex"].iter().any(|b| std::path::Path::new(d).join(b).is_file()))
-}
-
 /// Once per Mac: offer to connect Claude Code and Codex. After that, saying "connect to jamsesh"
 /// to either one is enough, whichever host this Mac is on.
 fn offer_agents(app: AppHandle) {
@@ -336,7 +332,7 @@ fn offer_agents(app: AppHandle) {
         let state = app.state::<Arc<App>>().inner().clone();
         {
             let mut inner = state.inner.lock().await;
-            if inner.cfg.agents_asked || !has_agent_cli() {
+            if inner.cfg.agents_asked || !host::has_agent() {
                 return;
             }
             inner.cfg.agents_asked = true;
