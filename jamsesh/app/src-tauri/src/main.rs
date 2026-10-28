@@ -439,8 +439,16 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
     let _ = app;
     if out.status.success() {
-        Ok("Claude Code and Codex on this Mac are connected. Restart them, then say \"connect to jamsesh\" in each repository you're working in."
-            .to_string())
+        // Name only the agents the script set up: it prints "ok  Claude Code: …" / "ok  Codex: …".
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let set_up = |agent: &str| stdout.lines().any(|l| l.trim_start().starts_with(&format!("ok  {agent}:")));
+        let (agents, them) = match (set_up("Claude Code"), set_up("Codex")) {
+            (true, true) => ("Claude Code and Codex on this Mac are", "them"),
+            (true, false) => ("Claude Code on this Mac is", "it"),
+            (false, true) => ("Codex on this Mac is", "it"),
+            (false, false) => ("Your agents on this Mac are", "them"),
+        };
+        Ok(format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in."))
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         Err(format!("Setup didn't finish: {}", err.lines().last().unwrap_or("unknown error")))

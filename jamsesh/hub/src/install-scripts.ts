@@ -133,9 +133,31 @@ umask 022
 curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/hook.sh" -o "$DIR/hook.sh" && chmod +x "$DIR/hook.sh"
 [ -n "$NAME" ] && curl -fsS -X POST -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d "{\\"name\\": \\"$NAME\\"}" "$HUB/api/people" >/dev/null || true
 
-if command -v claude >/dev/null 2>&1; then
-  claude mcp remove jamsesh -s user >/dev/null 2>&1 || true
-  claude mcp add --transport http -s user jamsesh "$HUB/mcp" --header "authorization: Bearer $TOKEN" >/dev/null
+# Agent CLIs often aren't on PATH: the Claude desktop app keeps its own copy of Claude Code, and nvm
+# and Volta keep theirs in their own folders. Prints the first one found, the newest copy first.
+find_cli() {
+  local name="$1" c
+  c="$(command -v "$name" 2>/dev/null || true)"
+  [ -n "$c" ] && { printf '%s' "$c"; return 0; }
+  for c in "$HOME/.local/bin/$name" "$HOME/.claude/local/$name" "$HOME/.volta/bin/$name" "/opt/homebrew/bin/$name" "/usr/local/bin/$name" \\
+    $(ls -td "$HOME"/.nvm/versions/node/*/bin/"$name" 2>/dev/null || true); do
+    [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  if [ "$name" = claude ]; then
+    c="$(ls -td "$HOME/Library/Application Support/Claude/claude-code"/*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -n 1 || true)"
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  fi
+  return 1
+}
+# JSON and text edits run in Perl: every Mac has it, while python3 on a Mac without the developer
+# tools only opens Apple's "install the command line tools" dialog.
+command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
+configured=0
+
+CLAUDE="$(find_cli claude || true)"
+if [ -n "$CLAUDE" ]; then
+  "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
+  "$CLAUDE" mcp add --transport http -s user jamsesh "$HUB/mcp" --header "authorization: Bearer $TOKEN" >/dev/null
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
   cat > "$HOME/.claude/commands/jamsesh.md" <<'CMD'
@@ -151,52 +173,79 @@ Join the JamSesh room session and work as part of it.
 4. Post your repo card with jam_repo_card, jam_claim your workstream, and tell me in two lines who else is here and what's open.
 5. Then do the work. When you're idle, call jam_wait so the room can reach you.
 CMD
-  python3 - "$DIR/hook.sh" <<'PY'
-import json, os, sys
-hook = sys.argv[1]
-path = os.path.expanduser("~/.claude/settings.json")
-try:
-    data = json.load(open(path))
-except Exception:
-    data = {}
-hooks = data.setdefault("hooks", {})
-for event, arg in (("SessionStart", "start"), ("UserPromptSubmit", "prompt"), ("Stop", "stop")):
-    entries = [e for e in hooks.get(event, []) if "jamsesh" not in json.dumps(e)]
-    entries.append({"hooks": [{"type": "command", "command": f"{hook} {arg}", "timeout": 5}]})
-    hooks[event] = entries
-os.makedirs(os.path.dirname(path), exist_ok=True)
-json.dump(data, open(path, "w"), indent=2)
-PY
+  # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
+  perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" <<'PL'
+use strict; use warnings; use JSON::PP;
+my ($hook, $path) = @ARGV;
+my $data = {};
+if (-e $path) {
+  open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
+  my $text = do { local $/; <$in> };
+  close $in;
+  if ($text =~ /\\S/) {
+    $data = eval { JSON::PP->new->relaxed->decode($text) };
+    die "JamSesh: $path isn't valid JSON, so it was left as it is. Fix it, then connect again.\\n" unless ref $data eq 'HASH';
+  }
+}
+$data->{hooks} = {} unless ref $data->{hooks} eq 'HASH';
+my $hooks = $data->{hooks};
+my $plain = JSON::PP->new->allow_nonref;
+for my $pair (['SessionStart', 'start'], ['UserPromptSubmit', 'prompt'], ['Stop', 'stop']) {
+  my ($event, $arg) = @$pair;
+  my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
+  push @kept, { hooks => [{ type => 'command', command => "$hook $arg", timeout => 5 }] };
+  $hooks->{$event} = \\@kept;
+}
+my $tmp = "$path.jamsesh-tmp";
+open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+print $out JSON::PP->new->pretty->canonical->encode($data);
+close $out or die "JamSesh: can't write $tmp: $!\\n";
+rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
+PL
   ok "Claude Code: MCP server, skill, /jamsesh command, hooks"
+  configured=$((configured + 1))
 else
   skip "Claude Code isn't installed"
 fi
 
-if command -v codex >/dev/null 2>&1 || [ -d "$HOME/.codex" ]; then
+if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/prompts"
-  python3 - "$HUB" "$TOKEN" <<'PY'
-import os, re, sys
-hub, token = sys.argv[1], sys.argv[2]
-path = os.path.expanduser("~/.codex/config.toml")
-text = open(path).read() if os.path.exists(path) else ""
-text = re.sub(r"\\n?\\[mcp_servers\\.jamsesh(\\.[a-z_]+)?\\][^\\[]*", "\\n", text).rstrip() + "\\n"
-text += f'\\n[mcp_servers.jamsesh]\\nurl = "{hub}/mcp"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = "approve"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = "Bearer {token}"\\n'
-open(path, "w").write(text)
-os.chmod(path, 0o600)
-PY
+  perl - "$HUB" "$TOKEN" "$HOME/.codex/config.toml" <<'PL'
+use strict; use warnings;
+my ($hub, $token, $path) = @ARGV;
+my $text = '';
+if (-e $path) {
+  open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
+  $text = do { local $/; <$in> };
+  close $in;
+}
+$text =~ s/\\n?\\[mcp_servers\\.jamsesh(\\.[a-z_]+)?\\][^\\[]*/\\n/g;
+$text =~ s/\\s+\\z//;
+$text .= "\\n\\n[mcp_servers.jamsesh]\\nurl = \\"$hub/mcp\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $token\\"\\n";
+my $tmp = "$path.jamsesh-tmp";
+umask 077;
+open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+print $out $text;
+close $out or die "JamSesh: can't write $tmp: $!\\n";
+chmod 0600, $tmp;
+rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
+PL
   mkdir -p "$HOME/.codex/skills/jamsesh"
   curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/skills/jamsesh/SKILL.md" || true
   curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
   printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
   # "connect to jamsesh" in any Codex session: a marked block in Codex's global instructions.
-  python3 - "$HOME/.codex/AGENTS.md" <<'PY'
-import sys, re
-path = sys.argv[1]
-try:
-    text = open(path).read()
-except FileNotFoundError:
-    text = ""
-block = """<!-- jamsesh:start -->
+  perl - "$HOME/.codex/AGENTS.md" <<'PL'
+use strict; use warnings;
+my ($path) = @ARGV;
+my $text = '';
+if (-e $path) {
+  open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
+  $text = do { local $/; <$in> };
+  close $in;
+}
+my $block = <<'BLOCK';
+<!-- jamsesh:start -->
 ## JamSesh
 
 When your person says "connect to jamsesh", "join jamsesh", or "join the session", read
@@ -209,13 +258,25 @@ When the \`jamsesh\` tools are available and you start work in a repository, joi
 here, so you are the room's only link to your person: post a one-line jam_update (progress) when
 your person gives you a new task, check jam_inbox between steps, and when you are idle keep
 calling jam_wait instead of ending your turn.
-<!-- jamsesh:end -->"""
-text = re.sub(r"\\n*<!-- jamsesh:start -->.*?<!-- jamsesh:end -->\\n*", "\\n", text, flags=re.S).rstrip()
-open(path, "w").write((text + "\\n\\n" if text else "") + block + "\\n")
-PY
+<!-- jamsesh:end -->
+BLOCK
+$text =~ s/\\n*<!-- jamsesh:start -->.*?<!-- jamsesh:end -->\\n*/\\n/gs;
+$text =~ s/\\s+\\z//;
+my $tmp = "$path.jamsesh-tmp";
+open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+print $out (length $text ? "$text\\n\\n" : '') . $block;
+close $out or die "JamSesh: can't write $tmp: $!\\n";
+rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
+PL
   ok "Codex: MCP server, skill, /jamsesh prompt and join instructions (Codex has no hooks here)"
+  configured=$((configured + 1))
 else
   skip "Codex isn't installed"
+fi
+# Saying "done" when no agent was set up sent people off to restart agents that would never connect.
+if [ "$configured" -eq 0 ]; then
+  echo "Didn't find Claude Code or Codex on this computer, so no agent was connected. Install one (or open it once), then connect again." >&2
+  exit 1
 fi
 echo "Done. Restart Claude Code or Codex (or run /mcp and reconnect jamsesh), then tell it: connect to jamsesh."
 }
