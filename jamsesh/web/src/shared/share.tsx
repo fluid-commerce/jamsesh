@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
-import { mediaAvailable, publish, renamePublication, stopPublishing, useWatch, usePublications } from "./rtc";
+import { mediaAvailable, publish, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
 const KIND_WORD = { screen: "screen", camera: "camera" } as const;
 
-function failText(e: unknown): string | null {
+function failText(e: unknown, kind: Share["kind"] = "camera"): string | null {
   const err = e as DOMException;
-  if (err?.name === "NotAllowedError" || err?.name === "AbortError") return null; // user said no: say nothing
+  if (err?.name === "AbortError") return null; // user said no: say nothing
+  if (err?.name === "NotAllowedError") {
+    // A cancelled picker looks the same as a blocked permission, so say what to check, softly.
+    return kind === "screen" ? "Screen sharing didn't start. If you didn't cancel it, allow screen recording for this app in System Settings, Privacy & Security." : "Camera access was blocked. Allow it in your browser or System Settings.";
+  }
+  if (err?.name === "NotSupportedError" || err?.name === "TypeError") return kind === "screen" ? "This window can't share its screen. Open JamSesh in Chrome or Safari to share, or share your camera instead." : "This window can't use a camera.";
   if (err?.name === "NotFoundError") return "No camera found.";
   if (err?.name === "NotReadableError") return "That camera is busy in another app.";
   return err?.message || "Couldn't start sharing.";
@@ -38,7 +43,7 @@ export function PhotoAvatar({ person, size = 28 }: { person: Pick<Person, "name"
 // ---------------------------------------------------------------------------------------------
 
 export function ShareTile({ share }: { share: Share }) {
-  const { stream, status, attempts } = useWatch(share);
+  const { stream, status, attempts, failures } = useWatch(share);
   const video = useRef<HTMLVideoElement>(null);
   const [playing, setPlaying] = useState(false);
 
@@ -60,7 +65,13 @@ export function ShareTile({ share }: { share: Share }) {
       {!live && (
         <div className="shr-connecting" role="status">
           <span className="shr-spin" />
-          <span>{attempts > 4 ? `Waiting for ${first}'s ${word}…` : `Connecting to ${first}'s ${word}…`}</span>
+          <span>
+            {failures >= 2
+              ? `Can't reach ${first}'s ${word} directly. A network between you is blocking it. Being on the same Wi-Fi fixes it.`
+              : attempts > 4
+                ? `Waiting for ${first}'s ${word}…`
+                : `Connecting to ${first}'s ${word}…`}
+          </span>
         </div>
       )}
       <div className="shr-chip">
@@ -97,16 +108,32 @@ export function ShareControls({ personId, kinds = ["screen", "camera"] }: { pers
   const mine = (state?.shares ?? []).filter((s) => s.status === "live" && s.deviceId === hub.deviceId && (!s.personId || s.personId === personId));
   const active = (k: Share["kind"]) => pubs.find((p) => p.kind === k) ?? null;
   const blocked = mediaAvailable();
+  const unavailable = (k: Share["kind"]) => (k === "screen" ? screenUnavailable() : blocked);
+  // Share recovery: a share the hub lost track of is being put back; say so rather than look stuck.
+  const lost = pubs.some((p) => !(state?.shares ?? []).some((s) => s.id === p.shareId && s.status === "live"));
+  const [lostFor, setLostFor] = useState(false);
+  useEffect(() => {
+    if (!lost) return setLostFor(false);
+    const t = setTimeout(() => setLostFor(true), 5000);
+    return () => clearTimeout(t);
+  }, [lost]);
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 9000);
+    return () => clearTimeout(t);
+  }, [error]);
 
   const toggle = async (kind: Share["kind"]) => {
     setError(null);
     const cur = active(kind);
     if (cur) return void stopPublishing(cur.shareId);
+    const why = unavailable(kind);
+    if (why) return setError(why);
     setBusy(kind);
     try {
       await startShare(kind);
     } catch (e) {
-      setError(failText(e));
+      setError(failText(e, kind));
     } finally {
       setBusy(null);
     }
@@ -123,8 +150,10 @@ export function ShareControls({ personId, kinds = ["screen", "camera"] }: { pers
             type="button"
             className={`shr-btn ${on ? "on" : ""}`}
             aria-pressed={on}
-            disabled={!!blocked || busy === kind}
-            title={blocked ?? (on ? `Stop sharing your ${kind}` : kind === "screen" ? "Share your screen with the room" : "Share your camera with the room")}
+            disabled={busy === kind}
+            aria-disabled={!!unavailable(kind)}
+            data-unavailable={!!unavailable(kind) || undefined}
+            title={unavailable(kind) ?? (on ? `Stop sharing your ${kind}` : kind === "screen" ? "Share your screen with the room" : "Share your camera with the room")}
             onClick={() => toggle(kind)}
           >
             <span className="shr-ico">{kind === "screen" ? <ScreenIcon /> : <CameraIcon />}</span>
@@ -136,6 +165,11 @@ export function ShareControls({ personId, kinds = ["screen", "camera"] }: { pers
         <button type="button" className="shr-btn stop" onClick={() => pubs.forEach((p) => stopPublishing(p.shareId))}>
           Stop
         </button>
+      )}
+      {lostFor && !error && (
+        <span className="shr-err" role="status">
+          Reconnecting your share…
+        </span>
       )}
       {error && (
         <span className="shr-err" role="alert">
@@ -204,7 +238,7 @@ export function ShareRequestPrompt() {
       await startShare(req.kind, req.shareId);
       pop();
     } catch (e) {
-      setError(failText(e) ?? "Sharing was cancelled. Try again, or choose Not now.");
+      setError(failText(e, req.kind) ?? "Sharing was cancelled. Try again, or choose Not now.");
     } finally {
       setBusy(false);
     }
@@ -225,6 +259,7 @@ export function ShareRequestPrompt() {
 
   if (!req) return null;
   const what = req.kind === "screen" ? "your screen" : "your camera";
+  const why = req.kind === "screen" ? screenUnavailable() : mediaAvailable();
   return (
     <div className="shr-scrim" onMouseDown={(e) => e.target === e.currentTarget && decline()}>
       <div className="shr-card" role="alertdialog" aria-modal="true" aria-labelledby="shr-title" aria-describedby="shr-body">
@@ -234,12 +269,12 @@ export function ShareRequestPrompt() {
         </h2>
         <p id="shr-body">{req.reason || "They'll see it live in the room until you stop sharing."}</p>
         {req.reason && <p className="shr-note">Live in the room until you stop sharing.</p>}
-        {(mediaAvailable() || error) && <p className="shr-err" role="alert">{mediaAvailable() ?? error}</p>}
+        {(why || error) && <p className="shr-err" role="alert">{why ?? error}</p>}
         <div className="shr-actions">
           <button ref={declineBtn} data-role="decline" type="button" className="shr-btn ghost" onClick={decline}>
             Not now
           </button>
-          <button ref={accept} type="button" className="shr-btn primary" disabled={busy || !!mediaAvailable()} onClick={share}>
+          <button ref={accept} type="button" className="shr-btn primary" disabled={busy || !!why} onClick={share}>
             {req.kind === "screen" ? "Share screen" : "Share camera"}
           </button>
         </div>

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "../host/HostView";
-import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState } from "../shared/hub";
+import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState, type Stage as StageState } from "../shared/hub";
 import { playChime } from "../shared/sound";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
@@ -9,6 +9,10 @@ import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share"
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
 import { Stage } from "../host/Stage";
+import { InviteButton } from "./Invite";
+import { isTypingTarget, plain } from "../shared/keys";
+import { MicNotice } from "../shared/MicNotice";
+import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
@@ -61,7 +65,7 @@ export function ClientView() {
   // M mutes or unmutes from anywhere outside a text field.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== "m" || e.metaKey || e.ctrlKey || (e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
+      if (e.key.toLowerCase() !== "m" || !plain(e) || isTypingTarget(e)) return;
       if (mic.status.on) (mic.stop(), setPref("mic", "off"));
       else mic.start().then(() => setPref("mic", "on")).catch(() => {});
     };
@@ -128,17 +132,16 @@ export function ClientView() {
         <TabNav state={state} tab={tab} setTab={setTab} />
         <div className="header-right">
           {remote && <span className="badge neutral" title="You're joining remotely: the Screen tab mirrors the big screen">Remote</span>}
-          <span className="chip big-screen-chip ellipsis" title="What the big screen shows">
-            On screen: {state.stage.mode === "welcome" ? "board" : state.stage.title || state.stage.mode}
-          </span>
+          <BigScreenChip stage={state.stage} />
           <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute (M)" : "Unmute (M)")} aria-label={micStatus.on ? "Mute" : "Unmute"}>
             {micStatus.on ? <MicIcon size={16} /> : <MicOffIcon size={16} />}
             {micStatus.on && <Meter db={micStatus.level} />}
             <span className="mic-label">{micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Muted"}</span>
           </button>
-          <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
+          <RecordPrompt personId={me.id} brainName={state.settings.brainName} mic={mic} />
           <AnnotateToggle />
           <ShareControls personId={me.id} />
+          <InviteButton compact />
           <button className="row btn ghost small" style={{ height: 36, padding: "0 8px" }} onClick={() => setProfile(true)} title="Your profile: photo, title, voice" aria-label={`Your profile (${me.name})`}>
             <PhotoAvatar person={me} size={24} />
             <span className="me-name">{me.name}</span>
@@ -148,9 +151,7 @@ export function ClientView() {
           </button>
         </div>
       </header>
-      {micStatus.error && (
-        <div style={{ padding: "8px 16px", background: "var(--warn-bg)", color: "var(--warn)", fontSize: 13 }}>{micStatus.error}</div>
-      )}
+      <MicNotice status={micStatus} onRetry={toggleMic} />
 
       <main className="client-main" style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>
@@ -167,6 +168,28 @@ export function ClientView() {
       {!enrollAsked && me.voiceSamples === 0 && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
       {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
     </div>
+  );
+}
+
+/** What the big screen shows. Off the board it is a button, so nobody is stuck with someone else's pick. */
+function BigScreenChip({ stage }: { stage: StageState }) {
+  const home = stage.mode === "welcome" || stage.mode === "board";
+  if (home) {
+    return (
+      <span className="chip big-screen-chip ellipsis" title="What the big screen shows">
+        On screen: board
+      </span>
+    );
+  }
+  return (
+    <button
+      className="chip big-screen-chip release"
+      onClick={() => api("/stage", { mode: "board", by: "Someone in the room" })}
+      title={stage.pinned ? "Pinned. Click to put the big screen back on the board" : "Click to put the big screen back on the board"}
+    >
+      <span className="bsc-what ellipsis">On screen: {stage.title || stage.mode}</span>
+      <span className="bsc-back">Back to board</span>
+    </button>
   );
 }
 
@@ -348,7 +371,7 @@ function PhoneClient({
         {land && (
           <div className="m-header-actions">
             {micBtn}
-            <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
+            <RecordPrompt personId={me.id} brainName={state.settings.brainName} mic={mic} />
             <AnnotateToggle label="Pin" />
             {roomBtn}
           </div>
@@ -362,7 +385,7 @@ function PhoneClient({
         </button>
       </header>
       {!land && <TabNav state={state} tab={tab} setTab={setTab} phone />}
-      {micStatus.error && <div className="m-error">{micStatus.error}</div>}
+      <MicNotice status={micStatus} onRetry={toggleMic} phone />
 
       <main className="m-main">
         <TabContent tab={tab} state={state} me={me} layout={layout} />
@@ -381,7 +404,7 @@ function PhoneClient({
           <SayBox personId={me.id} brainName={state.settings.brainName} phone />
           <div className="m-actions">
             {micBtn}
-            <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
+            <RecordPrompt personId={me.id} brainName={state.settings.brainName} mic={mic} />
             <AnnotateToggle label="Pin" />
             {roomBtn}
           </div>
@@ -394,7 +417,8 @@ function PhoneClient({
           <section className="m-sheet" role="dialog" aria-label="The room">
             <header>
               <h2>The room</h2>
-              <ShareControls personId={me.id} kinds={typeof navigator !== "undefined" && typeof navigator.mediaDevices?.getDisplayMedia === "function" ? ["screen", "camera"] : ["camera"]} />
+              <ShareControls personId={me.id} kinds={canShareScreen() ? ["screen", "camera"] : ["camera"]} />
+              <InviteButton compact />
               <button className="m-icon" onClick={() => setRoom(false)} aria-label="Close">
                 <CloseIcon />
               </button>
@@ -507,10 +531,12 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
     const items = state.artifacts.filter((a) => filter === "all" || a.stage === filter);
     const map = new Map<string, Artifact[]>();
     for (const a of items) map.set(a.group || a.title, [...(map.get(a.group || a.title) ?? []), a]);
+    // Variants read A, B, C, not in the order they happened to land.
+    for (const list of map.values()) if (list.length > 1 && list.every((a) => a.variant)) list.sort((x, y) => x.variant.localeCompare(y.variant));
     return [...map.entries()];
   }, [state.artifacts, filter]);
   const show = (items: Artifact[], title: string) =>
-    api("/stage", { mode: items.length > 1 ? "compare" : "spotlight", items: items.map((i) => i.id), title, by: "Someone in the room" });
+    api("/stage", { mode: items.length > 1 ? "compare" : "spotlight", items: items.map((i) => i.id), title, pinned: false, by: "Someone in the room" });
   return (
     <div className="tab-pane scrollbars-thin">
       <div className="row between wrap-row" style={{ marginBottom: 16 }}>

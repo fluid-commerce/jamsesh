@@ -353,6 +353,8 @@ export class Canvas {
 
   /** Forwards a FigCraft tool call for an agent and remembers which nodes it touched. */
   async call(agent: Agent, tool: string, args: any): Promise<ToolResult> {
+    const blocked = forbiddenCommand(tool, args);
+    if (blocked) return { content: [{ type: "text", text: `${blocked} is a file or collaboration command, and the shared file belongs to the room. Agents work in the file through nodes, styles and variables; ask a person to open, save or share files.` }], isError: true };
     const mcp = await this.forAgent(agent);
     args = this.place(tool, args ?? {}, this.agentPage.get(agent.id));
     const result = await mcp.call(tool, args, 120_000);
@@ -372,10 +374,12 @@ export class Canvas {
   place(tool: string, args: any, page?: string): any {
     const isTop = (p: any) => p && !p.parent && /^(frame|section|component)$/i.test(String(p.type ?? ""));
     let targets: any[] = [];
+    const creates = (c: any) => (c?.command === "node.create" && isTop(c.params)) || (c?.command === "frame.create" && c.params && !c.params.parent);
     if (tool === "create_node" && isTop(args)) targets = [args];
-    else if (tool === "batch" && Array.isArray(args.commands)) targets = args.commands.filter((c: any) => c?.command === "node.create" && isTop(c.params)).map((c: any) => c.params);
+    else if (tool === "run_command" && creates(args)) targets = [args.params];
+    else if (tool === "batch" && Array.isArray(args.commands)) targets = args.commands.filter(creates).map((c: any) => c.params);
     if (!targets.length) return args;
-    const rect = (p: any) => ({ x: Number(p.x ?? 0), y: Number(p.y ?? 0), w: Number(p.width ?? 100), h: Number(p.height ?? 100) });
+    const rect = (p: any) => ({ x: Number(p.x ?? 0), y: Number(p.y ?? 0), w: Number(p.width ?? (p.preset ? 390 : 100)), h: Number(p.height ?? (p.preset ? 844 : 100)) });
     const rects = targets.map(rect);
     const onPage = (r: { page: string }) => !page || r.page === page;
     const taken = [...this.occupied, ...this.placed].filter(onPage);
@@ -396,7 +400,11 @@ export class Canvas {
     if (!k) return;
     let a = this.activity.get(agent.id);
     if (!a) ((a = { created: 0, edited: 0, timer: null }), this.activity.set(agent.id, a));
-    if (tool === "batch" && Array.isArray(args?.steps)) a.created += args.steps.filter((s: any) => s?.tool === "create_node").length;
+    if (tool === "batch" && Array.isArray(args?.commands)) {
+      const made = args.commands.filter((s: any) => /^(node|frame|component)\.create/.test(String(s?.command ?? ""))).length;
+      a.created += made;
+      a.edited += args.commands.length - made;
+    } else if (tool === "run_command" && /^(node|frame|component)\.create/.test(String(args?.command ?? ""))) a.created++;
     else a[k]++;
     this.session.touchAgent(agent.id, { status: "working", activity: "Designing on the canvas" });
     if (!a.timer) {
@@ -592,4 +600,12 @@ function guessPlatform(f: FrameInfo, agent: Agent | undefined): Platform | null 
   if (/\b(mobile|ios|android|iphone|phone)\b/.test(n) || (f.width > 0 && f.width <= 500 && f.height > f.width)) return "mobile";
   if (/\b(desktop|web|mac|windows)\b/.test(n) || f.width >= 1000) return "desktop";
   return agent?.platform ?? null;
+}
+
+/** Agents don't open, save or share the room's file: the name of the file or collab command in a call, if any. */
+export function forbiddenCommand(tool: string, args: any): string | null {
+  const bad = (c: unknown) => (typeof c === "string" && /^(file|collab)\./.test(c.trim()) ? c.trim() : null);
+  if (tool === "run_command") return bad(args?.command);
+  if (tool === "batch" && Array.isArray(args?.commands)) for (const c of args.commands) { const b = bad(c?.command); if (b) return b; }
+  return null;
 }

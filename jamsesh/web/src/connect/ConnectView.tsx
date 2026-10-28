@@ -5,7 +5,10 @@ const ALPHABET = /[23456789ABCDEFGHJKMNPQRSTUVWXYZ]/;
 /** Pair this device with the host: the 4-character code from the big screen. */
 export function ConnectView() {
   const params = new URLSearchParams(location.search);
-  const next = params.get("next") || "/client";
+  // Only a path on this site: "//evil.example" or "https://…" would send someone off-site after pairing.
+  const wanted = params.get("next") ?? "";
+  const next = /^\/(?![/\\])/.test(wanted) ? wanted : "/client";
+  const fromLink = useRef(!!params.get("c"));
   const [chars, setChars] = useState<string[]>(() => (params.get("c") ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).split("").concat(["", "", "", ""]).slice(0, 4));
   const [state, setState] = useState<"idle" | "joining" | "error">("idle");
   const [error, setError] = useState("");
@@ -21,10 +24,16 @@ export function ConnectView() {
   async function submit(code: string) {
     setState("joining");
     setError("");
+    const wasLink = fromLink.current;
+    if (wasLink && code !== (params.get("c") ?? "").toUpperCase()) fromLink.current = false;
     try {
       const r = await fetch("/api/pair", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, kind: "browser", label: deviceLabel() }) });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error ?? "That didn't work.");
+      if (!r.ok) {
+        // A code from a scanned or saved link is old by the time it is used: say so, rather than blame the typing.
+        const stale = fromLink.current && r.status !== 429;
+        throw new Error(stale ? "That code has expired. Codes change every 30 seconds: scan the big screen again, or type the code showing now." : (j.error ?? "That didn't work."));
+      }
       location.replace(next);
     } catch (e) {
       setState("error");
@@ -110,9 +119,19 @@ export function ConnectView() {
         </div>
         {/* A Mac in a browser (not already inside the app, which shows this page from 127.0.0.1). */}
         {/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints === 0 && location.hostname !== "127.0.0.1" && (
-          <a className="connect-app" href="/download/mac">
-            On a Mac? Get the JamSesh app
-          </a>
+          <>
+            <a className="connect-app" href="/download/mac">
+              On a Mac? Get the JamSesh app
+            </a>
+            <details className="connect-help">
+              <summary>If macOS won't open it</summary>
+              <ol>
+                <li>Open the downloaded app once, then dismiss the warning.</li>
+                <li>Go to System Settings, Privacy &amp; Security, and click Open Anyway.</li>
+                <li>Allow Local Network, Microphone and Camera when asked, so the app can find sessions and hear you.</li>
+              </ol>
+            </details>
+          </>
         )}
       </div>
     </div>

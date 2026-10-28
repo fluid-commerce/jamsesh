@@ -224,6 +224,31 @@ export function useBufferedAudio() {
   return useSyncExternalStore(audioBuffer.subscribe, audioBuffer.get);
 }
 
+/** How far above the room's noise someone must be to count as talking over the brain, not its echo. */
+export const BARGE_MARGIN_DB = 22;
+const BARGE_FRAMES = 8;
+
+/** True when a finished segment is the brain's own voice coming back, not a person. */
+export function isEchoSegment(level: number, noise: number, suppressing: boolean) {
+  return suppressing && level < noise + BARGE_MARGIN_DB;
+}
+
+let holds = 0;
+/**
+ * Keeps this laptop's microphone from sending speech while the caller does something that
+ * must not be heard as room talk (reading the voice-enrollment sentence). Release is
+ * delayed a moment so the last words, finishing after the caller stops, are still dropped.
+ */
+export function holdMic() {
+  holds++;
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    setTimeout(() => (holds = Math.max(0, holds - 1)), 1500);
+  };
+}
+
 export class Mic {
   status: MicStatus = { on: false, level: -90, noise: -70, speaking: false, sent: 0, error: null, deviceLabel: "", buffered: audioBuffer.get().seconds };
   private ctx: AudioContext | null = null;
@@ -241,6 +266,15 @@ export class Mic {
   private base = 0;
   private lastLevelSent = 0;
   private suppressUntil = 0;
+  private loud = 0;
+  /** Called when someone talks over the brain: cut its voice off. */
+  onBargeIn = new Set<() => void>();
+  private wanted = false;
+  private starting: Promise<void> | null = null;
+  private lastFrameAt = 0;
+  private watchdog: ReturnType<typeof setInterval> | null = null;
+  private retry: ReturnType<typeof setTimeout> | null = null;
+  private tries = 0;
 
   constructor(private deviceId: string) {
     audioBuffer.subscribe(() => this.status.buffered !== audioBuffer.get().seconds && this.emit({ buffered: audioBuffer.get().seconds }));
@@ -262,8 +296,30 @@ export class Mic {
     for (const fn of this.listeners) fn(this.status);
   }
 
+  /** Starts listening. The mic then stays wanted: if it dies (device change, sleep) it comes back by itself. */
   async start() {
+    this.wanted = true;
     if (this.status.on) return;
+    this.starting ??= this.open().finally(() => (this.starting = null));
+    return this.starting;
+  }
+
+  /** Turns the mic on if it is off; false (with the reason on status.error) when it can't be. */
+  async ensureOn() {
+    try {
+      await this.start();
+      return this.status.on;
+    } catch {
+      return false;
+    }
+  }
+
+  /** The brain finished talking (or was cut off): what the mic hears from now on is people. */
+  playbackEnded() {
+    this.suppressUntil = Math.min(this.suppressUntil, Date.now() + 300);
+  }
+
+  private async open() {
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("This page can't use the microphone over plain HTTP. Open the host's https address (set up Remote access on the host), or use the host itself.");
@@ -272,6 +328,11 @@ export class Mic {
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false },
       });
       this.ctx = new AudioContext();
+      // A context made without a click starts suspended in some browsers; a suspended one hears nothing.
+      await this.ctx.resume().catch(() => {});
+      this.ctx.onstatechange = () => {
+        if (this.ctx && this.ctx.state !== "running" && this.ctx.state !== "closed") void this.ctx.resume().catch(() => {});
+      };
       const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
       await this.ctx.audioWorklet.addModule(url);
       const src = this.ctx.createMediaStreamSource(this.stream);
@@ -280,21 +341,74 @@ export class Mic {
       src.connect(node);
       this.frameIndex = 0;
       this.base = 0;
-      const label = this.stream.getAudioTracks()[0]?.label ?? "Microphone";
-      this.emit({ on: true, error: null, deviceLabel: label });
+      this.lastFrameAt = Date.now();
+      const track = this.stream.getAudioTracks()[0];
+      track?.addEventListener("ended", () => this.recover("The microphone was unplugged or taken by another app."));
+      this.watchdog ??= setInterval(() => this.check(), 2000);
+      this.tries = 0;
+      this.emit({ on: true, error: null, deviceLabel: track?.label ?? "Microphone" });
     } catch (e) {
-      this.emit({ on: false, error: e instanceof Error ? e.message : String(e) });
+      this.teardown();
+      const msg = e instanceof Error ? e.message : String(e);
+      this.emit({ on: false, error: msg });
+      // Permission refusals won't fix themselves by retrying; anything else might.
+      if (this.wanted && this.tries > 0 && !/NotAllowed|Permission|denied/i.test(`${(e as Error)?.name} ${msg}`)) this.scheduleRetry();
       throw e;
     }
   }
 
-  stop() {
+  /** The stream died or went quiet while it should be listening: say so, then try again. */
+  private recover(reason: string) {
+    if (!this.wanted) return;
+    this.teardown();
+    this.emit({ on: false, speaking: false, level: -90, error: `${reason} Reconnecting…` });
+    this.tries = Math.max(this.tries, 1);
+    this.scheduleRetry();
+  }
+
+  private scheduleRetry() {
+    if (this.retry || !this.wanted) return;
+    if (this.tries > 6) {
+      this.emit({ error: "The microphone stopped and could not come back. Turn it on again." });
+      return;
+    }
+    const wait = Math.min(15_000, 1000 * 2 ** (this.tries - 1));
+    this.tries++;
+    this.retry = setTimeout(() => {
+      this.retry = null;
+      if (this.wanted && !this.status.on) void this.start().catch(() => {});
+    }, wait);
+  }
+
+  /** Every couple of seconds: frames still arriving? */
+  private check() {
+    if (!this.status.on) return;
+    if (Date.now() - this.lastFrameAt > 3500) this.recover("The microphone stopped delivering sound.");
+  }
+
+  private teardown() {
     this.stream?.getTracks().forEach((t) => t.stop());
-    this.ctx?.close();
+    void this.ctx?.close().catch(() => {});
     this.ctx = null;
     this.stream = null;
     this.seg = null;
-    this.emit({ on: false, speaking: false, level: -90 });
+    if (this.watchdog) clearInterval(this.watchdog);
+    this.watchdog = null;
+  }
+
+  stop() {
+    this.wanted = false;
+    if (this.retry) clearTimeout(this.retry);
+    this.retry = null;
+    this.teardown();
+    this.emit({ on: false, speaking: false, level: -90, error: null });
+  }
+
+  /** Sends the sentence being spoken right now without waiting for the pause that normally ends it. Resolves once it is uploaded. */
+  async flush() {
+    if (!this.seg) return;
+    this.silence = 0;
+    await this.finish(this.base + this.frameIndex * 20);
   }
 
   private frame(f: Float32Array) {
@@ -314,6 +428,16 @@ export class Mic {
 
     this.ring.push(f);
     if (this.ring.length > PREROLL_FRAMES) this.ring.shift();
+
+    // Someone talking over the brain: sustained and well above the room, which its echo is not.
+    if (Date.now() < this.suppressUntil) {
+      this.loud = db > this.noise + BARGE_MARGIN_DB && db > -45 ? this.loud + 1 : 0;
+      if (this.loud >= BARGE_FRAMES) {
+        this.loud = 0;
+        this.suppressUntil = 0;
+        for (const fn of this.onBargeIn) fn();
+      }
+    } else this.loud = 0;
 
     if (!this.seg) {
       this.run = isSpeech ? this.run + 1 : 0;
@@ -341,7 +465,7 @@ export class Mic {
     }
   }
 
-  private finish(ts: number) {
+  private finish(ts: number): Promise<void> | void {
     const frames = this.seg!;
     this.seg = null;
     this.run = 0;
@@ -350,12 +474,14 @@ export class Mic {
     const t0 = this.segStart;
     const t1 = ts - trim * 20;
     if (this.segSpeechFrames < MIN_SPEECH_FRAMES) return;
-    if (Date.now() < this.suppressUntil) return;
+    if (holds > 0) return;
     const samples = new Float32Array(kept.length * FRAME);
     kept.forEach((k, i) => samples.set(k, i * FRAME));
     const levels = [...this.segLevels].sort((a, b) => a - b);
     const level = levels.slice(Math.floor(levels.length / 2)).reduce((a, b) => a + b, 0) / Math.max(1, levels.length - Math.floor(levels.length / 2));
-    void audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced });
+    // The brain's own voice coming back through the speakers is not a person.
+    if (isEchoSegment(level, this.noise, Date.now() < this.suppressUntil)) return;
+    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced });
   }
 }
 

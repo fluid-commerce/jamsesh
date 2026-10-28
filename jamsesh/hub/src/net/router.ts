@@ -214,16 +214,20 @@ export class PortMapper {
         if (this.igd) {
           const ip = await soap(this.igd, "GetExternalIPAddress", {});
           const externalIp = ip.text.match(/<NewExternalIPAddress>([^<]*)</)?.[1];
-          const add = await soap(this.igd, "AddPortMapping", {
-            NewRemoteHost: "",
-            NewExternalPort: externalPort,
-            NewProtocol: "TCP",
-            NewInternalPort: internalPort,
-            NewInternalClient: lanIp,
-            NewEnabled: 1,
-            NewPortMappingDescription: "JamSesh",
-            NewLeaseDuration: LEASE,
-          });
+          const map = (lease: number) =>
+            soap(this.igd!, "AddPortMapping", {
+              NewRemoteHost: "",
+              NewExternalPort: externalPort,
+              NewProtocol: "TCP",
+              NewInternalPort: internalPort,
+              NewInternalClient: lanIp,
+              NewEnabled: 1,
+              NewPortMappingDescription: "JamSesh",
+              NewLeaseDuration: lease,
+            });
+          let add = await map(LEASE);
+          // Many routers accept only permanent mappings (error 725): ask again without a lease.
+          if (!add.ok && String(add.errorCode) === "725") add = await map(0);
           if (add.ok) {
             this.current = { method: "upnp", internalPort, externalPort, lanIp };
             status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: LEASE, message: `Your router opened port ${externalPort} automatically (UPnP).` };

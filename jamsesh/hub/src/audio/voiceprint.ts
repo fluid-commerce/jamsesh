@@ -75,6 +75,16 @@ export class Voiceprints {
     this.reload();
   }
 
+  /** Drops the sample that is this embedding (a line first filed under the wrong person). */
+  remove(personId: string, e: Float32Array) {
+    const mine = this.store.voiceSamples().filter((x) => x.personId === personId);
+    const hit = mine.find((x) => cosine(normalize(x.embedding), e) > 0.995);
+    if (!hit) return;
+    this.store.clearVoiceprint(personId);
+    for (const x of mine) if (x !== hit) this.store.addVoiceSample(personId, x.embedding);
+    this.reload();
+  }
+
   clear(personId: string) {
     this.store.clearVoiceprint(personId);
     this.reload();

@@ -135,6 +135,11 @@ export class Hub {
     this.autosave.start();
     setInterval(() => this.devproxy.refresh(), 30_000);
     await Promise.all(tasks);
+    // Without an engine the room is deaf and nothing says so; say so on the first screen.
+    if (this.opts.whisper !== false) {
+      const problem = this.transcriber.problem();
+      if (problem) this.transcriber.warn(problem);
+    }
   }
 
   /** Stops, saving a final snapshot first when there is a canvas to save. */
@@ -155,27 +160,40 @@ export class Hub {
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   private promptMode = new Map<string, number>();
+  /** A prompt window stays open this long at most (SPEC 11.3). */
+  static PROMPT_MAX_MS = 2 * 60_000;
 
   promptStart(deviceId: string, t0: number) {
     this.promptMode.set(deviceId, t0);
   }
 
+  /**
+   * Whether this line is the person recording's own. Every laptop in the room hears
+   * everyone, so hearing it on the recording device is not enough: it must be their voice,
+   * or (when the voice is unknown) loudest at their laptop. Everyone else keeps flowing
+   * through normal triage while the window is open.
+   */
+  private fromRecorder(u: Utterance, deviceId: string, personId?: string | null) {
+    if (!u.devices.some((d) => d.deviceId === deviceId)) return false;
+    const owner = personId ?? this.session.store.get("devices", deviceId)?.personId ?? null;
+    if (owner && u.personId === owner) return true;
+    const loudest = [...u.devices].sort((a, b) => b.level - a.level)[0];
+    if (loudest?.deviceId !== deviceId) return false;
+    return !u.personId || !owner || u.personId === owner;
+  }
+
   private inPrompt(u: Utterance) {
-    // A recording nobody stopped (a closed lid, a crash) stops holding that device's lines.
-    for (const [deviceId, t0] of this.promptMode) if (Date.now() - t0 > 3 * 60_000) this.promptMode.delete(deviceId);
-    for (const [deviceId, t0] of this.promptMode) if (u.t1 >= t0 - 500 && u.devices.some((d) => d.deviceId === deviceId)) return true;
+    for (const [deviceId, t0] of this.promptMode) if (Date.now() - t0 > Hub.PROMPT_MAX_MS) this.promptMode.delete(deviceId);
+    for (const [deviceId, t0] of this.promptMode) if (u.t1 >= t0 - 500 && this.fromRecorder(u, deviceId)) return true;
     return false;
   }
 
   /** A transcribed line from the room (new, or updated after a late copy or a label). */
   private roomLine(u: Utterance, isNew: boolean) {
     const s = this.session;
-    if (isNew && this.inPrompt(u)) {
-      // Part of a recorded prompt: the prompt goes to the brain whole when recording stops.
-      const ev = s.store.addEvent({ kind: "speech", authorType: "person", authorId: u.personId, authorName: u.speakerName, text: u.text, ts: u.t0, relevance: "work", data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, forBrain: true } });
-      s.store.put("utterances", { ...u, eventId: ev.id });
-      return;
-    }
+    // The recorder's own words belong to the prompt (promptWindow reads them from the store);
+    // a feed line as well would show them twice.
+    if (isNew && this.inPrompt(u)) return;
     if (isNew) {
       const ev = s.store.addEvent({
         kind: "speech",
@@ -190,7 +208,10 @@ export class Hub {
       this.brain.hear(ev);
       return;
     }
-    if (u.eventId) s.store.updateEvent(u.eventId, { text: u.text, authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
+    if (!u.eventId) return;
+    // A recorded prompt's text is the whole window's; a single line's update must not replace it.
+    if (s.store.event(u.eventId)?.data.recorded) return;
+    s.store.updateEvent(u.eventId, { text: u.text, authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
   }
 
   /** Typed into the room (the client view's box, or the host's). Treated like speech; direct goes straight to the brain. */
@@ -217,12 +238,15 @@ export class Hub {
   async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
-    const deadline = Date.now() + 7000;
+    // Lines still settling or being transcribed from this laptop count: the last sentence is
+    // usually the one that is, because Stop lands right after it was said.
+    const deadline = Date.now() + 15_000;
+    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
     while (Date.now() < deadline) {
-      const now = s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.devices.some((d) => d.deviceId === w.deviceId));
-      stable = now.length === lines.length && Date.now() > w.t1 + 2500 ? stable + 1 : 0;
+      const now = heard();
+      stable = now.length === lines.length && Date.now() > w.t1 + 1500 && this.audio.pendingFor(w.deviceId) === 0 ? stable + 1 : 0;
       lines = now;
       if (stable >= 2) break;
       await Bun.sleep(400);
@@ -244,8 +268,10 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, pointer: marks, deviceId: w.deviceId },
+      data: { direct: true, recorded: true, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
     });
+    // One spoken line: it can be relabelled from the prompt, like any line in the feed.
+    if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
     // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
     for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
     this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");

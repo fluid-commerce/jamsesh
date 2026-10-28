@@ -294,6 +294,18 @@ export interface BuildRequest {
   decidedBy?: string;
 }
 
+/** One big-screen window. "main" is the one with the header; user-less hosts add one per display. */
+export interface ScreenInfo {
+  id: string;
+  width: number;
+  height: number;
+  dpr: number;
+  screenX: number;
+  screenY: number;
+  at: number;
+  stage: Stage;
+}
+
 export interface HubState {
   session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string }[] };
   settings: Settings;
@@ -311,6 +323,8 @@ export interface HubState {
   annotations: Annotation[];
   facts: Fact[];
   buildRequests: BuildRequest[];
+  /** Every big-screen window that has reported in (user-less hosts have one per display). */
+  screens: ScreenInfo[];
   digest: string;
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
 }

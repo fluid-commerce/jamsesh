@@ -58,6 +58,12 @@ const MIN_OVERLAP = 0.45;
 const BASE_SETTLE_MS = 700;
 const MAX_SETTLE_MS = 3500;
 const KEEP_FINAL_MS = 15_000;
+/** Settle when no other microphone could have heard it: nothing to wait for. */
+const SOLO_SETTLE_MS = 250;
+/** A device that has not sent speech for this long no longer sets the settle window. */
+const LAG_TTL_MS = 90_000;
+/** Copies this late came out of an offline buffer; their lag says nothing about the network. */
+const LAG_OUTLIER_MS = 10_000;
 const CLEAN_SNR = 12;
 /** Below these a segment is silence or steady noise, not a voice. */
 const MIN_SPEECH_DB = -62;
@@ -77,7 +83,7 @@ const VOICE_TEMP = 0.05;
 export class AudioPipeline {
   private open: Group[] = [];
   private finalized: Group[] = [];
-  private lag = new Map<string, number>();
+  private lag = new Map<string, { ms: number; at: number; location: "room" | "remote" }>();
   /** Unconfirmed first voice samples per person (see autoEnroll). */
   private candidates = new Map<string, Float32Array[][]>();
   voiceprints: Voiceprints;
@@ -91,10 +97,18 @@ export class AudioPipeline {
     this.voiceprints = new Voiceprints(session.store);
   }
 
-  /** Settle window: long enough for the slowest active device's typical lag. */
-  settleMs() {
-    const lags = [...this.lag.values()];
-    const worst = lags.length ? Math.max(...lags) : 0;
+  /**
+   * Settle window: long enough for the slowest active device in that location (room and
+   * remote laptops are different rooms), and almost none when it is the only microphone
+   * that could have heard the line.
+   */
+  settleMs(location: "room" | "remote" = "room") {
+    const now = Date.now();
+    const live = [...this.lag.entries()].filter(([, l]) => l.location === location && now - l.at < LAG_TTL_MS);
+    const listening = new Set(live.map(([id]) => id));
+    for (const d of this.session.store.all("devices")) if (d.micOn && (d.location ?? "room") === location && now - d.lastSeen < LAG_TTL_MS) listening.add(d.id);
+    if (listening.size <= 1) return SOLO_SETTLE_MS;
+    const worst = live.length ? Math.max(...live.map(([, l]) => l.ms)) : 0;
     return Math.min(MAX_SETTLE_MS, BASE_SETTLE_MS + worst * 1.25);
   }
 
@@ -103,8 +117,13 @@ export class AudioPipeline {
     return this.open.length + this.finalized.filter((g) => g.busy).length;
   }
 
+  /** Same, for lines this device heard (a record-to-prompt window waits on these). */
+  pendingFor(deviceId: string) {
+    return this.open.filter((g) => g.segments.some((s) => s.deviceId === deviceId)).length + this.finalized.filter((g) => g.busy && g.segments.some((s) => s.deviceId === deviceId)).length;
+  }
+
   deviceLag(deviceId: string) {
-    return this.lag.get(deviceId) ?? 0;
+    return this.lag.get(deviceId)?.ms ?? 0;
   }
 
   async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array; levelDb?: number; noiseDb?: number }): Promise<Segment> {
@@ -128,12 +147,14 @@ export class AudioPipeline {
       wav: pcm === raw ? input.wav : encodeWav(pcm),
       arrivedAt: now,
     };
+    const location = this.session.store.get("devices", seg.deviceId)?.location ?? "room";
     const lag = Math.max(0, now - seg.t1);
     const prev = this.lag.get(seg.deviceId);
-    this.lag.set(seg.deviceId, prev == null ? lag : prev * 0.7 + lag * 0.3);
+    // A buffered segment flushed after a reconnect would pin the average high for minutes.
+    if (lag <= LAG_OUTLIER_MS) this.lag.set(seg.deviceId, { ms: prev == null ? lag : prev.ms * 0.7 + lag * 0.3, at: now, location });
+    else if (prev) this.lag.set(seg.deviceId, { ...prev, at: now, location });
     this.session.touchDevice(seg.deviceId, { level: levelDb });
 
-    const location = this.session.store.get("devices", seg.deviceId)?.location ?? "room";
     const near = (g: Group) => g.location === location && (location === "room" || g.segments.some((x) => x.deviceId === seg.deviceId));
     // A late copy of an utterance that is already out.
     const done = this.finalized.find((g) => near(g) && overlaps(g, seg));
@@ -145,6 +166,8 @@ export class AudioPipeline {
       return seg;
     }
     let g = this.open.find((x) => near(x) && overlaps(x, seg));
+    // A copy so late its group is gone (an offline buffer flushed): the line is already in the feed.
+    if (!g && this.session.store.all("utterances").some((u) => u.location === location && sameUtterance(u, seg))) return seg;
     if (!g) {
       g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, busy: null, location };
       this.open.push(g);
@@ -159,7 +182,7 @@ export class AudioPipeline {
 
   private schedule(g: Group) {
     if (g.timer) clearTimeout(g.timer);
-    const wait = Math.max(0, g.t1 + this.settleMs() - Date.now());
+    const wait = Math.max(0, g.t1 + this.settleMs(g.location) - Date.now());
     g.timer = setTimeout(() => this.finalize(g).catch((e) => console.error("audio:", e)), Math.max(wait, 150));
   }
 
@@ -213,7 +236,9 @@ export class AudioPipeline {
 
   private hint() {
     const names = [...this.session.people().map((p) => p.name), ...this.session.agents().map((a) => a.name.split("'")[0])];
-    return `JamSesh, FigCraft, canvas, mockup, variant, desktop, mobile. ${[...new Set(names)].join(", ")}.`;
+    const brain = this.session.settings().brainName;
+    const brainWords = brain && brain !== "JamSesh" ? [brain] : [];
+    return `${[...brainWords, "JamSesh", "Jam Sesh", "FigCraft"].join(", ")}, canvas, mockup, variant, desktop, mobile. ${[...new Set(names)].join(", ")}.`;
   }
 
   private async emit(g: Group) {
@@ -355,10 +380,14 @@ export class AudioPipeline {
       }
     }
     const candidates = new Set([...deviceScores.keys(), ...voice.keys()]);
+    const voiceTop = [...voice.values()].sort((a, b) => b - a);
     const scores = [...candidates].map((personId) => {
       const v = voice.get(personId);
       const d = deviceScores.get(personId) ?? 0;
-      const wVoice = v === undefined ? 0 : Math.min(0.75, 0.45 + 0.05 * this.voiceprints.count(personId));
+      // A voice that clearly stands out from every other enrolled voice counts for more even
+      // when it has few samples: it is how someone who walked to another laptop is still found.
+      const standout = v !== undefined && v === voiceTop[0] && voiceTop.length > 1 ? clamp((v - voiceTop[1]) / 0.5) * 0.12 : 0;
+      const wVoice = v === undefined ? 0 : Math.min(0.75, 0.45 + 0.05 * this.voiceprints.count(personId) + standout);
       const score = v === undefined ? d * 0.85 : wVoice * v + (1 - wVoice) * d;
       return { personId, score, voice: v ?? -1, device: d };
     });
@@ -421,15 +450,21 @@ export class AudioPipeline {
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
     const g = this.finalized.find((x) => x.utteranceId === utteranceId);
+    // Moving a line off someone it was auto-filed under also takes it out of their voiceprint.
+    const prior = u.personId && u.personId !== personId && u.method !== "manual" ? u.personId : null;
     // Teach from the clearest copy that did not clip.
     const usable = g?.segments.filter((s) => s.clipped <= MAX_CLIPPED) ?? [];
     const best = g ? (usable.length ? pickBest(usable) : null) : null;
     if (best) {
       if (best.embedding === undefined) best.embedding = embed(best.pcm);
-      if (best.embedding) this.voiceprints.add(personId, best.embedding);
+      if (best.embedding) (this.voiceprints.add(personId, best.embedding), prior && this.voiceprints.remove(prior, best.embedding));
     } else if (!g && u.eventId) {
       const stored = this.session.store.event(u.eventId)?.data.embedding as number[] | undefined;
-      if (stored) this.voiceprints.add(personId, new Float32Array(stored));
+      if (stored) {
+        const e = new Float32Array(stored);
+        this.voiceprints.add(personId, e);
+        if (prior) this.voiceprints.remove(prior, e);
+      }
     }
     const next: Utterance = { ...u, personId, speakerName: person.name, confidence: 1, method: "manual" };
     this.session.store.put("utterances", next);

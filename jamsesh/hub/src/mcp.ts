@@ -4,7 +4,9 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { bus } from "./bus";
 import { config } from "./config";
+import { ownTarget } from "./devproxy";
 import type { Hub } from "./hub";
 import { shortRepo, type UpdateKind } from "./session";
 import type { Agent, Directive, JamEvent } from "./types";
@@ -18,6 +20,13 @@ interface Ctx {
   ip: string;
   /** The paired device this agent connected with ("host" for agents on the host). */
   device: string | null;
+  /** The skill text has been handed over in this connection (a new conversation starts a new one). */
+  skillSent?: boolean;
+}
+
+/** A remote URL without the credentials some people have embedded in it. */
+export function cleanRepo(repo: string) {
+  return repo.trim().replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, "$1");
 }
 
 const PLATFORMS = ["desktop", "mobile", "web", "design", "backend", "other"];
@@ -100,7 +109,7 @@ const JAM_TOOLS = [
   {
     name: "jam_wait",
     description: "When you have nothing to do, wait here for the next directive or message (returns as soon as one arrives, or after the timeout with nothing).",
-    inputSchema: { type: "object", properties: { seconds: { type: "number", description: "Up to 540; default 240" } } },
+    inputSchema: { type: "object", properties: { seconds: { type: "number", description: "Up to 230; default 200. Call it again right away when it returns nothing." } } },
   },
   {
     name: "jam_ack",
@@ -122,7 +131,7 @@ const JAM_TOOLS = [
       "Ask another agent a question and wait for its answer (it is told to answer right away). Use it whenever another agent's knowledge would save you guessing: how their repo does something, what their mockup's spacing is, whether they already built a component, what they decided. Returns the answer, or tells you it's still pending.",
     inputSchema: {
       type: "object",
-      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 300; default 120" } },
+      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 230; default 120" } },
       required: ["to", "question"],
     },
   },
@@ -156,7 +165,7 @@ const JAM_TOOLS = [
   {
     name: "jam_devserver",
     description:
-      "Put your running dev server on the host so the room can open it. Bind it to 0.0.0.0 first (for example `vite --host 0.0.0.0`, `next dev -H 0.0.0.0`, `expo start --lan`). Give its local URL; the host forwards a port to it and returns the shared URL.",
+      "Put your running dev server on the host so the room can open it. Bind it to 0.0.0.0 first (for example `vite --host 0.0.0.0`, `next dev -H 0.0.0.0`; for Expo use `expo start --web`, since `--lan` only serves the app manifest). Give its local URL on your own machine; the host forwards a port to it, open only to people in the session, and returns the shared URL.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string", description: "What it is, for example 'Mobile app (Expo web)'" }, url: { type: "string", description: "For example http://localhost:5173" }, platform: { type: "string", enum: PLATFORMS } },
@@ -176,6 +185,11 @@ const JAM_TOOLS = [
       },
       required: ["command"],
     },
+  },
+  {
+    name: "jam_devserver_remove",
+    description: "Take one of your dev servers off the host when you've stopped it. Give its name, or leave it out to remove all of yours.",
+    inputSchema: { type: "object", properties: { name: { type: "string" } } },
   },
   {
     name: "jam_post_image",
@@ -236,6 +250,8 @@ const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip =
 export class McpEndpoint {
   private sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; ctx: Ctx }>();
   private canvasTools: { name: string; description?: string; inputSchema?: any }[] = [];
+  /** When each agent last changed the canvas and last rendered a frame: to nudge unchecked work. */
+  private canvasState = new Map<string, { edit: number; render: number }>();
 
   constructor(private hub: Hub) {}
 
@@ -280,7 +296,7 @@ export class McpEndpoint {
       {
         capabilities: { tools: {}, prompts: {} },
         instructions:
-          "You are connected to a JamSesh room session. Call jam_join first. Then follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, jam_wait when idle, and verify mockups against the design system and builds against mockups.",
+          "You are connected to a JamSesh room session. Call jam_join first. Then follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, jam_wait when idle (it returns after a few minutes with nothing; call it again, and don't end your turn while the session is live), and verify mockups against the design system and builds against mockups.",
       },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.toolList() }));
@@ -318,6 +334,7 @@ export class McpEndpoint {
     if (name.startsWith("canvas_") && name !== "canvas_frames" && name !== "canvas_render") {
       const agent = this.requireAgent(ctx);
       const r = await this.hub.canvas.call(agent, name.slice("canvas_".length), args);
+      if (!r.isError && /^canvas_(create_node|set_properties|batch|run_command|delete_nodes?|import_svg)$/.test(name)) this.canvasNote(agent.id).edit = Date.now();
       return r as ToolOut;
     }
 
@@ -334,7 +351,7 @@ export class McpEndpoint {
         const { agent, resumed } = s.registerAgent({
           ownerName,
           harness: args.harness ?? "other",
-          repo: String(args.repo ?? ""),
+          repo: cleanRepo(String(args.repo ?? "")),
           branch: args.branch,
           cwd: args.cwd,
           machine,
@@ -343,7 +360,9 @@ export class McpEndpoint {
           name: args.name,
         });
         ctx.agentId = agent.id;
-        return text(this.briefing(agent, resumed));
+        const first = !ctx.skillSent;
+        ctx.skillSent = true;
+        return text(this.briefing(agent, resumed, first));
       }
       case "jam_rename": {
         const agent = this.requireAgent(ctx);
@@ -381,7 +400,7 @@ export class McpEndpoint {
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId } });
         if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
-        return text(`Posted (#${ev.id}).${inbox}`);
+        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind)}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
@@ -393,7 +412,7 @@ export class McpEndpoint {
         return text(this.inboxText(this.requireAgent(ctx)));
       case "jam_wait": {
         const agent = this.requireAgent(ctx);
-        const secs = Math.max(5, Math.min(540, Number(args.seconds ?? 240)));
+        const secs = Math.max(5, Math.min(230, Number(args.seconds ?? 200)));
         s.touchAgent(agent.id, { status: "waiting", activity: "Waiting for work" });
         const token = extra?._meta?.progressToken;
         const keepAlive = token != null && extra?.sendNotification
@@ -423,7 +442,7 @@ export class McpEndpoint {
       }
       case "jam_ask": {
         const agent = this.requireAgent(ctx);
-        const secs = Math.max(5, Math.min(300, Number(args.waitSeconds ?? 120)));
+        const secs = Math.max(5, Math.min(230, Number(args.waitSeconds ?? 120)));
         const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000);
         s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
         const a = await answer;
@@ -471,18 +490,21 @@ export class McpEndpoint {
       }
       case "jam_devserver": {
         const agent = this.requireAgent(ctx);
-        let url = String(args.url);
-        // The address this agent reaches the host from (its laptop's LAN address, or the host itself).
-        const ip = ctx.ip.replace(/^::ffff:/, "");
-        const remote = machineIsHost(ip) ? "127.0.0.1" : ip;
-        url = url.replace(/\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(?=[:/])/, `//${remote}`);
-        if (!/^[a-z]+:\/\//.test(url)) url = url.replace(/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(?=:)/, remote);
-        const d = await this.hub.devproxy.register({ agentId: agent.id, name: String(args.name), target: url, platform: args.platform });
+        // The dev server has to be on the agent's own machine: its address as the hub sees it.
+        const target = ownTarget(String(args.url ?? ""), ctx.ip);
+        const d = await this.hub.devproxy.register({ agentId: agent.id, name: String(args.name ?? "Dev server").slice(0, 80), target, platform: args.platform });
         return text(
           d.up
-            ? `Live for the room at ${d.url} (forwards to ${d.target}).`
+            ? `Live for the room at ${d.url} (forwards to ${d.target}). Only people in the session can open it. Hot reload works through it. Call jam_devserver_remove when you stop it.`
             : `Registered at ${d.url}, but ${d.target} isn't answering from the host. Make sure the dev server listens on 0.0.0.0 (not localhost) and that your firewall allows it, then call jam_devserver again.`,
         );
+      }
+      case "jam_devserver_remove": {
+        const agent = this.requireAgent(ctx);
+        const mine = s.devservers().filter((d) => d.agentId === agent.id && (!args.name || d.name.toLowerCase() === String(args.name).toLowerCase()));
+        if (!mine.length) return text(args.name ? `You have no dev server called "${args.name}".` : "You have no dev servers on the host.");
+        for (const d of mine) this.hub.devproxy.remove(d.id);
+        return text(`Removed ${mine.map((d) => d.name).join(", ")}.`);
       }
       case "jam_post_image": {
         const agent = this.requireAgent(ctx);
@@ -500,7 +522,13 @@ export class McpEndpoint {
         const items = (args.artifactIds ?? []).filter((i: string) => known.has(i));
         const columns = (args.columns ?? []).map((c: any) => ({ label: String(c.label ?? ""), items: (c.artifactIds ?? []).filter((i: string) => known.has(i)) }));
         if (!items.length && !columns.some((c: any) => c.items.length)) throw new Error("No known artifact ids. Use jam_artifacts.");
-        if (s.stage().pinned) return text("A person pinned the screen; your request is queued as a toast instead.");
+        const cur = s.stage();
+        const peopleChose = !s.agents().some((a) => a.name === cur.by) && cur.mode !== "board" && cur.mode !== "welcome";
+        if (cur.pinned || (peopleChose && Date.now() - cur.since < 90_000)) {
+          const why = cur.pinned ? "A person pinned the screen" : `${cur.by} just put something on the screen`;
+          bus.send({ type: "toast", tone: "info", text: `${agent.name} would like to show ${args.title || "their work"}`, detail: `${why}, so it wasn't swapped in.` });
+          return text(`${why}, so I didn't replace it. The room got a note that you'd like to show this; try again in a minute or ask them.`);
+        }
         s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items, columns: columns.length ? columns : undefined }, agent.name);
         return text("On the big screen.");
       }
@@ -523,7 +551,7 @@ export class McpEndpoint {
         return json(await this.hub.canvas.frames());
       }
       case "canvas_render": {
-        this.requireAgent(ctx);
+        this.canvasNote(this.requireAgent(ctx).id).render = Date.now();
         return (await this.hub.canvas.renderNode(String(args.frameId), args.maxSize ?? 1600)) as ToolOut;
       }
     }
@@ -532,7 +560,30 @@ export class McpEndpoint {
 
   // ---------- text the agents read ----------
 
-  briefing(agent: Agent, resumed: boolean) {
+  private canvasNote(agentId: string) {
+    let c = this.canvasState.get(agentId);
+    if (!c) this.canvasState.set(agentId, (c = { edit: 0, render: 0 }));
+    return c;
+  }
+
+  /** A reminder appended to jam_update when "done" or "shipped" skips the checks the skill asks for. */
+  private checkWarning(agent: Agent, kind: string): string {
+    const s = this.hub.session;
+    const now = Date.now();
+    if (kind === "done") {
+      const c = this.canvasState.get(agent.id);
+      if (c && c.edit > c.render && now - c.edit < 2 * 3600_000)
+        return "\n\nHeads-up: you changed the canvas after your last canvas_render. Render your frames, look at them next to the product's real screens, and fix differences before calling this finished. Post a corrected update if something was off.";
+    }
+    if (kind === "shipped") {
+      const built = s.artifacts().some((a) => a.agentId === agent.id && a.stage === "built" && a.kind !== "devserver" && now - Math.max(a.ts, a.updatedAt ?? 0) < 3 * 3600_000);
+      if (!built)
+        return "\n\nHeads-up: there's no \"(built)\" screenshot from you yet. Screenshot your running build at the mockup's size, compare it with canvas_render of the mockup, and post it with jam_post_image so the room sees both. Then say what still differs.";
+    }
+    return "";
+  }
+
+  briefing(agent: Agent, resumed: boolean, fullSkill = true) {
     const s = this.hub.session;
     const inbox = this.inboxText(agent, false);
     return [
@@ -547,9 +598,9 @@ export class McpEndpoint {
       "",
       inbox,
       "",
-      resumed
-        ? "You've joined before, so the JamSesh skill is in your context already. Next: jam_inbox, then carry on."
-        : `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub).replace(/^---[\s\S]*?---\s*/, "")}`,
+      fullSkill
+        ? `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub).replace(/^---[\s\S]*?---\s*/, "")}`
+        : "You already have the JamSesh skill from this conversation. Next: jam_inbox, then carry on. When you go idle, keep calling jam_wait.",
     ].join("\n");
   }
 

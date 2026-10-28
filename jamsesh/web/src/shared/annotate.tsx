@@ -486,7 +486,8 @@ export function PinLayer({ target, personId, enabled }: { target: PinTarget; per
   };
 
   return (
-    <div ref={layer} className={`an-layer ${enabled ? "on" : ""}`}>
+    // A click here is for the pin, never for the tile underneath (which may open it as a spotlight).
+    <div ref={layer} className={`an-layer ${enabled ? "on" : ""}`} onClick={(e) => e.stopPropagation()}>
       {enabled && <div className="an-catch" onClick={drop} />}
       {mine.map((a) => (
         <Marker key={a.id} ann={a} n={numberOf.get(a.id) ?? null} state={state} pos={place(a)} open={openId === a.id} showCard={openId === a.id || hoverId === a.id} hot={hotId === a.id} />
@@ -715,7 +716,9 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
 // ---------- record a prompt ----------
 
 type RecState = { phase: "idle" } | { phase: "live"; t0: number } | { phase: "sending" };
-type RecResult = { ok: boolean; text: string; pointed: string[]; reason?: string; out?: boolean };
+type RecResult = { ok: boolean; text: string; pointed: string[]; reason?: string; note?: string; out?: boolean };
+/** The laptop mic, as far as recording needs it. */
+type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void };
 
 function Trail({ feed }: { feed: React.RefObject<{ push: ((s: TrailSample) => void) | null }> }) {
   const cv = useRef<HTMLCanvasElement>(null);
@@ -798,7 +801,7 @@ const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms 
  * is captured too; stopping posts one prompt. The mic keeps running the whole time.
  * `text` is optional typed text to send along (for rooms where nobody has a mic).
  */
-export function RecordPrompt({ personId, brainName, text }: { personId: string; brainName: string; text?: string }) {
+export function RecordPrompt({ personId, brainName, text, mic }: { personId: string; brainName: string; text?: string; mic?: MicLike }) {
   const { levels } = useHub();
   const [rec, setRec] = useState<RecState>({ phase: "idle" });
   const [now, setNow] = useState(0);
@@ -816,8 +819,21 @@ export function RecordPrompt({ personId, brainName, text }: { personId: string; 
     return () => clearInterval(id);
   }, [rec.phase]);
 
-  const start = () => {
-    if (recRef.current.phase !== "idle") return;
+  const starting = useRef(false);
+  const unmuted = useRef(false);
+  const start = async () => {
+    if (recRef.current.phase !== "idle" || starting.current) return;
+    // Recording while muted would capture nothing: switch the mic on for the recording, or say why it can't be.
+    if (mic && !mic.status.on && !typed.current) {
+      starting.current = true;
+      const ok = await mic.ensureOn();
+      starting.current = false;
+      if (!ok) {
+        setResult({ ok: false, text: "", pointed: [], reason: mic.status.error ? `Your mic is off and wouldn't turn on: ${mic.status.error}` : "Your mic is off, so there's nothing to record. Unmute it and try again." });
+        return;
+      }
+      unmuted.current = true;
+    }
     const t0 = hub.now();
     const r = (recorder.current = new PointerRecorder());
     r.onSample = (s) => feed.current.push?.(s);
@@ -844,11 +860,16 @@ export function RecordPrompt({ personId, brainName, text }: { personId: string; 
         pointer,
         ...(typed.current ? { text: typed.current } : {}),
       });
-      setResult({ ok: !!res.ok, text: res.text ?? "", pointed: res.pointed ?? [], reason: res.reason });
+      setResult({ ok: !!res.ok, text: res.text ?? "", pointed: res.pointed ?? [], reason: res.reason, note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
     } catch (e) {
       setResult({ ok: false, text: "", pointed: [], reason: e instanceof Error ? e.message : "Couldn't send that." });
     }
     setRec({ phase: "idle" });
+    if (unmuted.current) {
+      // Back to muted, once the last words have been through the mic.
+      unmuted.current = false;
+      setTimeout(() => mic?.stop(), 1600);
+    }
   };
 
   const toggle = () => (recRef.current.phase === "live" ? void stop() : start());
@@ -915,6 +936,7 @@ export function RecordPrompt({ personId, brainName, text }: { personId: string; 
             <div>
               <h4>{result.ok ? `Sent to ${brainName}` : "Nothing sent"}</h4>
               <p>{result.ok ? `“${result.text.length > 180 ? `${result.text.slice(0, 177)}…` : result.text}”` : result.reason || "Nothing was heard in that recording."}</p>
+              {result.note && <p style={{ color: "var(--dim)", marginTop: 4 }}>{result.note}</p>}
               {result.ok && result.pointed.length > 0 && (
                 <ul>
                   <li style={{ color: "var(--text)" }}>pointed at {result.pointed.length === 1 ? "1 thing" : `${result.pointed.length} things`}</li>

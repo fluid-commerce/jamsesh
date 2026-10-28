@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Person } from "../shared/hub";
-import { encodeWav } from "../shared/mic";
+import { encodeWav, holdMic } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
 import { WhereChooser } from "./ClientView";
 
@@ -60,8 +60,9 @@ export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainNam
   );
 }
 
-const SENTENCE = (brain: string) =>
-  `Hey ${brain}, this is my voice. When I ask you to bring something up on the big screen, or to send a change to my agent, this is how I sound.`;
+// No wake word in it: the room's microphones hear this too, and the brain must not answer it.
+const SENTENCE =
+  "This is my voice. When I ask for something to go up on the big screen, or to send a change to my agent, this is how I sound. I talk like this while I work, so here is me describing what I see: the layout, the colors, the spacing, and what I would change next on this screen.";
 
 /** Read one sentence; the hub turns it into a voiceprint so lines are attributed right from the start. */
 export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }) {
@@ -71,6 +72,8 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
   const rec = useRef<{ stop: () => void } | null>(null);
 
   const start = async () => {
+    // Your own laptop's always-on mic hears you read this; keep it from sending it to the room.
+    const release = holdMic();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
       const chunks: Blob[] = [];
@@ -78,8 +81,9 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
       mr.ondataavailable = (e) => chunks.push(e.data);
       const t0 = Date.now();
       const tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
-      const auto = setTimeout(() => mr.state === "recording" && mr.stop(), 14_000);
+      const auto = setTimeout(() => mr.state === "recording" && mr.stop(), 30_000);
       mr.onstop = async () => {
+        release();
         clearInterval(tick);
         clearTimeout(auto);
         stream.getTracks().forEach((t) => t.stop());
@@ -99,6 +103,7 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
       setSecs(0);
       setState("recording");
     } catch (e) {
+      release();
       setState("error");
       setMsg(e instanceof Error ? e.message : String(e));
     }
@@ -108,11 +113,11 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
     <div className="section">
       <h3>Teach {brainName} your voice</h3>
       <p className="help">
-        Read this out loud. It takes ten seconds and makes speaker recognition much better, especially when you walk around the room.
+        Read this out loud. It takes about twenty seconds and makes speaker recognition much better, especially when you walk around the room.
         {me.voiceSamples ? ` You have ${me.voiceSamples} voice sample${me.voiceSamples === 1 ? "" : "s"} so far.` : ""}
       </p>
       <blockquote style={{ margin: "0 0 14px", padding: "14px 16px", borderRadius: 14, background: "var(--panel)", border: "1px solid var(--line)", fontSize: 17, lineHeight: 1.45, color: state === "recording" ? "var(--text)" : "var(--muted)" }}>
-        {SENTENCE(brainName)}
+        {SENTENCE}
       </blockquote>
       <div className="row">
         {state === "recording" ? (

@@ -224,9 +224,9 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
 - The code rotates every 30 seconds, authenticator-style: it's derived from a host secret and the
   current 30-second window [A25d]. The previous window's code is also accepted, so someone typing
   as it changes still gets in.
-- Wrong codes are rate-limited. Eight wrong codes from one address lock that address out for 5
-  minutes. Sixty wrong codes from anyone within 5 minutes pause pairing for everyone until the
-  oldest failure ages out.
+- Wrong codes are rate-limited. Eight wrong codes from one address within a minute pause that
+  address for 2 minutes (an office behind one address isn't locked out for long). Sixty wrong codes
+  from anyone within 5 minutes pause pairing for everyone for a few minutes.
 - A successful pairing issues a device token (`jst_` plus 32 random bytes). The host stores only
   its SHA-256 hash. Browsers keep it in an HttpOnly, SameSite=Lax cookie (Secure over HTTPS, and
   scoped to the DuckDNS domain so dev-server subdomains open signed in). The Mac app keeps it in
@@ -241,9 +241,12 @@ The join card is on the big screen's Welcome view, in the header's join pill, an
 the **Join** view [A25c, A31]. It shows:
 
 - A QR code. Scanning it opens `<address>/connect?c=<code>` on the phone, which pairs that phone
-  with no typing [A25b]. Feeding the same QR (or its link) to Claude Code or Codex sets up and
-  connects the agent, because `<address>/agent?c=<code>` and the root address answer an agent with
-  instructions it follows without a script for the person to run [A25a, A25b].
+  with no typing [A25b]. Feeding the same link to Claude Code or Codex sets up and connects the
+  agent: `/connect` answers a request that isn't a browser page load with the agent's guide (the
+  same as `<address>/agent?c=<code>`), which pairs it and tells it how to set itself up without a
+  script for the person to run [A25a, A25b].
+- An invite link for someone outside the room: **Invite someone** creates a single-use code that's
+  good for ten minutes, as a link to paste into chat.
 - The address (an HTTPS address when remote access is on), and other addresses (LAN, Tailscale,
   public) below it.
 - The code in large type with a countdown ring.
@@ -322,8 +325,8 @@ connected through. Over HTTPS, dev servers are reached at `dev-<port>.<name>.duc
 ### 4.7 Keep-awake
 
 While people or agents are connected, the host stays awake [A24a]. The hub runs `caffeinate -d -i
--s -w <hub pid>` when at least one remote window is connected or an agent was active in the last
-10 minutes, and keeps it for 5 minutes after the last activity. macOS power assertions stack, so
+-s -w <hub pid>` when at least one window is connected (the host's own big screen counts) or an
+agent was active in the last 10 minutes, and keeps it for 5 minutes after the last activity. macOS power assertions stack, so
 JamSesh never undoes a keep-awake someone else set, and ending its own assertion never puts the Mac
 to sleep while another holds [A24b]. The assertion ends with the hub.
 
@@ -450,6 +453,11 @@ implement (change the code, run the dev server, compare with the mockup, ship), 
 
 People steer agents that misread something [B17] by prompting their own agent, by telling the
 room brain, or by sending a directive from the client.
+
+A directive sent to an agent that's offline (or silent for 20 minutes) shows a notice that it gets
+the work when it's back. If an explore or implement directive is still untouched after 45 seconds
+and its agent isn't waiting for work, the room sees "<agent> hasn't picked this up yet" with what
+its person can do: type anything to it, or tell it to wait for the room.
 
 ### 6.4 Prompts as context
 
@@ -624,8 +632,13 @@ off from the host. Brain status is **ready**, **thinking**, **off**, or **Add a 
   listens for its name.
 - A room line addresses the brain when it starts with the name (optionally after "hey", "ok",
   "okay", "yo", or "so"), or names it as the one being spoken to ("can you put that up,
-  JamSesh?"). Names of fewer than three letters aren't matched, and the name must be a whole word
-  [A8d].
+  JamSesh?"): within the first two or last two words, and not right after "the", "a", "to", or
+  similar ("update the jamsesh skill" isn't addressed to it). Names of fewer than three letters
+  aren't matched, and the name must be a whole word [A8d]. The default name also matches how
+  speech-to-text writes it: "Jam Session", "jam sesh", "jamsession".
+- Saying only the name ("Hey JamSesh…") chimes, and the same person's next line within 8 seconds
+  is taken as addressed to the brain, so a pause after the name works.
+- Prompts typed to an agent never address the brain, whatever they say.
 - Typing in **Ask <name>**, pressing **Record**, and **Send to <name>** on pins address the brain
   without saying the name [A8a, A8b, A7d].
 - A direct address skips triage and goes straight to the router model with up to 8 tool steps,
@@ -691,7 +704,12 @@ router sees the best matches with their scores [A3].
 
 Before a directive is sent, targets in the same repository (compared as `owner/name`) are reduced
 to one: the highest affinity, then the one with fewer open directives. The router is told which
-agents were dropped.
+agents were dropped. Three exceptions: an agent named in the request (by its name or its person's)
+is never dropped, agents with an unknown repository aren't grouped, and `answer` and `coordinate`
+directives go to every target.
+
+When the room changes its mind or a higher-weight person overrules work already sent, the brain
+cancels the old directive (`cancel_directive`, which tells the agent why) and sends the new one.
 
 ### 8.6 Decisions
 
@@ -788,14 +806,19 @@ Host builds that agents request wait for a person [A33a]. When an agent calls `j
    spoken (it's an announcement, so it bypasses the 4-second gap) and shown as a card on the big
    screen and every client with the command, **Approve**, and **Deny**.
 3. A person decides, fully by voice or with the button [A33b]:
-   - With one request waiting, a short line (10 words or fewer) from a person that says
-     "approve", "go ahead", "build it", "yes, build", or "do the build" approves it, and "deny",
-     "reject", "don't build", "not now", or "cancel the build" denies it, whether or not it names
-     the brain. A line that says both goes to the router.
+   - With one request waiting, "approve" or "deny" (also "approved", "denied", "reject") in a
+     line of 10 words or fewer decides it at any time, with or without a model.
+   - A casual answer ("go ahead", "build it", "yes", "sure", "no", "not now", "don't build")
+     counts only within 30 seconds of the spoken request or of its one-minute reminder, or when
+     it's said to the brain by name ("JamSesh, build it"). Minutes later, "go ahead" is about
+     something else.
+   - A line that's only the answer (five words or fewer) is handled there; a longer one also goes
+     on to the brain. A line that says both goes to the router.
    - With several waiting, the brain asks which, and the person names it.
    - Only words said after the request arrived count.
-   - Only people approve: agents' lines, agents' tokens, and anything an agent sends on a person's
-     behalf can't approve or deny.
+   - Only people's speech and what they type to the room count. Prompts typed to an agent never
+     count, and neither do agents' lines or anything sent with an agent's credential.
+   - The request is spoken again after a minute if nobody has answered.
 4. The agent is told the outcome (approved and building, denied, or expired) and woken.
 
 The approval card stays visible for a minute after the decision.
@@ -819,11 +842,18 @@ layouts, and the brief come back into the current session.
 
 ### 8.13 When the gateway isn't available
 
-Without a gateway key, or with `JAMSESH_OFFLINE=1`, the brain runs on rules: keyword triage,
-keyword routing (agents by name or platform, else best affinity), "bring up" by matching artifact
-titles, the Join view for join phrases, voice approvals, and decisions recorded and sent to the
-owning agent. When a gateway call fails, the brain falls back to the same rules for that batch
-and shows that it did, so nothing said is lost.
+Without a gateway key, or with `JAMSESH_OFFLINE=1`, the brain runs on rules: keyword triage
+(asking to see or join first, then decisions, then requests for work), keyword routing (agents by
+whole-word name or platform, else best affinity, skipping a request already sent in the last 10
+minutes), "bring up" by matching artifact titles, the Join view for join phrases, voice approvals,
+and decisions ("let's go with B") that send an implement directive to the agent that made the
+chosen variant. Spoken to directly on rules, it acts, or says it's on simple rules and what it
+can't do; "talk less" and similar still become a behavior note.
+
+Every gateway call has a time limit (15 seconds for triage, 45 for everything else). When a call
+fails, the brain falls back to the rules for that batch, shows a notice at most every five
+minutes, and goes straight to rules for the next minute, so nothing said is lost and nobody waits
+on a failing gateway.
 
 ## 9. Room audio
 
@@ -1229,23 +1259,39 @@ it.
 ## 14. Security
 
 - **Pairing.** Every request needs a paired device's token, except the connect page, `/healthz`,
-  static assets, pairing itself, and the agent intro. Requests from the host machine itself
-  (loopback, not through a tunnel) are trusted. Pairing takes the rotating code (see
-  [4.2](#42-pairing-code)).
+  static assets, pairing itself, and the agent intro. Only requests from the host machine itself
+  are trusted without one: loopback requests that no proxy, tunnel, or relay forwarded (a request
+  carrying `X-Forwarded-*`, `Forwarded`, `CF-Connecting-IP`, or `X-Real-IP` is treated as remote).
+  Pairing takes the rotating code (see [4.2](#42-pairing-code)) or a single-use invite code (eight
+  characters, ten minutes) that a person or the host creates for someone outside the room.
+- **Host names.** The hub answers only to loopback names, IP addresses, `.local` names, its own
+  DuckDNS domain and its subdomains, and `JAMSESH_PUBLIC_URL`, so a web page can't reach it through
+  DNS rebinding. Browser WebSockets must come from the hub's own origin (or the Mac app's relay).
+  Remote-access setup accepts JSON bodies only.
 - **Tokens** are random, stored on the host only as hashes, and kept in an HttpOnly cookie, the
   Keychain, or a mode-600 file. Tokens never go in URLs except the one-time dev-server sign-in.
+- **Two credentials per Mac.** The Mac app holds the person's credential for its window and a
+  separate agents' credential (issued from the window, kind `agent`) for everything else that
+  talks to its relay. The relay gives the person's credential only to its own window's requests
+  (a browser's `Origin` and `Sec-Fetch` headers) and the agents' credential to the rest. On the host,
+  the app's relay uses an agents' credential too, so agents on the host Mac aren't treated as the
+  host. Disconnecting a window disconnects the agents' credential issued from it.
 - **Revocation.** The host disconnects any device in **Settings > Connected devices**. Its token
-  stops working at once, its open connections close, and its window asks to pair again.
+  stops working at once and its open live-session connections close.
 - **Host-only.** The gateway key, models, host control, the brain's on/off switch, remote access,
   and the pairing code can only be read or changed on the host. Keys never leave the host.
-- **People versus agents.** Only people approve host builds and host commands. A request carrying
-  an agent's token, coming from an agent's MCP session, or coming through a Mac's relay on behalf
-  of an agent is never an approval, even if it claims to be from a person.
+- **People versus agents.** Only people approve host builds and speak as people: agent credentials
+  can't call the approval endpoint or `/api/say`, and a window can only speak as its own person.
+  The brain runs shell commands and starts host builds only when a person's own line asked for it
+  (said to the brain, recorded, or heard as a request); agents' messages never trigger them.
+  One limit is inherent: an agent running under your account on your Mac can do anything you can
+  there, including imitating the app's window. The protection is against agents elsewhere, and
+  against an agent being talked into it by text it reads.
 - **Network.** From outside the network, the host is reachable only over HTTPS. The canvas server
-  listens on the host only and the hub relays it to paired devices. Dev servers on the host are
-  reachable only by paired devices.
-- **Host control** is available only to the host brain, never to client agents' tools, and every
-  command it runs needs a person's approval (see [13.3](#133-preview-builds)).
+  listens on the host only and the hub relays it to paired devices.
+- **Host control** is available only to the host brain, never to client agents' tools.
+  `open_app`, `open_url`, `arrange`, `windows`, and `simulator` run when the brain decides to;
+  `shell` and preview builds need a person's request (see [13.3](#133-preview-builds)).
 - **Secrets.** The DuckDNS token and certificate keys are stored with mode 600 and scrubbed from
   errors. The gateway key is stored on the host only.
 

@@ -1,6 +1,7 @@
 // Speech to text. Order: local whisper.cpp on the host, whisper servers that client
 // machines offer, then the gateway. A pool spreads work across whoever is free.
 import { transcribe as aiTranscribe } from "ai";
+import { bus } from "../bus";
 import { config } from "../config";
 import type { Session } from "../session";
 import { describeError, gateway } from "../brain/llm";
@@ -39,14 +40,45 @@ export class Transcriber {
   private engines = new Map<string, Engine>();
   private localProc: ReturnType<typeof Bun.spawn> | null = null;
 
+  /** Why nothing is being heard, when that is the case (shown on the big screen and in Settings). */
+  private trouble: string | null = null;
+  private warnedAt = 0;
+
   constructor(private session: Session) {}
+
+  /** The "language" setting: an ISO code, or "auto" to let whisper detect it. Default English. */
+  private language() {
+    const l = String(this.session.store.setting<string>("language", "en") || "en").toLowerCase();
+    return /^[a-z]{2,3}$|^auto$/.test(l) ? l : "en";
+  }
+
+  /** null when speech can be turned into text; otherwise a sentence saying what to fix. */
+  problem(): string | null {
+    const mode = this.session.settings().transcription;
+    if (this.trouble) return this.trouble;
+    const local = [...this.engines.values()].some((e) => e.failures < 3);
+    if (mode !== "gateway" && local) return null;
+    if (mode !== "local" && gateway(this.session)) return null;
+    return mode === "local"
+      ? "Speech can't be turned into text: no local whisper is running. Install whisper-cpp and a model, or let the gateway transcribe in Settings."
+      : "Speech can't be turned into text: no whisper model is installed and no gateway key is set. Add a gateway key in Settings or install whisper-cpp.";
+  }
+
+  /** Says so once in a while, in the feed and on screen, instead of the room going silently deaf. */
+  warn(reason: string) {
+    this.trouble = reason;
+    if (Date.now() - this.warnedAt < 5 * 60_000) return;
+    this.warnedAt = Date.now();
+    bus.send({ type: "toast", tone: "warn", text: "JamSesh can't hear the room", detail: reason });
+    this.session.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: reason, relevance: "work", data: { transcriptionProblem: true } });
+  }
 
   async startLocal(port = 8178) {
     if (!config.whisperServerBin || !config.whisperModel) return false;
     const url = `http://127.0.0.1:${port}`;
     if (!(await ping(url))) {
       this.localProc = Bun.spawn(
-        [config.whisperServerBin, "-m", config.whisperModel, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "en"],
+        [config.whisperServerBin, "-m", config.whisperModel, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "auto"],
         { stdout: "ignore", stderr: "ignore" },
       );
       for (let i = 0; i < 60 && !(await ping(url)); i++) await Bun.sleep(250);
@@ -80,8 +112,9 @@ export class Transcriber {
       for (const e of pool) {
         e.inflight++;
         try {
-          const text = await whisperServer(e.url, wav, hint);
+          const text = await whisperServer(e.url, wav, hint, this.language());
           e.failures = 0;
+          this.trouble = null;
           e.lastOk = Date.now();
           return { text: cleanTranscript(text, durationSec, snr), engine: e.label };
         } catch (err) {
@@ -94,11 +127,20 @@ export class Transcriber {
       // Engines that failed get another chance after a minute.
       for (const e of this.engines.values()) if (e.failures >= 3 && Date.now() - e.lastOk > 60_000) e.failures = 2;
     }
-    if (mode === "local") return { text: "", engine: "none" };
-    const gw = gateway(this.session);
-    if (!gw) return { text: "", engine: "none" };
-    const r = await aiTranscribe({ model: gw.transcription(this.session.settings().models.transcribe), audio: wav });
-    return { text: cleanTranscript(r.text, durationSec, snr), engine: "gateway" };
+    const gw = mode === "local" ? null : gateway(this.session);
+    if (!gw) {
+      this.warn(this.problem() ?? "Speech can't be turned into text right now.");
+      return { text: "", engine: "none" };
+    }
+    try {
+      const lang = this.language();
+      const r = await aiTranscribe({ model: gw.transcription(this.session.settings().models.transcribe), audio: wav, providerOptions: lang === "auto" ? undefined : { openai: { language: lang } } });
+      this.trouble = null;
+      return { text: cleanTranscript(r.text, durationSec, snr), engine: "gateway" };
+    } catch (err) {
+      this.warn(`Transcription failed: ${describeError(err)}`);
+      return { text: "", engine: "none" };
+    }
   }
 }
 
@@ -111,11 +153,12 @@ async function ping(url: string) {
   }
 }
 
-async function whisperServer(url: string, wav: Uint8Array, hint: string): Promise<string> {
+async function whisperServer(url: string, wav: Uint8Array, hint: string, language = "en"): Promise<string> {
   const form = new FormData();
   form.append("file", new Blob([wav as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "clip.wav");
   form.append("response_format", "json");
   form.append("temperature", "0");
+  form.append("language", language);
   if (hint) form.append("prompt", hint);
   const r = await fetch(`${url}/inference`, { method: "POST", body: form, signal: AbortSignal.timeout(20_000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);

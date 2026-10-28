@@ -205,6 +205,15 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
   useEffect(() => {
     if (detectBlocked) setState(NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
     setForced(false);
+    if (!detectBlocked) return;
+    // The host reads the page's headers, which a browser can't see from inside the frame.
+    let live = true;
+    api<{ blocked: boolean }>(`/frame-check?url=${encodeURIComponent(raw)}`)
+      .then((r) => live && r.blocked && setState("blocked"))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
   }, [raw, detectBlocked]);
   // Sized in the resize callback itself, not through React state: state would land a frame late
   // and the frame would shake while the window is being resized.
@@ -638,13 +647,14 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
 
 export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string }) {
   const frame = useRef<HTMLIFrameElement>(null);
-  // Follow a participant (by name): the canvas shows what they're looking at.
+  // Follow a participant (by name): the canvas shows what they're looking at. A reload or reconnect gives them
+  // a new client id, so this keeps checking and follows the new one.
   useEffect(() => {
     if (!follow) return;
-    let done = false;
+    let followed: string | null = null;
     const tick = async () => {
       const fc = (frame.current?.contentWindow as any)?.figcraft;
-      if (!fc || done) return;
+      if (!fc) return;
       try {
         const peers = await fc.execute("collab.peers", {});
         const want = follow.toLowerCase().trim();
@@ -652,12 +662,14 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
         const name = (p: any) => String(p.name ?? "").toLowerCase().trim();
         // Exact name first ("Chey's Claude" is not "Chey"), then a name containing what was asked.
         const peer = list.find((p) => name(p) === want) ?? list.find((p) => name(p).includes(want)) ?? list.find((p) => want.includes(name(p)) && name(p).length > 2);
-        if (peer) {
-          await fc.execute("collab.follow", { client: peer.client ?? peer.id });
-          done = true;
-        }
+        const client = peer ? String(peer.client ?? peer.id) : null;
+        if (client && client !== followed) {
+          await fc.execute("collab.follow", { client });
+          followed = client;
+        } else if (!client) followed = null;
       } catch {}
     };
+    tick();
     const t = setInterval(tick, 2500);
     return () => clearInterval(t);
   }, [follow]);

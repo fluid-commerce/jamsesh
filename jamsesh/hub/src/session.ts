@@ -21,7 +21,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest } from "./types";
+ BuildRequest, ScreenInfo } from "./types";
 
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
@@ -138,6 +138,7 @@ export class Session {
       annotations: this.annotations(),
       facts: this.facts(),
       buildRequests: this.buildRequests(),
+      screens: this.screens(),
       digest: this.store.digest("session")?.text ?? "",
       brain: this.brainStatus,
     };
@@ -450,6 +451,21 @@ export class Session {
       detail: d.text,
     });
     for (const t of d.targets) this.wake(t);
+    // An agent that's gone, or idle without waiting for work, won't see this until its person types
+    // to it. Say so, so someone can nudge it, instead of the room assuming it's underway.
+    const asleep = (id: string) => {
+      const a = this.agent(id);
+      return !a || a.status === "offline" || Date.now() - a.lastSeen > 20 * 60_000;
+    };
+    const gone = d.targets.filter(asleep).map((t) => this.agent(t)?.name ?? "That agent");
+    if (gone.length) bus.send({ type: "toast", tone: "warn", text: `${gone.join(", ")} isn't connected right now`, detail: "It gets this as soon as it's back." });
+    if (d.mode === "explore" || d.mode === "implement")
+      setTimeout(() => {
+        const now = this.store.get("directives", directive.id);
+        if (!now || now.status === "done" || now.status === "cancelled") return;
+        const idle = d.targets.filter((t) => now.progress[t] === "pending" && !asleep(t) && this.agent(t)?.status !== "waiting").map((t) => this.agent(t)!);
+        for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
+      }, 45_000).unref?.();
     this.onDirective?.(directive);
     return directive;
   }
@@ -738,7 +754,28 @@ export class Session {
 
   // ---- stage ----
 
-  stage(): Stage {
+  // ---- big screens: "main", plus one per display on a user-less host ----
+
+  private bigScreens = new Map<string, Omit<ScreenInfo, "stage">>();
+  private screenReverts = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** A big-screen window reported its size; windows that stop reporting drop off after 3 minutes. */
+  reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage">) {
+    const known = this.bigScreens.has(id);
+    this.bigScreens.set(id, { id, ...info });
+    if (!known) bus.changed("session");
+  }
+
+  screens(): ScreenInfo[] {
+    const now = Date.now();
+    return [...this.bigScreens.values()]
+      .filter((sc) => now - sc.at < 3 * 60_000)
+      .sort((a, b) => (a.id === "main" ? -1 : b.id === "main" ? 1 : a.screenX - b.screenX))
+      .map((sc) => ({ ...sc, stage: this.stage(sc.id) }));
+  }
+
+  stage(screen = "main"): Stage {
+    if (screen !== "main") return this.store.setting<Record<string, Stage>>("screenStages", {})[screen] ?? { mode: "board", title: "", caption: "", items: [], pinned: false, since: Date.now(), by: "JamSesh" };
     return this.store.setting<Stage>("stage", {
       mode: "welcome",
       title: "",
@@ -750,8 +787,16 @@ export class Session {
     });
   }
 
-  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string) {
+  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main") {
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...next, since: Date.now(), by };
+    if (screen !== "main") {
+      this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
+      bus.changed("session");
+      clearTimeout(this.screenReverts.get(screen));
+      if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome")
+        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), 6 * 60_000));
+      return stage;
+    }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
     if (this.stageRevert) clearTimeout(this.stageRevert);

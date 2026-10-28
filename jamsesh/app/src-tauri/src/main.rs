@@ -35,6 +35,10 @@ struct Config {
     /// The host permission checklist was finished (or skipped).
     #[serde(default)]
     host_setup_done: bool,
+    /// User-less host: nobody uses this Mac, so every display is a big screen and no personal
+    /// window opens.
+    #[serde(default)]
+    userless: bool,
 }
 
 #[derive(Default)]
@@ -46,6 +50,8 @@ struct Inner {
 
 struct App {
     inner: Mutex<Inner>,
+    /// What the menu bar menu shows now; it's only rebuilt when this changes (an open menu stays open).
+    tray_shown: std::sync::Mutex<String>,
     hosts: discover::Hosts,
     dir: PathBuf,
 }
@@ -108,6 +114,47 @@ fn close_start(app: &AppHandle) {
 }
 
 /// The big screen goes full screen on the display that isn't this Mac's main one, when there is one.
+/// A big-screen window, full screen on one display (in the same Space, so app windows the brain
+/// arranges there can sit on top).
+fn big_window(app: &AppHandle, label: &str, url: &str, at: Option<tauri::PhysicalPosition<i32>>) -> Result<(), String> {
+    let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    let w = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .title("JamSesh big screen")
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        .inner_size(1440.0, 900.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    if let Some(p) = at {
+        let _ = w.set_position(p);
+    }
+    let _ = w.set_simple_fullscreen(true);
+    Ok(())
+}
+
+/// User-less host: one big screen per display. The main display gets the main screen (header,
+/// join code, room feed); the others are "screen-2", "screen-3", and so on.
+fn open_every_screen(app: &AppHandle, origin: &str) -> Result<(), String> {
+    for (label, w) in app.webview_windows() {
+        if label.starts_with("bigscreen") {
+            let _ = w.close();
+        }
+    }
+    let monitors = app.available_monitors().unwrap_or_default();
+    let primary = app.primary_monitor().ok().flatten().map(|m| *m.position());
+    let mut n = 1;
+    for m in &monitors {
+        if Some(*m.position()) == primary || monitors.len() == 1 {
+            big_window(app, "bigscreen", &format!("{origin}/host"), Some(*m.position()))?;
+        } else {
+            n += 1;
+            big_window(app, &format!("bigscreen-{n}"), &format!("{origin}/host?screen=screen-{n}"), Some(*m.position()))?;
+        }
+    }
+    Ok(())
+}
+
 fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("bigscreen") {
         if !next_display {
@@ -153,13 +200,19 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
     if let Some(old) = inner.relay.take() {
         old.stop();
     }
-    inner.relay = proxy::start(proxy::Upstream::parse(&origin)?, None, RELAY_PORT, |_| {}).await.ok();
+    let agents = proxy::post(&origin, "/api/pair/agents", None).await.ok().and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()).and_then(|v| v["token"].as_str().map(str::to_string));
+    inner.relay = proxy::start(proxy::Upstream::parse(&origin)?, None, agents, RELAY_PORT, |_| {}).await.ok();
     inner.cfg.role = Some("host".into());
     state.save(&inner.cfg);
     let setup_done = inner.cfg.host_setup_done;
+    let userless = inner.cfg.userless;
     drop(inner);
-    open_big_screen(app, &origin, false)?;
-    open_window(app, "client", &format!("{origin}/client"), "JamSesh")?;
+    if userless {
+        open_every_screen(app, &origin)?;
+    } else {
+        open_big_screen(app, &origin, false)?;
+        open_window(app, "client", &format!("{origin}/client"), "JamSesh")?;
+    }
     close_start(app);
     refresh_tray(app).await;
     if !setup_done {
@@ -170,12 +223,24 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
 }
 
 async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>) -> Result<(), String> {
-    let up = proxy::Upstream::parse(input)?;
+    // A typed name like team.duckdns.org is a remote host's HTTPS address; an IP or a .local name
+    // is a host on this network.
+    let raw = input.trim();
+    let bare = raw.split(['/', ':']).next().unwrap_or("");
+    let lan = bare.ends_with(".local") || bare.parse::<std::net::IpAddr>().is_ok() || !bare.contains('.');
+    let https_first = !raw.contains("://") && !lan;
+    let first = if https_first { format!("https://{raw}") } else { raw.to_string() };
+    let mut up = proxy::Upstream::parse(&first)?;
+    if https_first && !proxy::healthy(&up.origin).await {
+        up = proxy::Upstream::parse(raw)?;
+    }
     if !proxy::healthy(&up.origin).await {
         return Err(format!("No JamSesh host answered at {}. Check the address, and that this Mac is on the same network or the host has remote access set up.", up.origin));
     }
     let origin = up.origin.clone();
+    let origin_for_agents = origin.clone();
     let token = keychain(&origin).and_then(|k| k.get_password().ok());
+    let agents = keychain(&format!("{origin}#agents")).and_then(|k| k.get_password().ok());
     let paired = token.is_some();
     let keep = origin.clone();
     let handle = app.clone();
@@ -183,15 +248,20 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     if let Some(old) = inner.relay.take() {
         old.stop();
     }
-    let relay = proxy::start(up, token, RELAY_PORT, move |tok| {
+    let relay = proxy::start(up, token.clone(), agents.clone(), RELAY_PORT, move |tok| {
         if let Some(k) = keychain(&keep) {
             let _ = k.set_password(&tok);
         }
-        // Just paired: the moment to offer connecting this Mac's agents.
-        offer_agents(handle.clone());
+        // Just paired: get this Mac's agents their own credential, then offer to connect them.
+        let (handle, origin, tok) = (handle.clone(), keep.clone(), tok.clone());
+        tauri::async_runtime::spawn(async move {
+            fetch_agents_token(&handle, &origin, &tok).await;
+            offer_agents(handle);
+        });
     })
     .await?;
     let url = relay.url(if paired { "/client" } else { "/connect?next=%2Fclient" });
+    let needs_agents = paired && agents.is_none();
     inner.relay = Some(relay);
     inner.cfg.role = Some("join".into());
     inner.cfg.host_url = Some(origin);
@@ -206,10 +276,29 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     open_window(app, "client", &url, "JamSesh")?;
     close_start(app);
     refresh_tray(app).await;
+    if needs_agents {
+        if let Some(tok) = token {
+            fetch_agents_token(app, &origin_for_agents, &tok).await;
+        }
+    }
     if paired {
         offer_agents(app.clone());
     }
     Ok(())
+}
+
+/// Asks the host for this Mac's agents' credential (with the person's), keeps it in the Keychain,
+/// and hands it to the relay.
+async fn fetch_agents_token(app: &AppHandle, origin: &str, person_token: &str) {
+    let Ok(body) = proxy::post(origin, "/api/pair/agents", Some(person_token)).await else { return };
+    let Some(token) = serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|v| v["token"].as_str().map(str::to_string)) else { return };
+    if let Some(k) = keychain(&format!("{origin}#agents")) {
+        let _ = k.set_password(&token);
+    }
+    let state = app.state::<Arc<App>>();
+    if let Some(r) = state.inner.lock().await.relay.as_ref() {
+        r.set_agents_token(Some(token));
+    }
 }
 
 fn has_agent_cli() -> bool {
@@ -333,10 +422,10 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
 
 async fn refresh_tray(app: &AppHandle) {
     let state = app.state::<Arc<App>>();
-    let (role, label, hub_port, relay_port) = {
+    let (role, label, hub_port, relay_port, userless) = {
         let inner = state.inner.lock().await;
         let label = inner.cfg.host_name.clone().or(inner.cfg.host_url.clone()).unwrap_or_default();
-        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port))
+        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port), inner.cfg.userless)
     };
     // Who's here: people whose windows checked in during the last two minutes, and live agents.
     let present = match relay_port {
@@ -356,6 +445,13 @@ async fn refresh_tray(app: &AppHandle) {
         None => None,
     };
     let Some(tray) = app.tray_by_id("main") else { return };
+    let shown = format!("{role:?}|{label}|{code:?}|{present:?}|{userless}");
+    if let Ok(mut last) = state.tray_shown.lock() {
+        if *last == shown {
+            return;
+        }
+        *last = shown;
+    }
     let build = || -> tauri::Result<Menu<tauri::Wry>> {
         let menu = Menu::new(app)?;
         match role.as_deref() {
@@ -373,6 +469,7 @@ async fn refresh_tray(app: &AppHandle) {
                 menu.append(&MenuItem::with_id(app, "nextdisplay", "Move the big screen to the next display", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
+                menu.append(&tauri::menu::CheckMenuItem::with_id(app, "userless", "Use every display (nobody uses this Mac)", true, userless, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "setup", "Set up this Mac…", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "remote", "Set up remote access…", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -438,6 +535,16 @@ fn on_menu(app: &AppHandle, id: &str) {
                     let _ = w.eval("document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))");
                 }
             }
+            "userless" => {
+                let on = {
+                    let mut inner = state.inner.lock().await;
+                    inner.cfg.userless = !inner.cfg.userless;
+                    state.save(&inner.cfg);
+                    inner.cfg.userless
+                };
+                set_userless(&app, on, hub_origin.as_deref());
+                refresh_tray(&app).await;
+            }
             "setup" => open_setup(&app),
             "remote" => {
                 if let Some(o) = hub_origin {
@@ -489,6 +596,44 @@ async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Opt
     start_joining(&app, &state, &url, name).await
 }
 
+/// Switches between a host someone uses (one big screen plus their window) and a user-less one
+/// (a big screen on every display).
+fn set_userless(app: &AppHandle, on: bool, origin: Option<&str>) {
+    let Some(origin) = origin else { return };
+    if on {
+        if let Some(w) = app.get_webview_window("client") {
+            let _ = w.close();
+        }
+        let _ = open_every_screen(app, origin);
+    } else {
+        for (label, w) in app.webview_windows() {
+            if label.starts_with("bigscreen") {
+                let _ = w.close();
+            }
+        }
+        let _ = open_big_screen(app, origin, false);
+        let _ = open_window(app, "client", &format!("{origin}/client"), "JamSesh");
+    }
+}
+
+#[tauri::command]
+async fn get_userless(state: State<'_, Arc<App>>) -> Result<bool, String> {
+    Ok(state.inner.lock().await.cfg.userless)
+}
+
+#[tauri::command]
+async fn toggle_userless(app: AppHandle, state: State<'_, Arc<App>>) -> Result<bool, String> {
+    let (on, origin) = {
+        let mut inner = state.inner.lock().await;
+        inner.cfg.userless = !inner.cfg.userless;
+        state.save(&inner.cfg);
+        (inner.cfg.userless, inner.hub.as_ref().map(|h| h.origin()))
+    };
+    set_userless(&app, on, origin.as_deref());
+    refresh_tray(&app).await;
+    Ok(on)
+}
+
 #[tauri::command]
 async fn perm_status() -> perms::Status {
     tauri::async_runtime::spawn_blocking(perms::status).await.unwrap_or_else(|_| perms::status())
@@ -527,11 +672,11 @@ fn relaunch(app: AppHandle) {
 fn main() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start_info, nearby_hosts, host_here, join, perm_status, perm_request, perm_settings, finish_setup, relaunch, remote_setup])
+        .invoke_handler(tauri::generate_handler![start_info, nearby_hosts, host_here, join, perm_status, perm_request, perm_settings, finish_setup, relaunch, remote_setup, get_userless, toggle_userless])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            let state = Arc::new(App { inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }), hosts: discover::start(), dir });
+            let state = Arc::new(App { inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }), hosts: discover::start(), dir, tray_shown: std::sync::Mutex::new(String::new()) });
             app.manage(state.clone());
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;

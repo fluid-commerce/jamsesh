@@ -51,7 +51,10 @@ impl Upstream {
 struct Shared {
     up: Upstream,
     local: String,
+    /// The person's credential, for the app's own window.
     token: RwLock<Option<String>>,
+    /// This Mac's agents' credential: can't approve builds or speak as a person.
+    agents: RwLock<Option<String>>,
     client: HttpsClient,
     tls: Arc<rustls::ClientConfig>,
     on_token: Box<dyn Fn(String) + Send + Sync>,
@@ -59,12 +62,18 @@ struct Shared {
 
 pub struct Proxy {
     pub port: u16,
+    shared: Arc<Shared>,
     stop: tokio::sync::watch::Sender<bool>,
 }
 
 impl Proxy {
     pub fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
+    }
+    pub fn set_agents_token(&self, token: Option<String>) {
+        if let Ok(mut t) = self.shared.agents.write() {
+            *t = token;
+        }
     }
     pub fn stop(&self) {
         let _ = self.stop.send(true);
@@ -83,7 +92,7 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
 
 /// Starts the relay on `preferred_port` (so the window keeps the same origin, and with it its saved
 /// state, across launches), or on any free port if that one is taken.
-pub async fn start(up: Upstream, token: Option<String>, preferred_port: u16, on_token: impl Fn(String) + Send + Sync + 'static) -> Result<Proxy, String> {
+pub async fn start(up: Upstream, token: Option<String>, agents: Option<String>, preferred_port: u16, on_token: impl Fn(String) + Send + Sync + 'static) -> Result<Proxy, String> {
     let listener = match TcpListener::bind(("127.0.0.1", preferred_port)).await {
         Ok(l) => l,
         Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Couldn't open the local relay: {e}"))?,
@@ -92,9 +101,9 @@ pub async fn start(up: Upstream, token: Option<String>, preferred_port: u16, on_
     let tls = tls_config()?;
     let connector = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config((*tls).clone()).https_or_http().enable_http1().build();
     let client: HttpsClient = Client::builder(TokioExecutor::new()).build(connector);
-    let shared = Arc::new(Shared { up, local: format!("127.0.0.1:{port}"), token: RwLock::new(token), client, tls, on_token: Box::new(on_token) });
+    let shared = Arc::new(Shared { up, local: format!("127.0.0.1:{port}"), token: RwLock::new(token), agents: RwLock::new(agents), client, tls, on_token: Box::new(on_token) });
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
-    let sh = shared;
+    let sh = shared.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -110,7 +119,7 @@ pub async fn start(up: Upstream, token: Option<String>, preferred_port: u16, on_
             }
         }
     });
-    Ok(Proxy { port, stop })
+    Ok(Proxy { port, shared, stop })
 }
 
 fn text(status: StatusCode, msg: &str) -> Response<Body> {
@@ -147,7 +156,11 @@ fn prepare(sh: &Shared, headers: &mut HeaderMap, upgrade: bool, path: &str) {
     // Agents set up through the app send no credentials (or an empty "Bearer"): add this Mac's.
     let empty = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).is_none_or(|v| v.trim().eq_ignore_ascii_case("bearer") || v.trim().is_empty());
     if empty {
-        if let Some(t) = sh.token.read().ok().and_then(|t| t.clone()) {
+        // The app's window is a browser page (it sends Origin and Sec-Fetch headers); anything else
+        // on this Mac talking to the relay is an agent and gets the agents' credential.
+        let window = headers.contains_key("sec-fetch-mode") || headers.contains_key(header::ORIGIN);
+        let pick = if window { &sh.token } else { &sh.agents };
+        if let Some(t) = pick.read().ok().and_then(|t| t.clone()) {
             if let Ok(v) = HeaderValue::from_str(&format!("Bearer {t}")) {
                 headers.insert(header::AUTHORIZATION, v);
             }
@@ -256,7 +269,7 @@ async fn forward(sh: &Shared, mut req: Request<Incoming>) -> Result<Response<Bod
 pub async fn get(proxy_port: u16, path: &str) -> Result<(StatusCode, String), String> {
     let client = Client::builder(TokioExecutor::new()).build_http::<Empty<Bytes>>();
     let uri: Uri = format!("http://127.0.0.1:{proxy_port}{path}").parse().map_err(|e: hyper::http::uri::InvalidUri| e.to_string())?;
-    let resp = client.get(uri).await.map_err(|e| e.to_string())?;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(4), client.get(uri)).await.map_err(|_| "timed out".to_string())?.map_err(|e| e.to_string())?;
     let status = resp.status();
     let bytes = resp.into_body().collect().await.map_err(|e| e.to_string())?.to_bytes();
     Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
@@ -270,4 +283,22 @@ pub async fn healthy(origin: &str) -> bool {
     let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
     let Ok(uri) = format!("{}/healthz", up.origin).parse::<Uri>() else { return false };
     matches!(tokio::time::timeout(std::time::Duration::from_secs(3), client.get(uri)).await, Ok(Ok(r)) if r.status().is_success())
+}
+
+/// POST to the host directly (not through a relay), optionally as a paired device. For small JSON.
+pub async fn post(origin: &str, path: &str, bearer: Option<&str>) -> Result<String, String> {
+    let tls = tls_config()?;
+    let connector = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config((*tls).clone()).https_or_http().enable_http1().build();
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
+    let mut req = Request::post(format!("{origin}{path}")).header(header::CONTENT_TYPE, "application/json");
+    if let Some(t) = bearer {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let req = req.body(Full::new(Bytes::from_static(b"{}"))).map_err(|e| e.to_string())?;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(8), client.request(req)).await.map_err(|_| "timed out".to_string())?.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{}", resp.status()));
+    }
+    let bytes = resp.into_body().collect().await.map_err(|e| e.to_string())?.to_bytes();
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }

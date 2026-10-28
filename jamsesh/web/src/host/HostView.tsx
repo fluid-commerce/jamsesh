@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, deviceId, hub, pref, setPref, useHub, type StageMode } from "../shared/hub";
+import { api, deviceId, hub, pref, setPref, useHub, type HubState, type StageMode } from "../shared/hub";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
@@ -7,6 +7,9 @@ import { Stage } from "./Stage";
 import { CodeRing, JoinCard, useJoinCode } from "./JoinCard";
 import { fadeOut, playChime } from "../shared/sound";
 import { AnnotateToggle } from "../shared/annotate";
+import { InviteButton } from "../client/Invite";
+import { MicNotice } from "../shared/MicNotice";
+import { isTypingTarget, plain, useReclaimFocus } from "../shared/keys";
 
 const MODE_LABEL: Record<string, string> = { spotlight: "Spotlight", compare: "Compare", parity: "Parity", custom: "Custom view", layout: "Layout", join: "How to join" };
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
@@ -81,16 +84,24 @@ export function HostView() {
     if (micStatus.speaking && a && !a.paused && a.currentTime > 0.6) fadeOut(a);
   }, [micStatus.speaking]);
 
+  useReclaimFocus();
+  const invOpen = useRef(false);
+  invOpen.current = invite;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("input, textarea, select")) return;
+      if (isTypingTarget(e) || !plain(e)) return;
+      const k = e.key.toLowerCase();
+      if (k === "escape") {
+        if (invOpen.current) return setInvite(false);
+        if (!settings) api("/stage", { mode: "board", by: "Host" });
+        return;
+      }
       const m = MODES.find((x) => x.key === e.key);
-      if (m) api("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" });
-      if (e.key === "Escape" && !settings) api("/stage", { mode: "board", by: "Host" });
-      if ((e.key === "j" || e.key === "J") && !e.metaKey && !e.ctrlKey && !e.altKey) api("/stage", { mode: stageMode.current === "join" ? "board" : "join", by: "Host" });
-      if (e.key === "f") document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
-      if (e.key === ",") setSettings(true);
-      if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey) {
+      if (m) return void api("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" });
+      if (k === "j") return void api("/stage", { mode: stageMode.current === "join" ? "board" : "join", by: "Host" });
+      if (k === "f") return void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+      if (e.key === ",") return setSettings(true);
+      if (k === "m") {
         if (mic.status.on) (mic.stop(), setPref("hostMic", "off"));
         else mic.start().then(() => setPref("hostMic", "on")).catch(() => {});
       }
@@ -137,9 +148,15 @@ export function HostView() {
               </button>
             );
           })}
-          {!["board", "welcome", "canvas", "agents"].includes(state.stage.mode) && (
-            <button className="btn small" style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent", minWidth: 0 }} onClick={() => api("/stage", { mode: "board", by: "Host" })} title={`${state.stage.title || MODE_LABEL[state.stage.mode] || state.stage.mode}. Back to the board (Esc)`}>
-              <span className="stage-pill">{state.stage.title || MODE_LABEL[state.stage.mode] || state.stage.mode}</span>
+          {!["board", "welcome"].includes(state.stage.mode) && (
+            <button
+              className="btn small"
+              style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent", minWidth: 0 }}
+              onClick={() => api("/stage", { mode: "board", by: "Host" })}
+              title={`${state.stage.pinned ? "Pinned: the room won't change this until you release it. " : "Comes back to the board by itself. "}Back to the board (Esc)`}
+            >
+              {state.stage.pinned && <PinGlyph />}
+              <span className="stage-pill">{["canvas", "agents"].includes(state.stage.mode) ? "Pinned" : state.stage.title || MODE_LABEL[state.stage.mode] || state.stage.mode}</span>
               <span aria-hidden style={{ color: "var(--muted)" }}>✕</span>
             </button>
           )}
@@ -162,12 +179,13 @@ export function HostView() {
               );
             })}
           </span>
-          <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute the room mic (M)" : "Unmute the room mic (M)")}>
+          <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"} ${!micStatus.on && micStatus.error ? "broken" : ""}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute the room mic (M)" : "Unmute the room mic (M)")}>
             {micStatus.on ? <MicIcon size={16} /> : <MicOffIcon size={16} />}
             {micStatus.on && <Meter db={micStatus.level} />}
-            {micStatus.on ? "Room mic" : "Muted"}
+            {micStatus.on ? "Room mic" : micStatus.error ? "Mic problem" : "Muted"}
           </button>
           <AnnotateToggle />
+          <PinsChip state={state} />
           <BrainPill status={brain.status} error={brain.lastError} name={state.settings.brainName} />
           <JoinPill onOpen={() => setInvite(true)} />
           <span className="mono clock" style={{ color: "var(--dim)", fontSize: 15 }}>
@@ -179,6 +197,7 @@ export function HostView() {
         </div>
       </header>
 
+      <MicNotice status={micStatus} onRetry={toggleMic} />
       <main style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) clamp(320px, 22vw, 440px)", gap: 18 }}>
         <section style={{ minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
           <Stage state={state} interactive />
@@ -220,7 +239,8 @@ export function HostView() {
           <div className="modal-wrap">
             <div className="modal" style={{ width: "auto", padding: "28px 36px" }} role="dialog" aria-label="Join this session">
               <JoinCard large />
-              <div className="row" style={{ justifyContent: "center", marginTop: 14 }}>
+              <div className="row" style={{ justifyContent: "center", marginTop: 14, gap: 10 }}>
+                <InviteButton />
                 <button className="btn small" onClick={() => setInvite(false)}>
                   Done
                 </button>
@@ -230,6 +250,33 @@ export function HostView() {
         </>
       )}
     </div>
+  );
+}
+
+function PinGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flex: "none", color: "var(--directive)" }}>
+      <path d="M12 17v5M9 3h6l-1 6 3 3v2H7v-2l3-3z" />
+    </svg>
+  );
+}
+
+/** Open pins from everyone, with one click to send them all to the brain as a single prompt. */
+function PinsChip({ state }: { state: HubState }) {
+  const open = state.annotations.filter((a) => a.status === "open").length;
+  const [phase, setPhase] = useState<"idle" | "busy" | "done">("idle");
+  if (!open && phase === "idle") return null;
+  const send = async () => {
+    setPhase("busy");
+    await api("/annotations/send", { personId: null, ids: state.annotations.filter((a) => a.status === "open").map((a) => a.id) }).catch(() => {});
+    setPhase("done");
+    setTimeout(() => setPhase("idle"), 1800);
+  };
+  return (
+    <button className="btn small pins-chip" style={{ height: 36 }} onClick={send} disabled={phase === "busy"} title={`Send ${open} open pin${open === 1 ? "" : "s"} to ${state.settings.brainName} as one prompt`}>
+      <PinGlyph />
+      {phase === "done" ? "Sent" : `Send ${open} pin${open === 1 ? "" : "s"}`}
+    </button>
   );
 }
 

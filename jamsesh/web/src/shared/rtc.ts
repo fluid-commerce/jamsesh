@@ -17,7 +17,8 @@ type Signal =
   | { op: "bye"; shareId: string };
 
 // Public STUN lets shares connect across home and office networks; strict networks would need TURN.
-let iceServers: RTCIceServer[] = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
+const STUN: RTCIceServer[] = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
+let iceServers: RTCIceServer[] = STUN;
 /** Replaces the servers above, for example with a TURN server for networks that block direct connections. */
 export function configureRtc(opts: { iceServers?: RTCIceServer[] }) {
   if (opts.iceServers) iceServers = opts.iceServers;
@@ -26,9 +27,26 @@ export function configureRtc(opts: { iceServers?: RTCIceServer[] }) {
 const rid = () => Math.random().toString(36).slice(2, 10);
 const send = (to: string, data: Signal) => hub.send({ type: "rtc", to, data });
 
+/** True on a plain-http page, where browsers hide the mic, camera and screen capture altogether. */
+export function isInsecure() {
+  return typeof navigator === "undefined" || !navigator.mediaDevices;
+}
+
+/** Whether this window can capture the screen at all (the Mac app's web view may not). */
+export function canShareScreen() {
+  return !isInsecure() && typeof navigator.mediaDevices.getDisplayMedia === "function";
+}
+
 export function mediaAvailable(): string | null {
-  if (typeof navigator === "undefined" || !navigator.mediaDevices) {
-    return "Sharing needs a secure page (https or localhost).";
+  if (isInsecure()) return "Sharing needs a secure page (https or localhost).";
+  return null;
+}
+
+/** Why a screen can't be shared from here, or null when it can. */
+export function screenUnavailable(): string | null {
+  if (isInsecure()) return "Sharing needs a secure page (https or localhost).";
+  if (typeof navigator.mediaDevices.getDisplayMedia !== "function") {
+    return "This window can't share its screen. Open JamSesh in Chrome or Safari to share, or share your camera instead.";
   }
   return null;
 }
@@ -46,6 +64,8 @@ export interface Publication {
 interface PubInternal extends Publication {
   peers: Map<string, { pc: RTCPeerConnection; id: string; queued: RTCIceCandidateInit[]; ready: boolean }>;
   stopped: boolean;
+  /** When capture began, so a share still being registered isn't registered twice. */
+  since: number;
 }
 
 const pubs = new Map<string, PubInternal>();
@@ -95,7 +115,7 @@ export async function publish(kind: Kind, shareId: string = `sh-${rid()}${rid()}
   init();
   if (pubs.has(shareId)) return pubs.get(shareId)!;
   const stream = await capture(kind);
-  const pub: PubInternal = { shareId, kind, stream, peers: new Map(), stopped: false };
+  const pub: PubInternal = { shareId, kind, stream, peers: new Map(), stopped: false, since: Date.now() };
   pubs.set(shareId, pub);
   // The browser's own "Stop sharing" button ends the track: end the share for everyone.
   for (const t of stream.getTracks()) t.addEventListener("ended", () => void stopPublishing(shareId), { once: true });
@@ -199,6 +219,8 @@ export interface WatchState {
   status: "connecting" | "live";
   /** Times we have asked the publisher; grows while it stays silent. */
   attempts: number;
+  /** Connections that were offered but never carried video (usually a network that blocks direct connections). */
+  failures: number;
 }
 
 interface Session {
@@ -244,8 +266,10 @@ function resetPc(s: Session) {
 function tick(s: Session) {
   const pc = s.pc;
   if (pc) {
-    if (pc.connectionState === "failed" || pc.connectionState === "closed") resetPc(s);
-    else if (pc.connectionState === "disconnected") {
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      if (pc.connectionState === "failed" && !s.snap.stream) setSnap(s, { failures: s.snap.failures + 1 });
+      resetPc(s);
+    } else if (pc.connectionState === "disconnected") {
       s.disconnectedAt ||= Date.now();
       if (Date.now() - s.disconnectedAt > 4000) resetPc(s);
     } else s.disconnectedAt = 0;
@@ -254,7 +278,10 @@ function tick(s: Session) {
   if (connected) return;
   // Don't interrupt a negotiation that is making progress.
   if (s.pc && Date.now() - s.lastOfferAt < OFFER_PATIENCE_MS) return;
-  if (s.pc) resetPc(s);
+  if (s.pc) {
+    if (!s.snap.stream) setSnap(s, { failures: s.snap.failures + 1 });
+    resetPc(s);
+  }
   want(s);
 }
 
@@ -304,7 +331,7 @@ function acquire(share: Pick<Share, "id" | "deviceId">): Session {
       disconnectedAt: 0,
       timer: null,
       listeners: new Set(),
-      snap: { stream: null, status: "connecting", attempts: 0 },
+      snap: { stream: null, status: "connecting", attempts: 0, failures: 0 },
     };
     sessions.set(share.id, s);
     const session = s;
@@ -331,7 +358,7 @@ export function watch(share: Pick<Share, "id" | "deviceId">, cb: (state: WatchSt
   init();
   const local = pubs.get(share.id);
   if (local) {
-    const state: WatchState = { stream: local.stream, status: "live", attempts: 0 };
+    const state: WatchState = { stream: local.stream, status: "live", attempts: 0, failures: 0 };
     cb(state);
     return { get: () => state, stop: () => {} };
   }
@@ -354,10 +381,46 @@ export function watch(share: Pick<Share, "id" | "deviceId">, cb: (state: WatchSt
 // Signaling router
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * A dropped connection ends this device's shares on the hub while the capture keeps running here.
+ * Once the hub is back, register what we are still publishing again (under the id the hub gives it).
+ */
+let registering = false;
+async function reregister() {
+  const snap = hub.get();
+  if (registering || !snap.connected || !snap.state) return;
+  const live = new Set(snap.state.shares.filter((s) => s.status === "live").map((s) => s.id));
+  registering = true;
+  try {
+    for (const pub of [...pubs.values()]) {
+      if (pub.stopped || live.has(pub.shareId) || Date.now() - pub.since < 10_000) continue;
+      try {
+        const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind: pub.kind, shareId: pub.shareId });
+        if (!pub.stopped) renamePublication(pub.shareId, share.id);
+      } catch {}
+    }
+  } finally {
+    registering = false;
+  }
+}
+
+/** A relay (TURN) the host runs, if it offers one. Without it, only networks that allow direct connections work. */
+function loadIceConfig() {
+  api<{ iceServers?: RTCIceServer[] }>("/rtc/config")
+    .then((c) => c?.iceServers?.length && configureRtc({ iceServers: [...STUN, ...c.iceServers] }))
+    .catch(() => {});
+}
+
 let inited = false;
 function init() {
   if (inited) return;
   inited = true;
+  loadIceConfig();
+  hub.onReconnect(() => {
+    loadIceConfig();
+    setTimeout(() => void reregister(), 2500);
+  });
+  setInterval(() => pubs.size > 0 && void reregister(), 8000);
   hub.onMessage((m) => {
     if (m?.type !== "rtc" || !m.data || m.from === hub.deviceId) return;
     const d = m.data as Signal;
@@ -414,7 +477,7 @@ export function useWatch(share: Pick<Share, "id" | "deviceId"> | null | undefine
   return state;
 }
 
-const IDLE: WatchState = { stream: null, status: "connecting", attempts: 0 };
+const IDLE: WatchState = { stream: null, status: "connecting", attempts: 0, failures: 0 };
 
 // Page teardown: let viewers know instead of making them wait for ICE to time out.
 if (typeof window !== "undefined") {

@@ -14,7 +14,32 @@ type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 
-const json = (v: unknown, status = 200) => Response.json(v, { status, headers: { "cache-control": "no-store" } });
+// Nothing to return means the thing was deleted (a queued edit to something gone): 410, not a crash.
+const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
+
+const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
+
+/** Host names this hub answers to: loopback, any IP address, .local names, and its own domains. */
+function knownHost(req: Request, hub: Hub) {
+  const host = (req.headers.get("host") ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host || host === "localhost" || host.endsWith(".local") || /^[\d.]+$/.test(host) || host.includes(":")) return true;
+  const domain = hub.net.status().domain?.toLowerCase();
+  if (domain && (host === domain || host.endsWith(`.${domain}`))) return true;
+  const extra = [process.env.JAMSESH_PUBLIC_URL, process.env.JAMSESH_PUBLIC_HOST].map((u) => (u ? u.replace(/^https?:\/\//, "").replace(/[:/].*$/, "").toLowerCase() : ""));
+  return extra.includes(host);
+}
+
+/** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
+function sameOrigin(req: Request) {
+  const origin = req.headers.get("origin");
+  if (!origin) return true; // not a browser
+  try {
+    const o = new URL(origin).host.toLowerCase();
+    return o === (req.headers.get("host") ?? "").toLowerCase() || o === (req.headers.get("x-forwarded-host") ?? "").toLowerCase();
+  } catch {
+    return false;
+  }
+}
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
 
 function isLocal(ip: string) {
@@ -37,9 +62,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     maxRequestBodySize: 64 * 1024 * 1024,
     async fetch(req, srv) {
       const url = new URL(req.url);
-      const ip = srv.requestIP(req)?.address ?? "0.0.0.0";
+      const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
+      // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
+      // Mac app's relay (which carries agents' traffic) all mark their requests.
+      const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
+      const ip = relayed && isLocal(peer) ? "relayed" : peer;
       const path = url.pathname;
       const local = isLocal(ip);
+      // DNS rebinding: a web page can't reach the host under a name of its own choosing.
+      if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
         if (path.endsWith("/healthz")) return new Response("ok");
@@ -54,10 +85,22 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         // Remote-access setup is only for someone at the host.
         if (local && path.startsWith("/api/net/")) {
+          // A JSON body only: a form or text post from another site can't change remote access.
+          if (req.method !== "GET" && !(req.headers.get("content-type") ?? "").includes("application/json")) return bad("Send JSON.", 415);
           const r = await hub.net.routes(req, url);
           if (r) return r;
         }
         if (path === "/api/pair" && req.method === "POST") return pairRoute(hub, req, url, ip);
+        // The Mac app's credential for agents on that Mac: separate from the person's window, so
+        // nothing an agent sends can approve a build or speak as a person.
+        if (path === "/api/pair/agents" && req.method === "POST") {
+          const owner = local ? null : hub.auth.check(tokenOf(req, url), ip);
+          if (!local && owner?.kind !== "browser") return bad("Pair this Mac first.", 401);
+          const who = owner?.personId ? s.person(owner.personId)?.name : undefined;
+          const personId = owner ? owner.personId : s.store.setting<string>("hostPersonId", "") || null;
+          const r = hub.auth.issue({ kind: "agent", label: `${who ? `${who}'s agents` : "Agents"} on ${owner?.label.split(" · ")[0] ?? "the host"}`, personId, ip, ownerDeviceId: owner?.id ?? "host" });
+          return json({ token: r.token, deviceId: r.device.id });
+        }
         if (path === "/api/pair/code") return local ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad("Only the host shows the code.", 403);
         if (path === "/api/pair/info") return json({ name: s.settings().sessionName, brainName: s.settings().brainName });
         if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
@@ -75,6 +118,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (!wantsHtml(req)) return new Response(agentIntro(originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
           return Response.redirect(ok ? "/client" : "/connect", 302);
         }
+        // The QR code's link, fed to Claude Code or Codex instead of a browser: the agent's guide.
+        if (path === "/connect" && url.searchParams.get("c") && !wantsHtml(req) && req.headers.get("sec-fetch-mode") !== "navigate") return agentRoute(hub, req, url, ip);
         if (PUBLIC_FILES.test(path) || path === "/connect") return webApp(path);
         // The Mac app, for people joining from a browser. It holds no secrets.
         if (path === "/download/mac") {
@@ -90,7 +135,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 
         if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null));
         if (path === "/ws") {
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local } as any })) return undefined as any;
+          // A page on another site can't open the live session (and read the room) from a browser.
+          if (!sameOrigin(req)) return bad("Not from this site.", 403);
+          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -119,9 +166,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       idleTimeout: 120,
       open(ws: ServerWebSocket<WsData>) {
         if (ws.data.collab != null) return openCollab(ws, hub);
-        if (!(ws.data as any).local) hub.peopleOnline++;
+        // Every open window counts, the host's own big screen included: the Mac stays awake for it.
+        hub.peopleOnline++;
         ws.send(JSON.stringify({ type: "state", state: s.state() } satisfies BusMessage));
         const off = bus.on((msg) => {
+          // Disconnected in Settings: this window's live session ends now, not at its next request.
+          if ((msg as any).type === "revoked" && (msg as any).deviceId && (msg as any).deviceId === (ws.data as any).pairedId) return void ws.close(4401, "disconnected");
           if (msg.type === "event" && msg.event.data?.embedding) {
             const { embedding: _drop, ...data } = msg.event.data;
             msg = { ...msg, event: { ...msg.event, data } };
@@ -155,7 +205,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       },
       close(ws: ServerWebSocket<WsData>) {
         if (ws.data.collab != null) return void ws.data.upstream?.close();
-        if (!(ws.data as any).local) hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
+        hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
         (ws as any).off?.();
         if (ws.data.deviceId) {
           sockets.get(ws.data.deviceId)?.delete(ws);
@@ -273,7 +323,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     if (!body?.deviceId) return bad("deviceId is required");
     if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
     // The person using the host's own window: agents on the host Mac work for them.
-    if (isLocal(ip) && body.kind !== "host" && body.personId) s.store.setSetting("hostPersonId", String(body.personId));
+    if (isLocal(ip) && body.kind !== "host" && body.personId) {
+      s.store.setSetting("hostPersonId", String(body.personId));
+      hub.auth.setOwnerPerson("host", String(body.personId));
+    }
     const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
     return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
   }
@@ -472,11 +525,44 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json(Object.keys(s.saveLayout(String(body.name))));
   }
 
+  // Whether a public page refuses to be shown in a frame (X-Frame-Options, CSP frame-ancestors).
+  // Browsers can't tell from inside the page, so the host reads the headers. Public sites only.
+  if (path === "/frame-check" && req.method === "GET") {
+    if (paired?.kind === "agent") return bad("not for agents", 403);
+    const target = (() => {
+      try {
+        return new URL(url.searchParams.get("url") ?? "");
+      } catch {
+        return null;
+      }
+    })();
+    const privateHost = (h: string) => /^(localhost|.*\.local|.*\.lan|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?|\[?f[cd])/i.test(h);
+    if (!target || !/^https?:$/.test(target.protocol) || privateHost(target.hostname)) return json({ blocked: false, checked: false });
+    try {
+      const res = await fetch(target, { redirect: "follow", signal: AbortSignal.timeout(5000), headers: { "user-agent": "Mozilla/5.0 JamSesh frame check" } });
+      res.body?.cancel().catch(() => {});
+      const xfo = (res.headers.get("x-frame-options") ?? "").toLowerCase();
+      const ancestors = (res.headers.get("content-security-policy") ?? "").match(/frame-ancestors([^;]*)/i)?.[1]?.trim().toLowerCase();
+      const blocked = /deny|sameorigin/.test(xfo) || (ancestors !== undefined && !/(^|\s)\*(\s|$)/.test(ancestors));
+      return json({ blocked, checked: true });
+    } catch {
+      return json({ blocked: false, checked: false });
+    }
+  }
+
   // A person opens a page in a browser on the host, for sites that refuse to show inside a tile.
   if (path === "/host/open-url" && req.method === "POST") {
     if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can open pages on the host.", 403);
     if (!s.settings().hostControl) return bad("Host control is turned off in Settings.", 409);
     return json({ result: await hub.host.act({ action: "open_url", url: String(body?.url ?? "") }) });
+  }
+
+  // An invite link for someone who isn't in the room: good once, for ten minutes.
+  if (path === "/invite" && req.method === "POST") {
+    if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can invite.", 403);
+    const { code, expiresAt } = hub.auth.invite();
+    const addr = s.addresses().find((a) => a.url.startsWith("https")) ?? s.addresses()[0];
+    return json({ url: `${addr?.url ?? originOf(req, url)}/connect?c=${code}`, code, expiresAt });
   }
 
   // ---- connected devices (Settings): everyone can see them; only the host disconnects ----
@@ -499,7 +585,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   // The big screen reports its size so the brain can plan layouts for its shape.
   if (path === "/display" && req.method === "POST" && isLocal(ip)) {
     const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0);
-    hub.host.bigScreen = { width: n(body?.width), height: n(body?.height), dpr: n(body?.dpr) || 1, screenX: n(body?.screenX), screenY: n(body?.screenY), at: Date.now() };
+    const info = { width: n(body?.width), height: n(body?.height), dpr: n(body?.dpr) || 1, screenX: n(body?.screenX), screenY: n(body?.screenY), at: Date.now() };
+    const screen = /^[\w-]{1,32}$/.test(String(body?.screen ?? "")) ? String(body.screen) : "main";
+    if (screen === "main") hub.host.bigScreen = info;
+    s.reportScreen(screen, info);
     return json({ ok: true });
   }
 

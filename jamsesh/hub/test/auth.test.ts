@@ -56,3 +56,13 @@ test("tokens survive a restart; only their hashes are stored", () => {
 test("codes differ between hosts", () => {
   expect(codeFor("a".repeat(64), 1)).not.toBe(codeFor("b".repeat(64), 1));
 });
+
+test("an invite code works once, for ten minutes", () => {
+  const a = auth();
+  const { code } = a.invite();
+  expect(code).toMatch(new RegExp(`^[${CODE_ALPHABET}]{8}$`));
+  expect(a.pair({ code, kind: "browser", label: "Remote laptop", ip: "203.0.113.5" }).ok).toBe(true);
+  expect(a.pair({ code, kind: "browser", label: "Someone else", ip: "203.0.113.6" }).ok).toBe(false);
+  const late = a.invite(Date.now() - 11 * 60_000);
+  expect(a.verifyCode(late.code)).toBe(false);
+});

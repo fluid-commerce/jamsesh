@@ -98,7 +98,17 @@ export class Network {
     this.renewTimer ??= setInterval(() => void this.ensureCert(), 24 * 3600_000);
     (this.renewTimer as any).unref?.();
     void this.openRouter();
-    void this.ensureCert();
+    void this.certWithRetry();
+  }
+
+  /** A first certificate often fails while DNS settles: try again after 2, 5, then 15 minutes. */
+  private async certWithRetry(attempt = 0) {
+    await this.ensureCert();
+    const delays = [2, 5, 15];
+    if (this.st.cert?.state !== "ok" && attempt < delays.length) {
+      const t = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000);
+      (t as any).unref?.();
+    }
   }
 
   async stop() {

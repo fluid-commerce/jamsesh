@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { api } from "../shared/hub";
 import { QR } from "../shared/ui";
+import { bare, joinOptions, type Code, type NetInfo } from "./joinOptions";
 
-type Code = { code: string; expiresIn: number; period: number; addresses: { label: string; url: string }[] };
+export { joinOptions, primaryAddress } from "./joinOptions";
 
 /** The live join code: refreshes when it rolls over, with a countdown ring. */
 export function useJoinCode() {
   const [code, setCode] = useState<Code | null>(null);
+  const [net, setNet] = useState<NetInfo | null>(null);
   const [left, setLeft] = useState(1);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
@@ -23,12 +25,17 @@ export function useJoinCode() {
     load();
     return () => (clearTimeout(timer), clearInterval(tick));
   }, []);
-  return { code, left };
-}
-
-export function primaryAddress(code: Code | null) {
-  const list = code?.addresses ?? [];
-  return list.find((a) => a.url.startsWith("https")) ?? list[0] ?? { label: "", url: location.origin };
+  // Whether the public address is confirmed reachable (only the host machine can ask).
+  const hasHttps = !!code?.addresses.some((a) => a.url.startsWith("https"));
+  useEffect(() => {
+    if (!hasHttps) return setNet(null);
+    let stop = false;
+    const poll = () => api<NetInfo>("/net/status").then((n) => !stop && setNet(n)).catch(() => {});
+    poll();
+    const id = setInterval(poll, 20_000);
+    return () => ((stop = true), clearInterval(id));
+  }, [hasHttps]);
+  return { code, left, net };
 }
 
 export function CodeRing({ left, size = 22 }: { left: number; size?: number }) {
@@ -44,30 +51,34 @@ export function CodeRing({ left, size = 22 }: { left: number; size?: number }) {
 
 /** QR, address and the big code: everything someone needs to join. */
 export function JoinCard({ large }: { large?: boolean }) {
-  const { code, left } = useJoinCode();
-  const addr = primaryAddress(code);
-  const host = addr.url.replace(/^https?:\/\//, "");
-  const others = (code?.addresses ?? []).filter((a) => a.url !== addr.url);
+  const { code, left, net } = useJoinCode();
+  const { options, unconfirmed } = joinOptions(code, net);
+  const lead = options[0];
+  const two = options.length > 1;
+  const c = code?.code ?? "····";
   return (
     <div className={`join-card ${large ? "large" : ""}`}>
-      <QR text={`${addr.url}/connect?c=${code?.code ?? ""}`} size={large ? 240 : 180} />
-      <div className="join-address mono">{host}</div>
+      <div className={`join-qrs ${two ? "two" : ""}`}>
+        {options.map((o) => (
+          <div key={o.key} className="join-qr">
+            <QR text={`${o.url}/connect?c=${c}`} size={two ? (large ? 200 : 150) : large ? 240 : 180} />
+            {two && <div className="join-qr-title">{o.title}</div>}
+            <div className="join-address mono">{o.host}</div>
+          </div>
+        ))}
+      </div>
       <div className="join-code" aria-live="polite">
-        <span className="mono">{code?.code ?? "····"}</span>
+        <span className="mono">{c}</span>
         <CodeRing left={left} size={large ? 30 : 24} />
       </div>
       <div className="join-hint">
         Scan, or open the address and type the code.
         <br />
-        For your agent: <span className="mono">join jamsesh at {host}, code {code?.code ?? "…"}</span>
+        For your agent: <span className="mono">join jamsesh at {lead.host}, code {c}</span>
       </div>
-      {others.length > 0 && (
+      {unconfirmed && (
         <div className="join-others">
-          {others.map((o) => (
-            <span key={o.url}>
-              {o.label}: <span className="mono">{o.url.replace(/^https?:\/\//, "")}</span>
-            </span>
-          ))}
+          Remote address <span className="mono">{bare(unconfirmed.url)}</span> isn't confirmed reachable yet, so it isn't offered.
         </div>
       )}
     </div>

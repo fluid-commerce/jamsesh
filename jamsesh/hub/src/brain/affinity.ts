@@ -68,11 +68,16 @@ export function affinity(session: Session, request: string): { agent: Agent; sco
  */
 export function oneAgentPerRepo(session: Session, targets: string[], request: string): { kept: string[]; dropped: Agent[] } {
   const ranked = new Map(affinity(session, request).map((r) => [r.agent.id, r.score]));
+  const lower = request.toLowerCase();
+  const word = (w: string) => w.length > 1 && new RegExp(`\\b${w.replace(/[^a-z0-9]/g, "")}\\b`).test(lower);
   const byRepo = new Map<string, Agent[]>();
   for (const id of targets) {
     const a = session.agent(id);
     if (!a) continue;
-    const key = repoKey(a.repo);
+    // Someone asked for this agent by name (or its person's): it keeps the work. An unknown
+    // repository isn't a shared one.
+    const named = word(a.name.toLowerCase().split(/[\s']/)[0]) || word(a.ownerName.toLowerCase().split(/\s+/)[0]);
+    const key = named || !repoKey(a.repo) ? `agent:${a.id}` : repoKey(a.repo);
     byRepo.set(key, [...(byRepo.get(key) ?? []), a]);
   }
   const kept: string[] = [];

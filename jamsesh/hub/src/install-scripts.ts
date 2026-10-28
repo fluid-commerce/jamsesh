@@ -5,25 +5,54 @@ import type { Hub } from "./hub";
 export function hookScript(hub: Hub) {
   void hub;
   return `#!/usr/bin/env bash
-# JamSesh hook for Claude Code: hook.sh prompt|stop, with the hook's JSON on stdin.
-# Sends your prompts into the room's context and picks up directives the room sends you.
+# JamSesh hook for Claude Code: hook.sh prompt|stop|start, with the hook's JSON on stdin.
+# Sends your prompts into the room's context, picks up directives the room sends you, and
+# at the start of a session reminds the agent to join the room.
 # Does nothing unless this machine is connected (jamsesh-client on).
 cfg="\${JAMSESH_CLIENT_ENV:-$HOME/.jamsesh/client.env}"
 [ -f "$cfg" ] || exit 0
 . "$cfg"
 [ "\${JAMSESH_ACTIVE:-0}" = "1" ] || exit 0
 body="$(cat)"
-if ! printf '%s' "$body" | curl -fs --max-time 3 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" \\
-  --data-binary @- "$JAMSESH_HUB/api/hooks/$1" 2>/dev/null; then
-  # The host is unreachable: keep prompts so they reach the room when it's back.
-  [ "$1" = "prompt" ] && printf '%s\\n' "$body" | tr -d '\\n' >> "\${JAMSESH_OUTBOX:-$HOME/.jamsesh/outbox.jsonl}" && echo >> "\${JAMSESH_OUTBOX:-$HOME/.jamsesh/outbox.jsonl}"
+dir="\${JAMSESH_DIR:-$HOME/.jamsesh}"
+outbox="\${JAMSESH_OUTBOX:-$dir/outbox.jsonl}"
+down="$dir/hub-down"
+now="$(date +%s)"
+
+if [ "$1" = "start" ]; then
+  # Only a live room gets the reminder, and the skill is refreshed from the host while we're here.
+  curl -fs --max-time 2 "$JAMSESH_HUB/healthz" >/dev/null 2>&1 || exit 0
+  skill="$HOME/.claude/skills/jamsesh/SKILL.md"
+  if [ -d "$(dirname "$skill")" ] && curl -fs --max-time 3 -H "authorization: Bearer $JAMSESH_TOKEN" "$JAMSESH_HUB/skill.md" -o "$skill.new" 2>/dev/null; then
+    mv -f "$skill.new" "$skill"
+  fi
+  printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"JamSesh: this computer is connected to a live room session. Before you start work in a repository, join it: load the jamsesh skill, then call jam_join (harness claude-code, this directory), post your jam_repo_card, and jam_claim your workstream. If you already joined in this conversation, carry on. When you have nothing to do, keep calling jam_wait so the room can reach you."}}'
   exit 0
 fi
-# Back in touch: send anything queued while the host was away.
-outbox="\${JAMSESH_OUTBOX:-$HOME/.jamsesh/outbox.jsonl}"
+
+# The host was unreachable a moment ago: don't make every prompt wait for it again.
+queue() {
+  [ "$1" = "prompt" ] || return 0
+  printf '%s\\t%s\\n' "$now" "$(printf '%s' "$body" | tr -d '\\n')" >> "$outbox"
+  # Keep the newest 50 only.
+  if [ "$(wc -l < "$outbox")" -gt 50 ]; then tail -n 50 "$outbox" > "$outbox.tmp" && mv -f "$outbox.tmp" "$outbox"; fi
+}
+if [ -f "$down" ] && [ $((now - $(cat "$down" 2>/dev/null || echo 0))) -lt 45 ]; then queue "$1"; exit 0; fi
+
+if ! printf '%s' "$body" | curl -fs --max-time 2 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" \\
+  --data-binary @- "$JAMSESH_HUB/api/hooks/$1" 2>/dev/null; then
+  # The host is unreachable: keep prompts so they reach the room when it's back.
+  printf '%s' "$now" > "$down"
+  queue "$1"
+  exit 0
+fi
+rm -f "$down"
+# Back in touch: send what was queued while the host was away, if it's still fresh. A prompt from
+# hours ago would only confuse the room, so anything older than ten minutes is dropped.
 if [ -s "$outbox" ]; then
-  while IFS= read -r line; do
-    [ -n "$line" ] && printf '%s' "$line" | curl -fs --max-time 3 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" --data-binary @- "$JAMSESH_HUB/api/hooks/prompt" >/dev/null 2>&1
+  while IFS=$'\\t' read -r ts line; do
+    case "$ts" in ''|*[!0-9]*) continue ;; esac
+    [ $((now - ts)) -le 600 ] && [ -n "$line" ] && printf '%s' "$line" | curl -fs --max-time 2 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" --data-binary @- "$JAMSESH_HUB/api/hooks/prompt" >/dev/null 2>&1
   done < "$outbox"
   : > "$outbox"
 fi
@@ -55,8 +84,8 @@ files outside your home folder.
 ## Set yourself up (one time per computer)
 
 Run this one command. It configures Claude Code and Codex on this computer: the \`jamsesh\` MCP
-server, the JamSesh skill, a \`/jamsesh\` command, and two Claude Code hooks (prompts go to the room,
-directives from the room reach you). Replace <NAME> with your person's first name; ask them if you
+server, the JamSesh skill, a \`/jamsesh\` command, and Claude Code hooks (prompts go to the room,
+directives from the room reach you, and each new session is reminded to join). Replace <NAME> with your person's first name; ask them if you
 don't know it.
 
 \`\`\`bash
@@ -131,7 +160,7 @@ try:
 except Exception:
     data = {}
 hooks = data.setdefault("hooks", {})
-for event, arg in (("UserPromptSubmit", "prompt"), ("Stop", "stop")):
+for event, arg in (("SessionStart", "start"), ("UserPromptSubmit", "prompt"), ("Stop", "stop")):
     entries = [e for e in hooks.get(event, []) if "jamsesh" not in json.dumps(e)]
     entries.append({"hooks": [{"type": "command", "command": f"{hook} {arg}", "timeout": 5}]})
     hooks[event] = entries
@@ -155,6 +184,8 @@ text += f'\\n[mcp_servers.jamsesh]\\nurl = "{hub}/mcp"\\ntool_timeout_sec = 600\
 open(path, "w").write(text)
 os.chmod(path, 0o600)
 PY
+  mkdir -p "$HOME/.codex/skills/jamsesh"
+  curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/skills/jamsesh/SKILL.md" || true
   curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
   printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
   # "connect to jamsesh" in any Codex session: a marked block in Codex's global instructions.
@@ -172,11 +203,17 @@ When your person says "connect to jamsesh", "join jamsesh", or "join the session
 ~/.codex/prompts/jamsesh.md and follow it: it connects you to the room session through the
 \`jamsesh\` MCP tools. If those tools fail to connect, tell your person to open the JamSesh app and
 host or join a session.
+
+When the \`jamsesh\` tools are available and you start work in a repository, join the session first
+(jam_join, jam_repo_card, jam_claim) unless you already did in this conversation. Codex has no hooks
+here, so you are the room's only link to your person: post a one-line jam_update (progress) when
+your person gives you a new task, check jam_inbox between steps, and when you are idle keep
+calling jam_wait instead of ending your turn.
 <!-- jamsesh:end -->"""
 text = re.sub(r"\\n*<!-- jamsesh:start -->.*?<!-- jamsesh:end -->\\n*", "\\n", text, flags=re.S).rstrip()
 open(path, "w").write((text + "\\n\\n" if text else "") + block + "\\n")
 PY
-  ok "Codex: MCP server and /jamsesh prompt"
+  ok "Codex: MCP server, skill, /jamsesh prompt and join instructions (Codex has no hooks here)"
 else
   skip "Codex isn't installed"
 fi

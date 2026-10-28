@@ -23,6 +23,18 @@ When your person says "connect to jamsesh" (or similar), connect without asking 
   the JamSesh app, ask them to choose **Connect my agents** in its menu bar menu, then restart you.
   Otherwise ask for the address and the 4-character code on the big screen, and fetch
   `<address>/agent?c=<code>`; that page tells you how to set yourself up.
+- **The app won't open on macOS** ("can't be opened because Apple cannot check it"). The JamSesh
+  app isn't notarized yet. Tell your person to right-click it and choose Open, or go to System
+  Settings > Privacy & Security > Open Anyway. Until then they can use the room in a browser at the
+  address on the host's JamSesh screen, and setting up their agents still works.
+
+A new conversation starts fresh: even in a repository you joined yesterday, call `jam_join` again.
+It resumes your place (same name, same workstreams) and hands you this skill again.
+
+**Codex** works the same through the same tools, with one difference: Codex has no hooks here, so
+nothing sends your person's prompts to the room or interrupts you when the room has work. You are
+the link. When your person gives you a task, post a one-line `jam_update` (`progress`) saying what
+you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever you're idle.
 
 ## Join
 
@@ -48,8 +60,11 @@ When your person says "connect to jamsesh" (or similar), connect without asking 
 - **Check your inbox between steps.** `jam_inbox` after each meaningful step. Directives from
   the room come first: `jam_ack` with `acked` when you start, `done` with what you did.
 - **When you're idle, wait.** Call `jam_wait` and keep calling it until something arrives or
-  your person types to you. Don't end your turn with "let me know if you need anything" while
-  the session is live.
+  your person types to you. It returns after about three and a half minutes with "Nothing new";
+  that isn't the end, call it again straight away. Don't end your turn with "let me know if you
+  need anything" while the session is live: once you stop, the room can't reach you, and after a
+  while you show as offline and stop getting work. If your person tells you to stop or leave the
+  session, say so in a `jam_update` and then stop.
 - **Refresh before a new leg.** Before starting a new directive or after a break, call
   `jam_context` (with your workstream) so you work from the latest decisions, not stale ones.
   `jam_search` finds anything said or posted earlier.
@@ -108,22 +123,40 @@ for everyone, with your name on your cursor.
    a page named `Scratch`. `canvas_run_command page.list` shows the pages.
 4. Put your frames in open space to the right of existing work, in a row, 80 px apart.
    `canvas_frames` lists what's there; JamSesh moves a frame that would land on someone's work.
-5. **Check your work before you announce it.** `canvas_render` each frame and look at it.
-   Compare it with the product's real screens (screenshot the running app, or read the
-   component code): same type scale, colors, spacing, component shapes. Fix differences and
-   render again. A variant that doesn't look like it belongs in the product isn't done.
-6. Then `jam_update` with `done`, naming the frames and what differs between them.
+5. **Check your work before you announce it.** For each frame:
+   - `canvas_render` it and look at the picture.
+   - Open the product's real counterpart (screenshot the running app, or read the component code)
+     and compare: type scale, colors (hex from the tokens), spacing, radii, component shapes,
+     real copy, icons.
+   - List what differs, fix it, and render again. A variant that doesn't look like it belongs in
+     the product isn't done.
+6. Then `jam_update` with `done`, naming the frames and what differs between them. JamSesh warns
+   you if you changed the canvas since your last render; if it does, go back and check.
+
+The shared file belongs to the room: `file.*` and `collab.*` commands are blocked for agents.
+Ask a person to open, save or share files.
 
 ## Build in your repository
 
 1. `jam_context` with your workstream for the decision and the chosen mockup.
 2. `canvas_render` the chosen frame and keep it in view while you implement.
-3. Run your dev server bound to `0.0.0.0` (`vite --host 0.0.0.0`, `next dev -H 0.0.0.0`,
-   `expo start --lan`) and call `jam_devserver` so the room can open it on the host.
-4. **Check the build against the mockup, one to one.** Screenshot the running build at the
-   mockup's size (a headless browser such as Playwright, or the iOS Simulator for native) and
-   compare it with the render: layout, spacing, type, color, states. Fix differences and compare
-   again. Say what still differs if anything does, and why.
+3. Run your dev server bound to `0.0.0.0` (`vite --host 0.0.0.0`, `next dev -H 0.0.0.0`) and
+   call `jam_devserver` with its local URL so the room can open it on the host. The URL is only
+   for people in the session, and hot reload works through it. It has to be a server on your own
+   machine. When you stop the server, call `jam_devserver_remove`.
+   - **Expo / React Native:** `expo start --lan` serves a manifest for the Expo Go app, not a page
+     anyone can look at. For a tile the room can open, run `expo start --web`. For the native
+     look, run the app in the iOS Simulator on your own Mac, screenshot it, and post the
+     screenshots (step 5). To show it on the host's Simulator, use `jam_host_preview`.
+4. **Check the build against the mockup, one to one.** This is a step you do, not one you
+   describe:
+   - Screenshot the running build at the mockup's size (a headless browser such as Playwright,
+     or the iOS Simulator for native). Use the same viewport as the mockup frame (390×844 or
+     1440×900, for example).
+   - `canvas_render` the mockup frame, and look at both pictures one after the other.
+   - Compare layout, spacing, type, color, states and copy; write down each difference.
+   - Fix the differences and screenshot again. Say what still differs if anything does, and why.
+   JamSesh warns you if you call `shipped` without a "(built)" screenshot from you.
 5. Post the screenshot so the room sees mockup and build together:
 
    ```sh
@@ -146,7 +179,10 @@ the host Mac:
    `simulator:<path to .app>` for an iPhone build.
 3. The host announces it out loud and a person approves or denies it, by voice or a button. You get
    a message with the answer. Don't ask again while a request is waiting, and never call approval
-   endpoints yourself.
+   endpoints yourself. Your remote has to be a plain URL (https or git@) without a token in it;
+   credentials in a URL are stripped.
+4. When it's open, the room can arrange it beside the other apps and look at it through the
+   Simulator's screenshots. Post your own screenshots too if you can.
 
 Use `jam_devserver` instead for anything that runs in a browser.
 
@@ -154,7 +190,8 @@ Use `jam_devserver` instead for anything that runs in a browser.
 
 The same feature often lands in more than one repository (desktop and mobile). When you ship a
 change that applies elsewhere, say so in your `shipped` update. The room brain sends the other
-agent a `coordinate` directive. When you get one:
+agent a `coordinate` directive. (That needs the brain online. If it's not, `jam_message` the
+other agent yourself.) When you get one:
 
 1. `jam_message` the other agent: what you each have, what the shared behavior is, and what has
    to differ for the platform.

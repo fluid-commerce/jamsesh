@@ -5,7 +5,8 @@ import { useEffect, useState, type ReactNode } from "react";
 export type Layout = "desktop" | "phone" | "landscape";
 
 const Q_LANDSCAPE = "(orientation: landscape) and (max-height: 520px) and (pointer: coarse)";
-const Q_PORTRAIT = "(max-width: 720px)";
+// Phones, and touch tablets held upright: an editable canvas beside a 380px panel doesn't fit either.
+const Q_PORTRAIT = "(max-width: 720px), (pointer: coarse) and (orientation: portrait) and (max-width: 1100px)";
 
 function read(): Layout {
   if (typeof matchMedia === "undefined") return "desktop";

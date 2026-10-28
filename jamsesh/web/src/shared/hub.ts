@@ -346,7 +346,7 @@ export function useHub() {
 }
 
 /** Calls that must never wait in the outbox: they only make sense live. */
-const NEVER_QUEUE = /^\/(audio|pair|hooks\/|shares\/request|debug\/)/;
+const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|shares\/request|debug\/)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {
@@ -418,7 +418,7 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
   if (!res.ok) {
     // A proxy answering 502/503/504 while the hub restarts is a connection problem.
     if (queueable && [502, 503, 504].includes(res.status)) return save();
-    throw new Error(json.error ?? `HTTP ${res.status}`);
+    throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), { status: res.status });
   }
   return json as T;
 }

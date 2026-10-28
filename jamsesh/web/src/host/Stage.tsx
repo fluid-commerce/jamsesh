@@ -11,7 +11,7 @@ const TilePins = createContext(true);
 function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
-import { CodeRing, JoinCard, primaryAddress, useJoinCode } from "./JoinCard";
+import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
@@ -19,7 +19,7 @@ export function Stage({ state, interactive, tilePins = true }: { state: HubState
   const stage = state.stage;
   const byId = useMemo(() => new Map(state.artifacts.map((a) => [a.id, a])), [state.artifacts]);
   const pick = (ids: string[]) => ids.map((id) => byId.get(id)).filter(Boolean) as Artifact[];
-  const spotlight = (a: Artifact) => interactive && api("/stage", { mode: "spotlight", items: [a.id], title: a.title, by: "Someone in the room" });
+  const spotlight = (a: Artifact) => interactive && api("/stage", { mode: "spotlight", items: [a.id], title: a.title, pinned: false, by: "Someone in the room" });
 
   let body: ReactElement;
   switch (stage.mode) {
@@ -42,11 +42,7 @@ export function Stage({ state, interactive, tilePins = true }: { state: HubState
       body = <Agents state={state} />;
       break;
     case "canvas":
-      body = (
-        <div className="tile" style={{ height: "100%", animation: "none" }}>
-          <CanvasFrame kind="view" name="Big screen" title="Live canvas" />
-        </div>
-      );
+      body = <TileView tile={{ kind: "canvas" }} state={state} />;
       break;
     case "custom":
       body = <Custom state={state} />;
@@ -250,9 +246,11 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
     case "web": {
       const dev = state.devservers.find((d) => d.url === tile.url);
       const mobile = dev?.platform === "mobile" || /mobile|expo|ios|android/i.test(tile.label ?? "");
+      const label = tile.label ?? dev?.name ?? hostOf(tile.url);
+      const target = { kind: "web", ref: tile.url, label };
       return (
-        <TileFrame label={tile.label ?? dev?.name ?? hostOf(tile.url)} kind="web" sub={tile.url} target={{ kind: "web", ref: tile.url, label: tile.label ?? dev?.name ?? hostOf(tile.url) }}>
-          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} detectBlocked={!dev} />
+        <TileFrame label={label} kind="web" sub={tile.url} target={target} ownPins>
+          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} detectBlocked={!dev} pin={target} />
         </TileFrame>
       );
     }
@@ -295,17 +293,31 @@ function hostOf(url: string) {
   }
 }
 
-function TileFrame({ label, sub, kind, children, target }: { label: string; sub?: string; kind: string; children: ReactNode; target?: SlotTarget }) {
+const KIND_LABEL: Record<string, string> = { web: "Browser", screen: "Live share", canvas: "Canvas", agent: "Agent", feed: "Room", html: "Custom view", artifact: "Artifact" };
+const shortHost = (u: string) => {
+  try {
+    return new URL(u).host.replace(/^www\./, "");
+  } catch {
+    return u;
+  }
+};
+
+/** `ownPins`: the content lays its own pin layer (on the picture itself) instead of one over the whole media box. */
+function TileFrame({ label, sub, kind, children, target, ownPins }: { label: string; sub?: string; kind: string; children: ReactNode; target?: SlotTarget; ownPins?: boolean }) {
   return (
     <div className="tile" data-jam-target={target ? JSON.stringify(target) : undefined} style={{ animation: "none" }}>
       <div className="media" style={{ padding: 0 }}>
         {children}
-        {target && <Slot target={target} />}
+        {target && !ownPins && <Slot target={target} />}
       </div>
       <div className="meta">
-        <span className="badge neutral">{kind === "web" ? "Browser" : kind === "screen" ? "Live share" : kind === "canvas" ? "Canvas" : kind}</span>
+        {/* The same footer as an artifact tile: dot, title, then what it is. */}
+        <span className="dot" style={{ background: kind === "screen" ? "var(--built)" : "var(--faint)" }} />
         <span className="title">{label}</span>
-        {sub && <span className="chip mono" style={{ color: "var(--dim)", fontSize: 12 }}>{sub}</span>}
+        <span className="chip">
+          {KIND_LABEL[kind] ?? kind}
+          {sub ? ` · ${shortHost(sub)}` : ""}
+        </span>
       </div>
     </div>
   );
@@ -385,15 +397,23 @@ function slim(state: HubState) {
 
 /** Everything someone needs to get on, readable from the back of the room. */
 function JoinStage({ state }: { state: HubState }) {
-  const { code, left } = useJoinCode();
-  const addr = primaryAddress(code);
-  const host = addr.url.replace(/^https?:\/\//, "");
+  const { code, left, net } = useJoinCode();
+  const { options } = joinOptions(code, net);
+  const two = options.length > 1;
+  const lead = options[0];
+  const host = lead.host;
   const c = code?.code ?? "····";
+  const plainHttp = options.every((o) => o.url.startsWith("http:"));
   return (
     <div className="join-stage">
-      <div className="join-stage-qr">
-        <QR text={`${addr.url}/connect?c=${code?.code ?? ""}`} size={520} />
-        <div className="join-stage-scan">Point your phone's camera here</div>
+      <div className={`join-stage-qrs ${two ? "two" : ""}`}>
+        {options.map((o) => (
+          <div key={o.key} className="join-stage-qr">
+            <QR text={`${o.url}/connect?c=${c}`} size={520} />
+            {two && <div className="join-stage-which">{o.title}</div>}
+            <div className="join-stage-scan">{two ? <span className="mono">{o.host}</span> : "Scan with a phone camera"}</div>
+          </div>
+        ))}
       </div>
       <div className="join-stage-info">
         <div className="label">{state.settings.sessionName}</div>
@@ -401,11 +421,14 @@ function JoinStage({ state }: { state: HubState }) {
           <span className="mono">{c}</span>
           <CodeRing left={left} size={56} />
         </div>
-        <div className="join-stage-addr mono">{host}</div>
+        {!two && <div className="join-stage-addr mono">{host}</div>}
         <ol className="join-stage-steps">
           <li>
             <b>Phone</b>
-            <span>Open the Camera, point it at the QR code, and tap the link. You're in.</span>
+            <span>
+              {two ? "In the room, scan the left code. Joining from elsewhere, or want your phone's mic on? Scan the right one." : "Scan the code with the Camera app and tap the link."}
+              {plainHttp && " Phone browsers only allow the mic over https, so use the Mac app or a secure address for voice."}
+            </span>
           </li>
           <li>
             <b>Laptop</b>

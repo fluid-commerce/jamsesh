@@ -43,7 +43,9 @@ export function speechDecision(opts: {
 
 /** "Talk less", "don't talk unless asked", "stay quiet" and the like, saved as room notes. */
 export function quietRoom(notes: string[]) {
-  return notes.some((n) => /\b(quiet|silent|don'?t (talk|speak)|stop (talking|speaking)|less talk|talk less|no voice|unless (someone|we|i) ask)/i.test(n));
+  return notes.some((n) =>
+    /\b(quiet|silent|shush|hush|mute|don'?t (talk|speak)|do not (talk|speak)|stop (talking|speaking)|less talk|talk(ing)? less|speak(ing)? less|no voice|unless (someone|we|i|anyone|people|they|you'?re|you are) (ask|spoken|talk|address)|only (talk|speak|respond|reply|answer|say anything|chime in|jump in)\b[^.]{0,40}\b(ask|spoken to|addressed|talk to|call on|prompt|need)|(talk|speak|respond|reply) only (when|if)|when (someone|we|i|anyone|people) (ask|ask you|talk to you|address))/i.test(n),
+  );
 }
 
 /** Keeps spoken replies to two sentences. */

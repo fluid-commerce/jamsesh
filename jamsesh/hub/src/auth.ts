@@ -20,6 +20,8 @@ export interface PairedDevice {
   lastSeen: number;
   ip: string;
   revoked: boolean;
+  /** For a Mac's agents' credential: the person's window it was issued from. */
+  ownerDeviceId?: string;
 }
 
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -41,7 +43,7 @@ export function normalizeCode(input: string) {
   return input.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
-type Attempts = { n: number; until: number };
+type Attempts = { n: number; until: number; last?: number };
 
 export class Auth {
   private secret: string;
@@ -71,9 +73,27 @@ export class Auth {
     return { code: codeFor(this.secret, window), expiresIn: CODE_PERIOD_MS - (now % CODE_PERIOD_MS), period: CODE_PERIOD_MS };
   }
 
-  /** The current code, or the one before it (people read it off the screen). */
+  /** Invite links: an 8-character code, good once, for ten minutes (for people not in the room). */
+  private invites = new Map<string, number>();
+
+  invite(now = Date.now()) {
+    for (const [c, until] of this.invites) if (until < now) this.invites.delete(c);
+    let code = "";
+    const bytes = randomBytes(8);
+    for (const b of bytes) code += CODE_ALPHABET[b % CODE_ALPHABET.length];
+    const expiresAt = now + 10 * 60_000;
+    this.invites.set(code, expiresAt);
+    return { code, expiresAt };
+  }
+
+  /** The current code, or the one before it (people read it off the screen), or an unused invite. */
   verifyCode(input: string, now = Date.now()) {
     const want = normalizeCode(input);
+    const invite = this.invites.get(want);
+    if (invite) {
+      this.invites.delete(want);
+      return invite > now;
+    }
     if (want.length !== 4) return false;
     const w = Math.floor(now / CODE_PERIOD_MS);
     return [w, w - 1].some((x) => safeEqual(normalizeCode(codeFor(this.secret, x)), want));
@@ -93,9 +113,13 @@ export class Auth {
     const why = this.blocked(opts.ip, now);
     if (why) return { ok: false, error: why };
     if (!this.verifyCode(opts.code, now)) {
-      const a = this.perIp.get(opts.ip) ?? { n: 0, until: 0 };
+      // Eight wrong codes within a minute from one address (an office shares one) pauses it for two
+      // minutes: plenty against guessing a code that changes every 30 seconds.
+      const a = this.perIp.get(opts.ip) ?? { n: 0, until: 0, last: 0 };
+      if (now - (a.last ?? 0) > 60_000) a.n = 0;
       a.n++;
-      if (a.n >= 8) ((a.until = now + 5 * 60_000), (a.n = 0));
+      a.last = now;
+      if (a.n >= 8) ((a.until = now + 2 * 60_000), (a.n = 0));
       this.perIp.set(opts.ip, a);
       this.globalFails.push(now);
       return { ok: false, error: "That code didn't match. Codes change every 30 seconds; use the one on the screen now." };
@@ -119,6 +143,16 @@ export class Auth {
     return { ok: true, token, device };
   }
 
+  /** A token without a code, for a device that's already trusted (the Mac app's agents credential). */
+  issue(opts: { kind: PairedDevice["kind"]; label: string; ip: string; personId?: string | null; ownerDeviceId?: string }): { token: string; device: PairedDevice } {
+    const now = Date.now();
+    const token = `jst_${randomBytes(32).toString("base64url")}`;
+    const device: PairedDevice = { id: `dev_${randomBytes(6).toString("hex")}`, kind: opts.kind, label: opts.label.slice(0, 80), tokenHash: hash(token), personId: opts.personId ?? null, createdAt: now, lastSeen: now, ip: opts.ip, revoked: false, ownerDeviceId: opts.ownerDeviceId };
+    this.index(device);
+    this.persist();
+    return { token, device };
+  }
+
   /** The device a token belongs to, or null (unknown or revoked). */
   check(token: string | null | undefined, ip?: string): PairedDevice | null {
     if (!token) return null;
@@ -135,14 +169,25 @@ export class Auth {
     const d = this.devices.get(id);
     if (!d) return null;
     Object.assign(d, fields);
+    // The person's agents on that Mac work for the same person.
+    if (fields.personId !== undefined) for (const a of this.devices.values()) if (a.ownerDeviceId === id) a.personId = fields.personId;
     this.persist();
     return d;
+  }
+
+  /** Whose agents these are, for the credentials issued from one window ("host" for the host's own). */
+  setOwnerPerson(ownerDeviceId: string, personId: string) {
+    let changed = false;
+    for (const a of this.devices.values()) if (a.ownerDeviceId === ownerDeviceId && a.personId !== personId) (a.personId = personId), (changed = true);
+    if (changed) this.persist();
   }
 
   revoke(id: string) {
     const d = this.devices.get(id);
     if (!d) return false;
     d.revoked = true;
+    // Disconnecting a Mac's window disconnects its agents too.
+    for (const a of this.devices.values()) if (a.ownerDeviceId === id && !a.revoked) (a.revoked = true), bus.send({ type: "revoked", deviceId: a.id } as any);
     this.persist();
     bus.send({ type: "revoked", deviceId: id } as any);
     return true;

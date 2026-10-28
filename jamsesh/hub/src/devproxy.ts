@@ -1,19 +1,34 @@
-// Dev servers on the host. An agent's dev server runs on its own machine; the hub
-// opens a port here that forwards raw TCP to it, so HTTP, WebSockets and hot
-// reload work unchanged, and everyone opens it at the host's address.
-import type { Socket, TCPSocketListener } from "bun";
+// Dev servers on the host. An agent's dev server runs on its own machine; the hub opens a
+// port here that forwards HTTP and WebSockets (so hot reload works) to it, and everyone
+// opens it at the host's address. The ports are on the room's network, so each request
+// has to come from the host itself or carry a paired device's token (the cookie a paired
+// browser already holds, which browsers send to every port of the same address, or a
+// bearer header such as the Mac app's relay adds).
+import { createHash } from "node:crypto";
+import type { Server, ServerWebSocket } from "bun";
 import { config } from "./config";
 import { newId } from "./store";
 import type { Session } from "./session";
 import type { DevServer, Platform } from "./types";
 
-interface Pipe {
-  peer: Socket<any> | null;
-  queue: Uint8Array[];
+/** How long a dev server may stay unreachable before it's taken off the board. */
+export const DEV_GONE_MS = 30 * 60_000;
+/** Most dev servers one agent can keep on the host. */
+export const MAX_PER_AGENT = 6;
+
+interface WsData {
+  path: string;
+  protocols: string[];
+  up?: WebSocket;
+  queue: (string | Uint8Array)[];
 }
 
+const HOP = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length"];
+
 export class DevProxy {
-  private listeners = new Map<string, TCPSocketListener<any>>();
+  private listeners = new Map<string, Server<WsData>>();
+  private downSince = new Map<string, number>();
+  private tokenCache: { at: number; hashes: Set<string> } = { at: 0, hashes: new Set() };
 
   constructor(private session: Session) {}
 
@@ -24,6 +39,8 @@ export class DevProxy {
   async register(opts: { agentId: string; name: string; target: string; platform?: Platform | null }): Promise<DevServer> {
     const target = normalizeTarget(opts.target);
     const existing = this.session.devservers().find((d) => d.agentId === opts.agentId && (d.name === opts.name || d.target === target));
+    if (!existing && this.session.devservers().filter((d) => d.agentId === opts.agentId).length >= MAX_PER_AGENT)
+      throw new Error(`You already have ${MAX_PER_AGENT} dev servers on the host. Remove one with jam_devserver_remove first.`);
     const used = new Set(this.session.devservers().map((d) => d.hostPort));
     if (existing) this.close(existing.id);
     let hostPort = existing?.hostPort ?? config.devPortStart;
@@ -41,10 +58,11 @@ export class DevProxy {
     };
     await this.listen(d);
     const up = await this.check(d);
+    this.downSince.delete(d.id);
     this.session.store.put("devservers", { ...d, up });
     const agent = this.session.agent(opts.agentId);
     this.session.upsertArtifact({
-      id: this.session.artifacts().find((a) => a.kind === "devserver" && a.url === d.url)?.id,
+      id: this.artifactOf(d)?.id,
       kind: "devserver",
       stage: "built",
       title: opts.name,
@@ -57,65 +75,96 @@ export class DevProxy {
     return { ...d, up };
   }
 
+  private artifactOf(d: DevServer) {
+    return this.session.artifacts().find((a) => a.kind === "devserver" && a.url === d.url);
+  }
+
+  /** Whether a request may use a dev port: from the host itself, or from a paired device. */
+  allowed(req: Request, ip: string): boolean {
+    if (isLoopback(ip)) return true;
+    const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookieValue(req.headers.get("cookie"), "jam_token");
+    if (!token) return false;
+    const now = Date.now();
+    if (now - this.tokenCache.at > 3000) {
+      const devices = this.session.store.setting<{ tokenHash: string; revoked: boolean }[]>("pairedDevices", []);
+      this.tokenCache = { at: now, hashes: new Set(devices.filter((x) => !x.revoked).map((x) => x.tokenHash)) };
+    }
+    return this.tokenCache.hashes.has(createHash("sha256").update(token).digest("hex"));
+  }
+
   private async listen(d: DevServer) {
-    const [host, portStr] = d.target.split(":");
-    const port = Number(portStr);
-    const listener = Bun.listen<Pipe>({
+    const proxy = this;
+    const target = d.target;
+    const server = Bun.serve<WsData, never>({
       hostname: "0.0.0.0",
       port: d.hostPort,
-      socket: {
-        open(client) {
-          client.data = { peer: null, queue: [] };
-          Bun.connect<Pipe>({
-            hostname: host,
-            port,
-            socket: {
-              open(upstream) {
-                upstream.data = { peer: client, queue: [] };
-                client.data.peer = upstream;
-                for (const chunk of client.data.queue) upstream.write(chunk);
-                client.data.queue = [];
-              },
-              data(upstream, chunk) {
-                upstream.data.peer?.write(chunk);
-              },
-              close(upstream) {
-                upstream.data.peer?.end();
-              },
-              error(upstream) {
-                upstream.data.peer?.end();
-              },
-            },
-          }).catch(() => client.end());
+      idleTimeout: 120,
+      async fetch(req, srv) {
+        const ip = srv.requestIP(req)?.address ?? "";
+        if (!proxy.allowed(req, ip)) return denied(req);
+        const url = new URL(req.url);
+        const path = `${url.pathname}${url.search}`;
+        if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+          const headers = protocols.length ? { "sec-websocket-protocol": protocols[0] } : undefined;
+          if (srv.upgrade(req, { data: { path, protocols, queue: [] }, headers })) return undefined;
+          return new Response("expected a WebSocket", { status: 400 });
+        }
+        return forward(req, target, path);
+      },
+      websocket: {
+        open(ws: ServerWebSocket<WsData>) {
+          const up = new WebSocket(`ws://${target}${ws.data.path}`, { protocols: ws.data.protocols.slice(0, 1), headers: { origin: `http://${target}` } } as any);
+          up.binaryType = "arraybuffer";
+          ws.data.up = up;
+          up.onopen = () => {
+            for (const m of ws.data.queue) up.send(m as any);
+            ws.data.queue = [];
+          };
+          up.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer));
+          up.onclose = () => ws.close();
+          up.onerror = () => ws.close();
         },
-        data(client, chunk) {
-          if (client.data.peer) client.data.peer.write(chunk);
-          else client.data.queue.push(new Uint8Array(chunk));
+        message(ws, m) {
+          const up = ws.data.up;
+          const out = typeof m === "string" ? m : new Uint8Array(m);
+          if (up?.readyState === WebSocket.OPEN) up.send(out as any);
+          else ws.data.queue.push(out);
         },
-        close(client) {
-          client.data.peer?.end();
-        },
-        error(client) {
-          client.data.peer?.end();
+        close(ws) {
+          try {
+            ws.data.up?.close();
+          } catch {}
         },
       },
     });
-    this.listeners.set(d.id, listener);
+    this.listeners.set(d.id, server);
   }
 
+  /** Whether the dev server itself answers (asked directly, not through the forwarder). */
   async check(d: DevServer): Promise<boolean> {
     try {
-      const r = await fetch(`http://127.0.0.1:${d.hostPort}/`, { signal: AbortSignal.timeout(3000), redirect: "manual" });
+      const r = await fetch(`http://${d.target}/`, { signal: AbortSignal.timeout(3000), redirect: "manual", headers: { "accept-encoding": "identity" } });
+      void r.body?.cancel();
       return r.status > 0;
     } catch {
       return false;
     }
   }
 
+  /** Re-checks every dev server; ones that stay unreachable for a long while are taken down. */
   async refresh() {
+    const now = Date.now();
     for (const d of this.session.devservers()) {
       const up = await this.check(d);
       if (up !== d.up) this.session.store.patch("devservers", d.id, { up });
+      if (up) {
+        this.downSince.delete(d.id);
+        continue;
+      }
+      const since = this.downSince.get(d.id) ?? now;
+      this.downSince.set(d.id, since);
+      if (now - since > DEV_GONE_MS) this.remove(d.id);
     }
   }
 
@@ -124,14 +173,66 @@ export class DevProxy {
     this.listeners.delete(id);
   }
 
+  /** Takes a dev server off the host: its port closes and its tile goes away. */
   remove(id: string) {
+    const d = this.session.devservers().find((x) => x.id === id);
     this.close(id);
+    this.downSince.delete(id);
     this.session.store.remove("devservers", id);
+    const art = d && this.artifactOf(d);
+    if (art) this.session.store.remove("artifacts", art.id);
   }
 
   stop() {
     for (const id of [...this.listeners.keys()]) this.close(id);
   }
+}
+
+/** Passes a request to the dev server and its answer back, without the room's credentials. */
+async function forward(req: Request, target: string, path: string): Promise<Response> {
+  const headers = new Headers(req.headers);
+  for (const h of HOP) headers.delete(h);
+  headers.set("host", target);
+  headers.set("accept-encoding", "identity");
+  const auth = headers.get("authorization");
+  if (auth && /^Bearer\s+jst_/i.test(auth)) headers.delete("authorization");
+  const cookie = headers.get("cookie");
+  if (cookie) {
+    const kept = cookie.split(/;\s*/).filter((c) => !c.startsWith("jam_token="));
+    if (kept.length) headers.set("cookie", kept.join("; "));
+    else headers.delete("cookie");
+  }
+  const origin = headers.get("origin");
+  if (origin) headers.set("origin", `http://${target}`);
+  try {
+    const r = await fetch(`http://${target}${path}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual" } as RequestInit);
+    const out = new Headers(r.headers);
+    for (const h of HOP) out.delete(h);
+    out.delete("content-encoding");
+    const loc = out.get("location");
+    if (loc?.startsWith(`http://${target}`)) out.set("location", loc.slice(`http://${target}`.length) || "/");
+    return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
+  } catch {
+    return new Response("That dev server isn't answering right now. Its agent may have stopped it.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
+  }
+}
+
+const PAGE = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pair with JamSesh</title>
+<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box;background:Canvas;color:CanvasText}
+main{max-width:30em}h1{font-size:1.25rem;margin:0 0 .5rem}p{margin:.5rem 0;opacity:.8}</style>
+<main><h1>This is a JamSesh dev server</h1><p>It's only open to people in the session. Open the JamSesh screen on this computer first (enter the code shown on the host's screen), then come back and reload this page.</p>
+<p>Joined through the JamSesh app? Open the dev server from its tile in the app.</p></main>`;
+
+function denied(req: Request) {
+  if ((req.headers.get("accept") ?? "").includes("text/html")) return new Response(PAGE, { status: 401, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+  return new Response("Pair this device with JamSesh first.", { status: 401, headers: { "cache-control": "no-store" } });
+}
+
+const isLoopback = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+
+function cookieValue(header: string | null, name: string) {
+  for (const part of (header ?? "").split(/;\s*/)) if (part.startsWith(`${name}=`)) return decodeURIComponent(part.slice(name.length + 1));
+  return null;
 }
 
 /** Nothing listens on the port on any interface. */
@@ -142,6 +243,23 @@ function portFree(port: number) {
 /** "http://192.168.1.4:5173/" or "192.168.1.4:5173" → "192.168.1.4:5173". */
 export function normalizeTarget(t: string) {
   const s = t.trim().replace(/^[a-z]+:\/\//, "").replace(/\/.*$/, "");
-  if (!/^[\w.-]+:\d+$/.test(s)) throw new Error(`Give the dev server as host:port (got "${t}")`);
+  const m = s.match(/^([\w.-]+):(\d+)$/);
+  if (!m || Number(m[2]) < 1 || Number(m[2]) > 65535) throw new Error(`Give the dev server as host:port (got "${t}")`);
   return s.replace(/^localhost:/, "127.0.0.1:");
+}
+
+/**
+ * The address a dev server is reached at, from where the agent connects: its own machine only.
+ * "localhost" and friends become the agent's address; any other host has to be that address.
+ */
+export function ownTarget(raw: string, agentIp: string): string {
+  const ip = agentIp.replace(/^::ffff:/, "");
+  const loop = isLoopback(ip) || ip === "";
+  const local = loop ? "127.0.0.1" : ip;
+  const withHost = raw.trim().replace(/^[a-z]+:\/\//, "").replace(/\/.*$/, "");
+  const m = withHost.match(/^([^:]+):(\d+)$/) ?? (/^\d+$/.test(withHost) ? [withHost, "localhost", withHost] : null);
+  if (!m) throw new Error(`Give the dev server as a local URL like http://localhost:5173 (got "${raw}").`);
+  const host = m[1].toLowerCase();
+  if (["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"].includes(host) || host === local) return normalizeTarget(`${local}:${m[2]}`);
+  throw new Error(`A dev server has to run on your own machine; ${host} isn't it. Give its local URL (for example http://localhost:${m[2]}).`);
 }
