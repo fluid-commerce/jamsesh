@@ -221,7 +221,7 @@ export class Brain {
 
   /** Someone spoke to the brain directly (its name, Ask, or a recorded prompt). Always acts or answers. */
   async direct(ev: JamEvent, extra = "") {
-    if (this.stopped) return;
+    if (this.stopped || !this.session.settings().brainEnabled) return;
     // Heard you: an instant chime for spoken requests, before any thinking.
     if (!ev.data.typed) chime(this.session, ev.data.deviceId);
     return this.exclusive(() => this.directPass(ev, extra));
@@ -234,7 +234,7 @@ export class Brain {
     this.session.setBrain("thinking");
     bus.send({ type: "thinking", on: true, label: `${this.session.settings().brainName} is on it` });
     try {
-      await generateText({
+      const { text } = await generateText({
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
         system: this.system(),
@@ -243,6 +243,11 @@ export class Brain {
         stopWhen: isStepCount(8),
       });
       this.session.setBrain("ready");
+      // A plain-text reply with no tool call is still an answer: say it rather than drop the request.
+      if (this.actions === before) {
+        if (text?.trim()) void speak(this.session, text.trim(), { source: speechSource([ev]), kind: "answer" });
+        else this.offlineDirect(ev);
+      }
     } catch (e) {
       this.gatewayTrouble(e);
       console.error("direct:", describeError(e));
@@ -256,6 +261,7 @@ export class Brain {
   /** Someone started sharing a screen or camera: find it a place on the big screen. */
   async placeShare(share: Share) {
     const s = this.session;
+    if (this.stopped || !s.settings().brainEnabled) return;
     const stage = s.stage();
     if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
       bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
@@ -413,7 +419,7 @@ export class Brain {
           const { kept: targets, dropped } = i.mode === "answer" || i.mode === "coordinate" ? { kept: valid, dropped: [] as Agent[] } : oneAgentPerRepo(s, valid, i.text);
           // The same instruction twice (two tool calls in one pass, or a repeated ask) is sent once.
           const dupe = s.directives().find(
-            (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6,
+            (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6 && sameCounts(d.text, i.text),
           );
           if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
@@ -748,7 +754,7 @@ export class Brain {
     const agents = s.agents().filter((a) => a.status !== "offline");
     for (const line of triage.lines) {
       const ev = batch.find((e) => e.id === line.id);
-      if (!ev) continue;
+      if (!ev || !roomTalk(ev)) continue;
       const text = ev.text;
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
         s.setStage({ mode: "join", title: "", items: [] }, "Room brain");
@@ -765,7 +771,7 @@ export class Brain {
       if (line.intent === "decision") {
         s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, relevance: "work", data: { requestedBy: ev.authorName } });
         // "Let's go with B": find variant B on screen (or among the latest set) and have its agent build it.
-        const letter = text.match(/\b(?:direction|option|variant|version|with)\s+([a-z])\b/i)?.[1]?.toUpperCase();
+        const letter = variantLetter(text);
         const shown = s.stage().items.map((id) => s.artifacts().find((a) => a.id === id)).filter(Boolean) as Artifact[];
         const pool = shown.length ? shown : s.artifacts().slice(0, 12);
         const pick = letter ? pool.find((a) => new RegExp(`/\\s*${letter}\\b`).test(a.title)) : undefined;
@@ -777,12 +783,14 @@ export class Brain {
       const lower = text.toLowerCase();
       const word = (w: string) => w.length > 1 && new RegExp(`\\b${w.replace(/[^a-z0-9]/g, "")}\\b`).test(lower);
       const named = agents.filter((a) => word(a.ownerName.toLowerCase().split(/\s+/)[0]) || (a.platform !== "other" && word(a.platform)));
-      // Said twice (or picked up by two mics): don't send the same request again.
-      if (s.directives().some((d) => d.status !== "done" && Date.now() - d.ts < 10 * 60_000 && similar(d.text, text) > 0.8)) continue;
-      const best = affinity(s, text)[0];
-      const pool = named.length ? named : best ? [best.agent] : agents;
-      const targets = oneAgentPerRepo(s, pool.map((a) => a.id), text).kept;
       const mode = /\b(build|implement|ship|for real|in the (app|repo|code))\b/.test(lower) ? "implement" : "explore";
+      // Said twice (or picked up by two mics): don't send the same request again.
+      if (s.directives().some((d) => d.status !== "done" && d.status !== "cancelled" && d.mode === mode && Date.now() - d.ts < 10 * 60_000 && similar(d.text, text) > 0.8 && sameCounts(d.text, text))) continue;
+      const best = affinity(s, text)[0];
+      // Nobody named and no history to go on: the agent with the least unfinished work, never everyone.
+      const idlest = [...agents].sort((x, y) => s.openFor(x.id).length - s.openFor(y.id).length)[0];
+      const pool = named.length ? named : best ? [best.agent] : [idlest];
+      const targets = oneAgentPerRepo(s, pool.map((a) => a.id), text).kept;
       s.createDirective({ text, mode, targets, requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "Routed by keyword (the brain has no gateway key)." });
     }
   }
@@ -853,6 +861,7 @@ export class Brain {
 
   async digest(force = false) {
     const s = this.session;
+    if (this.stopped || !s.settings().brainEnabled) return;
     if (!force && Date.now() - this.lastDigestAt < DIGEST_EVERY_MS) return;
     const prev = s.store.digest("session");
     const lastId = s.store.lastEventId();
@@ -950,7 +959,8 @@ export class Brain {
         system: "Write a brief for an engineer picking up this workstream: goal, decisions made, what is built versus only mocked, open questions, next step. Plain text, under 150 words.",
         prompt: `Workstream: ${ws.title}\nPrevious brief: ${ws.brief || "(none)"}\n\nEvents:\n${events.map((e) => `- ${e.authorName}: ${e.text.slice(0, 300)}`).join("\n")}`,
       });
-      s.store.put("workstreams", { ...ws, brief: text.trim(), updatedAt: ws.updatedAt });
+      // Patch the current record: a claim made while the brief was being written stays.
+      s.store.patch("workstreams", ws.id, { brief: text.trim() });
     }
     void lastId;
   }
@@ -1034,6 +1044,12 @@ export function sameSpecifics(a: string, b: string) {
   return x.size === y.size && [...x].every((v) => y.has(v));
 }
 
+/** "three variants" and "five variants" are different asks: the counts, as digits or words, must agree. */
+function sameCounts(a: string, b: string) {
+  const counts = (t: string) => (t.toLowerCase().match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|couple|pair)\b/g) ?? []).join();
+  return counts(a) === counts(b);
+}
+
 function similar(a: string, b: string) {
   const x = new Set(terms(a));
   const y = new Set(terms(b));
@@ -1098,15 +1114,40 @@ export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[]
 // Rule-based triage, used without a gateway key and as a fallback.
 const JOIN_WORDS = /\b(qr( code)?|join(ing)? code|what'?s the code|the code again|how (do|can|does) (i|we|you|people|someone|they) (join|connect|get on|get in))\b/;
 
+/** Only people's room talk is routed: prompts typed to an agent and system notices are not for the rules. */
+function roomTalk(e: JamEvent) {
+  return e.kind !== "prompt" && e.authorType === "person";
+}
+
+const WORK_VERBS = "try|build|make|mock|add|give|explore|implement|ship|create|design|fix|put|redo|sketch|draw|do|get";
+const LETS_REQUEST = new RegExp(`\\blet'?s (?:just |also |go ahead and )?(?:${WORK_VERBS})\\b`);
+const POLITE_REQUEST = new RegExp(`\\b(?:can|could|would|will) (?:you|we|your agent|the [a-z]+ agent) (?:please )?(?:${WORK_VERBS})\\b`);
+const IMPERATIVE = new RegExp(`^(?:(?:ok|okay|so|and|now|then|please|hey|yeah|alright)\\b[, ]*)*(?:${WORK_VERBS.replace("|do|get", "")}|mock up|give (?:me|us))\\b`);
+const NOT_A_REQUEST = /\b(don'?t|do not|doesn'?t|shouldn'?t|should not|won'?t|can'?t|cannot|never|not|wonder|what if|maybe we|i think we should)\b/;
+
+/** A clear ask for work: "let's", "can you make", or a command. Questions, negations and musing are not. */
+export function looksLikeRequest(text: string) {
+  const t = text.toLowerCase().trim();
+  if (NOT_A_REQUEST.test(t)) return false;
+  if (LETS_REQUEST.test(t) || POLITE_REQUEST.test(t)) return true;
+  return !t.endsWith("?") && (IMPERATIVE.test(t) || /\b(?:please|go ahead and) (?:build|make|add|ship|fix|implement|create|mock)\b/.test(t));
+}
+
+/** The variant a decision names: "option B", "go with B" (a lone capital, so never "with a"). */
+function variantLetter(text: string) {
+  return (text.match(/\b(?:direction|option|variant|version)\s+([a-z])\b/i)?.[1] ?? text.match(/\bgo(?:ing)? with\s+(?:option |direction |variant )?([A-Z])\b/)?.[1] ?? text.match(/\bgo(?:ing)? with\s+([a-z])\s*(?:[.,!?;]|$)/)?.[1])?.toUpperCase();
+}
+
 export function ruleTriage(batch: JamEvent[]): Triage {
   const lines = batch.map((e) => {
     const t = e.text.toLowerCase().trim();
     let intent: Triage["lines"][number]["intent"] = "none";
     let relevance: Relevance = "discussion";
+    if (!roomTalk(e)) return { id: e.id, relevance, intent, confidence: 0.5 };
     // In order: asking to see something (or how to join), a decision, then a request for work.
     if (JOIN_WORDS.test(t) || /\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t)) intent = "present";
     else if (/\b(let'?s go with|we('re| are) going with|decided|i like (direction|option|variant) [a-z]\b|go with [a-z]\b)/.test(t)) intent = "decision";
-    else if (/\b(can you|could you|let'?s (try|build|make|do|ship|add|explore)|try (a|some|out)|make (a|some)|give (me|us)|build|implement|mock up|variants?|options? for)\b/.test(t)) intent = "directive";
+    else if (looksLikeRequest(t)) intent = "directive";
     if (/\b(haha|lol|lmao|dude|bro|shut up|your (mom|shirt|face))\b/.test(t) && intent === "none") relevance = "banter";
     if (t.split(/\s+/).length < 3 && intent === "none") relevance = "chatter";
     if (intent !== "none") relevance = "work";

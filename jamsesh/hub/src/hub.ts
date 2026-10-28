@@ -104,15 +104,17 @@ export class Hub {
         .then((bytes) => this.saveUpload(null, bytes, { title, stage: "built", note: "Captured on the host" }))
         .catch((e) => console.warn(`[host] couldn't keep the screenshot: ${e?.message ?? e}`));
     };
-    // A finished preview build reaches the brain, so it can arrange the app beside what it's compared with.
+    // A finished preview build lands in the feed for the room and the brain's context, but isn't
+    // room speech: running it through hear() would let the rules router turn it into a directive.
     this.host.onBuilt = (label, ok, text) => {
-      const ev = this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: ok ? `Preview build finished: ${label}. ${text}`.trim() : `Preview build failed: ${label}. ${text}`.trim() });
-      this.brain.hear(ev);
+      this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: ok ? `Preview build finished: ${label}. ${text}`.trim() : `Preview build failed: ${label}. ${text}`.trim() });
     };
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session);
     this.audio = new AudioPipeline(this.session, this.transcriber);
     this.canvas = new Canvas(this.session);
+    // A person's rename carries to their agents' default names, and so to their cursors.
+    this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
     this.mcp = new McpEndpoint(this);
     this.session.extraAddresses = () => {
@@ -168,16 +170,35 @@ export class Hub {
     this.canvas.stop();
     this.transcriber.stop();
     this.devproxy.stop();
+    for (const w of this.promptMode.values()) clearTimeout(w.timer);
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
-  private promptMode = new Map<string, { t0: number; t1?: number }>();
+  private promptMode = new Map<string, { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> }>();
   /** A prompt window stays open this long at most (SPEC 11.3). */
   static PROMPT_MAX_MS = 2 * 60_000;
 
   promptStart(deviceId: string, t0: number) {
-    this.promptMode.set(deviceId, { t0 });
+    // A new recording on a laptop whose last one never got its Stop: that one's held words go to the room.
+    this.releasePrompt(deviceId);
+    const w: { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> } = { t0 };
+    // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
+    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), Hub.PROMPT_MAX_MS + 1000);
+    w.timer.unref?.();
+    this.promptMode.set(deviceId, w);
+  }
+
+  /** Closes a window that never got Stop and hands what it held back to the room as ordinary speech. */
+  private releasePrompt(deviceId: string, only?: { t0: number; t1?: number }) {
+    const w = this.promptMode.get(deviceId);
+    if (!w || (only && w !== only) || w.t1 !== undefined) return;
+    clearTimeout(w.timer);
+    this.promptMode.delete(deviceId);
+    for (const u of this.session.store.all("utterances")) {
+      if (u.eventId || u.t1 < w.t0 - 500 || u.t0 > w.t0 + Hub.PROMPT_MAX_MS || !this.fromRecorder(u, deviceId)) continue;
+      this.roomLine(u, true);
+    }
   }
 
   /**
@@ -196,9 +217,8 @@ export class Hub {
   }
 
   private inPrompt(u: Utterance) {
-    for (const [deviceId, w] of this.promptMode) if (Date.now() - w.t0 > Hub.PROMPT_MAX_MS) this.promptMode.delete(deviceId);
-    // Inside the recording only: once Stop is pressed, what the person says next is ordinary speech.
-    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
+    // Inside the recording only: once Stop is pressed, or past the window's cap, what the person says is ordinary speech.
+    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
     return false;
   }
 
@@ -223,8 +243,12 @@ export class Hub {
       return;
     }
     if (!u.eventId) return;
-    // A recorded prompt's text is the whole window's; a single line's update must not replace it.
-    if (s.store.event(u.eventId)?.data.recorded) return;
+    // A recorded prompt's text is the whole window's; a single line's update must not replace it,
+    // but a relabel still changes who said it.
+    if (s.store.event(u.eventId)?.data.recorded) {
+      s.store.updateEvent(u.eventId, { authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
+      return;
+    }
     s.store.updateEvent(u.eventId, { text: u.text, authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
   }
 
@@ -257,8 +281,9 @@ export class Hub {
     // Stop was pressed: the window ends here, even while its last words are still being transcribed.
     const open = this.promptMode.get(w.deviceId);
     if (open) open.t1 = w.t1;
-    const deadline = Date.now() + 30_000;
-    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && this.fromRecorder(u, w.deviceId, w.personId));
+    // SPEC 11.3: answer within about 7 s, before the client gives up waiting.
+    const deadline = Date.now() + 7000;
+    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
     while (Date.now() < deadline) {
@@ -268,7 +293,11 @@ export class Hub {
       if (stable >= 2) break;
       await Bun.sleep(400);
     }
-    this.promptMode.delete(w.deviceId);
+    // Only this window's entry: a new recording may have started while this one waited.
+    if (open && this.promptMode.get(w.deviceId) === open) {
+      clearTimeout(open.timer);
+      this.promptMode.delete(w.deviceId);
+    }
     lines.sort((a, b) => a.t0 - b.t0);
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");

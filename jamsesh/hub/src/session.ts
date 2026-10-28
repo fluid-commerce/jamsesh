@@ -50,6 +50,8 @@ export class Session {
   onDirective: ((d: Directive) => void) | null = null;
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
   onClaim: ((agentId: string, workstream: string) => void) | null = null;
+  /** An agent took a new name because its owner was renamed (the canvas cursor follows). */
+  onAgentRenamed: ((agent: Agent, oldName: string) => void) | null = null;
 
   constructor(store: Store) {
     this.store = store;
@@ -65,6 +67,14 @@ export class Session {
     // Agents outlive a hub restart: they reconnect on their next call, and directives wait in their inbox.
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
+    // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
+    for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
+    // The stage's timer died with the old process: a brought-up screen still returns to the board.
+    const st = this.stage();
+    if (!st.pinned && st.mode !== "board" && st.mode !== "welcome") {
+      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Math.max(1000, st.since + 6 * 60_000 - Date.now()));
+      this.stageRevert.unref?.();
+    }
     bus.resolver = (key) => this.resolve(key);
   }
 
@@ -232,9 +242,14 @@ export class Session {
   upsertPerson(fields: { id?: string; name: string; role?: string; weight?: number }): Person {
     const existing = fields.id ? this.store.get("people", fields.id) : this.personByName(fields.name);
     if (existing) {
+      const incoming = fields.name.trim();
+      // Matched by name, not id: "Sam" or "I'm Felipe" is a shorter way to say who someone is, not a rename.
+      const shortened = !fields.id && !!incoming && existing.name.toLowerCase().startsWith(incoming.toLowerCase());
+      const name = shortened ? existing.name : incoming || existing.name;
+      if (name !== existing.name) this.renameOwned(existing, name);
       return this.store.put("people", {
         ...existing,
-        name: fields.name.trim() || existing.name,
+        name,
         role: fields.role ?? existing.role,
         // A new title brings its weight with it, unless someone set the weight by hand.
         weight: fields.weight ?? (fields.role !== undefined && fields.role !== existing.role && existing.weight === weightForRole(existing.role) ? weightForRole(fields.role) : existing.weight),
@@ -254,6 +269,25 @@ export class Session {
     this.store.put("people", p);
     this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${p.name}${p.role ? ` (${p.role})` : ""} joined the room.` });
     return p;
+  }
+
+  /** A renamed person's agents follow: their owner name, and a default "<name>'s Claude" name. */
+  private renameOwned(person: Person, name: string) {
+    const first = (n: string) => n.split(/\s+/)[0];
+    const defaults = [...new Set([person.name, first(person.name)].map((n) => n.toLowerCase()))];
+    for (const a of this.store.all("agents").filter((x) => x.ownerId === person.id)) {
+      const m = a.name.match(/^(.+)'s (Claude|Codex|Agent)( \(.*\))?( \d+)?$/i);
+      const isDefault = !!m && defaults.includes(m[1].toLowerCase());
+      let next = a.name;
+      if (isDefault) {
+        const base = `${first(name)}'s ${m![2]}${m![3] ?? ""}`;
+        const taken = new Set(this.store.all("agents").filter((x) => x.id !== a.id).map((x) => x.name.toLowerCase()));
+        next = base;
+        for (let i = 2; taken.has(next.toLowerCase()) && i < 100; i++) next = `${base} ${i}`;
+      }
+      const updated = this.store.put("agents", { ...a, ownerName: name, name: next });
+      if (next !== a.name) this.onAgentRenamed?.(updated, a.name);
+    }
   }
 
   removePerson(id: string) {
@@ -355,14 +389,17 @@ export class Session {
     this.store.put("agents", next, visible);
   }
 
-  findAgentByCwd(cwd: string, machine?: string): Agent | undefined {
+  findAgentByCwd(cwd: string, machine?: string, harness?: Agent["harness"]): Agent | undefined {
     const want = normalizePath(cwd);
     const agents = this.store.all("agents").filter((a) => a.cwd);
-    const all = agents.filter((a) => {
+    let all = agents.filter((a) => {
       const have = normalizePath(a.cwd);
       return want === have || want.startsWith(have + "/");
     });
-    const exact = (machine && all.find((a) => a.machine === machine)) || all.sort((a, b) => b.lastSeen - a.lastSeen)[0];
+    if (machine && all.some((a) => a.machine === machine)) all = all.filter((a) => a.machine === machine);
+    // The deepest folder is the closest match (/mono/ios over /mono); then the harness the hook came from.
+    const depth = (a: Agent) => normalizePath(a.cwd).length;
+    const exact = all.sort((a, b) => depth(b) - depth(a) || Number(b.harness === harness) - Number(a.harness === harness) || b.lastSeen - a.lastSeen)[0];
     if (exact) return exact;
     // Same folder name on the same machine (the agent may have reported its path another way).
     const base = want.split("/").pop();
@@ -373,7 +410,9 @@ export class Session {
   postUpdate(agentId: string, kind: UpdateKind, text: string, extra: { workstream?: string; data?: Record<string, any> } = {}) {
     const agent = this.agent(agentId);
     if (!agent) throw new Error("Unknown agent; call jam_join first.");
-    const ws = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }).workstream : undefined;
+    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its brief.
+    const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
+    const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
     const ev = this.store.addEvent({
       kind: kind === "decision" ? "decision" : "update",
       authorType: "agent",
@@ -399,7 +438,8 @@ export class Session {
     const key = normalize(t);
     const existing = this.store.all("workstreams").find((w) => normalize(w.title) === key);
     if (existing && existing.ownerAgentId && existing.ownerAgentId !== agentId && !opts.force) {
-      const owner = this.agent(existing.ownerAgentId);
+      // An agent that went quiet shows as offline (derived, never stored): its workstream is free to take.
+      const owner = this.agents().find((a) => a.id === existing.ownerAgentId);
       if (owner && owner.status !== "offline") {
         return { workstream: existing, conflict: owner };
       }
@@ -493,6 +533,8 @@ export class Session {
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
+    // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
+    if (d.status === "cancelled" || d.progress?.[agentId] === "cancelled") return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
@@ -516,7 +558,7 @@ export class Session {
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const messages = this.store
       .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId));
+      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId)));
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");
@@ -607,6 +649,7 @@ export class Session {
     const from = this.agent(fromId);
     const q = this.store.recentEvents({ kinds: ["message"], limit: 400 }).find((e) => e.data.askId === askId);
     if (!q) throw new Error("No question with that id.");
+    const waiting = this.asks.get(askId);
     this.store.addEvent({
       kind: "message",
       authorType: "agent",
@@ -614,9 +657,9 @@ export class Session {
       authorName: from?.name ?? "Agent",
       text,
       relevance: "work",
-      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId },
+      // A waiting jam_ask returns the answer itself: the inbox doesn't repeat it.
+      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...(waiting ? { inline: true } : {}) },
     });
-    const waiting = this.asks.get(askId);
     if (waiting) waiting.resolve(text);
     else if (q.authorId) this.wake(q.authorId); // the asker stopped waiting; it gets the answer in its inbox
   }

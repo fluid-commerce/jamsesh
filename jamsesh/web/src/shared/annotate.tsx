@@ -6,7 +6,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import "./annotate.css";
-import { ago, api, hub, useHub, type Annotation, type HubState } from "./hub";
+import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, type QueuedResult } from "./hub";
 import { PointerRecorder, canvasHit, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark, type TrailSample } from "./pointer";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -142,6 +142,8 @@ function inkFor(hex: string) {
   const lum = (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
   return lum > 0.6 ? "#14120d" : "#ffffff";
 }
+
+const NOT_SENT = "Not connected, nothing was sent.";
 
 function usePins() {
   const { state } = useHub();
@@ -463,7 +465,9 @@ export function PinLayer({ target, personId, enabled }: { target: PinTarget; per
       source: "pin" as const,
     };
     try {
-      const ann = await api<Annotation>("/annotations", body);
+      const ann = await api<Annotation | QueuedResult>("/annotations", body);
+      // Offline the call is only queued: there is no saved pin to show yet, and it appears once it sends.
+      if (!ann || "queued" in ann || !ann.target) return;
       pendingStore.set((p) => [...p, ann]);
       setTimeout(() => pendingStore.set((p) => p.filter((a) => a.id !== ann.id)), 6000);
     } catch (err) {
@@ -601,10 +605,13 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
     setTimeout(() => setSending("idle"), 2200);
   };
 
-  const Row = ({ a, dot }: { a: Annotation; dot?: boolean }) => {
+  // Called as a function, not mounted as a component: a component defined here is a new type on every
+  // render, which would remount the rows and wipe an edit in progress whenever the room changes.
+  const row = (a: Annotation, dot?: boolean) => {
     const color = colorOf(state, a.personId);
     return (
       <div
+        key={a.id}
         className={`an-item ${a.status === "sent" ? "sent" : ""} ${hot === a.id ? "hot" : ""}`}
         style={{ ["--c" as string]: color, ["--ink" as string]: inkFor(color) }}
         onPointerEnter={() => hotStore.set(a.id)}
@@ -673,7 +680,7 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
               <span>{g.items.length}</span>
             </div>
             {g.items.map((a) => (
-              <Row key={a.id} a={a} />
+              row(a)
             ))}
           </section>
         ))}
@@ -682,7 +689,7 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
             <button className="an-more" onClick={() => setShowPointed((v) => !v)}>
               {showPointed ? "Hide" : "Show"} {pointed.length} pointed during prompts
             </button>
-            {showPointed && pointed.map((a) => <Row key={a.id} a={a} dot />)}
+            {showPointed && pointed.map((a) => row(a, true))}
             {showPointed && (
               <button className="an-more" onClick={() => pointed.forEach((a) => void resolvePin(a))}>
                 Clear them
@@ -812,6 +819,8 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   recRef.current = rec;
   const typed = useRef(text);
   typed.current = text;
+  const who = useRef(personId);
+  who.current = personId;
 
   useEffect(() => {
     if (rec.phase !== "live") return;
@@ -841,7 +850,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     setResult(null);
     setNow(Date.now());
     setRec({ phase: "live", t0 });
-    api("/prompt-window/start", { deviceId: hub.deviceId, t0 }).catch(() => {});
+    api("/prompt-window/start", { deviceId: hub.deviceId, t0 }, undefined, { queue: false }).catch(() => {});
   };
 
   const stop = async () => {
@@ -854,17 +863,24 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       const pointer = await r.stop();
       // The sentence still being spoken has to reach the hub before it closes the window.
       await mic?.flush?.().catch(() => {});
-      const res = await api<{ ok: boolean; text?: string; pointed?: string[]; reason?: string }>("/prompt-window", {
-        deviceId: hub.deviceId,
-        personId,
-        t0: cur.t0,
-        t1,
-        pointer,
-        ...(typed.current ? { text: typed.current } : {}),
-      });
+      // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
+      const res = await api<{ ok: boolean; text?: string; pointed?: string[]; reason?: string; queued?: boolean }>(
+        "/prompt-window",
+        {
+          deviceId: hub.deviceId,
+          personId,
+          t0: cur.t0,
+          t1,
+          pointer,
+          ...(typed.current ? { text: typed.current } : {}),
+        },
+        undefined,
+        { queue: false, timeoutMs: 15_000 },
+      );
+      if (res.queued) throw new OfflineError(NOT_SENT);
       setResult({ ok: !!res.ok, text: res.text ?? "", pointed: res.pointed ?? [], reason: res.reason, note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
     } catch (e) {
-      setResult({ ok: false, text: "", pointed: [], reason: e instanceof Error ? e.message : "Couldn't send that." });
+      setResult({ ok: false, text: "", pointed: [], reason: e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't send that." });
     }
     setRec({ phase: "idle" });
     if (unmuted.current) {
@@ -885,12 +901,34 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     return () => window.removeEventListener("keydown", key);
   });
 
-  useEffect(
-    () => () => {
-      void recorder.current?.stop();
-    },
-    [],
-  );
+  // Leaving mid-recording (the button remounts when the layout changes, the page closes) must still
+  // close the hub's prompt window, or it keeps swallowing this laptop's speech. Send what was collected.
+  useEffect(() => {
+    const release = (unloading: boolean): boolean => {
+      const cur = recRef.current;
+      const r = recorder.current;
+      if (cur.phase !== "live" || !r) return false;
+      recRef.current = { phase: "idle" };
+      const send = (pointer: PointerMark[]) => {
+        const body = { deviceId: hub.deviceId, personId: who.current, t0: cur.t0, t1: hub.now(), pointer, ...(typed.current ? { text: typed.current } : {}) };
+        if (unloading) {
+          fetch("/api/prompt-window", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+        } else {
+          api("/prompt-window", body, undefined, { queue: false, timeoutMs: 15_000 }).catch(() => {});
+        }
+      };
+      // The page is going away: no time to distill the pointer, so send the words alone.
+      if (unloading) (void r.stop().catch(() => {}), send([]));
+      else void r.stop().then(send, () => send([]));
+      return true;
+    };
+    const onHide = () => release(true);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      window.removeEventListener("pagehide", onHide);
+      if (!release(false)) void recorder.current?.stop();
+    };
+  }, []);
 
   // Fade the result away.
   useEffect(() => {

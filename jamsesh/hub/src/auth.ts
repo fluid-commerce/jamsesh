@@ -193,6 +193,20 @@ export class Auth {
     return true;
   }
 
+  /**
+   * The machine a credential stands for: its owner window ("host" or the Mac's browser device), so
+   * agents keep their identity when the app re-issues their credential on a relaunch.
+   */
+  machineOf(id: string | null | undefined): string | null {
+    if (!id) return null;
+    return this.devices.get(id)?.ownerDeviceId ?? id;
+  }
+
+  /** Revokes the agents credentials an owner window issued earlier (the app issues a new one on each launch). */
+  revokeAgentsOf(ownerDeviceId: string) {
+    for (const a of this.devices.values()) if (a.ownerDeviceId === ownerDeviceId && a.kind === "agent" && !a.revoked) this.revoke(a.id);
+  }
+
   list() {
     return [...this.devices.values()].filter((d) => !d.revoked).map(({ tokenHash: _h, ...d }) => d);
   }

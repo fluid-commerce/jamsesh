@@ -334,7 +334,11 @@ export class Canvas {
       })();
       a = { mcp, ready, lastUsed: Date.now(), dir };
       this.agents.set(agent.id, a);
-      ready.catch(() => this.agents.delete(agent.id));
+      ready.catch(() => {
+        // Don't leave the headless participant running once it can't be reached through the map.
+        mcp.close();
+        if (this.agents.get(agent.id)?.mcp === mcp) this.agents.delete(agent.id);
+      });
     }
     await a.ready;
     a.lastUsed = Date.now();

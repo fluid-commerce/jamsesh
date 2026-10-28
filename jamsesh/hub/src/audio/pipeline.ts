@@ -107,6 +107,8 @@ export class AudioPipeline {
    * that could have heard the line.
    */
   settleMs(location: "room" | "remote" = "room") {
+    // Remote segments are only grouped within one device, so there is never another copy to wait for.
+    if (location === "remote") return SOLO_SETTLE_MS;
     const now = Date.now();
     const live = [...this.lag.entries()].filter(([, l]) => l.location === location && now - l.at < LAG_TTL_MS);
     const listening = new Set(live.map(([id]) => id));
@@ -467,8 +469,8 @@ export class AudioPipeline {
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
     const g = this.finalized.find((x) => x.utteranceId === utteranceId);
-    // Moving a line off someone it was auto-filed under also takes it out of their voiceprint.
-    const prior = u.personId && u.personId !== personId && u.method !== "manual" ? u.personId : null;
+    // Moving a line off someone it was filed under (by voice or by an earlier click) also takes it out of their voiceprint.
+    const prior = u.personId && u.personId !== personId ? u.personId : null;
     // Teach from the clearest copy that did not clip.
     const usable = g?.segments.filter((s) => s.clipped <= MAX_CLIPPED) ?? [];
     const best = g ? (usable.length ? pickBest(usable) : null) : null;

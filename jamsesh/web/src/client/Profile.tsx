@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type Person } from "../shared/hub";
 import { encodeWav, holdMic } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
+import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
@@ -71,7 +72,11 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
   const [secs, setSecs] = useState(0);
   const rec = useRef<{ stop: () => void } | null>(null);
 
+  // Over plain http (the default LAN join address) the browser has no mic API at all.
+  const blocked = mediaAvailable()?.replace("Sharing", "Reading aloud") ?? ("getUserMedia" in (navigator.mediaDevices ?? {}) ? null : "This page can't use the microphone. Open the host's secure address.");
+
   const start = async () => {
+    if (blocked) return setState("error"), setMsg(blocked);
     // Your own laptop's always-on mic hears you read this; keep it from sending it to the room.
     const release = holdMic();
     try {
@@ -125,10 +130,11 @@ export function VoiceEnroll({ me, brainName }: { me: Person; brainName: string }
             <span className="dot" style={{ background: "var(--warn)", animation: "pulse 1s infinite" }} /> Done reading · {secs}s
           </button>
         ) : (
-          <button className="btn primary" onClick={start} disabled={state === "saving"}>
+          <button className="btn primary" onClick={start} disabled={state === "saving" || !!blocked}>
             {state === "saving" ? "Learning your voice…" : state === "done" ? "Record again" : "Start reading"}
           </button>
         )}
+        {blocked && !msg && <span className="chip" style={{ whiteSpace: "normal", color: "var(--warn)" }}>{blocked}</span>}
         {msg && <span className="chip" style={{ whiteSpace: "normal", color: state === "error" ? "var(--warn)" : "var(--built)" }}>{msg}</span>}
       </div>
     </div>

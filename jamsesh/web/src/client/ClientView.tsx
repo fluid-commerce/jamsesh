@@ -38,6 +38,7 @@ export function ClientView() {
   const myDevice = state?.devices.find((d) => d.id === DEVICE);
   const remote = myDevice?.location === "remote";
   useEffect(() => {
+    mic.remote = remote;
     if (!remote) return;
     let audio: HTMLAudioElement | null = null;
     const onSpeak = (m: { audio: string | null; mime: string }) => {
@@ -135,7 +136,7 @@ export function ClientView() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <header className="app-header client-header" style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none" }}>
+      <header className={`app-header client-header ${remote ? "remote" : ""}`} style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none" }}>
         <div className="header-left">
           <Logo size={26} />
           <strong className="wordmark" style={{ fontWeight: 650 }}>JamSesh</strong>
@@ -143,7 +144,7 @@ export function ClientView() {
         </div>
         <TabNav state={state} tab={tab} setTab={setTab} />
         <div className="header-right">
-          {remote && <span className="badge neutral" title="You're joining remotely: the Screen tab mirrors the big screen">Remote</span>}
+          {remote && <span className="badge neutral" title="You're joining remotely: the Screen tab mirrors the big screen" >Remote</span>}
           <BigScreenChip stage={state.stage} />
           <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute (M)" : "Unmute (M)")} aria-label={micStatus.on ? "Mute" : "Unmute"}>
             {micStatus.on ? <MicIcon size={16} /> : <MicOffIcon size={16} />}

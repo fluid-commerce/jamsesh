@@ -6,7 +6,7 @@
 // bearer header such as the Mac app's relay adds).
 import { createHash } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
-import { config } from "./config";
+import { config, hostAddresses } from "./config";
 import { newId } from "./store";
 import type { Session } from "./session";
 import type { DevServer, Platform } from "./types";
@@ -30,7 +30,14 @@ export class DevProxy {
   private downSince = new Map<string, number>();
   private tokenCache: { at: number; hashes: Set<string> } = { at: 0, hashes: new Set() };
 
+  /** Ports on this machine that are the hub's own (it, the canvas): a dev port can't point at them. */
+  private reserved = new Set<number>([config.port, config.figcraftPort]);
+
   constructor(private session: Session) {}
+
+  reserve(port: number) {
+    this.reserved.add(port);
+  }
 
   restore() {
     for (const d of this.session.devservers()) this.listen(d).catch(() => this.session.store.patch("devservers", d.id, { up: false }));
@@ -38,6 +45,10 @@ export class DevProxy {
 
   async register(opts: { agentId: string; name: string; target: string; platform?: Platform | null }): Promise<DevServer> {
     const target = normalizeTarget(opts.target);
+    // Pointing a dev port at the hub would give every paired device the host's own trust.
+    const [targetHost, targetPort] = [target.replace(/:\d+$/, ""), Number(target.replace(/^.*:/, ""))];
+    if (this.reserved.has(targetPort) && (isLoopback(targetHost) || hostAddresses().some((a) => a.host === targetHost)))
+      throw new Error(`Port ${targetPort} on this machine belongs to JamSesh itself; give your dev server's own port.`);
     const existing = this.session.devservers().find((d) => d.agentId === opts.agentId && (d.name === opts.name || d.target === target));
     if (!existing && this.session.devservers().filter((d) => d.agentId === opts.agentId).length >= MAX_PER_AGENT)
       throw new Error(`You already have ${MAX_PER_AGENT} dev servers on the host. Remove one with jam_devserver_remove first.`);
@@ -82,14 +93,15 @@ export class DevProxy {
   /** Whether a request may use a dev port: from the host itself, or from a paired device. */
   allowed(req: Request, ip: string): boolean {
     if (isLoopback(ip)) return true;
-    const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookieValue(req.headers.get("cookie"), "jam_token");
-    if (!token) return false;
+    // The dev app may send its own Authorization header, so try the cookie's token too.
+    const tokens = [req.headers.get("authorization")?.replace(/^Bearer\s+/i, ""), cookieValue(req.headers.get("cookie"), "jam_token")].filter((t): t is string => !!t);
+    if (!tokens.length) return false;
     const now = Date.now();
     if (now - this.tokenCache.at > 3000) {
       const devices = this.session.store.setting<{ tokenHash: string; revoked: boolean }[]>("pairedDevices", []);
       this.tokenCache = { at: now, hashes: new Set(devices.filter((x) => !x.revoked).map((x) => x.tokenHash)) };
     }
-    return this.tokenCache.hashes.has(createHash("sha256").update(token).digest("hex"));
+    return tokens.some((t) => this.tokenCache.hashes.has(createHash("sha256").update(t).digest("hex")));
   }
 
   private async listen(d: DevServer) {

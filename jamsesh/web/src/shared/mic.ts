@@ -5,7 +5,7 @@
 // Auto gain control stays off so loudness still says how close a speaker is to
 // this device; the hub uses that to tell who is talking.
 import { useSyncExternalStore } from "react";
-import { hub } from "./hub";
+import { hub, pref } from "./hub";
 import { backoffMs, createStore, idbTable, markContact } from "./offline";
 
 const RATE = 16000;
@@ -265,6 +265,8 @@ export class Mic {
   private frameIndex = 0;
   private base = 0;
   private lastLevelSent = 0;
+  /** This laptop is a remote one: the brain only plays here when the listener wants it. */
+  remote = false;
   private suppressUntil = 0;
   private loud = 0;
   /** Called when someone talks over the brain: cut its voice off. */
@@ -284,7 +286,9 @@ export class Mic {
     audioBuffer.subscribe(() => this.status.buffered !== audioBuffer.get().seconds && this.emit({ buffered: audioBuffer.get().seconds }));
     audioBuffer.onUploaded.add(() => this.emit({ sent: this.status.sent + 1 }));
     hub.speakListeners.add((m) => {
-      // Don't transcribe the room brain talking through the speaker.
+      // Don't transcribe the room brain talking through the speaker, but only when something plays:
+      // no audio (text-to-speech failed) or a remote laptop with "hear the brain" off is silent here.
+      if (!m.audio || (this.remote && pref("hearBrain") === "off")) return;
       this.suppressUntil = Date.now() + Math.max(2500, m.text.length * 75) + 600;
     });
   }

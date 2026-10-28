@@ -422,7 +422,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
           {who}
         </button>
       ) : (
-        <span className={`who ${unsure ? "speaker-btn unsure" : ""}`} style={{ color: e.kind === "brain" ? "var(--text)" : color }}>
+        <span className={`who ${unsure ? "speaker-btn unsure" : ""}`} title={who} style={{ color: e.kind === "brain" ? "var(--text)" : color }}>
           {who}
         </span>
       )}
@@ -682,14 +682,29 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
   }, [follow]);
   const [link, setLink] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const { state } = useHub();
+  const { state, epoch } = useHub();
   const status = state?.session.canvas.status;
+  // A failed fetch tries again by itself (and right away when the hub comes back), instead of leaving the error up.
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (status !== "live") return;
+    if (status !== "live" || link) return;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let gone = false;
+    const failed = () => {
+      if (!gone) retry = setTimeout(() => setAttempt((n) => n + 1), 4000);
+    };
     api<{ link: string | null; reason: string | null }>(`/canvas-link?kind=${kind}`)
-      .then((r) => (r.link ? setLink(r.link) : setErr(r.reason ?? "The canvas isn't live yet.")))
-      .catch((e) => setErr(String(e.message ?? e)));
-  }, [kind, status]);
+      .then((r) => {
+        if (gone) return;
+        if (r.link) (setLink(r.link), setErr(null));
+        else (setErr(r.reason ?? "The canvas isn't live yet."), failed());
+      })
+      .catch((e) => (setErr(String(e.message ?? e)), failed()));
+    return () => {
+      gone = true;
+      clearTimeout(retry);
+    };
+  }, [kind, status, epoch, attempt, link]);
   if (!link) return <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>{err ?? (status === "failed" ? state?.session.canvas.reason : "Connecting to the canvas…")}</div>;
   const gl = new URLSearchParams(location.search).has("webgl") ? "&webgl" : "";
   const src = `/canvas/?canvas&control${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;

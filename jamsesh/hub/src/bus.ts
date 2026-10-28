@@ -36,7 +36,13 @@ class Bus {
     const keys = [...this.dirty];
     this.dirty.clear();
     for (const k of keys) {
-      const patch = this.resolver?.(k);
+      // One collection that can't be read (a store error) doesn't stop the others' patches.
+      let patch: ReturnType<NonNullable<Bus["resolver"]>> = null;
+      try {
+        patch = this.resolver?.(k) ?? null;
+      } catch (e) {
+        console.error(`bus: couldn't read ${k}`, e);
+      }
       if (patch) this.send({ type: "patch", key: patch.key, value: patch.value });
     }
   }

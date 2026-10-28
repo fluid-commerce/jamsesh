@@ -2,6 +2,7 @@
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
+import type { PairedDevice } from "./auth";
 import { bus } from "./bus";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
@@ -18,7 +19,7 @@ const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
-const HUMAN_ONLY = /^\/(say|audio|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people\/[\w-]+\/(voice|photo)|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+const HUMAN_ONLY = /^\/(say|audio|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|photo))?)?|settings|directives(\/[\w-]+)?|workers|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
@@ -55,6 +56,16 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
   const tokenOf = (req: Request, url: URL) =>
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token") ?? url.searchParams.get("token");
 
+  // The dev app may send its own Authorization header, so the paired token can be in the cookie instead.
+  const anyToken = (hub: Hub, req: Request, url: URL, ip: string) => {
+    const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    for (const t of [bearer, cookie(req, "jam_token"), url.searchParams.get("token")]) {
+      const d = t ? hub.auth.check(t, ip) : null;
+      if (d) return d;
+    }
+    return null;
+  };
+
   const PUBLIC_FILES = /^\/(assets\/|icons\/|fonts\/|favicon\.svg$|manifest\.webmanifest$|sw\.js$)/;
 
   const server = Bun.serve<WsData, any>({
@@ -80,13 +91,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
         const dev = devTarget(req, hub);
         if (dev) {
-          if (!local && !hub.auth.check(tokenOf(req, url), ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
+          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-            const who = local ? null : hub.auth.check(tokenOf(req, url), ip);
+            const who = local ? null : anyToken(hub, req, url, ip);
             if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
           }
           return proxyHttp(req, url, dev);
         }
+        // The host's own windows are trusted without a token, so a page on another site can't post as them.
+        if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
         // Remote-access setup is only for someone at the host.
         if (local && path.startsWith("/api/net/")) {
           // A JSON body only: a form or text post from another site can't change remote access.
@@ -102,6 +115,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (!local && owner?.kind !== "browser") return bad("Pair this Mac first.", 401);
           const who = owner?.personId ? s.person(owner.personId)?.name : undefined;
           const personId = owner ? owner.personId : s.store.setting<string>("hostPersonId", "") || null;
+          // One live credential per window: the app issues a new one on every launch.
+          hub.auth.revokeAgentsOf(owner?.id ?? "host");
           const r = hub.auth.issue({ kind: "agent", label: `${who ? `${who}'s agents` : "Agents"} on ${owner?.label.split(" · ")[0] ?? "the host"}`, personId, ip, ownerDeviceId: owner?.id ?? "host" });
           return json({ token: r.token, deviceId: r.device.id });
         }
@@ -146,7 +161,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
-        if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null));
+        if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
@@ -162,7 +177,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const script = Number.isInteger(relay) && relay > 1023 && relay < 65536 ? joinScript(hub, `http://127.0.0.1:${relay}`, "") : joinScript(hub, originOf(req, url), tokenOf(req, url) ?? "");
           return new Response(script, { headers: { "content-type": "text/x-shellscript" } });
         }
-        if (path.startsWith("/api/")) return await idempotent(hub, req, path, () => api(hub, req, url, ip));
+        if (path.startsWith("/api/")) return await idempotent(hub, req, path, () => api(hub, req, url, ip, device));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
@@ -239,6 +254,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       },
     },
   });
+  if (server.port) hub.devproxy.reserve(server.port);
   return server;
 }
 
@@ -324,16 +340,13 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   return md(agentGuide(origin, r.token));
 }
 
-async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Response> {
+async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" ? await readBody(req) : null;
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
-
-  // The paired device making this request (null on the host itself).
-  const paired = isLocal(ip) ? null : hub.auth.check(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token"));
 
   // Things only people do: speak, record, pin, approve, steer the screen, share, invite. An agent's
   // credential is refused on all of them (agents talk to the room through MCP), and a person's
@@ -366,18 +379,24 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     if (!deviceId) return bad("deviceId is required");
     // A timed-out upload is retried; the same segment from the same device only counts once.
     const segKey = `${deviceId}:${q.get("t0")}`;
-    if (recentSegments.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
-    remember(recentSegments, segKey, 4000);
-    const bytes: Uint8Array = body?.__raw ?? new Uint8Array(await req.arrayBuffer().catch(() => new ArrayBuffer(0)));
-    const seg = await hub.audio.ingest({
-      deviceId,
-      t0: Number(q.get("t0")),
-      t1: Number(q.get("t1")),
-      wav: bytes,
-      levelDb: q.has("level") ? Number(q.get("level")) : undefined,
-      noiseDb: q.has("noise") ? Number(q.get("noise")) : undefined,
-    });
-    return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    if (recentSegments.has(segKey) || segmentsInFlight.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
+    segmentsInFlight.add(segKey);
+    try {
+      const bytes: Uint8Array = body?.__raw ?? new Uint8Array(await req.arrayBuffer());
+      const seg = await hub.audio.ingest({
+        deviceId,
+        t0: Number(q.get("t0")),
+        t1: Number(q.get("t1")),
+        wav: bytes,
+        levelDb: q.has("level") ? Number(q.get("level")) : undefined,
+        noiseDb: q.has("noise") ? Number(q.get("noise")) : undefined,
+      });
+      remember(recentSegments, segKey, 4000);
+      return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    } finally {
+      segmentsInFlight.delete(segKey);
+    }
   }
 
   if (path === "/people" && req.method === "POST") {
@@ -449,12 +468,20 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
 
-  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, paired?.id));
-  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, paired?.id));
+  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
+  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");
-    const workerUrl = String(body.url).replace(/\/\/(localhost|127\.0\.0\.1)/, `//${isLocal(ip) ? "127.0.0.1" : ip}`);
+    // A worker is the caller's own machine: its audio goes there, so it can't name another host or replace the local engine.
+    if (String(body.id) === "local") return bad("That id is reserved.");
+    const self = ip.replace(/^::ffff:/, "");
+    const workerUrl = String(body.url).replace(/\/\/(localhost|127\.0\.0\.1)/, `//${isLocal(ip) ? "127.0.0.1" : self}`);
+    let workerHost = "";
+    try {
+      workerHost = new URL(workerUrl).hostname.replace(/^\[|\]$/g, "");
+    } catch {}
+    if (ip === "relayed" || !workerHost || workerHost !== (isLocal(ip) ? "127.0.0.1" : self)) return bad("A worker has to run on the machine that offers it.", 403);
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
@@ -633,6 +660,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 const IDEM_TTL_MS = 24 * 60 * 60_000;
 const idemSeen = new Map<string, { at: number; done: Promise<{ status: number; body: string; type: string }> }>();
 const recentSegments = new Set<string>();
+const segmentsInFlight = new Set<string>();
 
 function remember(set: Set<string>, key: string, max: number) {
   set.add(key);

@@ -20,6 +20,8 @@ interface Ctx {
   ip: string;
   /** The paired device this agent connected with ("host" for agents on the host). */
   device: string | null;
+  /** The address the agent reached the hub through (the app's relay on the host Mac, or the LAN address). */
+  origin?: string;
   /** The skill text has been handed over in this connection (a new conversation starts a new one). */
   skillSent?: boolean;
 }
@@ -270,16 +272,17 @@ export class McpEndpoint {
     return [...JAM_TOOLS, ...canvas];
   }
 
-  async handle(req: Request, ip: string, device: string | null = null): Promise<Response> {
+  async handle(req: Request, ip: string, device: string | null = null, origin?: string): Promise<Response> {
     const sid = req.headers.get("mcp-session-id");
     if (sid && this.sessions.has(sid)) {
       const s = this.sessions.get(sid)!;
       s.ctx.ip = ip;
+      if (origin) s.ctx.origin = origin;
       return s.transport.handleRequest(req);
     }
     // An unknown session (the hub restarted): 404 tells the client to start a new one.
     if (sid || req.method !== "POST") return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
-    const ctx: Ctx = { agentId: null, ip, device };
+    const ctx: Ctx = { agentId: null, ip, device, origin };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => void this.sessions.set(id, { transport, ctx }),
@@ -304,7 +307,7 @@ export class McpEndpoint {
       prompts: [{ name: "jamsesh", description: "How to work in this JamSesh session" }],
     }));
     server.setRequestHandler(GetPromptRequestSchema, async () => ({
-      messages: [{ role: "user", content: { type: "text", text: skillMarkdown(this.hub) } }],
+      messages: [{ role: "user", content: { type: "text", text: skillMarkdown(this.hub, ctx.origin) } }],
     }));
     server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       const name = req.params.name;
@@ -341,7 +344,8 @@ export class McpEndpoint {
     switch (name) {
       case "jam_join": {
         // The paired device identifies the machine (an address can change between networks).
-        const machine = ctx.device ?? (ctx.ip === "127.0.0.1" || ctx.ip === "::1" ? "host" : ctx.ip);
+        // An agents credential stands for its owner window, so a relaunch (a new credential) is the same machine.
+        const machine = this.hub.auth.machineOf(ctx.device) ?? (ctx.ip === "127.0.0.1" || ctx.ip === "::1" ? "host" : ctx.ip);
         // Through the Mac app, the paired device already belongs to a person.
         const onHost = ctx.device === "host" || (!ctx.device && machineIsHost(ctx.ip));
         const ownerId = onHost ? s.store.setting<string>("hostPersonId", "") : ctx.device ? this.hub.auth.list().find((d) => d.id === ctx.device)?.personId : undefined;
@@ -362,7 +366,7 @@ export class McpEndpoint {
         ctx.agentId = agent.id;
         const first = !ctx.skillSent;
         ctx.skillSent = true;
-        return text(this.briefing(agent, resumed, first));
+        return text(this.briefing(agent, resumed, first, ctx.origin));
       }
       case "jam_rename": {
         const agent = this.requireAgent(ctx);
@@ -491,7 +495,14 @@ export class McpEndpoint {
       case "jam_devserver": {
         const agent = this.requireAgent(ctx);
         // The dev server has to be on the agent's own machine: its address as the hub sees it.
-        const target = ownTarget(String(args.url ?? ""), ctx.ip);
+        let from = ctx.ip;
+        if (from === "relayed") {
+          // Through the Mac app's relay the hub only sees loopback: that is the host Mac only for its own agents.
+          const own = ctx.device === "host" || this.hub.auth.machineOf(ctx.device) === "host";
+          if (!own) throw new Error("The hub can't tell where your machine is from here (you're behind a tunnel or proxy), so it can't reach a dev server on it. Share a screenshot with jam_post_image instead.");
+          from = "127.0.0.1";
+        }
+        const target = ownTarget(String(args.url ?? ""), from);
         const d = await this.hub.devproxy.register({ agentId: agent.id, name: String(args.name ?? "Dev server").slice(0, 80), target, platform: args.platform });
         return text(
           d.up
@@ -583,14 +594,14 @@ export class McpEndpoint {
     return "";
   }
 
-  briefing(agent: Agent, resumed: boolean, fullSkill = true) {
+  briefing(agent: Agent, resumed: boolean, fullSkill = true, origin = this.hub.session.hubUrl) {
     const s = this.hub.session;
     const inbox = this.inboxText(agent, false);
     return [
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${s.person(agent.ownerId)?.role ? ` (${s.person(agent.ownerId)!.role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       s.person(agent.ownerId)?.role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
-      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${s.hubUrl}/api/upload" (JAMSESH_TOKEN is in ~/.jamsesh/client.env)`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload" (JAMSESH_TOKEN is in ~/.jamsesh/client.env)`,
       "",
       this.roster(),
       "",
@@ -599,7 +610,7 @@ export class McpEndpoint {
       inbox,
       "",
       fullSkill
-        ? `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub).replace(/^---[\s\S]*?---\s*/, "")}`
+        ? `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub, origin).replace(/^---[\s\S]*?---\s*/, "")}`
         : "You already have the JamSesh skill from this conversation. Next: jam_inbox, then carry on. When you go idle, keep calling jam_wait.",
     ].join("\n");
   }

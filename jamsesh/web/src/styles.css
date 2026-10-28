@@ -552,7 +552,7 @@ textarea:focus {
 
 .line {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: fit-content(45%) minmax(0, 1fr);
   gap: 10px;
   padding: 8px 10px;
   border-radius: 12px;
@@ -563,10 +563,16 @@ textarea:focus {
   font-weight: 600;
   font-size: 13px;
   white-space: nowrap;
+  /* A long name ("Maya's Claude (repo-name)") shortens; it never squeezes the line out. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .line .what {
   color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .line.banter .what,
@@ -1049,6 +1055,14 @@ select {
 @media (max-width: 1560px) {
   .host-header .session-name,
   .host-header .clock {
+    display: none;
+  }
+}
+/* Remote laptops carry two more controls (the Remote badge and the brain's voice), so their header
+   gives up its secondary text earlier: the "On screen" chip and the name hide, the photo stays. */
+@media (max-width: 1560px) {
+  .client-header.remote span.big-screen-chip,
+  .client-header.remote .me-name {
     display: none;
   }
 }
