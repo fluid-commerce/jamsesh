@@ -3,7 +3,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { bus } from "./bus";
-import { config } from "./config";
+import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { joinScript, hookScript } from "./install-scripts";
 import { skillMarkdown } from "./skill";
@@ -41,7 +41,7 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
       const path = url.pathname;
       try {
         if (path === "/healthz") return new Response("ok");
-        if (path === "/join.sh") return new Response(joinScript(hub), { headers: { "content-type": "text/x-shellscript" } });
+        if (path === "/join.sh") return new Response(joinScript(hub, originOf(req, url)), { headers: { "content-type": "text/x-shellscript" } });
         if (path === "/" ) return Response.redirect(isLocal(ip) ? "/host" : `/client${url.search}`, 302);
 
         const ok = authorized(req, url, ip);
@@ -131,7 +131,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn }));
+    const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
+    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
   }
 
   if (path === "/audio" && req.method === "POST") {
@@ -228,7 +229,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
-    const link = isLocal(ip) ? hub.canvas.localWs(kind) : kind === "view" ? s.canvas.wsView : s.canvas.wsEdit;
+    // Point the link at the address this person reached the host through (LAN, Tailscale, a tunnel).
+    const raw = isLocal(ip) ? hub.canvas.localWs(kind) : kind === "view" ? s.canvas.wsView : s.canvas.wsEdit;
+    const link = raw && !isLocal(ip) ? raw.replace(/\/\/[^/:]+:/, `//${url.hostname}:`) : raw;
     return json({ link, status: s.canvas.status, reason: s.canvas.reason, desktop: kind === "view" ? s.canvas.viewLink : s.canvas.editLink });
   }
 
@@ -321,6 +324,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   if (path === "/brain/digest" && req.method === "POST") return (await hub.brain.digest(true), json({ digest: s.store.digest("session")?.text ?? "" }));
 
   return bad("not found", 404);
+}
+
+/** The origin the client used to reach this host (proxies forward the original host). */
+function originOf(req: Request, url: URL) {
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
+  const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
+  return `${proto}://${host}`;
 }
 
 async function readBody(req: Request): Promise<any> {

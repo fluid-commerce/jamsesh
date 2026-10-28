@@ -43,6 +43,8 @@ interface Group {
   finalizedWith: string | null;
   /** Set while the group is being transcribed, so a copy arriving now still joins it. */
   busy: Promise<void> | null;
+  /** Copies from the room and from remote laptops never group: they are different rooms. */
+  location: "room" | "remote";
 }
 
 export interface SpeakerGuess {
@@ -131,8 +133,10 @@ export class AudioPipeline {
     this.lag.set(seg.deviceId, prev == null ? lag : prev * 0.7 + lag * 0.3);
     this.session.touchDevice(seg.deviceId, { level: levelDb });
 
+    const location = this.session.store.get("devices", seg.deviceId)?.location ?? "room";
+    const near = (g: Group) => g.location === location && (location === "room" || g.segments.some((x) => x.deviceId === seg.deviceId));
     // A late copy of an utterance that is already out.
-    const done = this.finalized.find((g) => overlaps(g, seg));
+    const done = this.finalized.find((g) => near(g) && overlaps(g, seg));
     if (done) {
       done.segments.push(seg);
       done.lastArrival = now;
@@ -140,9 +144,9 @@ export class AudioPipeline {
       await this.revisit(done, seg);
       return seg;
     }
-    let g = this.open.find((x) => overlaps(x, seg));
+    let g = this.open.find((x) => near(x) && overlaps(x, seg));
     if (!g) {
-      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, busy: null };
+      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, busy: null, location };
       this.open.push(g);
     }
     g.segments.push(seg);
@@ -237,14 +241,34 @@ export class AudioPipeline {
       method: guess.method,
       deviceId: best.deviceId,
       devices: g.segments.map((s) => ({ deviceId: s.deviceId, level: round(s.levelDb), snr: round(s.snr) })),
+      location: g.location,
       eventId: null,
       engine,
     };
+    // Hybrid sessions: the room's speakers play remote voices (and remote laptops hear the
+    // room through the call). The same words heard in the other location are an echo.
+    const echo = this.echoOf(u, best.snr);
+    if (echo === "drop") return;
     g.utteranceId = u.id;
     this.autoEnroll(guess, best, g.segments);
     this.session.store.put("utterances", u);
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
+  }
+
+  /** "drop" when this line is an echo of a clearer copy heard in the other location. */
+  private echoOf(u: Utterance, snr: number): "drop" | "keep" {
+    const recent = this.session.store
+      .all("utterances")
+      .filter((x) => x.location && x.location !== u.location && Math.abs(x.t0 - u.t0) < 3000 && Math.abs(x.t1 - u.t1) < 3500);
+    for (const other of recent) {
+      if (textSimilarity(other.text, u.text) < 0.55) continue;
+      const otherSnr = Math.max(...other.devices.map((d) => d.snr));
+      if (otherSnr >= snr - 6) return "drop";
+      // This copy is much clearer: the earlier one was the echo.
+      if (other.eventId) this.session.store.updateEvent(other.eventId, { relevance: "chatter", data: { echo: true } });
+    }
+    return "keep";
   }
 
   private keep(g: Group) {
@@ -422,6 +446,14 @@ export class AudioPipeline {
     if (best.embedding === undefined) best.embedding = embed(best.pcm);
     return best.embedding ? [...best.embedding] : null;
   }
+}
+
+function textSimilarity(a: string, b: string) {
+  const words = (t: string) => new Set(t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2));
+  const x = words(a);
+  const y = words(b);
+  if (!x.size || !y.size) return 0;
+  return [...x].filter((w) => y.has(w)).length / Math.min(x.size, y.size);
 }
 
 function overlaps(g: Group, s: { t0: number; t1: number }) {

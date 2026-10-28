@@ -60,6 +60,32 @@ Then, in Claude Code or Codex, in each repository you're working in:
 
 The agent joins, claims its workstream, and shows up on the big screen.
 
+## Join remotely, or mix the two
+
+JamSesh works with everyone in the room, everyone remote, or a group in the room with others
+joining from elsewhere.
+
+1. Give remote people a way to reach the host. The simplest is
+   [Tailscale](https://tailscale.com) on the host and on each remote laptop: the host's welcome
+   screen then shows a second join command with its Tailscale address. For an `https` address
+   (no browser flags needed), run `tailscale serve --bg 4747` on the host and start it with
+   `JAMSESH_PUBLIC_URL=https://<host>.<tailnet>.ts.net jamsesh host`.
+2. Remote people run the remote join command and pick **Remote** when their window asks where
+   they are (JamSesh guesses from their address).
+3. Keep your usual call (Meet, Zoom) running for voices. JamSesh doesn't carry audio between
+   people; it listens to each laptop.
+
+What changes for remote people:
+
+- Their laptop's mic is treated as its own room, so their lines are never merged with the room's.
+  When the room's speakers play a remote voice into the room mics (or a remote laptop hears the
+  room through the call), JamSesh keeps the clearest copy and drops the echo.
+- The **Screen** tab in their window mirrors the big screen live.
+- The brain's voice and chime play on their laptop.
+- Links to the canvas and to dev servers use the address they connected through.
+
+Headphones on remote laptops keep the transcript cleanest.
+
 ## How a session flows
 
 1. People talk. Every laptop's mic and the room mic send speech to the host, which keeps the
@@ -75,6 +101,23 @@ The agent joins, claims its workstream, and shows up on the big screen.
 6. If the change belongs on another platform too, the brain asks both agents to coordinate, and
    they present desktop beside mobile.
 
+## Save and pick up again
+
+Everything saves as it happens: the canvas, the room's context, and the screen layouts. On top of
+that, JamSesh keeps a snapshot every five minutes while things change, one when the host stops,
+and one whenever someone says "JamSesh, save this as …". Each snapshot holds the canvas as a
+`.figcraft` file you can open in FigCraft, the session's decisions and context as JSON, and
+readable session notes. **Settings > Saved** lists them with download links. The brain can also
+save a screen layout by name ("save this as the review layout") and bring it back later.
+
+`jamsesh new` starts the next day fresh; the previous session is archived, not deleted.
+
+## Canvas pages
+
+Each workstream gets its own canvas page, named after it, and an agent that claims a workstream
+draws on that page. Variants of one idea stay side by side on their workstream's page. Use the page
+menu at the top left of the canvas to switch pages, or to add one for something new.
+
 ## Talk to the brain
 
 The brain is called JamSesh until you rename it in **Settings > Room brain**. There are three ways
@@ -85,6 +128,10 @@ to address it directly instead of just talking in the room:
 - Press **Record prompt** (or `R`), talk while pointing at things on screen, then stop. Your words
   and where you pointed (frames you hovered or clicked, while saying "this one") go to the brain as
   one prompt.
+
+It doesn't talk back to everything. A soft chime means it heard you. It speaks only to answer a
+question or to tell you it can't do something; anything it does on the big screen speaks for
+itself, typed requests get typed answers, and it stops talking when someone talks over it.
 
 The brain learns how the room wants it to behave. Tell it ("JamSesh, keep it short and only talk
 when someone asks you something"), and it keeps that note for the session. The notes are listed in
@@ -169,6 +216,7 @@ cd ~/jamsesh/jamsesh/hub && bun ../scripts/demo.ts http://127.0.0.1:4747
 | Path | What |
 | --- | --- |
 | `~/.jamsesh/host/` | The session: SQLite context store, canvas server data, renders |
+| `~/.jamsesh/host/snapshots/` | Versioned snapshots: `canvas.figcraft`, `context.json`, `notes.md` |
 | `~/.jamsesh/bin/` | FigCraft binaries the host runs |
 | `~/.jamsesh/.env` | Gateway key fallback (`jamsesh key` sets it) |
 | `jamsesh/hub/` | The hub (Bun): API, MCP endpoint, brain, audio, canvas bridge |

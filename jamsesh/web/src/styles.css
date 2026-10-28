@@ -1058,3 +1058,30 @@ select {
   font-size: 13px;
   padding: 7px 10px;
 }
+
+.where-card {
+  flex: 1;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  transition: border-color 0.15s, background 0.15s;
+}
+.where-card strong {
+  font-weight: 600;
+  font-size: 14px;
+}
+.where-card span {
+  font-size: 12px;
+  color: var(--dim);
+}
+.where-card:hover {
+  background: var(--panel-2);
+}
+.where-card.on {
+  border-color: rgba(124, 196, 255, 0.6);
+  background: var(--decision-bg);
+}

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, type Person } from "../shared/hub";
 import { encodeWav } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
+import { WhereChooser } from "./ClientView";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
 export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainName: string; onClose: () => void }) {
@@ -46,6 +47,11 @@ export function ProfileDrawer({ me, brainName, onClose }: { me: Person; brainNam
             <p className="help" style={{ margin: 0 }}>
               {brainName} uses your title to weigh calls when people disagree, and agents see it next to your name.
             </p>
+          </div>
+          <div className="section">
+            <h3>Where you are</h3>
+            <p className="help">Remote laptops are kept apart from the room's microphones, show the big screen in the Screen tab, and play {brainName}'s voice here.</p>
+            <WhereChooser compact />
           </div>
           <VoiceEnroll me={me} brainName={brainName} />
         </div>

@@ -7,13 +7,14 @@ import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
+import { Stage } from "../host/Stage";
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
 
-type Tab = "canvas" | "work" | "pins" | "agents";
+type Tab = "canvas" | "screen" | "work" | "pins" | "agents";
 
 export function ClientView() {
   const { state, connected } = useHub();
@@ -26,11 +27,32 @@ export function ClientView() {
   const me = state?.people.find((p) => p.id === personId);
 
   useEffect(() => mic.onChange(setMicStatus) as () => void, []);
+  // Remote people don't hear the room speaker: the brain's voice and chime play here instead.
+  const myDevice = state?.devices.find((d) => d.id === DEVICE);
+  const remote = myDevice?.location === "remote";
+  useEffect(() => {
+    if (!remote) return;
+    let audio: HTMLAudioElement | null = null;
+    const onSpeak = (m: { audio: string | null; mime: string }) => {
+      if (!m.audio || pref("hearBrain") === "off") return;
+      audio?.pause();
+      audio = new Audio(`data:${m.mime};base64,${m.audio}`);
+      audio.play().catch(() => {});
+    };
+    hub.speakListeners.add(onSpeak);
+    const offChime = hub.onMessage((m) => m.type === "chime" && m.deviceId !== hub.deviceId && pref("hearBrain") !== "off" && playChime());
+    return () => {
+      hub.speakListeners.delete(onSpeak);
+      offChime();
+      audio?.pause();
+    };
+  }, [remote]);
   // Heard you: the chime also plays on the laptop that spoke or recorded.
   useEffect(() => hub.onMessage((m) => m.type === "chime" && m.deviceId === hub.deviceId && playChime()) as () => void, []);
   useEffect(() => {
     if (!me) return;
-    api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on }).catch(() => {});
+    const location = pref("location") || undefined;
+    api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on, location }).catch(() => {});
   }, [me?.id, micStatus.on]);
   useEffect(() => setPref("tab", tab), [tab]);
   // M mutes or unmutes from anywhere outside a text field.
@@ -75,6 +97,7 @@ export function ClientView() {
           {(
             [
               ["canvas", "Canvas"],
+              ["screen", "Screen"],
               ["work", "Work"],
               ["pins", `Pins${state.annotations.filter((a) => a.status === "open").length ? ` · ${state.annotations.filter((a) => a.status === "open").length}` : ""}`],
               ["agents", "Agents"],
@@ -86,6 +109,7 @@ export function ClientView() {
           ))}
         </nav>
         <div className="header-right">
+          {remote && <span className="badge neutral" title="You're joining remotely: the Screen tab mirrors the big screen">Remote</span>}
           <span className="chip big-screen-chip ellipsis" title="What the big screen shows">
             On screen: {state.stage.mode === "welcome" ? "board" : state.stage.title || state.stage.mode}
           </span>
@@ -116,6 +140,11 @@ export function ClientView() {
             <CanvasFrame kind="edit" name={me.name} title="Shared canvas" />
             <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
           </div>
+          {tab === "screen" && (
+            <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
+              <Stage state={state} interactive />
+            </div>
+          )}
           {tab === "work" && <WorkGallery state={state} personId={me.id} />}
           {tab === "pins" && (
             <div className="scrollbars-thin" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: 20 }}>
@@ -333,6 +362,36 @@ function Facts({ state }: { state: HubState }) {
   );
 }
 
+/** In the room or remote: decides how audio is grouped and whether the brain's voice plays here. */
+export function WhereChooser({ compact }: { compact?: boolean }) {
+  const { state } = useHub();
+  const guess = state?.devices.find((d) => d.id === DEVICE)?.location;
+  const [where, setWhere] = useState(pref("location") || guess || "room");
+  const pick = (w: "room" | "remote") => {
+    setWhere(w);
+    setPref("location", w);
+    api("/devices", { deviceId: DEVICE, location: w }).catch(() => {});
+  };
+  return (
+    <div style={{ margin: compact ? 0 : "18px 0 4px" }}>
+      {!compact && <div className="label" style={{ marginBottom: 8 }}>Where are you?</div>}
+      <div className="row" style={{ gap: 8 }}>
+        {(
+          [
+            ["room", "In the room", "With the big screen"],
+            ["remote", "Remote", "Joining from elsewhere"],
+          ] as const
+        ).map(([w, title, sub]) => (
+          <button key={w} type="button" className={`where-card ${where === w ? "on" : ""}`} onClick={() => pick(w)} aria-pressed={where === w}>
+            <strong>{title}</strong>
+            <span>{sub}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) => void }) {
   const qsName = new URLSearchParams(location.search).get("name") ?? "";
   const existing = state.people.find((p) => p.name.toLowerCase() === qsName.toLowerCase());
@@ -347,6 +406,7 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
         <Logo size={40} />
         <h1 style={{ fontSize: 34, letterSpacing: "-0.03em", margin: "18px 0 6px" }}>Join {state.settings.sessionName}</h1>
         <p style={{ color: "var(--muted)", marginTop: 0 }}>Your name and title tell the room brain who's talking and whose call counts.</p>
+        <WhereChooser />
         {state.people.length > 0 && (
           <div style={{ display: "grid", gap: 6, margin: "18px 0" }}>
             {state.people.map((p) => (

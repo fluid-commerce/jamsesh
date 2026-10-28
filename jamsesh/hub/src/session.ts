@@ -1,7 +1,7 @@
 // The session: people, devices, agents, workstreams, directives, artifacts and the
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
 import { bus } from "./bus";
-import { config } from "./config";
+import { config, hostAddresses } from "./config";
 import { newId, PALETTE, Store } from "./store";
 import type {
   Agent,
@@ -59,6 +59,13 @@ export class Session {
     bus.resolver = (key) => this.resolve(key);
   }
 
+  /** Every address people can join from: the room's LAN, Tailscale, and a public URL if one is set. */
+  addresses() {
+    const list = hostAddresses().map((a) => ({ label: a.label, url: `http://${a.host}:${config.port}` }));
+    if (process.env.JAMSESH_PUBLIC_URL) list.push({ label: "Remote", url: process.env.JAMSESH_PUBLIC_URL.replace(/\/$/, "") });
+    return list.length ? list : [{ label: "In the room", url: this.hubUrl }];
+  }
+
   get hubUrl() {
     return `http://${config.publicHost}:${config.port}`;
   }
@@ -100,7 +107,7 @@ export class Session {
 
   state(): HubState {
     return {
-      session: { name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas },
+      session: { name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),
@@ -233,11 +240,12 @@ export class Session {
       label: fields.label ?? cur?.label ?? "Device",
       personId: fields.personId !== undefined ? fields.personId : cur?.personId ?? null,
       kind: fields.kind ?? cur?.kind ?? "client",
+      location: fields.location ?? cur?.location ?? "room",
       micOn: fields.micOn ?? cur?.micOn ?? false,
       level: fields.level ?? cur?.level ?? 0,
       lastSeen: Date.now(),
     };
-    const changed = !cur || cur.label !== d.label || cur.personId !== d.personId || cur.micOn !== d.micOn || cur.kind !== d.kind;
+    const changed = !cur || cur.label !== d.label || cur.personId !== d.personId || cur.micOn !== d.micOn || cur.kind !== d.kind || cur.location !== d.location;
     this.store.put("devices", d, changed);
     return d;
   }

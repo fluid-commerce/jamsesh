@@ -20,7 +20,31 @@ function readEnvFile(file: string): Record<string, string> {
   return out;
 }
 
+/** This machine's addresses: its LAN address and, when present, its Tailscale address. */
+export function hostAddresses(): { label: string; host: string }[] {
+  const out: { label: string; host: string }[] = [];
+  for (const [name, list] of Object.entries(networkInterfaces())) {
+    for (const a of list ?? []) {
+      if (a.family !== "IPv4" || a.internal || a.address.startsWith("169.254")) continue;
+      const tail = a.address.startsWith("100.") && Number(a.address.split(".")[1]) >= 64 && Number(a.address.split(".")[1]) < 128;
+      if (tail || /^utun|^tailscale/.test(name)) out.push({ label: "Remote (Tailscale)", host: a.address });
+      else if (!out.some((o) => o.label === "In the room")) out.push({ label: "In the room", host: a.address });
+    }
+  }
+  return out;
+}
+
+/** Same /24 as one of this machine's LAN addresses: someone in the room. */
+export function sameLan(ip: string) {
+  const clean = ip.replace(/^::ffff:/, "");
+  if (clean === "127.0.0.1" || clean === "::1") return true;
+  const prefix = clean.split(".").slice(0, 3).join(".");
+  return hostAddresses().some((a) => a.label === "In the room" && a.host.split(".").slice(0, 3).join(".") === prefix);
+}
+
 export function lanAddress(): string {
+  const room = hostAddresses().find((a) => a.label === "In the room");
+  if (room) return room.host;
   for (const list of Object.values(networkInterfaces())) {
     for (const a of list ?? []) {
       if (a.family === "IPv4" && !a.internal && !a.address.startsWith("169.254")) return a.address;

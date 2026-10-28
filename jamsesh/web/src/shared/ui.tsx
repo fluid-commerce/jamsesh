@@ -46,7 +46,20 @@ export function colorFor(state: HubState | null, ref: { personId?: string | null
 
 // ---------- artifact tiles ----------
 
-export function ScaledFrame({ src, width = 1280, height = 800, title }: { src: string; width?: number; height?: number; title: string }) {
+/** URLs the host hands out name its LAN address; a remote viewer reaches the same port through the address they used. */
+export function localize(url: string) {
+  try {
+    const u = new URL(url);
+    if (/^(\d+\.){3}\d+$/.test(u.hostname) && u.hostname !== location.hostname && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+      u.hostname = location.hostname;
+      return u.toString();
+    }
+  } catch {}
+  return url;
+}
+
+export function ScaledFrame({ src: raw, width = 1280, height = 800, title }: { src: string; width?: number; height?: number; title: string }) {
+  const src = localize(raw);
   const box = useRef<HTMLDivElement>(null);
   const [fit, setFit] = useState({ scale: 0, left: 0, top: 0 });
   useLayoutEffect(() => {

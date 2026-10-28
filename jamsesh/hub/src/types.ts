@@ -19,6 +19,8 @@ export interface Device {
   label: string;
   personId: string | null;
   kind: "host" | "client";
+  /** In the room with the host, or joining from somewhere else. */
+  location: "room" | "remote";
   micOn: boolean;
   level: number;
   lastSeen: number;
@@ -237,6 +239,7 @@ export interface Utterance {
   method: string;
   deviceId: string;
   devices: { deviceId: string; level: number; snr: number }[];
+  location: "room" | "remote";
   eventId: number | null;
   engine: string;
 }
@@ -265,7 +268,7 @@ export interface Settings {
 }
 
 export interface HubState {
-  session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo };
+  session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string }[] };
   settings: Settings;
   people: Person[];
   devices: Device[];

@@ -371,7 +371,6 @@ function slim(state: HubState) {
 }
 
 function Welcome({ state }: { state: HubState }) {
-  const cmd = `curl -fsSL ${state.session.hubUrl}/join.sh | bash`;
   return (
     <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
       <div style={{ display: "grid", gridTemplateColumns: "auto auto", gap: 56, alignItems: "center", maxWidth: 1200 }}>
@@ -385,9 +384,16 @@ function Welcome({ state }: { state: HubState }) {
             <span style={{ color: "var(--dim)" }}>The agents are listening.</span>
           </h1>
           <div style={{ fontSize: 18, color: "var(--muted)", marginBottom: 12 }}>On each laptop, run</div>
-          <code className="mono" style={{ display: "inline-block", fontSize: "clamp(15px, 1.2vw, 22px)", padding: "14px 18px", background: "var(--panel)", border: "1px solid var(--line-2)", borderRadius: 14 }}>
-            {cmd}
-          </code>
+          <div style={{ display: "grid", gap: 10 }}>
+            {(state.session.addresses?.length ? state.session.addresses : [{ label: "", url: state.session.hubUrl }]).map((a) => (
+              <div key={a.url} className="row" style={{ gap: 14 }}>
+                {state.session.addresses?.length > 1 && <span className="label" style={{ width: 150 }}>{a.label}</span>}
+                <code className="mono" style={{ display: "inline-block", fontSize: "clamp(15px, 1.2vw, 22px)", padding: "14px 18px", background: "var(--panel)", border: "1px solid var(--line-2)", borderRadius: 14 }}>
+                  curl -fsSL {a.url}/join.sh | bash
+                </code>
+              </div>
+            ))}
+          </div>
           <div style={{ fontSize: 18, color: "var(--muted)", marginTop: 18 }}>
             then type <span className="mono" style={{ color: "var(--text)" }}>/jamsesh</span> in Claude Code or Codex. Join code{" "}
             <span className="mono" style={{ color: "var(--text)", letterSpacing: "0.12em" }}>{state.session.code}</span>

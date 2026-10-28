@@ -257,7 +257,7 @@ export class Brain {
     const fmtAgent = (a: Agent) =>
       `- ${a.id}: ${a.name}, owner ${a.ownerName}, ${a.harness}, repo ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, platform ${a.platform}, status ${a.status}${a.focus ? `, focus: ${a.focus}` : ""}${a.activity ? `, doing: ${a.activity}` : ""}${s.isWaiting(a.id) ? " (idle, waiting for work)" : ""}`;
     return [
-      `## People\n${people.map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""} (weight ${p.weight})`).join("\n") || "(nobody named yet)"}`,
+      `## People\n${people.map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""} (weight ${p.weight})${s.store.all("devices").some((d) => d.personId === p.id && d.location === "remote") ? ", remote (sees the big screen in their Screen tab, hears your voice on their laptop)" : ""}`).join("\n") || "(nobody named yet)"}`,
       `## Agents\n${agents.filter((a) => a.status !== "offline").map(fmtAgent).join("\n") || "(no agents connected)"}`,
       historyBrief(s, batch.map((e) => e.text).join(" ")),
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,

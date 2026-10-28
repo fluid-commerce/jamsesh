@@ -17,8 +17,9 @@ curl -s --max-time 3 -X POST -H 'content-type: application/json' -H "x-jam-code:
 `;
 }
 
-export function joinScript(hub: Hub) {
-  const HUB = hub.session.hubUrl;
+export function joinScript(hub: Hub, origin?: string) {
+  // The address this laptop reached the host through: the room's LAN, Tailscale, or a tunnel.
+  const HUB = origin ?? hub.session.hubUrl;
   const CODE = hub.session.code;
   return `#!/usr/bin/env bash
 # JamSesh: connect this computer to the session at ${HUB}
