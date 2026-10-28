@@ -481,7 +481,8 @@ export class McpEndpoint {
     return [
       `## Session brief\n${brief || "(no brief yet; the session just started)"}`,
       ws ? `## Workstream: ${ws.title}\n${ws.brief || "(no brief yet)"}` : "",
-      `## Decisions\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
+      knowledge(s, ws?.title),
+      `## Decisions as said in the room\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
       `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
       `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
       `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
@@ -523,6 +524,24 @@ function modeHint(mode: Directive["mode"]) {
     case "present":
       return "Put the requested work on the big screen with jam_show.";
   }
+}
+
+/** The curated knowledge an agent should work from, its own workstream first. */
+function knowledge(s: Hub["session"], workstream?: string) {
+  const active = s.facts().filter((f) => f.status === "active");
+  if (!active.length) return "";
+  const mine = active.filter((f) => workstream && f.workstream.toLowerCase() === workstream.toLowerCase());
+  const general = active.filter((f) => !f.workstream);
+  const other = active.filter((f) => f.workstream && !mine.includes(f));
+  const fmt = (f: (typeof active)[number]) => `- [${f.kind}] ${f.text}${f.by ? ` (${f.by})` : ""}`;
+  return [
+    "## What the session has settled (curated; follow these)",
+    mine.length ? `For ${workstream}:\n${mine.map(fmt).join("\n")}` : "",
+    general.length ? `Session-wide:\n${general.map(fmt).join("\n")}` : "",
+    other.length ? `Other workstreams:\n${other.slice(0, 15).map((f) => `- [${f.kind}, ${f.workstream}] ${f.text}`).join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function fmtEvent(e: JamEvent) {

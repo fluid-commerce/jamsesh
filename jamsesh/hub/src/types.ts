@@ -173,6 +173,20 @@ export interface Share {
   startedAt: number;
 }
 
+/** One curated piece of session knowledge the brain keeps current. */
+export interface Fact {
+  id: string;
+  ts: number;
+  updatedAt: number;
+  kind: "decision" | "requirement" | "constraint" | "preference" | "question" | "fact";
+  text: string;
+  workstream: string;
+  by: string;
+  status: "active" | "resolved" | "superseded";
+  note: string;
+  sourceEventIds: number[];
+}
+
 export interface Annotation {
   id: string;
   ts: number;
@@ -263,6 +277,7 @@ export interface HubState {
   stage: Stage;
   shares: Share[];
   annotations: Annotation[];
+  facts: Fact[];
   digest: string;
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
 }

@@ -7,6 +7,7 @@ import type {
   Agent,
   Annotation,
   Artifact,
+  Fact,
   CanvasInfo,
   Device,
   DevServer,
@@ -112,6 +113,7 @@ export class Session {
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
+      facts: this.facts(),
       digest: this.store.digest("session")?.text ?? "",
       brain: this.brainStatus,
     };
@@ -141,6 +143,8 @@ export class Session {
         return { key, value: this.shares() };
       case "annotations":
         return { key, value: this.annotations() };
+      case "facts":
+        return { key, value: this.facts() };
       case "settings":
         return { key, value: this.settings() };
       case "session":
@@ -624,6 +628,14 @@ export class Session {
     const ann: Annotation = { ...a, id: newId("pin"), ts: Date.now(), authorName: person?.name ?? a.authorName ?? "Someone", status: "open", promptEventId: null };
     this.store.put("annotations", ann);
     return ann;
+  }
+
+  // ---- curated context ----
+
+  /** Active facts first (newest first), then the latest resolved or superseded ones. */
+  facts(): Fact[] {
+    const all = this.store.all("facts").sort((a, b) => b.updatedAt - a.updatedAt);
+    return [...all.filter((f) => f.status === "active"), ...all.filter((f) => f.status !== "active").slice(0, 30)];
   }
 
   // ---- people ----

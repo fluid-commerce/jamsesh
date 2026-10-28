@@ -7,6 +7,7 @@ import type {
   Agent,
   Annotation,
   Artifact,
+  Fact,
   Device,
   DevServer,
   Directive,
@@ -30,6 +31,7 @@ type Collections = {
   utterances: Utterance;
   shares: Share;
   annotations: Annotation;
+  facts: Fact;
 };
 export type CollectionName = keyof Collections;
 

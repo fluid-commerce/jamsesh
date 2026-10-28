@@ -349,7 +349,28 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
   return <button className={`toggle ${on ? "on" : ""}`} role="switch" aria-checked={on} aria-label={label} onClick={() => onChange(!on)} />;
 }
 
-export function CanvasFrame({ kind, name, title }: { kind: "edit" | "view"; name?: string; title: string }) {
+export function CanvasFrame({ kind, name, title, follow }: { kind: "edit" | "view"; name?: string; title: string; follow?: string }) {
+  const frame = useRef<HTMLIFrameElement>(null);
+  // Follow a participant (by name): the canvas shows what they're looking at.
+  useEffect(() => {
+    if (!follow) return;
+    let done = false;
+    const tick = async () => {
+      const fc = (frame.current?.contentWindow as any)?.figcraft;
+      if (!fc || done) return;
+      try {
+        const peers = await fc.execute("collab.peers", {});
+        const want = follow.toLowerCase();
+        const peer = (peers?.peers ?? []).find((p: any) => String(p.name ?? "").toLowerCase().includes(want) || want.includes(String(p.name ?? "").toLowerCase().split(" ")[0]));
+        if (peer) {
+          await fc.execute("collab.follow", { client: peer.client ?? peer.id });
+          done = true;
+        }
+      } catch {}
+    };
+    const t = setInterval(tick, 2500);
+    return () => clearInterval(t);
+  }, [follow]);
   const [link, setLink] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const { state } = useHub();
@@ -362,8 +383,8 @@ export function CanvasFrame({ kind, name, title }: { kind: "edit" | "view"; name
   }, [kind, status]);
   if (!link) return <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>{err ?? (status === "failed" ? state?.session.canvas.reason : "Connecting to the canvas…")}</div>;
   const gl = new URLSearchParams(location.search).has("webgl") ? "&webgl" : "";
-  const src = `/canvas/?canvas${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;
-  return <iframe src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />;
+  const src = `/canvas/?canvas&control${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;
+  return <iframe ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />;
 }
 
 export function Section({ title, help, children, right }: { title: string; help?: string; children: ReactNode; right?: ReactNode }) {

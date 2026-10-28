@@ -9,6 +9,7 @@ import { shortRepo } from "../session";
 import type { Agent, Artifact, JamEvent, Relevance, Share, Tile } from "../types";
 import { describeError, model } from "./llm";
 import { speak } from "./speech";
+import { newId } from "../store";
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import type { HostControl } from "../hostctl";
 
@@ -256,6 +257,9 @@ export class Brain {
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,
       `## Open directives\n${open.map((d) => `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => s.agent(t)?.name).join(", ")}: ${d.text}`).join("\n") || "(none)"}`,
       digest ? `## Session brief\n${digest}` : "",
+      s.facts().some((f) => f.status === "active")
+        ? `## Curated knowledge (respect decisions, requirements and constraints when routing)\n${s.facts().filter((f) => f.status === "active").slice(0, 40).map((f) => `- [${f.kind}${f.workstream ? `, ${f.workstream}` : ""}] ${f.text}`).join("\n")}`
+        : "",
       `## Recent agent activity\n${updates.map((e) => `- ${e.authorName}: ${e.text.slice(0, 220)}`).join("\n") || "(none)"}`,
       `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}`).join("\n") || "(none)"}`,
       `## Live shares\n${s.shares().filter((x) => x.status === "live").map((x) => `- ${x.id}: ${x.label}`).join("\n") || "(none)"}`,
@@ -332,6 +336,8 @@ export class Brain {
             data: { requestedBy: requester, artifactIds: i.artifactIds ?? [], sourceEventIds: sourceIds },
           });
           bus.send({ type: "toast", tone: "decision", text: "Decision", detail: i.text });
+          // Decisions reach the curated knowledge (and every agent's context) right away.
+          setTimeout(() => this.digest(true).catch(() => {}), 3000);
           return "Recorded.";
         },
       }),
@@ -603,9 +609,63 @@ export class Brain {
         prompt: `Previous brief:\n${prev?.text ?? "(none, the session just started)"}\n\nPeople: ${s.people().map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ")}\nAgents: ${s.agents().map((a) => `${a.name} (${a.platform}, ${shortRepo(a.repo)})`).join(", ")}\n\nNew events:\n${events.map((e) => `- [${e.kind}] ${e.authorName}: ${e.text.slice(0, 400)}`).join("\n")}`,
       });
       s.store.setDigest("session", text.trim(), lastId);
+      await this.curate(events);
       await this.workstreamBriefs(lastId);
     } catch (e) {
       console.error("digest:", describeError(e));
+    }
+  }
+
+  /**
+   * Curated context: turn what just happened into durable knowledge (decisions,
+   * requirements, constraints, preferences, open questions, facts), resolve what was
+   * answered, and supersede what changed. Agents get the active set in jam_context.
+   */
+  async curate(events: JamEvent[]) {
+    const s = this.session;
+    const m = model(s, "digest");
+    if (!m || !events.length) return;
+    const active = s.facts().filter((f) => f.status === "active");
+    const workstreams = s.store.all("workstreams").map((w) => w.title);
+    const { output } = await generateText({
+      model: m,
+      output: Output.object({ schema: curateSchema }),
+      system: CURATE_SYSTEM,
+      prompt: [
+        `People: ${s.people().map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ") || "(none)"}`,
+        `Workstreams: ${workstreams.join(", ") || "(none)"}`,
+        `Current knowledge (id: kind, workstream, text):\n${active.map((f) => `${f.id}: ${f.kind}, ${f.workstream || "general"}, ${f.text}`).join("\n") || "(empty)"}`,
+        `New events (id, kind, author, text):\n${events.map((e) => `[${e.id}] ${e.kind}${e.relevance ? `/${e.relevance}` : ""} ${e.authorName}: ${e.text.slice(0, 500)}`).join("\n")}`,
+      ].join("\n\n"),
+    });
+    if (!output) return;
+    const now = Date.now();
+    for (const u of output.update) {
+      const f = s.store.get("facts", u.id);
+      if (f && f.status === "active") s.store.put("facts", { ...f, text: u.text, note: u.reason, updatedAt: now });
+    }
+    for (const r of output.resolve) {
+      const f = s.store.get("facts", r.id);
+      if (f && f.status === "active") s.store.put("facts", { ...f, status: "resolved", note: r.reason, updatedAt: now });
+    }
+    for (const r of output.supersede) {
+      const f = s.store.get("facts", r.id);
+      if (f && f.status === "active") s.store.put("facts", { ...f, status: "superseded", note: r.reason, updatedAt: now });
+    }
+    for (const a of output.add) {
+      if (active.some((f) => f.kind === a.kind && similar(f.text, a.text) > 0.75)) continue;
+      s.store.put("facts", {
+        id: newId("fact"),
+        ts: now,
+        updatedAt: now,
+        kind: a.kind,
+        text: a.text,
+        workstream: a.workstream ?? "",
+        by: a.by ?? "",
+        status: "active",
+        note: "",
+        sourceEventIds: a.eventIds ?? [],
+      });
     }
   }
 
@@ -695,6 +755,30 @@ How to route:
 - Don't repeat a directive that is already open. Don't route banter. If nothing needs doing, call no_action.
 - "That was Felipe" / "Britain said that" right after a line means fix_speaker on that line. It is not banter even if phrased casually.
 - Speak (say_to_room) only when someone addresses you directly ("hey brain", "JamSesh, ...") or asks a question only you can answer. Keep it to one sentence.`;
+
+const curateSchema = z.object({
+  add: z.array(
+    z.object({
+      kind: z.enum(["decision", "requirement", "constraint", "preference", "question", "fact"]),
+      text: z.string().describe("One self-contained sentence an engineer can act on, with specifics (names, values, screens)"),
+      workstream: z.string().optional().describe("Existing workstream title, or empty for session-wide"),
+      by: z.string().optional().describe("Who said or decided it"),
+      eventIds: z.array(z.number()).optional(),
+    }),
+  ),
+  update: z.array(z.object({ id: z.string(), text: z.string(), reason: z.string() })).describe("Knowledge that still holds but changed in scope or detail (rewrite it whole)"),
+  resolve: z.array(z.object({ id: z.string(), reason: z.string() })).describe("Questions answered or requirements met"),
+  supersede: z.array(z.object({ id: z.string(), reason: z.string() })).describe("Knowledge a newer event changed (for example the room switched from A to B)"),
+});
+
+const CURATE_SYSTEM = `You curate the shared knowledge of a live design-and-build session, so every agent works from the same, current facts. From the new events, record only what will still matter later:
+- decision: a direction the team chose ("Settings header uses option A, the big greeting"), with who decided.
+- requirement: something the result must do or include.
+- constraint: a limit (deadline, platform rule, "don't touch the API").
+- preference: how someone likes things (style, tone, "Felipe prefers fewer steps").
+- question: an open question nobody answered yet.
+- fact: useful project knowledge (token values, URLs of dev servers, where code lives).
+Ignore banter, chatter, greetings, and tool noise. Don't restate existing knowledge. When something changed, either update it (same item, new scope or detail, for example "A on both apps" becomes "A on mobile") or supersede it (replaced outright). Never leave two active items that contradict each other. Resolve questions that got answered. Be sparse: most batches add zero to three items.`;
 
 const DIGEST_SYSTEM = `You keep the running brief of a live design-and-build session, for agents that join late or start a new leg of work. Update the previous brief with the new events. Structure:
 GOAL: one line.

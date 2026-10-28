@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, type ReactElement } from "react";
-import { api, ago, type Artifact, type HubState } from "../shared/hub";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, QR, colorFor, useNow } from "../shared/ui";
+import { useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
+import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, QR, RoomFeed, ScaledFrame, colorFor, useNow } from "../shared/ui";
 
 const BOARD_MAX = 5;
 
@@ -36,6 +36,9 @@ export function Stage({ state, interactive }: { state: HubState; interactive?: b
       break;
     case "custom":
       body = <Custom state={state} />;
+      break;
+    case "layout":
+      body = <LayoutView state={state} />;
       break;
     default:
       body = <Board state={state} onPick={spotlight} />;
@@ -166,6 +169,163 @@ function Agents({ state }: { state: HubState }) {
         })}
       </div>
     </>
+  );
+}
+
+/** A layout the brain or a person designed: any mix of tiles, in a bento or an explicit grid. */
+function LayoutView({ state }: { state: HubState }) {
+  const layout = state.stage.layout;
+  const tiles = layout?.tiles ?? [];
+  if (!tiles.length) return <Board state={state} onPick={() => {}} />;
+  const auto = autoGrid(tiles.length);
+  const grid = layout?.grid ?? auto;
+  return (
+    <>
+      <Header title={state.stage.title} caption={state.stage.caption} />
+      <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 16, gridTemplateColumns: grid.columns, gridTemplateRows: grid.rows }}>
+        {tiles.map((t, i) => (
+          <div key={i} style={{ gridArea: grid.areas[i] ?? "auto", minHeight: 0, minWidth: 0, display: "flex" }}>
+            <TileView tile={t} state={state} />
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function autoGrid(n: number): { columns: string; rows: string; areas: string[] } {
+  switch (n) {
+    case 1:
+      return { columns: "1fr", rows: "1fr", areas: ["1 / 1 / 2 / 2"] };
+    case 2:
+      return { columns: "1fr 1fr", rows: "1fr", areas: ["1 / 1 / 2 / 2", "1 / 2 / 2 / 3"] };
+    case 3:
+      return { columns: "1.4fr 1fr", rows: "1fr 1fr", areas: ["1 / 1 / 3 / 2", "1 / 2 / 2 / 3", "2 / 2 / 3 / 3"] };
+    case 4:
+      return { columns: "1fr 1fr", rows: "1fr 1fr", areas: ["1 / 1 / 2 / 2", "1 / 2 / 2 / 3", "2 / 1 / 3 / 2", "2 / 2 / 3 / 3"] };
+    default: {
+      const cols = n <= 6 ? 3 : 4;
+      const rows = Math.ceil(n / cols);
+      return { columns: `repeat(${cols}, 1fr)`, rows: `repeat(${rows}, 1fr)`, areas: Array.from({ length: n }, (_, i) => `${Math.floor(i / cols) + 1} / ${(i % cols) + 1} / ${Math.floor(i / cols) + 2} / ${(i % cols) + 2}`) };
+    }
+  }
+}
+
+/** One tile of any kind, framed the same way, with its annotation target. */
+export function TileView({ tile, state, interactive }: { tile: Tile; state: HubState; interactive?: boolean }) {
+  switch (tile.kind) {
+    case "artifact": {
+      const a = state.artifacts.find((x) => x.id === tile.artifactId);
+      if (!a) return <TileFrame label={tile.label ?? "Gone"} kind="artifact"><div className="empty-note">That artifact was removed.</div></TileFrame>;
+      return (
+        <div data-jam-target={JSON.stringify({ kind: a.kind === "devserver" ? "web" : "artifact", ref: a.kind === "devserver" ? a.url : a.id, label: a.title })} style={{ flex: 1, display: "flex", minWidth: 0, position: "relative" }}>
+          <ArtifactTile art={a} state={state} />
+          <Slot target={{ kind: a.kind === "devserver" ? "web" : "artifact", ref: a.kind === "devserver" ? a.url ?? "" : a.id, label: a.title }} />
+        </div>
+      );
+    }
+    case "canvas":
+      return (
+        <TileFrame label={tile.label ?? (tile.follow ? `Canvas · following ${tile.follow}` : "Live canvas")} kind="canvas" target={{ kind: "canvas", ref: "canvas", label: "Canvas" }}>
+          <CanvasFrame kind="view" name="Big screen" title="Live canvas" follow={tile.follow ?? undefined} />
+        </TileFrame>
+      );
+    case "web": {
+      const dev = state.devservers.find((d) => d.url === tile.url);
+      const mobile = dev?.platform === "mobile" || /mobile|expo|ios|android/i.test(tile.label ?? "");
+      return (
+        <TileFrame label={tile.label ?? dev?.name ?? hostOf(tile.url)} kind="web" sub={tile.url} target={{ kind: "web", ref: tile.url, label: tile.label ?? dev?.name ?? hostOf(tile.url) }}>
+          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} />
+        </TileFrame>
+      );
+    }
+    case "screen": {
+      const sh = state.shares.find((x) => x.id === tile.shareId);
+      return (
+        <TileFrame label={tile.label ?? sh?.label ?? "Shared screen"} kind="screen" target={{ kind: "screen", ref: tile.shareId, label: tile.label ?? sh?.label ?? "Shared screen" }}>
+          {sh && sh.status === "live" ? <ScreenSlot share={sh} /> : <div className="empty-note">{sh?.status === "requested" ? `Waiting for ${sh.personName} to share…` : "This share ended."}</div>}
+        </TileFrame>
+      );
+    }
+    case "agent": {
+      const a = state.agents.find((x) => x.id === tile.agentId);
+      if (!a) return <TileFrame label="Agent" kind="agent"><div className="empty-note">Agent left.</div></TileFrame>;
+      return <AgentCard agent={a} state={state} />;
+    }
+    case "feed":
+      return (
+        <TileFrame label={tile.label ?? "The room"} kind="feed">
+          <div style={{ position: "absolute", inset: 0, padding: 12, display: "flex", flexDirection: "column" }}>
+            <RoomFeed big filter="room" />
+          </div>
+        </TileFrame>
+      );
+    case "html":
+      return (
+        <TileFrame label={tile.label ?? ""} kind="html">
+          <iframe srcDoc={`<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#0c0d0f;color:#f3f2ef;font-family:system-ui}</style>${tile.html}`} sandbox="allow-scripts" title={tile.label ?? "View"} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }} />
+        </TileFrame>
+      );
+  }
+  void interactive;
+}
+
+function hostOf(url: string) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+function TileFrame({ label, sub, kind, children, target }: { label: string; sub?: string; kind: string; children: ReactNode; target?: { kind: string; ref: string; label: string } }) {
+  return (
+    <div className="tile" data-jam-target={target ? JSON.stringify(target) : undefined} style={{ animation: "none" }}>
+      <div className="media" style={{ padding: 0 }}>
+        {children}
+        {target && <Slot target={target} />}
+      </div>
+      <div className="meta">
+        <span className="badge neutral">{kind === "web" ? "Browser" : kind === "screen" ? "Live share" : kind === "canvas" ? "Canvas" : kind}</span>
+        <span className="title">{label}</span>
+        {sub && <span className="chip mono" style={{ color: "var(--dim)", fontSize: 12 }}>{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Annotation pins for a tile (filled in by the annotation layer when it's mounted). */
+export const tileSlots: { render: ((target: { kind: string; ref: string; label: string }) => ReactNode) | null; screen: ((share: Share) => ReactNode) | null } = { render: null, screen: null };
+
+function Slot({ target }: { target: { kind: string; ref: string; label: string } }) {
+  return <>{tileSlots.render?.(target) ?? null}</>;
+}
+
+function ScreenSlot({ share }: { share: Share }) {
+  return <>{tileSlots.screen?.(share) ?? <div className="empty-note">Connecting to {share.personName}'s {share.kind}…</div>}</>;
+}
+
+function AgentCard({ agent: a, state }: { agent: HubState["agents"][number]; state: HubState }) {
+  const now = useNow(5000);
+  const latest = state.artifacts.find((x) => x.agentId === a.id && x.image);
+  const updates = state.events.filter((e) => e.authorId === a.id && ["update", "artifact", "canvas", "message"].includes(e.kind)).slice(-4).reverse();
+  return (
+    <div className="tile" style={{ padding: 0 }}>
+      <div style={{ padding: "16px 18px 6px" }}>
+        <AgentRow agent={a} state={state} />
+      </div>
+      <div className="media" style={{ padding: 14 }}>
+        {latest ? <img src={latest.image!} alt={latest.title} /> : <div className="empty-note">No visuals yet</div>}
+      </div>
+      <div style={{ padding: "10px 18px 16px", borderTop: "1px solid var(--line)", display: "grid", gap: 6 }}>
+        {updates.map((u) => (
+          <div key={u.id} className="row" style={{ fontSize: 14, gap: 8 }}>
+            <span className="chip mono" style={{ width: 34, color: "var(--dim)", fontSize: 12 }}>{ago(u.ts, now)}</span>
+            <span className="grow" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--muted)" }}>{u.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
