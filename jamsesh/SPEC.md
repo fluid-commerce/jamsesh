@@ -134,6 +134,17 @@ the client.
   to the next display** moves it.
 - Opens your own **client window** (`/client`), because the person at the host is usually a
   participant.
+- **User-less host** (**Use every display (nobody uses this Mac)** in the menu bar menu, saved with
+  the app): when nobody uses the host's desktop, every connected display becomes a presentation
+  surface. The app opens one big-screen window per display, each in same-Space full screen on its
+  own display, and no client window. The main display gets the main screen (`/host`, with the
+  header, join code, and room feed); every other display gets an extra screen
+  (`/host?screen=screen-2`, `screen-3`, and so on) that shows only its stage, edge to edge, with no
+  header, room mic, or side panels. Each screen has its own stage, reports its size, and reverts to
+  the board after 6 minutes like the main one. The brain sees every screen by id with its
+  resolution, aspect ratio, and what it shows, and `show_on_screen`, `set_layout`, and
+  `build_custom_view` take a `screen` to put things on a specific one (see
+  [10.1](#101-layout)).
 - Keeps hosting from the menu bar when its windows are closed. The menu shows that it's hosting,
   the current join code (refreshed every 5 seconds), who's connected, and **Open my window**,
   **Show the big screen**, **Move the big screen to the next display**, **Mute the room mic**,
@@ -143,8 +154,10 @@ the client.
   seconds, saves a snapshot, and exits, so it never holds the port with no window.
 - Carries the whole host runtime: the hub compiled to one program, the web app, the WebAssembly
   canvas, `figcraft-server` and `figcraft-cli`, the skill, the voiceprint library, and the
-  speaker-embedding model. Downloads the speech-to-text engine and model on first use, so the host
-  Mac needs nothing else [B28a, B29].
+  speaker-embedding model, so the host Mac needs nothing else [B29]. Speech-to-text runs on the Mac
+  when whisper.cpp and a model are installed (`brew install whisper-cpp`); otherwise it goes
+  through the gateway, and the room sees a notice if neither is available [B28a]. The app doesn't
+  download a speech model itself.
 - Advertises itself on the local network with Bonjour (`dns-sd -R <ComputerName> _jamsesh._tcp`,
   TXT `session=<name>` and `https=<public URL>` when remote access is on). The record carries no
   secret.
@@ -369,10 +382,16 @@ A26c].
 
 ### 5.3 Identity memory
 
-Each client remembers, per host address: who you are (person id, name), where you are (in the
-room or remote), your device ids, your preferences (mic, hearing the brain), and the sessions you've
-been in on that host [A26e]. Opening the same host again picks up where you left off. The Mac app
-also remembers the last host and its token.
+Each client remembers, per host: who you are (person id, name), where you are (in the room or
+remote), your device ids, your preferences (mic, hearing the brain), and the sessions you've been
+in on that host [A26e]. Opening the same host again picks up where you left off. The Mac app also
+remembers the last host and its token.
+
+Hosts are told apart by a permanent id each hub generates (`hostId` in `/api/pair/info`), not by
+address: the Mac app reaches every host at the same local address (its relay), so the window learns
+the host's id before it reads anything saved, and keeps identity and the offline queue under it.
+Offline at startup, it uses the last id it saw at that address. The first time, the identity saved
+under the plain address moves to the host it belongs to.
 
 ## 6. Agents, MCP tools, and the skill
 

@@ -132,6 +132,3 @@ function notes(c: any): string {
   return lines.join("\n");
 }
 
-export function copyIfExists(from: string, to: string) {
-  if (existsSync(from)) copyFileSync(from, to);
-}

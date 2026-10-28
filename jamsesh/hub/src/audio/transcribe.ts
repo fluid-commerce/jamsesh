@@ -23,14 +23,22 @@ const HALLUCINATIONS = [
   /subtitles by|amara\.org|transcribed by/i,
 ];
 
+/** Video-outro lines whisper invents from noise; nobody says these in a working session. */
+const NEVER_SAID = /next video|like and subscribe|see you (in the )?next (one|time)|thanks for watching|don'?t forget to subscribe/i;
+
 /**
  * Whisper invents "Thank you." or a lone full stop for silence and steady noise, at any
  * length. Such stock phrases are believed only when the audio was a short blip (too
  * brief to carry a sentence anyway) or a clean voice (snr in dB, when known).
  */
-export function cleanTranscript(text: string, durationSec: number, snr = Infinity): string {
+export function cleanTranscript(text: string, durationSec: number, snr = Infinity, names: string[] = []): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (!/[\p{L}\p{N}]/u.test(t)) return "";
+  // Only people's names ("Chey, Pat."): whisper repeating names it was given, not someone talking.
+  const words = t.toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
+  const known = new Set(names.flatMap((n) => n.toLowerCase().split(/[^\p{L}\p{N}']+/u)).filter(Boolean));
+  if (known.size && words.length && words.every((w) => known.has(w))) return "";
+  if (NEVER_SAID.test(t)) return "";
   if (HALLUCINATIONS.some((r) => r.test(t)) && (durationSec < 3 || snr < CLEAN_VOICE_SNR)) return "";
   return t;
 }
@@ -105,7 +113,7 @@ export class Transcriber {
     return [...this.engines.values()].map((e) => ({ id: e.id, label: e.label, kind: e.kind, inflight: e.inflight, healthy: e.failures < 3 }));
   }
 
-  async transcribe(wav: Uint8Array, durationSec: number, hint = "", snr = Infinity): Promise<{ text: string; engine: string }> {
+  async transcribe(wav: Uint8Array, durationSec: number, hint = "", snr = Infinity, names: string[] = []): Promise<{ text: string; engine: string }> {
     const mode = this.session.settings().transcription;
     if (mode !== "gateway") {
       const pool = [...this.engines.values()].filter((e) => e.failures < 3).sort((a, b) => a.inflight - b.inflight || (a.kind === "local" ? -1 : 1));
@@ -116,7 +124,7 @@ export class Transcriber {
           e.failures = 0;
           this.trouble = null;
           e.lastOk = Date.now();
-          return { text: cleanTranscript(text, durationSec, snr), engine: e.label };
+          return { text: cleanTranscript(text, durationSec, snr, names), engine: e.label };
         } catch (err) {
           e.failures++;
           console.error(`whisper ${e.label}:`, describeError(err));
@@ -134,9 +142,10 @@ export class Transcriber {
     }
     try {
       const lang = this.language();
-      const r = await aiTranscribe({ model: gw.transcription(this.session.settings().models.transcribe), audio: wav, providerOptions: lang === "auto" ? undefined : { openai: { language: lang } } });
+      // Bounded, so a slow gateway can't hold a recorded prompt past its window.
+      const r = await aiTranscribe({ abortSignal: AbortSignal.timeout(20_000), model: gw.transcription(this.session.settings().models.transcribe), audio: wav, providerOptions: lang === "auto" ? undefined : { openai: { language: lang } } });
       this.trouble = null;
-      return { text: cleanTranscript(r.text, durationSec, snr), engine: "gateway" };
+      return { text: cleanTranscript(r.text, durationSec, snr, names), engine: "gateway" };
     } catch (err) {
       this.warn(`Transcription failed: ${describeError(err)}`);
       return { text: "", engine: "none" };

@@ -1,6 +1,7 @@
 // Control of the host machine for the room brain: open apps and URLs, place windows,
 // drive the iOS Simulator, and run shell commands. Only the brain on the host can
 // use this; client agents never reach it.
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bus } from "./bus";
@@ -289,6 +290,7 @@ export class HostControl {
         case "type_text":
           return this.typeText(a.text, a.app);
         case "shell": {
+          if (!this.session.settings().hostControl) return "Host control is turned off in Settings.";
           if (!a.command) return "Give a command.";
           const r = await run(["/bin/zsh", "-lc", a.command], 60_000);
           this.log(`Ran on the host: ${a.command}`);
@@ -436,6 +438,8 @@ export class HostControl {
     const req = this.requests.get(id) ?? this.pendingRequests().find((r) => r.id.endsWith(id));
     if (!req) return "There's no build request with that id.";
     if (req.status !== "pending") return `That request was already ${req.status}.`;
+    // Turned off while it waited: nothing runs.
+    if (approve && !this.session.settings().hostControl) return "Host control is turned off in Settings, so the build can't run. Turn it on, then approve again.";
     if (req.createdAt > saidAt) return `${by} spoke before this request arrived, so it's still waiting for an answer.`;
     req.status = approve ? "approved" : "denied";
     req.decidedBy = by;
@@ -451,11 +455,13 @@ export class HostControl {
    * launch an iPhone build in the Simulator.
    */
   preview(o: { repo: string; branch?: string; command: string; open?: string; by: string }): string {
+    if (!this.session.settings().hostControl) return "Host control is turned off in Settings.";
     if (!/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(o.repo)) return "I need the repository's remote URL (https or git@) to build it on the host.";
     const name = o.repo.replace(/\.git$/, "").split(/[/:]/).pop() || "repo";
     const branch = o.branch?.trim() || "";
     if (branch && !/^[\w./-]+$/.test(branch)) return "That branch name has characters I won't pass to git.";
-    const slug = `${name}${branch ? `-${branch.replace(/[^\w-]+/g, "-")}` : ""}`;
+    // The checkout is keyed by the full remote, so org-a/app and org-b/app never share one.
+    const slug = `${name}${branch ? `-${branch.replace(/[^\w-]+/g, "-")}` : ""}-${createHash("sha1").update(o.repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
     if (this.builds.has(slug)) return `${name}${branch ? `@${branch}` : ""} is already building on the host.`;
     const dir = join(config.home, "previews", slug);
     const label = `${name}${branch ? `@${branch}` : ""}`;

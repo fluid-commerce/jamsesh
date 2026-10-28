@@ -59,6 +59,9 @@ export function newId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
 }
 
+/** As long as a laptop keeps a queued change (web/src/shared/offline.ts): a replay is always recognized. */
+const REPLAY_MS = 7 * 86_400_000;
+
 export class Store {
   db: Database;
   private cache = new Map<CollectionName, Map<string, any>>();
@@ -147,15 +150,16 @@ export class Store {
 
   // ---- settings ----
 
-  // ---- replayed calls: the first answer to each idempotency key, kept a day across restarts ----
+  // ---- replayed calls: the first answer to each idempotency key, kept across restarts for as long
+  // as a laptop keeps a change queued (seven days) ----
 
   reply(key: string): { status: number; type: string; body: string } | null {
-    return (this.db.query("SELECT status, type, body FROM replies WHERE key = ? AND at > ?").get(key, Date.now() - 86_400_000) as { status: number; type: string; body: string } | null) ?? null;
+    return (this.db.query("SELECT status, type, body FROM replies WHERE key = ? AND at > ?").get(key, Date.now() - REPLAY_MS) as { status: number; type: string; body: string } | null) ?? null;
   }
 
   saveReply(key: string, r: { status: number; type: string; body: string }): void {
     this.db.query("INSERT OR REPLACE INTO replies (key, status, type, body, at) VALUES (?, ?, ?, ?, ?)").run(key, r.status, r.type, r.body.slice(0, 200_000), Date.now());
-    if (Math.random() < 0.02) this.db.query("DELETE FROM replies WHERE at < ?").run(Date.now() - 86_400_000);
+    if (Math.random() < 0.02) this.db.query("DELETE FROM replies WHERE at < ?").run(Date.now() - REPLAY_MS);
   }
 
   setting<T>(key: string, fallback: T): T {

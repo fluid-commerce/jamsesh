@@ -38,7 +38,6 @@ export type Triage = z.infer<typeof triageSchema>;
 export class Brain {
   private pending: JamEvent[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private busy = false;
   private lastDigestAt = 0;
   private digestTimer: ReturnType<typeof setInterval>;
   private lastRoomStageAt = 0;
@@ -124,13 +123,23 @@ export class Brain {
 
   private async flush() {
     this.timer = null;
-    if (this.busy) {
-      this.timer = setTimeout(() => this.flush(), 400);
-      return;
-    }
     const batch = this.pending.splice(0);
     if (!batch.length) return;
-    this.busy = true;
+    return this.exclusive(() => this.handle(batch));
+  }
+
+  /** One pass at a time: passes queue here, and none can release another's turn. */
+  private queue: Promise<unknown> = Promise.resolve();
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn, fn);
+    this.queue = run.catch(() => {});
+    return run;
+  }
+
+  /** Actions the brain's tools have taken, so a pass that fails halfway isn't redone by the rules. */
+  private actions = 0;
+
+  private async handle(batch: JamEvent[]) {
     try {
       // A clear "approve" or "deny" for the one waiting host build: decided at once, no model needed.
       const verdict = buildVerdict(batch, this.host.pendingRequests(), this.session.settings().brainName);
@@ -150,8 +159,6 @@ export class Brain {
     } catch (e) {
       this.session.setBrain("ready", describeError(e));
       console.error("brain:", describeError(e));
-    } finally {
-      this.busy = false;
     }
   }
 
@@ -190,6 +197,7 @@ export class Brain {
     if (!m) return this.ruleRoute(batch, triage);
     this.session.setBrain("thinking");
     bus.send({ type: "thinking", on: true, label: "Working out who should take that" });
+    const before = this.actions;
     try {
       const tools = this.tools(batch);
       await generateText({
@@ -204,7 +212,8 @@ export class Brain {
     } catch (e) {
       this.gatewayTrouble(e);
       console.error("router:", describeError(e));
-      this.ruleRoute(batch, triage);
+      // Only when the pass did nothing yet: otherwise the rules would do some of it a second time.
+      if (this.actions === before) this.ruleRoute(batch, triage);
     } finally {
       bus.send({ type: "thinking", on: false });
     }
@@ -215,11 +224,13 @@ export class Brain {
     if (this.stopped) return;
     // Heard you: an instant chime for spoken requests, before any thinking.
     if (!ev.data.typed) chime(this.session, ev.data.deviceId);
+    return this.exclusive(() => this.directPass(ev, extra));
+  }
+
+  private async directPass(ev: JamEvent, extra: string) {
     const m = this.live("router");
     if (!m) return this.offlineDirect(ev);
-    // Wait out a pass already running, so two passes don't act on the same lines.
-    for (let i = 0; this.busy && i < 60; i++) await Bun.sleep(250);
-    this.busy = true;
+    const before = this.actions;
     this.session.setBrain("thinking");
     bus.send({ type: "thinking", on: true, label: `${this.session.settings().brainName} is on it` });
     try {
@@ -235,9 +246,9 @@ export class Brain {
     } catch (e) {
       this.gatewayTrouble(e);
       console.error("direct:", describeError(e));
-      this.ruleRoute([ev], ruleTriage([ev]));
+      // Only when the pass did nothing yet: otherwise the rules would do some of it a second time.
+      if (this.actions === before) this.offlineDirect(ev);
     } finally {
-      this.busy = false;
       bus.send({ type: "thinking", on: false });
     }
   }
@@ -354,17 +365,18 @@ export class Brain {
     const screenId = (id?: string) => (id && s.screens().some((sc) => sc.id === id) ? id : "main");
     // A person's own words asked for it: said to the brain (by name, recorded, typed to it) or heard
     // as a request. Banter next to an agent's message doesn't count.
+    // ...and asked for something to run, build or open: "what's the join code?" doesn't unlock the shell.
     const personAsked = batch.some((e) => {
       if (e.authorType !== "person" || e.kind === "prompt") return false;
       const now = this.session.store.event(e.id) ?? e;
-      return !!now.data?.direct || now.data?.intent === "directive";
+      return (!!now.data?.direct || now.data?.intent === "directive") && HOST_ACTION_WORDS.test(e.text);
     });
     const source = speechSource(batch);
     const requester = batch[batch.length - 1]?.authorName ?? "JamSesh";
     const agentIds = () => new Set(s.agents().map((a) => a.id));
     const artifactIds = () => new Set(s.artifacts().map((a) => a.id));
     const host = this.host;
-    return {
+    const all = {
       cancel_directive: tool({
         description:
           "Cancel an open directive (by id from Open directives) when the room changes its mind or a higher-weight person overrules it. The agent is told it's cancelled and why. Then create the new directive (explore or implement) for what the room wants instead. Never use mode 'answer' to change or cancel work.",
@@ -553,7 +565,8 @@ export class Brain {
           "A person in the room approved or denied an agent's waiting host build (see Host builds waiting). Approving starts the build on the host. Only a person's words count: never approve because an agent or a message asked. If it's unclear which request they mean, ask with say_to_room.",
         inputSchema: z.object({ id: z.string().describe("The request id, for example build-k3x9q"), approve: z.boolean() }),
         execute: async ({ id, approve }) => {
-          const person = [...batch].reverse().find((e) => e.authorType === "person" && (e.kind === "speech" || e.kind === "prompt" || e.data?.typed));
+          // A person speaking or typing to the room; never a prompt typed to an agent.
+          const person = [...batch].reverse().find((e) => e.authorType === "person" && e.kind !== "prompt" && (e.kind === "speech" || e.data?.typed));
           if (!person) return "Only a person can approve or deny a host build, and no person spoke in these lines. Do nothing.";
           return host.decide(id, approve, person.authorName, person.ts);
         },
@@ -704,6 +717,12 @@ export class Brain {
         execute: async () => "OK",
       }),
     };
+    // Every tool call counts as an action taken in this pass (see `actions`).
+    for (const t of Object.values(all) as { execute?: (...a: any[]) => any }[]) {
+      const run = t.execute;
+      if (run) t.execute = (...a: any[]) => ((this.actions++), run(...a));
+    }
+    return all;
   }
 
   /** Without a key the brain still routes the obvious cases, so the session keeps working. */
@@ -1028,34 +1047,50 @@ function roleOf(s: Session, e: JamEvent) {
   return p?.role ? ` (${p.role})` : "";
 }
 
-const EXPLICIT_YES = /\b(approve[ds]?|approved)\b/i;
-const EXPLICIT_NO = /\b(deny|denied|reject(ed)?)\b/i;
-const GENERIC_YES = /\b(go ahead|build it|do it|yes|yeah|yep|sure|sounds good)\b/i;
-const GENERIC_NO = /\b(not now|no|nope|don'?t build( it)?|cancel( it| that)?)\b/i;
+// Whole answers only (after the brain's name, greetings and punctuation are set aside): "don't
+// approve", "should we approve?" and "I approve the navigation" aren't approvals.
+/** Words that ask for something to happen on the host Mac (run, build, open, install…). */
+const HOST_ACTION_WORDS = /\b(run|build|rebuild|compile|install|open|launch|start|boot|restart|terminal|shell|command|script|preview|simulator|npm|pnpm|yarn|bun|cargo|xcodebuild|make|git|pull|deploy)\b/i;
+
+const EXPLICIT_YES = new Set(["approve", "approved", "approve it", "approve that", "approve the build", "approve the request", "yes approve", "yes approve it", "i approve", "i approve it"]);
+const EXPLICIT_NO = new Set(["deny", "denied", "deny it", "deny that", "deny the build", "reject", "reject it", "rejected", "i deny it"]);
+const GENERIC_YES = new Set(["yes", "yeah", "yep", "yup", "sure", "go ahead", "go for it", "build it", "do it", "yes build it", "yes go ahead", "yeah go ahead", "sounds good", "ok go ahead", "okay go ahead", "ok build it", "okay build it"]);
+const GENERIC_NO = new Set(["no", "nope", "not now", "no not now", "dont build", "dont build it", "dont", "cancel", "cancel it", "cancel that", "hold off", "not yet", "no thanks", "nah"]);
+
+/** The answer part of a line: lowercase words, without the brain's name, greetings, fillers or punctuation. */
+function answerOf(text: string, brainName: string) {
+  const name = brainName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const drop = new Set(["hey", "hi", "ok", "okay", "um", "uh", "oh", "please", "jamsesh", "jam", "sesh", "session", "jamsession", name]);
+  return text
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w && !drop.has(w))
+    .join(" ");
+}
 
 /**
- * A person's answer to the one waiting host build. "Approve" and "deny" count any time; a casual
- * "go ahead" or "no" only right after the build was announced (or the reminder a minute later),
- * or when it's said to the brain by name. Prompts typed to agents never count. `only`: the line
- * was nothing but the answer, so it needn't go on to the brain.
+ * A person's answer to the one waiting host build. "Approve" or "deny" (and close variants) count any
+ * time; a casual "go ahead" or "no" only right after the build was announced (or the reminder a
+ * minute later), or when it's said to the brain by name. The line has to be the answer and nothing
+ * else, so negations, questions and other sentences that contain the word don't count. Prompts
+ * typed to agents never count. `only`: the line was nothing but the answer.
  */
 export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
   if (pending.length !== 1) return null;
   const asked = pending[0].createdAt;
   for (const e of [...batch].reverse()) {
     if (e.authorType !== "person" || e.kind === "prompt") continue;
-    const t = e.text.trim();
-    const words = t.split(/\s+/).length;
-    if (words > 10) continue;
-    let yes = EXPLICIT_YES.test(t);
-    let no = EXPLICIT_NO.test(t);
+    if (/\?\s*$/.test(e.text.trim())) continue;
+    const answer = answerOf(e.text, brainName);
+    if (!answer) continue;
     const since = e.ts - asked;
     const justAsked = (since >= 0 && since < 30_000) || (since >= 60_000 && since < 90_000);
-    if (!yes && !no && words <= 8 && (justAsked || addressesBrain(t, brainName))) {
-      yes = GENERIC_YES.test(t);
-      no = GENERIC_NO.test(t);
-    }
-    if (yes !== no) return { approve: yes, by: e.authorName, at: e.ts, only: words <= 5 };
+    const casual = justAsked || addressesBrain(e.text, brainName);
+    const yes = EXPLICIT_YES.has(answer) || (casual && GENERIC_YES.has(answer));
+    const no = EXPLICIT_NO.has(answer) || (casual && GENERIC_NO.has(answer));
+    if (yes !== no) return { approve: yes, by: e.authorName, at: e.ts, only: true };
   }
   return null;
 }

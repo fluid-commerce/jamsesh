@@ -2489,3 +2489,7 @@ html.in-app .app-header {
     justify-content: center;
   }
 }
+.build-request-err {
+  color: var(--warn);
+  font-size: 13px;
+}

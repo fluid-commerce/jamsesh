@@ -17,6 +17,9 @@ const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 // Nothing to return means the thing was deleted (a queued edit to something gone): 410, not a crash.
 const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
+/** API paths (after /api) that stand for a person: never callable with an agent's credential. */
+const HUMAN_ONLY = /^\/(say|audio|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people\/[\w-]+\/(voice|photo)|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
 /** Host names this hub answers to: loopback, any IP address, .local names, and its own domains. */
@@ -79,7 +82,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (dev) {
           if (!local && !hub.auth.check(tokenOf(req, url), ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-            if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev } as any })) return undefined as any;
+            const who = local ? null : hub.auth.check(tokenOf(req, url), ip);
+            if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
           }
           return proxyHttp(req, url, dev);
         }
@@ -111,8 +115,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
         if (path === "/collab" || path.startsWith("/collab/")) {
-          // The canvas server checks its own link tokens; JamSesh only relays.
-          if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname.replace(/^\/collab/, "") || "/"}${url.search}` } })) return undefined as any;
+          // The canvas server checks its own link tokens; JamSesh also requires a current pairing, so
+          // a disconnected device can't come back with a link it kept.
+          const who = local ? null : hub.auth.check(tokenOf(req, url), ip);
+          if (!local && !who) return bad("This device isn't paired with this JamSesh host.", 401);
+          if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname.replace(/^\/collab/, "") || "/"}${url.search}`, pairedId: who?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
 
@@ -171,7 +178,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     websocket: {
       idleTimeout: 120,
       open(ws: ServerWebSocket<WsData>) {
-        if (ws.data.collab != null) return openCollab(ws, hub);
+        if (ws.data.collab != null) {
+          // Disconnected in Settings: the canvas (or dev server) connection closes too.
+          const pid = (ws.data as any).pairedId;
+          if (pid) (ws as any).off = bus.on((msg) => (msg as any).type === "revoked" && (msg as any).deviceId === pid && ws.close(4401, "disconnected"));
+          return openCollab(ws, hub);
+        }
         // Every open window counts, the host's own big screen included: the Mac stays awake for it.
         hub.peopleOnline++;
         ws.send(JSON.stringify({ type: "state", state: s.state() } satisfies BusMessage));
@@ -210,7 +222,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         } catch {}
       },
       close(ws: ServerWebSocket<WsData>) {
-        if (ws.data.collab != null) return void ws.data.upstream?.close();
+        if (ws.data.collab != null) {
+          (ws as any).off?.();
+          return void ws.data.upstream?.close();
+        }
         hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
         (ws as any).off?.();
         if (ws.data.deviceId) {
@@ -319,6 +334,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   // The paired device making this request (null on the host itself).
   const paired = isLocal(ip) ? null : hub.auth.check(req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token"));
+
+  // Things only people do: speak, record, pin, approve, steer the screen, share, invite. An agent's
+  // credential is refused on all of them (agents talk to the room through MCP), and a person's
+  // window always acts as its own person, whatever the request says.
+  if (req.method !== "GET" && HUMAN_ONLY.test(path)) {
+    if (paired?.kind === "agent") return bad("That's for people; agents use their jam_ tools.", 403);
+    if (paired?.personId && body && typeof body === "object" && "personId" in body) body.personId = paired.personId;
+  }
 
   if (path === "/me") {
     const personId = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;

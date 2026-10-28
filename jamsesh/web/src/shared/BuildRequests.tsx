@@ -18,9 +18,12 @@ export function BuildRequests({ big }: { big?: boolean }) {
 
 function Card({ r }: { r: BuildRequest }) {
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
   const decide = async (approve: boolean) => {
     setBusy(true);
-    await api(`/build-requests/${r.id}`, { approve, personId: pref("personId") }).catch(() => {});
+    setErr("");
+    // Live only: an approval queued while offline could start a build long after someone changed their mind.
+    await api(`/build-requests/${r.id}`, { approve, personId: pref("personId") }, "POST", { queue: false }).catch(() => setErr("Not connected to the host. Say it out loud, or try again when you're back."));
     setBusy(false);
   };
   const repo = r.repo.replace(/\.git$/, "").split(/[/:]/).pop();
@@ -34,6 +37,7 @@ function Card({ r }: { r: BuildRequest }) {
         </span>
       </div>
       <code className="build-request-cmd">{r.command}</code>
+      {err && <div className="build-request-err" role="alert">{err}</div>}
       <div className="build-request-foot">
         <span className="build-request-say">
           Say <b>“approve”</b> or <b>“deny”</b>

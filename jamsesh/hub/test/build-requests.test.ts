@@ -9,9 +9,11 @@ const longAgo = [{ createdAt: Date.now() - 5 * 60_000 }];
 
 test("approve and deny count any time; a casual yes or no only right after the announcement", () => {
   expect(buildVerdict([said("approve")], longAgo)).toMatchObject({ approve: true, by: "Maya" });
-  expect(buildVerdict([said("deny that one")], longAgo)?.approve).toBe(false);
+  expect(buildVerdict([said("deny that")], longAgo)?.approve).toBe(false);
   expect(buildVerdict([said("yeah go ahead")], justAsked)?.approve).toBe(true);
-  expect(buildVerdict([said("not now, we're mid-review")], justAsked)?.approve).toBe(false);
+  expect(buildVerdict([said("not now")], justAsked)?.approve).toBe(false);
+  // More than the answer leaves it waiting (it expires on its own): the safe side.
+  expect(buildVerdict([said("not now, we're mid-review")], justAsked)).toBeNull();
   // Minutes later, "go ahead" is about something else...
   expect(buildVerdict([said("ok go ahead and mock that up")], longAgo)).toBeNull();
   // ...unless it's said to the brain.
@@ -29,9 +31,12 @@ test("prompts to agents, agents, and unclear lines never approve", () => {
   expect(buildVerdict([said("I think we should approve the budget for next quarter before the offsite, honestly")], justAsked)).toBeNull();
 });
 
-test("a short answer is handled whole; a longer line still goes to the brain", () => {
-  expect(buildVerdict([said("approve")], justAsked)?.only).toBe(true);
-  expect(buildVerdict([said("approve, and then put it next to the simulator")], justAsked)?.only).toBe(false);
+test("negations, questions, and other sentences with the word don't approve anything (from Astra's review)", () => {
+  for (const t of ["don't approve", "No, approve nothing", "Should we approve?", "I approve the navigation", "approve, and then put it next to the simulator", "do not approve that", "go ahead?"])
+    expect([t, buildVerdict([said(t)], justAsked)]).toEqual([t, null]);
+  expect(buildVerdict([said("JamSesh, approve.")], longAgo)?.approve).toBe(true);
+  expect(buildVerdict([said("Okay, approve it")], longAgo)?.approve).toBe(true);
+  expect(buildVerdict([said("Don't build it")], justAsked)?.approve).toBe(false);
 });
 
 test("words only count for requests that were already waiting when someone spoke", async () => {

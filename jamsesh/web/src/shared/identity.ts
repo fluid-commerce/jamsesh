@@ -33,11 +33,14 @@ let hostKey = "";
 export function setHostKey(id: string) {
   if (!id || hostKey) return;
   hostKey = id;
-  // First time with ids: the identity saved under the plain address belongs to this host.
+  // First time with ids: the identity saved under the plain address belongs to the first host seen
+  // here, once. Another host reached at the same address (the Mac app's relay) starts fresh.
+  const moved = `jamsesh.identityMoved::${location.origin}`;
   const plain = lsGet(storageKey(location.origin));
-  if (plain && !lsGet(storageKey(`${location.origin}#${id}`))) {
+  if (plain && !lsGet(moved) && !lsGet(storageKey(`${location.origin}#${id}`))) {
     try {
       localStorage.setItem(storageKey(`${location.origin}#${id}`), plain);
+      localStorage.setItem(moved, id);
     } catch {}
   }
 }

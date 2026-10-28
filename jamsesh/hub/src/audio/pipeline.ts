@@ -67,6 +67,10 @@ const LAG_OUTLIER_MS = 10_000;
 const CLEAN_SNR = 12;
 /** Below these a segment is silence or steady noise, not a voice. */
 const MIN_SPEECH_DB = -62;
+/** A noise floor below this is a muted or paused mic, not a room. */
+const BROKEN_FLOOR_DB = -85;
+/** Loud enough to be someone speaking whatever the floor says. */
+const LOUD_DB = -42;
 const MIN_SPEECH_SNR = 4;
 const MIN_ACTIVE = 0.3;
 /** Every frame near the peak and barely above the floor: a hum or rumble, not words. */
@@ -234,11 +238,18 @@ export class AudioPipeline {
     return { ...g, id: newId("grp"), busy: null, utteranceId: null, finalizedWith: null, segments, t0: Math.min(...segments.map((s) => s.t0)), t1: Math.max(...segments.map((s) => s.t1)) };
   }
 
+  /**
+   * What whisper is primed with: only the brain's name, so it's spelled right when said. Whisper
+   * repeats its hint on near-silence, so people's names stay out of it ("Chey, Pat." from nobody).
+   */
   private hint() {
-    const names = [...this.session.people().map((p) => p.name), ...this.session.agents().map((a) => a.name.split("'")[0])];
     const brain = this.session.settings().brainName;
-    const brainWords = brain && brain !== "JamSesh" ? [brain] : [];
-    return `${[...brainWords, "JamSesh", "Jam Sesh", "FigCraft"].join(", ")}, canvas, mockup, variant, desktop, mobile. ${[...new Set(names)].join(", ")}.`;
+    return brain && brain !== "JamSesh" ? `${brain}, JamSesh.` : "JamSesh.";
+  }
+
+  /** Everyone's names, so a line made of nothing but names is recognized as whisper's invention. */
+  private names() {
+    return [...this.session.people().map((p) => p.name), ...this.session.agents().map((a) => a.name.split("'")[0])];
   }
 
   private async emit(g: Group) {
@@ -246,11 +257,14 @@ export class AudioPipeline {
     const dur = (best.t1 - best.t0) / 1000;
     // Nothing to transcribe in near-silence, steady noise (no pauses against a floor) or
     // a few knocks and clicks.
-    if (best.levelDb < MIN_SPEECH_DB || best.snr < MIN_SPEECH_SNR || best.active < MIN_ACTIVE || (best.active > STEADY_ACTIVE && best.snr < STEADY_SNR)) {
+    // A noise floor near digital silence (a muted or paused mic) makes any room tone look like a
+    // clear voice; then only a plainly loud segment counts.
+    const brokenFloor = best.levelDb - best.snr < BROKEN_FLOOR_DB && best.levelDb < LOUD_DB;
+    if (brokenFloor || best.levelDb < MIN_SPEECH_DB || best.snr < MIN_SPEECH_SNR || best.active < MIN_ACTIVE || (best.active > STEADY_ACTIVE && best.snr < STEADY_SNR)) {
       g.finalizedWith = best.id;
       return;
     }
-    const { text, engine } = await this.transcriber.transcribe(best.wav, dur, this.hint(), best.snr);
+    const { text, engine } = await this.transcriber.transcribe(best.wav, dur, this.hint(), trustedSnr(best), this.names());
     const guess = this.identify(g.segments, best);
     g.finalizedWith = best.id;
     if (!text) return;
@@ -319,24 +333,27 @@ export class AudioPipeline {
     let text = u.text;
     let engine = u.engine;
     if (best === late && current && late.snr > current.snr + 6) {
-      const r = await this.transcriber.transcribe(late.wav, (late.t1 - late.t0) / 1000, this.hint(), late.snr);
+      const r = await this.transcriber.transcribe(late.wav, (late.t1 - late.t0) / 1000, this.hint(), trustedSnr(late), this.names());
       if (r.text) ((text = r.text), (engine = r.engine));
       g.finalizedWith = late.id;
     }
-    const manual = u.method === "manual";
-    const person = manual ? this.session.person(u.personId) : this.session.person(guess.personId);
+    // Read the line again after the wait: someone may have corrected the speaker meanwhile, and a
+    // correction always wins over a late copy.
+    const fresh = this.session.store.get("utterances", u.id) ?? u;
+    const manual = fresh.method === "manual";
+    const person = manual ? this.session.person(fresh.personId) : this.session.person(guess.personId);
     const next: Utterance = {
-      ...u,
+      ...fresh,
       text,
       engine,
-      personId: manual ? u.personId : guess.personId,
+      personId: manual ? fresh.personId : guess.personId,
       speakerName: person?.name ?? "Someone",
       confidence: manual ? 1 : guess.confidence,
       method: manual ? "manual" : guess.method + "+late",
       deviceId: best.deviceId,
       devices: g.segments.map((s) => ({ deviceId: s.deviceId, level: round(s.levelDb), snr: round(s.snr) })),
     };
-    if (next.text !== u.text || next.personId !== u.personId || next.devices.length !== u.devices.length) {
+    if (next.text !== fresh.text || next.personId !== fresh.personId || next.devices.length !== fresh.devices.length) {
       this.session.store.put("utterances", next);
       this.onLine?.(next, false);
       bus.send({ type: "utterance", utterance: next });
@@ -525,3 +542,8 @@ export function pickBest(segments: Segment[]): Segment {
 
 const round = (n: number) => Math.round(n * 10) / 10;
 const clamp = (n: number) => Math.min(1, Math.max(0, n));
+
+/** A segment's signal-to-noise ratio, or 0 when its noise floor can't be real (digital silence). */
+function trustedSnr(seg: { levelDb: number; snr: number }) {
+  return seg.levelDb - seg.snr < BROKEN_FLOOR_DB ? 0 : seg.snr;
+}

@@ -346,7 +346,9 @@ export function useHub() {
 }
 
 /** Calls that must never wait in the outbox: they only make sense live. */
-const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|shares\/request|debug\/)/;
+// Not worth replaying later, or unsafe to: approvals must be live, and a screen size is only worth
+// reporting now.
+const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|shares\/request|debug\/|build-requests\/|display)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {

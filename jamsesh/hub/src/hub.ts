@@ -171,12 +171,13 @@ export class Hub {
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */
-  private promptMode = new Map<string, number>();
+  /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
+  private promptMode = new Map<string, { t0: number; t1?: number }>();
   /** A prompt window stays open this long at most (SPEC 11.3). */
   static PROMPT_MAX_MS = 2 * 60_000;
 
   promptStart(deviceId: string, t0: number) {
-    this.promptMode.set(deviceId, t0);
+    this.promptMode.set(deviceId, { t0 });
   }
 
   /**
@@ -195,8 +196,9 @@ export class Hub {
   }
 
   private inPrompt(u: Utterance) {
-    for (const [deviceId, t0] of this.promptMode) if (Date.now() - t0 > Hub.PROMPT_MAX_MS) this.promptMode.delete(deviceId);
-    for (const [deviceId, t0] of this.promptMode) if (u.t1 >= t0 - 500 && this.fromRecorder(u, deviceId)) return true;
+    for (const [deviceId, w] of this.promptMode) if (Date.now() - w.t0 > Hub.PROMPT_MAX_MS) this.promptMode.delete(deviceId);
+    // Inside the recording only: once Stop is pressed, what the person says next is ordinary speech.
+    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
     return false;
   }
 
@@ -252,7 +254,10 @@ export class Hub {
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
     // usually the one that is, because Stop lands right after it was said.
-    const deadline = Date.now() + 15_000;
+    // Stop was pressed: the window ends here, even while its last words are still being transcribed.
+    const open = this.promptMode.get(w.deviceId);
+    if (open) open.t1 = w.t1;
+    const deadline = Date.now() + 30_000;
     const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;

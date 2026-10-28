@@ -79,8 +79,14 @@ export function ClientView() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   useEffect(() => {
-    // Your mic listens from the moment you join, unless you muted it.
-    if (me && pref("mic") !== "off" && !mic.status.on) mic.start().catch(() => {});
+    // Your mic listens from the moment you join, unless you muted it. On the host Mac itself the room
+    // mic (in the big screen) already hears you: a second capture of the same mic only competes.
+    if (me && pref("mic") !== "off" && !mic.status.on)
+      api<{ onHost: boolean }>("/me")
+        .then((m) => {
+          if (!m.onHost) void mic.start().catch(() => {});
+        })
+        .catch(() => mic.start().catch(() => {}));
   }, [me?.id]);
 
   if (!state) return <div style={{ height: "100%", display: "grid", placeItems: "center", color: "var(--muted)" }}>{connected ? "Loading…" : "Connecting to the host…"}</div>;

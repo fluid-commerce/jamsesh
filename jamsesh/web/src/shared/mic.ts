@@ -272,6 +272,10 @@ export class Mic {
   private wanted = false;
   private starting: Promise<void> | null = null;
   private lastFrameAt = 0;
+  /** The track is muted by the system; frames resume on their own. */
+  private paused = false;
+  /** Watchdog checks in a row that found no frames. */
+  private stalls = 0;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
   private tries = 0;
@@ -344,6 +348,9 @@ export class Mic {
       this.lastFrameAt = Date.now();
       const track = this.stream.getAudioTracks()[0];
       track?.addEventListener("ended", () => this.recover("The microphone was unplugged or taken by another app."));
+      // Paused by the system (another app took the input, or the window was hidden): not a fault.
+      track?.addEventListener("mute", () => (this.paused = true));
+      track?.addEventListener("unmute", () => ((this.paused = false), (this.lastFrameAt = Date.now())));
       this.watchdog ??= setInterval(() => this.check(), 2000);
       this.tries = 0;
       this.emit({ on: true, error: null, deviceLabel: track?.label ?? "Microphone" });
@@ -382,8 +389,14 @@ export class Mic {
 
   /** Every couple of seconds: frames still arriving? */
   private check() {
-    if (!this.status.on) return;
-    if (Date.now() - this.lastFrameAt > 3500) this.recover("The microphone stopped delivering sound.");
+    if (!this.status.on || this.paused) return;
+    if (Date.now() - this.lastFrameAt <= 3500) return void (this.stalls = 0);
+    // Stalled: wake the audio first; only call it dead when that hasn't helped twice running.
+    void this.ctx?.resume().catch(() => {});
+    if (++this.stalls >= 2) {
+      this.stalls = 0;
+      this.recover("The microphone stopped delivering sound.");
+    }
   }
 
   private teardown() {
@@ -412,6 +425,7 @@ export class Mic {
   }
 
   private frame(f: Float32Array) {
+    this.lastFrameAt = Date.now();
     const now = hub.now();
     // Time from the audio clock, re-anchored to host time when they drift apart.
     const t = this.base + this.frameIndex * 20;
@@ -422,8 +436,12 @@ export class Mic {
     let acc = 0;
     for (let i = 0; i < f.length; i++) acc += f[i] * f[i];
     const db = 10 * Math.log10(acc / f.length + 1e-12);
-    if (db < this.noise) this.noise = this.noise * 0.9 + db * 0.1;
-    else this.noise += Math.min(0.02, (db - this.noise) * 0.002);
+    // Digital silence (a paused or muted track) says nothing about the room: it would drag the floor
+    // toward -120 dB and make faint room tone look like a clear voice.
+    if (db > -100) {
+      if (db < this.noise) this.noise = this.noise * 0.9 + db * 0.1;
+      else this.noise += Math.min(0.02, (db - this.noise) * 0.002);
+    }
     const isSpeech = db > this.noise + 10 && db > -58;
 
     this.ring.push(f);

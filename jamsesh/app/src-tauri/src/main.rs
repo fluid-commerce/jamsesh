@@ -87,6 +87,9 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
+        // A window behind another keeps its microphone and timers (WebKit would otherwise throttle
+        // it, and the room mic would go quiet whenever someone's window covers the big screen).
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .inner_size(1280.0, 820.0)
         .min_inner_size(420.0, 560.0)
         .build()
@@ -125,6 +128,9 @@ fn big_window(app: &AppHandle, label: &str, url: &str, at: Option<tauri::Physica
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
+        // A window behind another keeps its microphone and timers (WebKit would otherwise throttle
+        // it, and the room mic would go quiet whenever someone's window covers the big screen).
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .inner_size(1440.0, 900.0)
         .build()
         .map_err(|e| e.to_string())?;
@@ -172,6 +178,9 @@ fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
+        // A window behind another keeps its microphone and timers (WebKit would otherwise throttle
+        // it, and the room mic would go quiet whenever someone's window covers the big screen).
+        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
         .inner_size(1440.0, 900.0)
         .build()
         .map_err(|e| e.to_string())?;
@@ -301,8 +310,13 @@ async fn fetch_agents_token(app: &AppHandle, origin: &str, person_token: &str) {
         let _ = k.set_password(&token);
     }
     let state = app.state::<Arc<App>>();
-    if let Some(r) = state.inner.lock().await.relay.as_ref() {
+    let mut inner = state.inner.lock().await;
+    if let Some(r) = inner.relay.as_ref() {
         r.set_agents_token(Some(token));
+    }
+    // Paired again: dev-port mirrors carried the old credential; the next refresh recreates them.
+    for (_, m) in inner.mirrors.drain() {
+        m.stop();
     }
 }
 
@@ -384,8 +398,9 @@ async fn leave(app: &AppHandle, state: &App) {
     inner.cfg.role = None;
     state.save(&inner.cfg);
     drop(inner);
-    for label in ["client", "bigscreen"] {
-        if let Some(w) = app.get_webview_window(label) {
+    // Every window the session opened, including a user-less host's extra screens.
+    for (label, w) in app.webview_windows() {
+        if label == "client" || label.starts_with("bigscreen") {
             let _ = w.close();
         }
     }
