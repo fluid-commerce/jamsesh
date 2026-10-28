@@ -206,7 +206,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
   }
   const unsure = e.kind === "speech" && !e.data.typed && (e.data.confidence ?? 1) < 0.55 && e.data.method !== "manual";
   const who =
-    e.kind === "brain" ? "JamSesh" : e.kind === "prompt" ? `${e.authorName} → ${shortAgent(e.data.agentName)}` : e.authorName;
+    e.kind === "brain" ? state.settings.brainName : e.kind === "prompt" ? `${e.authorName} → ${shortAgent(e.data.agentName)}` : e.authorName;
   const cls = [e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? "agent" : "", e.kind === "prompt" ? "prompt" : "", e.relevance ?? ""].join(" ");
   return (
     <div className={`line ${cls}`}>
@@ -228,6 +228,11 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
         {e.kind === "message" && <span className="tag" style={{ color: "var(--dim)", marginRight: 8 }}>to {e.data.toName}</span>}
         {e.text}
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
+        {e.kind === "brain" && e.data.spoken && (
+          <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
+          </span>
+        )}
       </span>
     </div>
   );

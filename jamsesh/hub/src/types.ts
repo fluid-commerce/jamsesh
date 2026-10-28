@@ -302,4 +302,5 @@ export type BusMessage =
   | { type: "level"; deviceId: string; level: number }
   | { type: "thinking"; on: boolean; label?: string }
   | { type: "rtc"; from: string; to: string; data: any }
+  | { type: "chime"; deviceId: string | null }
   | { type: "share-request"; shareId: string; deviceIds: string[]; kind: "screen" | "camera"; reason: string; by: string };

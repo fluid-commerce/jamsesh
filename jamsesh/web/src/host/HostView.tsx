@@ -4,6 +4,7 @@ import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
 import { Stage } from "./Stage";
+import { fadeOut, playChime } from "../shared/sound";
 import { AnnotateToggle } from "../shared/annotate";
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
 
@@ -34,9 +35,11 @@ export function HostView() {
       audioRef.current.play().catch(() => {});
     };
     hub.speakListeners.add(onSpeak);
+    const offChime = hub.onMessage((m) => m.type === "chime" && playChime());
     if (pref("hostMic") === "on") mic.start().catch(() => {});
     return () => {
       off();
+      offChime();
       hub.speakListeners.delete(onSpeak);
     };
   }, []);
@@ -44,6 +47,12 @@ export function HostView() {
   useEffect(() => {
     api("/devices", { deviceId: DEVICE, label: "Room mic (host)", kind: "host", micOn: micStatus.on }).catch(() => {});
   }, [micStatus.on]);
+
+  // Barge-in: when someone in the room starts talking, the brain stops.
+  useEffect(() => {
+    const a = audioRef.current;
+    if (micStatus.speaking && a && !a.paused && a.currentTime > 0.6) fadeOut(a);
+  }, [micStatus.speaking]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

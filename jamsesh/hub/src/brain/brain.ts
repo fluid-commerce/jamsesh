@@ -8,7 +8,7 @@ import type { Session, UpdateKind } from "../session";
 import { shortRepo } from "../session";
 import type { Agent, Artifact, JamEvent, Relevance, Share, Tile } from "../types";
 import { describeError, model } from "./llm";
-import { speak } from "./speech";
+import { chime, speak, type SpeechSource } from "./speech";
 import { newId } from "../store";
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import type { HostControl } from "../hostctl";
@@ -75,8 +75,8 @@ export class Brain {
   hear(ev: JamEvent) {
     if (this.stopped || !this.session.settings().brainEnabled) return;
     if (addressesBrain(ev.text, this.session.settings().brainName)) {
-      this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true } });
-      return void this.direct(ev);
+      const marked = this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true } }) ?? { ...ev, data: { ...ev.data, direct: true } };
+      return void this.direct(marked);
     }
     this.pending.push(ev);
     if (this.timer) clearTimeout(this.timer);
@@ -161,6 +161,8 @@ export class Brain {
   /** Someone spoke to the brain directly (its name, Ask, or a recorded prompt). Always acts or answers. */
   async direct(ev: JamEvent, extra = "") {
     if (this.stopped) return;
+    // Heard you: an instant chime for spoken requests, before any thinking.
+    if (!ev.data.typed) chime(this.session, ev.data.deviceId);
     const m = model(this.session, "router");
     if (!m) return this.ruleRoute([ev], ruleTriage([ev]));
     // Wait out a pass already running, so two passes don't act on the same lines.
@@ -172,7 +174,7 @@ export class Brain {
       await generateText({
         model: m,
         system: this.system(),
-        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room in one or two sentences. If it's feedback about how you behave, call remember_feedback. Always do something visible: act, answer, or say briefly why you won't.`,
+        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room (kind answer). If it's feedback about how you behave, call remember_feedback. Always do something visible: act on the screen or with a directive, answer, or use say_to_room (kind problem) to say briefly why you can't. Don't add a spoken confirmation of an action that is already visible.`,
         tools: this.tools([ev]),
         stopWhen: isStepCount(8),
       });
@@ -282,6 +284,7 @@ export class Brain {
   tools(batch: JamEvent[]) {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
+    const source = speechSource(batch);
     const requester = batch[batch.length - 1]?.authorName ?? "JamSesh";
     const agentIds = () => new Set(s.agents().map((a) => a.id));
     const artifactIds = () => new Set(s.artifacts().map((a) => a.id));
@@ -395,11 +398,12 @@ export class Brain {
         },
       }),
       say_to_room: tool({
-        description: "Speak a short reply out loud on the room speaker. Use sparingly: answers to direct questions to the room brain, or confirming a big action. One or two sentences.",
-        inputSchema: z.object({ text: z.string() }),
-        execute: async ({ text }) => {
-          await speak(s, text);
-          return "Said.";
+        description:
+          "Reply to the room. kind 'answer' for a question someone asked you, 'problem' when you can't do what was asked or a person must act, 'confirm' for anything else. JamSesh decides whether it is spoken or shown as text (typed and overheard requests get text; visible actions stay silent). One or two short sentences; never narrate what you're doing.",
+        inputSchema: z.object({ text: z.string(), kind: z.enum(["answer", "problem", "confirm"]) }),
+        execute: async ({ text, kind }) => {
+          const how = await speak(s, text, { source, kind });
+          return how === "spoken" ? "Said out loud." : "Shown as text.";
         },
       }),
       host_action: tool({
@@ -694,6 +698,16 @@ export class Brain {
 
 const STOPWORDS = new Set(["the", "and", "for", "option", "options", "variant", "variants", "version", "versions", "one", "ones", "all", "that", "this", "our", "real", "quick", "please", "up", "can", "you", "again"]);
 
+/** Where a request came from, which decides whether a reply is spoken. */
+export function speechSource(batch: JamEvent[]): SpeechSource {
+  const ev = batch[batch.length - 1];
+  if (!ev) return "ambient";
+  if (ev.data?.typed) return ev.data.direct ? "typed" : "ambient";
+  if (ev.data?.recorded) return "recorded";
+  if (ev.data?.direct) return "voice";
+  return "ambient";
+}
+
 /** "JamSesh, …", "hey jam sesh", or the room's own name for the brain anywhere in the line. */
 export function addressesBrain(text: string, name: string) {
   const flat = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -759,7 +773,7 @@ How to route:
 - When one platform ships something visible (an agent posts "shipped" or "done"), the other platforms' agents should get a 'coordinate' directive so desktop and mobile stay in parity, adapted to each platform. Include the shipping agent in it.
 - Don't repeat a directive that is already open. Don't route banter. If nothing needs doing, call no_action.
 - "That was Felipe" / "Britain said that" right after a line means fix_speaker on that line. It is not banter even if phrased casually.
-- Speak (say_to_room) only when someone addresses you directly ("hey brain", "JamSesh, ...") or asks a question only you can answer. Keep it to one sentence.`;
+- Replies (say_to_room): only when someone addressed you. Use kind 'answer' for their question, 'problem' when you can't do it or a person must act. Don't confirm actions that show on the big screen or as a routed toast; silence plus the visible change is the confirmation. JamSesh decides whether a reply is spoken. Never more than two short sentences.`;
 
 const curateSchema = z.object({
   add: z.array(

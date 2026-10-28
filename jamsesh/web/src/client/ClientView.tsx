@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Logo } from "../host/HostView";
-import { api, deviceId, pref, setPref, useHub, type Artifact, type HubState } from "../shared/hub";
+import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState } from "../shared/hub";
+import { playChime } from "../shared/sound";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
@@ -25,6 +26,8 @@ export function ClientView() {
   const me = state?.people.find((p) => p.id === personId);
 
   useEffect(() => mic.onChange(setMicStatus) as () => void, []);
+  // Heard you: the chime also plays on the laptop that spoke or recorded.
+  useEffect(() => hub.onMessage((m) => m.type === "chime" && m.deviceId === hub.deviceId && playChime()) as () => void, []);
   useEffect(() => {
     if (!me) return;
     api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on }).catch(() => {});
