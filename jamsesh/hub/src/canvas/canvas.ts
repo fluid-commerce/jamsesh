@@ -63,8 +63,21 @@ export class Canvas {
     for (const d of [this.serverDir, this.rendersDir, this.filesDir]) mkdirSync(d, { recursive: true });
   }
 
+  /** The canvas server's port: the configured one, or the first free one after it (remembered). */
+  port = config.figcraftPort;
+
   private get serverUrl() {
-    return `http://127.0.0.1:${config.figcraftPort}`;
+    return `http://127.0.0.1:${this.port}`;
+  }
+
+  private async choosePort() {
+    const saved = this.session.store.setting<number>("figcraftPort", 0);
+    const candidates = [...new Set([saved, config.figcraftPort, ...Array.from({ length: 30 }, (_, i) => config.figcraftPort + 1 + i)])].filter(Boolean);
+    for (const p of candidates) {
+      if (await healthy(`http://127.0.0.1:${p}`) && p === saved) return p; // our server from before
+      if (portFree(p)) return p;
+    }
+    throw new Error(`no free port for the canvas server near ${config.figcraftPort}`);
   }
 
   async start() {
@@ -90,11 +103,21 @@ export class Canvas {
   }
 
   private async startServer() {
+    this.port = await this.choosePort();
+    const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
+    const before = this.session.store.setting<number>("figcraftPort", 0);
+    if (saved && before && before !== this.port) {
+      // The file is still in the server's data folder; only the address changed.
+      const fix = (l: string) => l.replace(`:${before}&`, `:${this.port}&`);
+      this.session.store.setSetting("canvasLinks", { edit: fix(saved.edit), view: fix(saved.view) });
+      console.warn(`canvas: port ${before} is taken, using ${this.port}`);
+    }
+    this.session.store.setSetting("figcraftPort", this.port);
     if (await healthy(this.serverUrl)) return;
     if (!existsSync(config.figcraftServerBin) && config.figcraftServerBin.includes("/")) {
       throw new Error(`figcraft-server not found at ${config.figcraftServerBin}. Run jamsesh/install.sh.`);
     }
-    this.serverProc = Bun.spawn([config.figcraftServerBin, "--listen", `0.0.0.0:${config.figcraftPort}`, "--data", this.serverDir], {
+    this.serverProc = Bun.spawn([config.figcraftServerBin, "--listen", `0.0.0.0:${this.port}`, "--data", this.serverDir], {
       stdout: "ignore",
       stderr: "pipe",
     });
@@ -132,7 +155,7 @@ export class Canvas {
       await host.command("collab.leave", {}).catch(() => {});
     }
     const key = await this.serverKey();
-    await host.command("collab.publish", { server: `ws://127.0.0.1:${config.figcraftPort}/?key=${key}`, name: this.session.settings().sessionName });
+    await host.command("collab.publish", { server: `ws://127.0.0.1:${this.port}/?key=${key}`, name: this.session.settings().sessionName });
     for (let i = 0; i < 80; i++) {
       const peers = await host.command("collab.peers");
       if (peers?.published?.edit) {
@@ -409,6 +432,12 @@ export class Canvas {
 }
 
 // ---------- helpers ----------
+
+/** True when nothing listens on the port on any interface (a test bind can succeed despite one). */
+function portFree(port: number) {
+  const r = Bun.spawnSync(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
+  return r.stdout.toString().trim() === "";
+}
 
 async function healthy(url: string) {
   try {

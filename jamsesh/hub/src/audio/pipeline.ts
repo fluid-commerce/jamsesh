@@ -12,7 +12,7 @@ import type { Session } from "../session";
 import type { Utterance } from "../types";
 import type { Transcriber } from "./transcribe";
 import { cosine, embed, Voiceprints } from "./voiceprint";
-import { decodeWav, encodeWav, resample, speechLevelDb, type Pcm } from "./wav";
+import { clippedShare, decodeWav, encodeWav, resample, speechLevelDb, type Pcm } from "./wav";
 
 export interface Segment {
   id: string;
@@ -22,6 +22,10 @@ export interface Segment {
   levelDb: number;
   noiseDb: number;
   snr: number;
+  /** Share of the segment that is near its loudest: low for clicks and knocks. */
+  active: number;
+  /** Share of samples at full scale. */
+  clipped: number;
   pcm: Pcm;
   wav: Uint8Array;
   arrivedAt: number;
@@ -53,7 +57,18 @@ const BASE_SETTLE_MS = 700;
 const MAX_SETTLE_MS = 3500;
 const KEEP_FINAL_MS = 15_000;
 const CLEAN_SNR = 12;
+/** Below these a segment is silence or steady noise, not a voice. */
+const MIN_SPEECH_DB = -62;
+const MIN_SPEECH_SNR = 4;
+const MIN_ACTIVE = 0.3;
+/** Every frame near the peak and barely above the floor: a hum or rumble, not words. */
+const STEADY_ACTIVE = 0.9;
+const STEADY_SNR = 8;
 const MAX_PRINT_SAMPLES = 40;
+/** A copy with more than this share of clipped samples does not teach a voiceprint. */
+const MAX_CLIPPED = 0.005;
+/** How far a copy's span may slide before it is another utterance. */
+const SPLIT_SPAN_MS = 1000;
 /** Softmax temperature over voiceprint similarities (cosine units). */
 const VOICE_TEMP = 0.05;
 
@@ -105,6 +120,8 @@ export class AudioPipeline {
       levelDb,
       noiseDb,
       snr: levelDb - noiseDb,
+      active: measured.active,
+      clipped: clippedShare(pcm),
       pcm,
       wav: pcm === raw ? input.wav : encodeWav(pcm),
       arrivedAt: now,
@@ -166,33 +183,28 @@ export class AudioPipeline {
     }
   }
 
-  /** Two people talking over each other: copies whose voices clearly differ become separate lines. */
+  /**
+   * Two people talking over each other. Every device hears one utterance start and end
+   * together, so a clean copy whose span is shifted a second or more against the best
+   * copy's is someone else speaking, however its voice embeds (the two voices bleed into
+   * each other's laptops, so embeddings of the copies are alike).
+   */
   private splitCrosstalk(g: Group): Group[] {
     if (g.segments.length < 2) return [g];
-    for (const s of g.segments) if (s.embedding === undefined) s.embedding = embed(s.pcm);
-    const best = pickBest(g.segments);
-    if (!best.embedding) return [g];
-    const keep: Segment[] = [];
-    const split: Segment[] = [];
-    for (const s of g.segments) {
-      if (s === best || !s.embedding) keep.push(s);
-      // A different voice has to be heard cleanly: a reverberant or babble-laden copy of
-      // the same person embeds far from the clean one too, and must not become a second line.
-      else if (cosine(s.embedding, best.embedding) < 0.3 && s.levelDb > best.levelDb - 4 && s.snr >= CLEAN_SNR) split.push(s);
-      else keep.push(s);
+    const out: Group[] = [];
+    let rest = g.segments;
+    while (rest.length) {
+      const best = pickBest(rest);
+      const keep = rest.filter((s) => s === best || !(shifted(best, s) && s.snr >= CLEAN_SNR));
+      const split = rest.filter((s) => !keep.includes(s));
+      out.push(keep.length === g.segments.length ? g : this.regroup(g, keep));
+      rest = split;
     }
-    if (!split.length) return [g];
-    const mk = (segments: Segment[]): Group => ({
-      ...g,
-      id: newId("grp"),
-      busy: null,
-      utteranceId: null,
-      finalizedWith: null,
-      segments,
-      t0: Math.min(...segments.map((s) => s.t0)),
-      t1: Math.max(...segments.map((s) => s.t1)),
-    });
-    return [mk(keep), mk(split)];
+    return out;
+  }
+
+  private regroup(g: Group, segments: Segment[]): Group {
+    return { ...g, id: newId("grp"), busy: null, utteranceId: null, finalizedWith: null, segments, t0: Math.min(...segments.map((s) => s.t0)), t1: Math.max(...segments.map((s) => s.t1)) };
   }
 
   private hint() {
@@ -203,7 +215,13 @@ export class AudioPipeline {
   private async emit(g: Group) {
     const best = pickBest(g.segments);
     const dur = (best.t1 - best.t0) / 1000;
-    const { text, engine } = await this.transcriber.transcribe(best.wav, dur, this.hint());
+    // Nothing to transcribe in near-silence, steady noise (no pauses against a floor) or
+    // a few knocks and clicks.
+    if (best.levelDb < MIN_SPEECH_DB || best.snr < MIN_SPEECH_SNR || best.active < MIN_ACTIVE || (best.active > STEADY_ACTIVE && best.snr < STEADY_SNR)) {
+      g.finalizedWith = best.id;
+      return;
+    }
+    const { text, engine } = await this.transcriber.transcribe(best.wav, dur, this.hint(), best.snr);
     const guess = this.identify(g.segments, best);
     g.finalizedWith = best.id;
     if (!text) return;
@@ -252,7 +270,7 @@ export class AudioPipeline {
     let text = u.text;
     let engine = u.engine;
     if (best === late && current && late.snr > current.snr + 6) {
-      const r = await this.transcriber.transcribe(late.wav, (late.t1 - late.t0) / 1000, this.hint());
+      const r = await this.transcriber.transcribe(late.wav, (late.t1 - late.t0) / 1000, this.hint(), late.snr);
       if (r.text) ((text = r.text), (engine = r.engine));
       g.finalizedWith = late.id;
     }
@@ -285,14 +303,14 @@ export class AudioPipeline {
    */
   identify(segments: Segment[], best = pickBest(segments)): SpeakerGuess {
     const s = this.session;
-    const byLevel = [...segments].sort((a, b) => b.levelDb - a.levelDb);
+    const byLevel = [...segments].sort((a, b) => speechDb(b) - speechDb(a));
     const loud = byLevel[0];
-    const margin = byLevel.length > 1 ? loud.levelDb - byLevel[1].levelDb : 6;
+    const margin = byLevel.length > 1 ? speechDb(loud) - speechDb(byLevel[1]) : 6;
     const deviceScores = new Map<string, number>();
     for (const seg of byLevel) {
       const owner = s.store.get("devices", seg.deviceId)?.personId;
       if (!owner || deviceScores.has(owner)) continue;
-      const rel = seg === loud ? 0.55 + Math.min(Math.max(margin, 0), 12) / 26 : Math.max(0, 0.35 - (loud.levelDb - seg.levelDb) / 30);
+      const rel = seg === loud ? 0.55 + Math.min(Math.max(margin, 0), 12) / 26 : Math.max(0, 0.35 - (speechDb(loud) - speechDb(seg)) / 30);
       deviceScores.set(owner, rel);
     }
     if (best.embedding === undefined) best.embedding = embed(best.pcm);
@@ -343,25 +361,28 @@ export class AudioPipeline {
     const enrolled = this.voiceprints.count(pid);
     const top = guess.scores[0];
     const owner = this.session.store.get("devices", best.deviceId)?.personId;
-    const byLevel = [...segments].sort((a, b) => b.levelDb - a.levelDb);
-    const margin = byLevel.length > 1 ? byLevel[0].levelDb - byLevel[1].levelDb : 99;
+    const byLevel = [...segments].sort((a, b) => speechDb(b) - speechDb(a));
+    const margin = byLevel.length > 1 ? speechDb(byLevel[0]) - speechDb(byLevel[1]) : 99;
     const atOwnDevice = owner === pid && byLevel[0].deviceId === best.deviceId;
-    if (!atOwnDevice || best.snr <= CLEAN_SNR || enrolled >= MAX_PRINT_SAMPLES) return;
+    if (!atOwnDevice || best.snr <= CLEAN_SNR || best.clipped > MAX_CLIPPED || enrolled >= MAX_PRINT_SAMPLES) return;
     const voices = [best.embedding];
     for (const s of segments) {
-      if (s === best || s.snr < 10) continue;
+      if (s === best || s.snr < 10 || s.clipped > MAX_CLIPPED) continue;
       if (s.embedding === undefined) s.embedding = embed(s.pcm);
       // Skip copies that carry someone else's voice (cross-talk bleed).
       if (s.embedding && cosine(s.embedding, best.embedding) >= 0.35) voices.push(s.embedding);
     }
     if (enrolled > 0) {
-      const voiceAgrees = top.voice < 0 || top.voice >= 0.5;
-      if (guess.confidence >= 0.72 && margin >= 6 && voiceAgrees) for (const v of voices) this.voiceprints.add(pid, v);
+      // Either the device is clearly the loudest, or it is a bit closer than the rest and
+      // the voice says the same: two weak signals that agree are enough to learn from.
+      const sure = guess.confidence >= 0.72 && margin >= 6 && (top.voice < 0 || top.voice >= 0.5);
+      const agreed = guess.confidence >= 0.55 && margin >= 3 && top.voice >= 0.6;
+      if (sure || agreed) for (const v of voices) this.voiceprints.add(pid, v);
       return;
     }
     if (guess.confidence < 0.5 || margin < 3) return;
     const held = this.candidates.get(pid) ?? [];
-    const twin = held.find((c) => cosine(c[0], best.embedding!) >= 0.5);
+    const twin = held.find((c) => cosine(c[0], best.embedding!) >= 0.4);
     if (twin) {
       for (const v of [...twin, ...voices]) this.voiceprints.add(pid, v);
       this.candidates.delete(pid);
@@ -376,11 +397,13 @@ export class AudioPipeline {
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
     const g = this.finalized.find((x) => x.utteranceId === utteranceId);
-    const best = g ? pickBest(g.segments) : null;
+    // Teach from the clearest copy that did not clip.
+    const usable = g?.segments.filter((s) => s.clipped <= MAX_CLIPPED) ?? [];
+    const best = g ? (usable.length ? pickBest(usable) : null) : null;
     if (best) {
       if (best.embedding === undefined) best.embedding = embed(best.pcm);
       if (best.embedding) this.voiceprints.add(personId, best.embedding);
-    } else if (u.eventId) {
+    } else if (!g && u.eventId) {
       const stored = this.session.store.event(u.eventId)?.data.embedding as number[] | undefined;
       if (stored) this.voiceprints.add(personId, new Float32Array(stored));
     }
@@ -401,10 +424,31 @@ export class AudioPipeline {
   }
 }
 
-function overlaps(g: { t0: number; t1: number }, s: { t0: number; t1: number }) {
-  const ov = Math.min(g.t1, s.t1) - Math.max(g.t0, s.t0);
-  const shorter = Math.min(g.t1 - g.t0, s.t1 - s.t0);
-  return shorter > 0 && ov / shorter >= MIN_OVERLAP;
+function overlaps(g: Group, s: { t0: number; t1: number }) {
+  return g.segments.some((m) => sameUtterance(m, s));
+}
+
+/** Copies of one utterance overlap heavily and are not slid along the timeline. */
+function sameUtterance(a: { t0: number; t1: number }, b: { t0: number; t1: number }) {
+  const ov = Math.min(a.t1, b.t1) - Math.max(a.t0, b.t0);
+  const shorter = Math.min(a.t1 - a.t0, b.t1 - b.t0);
+  return shorter > 0 && ov / shorter >= MIN_OVERLAP && !shifted(a, b);
+}
+
+/** Both ends moved the same way by a second or more: a different utterance, not a trimmed copy. */
+function shifted(a: { t0: number; t1: number }, b: { t0: number; t1: number }) {
+  const d0 = b.t0 - a.t0;
+  const d1 = b.t1 - a.t1;
+  return Math.abs(d0) >= SPLIT_SPAN_MS && Math.abs(d1) >= SPLIT_SPAN_MS && Math.sign(d0) === Math.sign(d1);
+}
+
+/**
+ * How loud the voice itself was at a device: the measured level with the noise floor's
+ * power taken out. A device in a noisy corner hears a loud room, not a loud speaker.
+ */
+function speechDb(s: Segment) {
+  const p = 10 ** (s.levelDb / 10) - 10 ** (s.noiseDb / 10);
+  return Math.max(s.levelDb - 10, 10 * Math.log10(Math.max(p, 1e-12)));
 }
 
 /** The clearest copy: signal-to-noise first, then loudness. */

@@ -9,6 +9,7 @@ import { shortRepo } from "../session";
 import type { Agent, Artifact, JamEvent, Relevance } from "../types";
 import { describeError, model } from "./llm";
 import { speak } from "./speech";
+import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import type { HostControl } from "../hostctl";
 
 const TRIAGE_DEBOUNCE_MS = 1400;
@@ -51,8 +52,15 @@ export class Brain {
     this.refreshStatus();
   }
 
+  private stopped = false;
+
   stop() {
+    this.stopped = true;
     clearInterval(this.digestTimer);
+    if (this.timer) clearTimeout(this.timer);
+    if (this.shipTimer) clearTimeout(this.shipTimer);
+    this.timer = null;
+    this.shipTimer = null;
   }
 
   refreshStatus() {
@@ -64,7 +72,7 @@ export class Brain {
 
   /** A new room line (speech or typed). Batches lines that arrive together. */
   hear(ev: JamEvent) {
-    if (!this.session.settings().brainEnabled) return;
+    if (this.stopped || !this.session.settings().brainEnabled) return;
     this.pending.push(ev);
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), TRIAGE_DEBOUNCE_MS);
@@ -178,6 +186,7 @@ export class Brain {
     return [
       `## People\n${people.map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""} (weight ${p.weight})`).join("\n") || "(nobody named yet)"}`,
       `## Agents\n${agents.filter((a) => a.status !== "offline").map(fmtAgent).join("\n") || "(no agents connected)"}`,
+      historyBrief(s, batch.map((e) => e.text).join(" ")),
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,
       `## Open directives\n${open.map((d) => `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => s.agent(t)?.name).join(", ")}: ${d.text}`).join("\n") || "(none)"}`,
       digest ? `## Session brief\n${digest}` : "",
@@ -219,8 +228,15 @@ export class Brain {
         }),
         execute: async (i) => {
           const known = agentIds();
-          const targets = i.targets.filter((t) => known.has(t));
-          if (!targets.length) return "No valid agent ids. Use the ids from the Agents list.";
+          const valid = i.targets.filter((t) => known.has(t));
+          if (!valid.length) return "No valid agent ids. Use the ids from the Agents list.";
+          // One request, one agent per repository: the one that already has the context.
+          const { kept: targets, dropped } = oneAgentPerRepo(s, valid, i.text);
+          // The same instruction twice (two tool calls in one pass, or a repeated ask) is sent once.
+          const dupe = s.directives().find(
+            (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6,
+          );
+          if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
           const d = s.createDirective({
             text: i.text,
@@ -232,7 +248,7 @@ export class Brain {
             sourceEventIds: sourceIds,
             workstreamId: ws?.id ?? null,
           });
-          return `Directive ${d.id} sent.`;
+          return `Directive ${d.id} sent to ${targets.map((t) => s.agent(t)?.name).join(", ")}.${dropped.length ? ` Not sent to ${dropped.map((a) => a.name).join(", ")}: same repository as an agent with more related history.` : ""}`;
         },
       }),
       record_decision: tool({
@@ -365,7 +381,9 @@ export class Brain {
       if (line.intent !== "directive" || !agents.length) continue;
       const lower = text.toLowerCase();
       const named = agents.filter((a) => lower.includes(a.ownerName.toLowerCase().split(/\s+/)[0]) || lower.includes(a.platform));
-      const targets = (named.length ? named : agents).map((a) => a.id);
+      const best = affinity(s, text)[0];
+      const pool = named.length ? named : best ? [best.agent] : agents;
+      const targets = oneAgentPerRepo(s, pool.map((a) => a.id), text).kept;
       const mode = /\b(build|implement|ship|for real|in the (app|repo|code))\b/.test(lower) ? "implement" : "explore";
       s.createDirective({ text, mode, targets, requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "Routed by keyword (the brain has no gateway key)." });
     }
@@ -380,7 +398,7 @@ export class Brain {
 
   /** Ships within a short window (desktop and mobile often land together) are considered once. */
   agentUpdated(agent: Agent, kind: UpdateKind, text: string) {
-    if (kind !== "shipped") return;
+    if (this.stopped || kind !== "shipped") return;
     this.shipped.push({ agent, text });
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
@@ -475,6 +493,13 @@ export class Brain {
 
 const STOPWORDS = new Set(["the", "and", "for", "option", "options", "variant", "variants", "version", "versions", "one", "ones", "all", "that", "this", "our", "real", "quick", "please", "up", "can", "you", "again"]);
 
+function similar(a: string, b: string) {
+  const x = new Set(terms(a));
+  const y = new Set(terms(b));
+  const inter = [...x].filter((t) => y.has(t)).length;
+  return inter / Math.max(1, Math.min(x.size, y.size));
+}
+
 function roleOf(s: Session, e: JamEvent) {
   if (e.authorType !== "person") return "";
   const p = s.person(e.authorId);
@@ -512,6 +537,7 @@ const ROUTER_SYSTEM = `You are the room brain for JamSesh, a live session where 
 
 How to route:
 - Decide between EXPLORE and IMPLEMENT. "Try", "what if", "show me options", "mock up", "let's see a few directions" = explore: the agent makes variants on the shared canvas, named "<Workstream> / <Letter>: <short description>". "Let's do it", "build it", "ship B", "implement that", "do it for real", "in the app" = implement: the agent changes code in its repository, runs its dev server, and checks the build against the chosen mockup.
+- Keep similar work with the agent that already has its context. Check "Agent work history" and "Best matches": a follow-up, tweak, or new variant of something an agent already worked on goes to that agent, even if another agent is idle. Never split one request between agents in the same repository; JamSesh keeps only the one with the most related history. Fan a request out only when it spans different repositories or platforms. Give genuinely new work to the agent whose repository it belongs in, preferring one with fewer unfinished directives.
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.
 - When people disagree, weigh by role weight (higher wins) and say whose call it was in the rationale. Don't silently drop the other view: mention it.
 - A decision ("I like B", "go with direction A") should usually do three things: record_decision, then an implement directive to the agent that owns it (mentioning the chosen artifact by title), and spotlight the chosen artifact.

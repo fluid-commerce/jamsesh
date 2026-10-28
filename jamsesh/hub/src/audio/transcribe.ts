@@ -22,12 +22,18 @@ const HALLUCINATIONS = [
   /subtitles by|amara\.org|transcribed by/i,
 ];
 
-export function cleanTranscript(text: string, durationSec: number): string {
+/**
+ * Whisper invents "Thank you." or a lone full stop for silence and steady noise, at any
+ * length. Such stock phrases are believed only when the audio was a short blip (too
+ * brief to carry a sentence anyway) or a clean voice (snr in dB, when known).
+ */
+export function cleanTranscript(text: string, durationSec: number, snr = Infinity): string {
   const t = text.replace(/\s+/g, " ").trim();
-  if (!t) return "";
-  if (HALLUCINATIONS.some((r) => r.test(t)) && durationSec < 3) return "";
+  if (!/[\p{L}\p{N}]/u.test(t)) return "";
+  if (HALLUCINATIONS.some((r) => r.test(t)) && (durationSec < 3 || snr < CLEAN_VOICE_SNR)) return "";
   return t;
 }
+const CLEAN_VOICE_SNR = 15;
 
 export class Transcriber {
   private engines = new Map<string, Engine>();
@@ -67,7 +73,7 @@ export class Transcriber {
     return [...this.engines.values()].map((e) => ({ id: e.id, label: e.label, kind: e.kind, inflight: e.inflight, healthy: e.failures < 3 }));
   }
 
-  async transcribe(wav: Uint8Array, durationSec: number, hint = ""): Promise<{ text: string; engine: string }> {
+  async transcribe(wav: Uint8Array, durationSec: number, hint = "", snr = Infinity): Promise<{ text: string; engine: string }> {
     const mode = this.session.settings().transcription;
     if (mode !== "gateway") {
       const pool = [...this.engines.values()].filter((e) => e.failures < 3).sort((a, b) => a.inflight - b.inflight || (a.kind === "local" ? -1 : 1));
@@ -77,7 +83,7 @@ export class Transcriber {
           const text = await whisperServer(e.url, wav, hint);
           e.failures = 0;
           e.lastOk = Date.now();
-          return { text: cleanTranscript(text, durationSec), engine: e.label };
+          return { text: cleanTranscript(text, durationSec, snr), engine: e.label };
         } catch (err) {
           e.failures++;
           console.error(`whisper ${e.label}:`, describeError(err));
@@ -92,7 +98,7 @@ export class Transcriber {
     const gw = gateway(this.session);
     if (!gw) return { text: "", engine: "none" };
     const r = await aiTranscribe({ model: gw.transcription(this.session.settings().models.transcribe), audio: wav });
-    return { text: cleanTranscript(r.text, durationSec), engine: "gateway" };
+    return { text: cleanTranscript(r.text, durationSec, snr), engine: "gateway" };
   }
 }
 

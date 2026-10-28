@@ -79,8 +79,20 @@ export function resample(pcm: Pcm, rate: number): Pcm {
   return { sampleRate: rate, samples: out };
 }
 
-/** RMS level in dBFS over the loudest 50% of 30 ms frames, which tracks speech, not pauses. */
-export function speechLevelDb(pcm: Pcm): { levelDb: number; noiseDb: number } {
+/** Share of samples pinned at full scale: a preamp set too hot, which wrecks a voiceprint. */
+export function clippedShare(pcm: Pcm): number {
+  let n = 0;
+  for (const x of pcm.samples) if (x >= 0.98 || x <= -0.98) n++;
+  return pcm.samples.length ? n / pcm.samples.length : 0;
+}
+
+/**
+ * RMS level in dBFS over the loudest 50% of 30 ms frames, which tracks speech, not pauses.
+ * `active` is the share of frames within 15 dB of the 95th-percentile frame: speech keeps
+ * about half its frames there (0.48 at the lowest in 60 clean clips), steady noise all of
+ * them, and a few clicks or knocks almost none.
+ */
+export function speechLevelDb(pcm: Pcm): { levelDb: number; noiseDb: number; active: number } {
   const frame = Math.round(pcm.sampleRate * 0.03);
   const levels: number[] = [];
   for (let i = 0; i + frame <= pcm.samples.length; i += frame) {
@@ -88,10 +100,12 @@ export function speechLevelDb(pcm: Pcm): { levelDb: number; noiseDb: number } {
     for (let j = i; j < i + frame; j++) acc += pcm.samples[j] ** 2;
     levels.push(10 * Math.log10(acc / frame + 1e-12));
   }
-  if (!levels.length) return { levelDb: -100, noiseDb: -100 };
+  if (!levels.length) return { levelDb: -100, noiseDb: -100, active: 0 };
   levels.sort((a, b) => a - b);
+  const p95 = levels[Math.floor(levels.length * 0.95)];
+  const active = levels.filter((l) => l > p95 - 15).length / levels.length;
   const upper = levels.slice(Math.floor(levels.length / 2));
   const levelDb = upper.reduce((a, b) => a + b, 0) / upper.length;
   const noiseDb = levels[Math.floor(levels.length * 0.1)];
-  return { levelDb, noiseDb };
+  return { levelDb, noiseDb, active };
 }

@@ -31,6 +31,11 @@ case "${1:-help}" in
       [ "${1:-}" = "--no-open" ] || open_big_screen
       exit 0
     fi
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "Port $PORT is used by another app ($(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | awk 'NR==2{print $1}')). Start JamSesh on another port:" >&2
+      echo "  JAMSESH_PORT=4848 jamsesh host" >&2
+      exit 1
+    fi
     ( for _ in $(seq 1 60); do sleep 0.5; curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; done
       [ "${1:-}" = "--no-open" ] || open_big_screen ) &
     exec bun run hub/src/index.ts "$@"

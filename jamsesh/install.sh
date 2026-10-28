@@ -22,7 +22,7 @@ else ok "whisper-server"; fi
 
 step "Building FigCraft (server, CLI, desktop app)"
 cargo build --release -p figcraft-server -p figcraft-cli -p figcraft
-cp target/release/figcraft-server target/release/figcraft-cli target/release/figcraft "$HOME_DIR/bin/"
+for b in figcraft-server figcraft-cli figcraft; do rm -f "$HOME_DIR/bin/$b"; cp "target/release/$b" "$HOME_DIR/bin/$b"; done
 ok "Binaries in $HOME_DIR/bin"
 
 step "Building the browser canvas"
