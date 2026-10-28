@@ -72,3 +72,15 @@ fn file_urls_are_paths() {
         assert_eq!(file_url_path(bad), None, "{bad}");
     }
 }
+
+#[test]
+fn jamsesh_takes_a_link_and_a_name() {
+    let a = parse(&args(&["--jamsesh", "figcraft://join?host=h", "--name", "Chey R"]));
+    assert_eq!((a.jamsesh.as_deref(), a.name.as_deref()), (Some("figcraft://join?host=h"), Some("Chey R")));
+    assert!(a.files.is_empty() && a.unknown.is_empty() && a.join.is_none(), "neither is a file or an unknown flag");
+    let a = parse(&args(&["--jamsesh=K7M-2QX-9TD", "--name=Sam"]));
+    assert_eq!((a.jamsesh.as_deref(), a.name.as_deref()), (Some("K7M-2QX-9TD"), Some("Sam")));
+    // Missing or empty values are ignored, not taken as files.
+    assert_eq!(parse(&args(&["--jamsesh"])), Args::default());
+    assert_eq!(parse(&args(&["--name="])), Args::default());
+}

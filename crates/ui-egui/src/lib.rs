@@ -8,6 +8,7 @@
 pub mod a11y;
 pub mod bidi;
 pub mod canvas;
+pub mod canvas_only;
 pub mod cjk;
 pub mod control;
 pub mod dialogs;
@@ -41,6 +42,8 @@ mod async_dialog_tests;
 mod branch_ui_tests;
 #[cfg(test)]
 mod canvas_double_click_tests;
+#[cfg(test)]
+mod canvas_only_tests;
 #[cfg(test)]
 mod canvas_drag_tests;
 #[cfg(test)]
@@ -377,6 +380,9 @@ pub struct UiState {
     /// An opacity digit just typed and when (a second one soon after makes an exact percentage).
     pub opacity_digit: Option<(u32, f64)>,
     pub home: bool,
+    /// Canvas-only mode (an embedded room view): just the canvas and its live overlays, with no tab bar,
+    /// panels, toolbar, home screen, main menu or update prompt. The embedder sets it.
+    pub canvas_only: bool,
     /// The home screen's section, and the Templates search and filter.
     pub home_view: home::Home,
     /// How the window's title bar is drawn (the desktop app sets it when it opens the window).
@@ -561,6 +567,7 @@ impl Default for UiState {
             shortcuts_query: String::new(),
             opacity_digit: None,
             home: false,
+            canvas_only: false,
             home_view: home::Home::default(),
             title_bar: TitleBar::Native,
             icon_gallery: false,

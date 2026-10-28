@@ -41,11 +41,22 @@ pub fn start() {
                     let ctx = cc.egui_ctx.clone();
                     session.live.install(Box::new(figcraft_collab_net::NetLink::new(std::sync::Arc::new(move || ctx.request_repaint()))));
                     let mut fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
-                    // `#join=<link>`: join that session, as opening an invite link does on the desktop.
+                    // `?canvas` (or `?jamsesh`): just the live canvas; `?name=` is the display name.
+                    let canvas = crate::query::canvas(&query());
+                    fig.ui.canvas_only = canvas;
+                    if let Some(name) = crate::query::name(&query()) {
+                        fig.session.prefs.user_name = name;
+                    }
+                    // `#join=<link>`: join that session, as opening an invite link does on the desktop
+                    // (the canvas-only view joins at once, with no confirmation).
                     let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
                     if let Some(link) = crate::query::join_link(&hash) {
                         let link = js_sys::decode_uri_component(link).ok().and_then(|s| s.as_string()).unwrap_or_else(|| link.to_string());
-                        figcraft_ui_egui::live::open_invite(&mut fig, &link);
+                        if canvas {
+                            fig.run("collab.join", serde_json::json!({"link": link}));
+                        } else {
+                            figcraft_ui_egui::live::open_invite(&mut fig, &link);
+                        }
                     }
                     // `?control`: `window.figcraft`, the page's control channel (crate::api), opt-in.
                     if crate::query::control(&query()) {

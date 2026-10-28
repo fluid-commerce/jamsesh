@@ -1,0 +1,12 @@
+{
+  "name": "jamsesh",
+  "private": true,
+  "type": "module",
+  "workspaces": ["hub", "web"],
+  "scripts": {
+    "host": "bun run hub/src/index.ts",
+    "dev:web": "cd web && bunx vite",
+    "build:web": "cd web && bunx vite build",
+    "test": "bun test hub"
+  }
+}

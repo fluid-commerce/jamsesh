@@ -1,5 +1,5 @@
 //! The command line: `figcraft [--control <port>] [--automation-read-root <dir>]…
-//! [--automation-write-root <dir>]… [files…] [figcraft://join?…]`. An invite link
+//! [--jamsesh <link> [--name <name>]] [--automation-write-root <dir>]… [files…] [figcraft://join?…]`. An invite link
 //! (what the system passes when a `figcraft://` link is opened) joins that session once the window
 //! is up; everything else that isn't a flag is a file to open, as a path or a `file://` URL (the
 //! Linux desktop entry passes URLs, `%U`, so that it can also hand over invite links). Any other
@@ -19,6 +19,11 @@ pub struct Args {
     /// which is refused at startup.
     pub read_roots: Vec<String>,
     pub write_roots: Vec<String>,
+    /// `--jamsesh <link>` (or `--jamsesh=<link>`): canvas-only mode, joined to this room link
+    /// without asking.
+    pub jamsesh: Option<String>,
+    /// `--name <name>` (or `--name=<name>`): the display name for this run.
+    pub name: Option<String>,
     /// `--flags` the app doesn't know, as given.
     pub unknown: Vec<String>,
 }
@@ -73,6 +78,10 @@ pub fn parse(args: &[String]) -> Args {
             roots.push(inline.or_else(|| it.next().cloned()).unwrap_or_default());
         } else if flag == "--control" {
             out.control = inline.or_else(|| it.next().cloned()).and_then(|p| p.parse().ok());
+        } else if flag == "--jamsesh" {
+            out.jamsesh = inline.or_else(|| it.next().cloned()).filter(|l| !l.is_empty());
+        } else if flag == "--name" {
+            out.name = inline.or_else(|| it.next().cloned()).filter(|n| !n.is_empty());
         } else if is_invite(a) {
             out.join = Some(a.clone());
         } else if let Some(path) = file_url_path(a) {

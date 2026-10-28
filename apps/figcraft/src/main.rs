@@ -151,7 +151,7 @@ fn main() -> eframe::Result {
     let args = args::parse(&args);
     if let Some(flag) = args.unknown.first() {
         eprintln!(
-            "FigCraft: unknown option {flag}\nUsage: figcraft [--control PORT] [--automation-read-root DIR]... [--automation-write-root DIR]... [FILE | figcraft://join?...]..."
+            "FigCraft: unknown option {flag}\nUsage: figcraft [--control PORT] [--jamsesh LINK [--name NAME]] [--automation-read-root DIR]... [--automation-write-root DIR]... [FILE | figcraft://join?...]..."
         );
         std::process::exit(2);
     }
@@ -166,6 +166,8 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    // Canvas-only room view: `--jamsesh <link>`, or JAMSESH_LINK in the environment.
+    let jamsesh = args.jamsesh.clone().or_else(|| std::env::var("JAMSESH_LINK").ok().filter(|l| !l.is_empty()));
     let port = args.control.or_else(|| std::env::var("FIGCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok()));
     // System fonts: index them in the background, then wake the UI (an idle window draws no frames)
     // to lay text out again with them.
@@ -215,8 +217,13 @@ fn main() -> eframe::Result {
     // default, never a build from source unless asked).
     session.live.links = figcraft_collab_net::links::system();
     session.invite_links_startup();
+    // The name given on the command line is for this run (kept only if a later change saves the settings).
+    if let Some(name) = &args.name {
+        session.prefs.user_name = name.clone();
+    }
+    // A room view waits on its joined file rather than opening an empty one beside it.
     let first_run = svc.prefs.is_none() && args.join.is_none();
-    if session.docs.is_empty() && opens_new_file(first_run, session.prefs.start_on_home, port.is_some()) {
+    if session.docs.is_empty() && jamsesh.is_none() && opens_new_file(first_run, session.prefs.start_on_home, port.is_some()) {
         let _ = session.execute("file.new", &json!({}));
     }
     // The interface language from the first frame on, and for the message when the window can't
@@ -226,10 +233,14 @@ fn main() -> eframe::Result {
     fig.set_startup_update_check(true);
     fig.automation_roots = roots;
     fig.ui.home = false;
+    fig.ui.canvas_only = jamsesh.is_some();
     // Files named on the command line are the user's too: their missing fonts are listed.
     fig.ui.font_checks = opened;
     fig.note_recovered(recovered.copies);
-    if let Some(link) = &args.join {
+    if let Some(link) = &jamsesh {
+        // Canvas-only: join straight away (no confirmation); a failure shows as a toast.
+        fig.run("collab.join", json!({"link": link}));
+    } else if let Some(link) = &args.join {
         figcraft_ui_egui::live::open_invite(&mut fig, link);
     }
     let queue: Arc<Mutex<Vec<ControlRequest>>> = Arc::new(Mutex::new(Vec::new()));
@@ -252,7 +263,8 @@ fn main() -> eframe::Result {
     // Hyprland, COSMIC) or an X11 window manager keeps the native frame, while GNOME's Mutter —
     // which draws no server-side frame — leaves it to the app's own custom title bar. This replaces
     // the old bespoke xdg-decoration probe that always drew FigCraft's custom title bar on KDE.
-    fig.ui.title_bar = desktop_title_bar();
+    // A room view has no tab bar to carry window controls or drag the window: the system frame does.
+    fig.ui.title_bar = if jamsesh.is_some() { figcraft_ui_egui::TitleBar::Native } else { desktop_title_bar() };
     viewport = window_chrome(viewport, fig.ui.title_bar);
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);

@@ -290,9 +290,12 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     crate::handles::draw(app, &painter);
     crate::board_facilitate::badges(app, &painter);
     crate::board_bar::stamp_author(app, &painter, ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)));
-    crate::board_bar::show(app, &ctx);
-    crate::board_facilitate::show(app, &ctx, rect);
-    crate::widget_bar::show(app, &ctx);
+    let canvas_only = app.ui.canvas_only;
+    if !canvas_only {
+        crate::board_bar::show(app, &ctx);
+        crate::board_facilitate::show(app, &ctx, rect);
+        crate::widget_bar::show(app, &ctx);
+    }
     crate::selection_spacing::draw(app, &painter);
     crate::comments::draw(app, &painter);
     crate::live_text::draw(app, &painter);
@@ -300,9 +303,14 @@ pub fn show(app: &mut FigApp, ui: &mut Ui, worker: &mut Worker) {
     crate::live::chat_box(app, &ctx);
     crate::live::spotlight_banner(app, &ctx, rect);
     crate::comments::popovers(app, &ctx);
-    crate::versions::preview_banner(app, &ctx, rect);
-    crate::branch_ui::banner(app, &ctx, rect);
-    crate::dev_mode::focus_bar(app, &ctx, rect);
+    if canvas_only {
+        let zoom = app.session.ds().ok().map(|d| d.view.zoom);
+        crate::canvas_only::overlay(app, &ctx, rect, zoom);
+    } else {
+        crate::versions::preview_banner(app, &ctx, rect);
+        crate::branch_ui::banner(app, &ctx, rect);
+        crate::dev_mode::focus_bar(app, &ctx, rect);
+    }
     // The cursor: the tool's, unless something on the canvas with its own has the pointer.
     app.canvas.cursor = None;
     if let (true, Some(at)) = (own_cursor && resp.hovered(), ctx.input(|i| i.pointer.hover_pos())) {

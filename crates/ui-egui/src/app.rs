@@ -224,7 +224,14 @@ impl FigApp {
         self.sync_dev_mode();
         self.end_pen_outside_design();
         tabs::relink_presents(self);
-        tabs::tab_bar(self, ui);
+        if self.ui.canvas_only {
+            // An embedded room view: no tabs, home screen, main menu or shortcuts sheet.
+            self.ui.home = false;
+            self.ui.main_menu = false;
+            self.ui.shortcuts_panel = false;
+        } else {
+            tabs::tab_bar(self, ui);
+        }
         // Control/window work and this pass's physical tab click may have replaced the owner.
         // A shared field ID in that replacement must never consume the old commit marker.
         let field_save = shortcuts::revalidate_field_save(self, &ctx, field_save);
@@ -236,6 +243,17 @@ impl FigApp {
             dialogs::show(self, &ctx);
             updates_ui::show(self, &ctx);
             // What went wrong while presenting (a widget's plugin failing) shows over it.
+            self.toast_ui(&ctx);
+            windows::requests(self, &ctx);
+            shortcuts::clear_field_save_marker(&ctx);
+            self.observe_ime(&ctx, false);
+            return;
+        }
+        if self.ui.canvas_only && !self.has_files() {
+            // Never the home screen: the session's file is still on its way.
+            canvas_only::empty(self, ui);
+            dialogs::keys(self, &ctx);
+            dialogs::show(self, &ctx);
             self.toast_ui(&ctx);
             windows::requests(self, &ctx);
             shortcuts::clear_field_save_marker(&ctx);
@@ -256,7 +274,7 @@ impl FigApp {
             self.observe_ime(&ctx, false);
             return;
         }
-        let hidden = self.session.ds().map(|d| d.view.ui_hidden).unwrap_or(false);
+        let hidden = self.ui.canvas_only || self.session.ds().map(|d| d.view.ui_hidden).unwrap_or(false);
         let narrow = !hidden && ui.available_width() < NARROW_WIDTH;
         let mobile = self.ui.mobile_panel.filter(|_| narrow);
         self.ui.narrow = narrow;
@@ -362,7 +380,9 @@ impl FigApp {
         self.end_unwanted_text_preview(&ctx);
         self.end_pen_outside_design();
         dialogs::show(self, &ctx);
-        updates_ui::show(self, &ctx);
+        if !self.ui.canvas_only {
+            updates_ui::show(self, &ctx);
+        }
         self.toast_ui(&ctx);
         // A rename started after the layers panel drew (Cmd/Ctrl+R, a double-click) opens its field
         // next frame.

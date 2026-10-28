@@ -1,6 +1,6 @@
-//! `#join=` and `?control` in the page's URL.
+//! `#join=`, `?control`, `?canvas` and `?name=` in the page's URL.
 
-use crate::query::{control, join_link};
+use crate::query::{canvas, control, join_link, name};
 
 #[test]
 fn join_takes_the_rest_of_the_fragment() {
@@ -37,4 +37,29 @@ fn control_is_opt_in() {
     assert!(!control("?"));
     assert!(!control("?webgl"));
     assert!(!control("?nocontrol&controls"), "only the whole entry name");
+}
+
+#[test]
+fn canvas_is_opt_in_under_either_name() {
+    assert!(canvas("?canvas"));
+    assert!(canvas("?jamsesh"));
+    assert!(canvas("?webgl&canvas=1"), "after other entries, with a value");
+    assert!(canvas("jamsesh"), "no leading ?");
+    assert!(!canvas(""));
+    assert!(!canvas("?webgl"));
+    assert!(!canvas("?canvases&notcanvas"), "only the whole entry name");
+}
+
+#[test]
+fn the_name_is_unescaped_and_bounded() {
+    assert_eq!(name("?name=Chey"), Some("Chey".into()));
+    assert_eq!(name("?canvas&name=Chey%20R%C3%A4smussen"), Some("Chey Räsmussen".into()));
+    assert_eq!(name("?name=Two+Words&canvas"), Some("Two Words".into()));
+    assert_eq!(name("?name=100%"), Some("100%".into()), "a stray % stays");
+    assert_eq!(name("?name=%E0%A4"), Some("\u{fffd}".into()), "bad UTF-8 is replaced, not dropped");
+    assert_eq!(name("?name=%20%20"), None, "blank");
+    assert_eq!(name("?name="), None);
+    assert_eq!(name("?canvas"), None);
+    assert_eq!(name("?username=x"), None, "only the whole entry name");
+    assert_eq!(name(&format!("?name={}", "a".repeat(200))).map(|n| n.chars().count()), Some(64));
 }
