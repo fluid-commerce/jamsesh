@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "The start window (bundled page) may call the app's own commands.",
   "windows": ["start", "setup"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:default"]
 }

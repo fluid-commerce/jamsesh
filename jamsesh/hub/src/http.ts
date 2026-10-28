@@ -102,7 +102,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const script = Number.isInteger(relay) && relay > 1023 && relay < 65536 ? joinScript(hub, `http://127.0.0.1:${relay}`, "") : joinScript(hub, originOf(req, url), tokenOf(req, url) ?? "");
           return new Response(script, { headers: { "content-type": "text/x-shellscript" } });
         }
-        if (path.startsWith("/api/")) return await idempotent(req, path, () => api(hub, req, url, ip));
+        if (path.startsWith("/api/")) return await idempotent(hub, req, path, () => api(hub, req, url, ip));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
@@ -266,7 +266,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   if (path === "/me") {
     const personId = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
-    return json({ device: paired && { id: paired.id, kind: paired.kind, label: paired.label }, person: personId ? s.person(personId) ?? null : null });
+    return json({ onHost: isLocal(ip), device: paired && { id: paired.id, kind: paired.kind, label: paired.label }, person: personId ? s.person(personId) ?? null : null });
   }
 
   if (path === "/devices" && req.method === "POST") {
@@ -324,6 +324,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   if (path === "/say" && req.method === "POST") {
     if (!body?.text?.trim()) return bad("text is required");
+    // Only people speak as people: agents post through MCP, and a window speaks as its own person.
+    if (paired?.kind === "agent") return bad("Agents post with jam_update and jam_message, not as a person.", 403);
+    if (paired?.personId && body.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
     return json(hub.typed(body.personId ?? null, body.text, !!body.direct));
   }
 
@@ -469,6 +472,21 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json(Object.keys(s.saveLayout(String(body.name))));
   }
 
+  // A person opens a page in a browser on the host, for sites that refuse to show inside a tile.
+  if (path === "/host/open-url" && req.method === "POST") {
+    if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can open pages on the host.", 403);
+    if (!s.settings().hostControl) return bad("Host control is turned off in Settings.", 409);
+    return json({ result: await hub.host.act({ action: "open_url", url: String(body?.url ?? "") }) });
+  }
+
+  // ---- connected devices (Settings): everyone can see them; only the host disconnects ----
+  if (path === "/paired" && req.method === "GET") return json(hub.auth.list());
+  m = path.match(/^\/paired\/([\w-]+)$/);
+  if (m && req.method === "DELETE") {
+    if (!isLocal(ip)) return bad("Only the host can disconnect devices.", 403);
+    return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
+  }
+
   // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.
   m = path.match(/^\/build-requests\/([\w-]+)$/);
   if (m && req.method === "POST") {
@@ -503,7 +521,7 @@ function remember(set: Set<string>, key: string, max: number) {
   if (set.size > max) set.delete(set.values().next().value!);
 }
 
-async function idempotent(req: Request, path: string, run: () => Promise<Response>): Promise<Response> {
+async function idempotent(hub: Hub, req: Request, path: string, run: () => Promise<Response>): Promise<Response> {
   const key = req.headers.get("x-jam-idem");
   if (!key || req.method === "GET" || path === "/api/audio" || key.length > 100) return run();
   const now = Date.now();
@@ -511,6 +529,9 @@ async function idempotent(req: Request, path: string, run: () => Promise<Respons
     if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;
     idemSeen.delete(k);
   }
+  // Answered before a restart: replay it from the database.
+  const saved = idemSeen.has(key) ? null : hub.session.store.reply(key);
+  if (saved) return new Response(saved.body, { status: saved.status, headers: { "content-type": saved.type, "x-jam-idem-replay": "1" } });
   const seen = idemSeen.get(key);
   if (seen) {
     const r = await seen.done;
@@ -522,8 +543,10 @@ async function idempotent(req: Request, path: string, run: () => Promise<Respons
     const res = await run();
     const body = await res.clone().text();
     // Server errors aren't remembered, so the retry can succeed.
+    const reply = { status: res.status, body, type: res.headers.get("content-type") ?? "application/json" };
     if (res.status >= 500) idemSeen.delete(key);
-    settle({ status: res.status, body, type: res.headers.get("content-type") ?? "application/json" });
+    else hub.session.store.saveReply(key, reply);
+    settle(reply);
     return res;
   } catch (e) {
     idemSeen.delete(key);

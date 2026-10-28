@@ -93,6 +93,7 @@ export class Store {
         person_id TEXT NOT NULL, ts INTEGER NOT NULL, embedding BLOB NOT NULL
       );
       CREATE TABLE IF NOT EXISTS digests (scope TEXT PRIMARY KEY, text TEXT NOT NULL, updated INTEGER NOT NULL, through_event INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS replies (key TEXT PRIMARY KEY, status INTEGER NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL);
     `);
   }
 
@@ -144,6 +145,17 @@ export class Store {
   }
 
   // ---- settings ----
+
+  // ---- replayed calls: the first answer to each idempotency key, kept a day across restarts ----
+
+  reply(key: string): { status: number; type: string; body: string } | null {
+    return (this.db.query("SELECT status, type, body FROM replies WHERE key = ? AND at > ?").get(key, Date.now() - 86_400_000) as { status: number; type: string; body: string } | null) ?? null;
+  }
+
+  saveReply(key: string, r: { status: number; type: string; body: string }): void {
+    this.db.query("INSERT OR REPLACE INTO replies (key, status, type, body, at) VALUES (?, ?, ?, ?, ?)").run(key, r.status, r.type, r.body.slice(0, 200_000), Date.now());
+    if (Math.random() < 0.02) this.db.query("DELETE FROM replies WHERE at < ?").run(Date.now() - 86_400_000);
+  }
 
   setting<T>(key: string, fallback: T): T {
     if (this.team && TEAM_SETTINGS.has(key)) return this.team.setting(key, fallback);

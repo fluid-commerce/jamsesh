@@ -80,6 +80,8 @@ impl Hub {
         };
         let child = cmd
             .env("PATH", path_env())
+            // The hub exits on its own if this app goes away without stopping it.
+            .env("JAMSESH_PARENT_PID", std::process::id().to_string())
             .env("JAMSESH_PORT", port.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))

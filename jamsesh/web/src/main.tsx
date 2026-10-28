@@ -29,6 +29,13 @@ if (!isConnect && !isSetup) hub.start(deviceId(isHost ? "host" : "client"));
 
 registerServiceWorker();
 
+// Inside the Mac app the window has no title bar: the header holds the window controls and drags
+// the window.
+if ("__TAURI_INTERNALS__" in window) {
+  document.documentElement.classList.add("in-app");
+  new MutationObserver(() => document.querySelectorAll(".app-header:not([data-tauri-drag-region])").forEach((h) => h.setAttribute("data-tauri-drag-region", ""))).observe(document.body, { childList: true, subtree: true });
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : isHost ? <HostView /> : <ClientView />}

@@ -429,6 +429,14 @@ export class Canvas {
     else await this.host.command("page.add", { name });
   }
 
+  /** An agent took a new name: its cursor on the canvas follows. */
+  async renameAgent(agentId: string, name: string) {
+    const a = this.agents.get(agentId);
+    if (!a) return;
+    await a.ready.catch(() => {});
+    await a.mcp.command("pref.userName", { name }).catch(() => {});
+  }
+
   /** Puts an agent's participant on its workstream's page, so its new frames land there. */
   async focusAgentPage(agentId: string, name: string) {
     const a = this.agents.get(agentId);

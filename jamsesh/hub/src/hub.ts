@@ -161,6 +161,8 @@ export class Hub {
   }
 
   private inPrompt(u: Utterance) {
+    // A recording nobody stopped (a closed lid, a crash) stops holding that device's lines.
+    for (const [deviceId, t0] of this.promptMode) if (Date.now() - t0 > 3 * 60_000) this.promptMode.delete(deviceId);
     for (const [deviceId, t0] of this.promptMode) if (u.t1 >= t0 - 500 && u.devices.some((d) => d.deviceId === deviceId)) return true;
     return false;
   }
@@ -241,7 +243,8 @@ export class Hub {
       authorName: person?.name ?? "Someone",
       text: said || "(pointed without speaking)",
       relevance: "work",
-      data: { direct: true, recorded: true, pointer: marks },
+      // The recording laptop gets the chime for its own prompt.
+      data: { direct: true, recorded: true, pointer: marks, deviceId: w.deviceId },
     });
     // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
     for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
@@ -263,7 +266,8 @@ export class Hub {
       authorName: p?.name ?? "Someone",
       text: `${note ? `${note}\n` : ""}Annotations from the room (${open.length}):\n${lines.join("\n")}`,
       relevance: "work",
-      data: { direct: true, annotations: open.map((a) => a.id) },
+      // Sent with a button, so the answer comes back as text, not a chime and a spoken reply.
+      data: { direct: true, typed: true, annotations: open.map((a) => a.id) },
     });
     for (const a of open) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
     this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed.");
@@ -329,7 +333,10 @@ export class Hub {
     if (r.status === "pending") {
       s.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${r.agentName} asks to build ${what} on the host: ${r.command}. Say "approve" or "deny".`, relevance: "work", data: { buildRequest: r.id } });
       // Said out loud: often nobody is at the host to click anything.
-      void speak(s, `${r.agentName} wants to build ${what} on the host. Approve or deny?`, { source: "voice", kind: "answer" });
+      const ask = `${r.agentName} wants to build ${what} on the host. Approve or deny?`;
+      void speak(s, ask, { source: "voice", kind: "request" });
+      // Once more after a minute if nobody answered (people may have been mid-conversation).
+      setTimeout(() => r.status === "pending" && void speak(s, `Still waiting: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
     } else {
       const outcome = r.status === "approved" ? `approved by ${r.decidedBy}; it's building on the host now and opens when it's done` : r.status === "denied" ? `denied by ${r.decidedBy}` : "not answered in 10 minutes, so it expired";
       if (r.status !== "approved") bus.send({ type: "toast", tone: "info", text: r.status === "denied" ? `Denied ${r.agentName}'s build` : `${r.agentName}'s build request expired`, detail: r.decidedBy ? `By ${r.decidedBy}` : undefined });

@@ -69,7 +69,8 @@ export function ClientView() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   useEffect(() => {
-    if (me && pref("mic") === "on" && !mic.status.on) mic.start().catch(() => {});
+    // Your mic listens from the moment you join, unless you muted it.
+    if (me && pref("mic") !== "off" && !mic.status.on) mic.start().catch(() => {});
   }, [me?.id]);
 
   if (!state) return <div style={{ height: "100%", display: "grid", placeItems: "center", color: "var(--muted)" }}>{connected ? "Loading…" : "Connecting to the host…"}</div>;
@@ -411,39 +412,28 @@ function PhoneClient({
 
 /** The big screen, laid out wide and scaled down to the phone so the whole picture fits. Tap to pin. */
 function MirrorStage({ state, personId, scale }: { state: HubState; personId: string; scale: number }) {
-  const box = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 0, h: 0 });
-  useLayoutEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    const m = () => setSize({ w: el.clientWidth, h: el.clientHeight });
-    m();
-    const ro = new ResizeObserver(m);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
   const mode = useAnnotateMode();
   const stage = state.stage;
   const empty = stage.mode === "welcome" && state.artifacts.length === 0;
-  // Layout stages carry their own pin layers per tile; everything else gets one over the whole picture.
+  // Layout stages carry their own pin layers per tile; everything else gets one over the whole picture
+  // (a finger can't aim at a tile that small), so the stage's own tile pins stay off.
   const solo = stage.mode === "spotlight" && stage.items.length === 1 ? state.artifacts.find((a) => a.id === stage.items[0]) : undefined;
   const target = solo
     ? { kind: (solo.kind === "devserver" ? "web" : "artifact") as "web" | "artifact", ref: solo.kind === "devserver" ? solo.url ?? solo.id : solo.id, label: solo.title }
     : { kind: "screen" as const, ref: `stage:${stage.mode}`, label: stage.title || "Big screen" };
   const pinAll = !empty && stage.mode !== "layout";
   return (
-    <div ref={box} className="m-mirror" data-jam-target={pinAll ? JSON.stringify(target) : undefined}>
+    <div className="m-mirror" data-jam-target={pinAll ? JSON.stringify(target) : undefined}>
       {empty ? (
         <div className="m-mirror-empty">
           <strong>Nothing on the big screen yet</strong>
           <span>When the room shares work, it mirrors here live. Tap it to pin a note.</span>
         </div>
       ) : (
-        size.w > 0 && (
-          <div className="m-mirror-inner" style={{ width: size.w / scale, height: size.h / scale, transform: `scale(${scale})` }}>
-            <Stage state={state} interactive />
-          </div>
-        )
+        // Laid out larger and scaled down, in percentages, so it follows a resize in the same frame.
+        <div className="m-mirror-inner" style={{ width: `${100 / scale}%`, height: `${100 / scale}%`, transform: `scale(${scale})` }}>
+          <Stage state={state} interactive tilePins={false} />
+        </div>
       )}
       {pinAll && <PinLayer target={target} personId={personId} enabled={mode.on} />}
     </div>
@@ -618,6 +608,13 @@ function Facts({ state }: { state: HubState }) {
 /** In the room or remote: decides how audio is grouped and whether the brain's voice plays here. */
 export function WhereChooser({ compact }: { compact?: boolean }) {
   const { state } = useHub();
+  // The host Mac's own window is always in the room: nothing to choose.
+  const [onHost, setOnHost] = useState(false);
+  useEffect(() => {
+    api<{ onHost: boolean }>("/me")
+      .then((m) => setOnHost(!!m.onHost))
+      .catch(() => {});
+  }, []);
   const guess = state?.devices.find((d) => d.id === DEVICE)?.location;
   const [where, setWhere] = useState(pref("location") || guess || "room");
   const pick = (w: "room" | "remote") => {
@@ -625,6 +622,7 @@ export function WhereChooser({ compact }: { compact?: boolean }) {
     setPref("location", w);
     api("/devices", { deviceId: DEVICE, location: w }).catch(() => {});
   };
+  if (onHost) return null;
   return (
     <div style={{ margin: compact ? 0 : "18px 0 4px" }}>
       {!compact && <div className="label" style={{ marginBottom: 8 }}>Where are you?</div>}
@@ -657,7 +655,10 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
     <div className="onboard">
       <div className="onboard-card">
         <Logo size={40} />
-        <h1 className="onboard-h">Join {state.settings.sessionName}</h1>
+        <div className="label" style={{ marginBottom: 6 }}>
+          {state.settings.sessionName}
+        </div>
+        <h1 className="onboard-h">Join the session</h1>
         <p style={{ color: "var(--muted)", marginTop: 0 }}>Your name and title tell the room brain who's talking and whose call counts.</p>
         <WhereChooser />
         {state.people.length > 0 && (

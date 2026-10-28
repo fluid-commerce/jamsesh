@@ -224,7 +224,8 @@ export class Session {
         ...existing,
         name: fields.name.trim() || existing.name,
         role: fields.role ?? existing.role,
-        weight: fields.weight ?? existing.weight,
+        // A new title brings its weight with it, unless someone set the weight by hand.
+        weight: fields.weight ?? (fields.role !== undefined && fields.role !== existing.role && existing.weight === weightForRole(existing.role) ? weightForRole(fields.role) : existing.weight),
       });
     }
     const count = this.store.all("people").length;

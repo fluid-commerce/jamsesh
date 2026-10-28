@@ -51,3 +51,16 @@ const shutdown = async () => {
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// Run by the Mac app: if the app goes away without stopping the hub (a crash, Force Quit), save
+// and exit instead of running on with no window, holding the port.
+const parent = Number(process.env.JAMSESH_PARENT_PID);
+if (parent > 1) {
+  setInterval(() => {
+    try {
+      process.kill(parent, 0);
+    } catch {
+      void shutdown();
+    }
+  }, 2000).unref();
+}

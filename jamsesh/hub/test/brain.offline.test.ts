@@ -78,4 +78,32 @@ describe("offline rule-based brain", () => {
       expect(r.decisions().length).toBeGreaterThanOrEqual(1);
     });
   }, 30_000);
+
+  test("show me options is presenting, not a request for work", async () => {
+    await runScenario("offline: show me options", [6], async (r) => {
+      r.say("felipe", "show me the options for the nav");
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(["compare", "spotlight"]).toContain(r.stage().mode);
+    });
+  }, 30_000);
+
+  test("how to join puts the Join view up without a model", async () => {
+    await runScenario("offline: join", [6], async (r) => {
+      r.say("jonathan", "wait what's the code again");
+      await r.settle();
+      expect(r.stage().mode).toBe("join");
+    });
+  }, 30_000);
+
+  test("a decision has the chosen variant built by its agent", async () => {
+    await runScenario("offline: decision builds", [6], async (r) => {
+      r.say("felipe", "ok let's go with B");
+      await r.settle();
+      const ds = r.newDirectives();
+      expect(ds.length).toBe(1);
+      expect(ds[0].mode).toBe("implement");
+      expect(ds[0].text).toContain(r.art.navB.title);
+    });
+  }, 30_000);
 });

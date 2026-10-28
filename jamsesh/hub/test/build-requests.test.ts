@@ -33,3 +33,11 @@ test("words only count for requests that were already waiting when someone spoke
   expect(host.decide(r.id, false, "Maya")).toContain("Denied");
   expect(host.pendingRequests()).toHaveLength(0);
 });
+
+test("the brain's name counts when someone addresses it, not when they mention it", async () => {
+  const { addressesBrain } = await import("../src/brain/brain");
+  for (const yes of ["JamSesh, bring up the nav options", "hey jam sesh what's the code", "ok jamsesh put it up", "can you show both versions, JamSesh?", "Pixel, show the mobile one", "jamsesh"])
+    expect([yes, addressesBrain(yes, yes.startsWith("Pixel") ? "Pixel" : "JamSesh")]).toEqual([yes, true]);
+  for (const no of ["update the jamsesh skill with the new tools", "open the JamSesh app on your laptop", "I think jamsesh is going to be useful for the offsite next week honestly", "we jammed on the session yesterday"])
+    expect([no, addressesBrain(no, "JamSesh")]).toEqual([no, false]);
+});

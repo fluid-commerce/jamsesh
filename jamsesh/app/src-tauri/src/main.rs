@@ -74,6 +74,11 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
     let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
         .title(title)
+        // No separate title bar: the window controls sit in the page's own header (centered in
+        // its 56 px), with the logo to their right; the header is the drag area.
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
         .inner_size(1280.0, 820.0)
         .min_inner_size(420.0, 560.0)
         .build()
@@ -89,6 +94,8 @@ fn open_start(app: &AppHandle) {
     }
     let _ = WebviewWindowBuilder::new(app, "start", WebviewUrl::App("index.html".into()))
         .title("JamSesh")
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
         .inner_size(560.0, 640.0)
         .resizable(false)
         .build();
@@ -111,7 +118,14 @@ fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<
         let _ = w.close();
     }
     let parsed: url::Url = format!("{origin}/host").parse().map_err(|e: url::ParseError| e.to_string())?;
-    let w = WebviewWindowBuilder::new(app, "bigscreen", WebviewUrl::External(parsed)).title("JamSesh big screen").inner_size(1440.0, 900.0).build().map_err(|e| e.to_string())?;
+    let w = WebviewWindowBuilder::new(app, "bigscreen", WebviewUrl::External(parsed))
+        .title("JamSesh big screen")
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        .inner_size(1440.0, 900.0)
+        .build()
+        .map_err(|e| e.to_string())?;
     let monitors = w.available_monitors().unwrap_or_default();
     if monitors.len() > 1 {
         let primary = w.primary_monitor().ok().flatten().map(|m| *m.position());
@@ -228,13 +242,38 @@ fn offer_agents(app: AppHandle) {
     });
 }
 
+/// The DuckDNS and HTTPS wizard, in its own window (never on the big screen).
+fn open_remote_setup(app: &AppHandle, origin: &str) {
+    if let Some(w) = app.get_webview_window("remote") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    if let Ok(url) = format!("{origin}/setup?app").parse::<url::Url>() {
+        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)).title("Remote access").inner_size(900.0, 820.0).build();
+    }
+}
+
+#[tauri::command]
+async fn remote_setup(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
+    let origin = state.inner.lock().await.hub.as_ref().map(|h| h.origin()).ok_or("Host a session first.")?;
+    open_remote_setup(&app, &origin);
+    Ok(())
+}
+
 fn open_setup(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("setup") {
         let _ = w.show();
         let _ = w.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "setup", WebviewUrl::App("setup.html".into())).title("Set up this Mac").inner_size(620.0, 720.0).resizable(false).build();
+    let _ = WebviewWindowBuilder::new(app, "setup", WebviewUrl::App("setup.html".into()))
+        .title("Set up this Mac")
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .inner_size(620.0, 790.0)
+        .resizable(false)
+        .build();
 }
 
 async fn leave(app: &AppHandle, state: &App) {
@@ -294,10 +333,23 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
 
 async fn refresh_tray(app: &AppHandle) {
     let state = app.state::<Arc<App>>();
-    let (role, label, hub_port) = {
+    let (role, label, hub_port, relay_port) = {
         let inner = state.inner.lock().await;
         let label = inner.cfg.host_name.clone().or(inner.cfg.host_url.clone()).unwrap_or_default();
-        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port))
+        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port))
+    };
+    // Who's here: people whose windows checked in during the last two minutes, and live agents.
+    let present = match relay_port {
+        Some(p) => proxy::get(p, "/api/state").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()).map(|st| {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+            let mut people: Vec<String> = st["devices"].as_array().into_iter().flatten().filter(|d| d["kind"] == "client" && now - d["lastSeen"].as_f64().unwrap_or(0.0) < 120_000.0).filter_map(|d| d["personId"].as_str().map(str::to_string)).collect();
+            people.sort();
+            people.dedup();
+            let agents = st["agents"].as_array().into_iter().flatten().filter(|a| a["status"] != "offline").count();
+            let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+            format!("{}, {} here", plural(people.len(), "person", "people"), plural(agents, "agent", "agents"))
+        }),
+        None => None,
     };
     let code = match hub_port {
         Some(p) => proxy::get(p, "/api/pair/code").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()).and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string)),
@@ -309,21 +361,31 @@ async fn refresh_tray(app: &AppHandle) {
         match role.as_deref() {
             Some("host") => {
                 menu.append(&MenuItem::with_id(app, "status", "Hosting a session", false, None::<&str>)?)?;
+                if let Some(p) = &present {
+                    menu.append(&MenuItem::with_id(app, "present", p, false, None::<&str>)?)?;
+                }
                 menu.append(&MenuItem::with_id(app, "code", format!("Join code: {}", code.as_deref().unwrap_or("…")), false, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "open", "Open my window", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(app, "muteroom", "Mute or unmute the room mic", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "bigscreen", "Show the big screen", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "nextdisplay", "Move the big screen to the next display", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "setup", "Set up this Mac…", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(app, "remote", "Set up remote access…", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "leave", "Stop hosting", true, None::<&str>)?)?;
             }
             Some("join") => {
                 menu.append(&MenuItem::with_id(app, "status", format!("Joined {label}"), false, None::<&str>)?)?;
+                if let Some(p) = &present {
+                    menu.append(&MenuItem::with_id(app, "present", p, false, None::<&str>)?)?;
+                }
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "open", "Open my window", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "leave", "Leave the session", true, None::<&str>)?)?;
@@ -369,7 +431,19 @@ fn on_menu(app: &AppHandle, id: &str) {
                 };
                 app.dialog().message(text).title(title).kind(kind).show(|_| {});
             }
+            // The windows' own M shortcut, so muting works from the menu bar without finding the window.
+            "mute" | "muteroom" => {
+                let label = if id == "mute" { "client" } else { "bigscreen" };
+                if let Some(w) = app.get_webview_window(label) {
+                    let _ = w.eval("document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))");
+                }
+            }
             "setup" => open_setup(&app),
+            "remote" => {
+                if let Some(o) = hub_origin {
+                    open_remote_setup(&app, &o);
+                }
+            }
             "reopen" => match (role.as_deref(), hub_origin) {
                 (Some("host"), Some(o)) => drop(open_big_screen(&app, &o, false)),
                 _ => on_menu(&app, "open"),
@@ -453,7 +527,7 @@ fn relaunch(app: AppHandle) {
 fn main() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start_info, nearby_hosts, host_here, join, perm_status, perm_request, perm_settings, finish_setup, relaunch])
+        .invoke_handler(tauri::generate_handler![start_info, nearby_hosts, host_here, join, perm_status, perm_request, perm_settings, finish_setup, relaunch, remote_setup])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();

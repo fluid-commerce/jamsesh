@@ -17,7 +17,8 @@ import type { Session } from "../session";
 import { describeError, gateway } from "./llm";
 
 export type SpeechSource = "voice" | "recorded" | "typed" | "ambient";
-export type SpeechKind = "answer" | "problem" | "confirm";
+/** "request": the room must answer out loud (a host build waiting for approval). */
+export type SpeechKind = "answer" | "problem" | "confirm" | "request";
 
 let lastSpokeAt = 0;
 
@@ -31,6 +32,8 @@ export function speechDecision(opts: {
 }): "speak" | "text" {
   const { voiceReplies, source, kind, quietRoom, sinceLastMs } = opts;
   if (!voiceReplies) return "text";
+  // Someone has to answer, and often nobody is at the host to read it: always said out loud.
+  if (kind === "request") return "speak";
   if (source === "typed" || source === "ambient") return "text";
   if (kind === "confirm") return "text";
   if (quietRoom && kind !== "answer") return "text";
@@ -58,6 +61,11 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   const s = session.settings();
   const source = opts.source ?? "voice";
   const kind = opts.kind ?? "answer";
+  // Requests wait out the gap after the last reply instead of being dropped to text.
+  if (kind === "request" && s.voiceReplies) {
+    const wait = 4000 - (Date.now() - lastSpokeAt);
+    if (wait > 0) await Bun.sleep(wait);
+  }
   const decision = speechDecision({ voiceReplies: s.voiceReplies, source, kind, quietRoom: quietRoom(s.brainNotes), sinceLastMs: Date.now() - lastSpokeAt });
   const spoken = decision === "speak";
   const words = spoken ? trimForSpeech(text) : text;

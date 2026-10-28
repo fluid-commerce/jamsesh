@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
-import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person } from "./hub";
+import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { isOpaqueFrame, pointerRecording } from "./pointer";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -60,30 +61,199 @@ export function localize(url: string) {
   return url;
 }
 
-export function ScaledFrame({ src: raw, width = 1280, height = 800, title }: { src: string; width?: number; height?: number; title: string }) {
-  const src = localize(raw);
+/** What a tile hangs on a pin layer: the target the pins and pointer marks are filed under. */
+export type SlotTarget = { kind: string; ref: string; label: string };
+
+/** Pin layers for tiles (filled in by main.tsx once the annotation layer is mounted). */
+export const tileSlots: { render: ((target: SlotTarget) => ReactNode) | null; screen: ((share: Share) => ReactNode) | null } = { render: null, screen: null };
+
+export function Slot({ target }: { target: SlotTarget }) {
+  return <>{tileSlots.render?.(target) ?? null}</>;
+}
+
+/** The pin target for an artifact: its id, or the page's URL for a dev server. */
+export function artifactTarget(a: Artifact): SlotTarget {
+  return a.kind === "devserver" ? { kind: "web", ref: a.url ?? a.id, label: a.title } : { kind: "artifact", ref: a.id, label: a.title };
+}
+
+function useRecording() {
+  return useSyncExternalStore(pointerRecording.sub, pointerRecording.get);
+}
+
+/**
+ * While a prompt is being recorded, a frame from another origin (or a sandboxed one) swallows the
+ * pointer, so a transparent sheet goes over it to see where people point. It exists only while
+ * recording, so the page underneath stays fully usable the rest of the time. Place it inside the
+ * tile, over the frame, with `position: relative` on the parent.
+ */
+export function RecordCatch({ frame }: { frame: RefObject<HTMLIFrameElement | null> }) {
+  const recording = useRecording();
+  const [cover, setCover] = useState(false);
+  useEffect(() => {
+    if (!recording) return setCover(false);
+    const check = () => setCover(isOpaqueFrame(frame.current));
+    check();
+    const id = setInterval(check, 400);
+    return () => clearInterval(id);
+  }, [recording, frame]);
+  return cover ? <div className="rec-catch" aria-hidden /> : null;
+}
+
+/**
+ * Pins for an image or an empty tile: a layer that follows the picture itself, not the padded tile
+ * around it, so a pin stays on the same spot of the picture however the tile is resized.
+ * Mount it as a child of the (positioned) media box.
+ */
+export function FitPins({ target }: { target: SlotTarget }) {
   const box = useRef<HTMLDivElement>(null);
-  const [fit, setFit] = useState({ scale: 0, left: 0, top: 0 });
   useLayoutEffect(() => {
     const el = box.current;
-    if (!el) return;
-    const measure = () => {
-      const scale = Math.min(el.clientWidth / width, el.clientHeight / height);
-      setFit({ scale, left: (el.clientWidth - width * scale) / 2, top: (el.clientHeight - height * scale) / 2 });
+    const media = el?.parentElement;
+    if (!el || !media) return;
+    const img = media.querySelector("img");
+    const fit = () => {
+      const m = media.getBoundingClientRect();
+      const k = m.width / Math.max(1, media.offsetWidth) || 1; // an ancestor's scale() cancels out
+      const r = img ? img.getBoundingClientRect() : m;
+      el.style.left = `${(r.left - m.left) / k}px`;
+      el.style.top = `${(r.top - m.top) / k}px`;
+      el.style.width = `${r.width / k}px`;
+      el.style.height = `${r.height / k}px`;
     };
-    measure();
-    const ro = new ResizeObserver(measure);
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(media);
+    if (img) ro.observe(img);
+    return () => ro.disconnect();
+  }, [target.ref]);
+  return (
+    <div ref={box} className="pinbox">
+      <Slot target={target} />
+    </div>
+  );
+}
+
+// Sites known to refuse being framed (X-Frame-Options or frame-ancestors). A browser can't tell a
+// refused frame from a loaded one, so these are shown as the fallback up front.
+const NO_FRAME = /^(www\.)?(google\.com|github\.com|x\.com|twitter\.com|facebook\.com|instagram\.com|linkedin\.com|amazon\.com|reddit\.com|netflix\.com|paypal\.com|pinterest\.com|figma\.com)$/i;
+const LOAD_TIMEOUT = 12_000;
+
+function hostName(url: string) {
+  try {
+    return new URL(url).host.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+/** Shown in place of a page that can't be framed: who it is, why it's blank, and a way to still show it. */
+function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
+  const [phase, setPhase] = useState<"idle" | "busy" | "done">("idle");
+  const [err, setErr] = useState("");
+  const open = async () => {
+    setPhase("busy");
+    setErr("");
+    try {
+      const r = await api<{ result?: string }>("/host/open-url", { url }, "POST", { queue: false });
+      const msg = String(r?.result ?? "");
+      if (/^opened/i.test(msg) || !msg) setPhase("done");
+      else (setErr(msg), setPhase("idle"));
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't open it on the host.");
+      setPhase("idle");
+    }
+  };
+  return (
+    <div className="frame-blocked">
+      <div className="fb-inner">
+        <svg className="fb-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="3" y="4.5" width="18" height="15" rx="3" />
+          <path d="M3 9h18" />
+          <path d="m9.5 12.5 5 5m0-5-5 5" />
+        </svg>
+        <div className="fb-host" title={url}>{hostName(url)}</div>
+        <div className="fb-line">Can't be shown inside JamSesh.</div>
+        <button className="btn small fb-open" onClick={open} disabled={phase === "busy"}>
+          {phase === "busy" ? "Opening…" : phase === "done" ? "Opened. Open again" : "Open on the host"}
+        </button>
+        {err && <div className="fb-err" role="alert">{err}</div>}
+        {onTry && !err && phase === "idle" && (
+          <button className="fb-try" onClick={onTry}>
+            Try showing it here
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked }: { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean }) {
+  const src = localize(raw);
+  const box = useRef<HTMLDivElement>(null);
+  const frame = useRef<HTMLIFrameElement>(null);
+  const pinbox = useRef<HTMLDivElement>(null);
+  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => (detectBlocked && NO_FRAME.test(hostName(raw)) ? "blocked" : "loading"));
+  const [forced, setForced] = useState(false);
+  const blocked = state === "blocked" && !forced;
+  // A frame that never reports loading is as good as blocked; a load event on a page we can't
+  // inspect (another origin) is taken as loaded.
+  useEffect(() => {
+    if (!detectBlocked || blocked) return;
+    const id = setTimeout(() => setState((s) => (s === "loading" ? "blocked" : s)), LOAD_TIMEOUT);
+    return () => clearTimeout(id);
+  }, [detectBlocked, blocked, src]);
+  useEffect(() => {
+    if (detectBlocked) setState(NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
+    setForced(false);
+  }, [raw, detectBlocked]);
+  // Sized in the resize callback itself, not through React state: state would land a frame late
+  // and the frame would shake while the window is being resized.
+  useLayoutEffect(() => {
+    const el = box.current;
+    const f = frame.current;
+    if (!el || !f) return;
+    const fit = () => {
+      const scale = Math.min(el.clientWidth / width, el.clientHeight / height) || 0;
+      const left = (el.clientWidth - width * scale) / 2;
+      const top = (el.clientHeight - height * scale) / 2;
+      f.style.left = `${left}px`;
+      f.style.top = `${top}px`;
+      f.style.transform = `scale(${scale})`;
+      f.style.borderRadius = `${scale ? 12 / scale : 0}px`;
+      f.style.visibility = scale > 0 ? "visible" : "hidden";
+      // The pin layer and the capture sheet sit exactly on the picture, in the same frame.
+      const p = pinbox.current;
+      if (p) {
+        p.style.left = `${left}px`;
+        p.style.top = `${top}px`;
+        p.style.width = `${width * scale}px`;
+        p.style.height = `${height * scale}px`;
+        p.style.borderRadius = `${12}px`;
+      }
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [width, height]);
+  }, [width, height, blocked]);
   return (
     <div ref={box} style={{ position: "absolute", inset: "50px 18px 18px", overflow: "hidden" }}>
-      {fit.scale > 0 && (
-        <iframe
-          src={src}
-          title={title}
-          style={{ position: "absolute", left: fit.left, top: fit.top, width, height, transform: `scale(${fit.scale})`, transformOrigin: "0 0", border: 0, borderRadius: 12 / fit.scale, background: "#fff", boxShadow: "0 16px 50px -18px rgba(0,0,0,.8)" }}
-        />
+      {blocked ? (
+        <BlockedFrame url={raw} onTry={() => setForced(true)} />
+      ) : (
+        <>
+          <iframe
+            ref={frame}
+            src={src}
+            title={title}
+            onLoad={() => setState("ok")}
+            style={{ position: "absolute", width, height, transformOrigin: "0 0", border: 0, background: "#fff", boxShadow: "0 16px 50px -18px rgba(0,0,0,.8)", visibility: "hidden" }}
+          />
+          <div ref={pinbox} className="pinbox">
+            <RecordCatch frame={frame} />
+            {pin && <Slot target={pin} />}
+          </div>
+        </>
       )}
     </div>
   );
@@ -97,6 +267,7 @@ export function ArtifactTile({
   onClick,
   big,
   live = true,
+  pins,
 }: {
   art: Artifact;
   state: HubState;
@@ -105,11 +276,15 @@ export function ArtifactTile({
   onClick?: () => void;
   big?: boolean;
   live?: boolean;
+  /** Take pins and pointer marks: the tile becomes a pin target (the artifact, or the dev server's URL). */
+  pins?: boolean;
 }) {
   const color = colorFor(state, { agentId: art.agentId });
+  const target = pins ? artifactTarget(art) : undefined;
   const dev = state.devservers.find((d) => d.url === art.url);
+  const framed = art.kind === "devserver" && !!art.url && live && dev?.up !== false;
   return (
-    <div className={`tile ${art.stage} ${fresh ? "fresh" : ""} ${onClick ? "clickable" : ""}`} onClick={onClick}>
+    <div className={`tile ${art.stage} ${fresh ? "fresh" : ""} ${onClick ? "clickable" : ""}`} onClick={onClick} data-jam-target={target ? JSON.stringify(target) : undefined}>
       {variant && <div className="variant">{variant}</div>}
       <div className="corner">
         {art.platform && art.platform !== "other" && <span className="badge neutral">{art.platform}</span>}
@@ -118,7 +293,7 @@ export function ArtifactTile({
       <div className="media" style={big ? { padding: 28 } : undefined}>
         {art.kind === "devserver" && art.url ? (
           live && dev?.up !== false ? (
-            <ScaledFrame src={art.url} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} />
+            <ScaledFrame src={art.url} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} pin={target} />
           ) : (
             <div className="empty-note mono">{art.url} isn't answering</div>
           )
@@ -127,6 +302,7 @@ export function ArtifactTile({
         ) : art.kind === "html" ? null : (
           <div className="empty-note">{art.note || art.title}</div>
         )}
+        {target && !framed && <FitPins key={art.image ?? art.id} target={target} />}
       </div>
       <div className="meta">
         <span className="dot" style={{ background: color }} />

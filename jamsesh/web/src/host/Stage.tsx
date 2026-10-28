@@ -1,11 +1,21 @@
-import { useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
 import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, QR, RoomFeed, ScaledFrame, colorFor, useNow } from "../shared/ui";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, RecordCatch, RoomFeed, ScaledFrame, Slot, artifactTarget, colorFor, tileSlots, useNow, type SlotTarget } from "../shared/ui";
+
+export { tileSlots };
+
+/** Whether the tiles of this stage carry their own pin layers (the phone mirror pins the whole picture instead). */
+const TilePins = createContext(true);
+
+/** An artifact tile that takes pins wherever the stage shows one. */
+function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
+  return <ArtifactTile {...props} pins={useContext(TilePins)} />;
+}
 import { CodeRing, JoinCard, primaryAddress, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
-export function Stage({ state, interactive }: { state: HubState; interactive?: boolean }) {
+export function Stage({ state, interactive, tilePins = true }: { state: HubState; interactive?: boolean; tilePins?: boolean }) {
   const stage = state.stage;
   const byId = useMemo(() => new Map(state.artifacts.map((a) => [a.id, a])), [state.artifacts]);
   const pick = (ids: string[]) => ids.map((id) => byId.get(id)).filter(Boolean) as Artifact[];
@@ -49,7 +59,7 @@ export function Stage({ state, interactive }: { state: HubState; interactive?: b
   }
   return (
     <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
-      {body}
+      <TilePins.Provider value={tilePins}>{body}</TilePins.Provider>
     </div>
   );
 }
@@ -79,7 +89,7 @@ function Board({ state, onPick }: { state: HubState; onPick: (a: Artifact) => vo
       {items.map((a, i) => (
         <div key={a.id} style={{ gridArea: l.areas[i], minHeight: 0, display: "flex" }}>
           <div style={{ flex: 1, display: "flex", minWidth: 0 }}>
-            <ArtifactTile art={a} state={state} fresh={now - a.updatedAt < 45_000} big={i === 0 && n >= 3} onClick={() => onPick(a)} />
+            <PinnedTile art={a} state={state} fresh={now - a.updatedAt < 45_000} big={i === 0 && n >= 3} onClick={() => onPick(a)} />
           </div>
         </div>
       ))}
@@ -107,7 +117,7 @@ function Columns({ title, caption, items, state, lettered, big }: { title: strin
       <Header title={title} caption={caption} />
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 18, gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
         {(lettered ? [...items].sort((a, b) => (a.variant || a.title).localeCompare(b.variant || b.title)) : items).map((a, i) => (
-          <ArtifactTile key={a.id} art={a} state={state} big={big || items.length <= 3} variant={lettered ? a.variant || String.fromCharCode(65 + i) : undefined} />
+          <PinnedTile key={a.id} art={a} state={state} big={big || items.length <= 3} variant={lettered ? a.variant || String.fromCharCode(65 + i) : undefined} />
         ))}
       </div>
     </>
@@ -128,7 +138,7 @@ function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Art
             </div>
             <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 14, gridTemplateColumns: `repeat(${Math.max(1, c.items.length)}, minmax(0, 1fr))` }}>
               {pick(c.items).map((a) => (
-                <ArtifactTile key={a.id} art={a} state={state} />
+                <PinnedTile key={a.id} art={a} state={state} />
               ))}
             </div>
           </div>
@@ -139,6 +149,7 @@ function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Art
 }
 
 function Agents({ state }: { state: HubState }) {
+  const pins = useContext(TilePins);
   const agents = state.agents.filter((a) => a.status !== "offline");
   const now = useNow(5000);
   if (!agents.length) return <Welcome state={state} />;
@@ -157,8 +168,9 @@ function Agents({ state }: { state: HubState }) {
                 <AgentRow agent={a} state={state} />
               </div>
               {latest ? (
-                <div className="media" style={{ padding: 14 }}>
+                <div className="media" style={{ padding: 14 }} data-jam-target={pins ? JSON.stringify(artifactTarget(latest)) : undefined}>
                   <img src={latest.image!} alt={latest.title} />
+                  {pins && <FitPins key={latest.image} target={artifactTarget(latest)} />}
                 </div>
               ) : (
                 <div style={{ flex: 1, minHeight: 0 }} />
@@ -226,10 +238,7 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
       const a = state.artifacts.find((x) => x.id === tile.artifactId);
       if (!a) return <TileFrame label={tile.label ?? "Gone"} kind="artifact"><div className="empty-note">That artifact was removed.</div></TileFrame>;
       return (
-        <div data-jam-target={JSON.stringify({ kind: a.kind === "devserver" ? "web" : "artifact", ref: a.kind === "devserver" ? a.url : a.id, label: a.title })} style={{ flex: 1, display: "flex", minWidth: 0, position: "relative" }}>
-          <ArtifactTile art={a} state={state} />
-          <Slot target={{ kind: a.kind === "devserver" ? "web" : "artifact", ref: a.kind === "devserver" ? a.url ?? "" : a.id, label: a.title }} />
-        </div>
+        <ArtifactTile art={a} state={state} pins />
       );
     }
     case "canvas":
@@ -243,7 +252,7 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
       const mobile = dev?.platform === "mobile" || /mobile|expo|ios|android/i.test(tile.label ?? "");
       return (
         <TileFrame label={tile.label ?? dev?.name ?? hostOf(tile.url)} kind="web" sub={tile.url} target={{ kind: "web", ref: tile.url, label: tile.label ?? dev?.name ?? hostOf(tile.url) }}>
-          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} />
+          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} detectBlocked={!dev} />
         </TileFrame>
       );
     }
@@ -286,7 +295,7 @@ function hostOf(url: string) {
   }
 }
 
-function TileFrame({ label, sub, kind, children, target }: { label: string; sub?: string; kind: string; children: ReactNode; target?: { kind: string; ref: string; label: string } }) {
+function TileFrame({ label, sub, kind, children, target }: { label: string; sub?: string; kind: string; children: ReactNode; target?: SlotTarget }) {
   return (
     <div className="tile" data-jam-target={target ? JSON.stringify(target) : undefined} style={{ animation: "none" }}>
       <div className="media" style={{ padding: 0 }}>
@@ -300,13 +309,6 @@ function TileFrame({ label, sub, kind, children, target }: { label: string; sub?
       </div>
     </div>
   );
-}
-
-/** Annotation pins for a tile (filled in by the annotation layer when it's mounted). */
-export const tileSlots: { render: ((target: { kind: string; ref: string; label: string }) => ReactNode) | null; screen: ((share: Share) => ReactNode) | null } = { render: null, screen: null };
-
-function Slot({ target }: { target: { kind: string; ref: string; label: string } }) {
-  return <>{tileSlots.render?.(target) ?? null}</>;
 }
 
 function ScreenSlot({ share }: { share: Share }) {
@@ -323,8 +325,9 @@ function AgentCard({ agent: a, state }: { agent: HubState["agents"][number]; sta
         <AgentRow agent={a} state={state} />
       </div>
       {latest ? (
-        <div className="media" style={{ padding: 14 }}>
+        <div className="media" style={{ padding: 14 }} data-jam-target={JSON.stringify(artifactTarget(latest))}>
           <img src={latest.image!} alt={latest.title} />
+          <FitPins key={latest.image} target={artifactTarget(latest)} />
         </div>
       ) : (
         <div style={{ flex: 1, minHeight: 0 }} />
@@ -343,6 +346,8 @@ function AgentCard({ agent: a, state }: { agent: HubState["agents"][number]; sta
 
 function Custom({ state }: { state: HubState }) {
   const ref = useRef<HTMLIFrameElement>(null);
+  const pins = useContext(TilePins);
+  const target: SlotTarget = { kind: "screen", ref: "stage:custom", label: state.stage.title || "Big screen" };
   const html = state.stage.html ?? "";
   const doc = useMemo(
     () =>
@@ -357,7 +362,11 @@ function Custom({ state }: { state: HubState }) {
   return (
     <>
       <Header title={state.stage.title} />
-      <iframe ref={ref} srcDoc={doc} sandbox="allow-scripts" title={state.stage.title} style={{ flex: 1, border: 0, borderRadius: 22, background: "var(--panel)" }} />
+      <div data-jam-target={pins ? JSON.stringify(target) : undefined} style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", borderRadius: 22 }}>
+        <iframe ref={ref} srcDoc={doc} sandbox="allow-scripts" title={state.stage.title} style={{ flex: 1, border: 0, borderRadius: 22, background: "var(--panel)" }} />
+        <RecordCatch frame={ref} />
+        {pins && <Slot target={target} />}
+      </div>
     </>
   );
 }

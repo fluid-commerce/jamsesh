@@ -365,6 +365,7 @@ export class McpEndpoint {
         s.touchAgent(agent.id, fields);
         s.store.put("agents", { ...s.agent(agent.id)! });
         const now = s.agent(agent.id)!;
+        if (before !== now.name) void this.hub.canvas.renameAgent(agent.id, now.name);
         s.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: now.name, text: `${before !== now.name ? `${before} is now ${now.name}` : now.name} (${now.ownerName}${s.person(now.ownerId)?.role ? `, ${s.person(now.ownerId)!.role}` : ""}'s agent).` });
         return text(`You are ${now.name}, working for ${now.ownerName}${s.person(now.ownerId)?.role ? ` (${s.person(now.ownerId)!.role})` : ""}.`);
       }

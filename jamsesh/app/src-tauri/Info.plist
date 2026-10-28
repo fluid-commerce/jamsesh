@@ -6,6 +6,8 @@
   <string>JamSesh listens to the room so the session's brain hears what people say.</string>
   <key>NSCameraUsageDescription</key>
   <string>JamSesh uses the camera for your profile photo and when you share your camera with the room.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>JamSesh arranges app windows on this Mac when the room asks (through System Events).</string>
   <key>NSLocalNetworkUsageDescription</key>
   <string>JamSesh finds sessions hosted on your network and connects to them.</string>
   <key>NSBonjourServices</key>

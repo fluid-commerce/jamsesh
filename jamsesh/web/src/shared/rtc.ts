@@ -16,8 +16,9 @@ type Signal =
   | { op: "ice"; shareId: string; pc: string; candidate: RTCIceCandidateInit | null }
   | { op: "bye"; shareId: string };
 
-let iceServers: RTCIceServer[] = [];
-/** LAN needs none. Pass STUN/TURN servers here if the room ever spans networks. */
+// Public STUN lets shares connect across home and office networks; strict networks would need TURN.
+let iceServers: RTCIceServer[] = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
+/** Replaces the servers above, for example with a TURN server for networks that block direct connections. */
 export function configureRtc(opts: { iceServers?: RTCIceServer[] }) {
   if (opts.iceServers) iceServers = opts.iceServers;
 }

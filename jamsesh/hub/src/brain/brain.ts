@@ -75,10 +75,27 @@ export class Brain {
     else s.setBrain("ready");
   }
 
+  private lastTroubleAt = 0;
+  /** The gateway failed: say so on screen (at most every five minutes); the caller falls back to rules. */
+  private gatewayTrouble(e: unknown) {
+    this.session.setBrain("ready", describeError(e));
+    if (Date.now() - this.lastTroubleAt < 5 * 60_000) return;
+    this.lastTroubleAt = Date.now();
+    bus.send({ type: "toast", tone: "warn", text: `${this.session.settings().brainName} can't reach the AI Gateway right now`, detail: `Using simple rules until it's back. ${describeError(e).slice(0, 100)}` });
+  }
+
   /** A new room line (speech or typed). Batches lines that arrive together. */
   hear(ev: JamEvent) {
     if (this.stopped || !this.session.settings().brainEnabled) return;
-    if (addressesBrain(ev.text, this.session.settings().brainName)) {
+    // "JamSesh, approve" for the one waiting host build: decided here, with or without a model.
+    const verdict = buildVerdict([ev], this.host.pendingRequests().length);
+    if (verdict) {
+      const [req] = this.host.pendingRequests();
+      this.host.decide(req.id, verdict.approve, verdict.by, verdict.at);
+      return;
+    }
+    // Prompts people type to their own agents mention JamSesh all the time; they aren't for the brain.
+    if (ev.kind !== "prompt" && addressesBrain(ev.text, this.session.settings().brainName)) {
       const marked = this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true } }) ?? { ...ev, data: { ...ev.data, direct: true } };
       return void this.direct(marked);
     }
@@ -129,7 +146,7 @@ export class Brain {
       .recentEvents({ kinds: ["speech", "prompt", "directive"], limit: 14 })
       .filter((e) => !batch.some((b) => b.id === e.id));
     const agents = this.session.agents().filter((a) => a.status !== "offline");
-    const { output } = await generateText({
+    const result = await generateText({
       model: m,
       output: Output.object({ schema: triageSchema }),
       system: TRIAGE_SYSTEM,
@@ -139,8 +156,12 @@ export class Brain {
         `Earlier lines:\n${recent.map((e) => `- ${e.authorName}: ${e.text}`).join("\n") || "(none)"}`,
         `New lines to judge:\n${batch.map((e) => `[${e.id}] ${e.authorName}${roleOf(this.session, e)}: ${e.text}`).join("\n")}`,
       ].join("\n\n"),
+    }).catch((e) => {
+      // The gateway is down or refused: keep going on simple rules rather than drop what was said.
+      this.gatewayTrouble(e);
+      return null;
     });
-    return output ?? ruleTriage(batch);
+    return result?.output ?? ruleTriage(batch);
   }
 
   // ---------- routing ----------
@@ -161,7 +182,7 @@ export class Brain {
       });
       this.session.setBrain("ready");
     } catch (e) {
-      this.session.setBrain("ready", describeError(e));
+      this.gatewayTrouble(e);
       console.error("router:", describeError(e));
       this.ruleRoute(batch, triage);
     } finally {
@@ -191,8 +212,9 @@ export class Brain {
       });
       this.session.setBrain("ready");
     } catch (e) {
-      this.session.setBrain("ready", describeError(e));
+      this.gatewayTrouble(e);
       console.error("direct:", describeError(e));
+      this.ruleRoute([ev], ruleTriage([ev]));
     } finally {
       this.busy = false;
       bus.send({ type: "thinking", on: false });
@@ -302,6 +324,8 @@ export class Brain {
   tools(batch: JamEvent[]) {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
+    // Commands on the host only ever run because a person asked, never because an agent's text did.
+    const personAsked = batch.some((e) => e.authorType === "person");
     const source = speechSource(batch);
     const requester = batch[batch.length - 1]?.authorName ?? "JamSesh";
     const agentIds = () => new Set(s.agents().map((a) => a.id));
@@ -438,6 +462,7 @@ export class Brain {
         }),
         execute: async (i) => {
           if (!s.settings().hostControl) return "Host control is turned off in Settings.";
+          if (i.action === "shell" && !personAsked) return "Shell commands only run when a person in the room asks. Do nothing.";
           return host.act(i);
         },
       }),
@@ -452,6 +477,7 @@ export class Brain {
         }),
         execute: async (i) => {
           if (!s.settings().hostControl) return "Host control is turned off in Settings.";
+          if (!personAsked) return "Builds on the host only start when a person in the room asks. Agents use jam_host_preview, which a person approves.";
           return host.preview({ ...i, by: "The room brain" });
         },
       }),
@@ -620,6 +646,10 @@ export class Brain {
       const ev = batch.find((e) => e.id === line.id);
       if (!ev) continue;
       const text = ev.text;
+      if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
+        s.setStage({ mode: "join", title: "", items: [] }, "Room brain");
+        continue;
+      }
       if (line.intent === "present") {
         const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
         const hit = s.artifacts().find((a) => words.some((w) => a.title.toLowerCase().includes(w)));
@@ -630,11 +660,21 @@ export class Brain {
       }
       if (line.intent === "decision") {
         s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, relevance: "work", data: { requestedBy: ev.authorName } });
+        // "Let's go with B": find variant B on screen (or among the latest set) and have its agent build it.
+        const letter = text.match(/\b(?:direction|option|variant|version|with)\s+([a-z])\b/i)?.[1]?.toUpperCase();
+        const shown = s.stage().items.map((id) => s.artifacts().find((a) => a.id === id)).filter(Boolean) as Artifact[];
+        const pool = shown.length ? shown : s.artifacts().slice(0, 12);
+        const pick = letter ? pool.find((a) => new RegExp(`/\\s*${letter}\\b`).test(a.title)) : undefined;
+        const owner = pick?.agentId ? s.agent(pick.agentId) : undefined;
+        if (pick && owner) s.createDirective({ text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement", targets: [owner.id], requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "The room chose this variant (routed by keyword; the brain has no model right now)." });
         continue;
       }
       if (line.intent !== "directive" || !agents.length) continue;
       const lower = text.toLowerCase();
-      const named = agents.filter((a) => lower.includes(a.ownerName.toLowerCase().split(/\s+/)[0]) || lower.includes(a.platform));
+      const word = (w: string) => w.length > 1 && new RegExp(`\\b${w.replace(/[^a-z0-9]/g, "")}\\b`).test(lower);
+      const named = agents.filter((a) => word(a.ownerName.toLowerCase().split(/\s+/)[0]) || (a.platform !== "other" && word(a.platform)));
+      // Said twice (or picked up by two mics): don't send the same request again.
+      if (s.directives().some((d) => d.status !== "done" && Date.now() - d.ts < 10 * 60_000 && similar(d.text, text) > 0.8)) continue;
       const best = affinity(s, text)[0];
       const pool = named.length ? named : best ? [best.agent] : agents;
       const targets = oneAgentPerRepo(s, pool.map((a) => a.id), text).kept;
@@ -813,13 +853,27 @@ export function speechSource(batch: JamEvent[]): SpeechSource {
   return "ambient";
 }
 
-/** "JamSesh, …", "hey jam sesh", or the room's own name for the brain anywhere in the line. */
+/**
+ * Whether a line speaks to the brain: its name used as a form of address ("JamSesh, bring up…",
+ * "hey jam sesh", "…can you do that, JamSesh?"), not mentioned as a thing ("update the jamsesh
+ * skill", "open the JamSesh app").
+ */
 export function addressesBrain(text: string, name: string) {
-  const flat = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const t = flat(text);
-  const n = flat(name);
-  if (n.length >= 3 && t.includes(n)) return true;
-  return n === "jamsesh" && /\b(jam ?sesh|jam ?session|jamsesh)\b/i.test(text) && /^(hey|ok|okay|yo|so)?\s*,?\s*jam/i.test(text.trim());
+  const n = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (n.length < 3) return false;
+  const words = text.toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, "")).filter(Boolean);
+  const ARTICLE = new Set(["the", "a", "an", "this", "that", "our", "your", "my", "in", "into", "to", "of", "with", "from", "on", "for", "about"]);
+  const GREETING = new Set(["hey", "hi", "ok", "okay", "yo", "so", "and", "alright", "um", "uh", "oh"]);
+  for (let i = 0; i < words.length; i++) {
+    // The name may be split by the transcriber ("jam sesh").
+    const span = words[i] === n ? 1 : i + 1 < words.length && words[i] + words[i + 1] === n ? 2 : 0;
+    if (!span) continue;
+    if (i > 0 && ARTICLE.has(words[i - 1])) continue;
+    const before = words.slice(0, i).filter((w) => !GREETING.has(w)).length;
+    const after = words.length - (i + span);
+    if (before <= 1 || after <= 1) return true;
+  }
+  return false;
 }
 
 /** Variant letters, numbers and hex colors: the details that make two similar sentences different. */
@@ -862,13 +916,15 @@ export function buildVerdict(batch: JamEvent[], waiting: number): { approve: boo
 }
 
 // Rule-based triage, used without a gateway key and as a fallback.
+const JOIN_WORDS = /\b(qr( code)?|join(ing)? code|what'?s the code|the code again|how (do|can|does) (i|we|you|people|someone|they) (join|connect|get on|get in))\b/;
+
 export function ruleTriage(batch: JamEvent[]): Triage {
   const lines = batch.map((e) => {
     const t = e.text.toLowerCase().trim();
     let intent: Triage["lines"][number]["intent"] = "none";
     let relevance: Relevance = "discussion";
-    if (/\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t)) intent = "present";
-    if (/\b(qr( code)?|join(ing)? code|what'?s the code|the code again|how (do|can|does) (i|we|you|people|someone|they) (join|connect|get on|get in))\b/.test(t)) intent = "present";
+    // In order: asking to see something (or how to join), a decision, then a request for work.
+    if (JOIN_WORDS.test(t) || /\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t)) intent = "present";
     else if (/\b(let'?s go with|we('re| are) going with|decided|i like (direction|option|variant) [a-z]\b|go with [a-z]\b)/.test(t)) intent = "decision";
     else if (/\b(can you|could you|let'?s (try|build|make|do|ship|add|explore)|try (a|some|out)|make (a|some)|give (me|us)|build|implement|mock up|variants?|options? for)\b/.test(t)) intent = "directive";
     if (/\b(haha|lol|lmao|dude|bro|shut up|your (mom|shirt|face))\b/.test(t) && intent === "none") relevance = "banter";

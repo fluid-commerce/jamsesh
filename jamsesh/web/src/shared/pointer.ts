@@ -1,6 +1,7 @@
 // Pointer capture for "record a prompt", after CursorCap's model (spec/motion-distillation.md):
 // raw samples while recording, distilled afterwards into dwell / click / drag marks, each tied to the
-// tile (data-jam-target) it landed on. Works across the document and every same-origin iframe, and
+// tile (data-jam-target) it landed on. Works across the document and every same-origin iframe (frames
+// from another origin get a capture overlay from their tile while recording), and
 // for canvas tiles turns an iframe pixel into a FigCraft page point plus the top-level frame under it.
 import { hub } from "./hub";
 
@@ -151,6 +152,38 @@ export function iframeFraction(iframe: HTMLIFrameElement, vx: number, vy: number
   return { fx: (vx - r.left) / Math.max(1, r.width), fy: (vy - r.top) / Math.max(1, r.height) };
 }
 
+// ---------- recording state ----------
+
+let recordingNow = false;
+const recordingSubs = new Set<() => void>();
+/** True while a PointerRecorder is running; tiles use it to lay a capture overlay over frames. */
+export const pointerRecording = {
+  get: () => recordingNow,
+  sub: (f: () => void) => (recordingSubs.add(f), () => void recordingSubs.delete(f)),
+};
+function setRecording(v: boolean) {
+  if (recordingNow === v) return;
+  recordingNow = v;
+  recordingSubs.forEach((f) => f());
+}
+
+/** Whether a frame's document can't be reached from here (another origin, or a sandbox). */
+export function isOpaqueFrame(f: HTMLIFrameElement | null) {
+  try {
+    return !f?.contentDocument;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The box a mark's 0..1 position is measured in: the tile's pin layer when it has one (the same box
+ * the pins are placed in, so a pointed-at spot lands where a pin dropped there would), else the tile.
+ */
+function frameBox(root: HTMLElement) {
+  return root.querySelector<HTMLElement>(".an-layer") ?? root;
+}
+
 // ---------- recorder ----------
 
 type Ev = { t: number; x: number; y: number; type: "move" | "down" | "up" | "leave"; el: Element | null };
@@ -177,6 +210,7 @@ export class PointerRecorder {
     this.views.clear();
     this.t0 = hub.now();
     this.running = true;
+    setRecording(true);
     this.attach(document, null);
     this.scanFrames();
     this.timers.push(setInterval(() => this.scanFrames(), 400));
@@ -190,7 +224,7 @@ export class PointerRecorder {
         const doc = f.contentDocument;
         if (doc && !this.attached.has(doc)) this.attach(doc, f);
       } catch {
-        // cross-origin: the pointer is invisible there; pins still work on the overlay
+        // cross-origin: the pointer is invisible inside; tiles lay a capture overlay over it while recording
       }
     }
   }
@@ -258,6 +292,7 @@ export class PointerRecorder {
   /** Stops, distills, and resolves each mark's target (and the canvas frame under it). */
   async stop(): Promise<PointerMark[]> {
     this.running = false;
+    setRecording(false);
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
     for (const off of this.offs) off();
@@ -334,7 +369,7 @@ export class PointerRecorder {
 
     return Promise.all(
       kept.map(async ({ raw: r, root, target }): Promise<PointerMark> => {
-        const box = root.getBoundingClientRect();
+        const box = frameBox(root).getBoundingClientRect();
         const x = clamp01((r.x - box.left) / Math.max(1, box.width));
         const y = clamp01((r.y - box.top) / Math.max(1, box.height));
         const t: JamTarget = { ...target };

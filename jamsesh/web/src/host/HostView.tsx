@@ -27,6 +27,8 @@ export function HostView() {
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const now = useNow(1000);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const stageMode = useRef<StageMode>("board");
+  stageMode.current = state?.stage.mode ?? "board";
 
   // Tell the brain the big screen's size and shape (and which display it's on) so it plans
   // layouts that fit. Again on every resize, move to another display, and reconnect.
@@ -49,13 +51,6 @@ export function HostView() {
   }, []);
 
   useEffect(() => {
-    // First run: offer remote-access setup once (it has "Skip, room only").
-    if (pref("setupOffered") !== "1") {
-      setPref("setupOffered", "1");
-      api<{ configured: boolean }>("/net/status")
-        .then((st) => !st.configured && location.replace("/setup"))
-        .catch(() => {});
-    }
     api("/devices", { deviceId: DEVICE, label: "Room mic (host)", kind: "host" }).catch(() => {});
     const off = mic.onChange(setMicStatus);
     // Play the brain's replies on the room speaker.
@@ -67,7 +62,8 @@ export function HostView() {
     };
     hub.speakListeners.add(onSpeak);
     const offChime = hub.onMessage((m) => m.type === "chime" && playChime());
-    if (pref("hostMic") === "on") mic.start().catch(() => {});
+    // The room mic listens unless someone muted it.
+    if (pref("hostMic") !== "off") mic.start().catch(() => {});
     return () => {
       off();
       offChime();
@@ -91,6 +87,7 @@ export function HostView() {
       const m = MODES.find((x) => x.key === e.key);
       if (m) api("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" });
       if (e.key === "Escape" && !settings) api("/stage", { mode: "board", by: "Host" });
+      if ((e.key === "j" || e.key === "J") && !e.metaKey && !e.ctrlKey && !e.altKey) api("/stage", { mode: stageMode.current === "join" ? "board" : "join", by: "Host" });
       if (e.key === "f") document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
       if (e.key === ",") setSettings(true);
       if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey) {
@@ -285,7 +282,7 @@ function Offline() {
 function JoinPill({ onOpen }: { onOpen: () => void }) {
   const { code, left } = useJoinCode();
   return (
-    <button className="btn small join-pill" style={{ height: 36 }} onClick={onOpen} title="Invite someone: QR, address and code">
+    <button className="btn small join-pill" style={{ height: 36 }} onClick={onOpen} title="Invite someone: QR, address and code. Press J to show it on the big screen">
       <CodeRing left={left} size={18} />
       <span className="mono" style={{ letterSpacing: "0.18em", fontSize: 15 }}>{code?.code ?? "····"}</span>
     </button>

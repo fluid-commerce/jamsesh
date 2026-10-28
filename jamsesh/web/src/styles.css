@@ -327,6 +327,100 @@ textarea:focus {
   background: #fff;
 }
 
+/* Pins and pointer capture sit exactly on the picture, whatever its padding or scale. */
+.pinbox {
+  position: absolute;
+  pointer-events: none;
+}
+.rec-catch {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* A page that can't be framed: who it is, why it's blank, and a way to still show it. */
+.frame-blocked {
+  position: absolute;
+  inset: 0;
+  container-type: size;
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  text-align: center;
+}
+.fb-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.fb-icon {
+  color: var(--dim);
+  flex: none;
+}
+.fb-host {
+  max-width: 100%;
+  font-size: clamp(15px, 1.4vw, 22px);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fb-line {
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.35;
+}
+.fb-open {
+  white-space: nowrap;
+  margin-top: 2px;
+}
+.fb-err {
+  max-width: 34ch;
+  color: var(--warn);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.fb-try {
+  all: unset;
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.fb-try:hover {
+  color: var(--muted);
+}
+.fb-try:focus-visible {
+  outline: 2px solid var(--directive);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+@container (max-height: 170px) {
+  .fb-icon {
+    display: none;
+  }
+  .fb-inner {
+    gap: 5px;
+  }
+}
+@container (max-height: 120px) {
+  .fb-line,
+  .fb-try {
+    display: none;
+  }
+}
+
 .tile .meta {
   display: flex;
   align-items: center;
@@ -2148,4 +2242,32 @@ html[data-layout] .shr-scrim {
   .build-requests {
     top: 112px;
   }
+}
+
+/* One height for every control in the window headers (they come from different components). */
+.app-header .rec-btn,
+.app-header .an-toggle,
+.app-header .mic-btn,
+.app-header .shr-btn {
+  height: 36px;
+  min-height: 36px;
+  box-sizing: border-box;
+}
+.app-header .rec-btn,
+.app-header .an-toggle {
+  padding: 0 13px 0 11px;
+  font-size: 13.5px;
+  gap: 8px;
+}
+.app-header .shr-btn:not(:has(> span)) {
+  width: 36px;
+  padding: 0;
+  justify-content: center;
+}
+
+/* In the Mac app: the window controls sit at the left of the header. */
+html.in-app .app-header {
+  padding-left: 84px !important;
+  -webkit-user-select: none;
+  user-select: none;
 }

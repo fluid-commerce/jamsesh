@@ -137,7 +137,10 @@ export function SetupView({ onSkip, previewStatus }: { onSkip?: () => void; prev
     if (r.ok) setStatus(r.data);
     else await refresh();
   };
-  const skip = () => (onSkip ? onSkip() : (location.href = "/host"));
+  // In the Mac app the wizard has its own window (?app), so there's nowhere to go back to.
+  const [closed, setClosed] = useState(false);
+  const inApp = new URLSearchParams(location.search).has("app");
+  const skip = () => (onSkip ? onSkip() : inApp ? setClosed(true) : (location.href = "/host"));
 
   const s = status;
   const cert = s?.cert;
@@ -147,6 +150,19 @@ export function SetupView({ onSkip, previewStatus }: { onSkip?: () => void; prev
   const s3: [Tone, string] =
     cert?.state !== "ok" ? ["idle", "Waiting"] : router?.state === "working" ? ["busy", "Asking router"] : router?.state === "done" && router.method !== "none" ? ["ok", "Open"] : router?.cgnat ? ["warn", "Blocked"] : router?.state === "done" ? ["warn", "One manual step"] : ["idle", "Waiting"];
   const s4: [Tone, string] = s?.reachable === "yes" ? ["ok", "Reachable"] : s?.reachable === "no" ? ["warn", "Not yet"] : router?.state === "done" && router.method !== "none" ? ["idle", "Ready to check"] : ["idle", "Waiting"];
+
+  if (closed)
+    return (
+      <div className="setup">
+        <div className="setup-inner">
+          <header className="setup-hero">
+            <p className="setup-eyebrow">Host setup</p>
+            <h1>Room only, for now</h1>
+            <p>Close this window. Everyone on this network can join. Set up remote access any time from JamSesh's menu bar menu.</p>
+          </header>
+        </div>
+      </div>
+    );
 
   return (
     <div className="setup">
@@ -337,9 +353,6 @@ export function SetupView({ onSkip, previewStatus }: { onSkip?: () => void; prev
 
         {derived !== 4 && (
           <footer className="setup-foot">
-            <button className="btn ghost" onClick={skip}>
-              Skip, room only
-            </button>
             <span>Room-only sessions keep working on your local network at any time.</span>
           </footer>
         )}

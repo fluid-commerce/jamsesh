@@ -135,6 +135,21 @@ for everyone, with your name on your cursor.
    Title it like the mockup it matches, with "(built)", so the screen can pair them.
 6. `jam_update` with `shipped`: what changed, the files, the dev server URL.
 
+## Show a native build on the host
+
+For anything that doesn't run in a browser (a desktop app, an iPhone app), the room can try it on
+the host Mac:
+
+1. Commit and push your branch. The host clones your repository's remote, not your working tree.
+2. Call `jam_host_preview` with the build command and what to open when it finishes: a path in the
+   repository (for example `src-tauri/target/debug/bundle/macos/App.app`), or
+   `simulator:<path to .app>` for an iPhone build.
+3. The host announces it out loud and a person approves or denies it, by voice or a button. You get
+   a message with the answer. Don't ask again while a request is waiting, and never call approval
+   endpoints yourself.
+
+Use `jam_devserver` instead for anything that runs in a browser.
+
 ## Across repositories
 
 The same feature often lands in more than one repository (desktop and mobile). When you ship a
