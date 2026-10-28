@@ -48,6 +48,8 @@ struct Inner {
     relay: Option<proxy::Proxy>,
     /// Join mode: the host's dev-server ports, mirrored on this Mac (see `Proxy::mirror`).
     mirrors: std::collections::HashMap<u16, proxy::Proxy>,
+    /// Why picking up where this Mac left off failed at launch, for the start window to say.
+    resume_error: Option<String>,
 }
 
 struct App {
@@ -767,6 +769,7 @@ struct StartInfo {
     host_problem: Option<String>,
     last_host: Option<String>,
     last_host_name: Option<String>,
+    resume_error: Option<String>,
 }
 
 #[tauri::command]
@@ -779,6 +782,7 @@ async fn start_info(app: AppHandle, state: State<'_, Arc<App>>) -> Result<StartI
         host_problem: problem,
         last_host: inner.cfg.host_url.clone(),
         last_host_name: inner.cfg.host_name.clone(),
+        resume_error: inner.resume_error.clone(),
     })
 }
 
@@ -928,7 +932,11 @@ fn main() {
                     (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
                     _ => Err(String::new()),
                 };
-                if resumed.is_err() {
+                if let Err(e) = resumed {
+                    // Say why on the start window instead of just showing it.
+                    if !e.is_empty() {
+                        state.inner.lock().await.resume_error = Some(e);
+                    }
                     open_start(&handle);
                 }
                 refresh_tray(&handle).await;

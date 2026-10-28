@@ -54,7 +54,10 @@
       .error { min-height: 20px; color: var(--warn); font-size: 13px; margin-top: 8px; }
       .busy { position: fixed; inset: 0; display: none; place-items: center; background: rgba(12, 13, 15, 0.86); }
       .busy.on { display: grid; }
-      .busy div { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+      .busy-box { display: grid; justify-items: center; gap: 12px; max-width: 360px; padding: 0 24px; text-align: center; }
+      .busy-row { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+      #busyhint { margin: 0; font-size: 12.5px; line-height: 1.5; color: #6b6f76; }
+      #busyhint:empty { display: none; }
     </style>
   </head>
   <body>
@@ -86,7 +89,12 @@
         <button class="btn" id="host">Host</button>
       </div>
     </main>
-    <div class="busy" id="busy"><div><span class="spinner"></span><span id="busytext">Connecting…</span></div></div>
+    <div class="busy" id="busy">
+      <div class="busy-box">
+        <div class="busy-row"><span class="spinner"></span><span id="busytext">Connecting…</span></div>
+        <p id="busyhint"></p>
+      </div>
+    </div>
 
     <script>
       const invoke = window.__TAURI__.core.invoke;
@@ -95,22 +103,28 @@
       let found = [];
       const started = Date.now();
 
-      function busy(text) {
+      function busy(text, hint = "") {
         $("busy").classList.toggle("on", !!text);
         if (text) $("busytext").textContent = text;
+        $("busyhint").textContent = hint;
       }
 
-      async function run(text, fn) {
+      async function run(text, fn, slowHint) {
         $("error").textContent = "";
         busy(text);
+        // Joining reads the saved sign-in from the keychain; after a rebuild macOS asks first, and
+        // the window would otherwise just spin.
+        const slow = slowHint && setTimeout(() => busy(text, slowHint), 6000);
         try {
           await fn();
         } catch (e) {
           $("error").textContent = String(e);
         } finally {
+          clearTimeout(slow);
           busy("");
         }
       }
+      const KEYCHAIN_HINT = "If macOS asks to let JamSesh use its saved sign-in, enter your Mac password and choose Always Allow.";
 
       function joinRow(name, sub, url, label) {
         const b = document.createElement("button");
@@ -119,7 +133,7 @@
         b.querySelector(".name").textContent = name;
         b.querySelector(".sub").textContent = sub;
         b.querySelector(".go").textContent = label;
-        b.onclick = () => run(`Connecting to ${name}…`, () => invoke("join", { url, name }));
+        b.onclick = () => run(`Connecting to ${name}…`, () => invoke("join", { url, name }), KEYCHAIN_HINT);
         return b;
       }
 
@@ -157,12 +171,13 @@
         e.preventDefault();
         const url = $("addr").value.trim();
         if (!url) return $("addr").focus();
-        run("Connecting…", () => invoke("join", { url, name: null }));
+        run("Connecting…", () => invoke("join", { url, name: null }), KEYCHAIN_HINT);
       };
       $("host").onclick = () => run("Starting the session…", () => invoke("host_here"));
 
       (async () => {
         info = await invoke("start_info");
+        if (info.resumeError) $("error").textContent = `Couldn't rejoin ${info.lastHostName || "your last session"}: ${info.resumeError}`;
         if (!info.canHost) {
           $("host").disabled = true;
           $("hostsub").textContent = info.hostProblem;

@@ -224,10 +224,17 @@ async fn bind(
     exact: bool,
     on_token: impl Fn(String) + Send + Sync + 'static,
 ) -> Result<Proxy, String> {
-    let listener = match TcpListener::bind(("127.0.0.1", preferred_port)).await {
-        Ok(l) => l,
-        Err(e) if exact => return Err(format!("Port {preferred_port} is in use on this Mac: {e}")),
-        Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Couldn't open the local relay: {e}"))?,
+    // Agents are set up for the preferred port, so give a JamSesh that is still quitting a few
+    // seconds to let go of it (quit and reopen) before taking another one.
+    let mut tries = if exact { 1 } else { 25 };
+    let listener = loop {
+        tries -= 1;
+        match TcpListener::bind(("127.0.0.1", preferred_port)).await {
+            Ok(l) => break l,
+            Err(e) if exact => return Err(format!("Port {preferred_port} is in use on this Mac: {e}")),
+            Err(_) if tries > 0 => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+            Err(_) => break TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Couldn't open the local relay: {e}"))?,
+        }
     };
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let tls = tls_config()?;
