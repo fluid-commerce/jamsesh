@@ -14,6 +14,11 @@ cfg="\${JAMSESH_CLIENT_ENV:-$HOME/.jamsesh/client.env}"
 . "$cfg"
 [ "\${JAMSESH_ACTIVE:-0}" = "1" ] || exit 0
 body="$(cat)"
+# Claude Code also sends prompts it writes itself (background task reports, relayed shell output).
+# They aren't the person talking, and they carry file paths and whole reports, so they stay out of the room.
+if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eq '"prompt"[[:space:]]*:[[:space:]]*"([[:space:]]|\\\\n)*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)'; then
+  exit 0
+fi
 dir="\${JAMSESH_DIR:-$HOME/.jamsesh}"
 outbox="\${JAMSESH_OUTBOX:-$dir/outbox.jsonl}"
 down="$dir/hub-down"
@@ -119,7 +124,13 @@ ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
 # Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
 case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing token: pair first at $HUB/agent?c=<code>" >&2; exit 1; } ;; esac
-NAME="\${JAMSESH_NAME:-}"
+# JSON and text edits run in Perl: every Mac has it, while python3 on a Mac without the developer
+# tools only opens Apple's "install the command line tools" dialog.
+command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
+# The person is whoever the host already knows this computer as. The setup never adds a person:
+# a guessed name only made duplicates.
+NAME="$(curl -fsS --max-time 5 -H "authorization: Bearer $TOKEN" "$HUB/api/me" 2>/dev/null | perl -MJSON::PP -0777 -ne 'my $m = eval { decode_json($_) }; print $m->{person}{name} // "" if ref $m eq "HASH" && ref $m->{person} eq "HASH"' || true)"
+[ -n "$NAME" ] || NAME="\${JAMSESH_NAME:-}"
 if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(. "$DIR/client.env"; echo "\${JAMSESH_NAME:-}")"; fi
 
 umask 077
@@ -131,16 +142,18 @@ JAMSESH_ACTIVE=1
 ENV
 umask 022
 curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/hook.sh" -o "$DIR/hook.sh" && chmod +x "$DIR/hook.sh"
-[ -n "$NAME" ] && curl -fsS -X POST -H 'content-type: application/json' -H "authorization: Bearer $TOKEN" -d "{\\"name\\": \\"$NAME\\"}" "$HUB/api/people" >/dev/null || true
 
 # Agent CLIs often aren't on PATH: the Claude desktop app keeps its own copy of Claude Code, and nvm
 # and Volta keep theirs in their own folders. Prints the first one found, the newest copy first.
+# JAMSESH_CLI_DIRS replaces the system-wide folders (tests point it somewhere empty).
 find_cli() {
-  local name="$1" c
+  local name="$1" c d
   c="$(command -v "$name" 2>/dev/null || true)"
   [ -n "$c" ] && { printf '%s' "$c"; return 0; }
-  for c in "$HOME/.local/bin/$name" "$HOME/.claude/local/$name" "$HOME/.volta/bin/$name" "/opt/homebrew/bin/$name" "/usr/local/bin/$name" \\
-    $(ls -td "$HOME"/.nvm/versions/node/*/bin/"$name" 2>/dev/null || true); do
+  for d in "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.volta/bin" \${JAMSESH_CLI_DIRS-/opt/homebrew/bin /usr/local/bin}; do
+    [ -x "$d/$name" ] && { printf '%s' "$d/$name"; return 0; }
+  done
+  for c in $(ls -td "$HOME"/.nvm/versions/node/*/bin/"$name" 2>/dev/null || true); do
     [ -x "$c" ] && { printf '%s' "$c"; return 0; }
   done
   if [ "$name" = claude ]; then
@@ -149,9 +162,6 @@ find_cli() {
   fi
   return 1
 }
-# JSON and text edits run in Perl: every Mac has it, while python3 on a Mac without the developer
-# tools only opens Apple's "install the command line tools" dialog.
-command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 configured=0
 
 CLAUDE="$(find_cli claude || true)"

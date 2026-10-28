@@ -5,10 +5,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hub } from "../src/hub";
-import { joinScript } from "../src/install-scripts";
+import { hookScript, joinScript } from "../src/install-scripts";
 
 let server: ReturnType<typeof Bun.serve>;
 let origin = "";
+let people = 0;
 
 beforeAll(() => {
   server = Bun.serve({
@@ -17,7 +18,8 @@ beforeAll(() => {
       const path = new URL(req.url).pathname;
       if (path === "/hook.sh") return new Response("#!/usr/bin/env bash\nexit 0\n");
       if (path === "/skill.md") return new Response("# JamSesh skill\n");
-      if (path === "/api/people") return Response.json({ ok: true });
+      if (path === "/api/me") return Response.json({ person: { id: "p_1", name: "Chey" } });
+      if (path === "/api/people") return (people++, Response.json({ ok: true }));
       return new Response("not found", { status: 404 });
     },
   });
@@ -43,7 +45,7 @@ function stubCli(path: string, log: string) {
 
 async function run(box: ReturnType<typeof sandbox>) {
   const proc = Bun.spawn(["/bin/bash", "-c", joinScript({} as Hub, origin, "tok")], {
-    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: "" },
+    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: "Felipe", JAMSESH_CLI_DIRS: box.bin },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -107,6 +109,39 @@ describe("agent setup script", () => {
     expect(r.code).not.toBe(0);
     expect(r.stdout).not.toContain("Done.");
     expect(r.stderr.split("\n").at(-1)).toContain("no agent was connected");
+  });
+
+  test("takes the person from the host and never adds one", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const before = people;
+    expect((await run(box)).code).toBe(0);
+    expect(people).toBe(before);
+    expect(readFileSync(join(box.home, ".jamsesh/client.env"), "utf8")).toContain('JAMSESH_NAME="Chey"');
+  });
+
+  test("the hook keeps Claude Code's own notices out of the room", async () => {
+    const box = sandbox();
+    const posted: string[] = [];
+    const hub = Bun.serve({ port: 0, fetch: async (req) => (posted.push(await req.text()), Response.json({ ok: true })) });
+    try {
+      const env = join(box.home, "client.env");
+      writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${hub.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+      const hook = async (prompt: string) => {
+        const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "prompt"], {
+          env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: box.home },
+          stdin: new Blob([JSON.stringify({ prompt })]),
+        });
+        await proc.exited;
+      };
+      await hook("<task-notification>\n<task-id>a1</task-id>\n</task-notification>");
+      await hook("\n<bash-stdout>ok</bash-stdout>");
+      await hook("put the mobile build next to the mockup");
+      expect(posted).toHaveLength(1);
+      expect(posted[0]).toContain("mobile build");
+    } finally {
+      hub.stop(true);
+    }
   });
 
   test("Codex: replaces its earlier JamSesh server and instructions once", async () => {
