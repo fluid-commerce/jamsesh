@@ -172,6 +172,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
   }
 
+  if (path === "/directives" && req.method === "POST") {
+    const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
+    if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
+    const p = s.person(body.personId);
+    return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+  }
+
   m = path.match(/^\/directives\/([\w-]+)$/);
   if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
 

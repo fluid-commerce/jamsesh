@@ -1,0 +1,245 @@
+import { useEffect, useMemo, useRef, type ReactElement } from "react";
+import { api, ago, type Artifact, type HubState } from "../shared/hub";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, QR, colorFor, useNow } from "../shared/ui";
+
+const BOARD_MAX = 5;
+
+export function Stage({ state, interactive }: { state: HubState; interactive?: boolean }) {
+  const stage = state.stage;
+  const byId = useMemo(() => new Map(state.artifacts.map((a) => [a.id, a])), [state.artifacts]);
+  const pick = (ids: string[]) => ids.map((id) => byId.get(id)).filter(Boolean) as Artifact[];
+  const spotlight = (a: Artifact) => interactive && api("/stage", { mode: "spotlight", items: [a.id], title: a.title, by: "Someone in the room" });
+
+  let body: ReactElement;
+  switch (stage.mode) {
+    case "welcome":
+      body = state.artifacts.length ? <Board state={state} onPick={spotlight} /> : <Welcome state={state} />;
+      break;
+    case "spotlight":
+      body = <Columns title={stage.title} caption={stage.caption} items={pick(stage.items)} state={state} big />;
+      break;
+    case "compare":
+      body = <Columns title={stage.title} caption={stage.caption} items={pick(stage.items)} state={state} lettered />;
+      break;
+    case "parity":
+      body = <Parity state={state} pick={pick} />;
+      break;
+    case "agents":
+      body = <Agents state={state} />;
+      break;
+    case "canvas":
+      body = (
+        <div className="tile" style={{ height: "100%", animation: "none" }}>
+          <CanvasFrame kind="view" name="Big screen" title="Live canvas" />
+        </div>
+      );
+      break;
+    case "custom":
+      body = <Custom state={state} />;
+      break;
+    default:
+      body = <Board state={state} onPick={spotlight} />;
+  }
+  return (
+    <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
+      {body}
+    </div>
+  );
+}
+
+function Board({ state, onPick }: { state: HubState; onPick: (a: Artifact) => void }) {
+  const now = useNow(4000);
+  const items = state.artifacts.slice(0, BOARD_MAX);
+  const n = items.length;
+  if (!n) return <Welcome state={state} />;
+  const layouts: Record<number, { cols: string; rows: string; areas: string[] }> = {
+    1: { cols: "1fr", rows: "1fr", areas: ["1 / 1 / 2 / 2"] },
+    2: { cols: "1fr 1fr", rows: "1fr", areas: ["1 / 1 / 2 / 2", "1 / 2 / 2 / 3"] },
+    3: { cols: "2fr 1fr", rows: "1fr 1fr", areas: ["1 / 1 / 3 / 2", "1 / 2 / 2 / 3", "2 / 2 / 3 / 3"] },
+    4: { cols: "2fr 1fr 1fr", rows: "1fr 1fr", areas: ["1 / 1 / 3 / 2", "1 / 2 / 3 / 3", "1 / 3 / 2 / 4", "2 / 3 / 3 / 4"] },
+    5: { cols: "2fr 1fr 1fr", rows: "1fr 1fr", areas: ["1 / 1 / 3 / 2", "1 / 2 / 2 / 3", "1 / 3 / 2 / 4", "2 / 2 / 3 / 3", "2 / 3 / 3 / 4"] },
+  };
+  const hero = items[0];
+  const landscape = (hero.width ?? 0) > (hero.height ?? 1) * 1.15 || (hero.kind === "devserver" && hero.platform !== "mobile");
+  const wide: Record<number, { cols: string; rows: string; areas: string[] }> = {
+    3: { cols: "1fr 1fr", rows: "1.25fr 1fr", areas: ["1 / 1 / 2 / 3", "2 / 1 / 3 / 2", "2 / 2 / 3 / 3"] },
+    4: { cols: "1fr 1fr 1fr", rows: "1.25fr 1fr", areas: ["1 / 1 / 2 / 3", "1 / 3 / 2 / 4", "2 / 1 / 3 / 2", "2 / 2 / 3 / 4"] },
+    5: { cols: "1fr 1fr 1fr", rows: "1.25fr 1fr", areas: ["1 / 1 / 2 / 3", "1 / 3 / 2 / 4", "2 / 1 / 3 / 2", "2 / 2 / 3 / 3", "2 / 3 / 3 / 4"] },
+  };
+  const l = landscape && wide[n] ? wide[n] : layouts[n];
+  return (
+    <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 16, gridTemplateColumns: l.cols, gridTemplateRows: l.rows }}>
+      {items.map((a, i) => (
+        <div key={a.id} style={{ gridArea: l.areas[i], minHeight: 0, display: "flex" }}>
+          <div style={{ flex: 1, display: "flex", minWidth: 0 }}>
+            <ArtifactTile art={a} state={state} fresh={now - a.updatedAt < 45_000} big={i === 0 && n >= 3} onClick={() => onPick(a)} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Header({ title, caption, right }: { title: string; caption?: string; right?: ReactElement }) {
+  if (!title && !caption) return null;
+  return (
+    <div className="row between" style={{ alignItems: "flex-end", marginBottom: 18 }}>
+      <div>
+        {title && <h1 style={{ margin: 0, fontSize: "clamp(26px, 2.4vw, 44px)", fontWeight: 650, letterSpacing: "-0.03em" }}>{title}</h1>}
+        {caption && <div style={{ color: "var(--muted)", fontSize: "clamp(15px, 1.1vw, 20px)", marginTop: 6 }}>{caption}</div>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function Columns({ title, caption, items, state, lettered, big }: { title: string; caption: string; items: Artifact[]; state: HubState; lettered?: boolean; big?: boolean }) {
+  if (!items.length) return <Board state={state} onPick={() => {}} />;
+  return (
+    <>
+      <Header title={title} caption={caption} />
+      <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 18, gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
+        {(lettered ? [...items].sort((a, b) => (a.variant || a.title).localeCompare(b.variant || b.title)) : items).map((a, i) => (
+          <ArtifactTile key={a.id} art={a} state={state} big={big || items.length <= 3} variant={lettered ? a.variant || String.fromCharCode(65 + i) : undefined} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Artifact[] }) {
+  const stage = state.stage;
+  const cols = stage.columns?.length ? stage.columns : [{ label: "", items: stage.items }];
+  return (
+    <>
+      <Header title={stage.title || "Side by side"} caption={stage.caption} />
+      <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 22, gridTemplateColumns: cols.map((c) => `${Math.max(1, c.items.length)}fr`).join(" ") }}>
+        {cols.map((c) => (
+          <div key={c.label} style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
+            <div className="label" style={{ fontSize: 13, marginBottom: 10 }}>
+              {c.label}
+            </div>
+            <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 14, gridTemplateColumns: `repeat(${Math.max(1, c.items.length)}, minmax(0, 1fr))` }}>
+              {pick(c.items).map((a) => (
+                <ArtifactTile key={a.id} art={a} state={state} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function Agents({ state }: { state: HubState }) {
+  const agents = state.agents.filter((a) => a.status !== "offline");
+  const now = useNow(5000);
+  if (!agents.length) return <Welcome state={state} />;
+  const cols = agents.length <= 2 ? agents.length : agents.length <= 4 ? 2 : 3;
+  return (
+    <>
+      <Header title={state.stage.title || "What everyone is doing"} />
+      <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 16, gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridAutoRows: "minmax(0, 1fr)" }}>
+        {agents.map((a) => {
+          const latest = state.artifacts.find((x) => x.agentId === a.id && x.image);
+          const updates = state.events.filter((e) => e.authorId === a.id && ["update", "artifact", "canvas", "message"].includes(e.kind)).slice(-4).reverse();
+          const color = colorFor(state, { agentId: a.id });
+          return (
+            <div key={a.id} className="tile" style={{ padding: 0, borderColor: a.status === "working" ? `${color}55` : undefined }}>
+              <div style={{ padding: "16px 18px 6px" }}>
+                <AgentRow agent={a} state={state} />
+              </div>
+              <div className="media" style={{ padding: 14 }}>
+                {latest ? <img src={latest.image!} alt={latest.title} /> : <div className="empty-note">No visuals yet</div>}
+              </div>
+              <div style={{ padding: "10px 18px 16px", borderTop: "1px solid var(--line)", display: "grid", gap: 6 }}>
+                {updates.length === 0 && <div className="empty-note" style={{ padding: 0 }}>Nothing posted yet.</div>}
+                {updates.map((u) => (
+                  <div key={u.id} className="row" style={{ fontSize: 14, gap: 8 }}>
+                    <span className="chip mono" style={{ width: 34, color: "var(--dim)", fontSize: 12 }}>{ago(u.ts, now)}</span>
+                    <span className="grow" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--muted)" }}>{u.text}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function Custom({ state }: { state: HubState }) {
+  const ref = useRef<HTMLIFrameElement>(null);
+  const html = state.stage.html ?? "";
+  const doc = useMemo(
+    () =>
+      `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#0c0d0f;color:#f3f2ef;font-family:system-ui,sans-serif}</style><script>window.JAM={state:${JSON.stringify(slim(state)).replace(/</g, "\\u003c")}};addEventListener("message",e=>{if(e.data&&e.data.jam){window.JAM.state=e.data.jam;dispatchEvent(new CustomEvent("jam",{detail:e.data.jam}))}})</script></head><body>${html}</body></html>`,
+    // Rebuild the document only when the view itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [html],
+  );
+  useEffect(() => {
+    ref.current?.contentWindow?.postMessage({ jam: slim(state) }, "*");
+  }, [state]);
+  return (
+    <>
+      <Header title={state.stage.title} />
+      <iframe ref={ref} srcDoc={doc} sandbox="allow-scripts" title={state.stage.title} style={{ flex: 1, border: 0, borderRadius: 22, background: "var(--panel)" }} />
+    </>
+  );
+}
+
+function slim(state: HubState) {
+  const origin = location.origin;
+  return {
+    agents: state.agents,
+    people: state.people,
+    workstreams: state.workstreams,
+    directives: state.directives.slice(0, 20),
+    artifacts: state.artifacts.slice(0, 40).map((a) => ({ ...a, image: a.image ? origin + a.image : null })),
+    events: state.events.slice(-60),
+  };
+}
+
+function Welcome({ state }: { state: HubState }) {
+  const cmd = `curl -fsSL ${state.session.hubUrl}/join.sh | bash`;
+  return (
+    <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "auto auto", gap: 56, alignItems: "center", maxWidth: 1200 }}>
+        <div>
+          <div className="label" style={{ fontSize: 14, marginBottom: 14 }}>
+            {state.settings.sessionName}
+          </div>
+          <h1 style={{ fontSize: "clamp(40px, 4.6vw, 84px)", lineHeight: 1.02, letterSpacing: "-0.045em", margin: "0 0 26px", fontWeight: 680 }}>
+            Talk it through.
+            <br />
+            <span style={{ color: "var(--dim)" }}>The agents are listening.</span>
+          </h1>
+          <div style={{ fontSize: 18, color: "var(--muted)", marginBottom: 12 }}>On each laptop, run</div>
+          <code className="mono" style={{ display: "inline-block", fontSize: "clamp(15px, 1.2vw, 22px)", padding: "14px 18px", background: "var(--panel)", border: "1px solid var(--line-2)", borderRadius: 14 }}>
+            {cmd}
+          </code>
+          <div style={{ fontSize: 18, color: "var(--muted)", marginTop: 18 }}>
+            then type <span className="mono" style={{ color: "var(--text)" }}>/jamsesh</span> in Claude Code or Codex. Join code{" "}
+            <span className="mono" style={{ color: "var(--text)", letterSpacing: "0.12em" }}>{state.session.code}</span>
+          </div>
+          {state.people.length > 0 && (
+            <div className="row" style={{ marginTop: 34, gap: 14, flexWrap: "wrap" }}>
+              {state.people.map((p) => (
+                <span key={p.id} className="row" style={{ gap: 8 }}>
+                  <Avatar name={p.name} color={p.color} size={34} />
+                  <span style={{ fontSize: 17 }}>{p.name}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div style={{ display: "grid", justifyItems: "center", gap: 10 }}>
+          <QR text={`${state.session.hubUrl}/client?code=${state.session.code}`} size={180} />
+          <span className="chip">Open the board on your phone</span>
+        </div>
+      </div>
+    </div>
+  );
+}

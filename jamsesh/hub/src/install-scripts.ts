@@ -8,7 +8,7 @@ export function hookScript(hub: Hub) {
 # JamSesh hook for Claude Code: hook.sh prompt|stop, with the hook's JSON on stdin.
 # Sends your prompts into the room's context and picks up directives the room sends you.
 # Does nothing unless this machine is connected (jamsesh-client on).
-cfg="$HOME/.jamsesh/client.env"
+cfg="\${JAMSESH_CLIENT_ENV:-$HOME/.jamsesh/client.env}"
 [ -f "$cfg" ] || exit 0
 . "$cfg"
 [ "\${JAMSESH_ACTIVE:-0}" = "1" ] || exit 0

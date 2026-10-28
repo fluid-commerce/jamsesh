@@ -251,9 +251,9 @@ export class Brain {
       }),
       show_on_screen: tool({
         description:
-          "Change the big screen. 'board' = live bento of newest work; 'spotlight' = one or two artifacts large; 'compare' = variants side by side (labelled A, B, C); 'parity' = columns, for example desktop beside mobile; 'agents' = every agent's live activity; 'custom' = your own HTML (use build_custom_view instead).",
+          "Change the big screen. 'board' = live bento of newest work; 'spotlight' = one or two artifacts large; 'compare' = variants side by side (labelled A, B, C); 'parity' = columns, for example desktop beside mobile; 'agents' = every agent's live activity; 'canvas' = the live shared canvas with everyone's cursors; 'custom' = your own HTML (use build_custom_view instead).",
         inputSchema: z.object({
-          mode: z.enum(["board", "spotlight", "compare", "parity", "agents"]),
+          mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas"]),
           title: z.string().optional(),
           caption: z.string().optional(),
           artifactIds: z.array(z.string()).optional(),
@@ -343,8 +343,8 @@ export class Brain {
       if (!ev) continue;
       const text = ev.text;
       if (line.intent === "present") {
-        const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/\s+/);
-        const hit = s.artifacts().find((a) => words.some((w) => w.length > 3 && a.title.toLowerCase().includes(w)));
+        const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+        const hit = s.artifacts().find((a) => words.some((w) => a.title.toLowerCase().includes(w)));
         if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) }, "Room brain");
         else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain");
         else s.setStage({ mode: "board" }, "Room brain");
@@ -366,11 +366,12 @@ export class Brain {
   // ---------- reacting to agents ----------
 
   agentUpdated(agent: Agent, kind: UpdateKind, text: string) {
-    if (kind !== "shipped" && kind !== "done") return;
+    // Only implemented changes need parity in other repositories; finished mockups don't.
+    if (kind !== "shipped") return;
     const others = this.session.agents().filter((a) => a.id !== agent.id && a.status !== "offline" && a.platform !== agent.platform && a.platform !== "design");
     if (!others.length) return;
     this.consider(
-      `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) reported "${kind}": ${text}\nOther platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. If the same change belongs in their apps, send a 'coordinate' directive to each of them and to ${agent.name}, asking them to align through jam_message, post renders, and compare side by side. Then put a parity view on screen when both have artifacts.`,
+      `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) reported "${kind}": ${text}\nOther platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. Shipped work should reach every platform by default, adapted to that platform's conventions (a desktop sidebar becomes tabs or a drawer on mobile; the feature and information architecture stay the same). Don't wait for the room to ask for parity or to pick a direction. Send one 'coordinate' directive to each other platform's agent and one to ${agent.name}, asking them to align through jam_message, post renders, and compare side by side. Call no_action only when the change is clearly specific to ${agent.platform} (an OS-only integration) or is an internal refactor with no visible result. Put a parity view on screen when both sides have artifacts.`,
     );
   }
 
@@ -439,6 +440,8 @@ export class Brain {
   }
 }
 
+const STOPWORDS = new Set(["the", "and", "for", "option", "options", "variant", "variants", "version", "versions", "one", "ones", "all", "that", "this", "our", "real", "quick", "please", "up", "can", "you", "again"]);
+
 function roleOf(s: Session, e: JamEvent) {
   if (e.authorType !== "person") return "";
   const p = s.person(e.authorId);
@@ -483,6 +486,7 @@ How to route:
 - Write directives as complete instructions an agent can act on without hearing the room: include counts, names, constraints, and which mockup.
 - Use host_action only when the room asks to see something outside the board (a native app, a simulator, side-by-side windows).
 - Lines marked "(typed to their agent)" are prompts a person gave their own agent, which is already on it. Don't route them back to that agent. Act on them only when they affect other agents (for example "and tell the mobile agent to match"), or record a decision they state.
+- When one platform ships something visible (an agent posts "shipped" or "done"), the other platforms' agents should get a 'coordinate' directive so desktop and mobile stay in parity, adapted to each platform. Include the shipping agent in it.
 - Don't repeat a directive that is already open. Don't route banter. If nothing needs doing, call no_action.
 - Speak (say_to_room) only when someone addresses you directly ("hey brain", "JamSesh, ...") or asks a question only you can answer. Keep it to one sentence.`;
 

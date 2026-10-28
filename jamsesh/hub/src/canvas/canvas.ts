@@ -170,7 +170,12 @@ export class Canvas {
       for (const f of frames) {
         seen.add(f.id);
         const t = this.tracked.get(f.id);
-        if (!t) this.tracked.set(f.id, { hash: f.hash, changedAt: now, rendered: null });
+        if (!t) {
+          // Already rendered before a restart: don't bump it back to the top of the board.
+          const prev = this.session.artifacts().find((a) => a.kind === "frame" && a.nodeId === f.id);
+          const same = prev?.image?.includes(`${f.id}-${f.hash.slice(0, 10)}`);
+          this.tracked.set(f.id, { hash: f.hash, changedAt: now, rendered: same ? f.hash : null });
+        }
         else if (t.hash !== f.hash) ((t.hash = f.hash), (t.changedAt = now));
         const cur = this.tracked.get(f.id)!;
         if (cur.rendered !== cur.hash && now - cur.changedAt >= SETTLE_MS) ready.push(f);

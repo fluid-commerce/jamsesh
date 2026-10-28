@@ -138,7 +138,7 @@ export interface DevServer {
   up: boolean;
 }
 
-export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "custom" | "welcome";
+export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "welcome";
 
 export interface Stage {
   mode: StageMode;
