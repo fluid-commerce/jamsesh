@@ -48,9 +48,29 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             </div>
           </Section>
 
+          <Section title="Room brain" help="Say its name to talk to it directly. It keeps notes on how the room wants it to behave.">
+            <label className="field">
+              <span>Name</span>
+              <input defaultValue={s.brainName} onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== s.brainName && update({ brainName: e.target.value.trim() })} />
+            </label>
+            <div className="field">
+              <span>What it has learned about how to behave</span>
+              {s.brainNotes.length === 0 && <div className="empty-note" style={{ padding: "4px 0" }}>Nothing yet. Tell it, for example, "{s.brainName}, keep your answers to one sentence."</div>}
+              {s.brainNotes.map((n, i) => (
+                <div key={i} className="row" style={{ padding: "6px 10px", background: "var(--panel)", borderRadius: 10, fontSize: 14 }}>
+                  <span className="grow">{n}</span>
+                  <button className="btn ghost small" onClick={() => update({ brainNotes: s.brainNotes.filter((_, j) => j !== i) })} title="Forget this">
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <NoteInput onAdd={(n) => update({ brainNotes: [...s.brainNotes, n] })} />
+            </div>
+          </Section>
+
           {host && (
             <Section
-              title="Brain"
+              title="Gateway"
               help="The room brain runs on the Vercel AI Gateway. The key stays on this machine."
               right={<Toggle on={s.brainEnabled} onChange={(v) => update({ brainEnabled: v })} label="Brain on" />}
             >
@@ -116,7 +136,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             )}
           </Section>
 
-          <Section title="People" help="Roles weigh in when instructions conflict. Voice samples come from lines you label, and from people talking at their own laptops.">
+          <Section title="People" help="Each person's title weighs in when instructions conflict. Voice samples come from lines you label, and from people talking at their own laptops.">
             {state.people.map((p) => (
               <PersonRow key={p.id} p={p} />
             ))}
@@ -172,9 +192,9 @@ const MODEL_LABELS: Record<string, string> = {
 function PersonRow({ p }: { p: Person }) {
   return (
     <div className="person-row">
-      <Avatar name={p.name} color={p.color} size={26} />
+      <Avatar name={p.name} color={p.color} size={26} photo={p.photo} />
       <input defaultValue={p.name} onBlur={(e) => e.target.value.trim() && e.target.value !== p.name && api(`/people/${p.id}`, { name: e.target.value.trim() }, "PATCH")} />
-      <input defaultValue={p.role} placeholder="Role" onBlur={(e) => e.target.value !== p.role && api(`/people/${p.id}`, { role: e.target.value }, "PATCH")} />
+      <input defaultValue={p.role} placeholder="Title (for example CPO)" onBlur={(e) => e.target.value !== p.role && api(`/people/${p.id}`, { role: e.target.value }, "PATCH")} />
       <select defaultValue={String(p.weight)} onChange={(e) => api(`/people/${p.id}`, { weight: Number(e.target.value) }, "PATCH")} title="How much their call counts">
         <option value="1">×1</option>
         <option value="2">×2</option>
@@ -184,6 +204,9 @@ function PersonRow({ p }: { p: Person }) {
         <span className="chip" title="Voice samples" style={{ fontSize: 12 }}>
           {p.voiceSamples ? `${p.voiceSamples} 🎙` : "no voice"}
         </span>
+        <button className="btn ghost small" title={`Ask ${p.name} to share their screen`} onClick={() => api("/shares/request", { personId: p.id, kind: "screen", reason: "The room wants to see your screen", by: "Host" }).catch((e) => alert(e.message))}>
+          Screen
+        </button>
         {p.voiceSamples > 0 && (
           <button className="btn ghost small" title="Forget their voice" onClick={() => api(`/people/${p.id}/voiceprint`, undefined, "DELETE")}>
             Reset
@@ -194,6 +217,24 @@ function PersonRow({ p }: { p: Person }) {
         </button>
       </span>
     </div>
+  );
+}
+
+function NoteInput({ onAdd }: { onAdd: (n: string) => void }) {
+  const [v, setV] = useState("");
+  return (
+    <form
+      className="row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (v.trim()) (onAdd(v.trim()), setV(""));
+      }}
+    >
+      <input className="grow" placeholder="Add a note, for example: ask before building anything big" value={v} onChange={(e) => setV(e.target.value)} />
+      <button className="btn" type="submit">
+        Add
+      </button>
+    </form>
   );
 }
 
@@ -210,7 +251,7 @@ function AddPerson() {
       }}
     >
       <input className="grow" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
-      <input className="grow" placeholder="Role (for example CPO)" value={role} onChange={(e) => setRole(e.target.value)} />
+      <input className="grow" placeholder="Title (for example CPO)" value={role} onChange={(e) => setRole(e.target.value)} />
       <button className="btn" type="submit">
         Add
       </button>

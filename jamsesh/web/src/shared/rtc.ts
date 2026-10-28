@@ -102,6 +102,16 @@ export async function publish(kind: Kind, shareId: string = `sh-${rid()}${rid()}
   return pub;
 }
 
+/** The hub assigns the final id to a share nobody requested; re-key the publication to match. */
+export function renamePublication(from: string, to: string) {
+  const pub = pubs.get(from);
+  if (!pub || from === to) return;
+  pubs.delete(from);
+  pub.shareId = to;
+  pubs.set(to, pub);
+  publishChanged();
+}
+
 /** Stop publishing: tell viewers, close connections, release the capture, end the share on the hub. */
 export async function stopPublishing(shareId: string, opts: { notifyHub?: boolean } = {}) {
   const pub = pubs.get(shareId);

@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
+import { embed } from "./audio/voiceprint";
+import { decodeWav, resample, speechLevelDb } from "./audio/wav";
 import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
 import { config } from "./config";
@@ -221,6 +223,23 @@ export class Hub {
     for (const a of open) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
     this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed.");
     return ev;
+  }
+
+  /** A deliberate voice sample: split into a few chunks so the voiceprint starts with variety. */
+  enrollVoice(personId: string, bytes: Uint8Array) {
+    const p = this.session.person(personId);
+    if (!p) throw new Error("No such person.");
+    const pcm = resample(decodeWav(bytes), 16000);
+    const { levelDb, noiseDb } = speechLevelDb(pcm);
+    if (levelDb - noiseDb < 8 || levelDb < -50) return { ok: false, reason: "That was too quiet. Hold the laptop closer and try again." };
+    const chunk = 16000 * 3;
+    let added = 0;
+    for (let i = 0; i + chunk / 2 <= pcm.samples.length; i += chunk) {
+      const e = embed({ sampleRate: 16000, samples: pcm.samples.subarray(i, Math.min(pcm.samples.length, i + chunk)) });
+      if (e) (this.audio.voiceprints.add(personId, e), added++);
+    }
+    this.session.store.put("people", this.session.person(personId)!);
+    return added ? { ok: true, samples: this.audio.voiceprints.count(personId) } : { ok: false, reason: "Couldn't hear enough speech. Try reading the whole sentence." };
   }
 
   async savePhoto(personId: string, bytes: Uint8Array) {

@@ -271,6 +271,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   if (m && req.method === "PATCH") return json(s.store.patch("annotations", m[1], { text: body?.text, status: body?.status }));
   if (m && req.method === "DELETE") return (s.store.remove("annotations", m[1]), json({ ok: true }));
 
+  // ---- voice enrollment: a person reads a sentence so JamSesh knows their voice ----
+  m = path.match(/^\/people\/([\w-]+)\/voice$/);
+  if (m && req.method === "POST") {
+    const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
+    return json(hub.enrollVoice(m[1], bytes));
+  }
+
   // ---- profile photos ----
   m = path.match(/^\/people\/([\w-]+)\/photo$/);
   if (m && req.method === "POST") {

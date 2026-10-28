@@ -182,7 +182,7 @@ export class Mic {
   }
 }
 
-function encodeWav(samples: Float32Array): ArrayBuffer {
+export function encodeWav(samples: Float32Array): ArrayBuffer {
   const buf = new ArrayBuffer(44 + samples.length * 2);
   const v = new DataView(buf);
   const w = (o: number, s: string) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));

@@ -51,6 +51,10 @@ export function HostView() {
       if (e.key === "Escape" && !settings) api("/stage", { mode: "board", by: "Host" });
       if (e.key === "f") document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
       if (e.key === ",") setSettings(true);
+      if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey) {
+        if (mic.status.on) (mic.stop(), setPref("hostMic", "off"));
+        else mic.start().then(() => setPref("hostMic", "on")).catch(() => {});
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -113,16 +117,16 @@ export function HostView() {
               const lvl = levels[d.id] ?? -90;
               return (
                 <span key={d.id} style={{ borderRadius: "50%", boxShadow: lvl > -45 ? `0 0 0 3px ${p?.color ?? "#fff"}55` : "none", transition: "box-shadow .15s" }}>
-                  <Avatar name={p?.name ?? "Room"} color={p?.color ?? "#5d6168"} size={26} />
+                  <Avatar name={p?.name ?? "Room"} color={p?.color ?? "#5d6168"} size={26} photo={p?.photo} />
                 </span>
               );
             })}
           </span>
           <button className={`btn small ${micStatus.on ? "on" : ""}`} onClick={toggleMic} title={micStatus.error ?? "The host's room microphone"}>
             {micStatus.on ? <Meter db={micStatus.level} /> : null}
-            {micStatus.on ? "Room mic" : "Room mic off"}
+            {micStatus.on ? "Room mic" : "Room mic muted"}
           </button>
-          <BrainPill status={brain.status} error={brain.lastError} />
+          <BrainPill status={brain.status} error={brain.lastError} name={state.settings.brainName} />
           <span className="mono" style={{ color: "var(--muted)", letterSpacing: "0.14em", fontSize: 15 }} title="Join code">
             {state.session.code}
           </span>
@@ -174,11 +178,11 @@ export function HostView() {
   );
 }
 
-function BrainPill({ status, error }: { status: string; error: string | null }) {
+function BrainPill({ status, error, name }: { status: string; error: string | null; name: string }) {
   const map: Record<string, [string, string]> = {
-    ready: ["var(--built)", "Brain on"],
-    thinking: ["var(--directive)", "Thinking"],
-    offline: ["var(--faint)", "Brain off"],
+    ready: ["var(--built)", `${name} is listening`],
+    thinking: ["var(--directive)", `${name} is thinking`],
+    offline: ["var(--faint)", `${name} is off`],
     "no-key": ["var(--warn)", "Add a gateway key"],
   };
   const [c, label] = map[status] ?? map.ready;

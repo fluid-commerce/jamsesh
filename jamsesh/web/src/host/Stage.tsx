@@ -388,7 +388,7 @@ function Welcome({ state }: { state: HubState }) {
             <div className="row" style={{ marginTop: 34, gap: 14, flexWrap: "wrap" }}>
               {state.people.map((p) => (
                 <span key={p.id} className="row" style={{ gap: 8 }}>
-                  <Avatar name={p.name} color={p.color} size={34} />
+                  <Avatar name={p.name} color={p.color} size={34} photo={p.photo} />
                   <span style={{ fontSize: 17 }}>{p.name}</span>
                 </span>
               ))}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
-import { mediaAvailable, publish, stopPublishing, useWatch, usePublications } from "./rtc";
+import { mediaAvailable, publish, renamePublication, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
 const KIND_WORD = { screen: "screen", camera: "camera" } as const;
@@ -79,7 +79,9 @@ export function ShareTile({ share }: { share: Share }) {
 async function startShare(kind: Share["kind"], shareId?: string): Promise<Share> {
   const pub = await publish(kind, shareId);
   try {
-    return await api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: pub.shareId });
+    const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: pub.shareId });
+    renamePublication(pub.shareId, share.id); // the hub only keeps a shareId it already knows (from a request)
+    return share;
   } catch (e) {
     await stopPublishing(pub.shareId, { notifyHub: false });
     throw e;

@@ -450,17 +450,22 @@ export class Brain {
           for (const t of i.tiles) {
             if (t.kind === "artifact" && t.ref && s.store.get("artifacts", t.ref)) tiles.push({ kind: "artifact", artifactId: t.ref, label: t.label });
             else if (t.kind === "canvas") tiles.push({ kind: "canvas", follow: t.follow ?? null, label: t.label });
-            else if (t.kind === "web" && t.ref && /^https?:\/\//.test(t.ref)) tiles.push({ kind: "web", url: t.ref, label: t.label });
+            else if (t.kind === "web" && t.ref && /^https?:\/\//.test(t.ref)) {
+              // Local addresses must be dev servers the agents registered; don't guess ports.
+              const local = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.)/.test(t.ref);
+              if (local && !s.devservers().some((d) => t.ref!.startsWith(d.url))) continue;
+              tiles.push({ kind: "web", url: t.ref, label: t.label });
+            }
             else if (t.kind === "screen" && t.ref && s.store.get("shares", t.ref)) tiles.push({ kind: "screen", shareId: t.ref, label: t.label });
             else if (t.kind === "agent" && t.ref && s.agent(t.ref)) tiles.push({ kind: "agent", agentId: t.ref, label: t.label });
             else if (t.kind === "feed") tiles.push({ kind: "feed", label: t.label });
             else if (t.kind === "html" && t.html) tiles.push({ kind: "html", html: t.html, label: t.label });
           }
-          if (!tiles.length) return "None of those tiles resolved. Use artifact ids, share ids and agent ids from the lists, or full URLs.";
+          if (!tiles.length) return "None of those tiles resolved. Use artifact ids, share ids and agent ids from the lists, dev server URLs from 'Dev servers on the host', or full public URLs.";
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
           this.lastRoomStageAt = Date.now();
           s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain");
-          return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out.` : ""}`;
+          return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out (local URLs must be registered dev servers). If the room asked for something that isn't available, tell them briefly.` : ""}`;
         },
       }),
       request_share: tool({

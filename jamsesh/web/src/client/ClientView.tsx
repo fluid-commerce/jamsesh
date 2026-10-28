@@ -4,6 +4,8 @@ import { api, deviceId, pref, setPref, useHub, type Artifact, type HubState } fr
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
+import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
+import { ProfileDrawer, VoiceEnroll } from "./Profile";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
@@ -15,6 +17,8 @@ export function ClientView() {
   const [personId, setPersonId] = useState(pref("personId"));
   const [tab, setTab] = useState<Tab>((pref("tab") as Tab) || "canvas");
   const [settings, setSettings] = useState(false);
+  const [profile, setProfile] = useState(false);
+  const [enrollAsked, setEnrollAsked] = useState(pref("enrollAsked") === "1");
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const me = state?.people.find((p) => p.id === personId);
 
@@ -24,6 +28,16 @@ export function ClientView() {
     api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on }).catch(() => {});
   }, [me?.id, micStatus.on]);
   useEffect(() => setPref("tab", tab), [tab]);
+  // M mutes or unmutes from anywhere outside a text field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== "m" || e.metaKey || e.ctrlKey || (e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
+      if (mic.status.on) (mic.stop(), setPref("mic", "off"));
+      else mic.start().then(() => setPref("mic", "on")).catch(() => {});
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   useEffect(() => {
     if (me && pref("mic") === "on" && !mic.status.on) mic.start().catch(() => {});
   }, [me?.id]);
@@ -69,13 +83,17 @@ export function ClientView() {
           <span className="chip" title="What the big screen shows">
             Big screen: {state.stage.mode === "welcome" ? "board" : state.stage.title || state.stage.mode}
           </span>
-          <button className={`btn small ${micStatus.on ? "on" : ""}`} onClick={toggleMic} title={micStatus.error ?? "Your laptop's mic helps JamSesh hear and recognize you"}>
+          <button className={`btn small ${micStatus.on ? "on" : ""}`} onClick={toggleMic} title={micStatus.error ?? "Mute or unmute (M). Your laptop's mic helps JamSesh hear and recognize you."}>
             {micStatus.on ? <Meter db={micStatus.level} /> : null}
-            {micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Mic off"}
+            {micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Muted"}
           </button>
-          <button className="row btn ghost small" onClick={() => setSettings(true)} title="Settings">
-            <Avatar name={me.name} color={me.color} size={22} />
+          <ShareControls personId={me.id} />
+          <button className="row btn ghost small" onClick={() => setProfile(true)} title="Your profile: photo, title, voice">
+            <PhotoAvatar person={me} size={22} />
             {me.name}
+          </button>
+          <button className="btn ghost small" onClick={() => setSettings(true)} title="Settings" aria-label="Settings">
+            ⚙︎
           </button>
         </div>
       </header>
@@ -124,10 +142,25 @@ export function ClientView() {
             </div>
             <RoomFeed editable />
           </div>
-          <SayBox personId={me.id} />
+          <SayBox personId={me.id} brainName={state.settings.brainName} />
         </aside>
       </main>
       <Toasts />
+      <ShareRequestPrompt />
+      {profile && <ProfileDrawer me={me} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
+      {!enrollAsked && me.voiceSamples === 0 && (
+        <>
+          <div className="scrim" />
+          <div className="drawer" style={{ top: "50%", left: "50%", right: "auto", bottom: "auto", transform: "translate(-50%, -50%)", width: "min(520px, 92vw)", borderRadius: 22, border: "1px solid var(--line-2)", padding: "8px 24px 20px" }}>
+            <VoiceEnroll me={me} brainName={state.settings.brainName} />
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button className="btn ghost small" onClick={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))}>
+                {me.voiceSamples ? "Done" : "Skip for now"}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
       {settings && (
         <SettingsDrawer
           host={false}
@@ -138,9 +171,10 @@ export function ClientView() {
   );
 }
 
-function SayBox({ personId }: { personId: string }) {
+function SayBox({ personId, brainName }: { personId: string; brainName: string }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState(true);
   return (
     <form
       style={{ padding: 12, borderTop: "1px solid var(--line)" }}
@@ -148,13 +182,23 @@ function SayBox({ personId }: { personId: string }) {
         e.preventDefault();
         if (!text.trim()) return;
         setBusy(true);
-        await api("/say", { personId, text }).catch(() => {});
+        await api("/say", { personId, text, direct: ask }).catch(() => {});
         setText("");
         setBusy(false);
       }}
     >
+      <div className="row" style={{ gap: 4, marginBottom: 8 }}>
+        {[
+          [true, `Ask ${brainName}`],
+          [false, "Say to the room"],
+        ].map(([v, label]) => (
+          <button key={String(v)} type="button" className="btn small" style={{ height: 26, background: ask === v ? "var(--panel-3)" : "transparent", borderColor: ask === v ? "var(--line-2)" : "transparent", color: ask === v ? "var(--text)" : "var(--muted)" }} onClick={() => setAsk(v as boolean)}>
+            {label as string}
+          </button>
+        ))}
+      </div>
       <div className="row" style={{ gap: 8 }}>
-        <input className="grow" placeholder="Say something to the room…" value={text} onChange={(e) => setText(e.target.value)} disabled={busy} />
+        <input className="grow" placeholder={ask ? `Tell ${brainName} what you need…` : "Say something to the room…"} value={text} onChange={(e) => setText(e.target.value)} disabled={busy} />
         <button className="btn primary small" style={{ height: 38 }} disabled={!text.trim() || busy}>
           Send
         </button>
@@ -217,6 +261,8 @@ function AgentsPanel({ state }: { state: HubState }) {
           <AgentRow agent={a} state={state} />
         </div>
       ))}
+      <h2 style={{ margin: "28px 0 12px", fontSize: 20, fontWeight: 650 }}>What the session has settled</h2>
+      <Facts state={state} />
       <h2 style={{ margin: "28px 0 12px", fontSize: 20, fontWeight: 650 }}>Session brief</h2>
       <pre style={{ whiteSpace: "pre-wrap", fontFamily: "var(--font)", color: "var(--muted)", margin: 0 }}>{state.digest || "The brief fills in as the session goes."}</pre>
       {state.devservers.length > 0 && (
@@ -233,6 +279,33 @@ function AgentsPanel({ state }: { state: HubState }) {
           ))}
         </>
       )}
+    </div>
+  );
+}
+
+const FACT_COLORS: Record<string, string> = { decision: "var(--decision)", requirement: "var(--built)", constraint: "var(--warn)", preference: "var(--mockup)", question: "var(--directive)", fact: "var(--muted)" };
+
+function Facts({ state }: { state: HubState }) {
+  const active = state.facts.filter((f) => f.status === "active");
+  if (!active.length) return <div className="empty-note">Decisions, requirements and open questions collect here as the room works.</div>;
+  const groups = new Map<string, typeof active>();
+  for (const f of active) groups.set(f.workstream || "Whole session", [...(groups.get(f.workstream || "Whole session") ?? []), f]);
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {[...groups].map(([ws, fs]) => (
+        <div key={ws}>
+          <div className="label" style={{ marginBottom: 6 }}>{ws}</div>
+          {fs.map((f) => (
+            <div key={f.id} className="row" style={{ alignItems: "flex-start", gap: 10, padding: "6px 0" }}>
+              <span className="badge" style={{ color: FACT_COLORS[f.kind], background: "rgba(255,255,255,.05)", flex: "none", width: 92, justifyContent: "center" }}>{f.kind}</span>
+              <span style={{ fontSize: 14 }}>
+                {f.text}
+                {f.by && <span style={{ color: "var(--dim)" }}> · {f.by}</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -255,7 +328,7 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
           <div style={{ display: "grid", gap: 6, margin: "18px 0" }}>
             {state.people.map((p) => (
               <button key={p.id} className="btn" style={{ justifyContent: "flex-start", height: 44 }} onClick={() => onPick(p.id)}>
-                <Avatar name={p.name} color={p.color} size={26} /> I'm {p.name}
+                <PhotoAvatar person={p} size={26} /> I'm {p.name}
                 {p.role && <span style={{ color: "var(--dim)" }}>· {p.role}</span>}
               </button>
             ))}

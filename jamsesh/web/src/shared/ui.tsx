@@ -16,7 +16,8 @@ export function initials(name: string) {
   return (parts[0]?.[0] ?? "?").toUpperCase() + (parts[1]?.[0]?.toUpperCase() ?? "");
 }
 
-export function Avatar({ name, color, size = 28 }: { name: string; color: string; size?: number }) {
+export function Avatar({ name, color, size = 28, photo }: { name: string; color: string; size?: number; photo?: string | null }) {
+  if (photo) return <img className="avatar" src={photo} alt={name} title={name} style={{ width: size, height: size, objectFit: "cover", border: `2px solid ${color}` }} />;
   return (
     <span className="avatar" style={{ background: color, width: size, height: size, fontSize: size * 0.42 }} title={name}>
       {initials(name)}
@@ -253,7 +254,7 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
         <div className="hint">Who said this? JamSesh learns their voice.</div>
         {state.people.map((p) => (
           <button key={p.id} className="item" onClick={() => assign({ personId: p.id })}>
-            <Avatar name={p.name} color={p.color} size={22} />
+            <Avatar name={p.name} color={p.color} size={22} photo={p.photo} />
             <span className="grow">{p.name}</span>
             {p.id === ev.authorId && <span className="chip">current</span>}
           </button>
@@ -282,7 +283,7 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
   return (
     <div className="row" style={{ alignItems: "flex-start", padding: compact ? "8px 0" : "10px 0", opacity: agent.status === "offline" ? 0.45 : 1 }}>
       <span style={{ position: "relative" }}>
-        <Avatar name={agent.ownerName} color={color} size={compact ? 26 : 32} />
+        <Avatar name={agent.ownerName} color={color} size={compact ? 26 : 32} photo={state.people.find((p) => p.id === agent.ownerId)?.photo} />
         <StatusDot status={agent.status} />
       </span>
       <div className="grow">

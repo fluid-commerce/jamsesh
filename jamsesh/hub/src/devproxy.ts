@@ -25,9 +25,9 @@ export class DevProxy {
     const target = normalizeTarget(opts.target);
     const existing = this.session.devservers().find((d) => d.agentId === opts.agentId && (d.name === opts.name || d.target === target));
     const used = new Set(this.session.devservers().map((d) => d.hostPort));
-    let hostPort = existing?.hostPort ?? config.devPortStart;
-    while (!existing && used.has(hostPort)) hostPort++;
     if (existing) this.close(existing.id);
+    let hostPort = existing?.hostPort ?? config.devPortStart;
+    while ((!existing && used.has(hostPort)) || !portFree(hostPort)) hostPort++;
     const d: DevServer = {
       id: existing?.id ?? newId("dev"),
       agentId: opts.agentId,
@@ -132,6 +132,11 @@ export class DevProxy {
   stop() {
     for (const id of [...this.listeners.keys()]) this.close(id);
   }
+}
+
+/** Nothing listens on the port on any interface. */
+function portFree(port: number) {
+  return Bun.spawnSync(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]).stdout.toString().trim() === "";
 }
 
 /** "http://192.168.1.4:5173/" or "192.168.1.4:5173" → "192.168.1.4:5173". */
