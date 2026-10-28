@@ -2457,3 +2457,35 @@ html.in-app .app-header {
   padding: clamp(16px, 2.2vw, 40px);
   overflow: hidden;
 }
+
+/* The logo keeps its size in a crowded header (an SVG in a flex row otherwise shrinks to nothing). */
+.app-header .header-left > svg {
+  flex: none;
+}
+
+/* The logo and name never give way; in the Mac app (window controls take 84px) the shortcut hints
+   and the mic's label go first. */
+.app-header .header-left {
+  flex: none;
+}
+@media (max-width: 1440px) {
+  html.in-app .client-header .rec-btn kbd,
+  html.in-app .client-header .an-toggle kbd {
+    display: none;
+  }
+}
+@media (max-width: 1360px) {
+  html.in-app .client-header .mic-label {
+    display: none;
+  }
+}
+@media (max-width: 1180px) {
+  html.in-app .client-header .an-toggle .an-label {
+    display: none;
+  }
+  html.in-app .client-header .an-toggle {
+    width: 36px;
+    padding: 0;
+    justify-content: center;
+  }
+}

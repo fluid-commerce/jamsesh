@@ -117,12 +117,12 @@ export function useAnnotateMode() {
 export function AnnotateToggle({ className = "", label = "Annotate" }: { className?: string; label?: string }) {
   const { on, toggle } = useAnnotateMode();
   return (
-    <button className={`an-toggle ${on ? "on" : ""} ${className}`} aria-pressed={on} onClick={toggle} title="Drop pins on what you see (A)" aria-label={label === "Annotate" ? undefined : "Drop pins on what you see"}>
+    <button className={`an-toggle ${on ? "on" : ""} ${className}`} aria-pressed={on} onClick={toggle} title="Drop pins on what you see (A)" aria-label={label === "Annotate" ? "Annotate" : "Drop pins on what you see"}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M12 21s-6.5-5.6-6.5-11A6.5 6.5 0 0 1 12 3.5 6.5 6.5 0 0 1 18.5 10c0 5.4-6.5 11-6.5 11Z" />
         <circle cx="12" cy="10" r="2.3" />
       </svg>
-      {label}
+      <span className="an-label">{label}</span>
       <kbd>A</kbd>
     </button>
   );

@@ -86,7 +86,7 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
         // its 56 px), with the logo to their right; the header is the drag area.
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
         .inner_size(1280.0, 820.0)
         .min_inner_size(420.0, 560.0)
         .build()
@@ -124,7 +124,7 @@ fn big_window(app: &AppHandle, label: &str, url: &str, at: Option<tauri::Physica
         .title("JamSesh big screen")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
         .inner_size(1440.0, 900.0)
         .build()
         .map_err(|e| e.to_string())?;
@@ -171,7 +171,7 @@ fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<
         .title("JamSesh big screen")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
         .inner_size(1440.0, 900.0)
         .build()
         .map_err(|e| e.to_string())?;
