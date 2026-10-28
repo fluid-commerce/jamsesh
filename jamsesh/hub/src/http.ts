@@ -301,6 +301,23 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return json(await hub.promptWindow({ deviceId: body.deviceId, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
   }
 
+  // ---- snapshots ----
+  if (path === "/snapshots" && req.method === "GET") return json({ snapshots: hub.autosave.list().map(({ dir: _d, ...x }) => x), layouts: Object.keys(s.savedLayouts()) });
+  if (path === "/snapshots" && req.method === "POST") {
+    const snap = await hub.autosave.save(String(body?.label ?? "saved by hand"));
+    return snap ? json({ id: snap.id, canvas: snap.canvas }) : bad("Nothing to save.");
+  }
+  m = path.match(/^\/snapshots\/([\w.-]+)\/(canvas\.figcraft|notes\.md|context\.json)$/);
+  if (m && req.method === "GET") {
+    const f = join(hub.autosave.dir, m[1], m[2]);
+    if (!existsSync(f)) return bad("not found", 404);
+    return new Response(Bun.file(f), { headers: { "content-disposition": `attachment; filename="${m[1]}-${m[2]}"` } });
+  }
+  if (path === "/layouts" && req.method === "POST") {
+    if (!body?.name?.trim()) return bad("name is required");
+    return json(Object.keys(s.saveLayout(String(body.name))));
+  }
+
   if (path === "/brain/digest" && req.method === "POST") return (await hub.brain.digest(true), json({ digest: s.store.digest("session")?.text ?? "" }));
 
   return bad("not found", 404);

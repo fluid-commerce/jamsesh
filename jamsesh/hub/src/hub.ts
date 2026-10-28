@@ -11,6 +11,7 @@ import { config } from "./config";
 import { DevProxy } from "./devproxy";
 import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
+import { Autosave } from "./autosave";
 import { Session } from "./session";
 import { newId, Store } from "./store";
 import type { Agent, Annotation, Artifact, Platform, Utterance } from "./types";
@@ -65,6 +66,7 @@ export class Hub {
   canvas: Canvas;
   devproxy: DevProxy;
   mcp: McpEndpoint;
+  autosave: Autosave;
   uploadsDir: string;
 
   constructor(private opts: HubOptions = {}) {
@@ -79,6 +81,8 @@ export class Hub {
     this.canvas = new Canvas(this.session);
     this.devproxy = new DevProxy(this.session);
     this.mcp = new McpEndpoint(this);
+    this.autosave = new Autosave(this, dir);
+    this.brain.autosave = this.autosave;
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
@@ -99,11 +103,19 @@ export class Hub {
     if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal().then((ok) => console.log(ok ? "whisper: local whisper.cpp ready" : "whisper: no local model, using the gateway")));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
+    this.autosave.start();
     setInterval(() => this.devproxy.refresh(), 30_000);
     await Promise.all(tasks);
   }
 
+  /** Stops, saving a final snapshot first when there is a canvas to save. */
+  async shutdown() {
+    await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
+    this.stop();
+  }
+
   stop() {
+    this.autosave.stop();
     this.brain.stop();
     this.canvas.stop();
     this.transcriber.stop();

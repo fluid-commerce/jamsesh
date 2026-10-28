@@ -2,7 +2,7 @@
 // the session file, renders frames to PNG as they settle, and gives each agent its
 // own headless FigCraft participant on the host (so agents install nothing).
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config";
 import type { Session } from "../session";
@@ -399,6 +399,16 @@ export class Canvas {
         }
       }, 12_000);
     }
+  }
+
+  /** Writes a copy of the live session file (as .figcraft) to `dest`. */
+  async saveCopy(dest: string): Promise<boolean> {
+    if (!this.host?.alive) return false;
+    const tmp = join(this.filesDir, "host", `snapshot-${Date.now()}.figcraft`);
+    const r = await this.host.call("save_file", { path: tmp }, 120_000);
+    if (r.isError || !existsSync(tmp)) throw new Error((r.content[0] as any)?.text ?? "save failed");
+    renameSync(tmp, dest);
+    return true;
   }
 
   /** A pin on the canvas becomes a FigCraft comment, so agents see it in the file too. */

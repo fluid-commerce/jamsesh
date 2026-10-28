@@ -42,6 +42,8 @@ export class Brain {
   private lastDigestAt = 0;
   private digestTimer: ReturnType<typeof setInterval>;
   private lastRoomStageAt = 0;
+  /** Set by the hub. */
+  autosave: import("../autosave").Autosave | null = null;
   /** Set by the hub: reassigns a transcribed line to a person and teaches their voiceprint. */
   relabel: ((eventId: number, personName: string) => string) | null = null;
 
@@ -266,6 +268,7 @@ export class Brain {
       `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}`).join("\n") || "(none)"}`,
       `## Live shares\n${s.shares().filter((x) => x.status === "live").map((x) => `- ${x.id}: ${x.label}`).join("\n") || "(none)"}`,
       `## Dev servers on the host\n${s.devservers().map((d) => `- ${d.name}: ${d.url}${d.up ? "" : " (down)"}`).join("\n") || "(none)"}`,
+      `## Saved layouts\n${Object.keys(s.savedLayouts()).join(", ") || "(none)"}`,
       `## Big screen now\n${stage.mode}${stage.title ? `: ${stage.title}` : ""}${stage.pinned ? " (pinned by a person)" : ""}`,
       `## Room transcript (oldest first)\n${room.map((e) => `[${e.id}] ${e.authorName}${roleOf(s, e)}${e.kind === "prompt" ? " (typed to their agent)" : ""}${e.relevance ? ` {${e.relevance}}` : ""}: ${e.text}`).join("\n")}`,
       batch.length
@@ -501,6 +504,34 @@ export class Brain {
           return before.length === after.length ? "No matching note." : "Dropped.";
         },
       }),
+      save_snapshot: tool({
+        description: "Save a named snapshot of the whole session now: the canvas file, curated context, layouts and readable notes. Use it when someone says to save, at milestones (a decision shipped), or before something big changes.",
+        inputSchema: z.object({ label: z.string().describe("Short name, for example 'nav decided'") }),
+        execute: async ({ label }) => {
+          const snap = await this.autosave?.save(label);
+          return snap ? `Saved "${label}"${snap.canvas ? " with the canvas" : ""}.` : "Nothing to save.";
+        },
+      }),
+      save_layout: tool({
+        description: "Save what's on the big screen now under a name, so the room can bring it back later ('save this as the review layout').",
+        inputSchema: z.object({ name: z.string() }),
+        execute: async ({ name }) => {
+          s.saveLayout(name);
+          return `Saved the screen as "${name}".`;
+        },
+      }),
+      show_saved_layout: tool({
+        description: "Bring back a saved screen layout by name.",
+        inputSchema: z.object({ name: z.string() }),
+        execute: async ({ name }) => {
+          const all = s.savedLayouts();
+          const key = Object.keys(all).find((k) => k.toLowerCase() === name.toLowerCase()) ?? Object.keys(all).find((k) => k.toLowerCase().includes(name.toLowerCase()));
+          if (!key) return `No saved layout called ${name}. Saved: ${Object.keys(all).join(", ") || "none"}.`;
+          this.lastRoomStageAt = Date.now();
+          s.setStage({ ...all[key], pinned: false }, "Room brain");
+          return `On screen: ${key}.`;
+        },
+      }),
       no_action: tool({
         description: "Nothing to do: the lines are discussion, banter, or already handled.",
         inputSchema: z.object({ reason: z.string() }),
@@ -662,7 +693,8 @@ export class Brain {
       if (f && f.status === "active") s.store.put("facts", { ...f, status: "superseded", note: r.reason, updatedAt: now });
     }
     for (const a of output.add) {
-      if (active.some((f) => f.kind === a.kind && similar(f.text, a.text) > 0.75)) continue;
+      // Paraphrases of what's already known are duplicates, not new knowledge.
+      if ([...active, ...s.facts().filter((f) => f.status === "active")].some((f) => (f.kind === a.kind || f.kind === "decision" || a.kind === "decision") && similar(f.text, a.text) > 0.55)) continue;
       s.store.put("facts", {
         id: newId("fact"),
         ts: now,

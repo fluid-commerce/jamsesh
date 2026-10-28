@@ -20,8 +20,12 @@ console.log(`
 
 if (args.has("--open")) Bun.spawn(["open", `http://127.0.0.1:${config.port}/host`]);
 
-const shutdown = () => {
-  hub.stop();
+let stopping = false;
+const shutdown = async () => {
+  if (stopping) return process.exit(0);
+  stopping = true;
+  console.log("Saving the session…");
+  await hub.shutdown();
   server.stop(true);
   process.exit(0);
 };

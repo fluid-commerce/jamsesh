@@ -638,6 +638,19 @@ export class Session {
     return [...all.filter((f) => f.status === "active"), ...all.filter((f) => f.status !== "active").slice(0, 30)];
   }
 
+  // ---- saved layouts ----
+
+  savedLayouts(): Record<string, Stage> {
+    return this.store.setting<Record<string, Stage>>("layouts", {});
+  }
+
+  saveLayout(name: string, stage = this.stage()) {
+    const all = { ...this.savedLayouts(), [name.trim()]: { ...stage, pinned: false } };
+    this.store.setSetting("layouts", all);
+    bus.changed("settings");
+    return all;
+  }
+
   // ---- people ----
 
   setPhoto(personId: string, url: string | null) {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, useHub, type Person, type Settings as S } from "./hub";
+import { ago, api, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
 
@@ -134,6 +134,8 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             </Section>
           )}
 
+          <Saved />
+
           <Section title="Transcription" help="Local whisper runs first: on the host, then on laptops that offer theirs. The gateway is the fallback.">
             <select value={s.transcription} onChange={(e) => update({ transcription: e.target.value as S["transcription"] })} style={{ marginBottom: 12 }}>
               <option value="auto">Local first, gateway fallback</option>
@@ -228,6 +230,46 @@ function PersonRow({ p }: { p: Person }) {
         </button>
       </span>
     </div>
+  );
+}
+
+function Saved() {
+  const [data, setData] = useState<{ snapshots: { id: string; label: string; at: number; canvas: boolean }[]; layouts: string[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = () => api("/snapshots").then(setData).catch(() => {});
+  useEffect(() => {
+    load();
+  }, []);
+  const last = data?.snapshots[0];
+  return (
+    <Section
+      title="Saved"
+      help="Everything saves as it happens. JamSesh also keeps a snapshot every five minutes while things change, and one when the host stops: the canvas file, the session's decisions and context, and readable notes."
+      right={
+        <button className="btn small" disabled={busy} onClick={async () => (setBusy(true), await api("/snapshots", { label: "saved by hand" }).catch(() => {}), await load(), setBusy(false))}>
+          {busy ? "Saving…" : "Save now"}
+        </button>
+      }
+    >
+      <div className="chip" style={{ marginBottom: 10 }}>{last ? `Last snapshot ${ago(last.at)} ago${last.label ? ` · ${last.label}` : ""}` : "No snapshots yet"}</div>
+      {data?.snapshots.slice(0, 5).map((x) => (
+        <div key={x.id} className="row" style={{ fontSize: 13, padding: "5px 0", borderTop: "1px solid var(--line)" }}>
+          <span className="grow ellipsis">{new Date(x.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}{x.label ? ` · ${x.label}` : ""}</span>
+          <a className="btn ghost small" href={`/api/snapshots/${x.id}/notes.md`}>Notes</a>
+          {x.canvas && <a className="btn ghost small" href={`/api/snapshots/${x.id}/canvas.figcraft`}>Canvas</a>}
+        </div>
+      ))}
+      {!!data?.layouts.length && (
+        <div style={{ marginTop: 12 }}>
+          <div className="label" style={{ marginBottom: 6 }}>Saved screen layouts</div>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            {data.layouts.map((n) => (
+              <span key={n} className="badge neutral" style={{ textTransform: "none", letterSpacing: 0, fontSize: 12 }}>{n}</span>
+            ))}
+          </div>
+        </div>
+      )}
+    </Section>
   );
 }
 
