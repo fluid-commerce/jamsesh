@@ -22,6 +22,18 @@ export const MicOffIcon = ({ size }: { size?: number }) => (
   </Icon>
 );
 
+export const SpeakerIcon = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />
+  </Icon>
+);
+
+export const SpeakerOffIcon = ({ size }: { size?: number }) => (
+  <Icon size={size}>
+    <path d="M4 9h4l5-4v14l-5-4H4zM17 9l5 6M22 9l-5 6" />
+  </Icon>
+);
+
 export const GearIcon = ({ size }: { size?: number }) => (
   <Icon size={size}>
     <circle cx="12" cy="12" r="3" />

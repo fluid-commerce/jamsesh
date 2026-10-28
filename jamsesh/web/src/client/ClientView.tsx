@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "../host/HostView";
 import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState, type Stage as StageState } from "../shared/hub";
-import { playChime } from "../shared/sound";
+import { fadeOut, playChime } from "../shared/sound";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
@@ -13,7 +13,7 @@ import { InviteButton } from "./Invite";
 import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
-import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
+import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
@@ -42,16 +42,22 @@ export function ClientView() {
     let audio: HTMLAudioElement | null = null;
     const onSpeak = (m: { audio: string | null; mime: string }) => {
       if (!m.audio || pref("hearBrain") === "off") return;
-      audio?.pause();
-      audio = new Audio(`data:${m.mime};base64,${m.audio}`);
-      audio.play().catch(() => {});
+      if (audio) (audio.onpause = null), audio.pause();
+      const a = (audio = new Audio(`data:${m.mime};base64,${m.audio}`));
+      a.onended = () => mic.playbackEnded();
+      a.onpause = () => mic.playbackEnded();
+      a.play().catch(() => mic.playbackEnded());
     };
+    // Talking over the brain stops it here too, as it does on the room speaker.
+    const onBarge = () => audio && !audio.paused && fadeOut(audio);
+    mic.onBargeIn.add(onBarge);
     hub.speakListeners.add(onSpeak);
     const offChime = hub.onMessage((m) => m.type === "chime" && m.deviceId !== hub.deviceId && pref("hearBrain") !== "off" && playChime());
     return () => {
       hub.speakListeners.delete(onSpeak);
+      mic.onBargeIn.delete(onBarge);
       offChime();
-      audio?.pause();
+      if (audio) (audio.onpause = null), audio.pause();
     };
   }, [remote]);
   // Heard you: the chime also plays on the laptop that spoke or recorded.
@@ -138,6 +144,7 @@ export function ClientView() {
             {micStatus.on && <Meter db={micStatus.level} />}
             <span className="mic-label">{micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Muted"}</span>
           </button>
+          {remote && <HearBrainToggle brainName={state.settings.brainName} />}
           <RecordPrompt personId={me.id} brainName={state.settings.brainName} mic={mic} />
           <AnnotateToggle />
           <ShareControls personId={me.id} />
@@ -418,6 +425,7 @@ function PhoneClient({
             <header>
               <h2>The room</h2>
               <ShareControls personId={me.id} kinds={canShareScreen() ? ["screen", "camera"] : ["camera"]} />
+              {remote && <HearBrainToggle brainName={state.settings.brainName} />}
               <InviteButton compact />
               <button className="m-icon" onClick={() => setRoom(false)} aria-label="Close">
                 <CloseIcon />
@@ -722,5 +730,19 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
         </form>
       </div>
     </div>
+  );
+}
+
+/** Remote people hear the brain on their own laptop; this turns that voice (and its chime) off or on. */
+function HearBrainToggle({ brainName }: { brainName: string }) {
+  const [on, setOn] = useState(pref("hearBrain") !== "off");
+  const flip = () => {
+    setPref("hearBrain", on ? "off" : "on");
+    setOn(!on);
+  };
+  return (
+    <button className="btn small ghost" style={{ height: 36, padding: "0 8px" }} onClick={flip} aria-pressed={on} title={on ? `Stop hearing ${brainName} on this laptop` : `Hear ${brainName}'s voice on this laptop`} aria-label={on ? `Mute ${brainName}'s voice` : `Hear ${brainName}'s voice`}>
+      {on ? <SpeakerIcon size={16} /> : <SpeakerOffIcon size={16} />}
+    </button>
   );
 }

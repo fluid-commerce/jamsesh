@@ -70,7 +70,7 @@ export class Session {
 
   /** Every address people can join from: the room's LAN, Tailscale, and a public URL if one is set. */
   /** Set by the hub: addresses from the network setup (the public HTTPS address). */
-  extraAddresses: () => { label: string; url: string }[] = () => [];
+  extraAddresses: () => { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] = () => [];
 
   addresses() {
     const list = [...this.extraAddresses(), ...hostAddresses().map((a) => ({ label: a.label, url: `http://${a.host}:${config.port}` }))];
@@ -97,6 +97,7 @@ export class Session {
       models: { ...DEFAULT_MODELS, ...s.setting<Partial<Settings["models"]>>("models", {}) },
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),
+      language: s.setting("language", "en"),
       gatewayKeySet: keyInSettings || !!config.envGatewayKey,
       gatewayKeySource: keyInSettings ? "settings" : config.envGatewayKey ? "env" : "none",
     };
@@ -107,7 +108,7 @@ export class Session {
   }
 
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainName", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl"] as const;
+    const allowed = ["sessionName", "brainName", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
     for (const k of allowed) if (patch[k] !== undefined) this.store.setSetting(k, patch[k]);
     if (patch.models) this.store.setSetting("models", { ...this.store.setting("models", {}), ...patch.models });
     if (patch.gatewayKey !== undefined) this.store.setSetting("gatewayKey", patch.gatewayKey.trim());
@@ -211,11 +212,17 @@ export class Session {
     const n = name.trim().toLowerCase();
     if (!n) return undefined;
     const all = this.store.all("people");
-    return (
-      all.find((p) => p.name.toLowerCase() === n) ??
-      all.find((p) => p.name.toLowerCase().split(/\s+/)[0] === n.split(/\s+/)[0]) ??
-      all.find((p) => p.name.toLowerCase().startsWith(n))
-    );
+    const exact = all.find((p) => p.name.trim().toLowerCase() === n);
+    if (exact) return exact;
+    // A first name or prefix only counts when it picks out one person: "Sam" with Sam Lee and Sam Cho is nobody.
+    const only = (hits: Person[]) => (hits.length === 1 ? hits[0] : undefined);
+    const first = n.split(/\s+/)[0];
+    // "Sam" finds Sam Lee and "Sam Lee" finds a Sam with no surname yet, but Sam Cho is never Sam Lee.
+    const oneWord = (x: string) => !/\s/.test(x.trim());
+    const byFirst = all.filter((p) => p.name.toLowerCase().split(/\s+/)[0] === first && (oneWord(n) || oneWord(p.name)));
+    if (byFirst.length) return only(byFirst);
+    // Too short a prefix ("Al") guesses rather than matches.
+    return n.length >= 3 ? only(all.filter((p) => p.name.toLowerCase().startsWith(n))) : undefined;
   }
 
   upsertPerson(fields: { id?: string; name: string; role?: string; weight?: number }): Person {
@@ -301,9 +308,13 @@ export class Session {
     const ownerFirst = (owner?.name ?? info.ownerName ?? "Someone").split(/\s+/)[0];
     const sameOwner = this.store.all("agents").filter((a) => a.ownerId === owner?.id && a.id !== existing?.id && a.harness === info.harness);
     const baseName = info.name?.trim() || `${ownerFirst}'s ${harnessLabel}${sameOwner.length ? ` (${shortRepo(info.repo)})` : ""}`;
+    // Two agents answering to the same name can't be told apart by voice or by jam_tell: number the newcomer.
+    const taken = new Set(this.store.all("agents").filter((a) => a.id !== existing?.id).map((a) => a.name.toLowerCase()));
+    let uniqueName = baseName;
+    for (let i = 2; taken.has(uniqueName.toLowerCase()) && i < 100; i++) uniqueName = `${baseName} ${i}`;
     const agent: Agent = {
       id: existing?.id ?? newId("a"),
-      name: existing && !info.name ? existing.name : baseName,
+      name: existing && !info.name ? existing.name : uniqueName,
       ownerId: owner?.id ?? null,
       ownerName: owner?.name ?? info.ownerName,
       harness: info.harness,
@@ -832,7 +843,7 @@ function makeCode() {
 export function weightForRole(role: string): number {
   const r = role.toLowerCase();
   if (/\b(ceo|founder|cpo|cto|chief|head of|vp|director)\b/.test(r)) return 3;
-  if (/\b(lead|principal|staff|manager|pm|product)\b/.test(r)) return 2;
+  if (/\b(lead|principal|staff|manager|pm)\b/.test(r) || /\bproduct (manager|owner|lead)\b/.test(r)) return 2;
   return 1;
 }
 

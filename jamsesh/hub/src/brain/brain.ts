@@ -306,6 +306,7 @@ export class Brain {
     const artifacts = s.artifacts().slice(0, 30);
     const stage = s.stage();
     const digest = s.store.digest("session")?.text;
+    const openPins = s.annotations().filter((a) => a.status === "open").slice(-12);
     const fmtAgent = (a: Agent) =>
       `- ${a.id}: ${a.name}, owner ${a.ownerName}, ${a.harness}, repo ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, platform ${a.platform}, status ${a.status}${a.focus ? `, focus: ${a.focus}` : ""}${a.activity ? `, doing: ${a.activity}` : ""}${s.isWaiting(a.id) ? " (idle, waiting for work)" : ""}`;
     return [
@@ -321,6 +322,7 @@ export class Brain {
         : "",
       `## Recent agent activity\n${updates.map((e) => `- ${e.authorName}: ${e.text.slice(0, 220)}`).join("\n") || "(none)"}`,
       `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}${a.page ? `, page ${a.page}` : ""}`).join("\n") || "(none)"}`,
+      openPins.length ? `## Open pins (people's notes on the screen, not sent yet)\n${openPins.map((a) => `- ${a.authorName} on ${a.target.label || a.target.kind}: ${a.text || "(no text)"}`).join("\n")}` : "",
       `## Live shares\n${s.shares().filter((x) => x.status === "live").map((x) => `- ${x.id}: ${x.label}`).join("\n") || "(none)"}`,
       `## Dev servers on the host\n${s.devservers().map((d) => `- ${d.name}: ${d.url}${d.up ? "" : " (down)"}`).join("\n") || "(none)"}`,
       `## Canvas pages (one per workstream)\n${this.pages().map((p) => `- ${p.name} (${p.frames} frames)`).join("\n") || "(starter page only)"}`,
@@ -445,8 +447,11 @@ export class Brain {
           columns: z.array(z.object({ label: z.string(), artifactIds: z.array(z.string()) })).optional(),
           pin: z.boolean().optional().describe("Keep it up until someone changes it"),
           screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
+          follow: z.string().optional().describe("For canvas: follow a person by name, so the screen shows what they're looking at. Agents have no viewport: follow people only."),
+          page: z.string().optional().describe("For canvas: open this canvas page"),
         }),
         execute: async (i) => {
+          if (i.follow && s.store.all("agents").some((a) => a.name.toLowerCase() === i.follow!.toLowerCase())) return "Agents have no viewport to follow. Follow a person, or show the page they work on.";
           const known = artifactIds();
           const items = (i.artifactIds ?? []).filter((a) => known.has(a));
           if ((i.mode === "spotlight" || i.mode === "compare") && !items.length) return "Those artifact ids don't exist. Use ids from the Recent artifacts list, or search_artifacts.";
@@ -459,6 +464,8 @@ export class Brain {
               items,
               columns: i.columns?.map((c) => ({ label: c.label, items: c.artifactIds.filter((a) => known.has(a)) })),
               pinned: i.pin ?? false,
+              follow: i.mode === "canvas" ? i.follow ?? null : null,
+              page: i.mode === "canvas" ? i.page ?? null : null,
             },
             "Room brain",
             screenId(i.screen),
@@ -504,9 +511,15 @@ export class Brain {
       }),
       host_action: tool({
         description:
-          "Act on the host machine (the Mac on the big screen): open an app or URL, place app windows side by side on a display ('arrange', sized to that display; see Screens), list the open windows ('windows'), boot an iOS Simulator and open a URL or app in it, run a shell command, or bring the JamSesh big screen back to the front ('focus_jamsesh'). Use it when the room asks to see something the board can't show, such as a native desktop app beside the iPhone Simulator. Check 'windows' before arranging when you're not sure what's open.",
+          "Act on the host machine (the Mac on the big screen): open an app or URL, place app windows side by side on a display ('arrange', sized to that display; see Screens), list the open windows ('windows'), boot an iOS Simulator and open a URL or app in it, run a shell command, or bring the JamSesh big screen back to the front ('focus_jamsesh'). Use it when the room asks to see something the board can't show, such as a native desktop app beside the iPhone Simulator. Check 'windows' before arranging when you're not sure what's open. " +
+          "Piloting: 'screenshot' captures the host's screen or one app's window (app); 'sim_screenshot' captures the booted Simulator and puts it on the board as an artifact; 'sim_launch' opens an app by bundle id (app); 'sim_tap' (x, y) and 'sim_swipe' (x, y to x2, y2) use pixel coordinates in the latest sim_screenshot, so take one first and read positions from it; 'sim_type' and 'type_text' type text; 'click' clicks the host screen at x, y in points. Taps, swipes, clicks and typing need the Accessibility permission on the host.",
         inputSchema: z.object({
-          action: z.enum(["open_app", "open_url", "arrange", "simulator", "shell", "focus_jamsesh", "windows"]),
+          action: z.enum(["open_app", "open_url", "arrange", "simulator", "shell", "focus_jamsesh", "windows", "screenshot", "click", "type_text", "sim_screenshot", "sim_tap", "sim_swipe", "sim_type", "sim_launch"]),
+          x: z.number().optional().describe("sim_tap / sim_swipe: pixels in the latest sim_screenshot; click: host screen points"),
+          y: z.number().optional(),
+          x2: z.number().optional().describe("sim_swipe: where the swipe ends"),
+          y2: z.number().optional(),
+          text: z.string().optional().describe("Text for type_text and sim_type"),
           display: z.string().optional().describe("For arrange: a display name from Screens, 'main', or 'big screen' (the default)"),
           app: z.string().optional().describe("App name for open_app, or comma-separated apps for arrange"),
           url: z.string().optional(),
@@ -797,14 +810,20 @@ export class Brain {
     const s = this.session;
     const stage = s.stage();
     if (stage.pinned || Date.now() - this.lastRoomStageAt < 90_000) return;
+    // Someone's live screen or camera is up: a new variant set doesn't push it off.
+    const liveShares = new Set(s.shares().filter((sh) => sh.status === "live").map((sh) => sh.id));
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && liveShares.has(t.shareId))) return;
     if (stage.mode === "welcome") s.setStage({ mode: "board" }, "JamSesh");
     const groups = new Map<string, Artifact[]>();
     for (const a of arts) if (a.group && a.variant) groups.set(a.group, s.artifacts().filter((x) => x.group === a.group && x.variant));
     for (const [group, items] of groups) {
       if (items.length >= 2 && items.length <= 6) {
         const mostRecent = Math.max(...items.map((i) => i.updatedAt));
-        if (Date.now() - mostRecent < 60_000) {
-          s.setStage({ mode: "compare", title: group, caption: `${items.length} directions from ${[...new Set(items.map((i) => i.agentName))].join(" and ")}`, items: items.sort((a, b) => a.variant.localeCompare(b.variant)).map((i) => i.id) }, "JamSesh");
+        // A fresh B next to yesterday's A isn't a finished set: every variant has to be recent.
+        const oldest = Math.min(...items.map((i) => i.updatedAt));
+        if (Date.now() - mostRecent < 60_000 && Date.now() - oldest < 30 * 60_000) {
+          items.sort((a, b) => a.variant.localeCompare(b.variant));
+          s.setStage({ mode: "compare", title: group, caption: compareCaption(items), items: items.map((i) => i.id) }, "JamSesh");
           return;
         }
       }
@@ -956,20 +975,35 @@ export function addressesBrain(text: string, name: string) {
   const n = name.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (n.length < 3) return false;
   // How speech-to-text tends to write the default name.
-  const names = n === "jamsesh" ? new Set(["jamsesh", "jamsession", "jamsess", "jamseh", "jamsech"]) : new Set([n]);
-  const words = text.toLowerCase().split(/\s+/).map((w) => w.replace(/[^a-z0-9]/g, "")).filter(Boolean);
+  const names = n === "jamsesh" ? new Set(["jamsesh", "jamsession", "jamsess", "jamseh", "jamsech", "jamses", "jamsey", "jamsy", "jamsessions"]) : new Set([n]);
+  const raw = text.toLowerCase().split(/\s+/).filter((w) => /[a-z0-9]/.test(w));
+  const words = raw.map((w) => w.replace(/[^a-z0-9]/g, ""));
   const ARTICLE = new Set(["the", "a", "an", "this", "that", "our", "your", "my", "in", "into", "to", "of", "with", "from", "on", "for", "about"]);
+  const TALKED_ABOUT = new Set(["is", "was", "isnt", "wasnt", "seems", "sounds", "looks", "feels", "has", "hasnt", "went", "got"]);
   const GREETING = new Set(["hey", "hi", "ok", "okay", "yo", "so", "and", "alright", "um", "uh", "oh"]);
   for (let i = 0; i < words.length; i++) {
     // The name may be split by the transcriber ("jam sesh").
     const span = names.has(words[i]) ? 1 : i + 1 < words.length && names.has(words[i] + words[i + 1]) ? 2 : 0;
     if (!span) continue;
-    if (i > 0 && ARTICLE.has(words[i - 1])) continue;
+    // Set off by a comma or a question mark ("can you do that, JamSesh?", "JamSesh, has it built?") is always an address.
+    const setOff = /[,?!]$/.test(raw[i + span - 1] ?? "") || (i > 0 && /[,]$/.test(raw[i - 1] ?? ""));
+    if (!setOff && i > 0 && ARTICLE.has(words[i - 1])) continue;
+    // "JamSesh is great", "jam session was fun": talking about it, not to it.
+    if (!setOff && TALKED_ABOUT.has(words[i + span] ?? "")) continue;
     const before = words.slice(0, i).filter((w) => !GREETING.has(w)).length;
     const after = words.length - (i + span);
     if (before <= 1 || after <= 1) return true;
   }
   return false;
+}
+
+/** "A, B and C from Sam's Claude": the variants by name, then who made them when anyone is known. */
+export function compareCaption(items: { variant: string; agentName?: string }[]) {
+  const list = (xs: string[]) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+  const variants = list(items.map((i) => i.variant).filter(Boolean));
+  const makers = list([...new Set(items.map((i) => i.agentName?.trim() ?? "").filter(Boolean))]);
+  const head = variants ? `${items.length} directions: ${variants}` : `${items.length} directions`;
+  return makers ? `${head}, from ${makers}` : head;
 }
 
 /** Variant letters, numbers and hex colors: the details that make two similar sentences different. */

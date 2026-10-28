@@ -429,7 +429,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: hub.audio.voiceprints.enrolled });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: hub.audio.voiceprints.enrolled, problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";

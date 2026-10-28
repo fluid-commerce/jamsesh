@@ -46,6 +46,8 @@ struct Inner {
     cfg: Config,
     hub: Option<host::Hub>,
     relay: Option<proxy::Proxy>,
+    /// Join mode: the host's dev-server ports, mirrored on this Mac (see `Proxy::mirror`).
+    mirrors: std::collections::HashMap<u16, proxy::Proxy>,
 }
 
 struct App {
@@ -248,6 +250,9 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     if let Some(old) = inner.relay.take() {
         old.stop();
     }
+    for (_, m) in inner.mirrors.drain() {
+        m.stop();
+    }
     let relay = proxy::start(up, token.clone(), agents.clone(), RELAY_PORT, move |tok| {
         if let Some(k) = keychain(&keep) {
             let _ = k.set_password(&tok);
@@ -370,6 +375,9 @@ async fn leave(app: &AppHandle, state: &App) {
     if let Some(r) = inner.relay.take() {
         r.stop();
     }
+    for (_, m) in inner.mirrors.drain() {
+        m.stop();
+    }
     if let Some(mut h) = inner.hub.take() {
         tauri::async_runtime::spawn_blocking(move || h.stop());
     }
@@ -420,6 +428,35 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
 
 // ---- menu bar ----
 
+/// Keeps one local mirror per dev server the host lists, so dev tiles load in this Mac's window.
+/// A port this Mac already uses is skipped (and tried again on the next refresh).
+async fn sync_mirrors(state: &App, st: &serde_json::Value) {
+    let wanted: std::collections::HashSet<u16> = st["devservers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["hostPort"].as_u64())
+        .filter_map(|p| u16::try_from(p).ok())
+        .filter(|p| *p != RELAY_PORT && *p >= 1024)
+        .collect();
+    let mut inner = state.inner.lock().await;
+    let gone: Vec<u16> = inner.mirrors.keys().filter(|p| !wanted.contains(*p)).copied().collect();
+    for p in gone {
+        if let Some(m) = inner.mirrors.remove(&p) {
+            m.stop();
+        }
+    }
+    for p in wanted {
+        if inner.mirrors.contains_key(&p) {
+            continue;
+        }
+        let Some(relay) = inner.relay.as_ref() else { return };
+        if let Ok(m) = relay.mirror(p).await {
+            inner.mirrors.insert(p, m);
+        }
+    }
+}
+
 async fn refresh_tray(app: &AppHandle) {
     let state = app.state::<Arc<App>>();
     let (role, label, hub_port, relay_port, userless) = {
@@ -427,9 +464,18 @@ async fn refresh_tray(app: &AppHandle) {
         let label = inner.cfg.host_name.clone().or(inner.cfg.host_url.clone()).unwrap_or_default();
         (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port), inner.cfg.userless)
     };
+    let st = match relay_port {
+        Some(p) => proxy::get(p, "/api/state").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()),
+        None => None,
+    };
+    if role.as_deref() == Some("join") {
+        if let Some(st) = &st {
+            sync_mirrors(&state, st).await;
+        }
+    }
     // Who's here: people whose windows checked in during the last two minutes, and live agents.
-    let present = match relay_port {
-        Some(p) => proxy::get(p, "/api/state").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()).map(|st| {
+    let present = match st {
+        Some(st) => Some({
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
             let mut people: Vec<String> = st["devices"].as_array().into_iter().flatten().filter(|d| d["kind"] == "client" && now - d["lastSeen"].as_f64().unwrap_or(0.0) < 120_000.0).filter_map(|d| d["personId"].as_str().map(str::to_string)).collect();
             people.sort();

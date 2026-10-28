@@ -235,6 +235,9 @@ export interface Stage {
   columns?: { label: string; items: string[] }[];
   layout?: Layout;
   html?: string;
+  /** Canvas mode: follow a person's viewport, or open a page. */
+  follow?: string | null;
+  page?: string | null;
   pinned: boolean;
   since: number;
   by: string;
@@ -275,6 +278,8 @@ export interface Settings {
   };
   transcription: "auto" | "local" | "gateway";
   hostControl: boolean;
+  /** Spoken language for transcription: an ISO code ("en" by default) or "auto". */
+  language: string;
   gatewayKeySet: boolean;
   gatewayKeySource: "settings" | "env" | "none";
 }
@@ -307,7 +312,7 @@ export interface ScreenInfo {
 }
 
 export interface HubState {
-  session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string }[] };
+  session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
   settings: Settings;
   people: Person[];
   devices: Device[];

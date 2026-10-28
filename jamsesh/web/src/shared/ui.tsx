@@ -51,6 +51,13 @@ export function colorFor(state: HubState | null, ref: { personId?: string | null
 export function localize(url: string) {
   try {
     const u = new URL(url);
+    // The host's own browser and the Mac app's window (its relay) are on 127.0.0.1: dev servers are
+    // there too, on the same port (on the host itself, or mirrored by the Mac app to the host).
+    const privateHost = /^(10|127|192\.168|172\.(1[6-9]|2\d|3[01]))\.|\.local$/.test(u.hostname) || u.hostname === "localhost";
+    if ((location.hostname === "127.0.0.1" || location.hostname === "localhost") && u.protocol === "http:" && u.port && privateHost) {
+      u.hostname = "127.0.0.1";
+      return u.toString();
+    }
     // On the public HTTPS address, dev servers live on their own subdomain: dev-<port>.<host>.
     if (location.protocol === "https:" && /^(\d+\.){3}\d+$/.test(u.hostname) && u.port) return `https://dev-${u.port}.${location.hostname}${u.pathname}${u.search}`;
     if (/^(\d+\.){3}\d+$/.test(u.hostname) && u.hostname !== location.hostname && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {

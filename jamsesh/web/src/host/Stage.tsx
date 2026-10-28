@@ -42,7 +42,7 @@ export function Stage({ state, interactive, tilePins = true }: { state: HubState
       body = <Agents state={state} />;
       break;
     case "canvas":
-      body = <TileView tile={{ kind: "canvas" }} state={state} />;
+      body = <TileView tile={{ kind: "canvas", follow: stage.follow ?? null, page: stage.page ?? null }} state={state} />;
       break;
     case "custom":
       body = <Custom state={state} />;

@@ -97,6 +97,18 @@ export class Hub {
     this.host = new HostControl(this.session);
     this.session.buildRequests = () => this.host.buildRequests();
     this.host.onRequest = (r) => this.onBuildRequest(r);
+    // Simulator and host screenshots become artifacts the room and the brain can see.
+    this.host.onImage = (path, title) => {
+      void Bun.file(path)
+        .bytes()
+        .then((bytes) => this.saveUpload(null, bytes, { title, stage: "built", note: "Captured on the host" }))
+        .catch((e) => console.warn(`[host] couldn't keep the screenshot: ${e?.message ?? e}`));
+    };
+    // A finished preview build reaches the brain, so it can arrange the app beside what it's compared with.
+    this.host.onBuilt = (label, ok, text) => {
+      const ev = this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: ok ? `Preview build finished: ${label}. ${text}`.trim() : `Preview build failed: ${label}. ${text}`.trim() });
+      this.brain.hear(ev);
+    };
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session);
     this.audio = new AudioPipeline(this.session, this.transcriber);
@@ -105,7 +117,7 @@ export class Hub {
     this.mcp = new McpEndpoint(this);
     this.session.extraAddresses = () => {
       const st = this.net.status();
-      return st.enabled && st.publicUrl && st.cert.state === "ok" ? [{ label: "Anywhere", url: st.publicUrl }] : [];
+      return st.enabled && st.publicUrl && st.cert.state === "ok" ? [{ label: "Anywhere", url: st.publicUrl, reachable: st.reachable }] : [];
     };
 
     this.autosave = new Autosave(this, dir);
@@ -428,7 +440,10 @@ export class Hub {
     const { directives, messages } = this.session.inbox(agent.id, true);
     if (!directives.length && !messages.length) {
       this.session.touchAgent(agent.id, { status: "idle" });
-      return {};
+      // Once a turn ends the agent can't hear the room until its person types, so ask it to wait for
+      // directives instead. Only once per stop: if this stop already comes from a hook, let it end.
+      if (body.stop_hook_active || agent.harness !== "claude-code" || agent.status === "offline") return {};
+      return { decision: "block", reason: "You're in a JamSesh session: call jam_wait to wait for the room's next directive. If your person is typing to you, stop and help them instead." };
     }
     const reason = [
       "JamSesh has new work for you:",

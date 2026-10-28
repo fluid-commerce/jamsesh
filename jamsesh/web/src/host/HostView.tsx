@@ -59,10 +59,22 @@ export function HostView() {
     // Play the brain's replies on the room speaker.
     const onSpeak = (m: { audio: string | null; mime: string }) => {
       if (!m.audio) return;
-      audioRef.current?.pause();
-      audioRef.current = new Audio(`data:${m.mime};base64,${m.audio}`);
-      audioRef.current.play().catch(() => {});
+      const prev = audioRef.current;
+      // Replaced, not finished: the new reply's echo suppression stays on.
+      if (prev) (prev.onpause = null), prev.pause();
+      const a = new Audio(`data:${m.mime};base64,${m.audio}`);
+      // Once the voice stops, what the mic hears is people again.
+      a.onended = () => mic.playbackEnded();
+      a.onpause = () => mic.playbackEnded();
+      audioRef.current = a;
+      a.play().catch(() => mic.playbackEnded());
     };
+    // Barge-in: someone in the room talks over the brain (louder than its echo), so it stops.
+    const onBarge = () => {
+      const a = audioRef.current;
+      if (a && !a.paused) fadeOut(a);
+    };
+    mic.onBargeIn.add(onBarge);
     hub.speakListeners.add(onSpeak);
     const offChime = hub.onMessage((m) => m.type === "chime" && playChime());
     // The room mic listens unless someone muted it.
@@ -70,6 +82,7 @@ export function HostView() {
     return () => {
       off();
       offChime();
+      mic.onBargeIn.delete(onBarge);
       hub.speakListeners.delete(onSpeak);
     };
   }, []);
@@ -77,12 +90,6 @@ export function HostView() {
   useEffect(() => {
     api("/devices", { deviceId: DEVICE, label: "Room mic (host)", kind: "host", micOn: micStatus.on }).catch(() => {});
   }, [micStatus.on]);
-
-  // Barge-in: when someone in the room starts talking, the brain stops.
-  useEffect(() => {
-    const a = audioRef.current;
-    if (micStatus.speaking && a && !a.paused && a.currentTime > 0.6) fadeOut(a);
-  }, [micStatus.speaking]);
 
   useReclaimFocus();
   const invOpen = useRef(false);
@@ -182,7 +189,7 @@ export function HostView() {
           <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"} ${!micStatus.on && micStatus.error ? "broken" : ""}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute the room mic (M)" : "Unmute the room mic (M)")}>
             {micStatus.on ? <MicIcon size={16} /> : <MicOffIcon size={16} />}
             {micStatus.on && <Meter db={micStatus.level} />}
-            {micStatus.on ? "Room mic" : micStatus.error ? "Mic problem" : "Muted"}
+            {micStatus.on ? (micStatus.speaking ? "Hearing…" : "Room mic") : micStatus.error ? (/reconnect/i.test(micStatus.error) ? "Reconnecting…" : "Mic problem") : "Muted"}
           </button>
           <AnnotateToggle />
           <PinsChip state={state} />

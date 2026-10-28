@@ -78,6 +78,22 @@ impl Proxy {
     pub fn stop(&self) {
         let _ = self.stop.send(true);
     }
+
+    /// Mirrors one of the host's dev-server ports at 127.0.0.1:<port> on this Mac, so a dev tile in
+    /// the window can keep its port. Requests carry this Mac's token, which the host's dev ports
+    /// accept. Over the public address the host routes dev servers by name (dev-<port>.<host>).
+    /// Fails if this Mac already uses that port.
+    pub async fn mirror(&self, port: u16) -> Result<Proxy, String> {
+        let up = &self.shared.up;
+        let dev = if up.tls {
+            let host = format!("dev-{port}.{}", up.host);
+            Upstream { origin: format!("https://{host}"), host, port: 443, tls: true }
+        } else {
+            Upstream { origin: format!("http://{}:{port}", up.host), host: up.host.clone(), port, tls: false }
+        };
+        let token = self.shared.token.read().ok().and_then(|t| t.clone());
+        bind(dev, token, None, port, true, |_| {}).await
+    }
 }
 
 fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
@@ -93,8 +109,14 @@ fn tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
 /// Starts the relay on `preferred_port` (so the window keeps the same origin, and with it its saved
 /// state, across launches), or on any free port if that one is taken.
 pub async fn start(up: Upstream, token: Option<String>, agents: Option<String>, preferred_port: u16, on_token: impl Fn(String) + Send + Sync + 'static) -> Result<Proxy, String> {
+    bind(up, token, agents, preferred_port, false, on_token).await
+}
+
+/// `exact`: only `preferred_port` will do (a dev-port mirror); otherwise any free port is the fallback.
+async fn bind(up: Upstream, token: Option<String>, agents: Option<String>, preferred_port: u16, exact: bool, on_token: impl Fn(String) + Send + Sync + 'static) -> Result<Proxy, String> {
     let listener = match TcpListener::bind(("127.0.0.1", preferred_port)).await {
         Ok(l) => l,
+        Err(e) if exact => return Err(format!("Port {preferred_port} is in use on this Mac: {e}")),
         Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Couldn't open the local relay: {e}"))?,
     };
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();

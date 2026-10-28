@@ -718,7 +718,7 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
 type RecState = { phase: "idle" } | { phase: "live"; t0: number } | { phase: "sending" };
 type RecResult = { ok: boolean; text: string; pointed: string[]; reason?: string; note?: string; out?: boolean };
 /** The laptop mic, as far as recording needs it. */
-type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void };
+type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void; flush?: () => Promise<void> };
 
 function Trail({ feed }: { feed: React.RefObject<{ push: ((s: TrailSample) => void) | null }> }) {
   const cv = useRef<HTMLCanvasElement>(null);
@@ -852,6 +852,8 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     setRec({ phase: "sending" });
     try {
       const pointer = await r.stop();
+      // The sentence still being spoken has to reach the hub before it closes the window.
+      await mic?.flush?.().catch(() => {});
       const res = await api<{ ok: boolean; text?: string; pointed?: string[]; reason?: string }>("/prompt-window", {
         deviceId: hub.deviceId,
         personId,
