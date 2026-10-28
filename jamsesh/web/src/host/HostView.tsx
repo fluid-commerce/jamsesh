@@ -4,6 +4,7 @@ import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
 import { Stage } from "./Stage";
+import { CodeRing, JoinCard, useJoinCode } from "./JoinCard";
 import { fadeOut, playChime } from "../shared/sound";
 import { AnnotateToggle } from "../shared/annotate";
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
@@ -20,11 +21,19 @@ const MODES: { mode: StageMode; label: string; key: string }[] = [
 export function HostView() {
   const { state, connected, thinking, speaking, levels } = useHub();
   const [settings, setSettings] = useState(false);
+  const [invite, setInvite] = useState(false);
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const now = useNow(1000);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
+    // First run: offer remote-access setup once (it has "Skip, room only").
+    if (pref("setupOffered") !== "1") {
+      setPref("setupOffered", "1");
+      api<{ configured: boolean }>("/net/status")
+        .then((st) => !st.configured && location.replace("/setup"))
+        .catch(() => {});
+    }
     api("/devices", { deviceId: DEVICE, label: "Room mic (host)", kind: "host" }).catch(() => {});
     const off = mic.onChange(setMicStatus);
     // Play the brain's replies on the room speaker.
@@ -141,9 +150,7 @@ export function HostView() {
           </button>
           <AnnotateToggle />
           <BrainPill status={brain.status} error={brain.lastError} name={state.settings.brainName} />
-          <span className="mono" style={{ color: "var(--muted)", letterSpacing: "0.14em", fontSize: 15 }} title="Join code">
-            {state.session.code}
-          </span>
+          <JoinPill onOpen={() => setInvite(true)} />
           <span className="mono clock" style={{ color: "var(--dim)", fontSize: 15 }}>
             {new Date(now).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
           </span>
@@ -188,6 +195,21 @@ export function HostView() {
       {!connected && <Offline />}
       <Toasts big />
       {settings && <SettingsDrawer host onClose={() => setSettings(false)} />}
+      {invite && (
+        <>
+          <div className="scrim" onClick={() => setInvite(false)} />
+          <div className="modal-wrap">
+            <div className="modal" style={{ width: "auto", padding: "28px 36px" }} role="dialog" aria-label="Join this session">
+              <JoinCard large />
+              <div className="row" style={{ justifyContent: "center", marginTop: 14 }}>
+                <button className="btn small" onClick={() => setInvite(false)}>
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -234,5 +256,16 @@ function Offline() {
     <div style={{ position: "fixed", bottom: 20, left: 20, padding: "10px 16px", borderRadius: 12, background: "var(--warn-bg)", color: "var(--warn)", border: "1px solid rgba(255,107,94,.3)" }}>
       Lost the hub. Reconnecting…
     </div>
+  );
+}
+
+/** The live join code in the header; opens the full invite card. */
+function JoinPill({ onOpen }: { onOpen: () => void }) {
+  const { code, left } = useJoinCode();
+  return (
+    <button className="btn small join-pill" style={{ height: 36 }} onClick={onOpen} title="Invite someone: QR, address and code">
+      <CodeRing left={left} size={18} />
+      <span className="mono" style={{ letterSpacing: "0.18em", fontSize: 15 }}>{code?.code ?? "····"}</span>
+    </button>
   );
 }

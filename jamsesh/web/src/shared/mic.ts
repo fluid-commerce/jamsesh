@@ -4,7 +4,9 @@
 //
 // Auto gain control stays off so loudness still says how close a speaker is to
 // this device; the hub uses that to tell who is talking.
+import { useSyncExternalStore } from "react";
 import { hub } from "./hub";
+import { backoffMs, createStore, idbTable, markContact } from "./offline";
 
 const RATE = 16000;
 const FRAME = 320; // 20 ms
@@ -42,12 +44,188 @@ export interface MicStatus {
   sent: number;
   error: string | null;
   deviceLabel: string;
+  /** Seconds of finished speech waiting on this laptop for the hub to come back. */
+  buffered: number;
 }
 
 type Listener = (s: MicStatus) => void;
 
+// ---------------------------------------------------------------------------
+// Audio buffer: finished speech segments wait here (IndexedDB) while the hub is
+// unreachable, then upload oldest-first with their ORIGINAL host-clock timestamps.
+// The hub's pipeline merges late copies by capture time.
+
+export const AUDIO_MAX_SECONDS = 180;
+export const AUDIO_MAX_SEGMENTS = 60;
+
+export interface AudioSeg {
+  seq?: number;
+  deviceId: string;
+  t0: number;
+  t1: number;
+  level: number;
+  noise: number;
+  wav: ArrayBuffer;
+  /** Stamped before the first clock sample arrived; shifted by the clock offset at upload. */
+  unsynced?: boolean;
+}
+
+export interface AudioBufferState {
+  segments: number;
+  seconds: number;
+  uploading: boolean;
+  /** Segments the hub accepted since this page loaded. */
+  uploaded: number;
+  dropped: number;
+}
+
+const wavSeconds = (s: { wav: ArrayBuffer }) => Math.max(0, (s.wav.byteLength - 44) / (RATE * 2));
+
+type PostResult = "ok" | "retry" | "unauthorized" | "drop";
+
+export class AudioBuffer {
+  private rows: AudioSeg[] = [];
+  private store = createStore<AudioBufferState>({ segments: 0, seconds: 0, uploading: false, uploaded: 0, dropped: 0 });
+  private draining = false;
+  private attempt = 0;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private uploaded = 0;
+  private dropped = 0;
+  private loaded: Promise<void> | null = null;
+  subscribe = this.store.subscribe;
+  get = this.store.get;
+  onUploaded = new Set<() => void>();
+
+  constructor(
+    private table = idbTable<AudioSeg>("audio"),
+    private post: (s: AudioSeg) => Promise<PostResult> = postSegment,
+    private canSend: () => boolean = () => hub.get().status === "connected" && hub.get().clockSynced,
+  ) {}
+
+  private publish() {
+    this.store.set({ segments: this.rows.length, seconds: Math.round(this.rows.reduce((a, r) => a + wavSeconds(r), 0) * 10) / 10, uploading: this.draining, uploaded: this.uploaded, dropped: this.dropped });
+  }
+
+  load() {
+    this.loaded ??= this.table.all().then((rows) => {
+      this.rows = [...rows, ...this.rows].sort((a, b) => a.t0 - b.t0);
+      this.publish();
+    });
+    return this.loaded;
+  }
+
+  /** A finished speech segment: straight to the hub when it is reachable, else saved. */
+  async submit(seg: AudioSeg) {
+    await this.load();
+    if (!this.rows.length && !this.draining && this.canSend()) {
+      const r = await this.post(seg);
+      if (r === "ok") return this.done();
+      if (r === "drop") return void this.dropped++;
+    }
+    seg.seq = await this.table.add(seg);
+    this.rows.push(seg);
+    this.rows.sort((a, b) => a.t0 - b.t0);
+    await this.trim();
+    this.publish();
+    void this.drain();
+  }
+
+  private done() {
+    this.uploaded++;
+    this.publish();
+    for (const fn of this.onUploaded) fn();
+  }
+
+  /** Oldest speech goes first when over the cap. */
+  private async trim() {
+    const gone: AudioSeg[] = [];
+    const secs = () => this.rows.reduce((a, r) => a + wavSeconds(r), 0);
+    while (this.rows.length > 1 && (this.rows.length > AUDIO_MAX_SEGMENTS || secs() > AUDIO_MAX_SECONDS)) gone.push(this.rows.shift()!);
+    this.dropped += gone.length;
+    await Promise.all(gone.map((g) => (g.seq != null ? this.table.delete(g.seq) : undefined)));
+  }
+
+  /** Upload what is waiting, oldest capture first. */
+  async drain(): Promise<void> {
+    await this.load();
+    if (this.draining || !this.rows.length || !this.canSend()) return;
+    this.draining = true;
+    this.publish();
+    try {
+      while (this.rows.length && this.canSend()) {
+        const s = this.rows[0];
+        const r = await this.post(s);
+        if (r === "retry") {
+          this.schedule();
+          return;
+        }
+        if (r === "unauthorized") return;
+        this.rows.shift();
+        this.attempt = 0;
+        if (s.seq != null) await this.table.delete(s.seq);
+        if (r === "ok") this.done();
+        else this.dropped++;
+        this.publish();
+      }
+    } finally {
+      this.draining = false;
+      this.publish();
+    }
+  }
+
+  private schedule() {
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.drain();
+    }, backoffMs(this.attempt++, Math.random, 15_000));
+  }
+
+  kick() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.attempt = 0;
+    return this.drain();
+  }
+}
+
+async function postSegment(s: AudioSeg): Promise<PostResult> {
+  // Segments stamped before the clock synced get the offset now (drain waits for the sync).
+  const shift = s.unsynced ? hub.get().clockOffset : 0;
+  const q = new URLSearchParams({ deviceId: s.deviceId, t0: String(Math.round(s.t0 + shift)), t1: String(Math.round(s.t1 + shift)), level: s.level.toFixed(1), noise: s.noise.toFixed(1) });
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20_000);
+  try {
+    const res = await fetch(`/api/audio?${q}`, { method: "POST", credentials: "same-origin", signal: ctl.signal, headers: { "content-type": "audio/wav" }, body: s.wav });
+    markContact();
+    if (res.ok) return "ok";
+    if (res.status === 401) {
+      hub.markUnauthorized();
+      return "unauthorized";
+    }
+    return res.status >= 500 || res.status === 408 || res.status === 429 ? "retry" : "drop";
+  } catch {
+    return "retry";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export const audioBuffer = new AudioBuffer();
+
+if (typeof window !== "undefined") {
+  void audioBuffer.load().then(() => audioBuffer.drain());
+  hub.subscribe(() => audioBuffer.get().segments && void audioBuffer.drain());
+  window.addEventListener("online", () => void audioBuffer.kick());
+}
+
+/** Seconds and count of speech waiting on this laptop. */
+export function useBufferedAudio() {
+  return useSyncExternalStore(audioBuffer.subscribe, audioBuffer.get);
+}
+
 export class Mic {
-  status: MicStatus = { on: false, level: -90, noise: -70, speaking: false, sent: 0, error: null, deviceLabel: "" };
+  status: MicStatus = { on: false, level: -90, noise: -70, speaking: false, sent: 0, error: null, deviceLabel: "", buffered: audioBuffer.get().seconds };
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private listeners = new Set<Listener>();
@@ -65,6 +243,8 @@ export class Mic {
   private suppressUntil = 0;
 
   constructor(private deviceId: string) {
+    audioBuffer.subscribe(() => this.status.buffered !== audioBuffer.get().seconds && this.emit({ buffered: audioBuffer.get().seconds }));
+    audioBuffer.onUploaded.add(() => this.emit({ sent: this.status.sent + 1 }));
     hub.speakListeners.add((m) => {
       // Don't transcribe the room brain talking through the speaker.
       this.suppressUntil = Date.now() + Math.max(2500, m.text.length * 75) + 600;
@@ -86,7 +266,7 @@ export class Mic {
     if (this.status.on) return;
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("This page can't use the microphone over plain HTTP. Open it from the JamSesh window that join.sh opens, or from the host itself.");
+        throw new Error("This page can't use the microphone over plain HTTP. Open the host's https address (set up Remote access on the host), or use the host itself.");
       }
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false },
@@ -175,10 +355,7 @@ export class Mic {
     kept.forEach((k, i) => samples.set(k, i * FRAME));
     const levels = [...this.segLevels].sort((a, b) => a - b);
     const level = levels.slice(Math.floor(levels.length / 2)).reduce((a, b) => a + b, 0) / Math.max(1, levels.length - Math.floor(levels.length / 2));
-    const q = new URLSearchParams({ deviceId: this.deviceId, t0: String(Math.round(t0)), t1: String(Math.round(t1)), level: level.toFixed(1), noise: this.noise.toFixed(1) });
-    fetch(`/api/audio?${q}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: encodeWav(samples) })
-      .then(() => this.emit({ sent: this.status.sent + 1 }))
-      .catch(() => {});
+    void audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced });
   }
 }
 

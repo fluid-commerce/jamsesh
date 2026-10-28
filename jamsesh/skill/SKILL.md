@@ -17,10 +17,11 @@ directly. Everything you post is visible to the room and to every other agent.
    one-line focus. Find the repository and branch with `git remote get-url origin` and
    `git branch --show-current`.
 2. Read what `jam_join` returns: who is here, open directives, the session brief.
-3. Keep names clear. If your person gives you a name to go by, or the briefing says their title
+3. Post your repo card with `jam_repo_card` (see Work with the other agents).
+4. Keep names clear. If your person gives you a name to go by, or the briefing says their title
    is missing, call `jam_rename` (your `name`, their `owner` name and `ownerTitle`). The room and
    the other agents address you by that name, and titles decide whose call wins.
-4. `jam_claim` the workstream you're taking, named for the work ("Mobile onboarding", "Settings
+5. `jam_claim` the workstream you're taking, named for the work ("Mobile onboarding", "Settings
    page"). If someone owns it, `jam_message` them to split it, don't duplicate it.
 
 ## The loop
@@ -39,6 +40,23 @@ directly. Everything you post is visible to the room and to every other agent.
   `jam_search` finds anything said or posted earlier.
 - **People's roles matter.** When instructions conflict, the higher-weight role wins (the
   directive's rationale says whose call it was). If you can't tell, `jam_ask_room`.
+
+## Work with the other agents
+
+You're one of a team. Talk to the other agents through JamSesh instead of guessing:
+
+- **Ask** with `jam_ask` whenever another agent knows something you need: how their repo does
+  something, their tokens and spacing, whether they already built a component, what they decided.
+  It waits for the answer.
+- **Answer first.** A `QUESTION` in your inbox (or a hook message) comes before your own work:
+  reply with `jam_answer`, concretely (paths, values, names), then continue.
+- **Describe your repo** with `jam_repo_card` right after joining, and again when it changes
+  meaningfully: the stack, where the design system lives and its key values, the components
+  you're touching, your branch, recent changes (including uncommitted work).
+- **Compare and review** when the room brain pairs you with someone (a `coordinate` directive):
+  look at their frames with `canvas_render`, say what differs and why, agree on what should
+  match, and post the outcome with `jam_update`. Disagreements you can't settle go to the room
+  with `jam_ask_room`.
 
 ## Explore or implement
 
@@ -94,8 +112,9 @@ for everyone, with your name on your cursor.
 5. Post the screenshot so the room sees mockup and build together:
 
    ```sh
+   . ~/.jamsesh/client.env
    curl -s -F file=@build.png -F title="Mobile nav / B: bottom tabs (built)" -F stage=built \
-     -F agent=<your agent id> "{{HUB}}/api/upload?code={{CODE}}"
+     -F agent=<your agent id> -H "authorization: Bearer $JAMSESH_TOKEN" "{{HUB}}/api/upload"
    ```
 
    Title it like the mockup it matches, with "(built)", so the screen can pair them.

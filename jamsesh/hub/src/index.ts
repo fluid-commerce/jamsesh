@@ -8,12 +8,27 @@ const hub = new Hub({ canvas: !args.has("--no-canvas"), whisper: !args.has("--no
 const server = startHttp(hub);
 await hub.start();
 
-const url = hub.session.hubUrl;
+// HTTPS for the public address, once remote access is set up (the router forwards 443 here).
+let secure: ReturnType<typeof startHttp> | null = null;
+const startSecure = () => {
+  secure?.stop(true);
+  secure = null;
+  const tls = hub.net.tlsOptions();
+  if (!tls) return;
+  try {
+    secure = startHttp(hub, hub.net.status().internalPort, tls);
+    console.log(`  HTTPS:       ${hub.net.status().publicUrl} (port ${hub.net.status().internalPort})`);
+  } catch (e) {
+    console.error("https:", e instanceof Error ? e.message : e);
+  }
+};
+startSecure();
+hub.net.onCertChange(startSecure);
+
 console.log(`
   JamSesh is live: ${hub.session.settings().sessionName}
   Host view:   http://127.0.0.1:${config.port}/host
-  Join code:   ${hub.session.code}
-  Clients run: curl -fsSL ${url}/join.sh | bash
+  Invite:      open the host view; it shows the QR code, address and 4-character code
   Canvas:      ${hub.session.canvas.status}${hub.session.canvas.reason ? ` (${hub.session.canvas.reason})` : ""}
   Brain:       ${hub.session.settings().gatewayKeySet ? `gateway key from ${hub.session.settings().gatewayKeySource}` : "no gateway key yet (add it in Settings)"}
 `);
@@ -26,6 +41,7 @@ const shutdown = async () => {
   stopping = true;
   console.log("Saving the session…");
   await hub.shutdown();
+  secure?.stop(true);
   server.stop(true);
   process.exit(0);
 };

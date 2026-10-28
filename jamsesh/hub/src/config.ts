@@ -57,8 +57,13 @@ const envFile = readEnvFile(join(HOME, ".env"));
 const dataDir = process.env.JAMSESH_DATA ?? join(HOME, "host");
 mkdirSync(dataDir, { recursive: true });
 
+/** People, devices, voiceprints and team settings outlive sessions (`jamsesh new` keeps them). */
+const teamDir = process.env.JAMSESH_TEAM ?? (process.env.JAMSESH_DATA ? join(process.env.JAMSESH_DATA, "team") : join(HOME, "team"));
+mkdirSync(teamDir, { recursive: true });
+
 export const config = {
   home: HOME,
+  teamDir,
   repo: REPO,
   dataDir,
   port: Number(process.env.JAMSESH_PORT ?? 4747),

@@ -39,6 +39,8 @@ type Waiter = { resolve: () => void; timer: ReturnType<typeof setTimeout> };
 export class Session {
   store: Store;
   code: string;
+  /** This session's id; the team store remembers every session. */
+  sessionId: string;
   startedAt = Date.now();
   canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null };
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
@@ -53,6 +55,13 @@ export class Session {
     this.store = store;
     this.code = store.setting("sessionCode", "") || makeCode();
     store.setSetting("sessionCode", this.code);
+    this.sessionId = store.setting("sessionId", "") || newId("ses");
+    store.setSetting("sessionId", this.sessionId);
+    const sessions = store.setting<{ id: string; name: string; startedAt: number; lastActive: number }[]>("sessions", []);
+    const me = sessions.find((x) => x.id === this.sessionId);
+    if (me) me.lastActive = Date.now();
+    else sessions.push({ id: this.sessionId, name: store.setting("sessionName", "Jam session"), startedAt: Date.now(), lastActive: Date.now() });
+    store.setSetting("sessions", sessions.slice(-200));
     // Agents outlive a hub restart: they reconnect on their next call, and directives wait in their inbox.
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
@@ -60,8 +69,11 @@ export class Session {
   }
 
   /** Every address people can join from: the room's LAN, Tailscale, and a public URL if one is set. */
+  /** Set by the hub: addresses from the network setup (the public HTTPS address). */
+  extraAddresses: () => { label: string; url: string }[] = () => [];
+
   addresses() {
-    const list = hostAddresses().map((a) => ({ label: a.label, url: `http://${a.host}:${config.port}` }));
+    const list = [...this.extraAddresses(), ...hostAddresses().map((a) => ({ label: a.label, url: `http://${a.host}:${config.port}` }))];
     if (process.env.JAMSESH_PUBLIC_URL) list.push({ label: "Remote", url: process.env.JAMSESH_PUBLIC_URL.replace(/\/$/, "") });
     return list.length ? list : [{ label: "In the room", url: this.hubUrl }];
   }
@@ -526,6 +538,51 @@ export class Session {
     if (target) this.wake(target.id);
     else for (const a of this.store.all("agents")) if (a.id !== from.id) this.wake(a.id);
     return ev;
+  }
+
+  // ---- agents asking each other ----
+
+  private asks = new Map<string, { resolve: (answer: string) => void; timer: ReturnType<typeof setTimeout> }>();
+
+  /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
+  ask(fromId: string | null, to: string, question: string, waitMs: number): { askId: string; answer: Promise<string | null> } {
+    const target = this.agent(to) ?? this.store.all("agents").find((a) => a.name.toLowerCase() === to.toLowerCase());
+    if (!target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
+    const from = this.agent(fromId);
+    const askId = newId("ask");
+    this.store.addEvent({
+      kind: "message",
+      authorType: from ? "agent" : "brain",
+      authorId: from?.id ?? null,
+      authorName: from?.name ?? this.settings().brainName,
+      text: question,
+      relevance: "work",
+      data: { to: target.id, toName: target.name, askId },
+    });
+    this.wake(target.id);
+    const answer = new Promise<string | null>((resolve) => {
+      const timer = setTimeout(() => (this.asks.delete(askId), resolve(null)), waitMs);
+      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer });
+    });
+    return { askId, answer };
+  }
+
+  answer(fromId: string, askId: string, text: string) {
+    const from = this.agent(fromId);
+    const q = this.store.recentEvents({ kinds: ["message"], limit: 400 }).find((e) => e.data.askId === askId);
+    if (!q) throw new Error("No question with that id.");
+    this.store.addEvent({
+      kind: "message",
+      authorType: "agent",
+      authorId: fromId,
+      authorName: from?.name ?? "Agent",
+      text,
+      relevance: "work",
+      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId },
+    });
+    const waiting = this.asks.get(askId);
+    if (waiting) waiting.resolve(text);
+    else if (q.authorId) this.wake(q.authorId); // the asker stopped waiting; it gets the answer in its inbox
   }
 
   // ---- artifacts ----

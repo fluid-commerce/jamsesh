@@ -5,11 +5,11 @@ import { join, normalize } from "node:path";
 import { bus } from "./bus";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
-import { joinScript, hookScript } from "./install-scripts";
+import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { skillMarkdown } from "./skill";
 import type { BusMessage, Stage } from "./types";
 
-type WsData = { deviceId: string | null };
+type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -21,55 +21,83 @@ function isLocal(ip: string) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
-export function startHttp(hub: Hub, port = config.port): Server<WsData> {
+export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; key: string; serverName: string }[]): Server<WsData> {
   const s = hub.session;
 
-  const authorized = (req: Request, url: URL, ip: string) => {
-    if (isLocal(ip)) return true;
-    const code = url.searchParams.get("code") ?? req.headers.get("x-jam-code") ?? cookie(req, "jam_code");
-    return code?.toUpperCase() === s.code;
-  };
+  const tokenOf = (req: Request, url: URL) =>
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token") ?? url.searchParams.get("token");
+
+  const PUBLIC_FILES = /^\/(assets\/|icons\/|fonts\/|favicon\.svg$|manifest\.webmanifest$|sw\.js$)/;
 
   const server = Bun.serve<WsData, any>({
     port,
     hostname: "0.0.0.0",
+    ...(tls ? { tls } : {}),
     idleTimeout: 255,
     maxRequestBodySize: 64 * 1024 * 1024,
     async fetch(req, srv) {
       const url = new URL(req.url);
       const ip = srv.requestIP(req)?.address ?? "0.0.0.0";
       const path = url.pathname;
+      const local = isLocal(ip);
       try {
-        if (path === "/healthz") return new Response("ok");
-        if (path === "/join.sh") return new Response(joinScript(hub, originOf(req, url)), { headers: { "content-type": "text/x-shellscript" } });
-        if (path === "/" ) return Response.redirect(isLocal(ip) ? "/host" : `/client${url.search}`, 302);
+        // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
+        if (path.endsWith("/healthz")) return new Response("ok");
+        // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
+        const dev = devTarget(req, hub);
+        if (dev) {
+          if (!local && !hub.auth.check(tokenOf(req, url), ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
+          if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+            if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev } as any })) return undefined as any;
+          }
+          return proxyHttp(req, url, dev);
+        }
+        // Remote-access setup is only for someone at the host.
+        if (local && path.startsWith("/api/net/")) {
+          const r = await hub.net.routes(req, url);
+          if (r) return r;
+        }
+        if (path === "/api/pair" && req.method === "POST") return pairRoute(hub, req, url, ip);
+        if (path === "/api/pair/code") return local ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad("Only the host shows the code.", 403);
+        if (path === "/api/pair/info") return json({ name: s.settings().sessionName, brainName: s.settings().brainName });
+        if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
+        if (path === "/collab" || path.startsWith("/collab/")) {
+          // The canvas server checks its own link tokens; JamSesh only relays.
+          if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname.replace(/^\/collab/, "") || "/"}${url.search}` } })) return undefined as any;
+          return bad("expected a WebSocket");
+        }
 
-        const ok = authorized(req, url, ip);
-        if (!ok && (path.startsWith("/api") || path === "/mcp" || path === "/ws" || path === "/skill.md")) return bad("This needs the session code shown on the host screen.", 401);
+        const device = local ? null : hub.auth.check(tokenOf(req, url), ip);
+        const ok = local || !!device;
 
-        if (path === "/mcp") return hub.mcp.handle(req, ip);
+        if (path === "/") {
+          if (local) return Response.redirect("/host", 302);
+          if (!wantsHtml(req)) return new Response(agentIntro(originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+          return Response.redirect(ok ? "/client" : "/connect", 302);
+        }
+        if (PUBLIC_FILES.test(path) || path === "/connect") return webApp(path);
+        if (!ok) {
+          if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
+          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
+        }
+        if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
+
+        if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null));
         if (path === "/ws") {
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device") } })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/skill.md") return new Response(skillMarkdown(hub), { headers: { "content-type": "text/markdown; charset=utf-8" } });
         if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
-        if (path.startsWith("/api/")) return await api(hub, req, url, ip);
+        if (path === "/agent/setup.sh") return new Response(joinScript(hub, originOf(req, url), tokenOf(req, url) ?? ""), { headers: { "content-type": "text/x-shellscript" } });
+        if (path.startsWith("/api/")) return await idempotent(req, path, () => api(hub, req, url, ip));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
           const rel = path.replace(/^\/canvas\/?/, "") || "index.html";
           return file(join(config.canvasDist, rel), config.canvasDist, true);
         }
-        // The web app (host, client, settings).
-        if (!config.webDist) return new Response("The JamSesh web app isn't built. Run: cd jamsesh && bun run build:web", { status: 503 });
-        const rel = path.replace(/^\//, "");
-        const candidate = join(config.webDist, rel);
-        if (rel && existsSync(candidate) && statSync(candidate).isFile()) return file(candidate, config.webDist, true);
-        const res = file(join(config.webDist, "index.html"), config.webDist);
-        const code = url.searchParams.get("code");
-        if (code && code.toUpperCase() === s.code) res.headers.append("set-cookie", `jam_code=${s.code}; Path=/; SameSite=Lax; Max-Age=86400`);
-        return res;
+        return webApp(path);
       } catch (e) {
         console.error("http:", path, e);
         return bad(e instanceof Error ? e.message : String(e), 500);
@@ -78,6 +106,8 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
     websocket: {
       idleTimeout: 120,
       open(ws: ServerWebSocket<WsData>) {
+        if (ws.data.collab != null) return openCollab(ws, hub);
+        if (!(ws.data as any).local) hub.peopleOnline++;
         ws.send(JSON.stringify({ type: "state", state: s.state() } satisfies BusMessage));
         const off = bus.on((msg) => {
           if (msg.type === "event" && msg.event.data?.embedding) {
@@ -94,6 +124,12 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
         }
       },
       message(ws: ServerWebSocket<WsData>, raw) {
+        if (ws.data.collab != null) {
+          const up = ws.data.upstream;
+          if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
+          else (ws.data.queue ??= []).push(raw);
+          return;
+        }
         try {
           const m = JSON.parse(String(raw));
           if (m.type === "level" && ws.data.deviceId) {
@@ -106,6 +142,8 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
         } catch {}
       },
       close(ws: ServerWebSocket<WsData>) {
+        if (ws.data.collab != null) return void ws.data.upstream?.close();
+        if (!(ws.data as any).local) hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
         (ws as any).off?.();
         if (ws.data.deviceId) {
           sockets.get(ws.data.deviceId)?.delete(ws);
@@ -119,6 +157,88 @@ export function startHttp(hub: Hub, port = config.port): Server<WsData> {
     },
   });
   return server;
+}
+
+/** Relays a canvas WebSocket to the canvas server, which only listens on this machine. */
+function openCollab(ws: ServerWebSocket<WsData>, hub: Hub) {
+  const port = (ws.data as any).devPort ?? hub.canvas.port;
+  const up = new WebSocket(`ws://127.0.0.1:${port}${ws.data.collab}`);
+  up.binaryType = "arraybuffer";
+  ws.data.upstream = up;
+  up.onopen = () => {
+    for (const m of ws.data.queue ?? []) up.send(m as any);
+    ws.data.queue = [];
+  };
+  up.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer));
+  up.onclose = () => ws.close();
+  up.onerror = () => ws.close();
+}
+
+/** The dev server port for a dev-<port>.<domain> request, when <domain> is this host's. */
+function devTarget(req: Request, hub: Hub): number | null {
+  const host = (req.headers.get("host") ?? "").split(":")[0].toLowerCase();
+  const m = host.match(/^dev-(\d{2,5})\.(.+)$/);
+  const domain = hub.net.status().domain?.toLowerCase();
+  if (!m || !domain || m[2] !== domain.replace(/^https?:\/\//, "")) return null;
+  const port = Number(m[1]);
+  return hub.session.devservers().some((d) => d.hostPort === port) ? port : null;
+}
+
+async function proxyHttp(req: Request, url: URL, port: number): Promise<Response> {
+  const headers = new Headers(req.headers);
+  headers.delete("cookie");
+  headers.set("host", `127.0.0.1:${port}`);
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}${url.pathname}${url.search}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual" });
+    return new Response(r.body, { status: r.status, headers: r.headers });
+  } catch {
+    return new Response("That dev server isn't answering.", { status: 502 });
+  }
+}
+
+/** The web app: hashed assets cached forever, every other path gets index.html. */
+function webApp(path: string): Response {
+  if (!config.webDist) return new Response("The JamSesh web app isn't built. Run: cd jamsesh && bun run build:web", { status: 503 });
+  const rel = path.replace(/^\//, "");
+  const candidate = join(config.webDist, rel);
+  if (rel && existsSync(candidate) && statSync(candidate).isFile()) return file(candidate, config.webDist, true);
+  return file(join(config.webDist, "index.html"), config.webDist);
+}
+
+function wantsHtml(req: Request) {
+  return (req.headers.get("accept") ?? "").includes("text/html");
+}
+
+/** POST /api/pair {code, kind, label}: browsers get an HttpOnly cookie, agents get the token. */
+async function pairRoute(hub: Hub, req: Request, url: URL, ip: string): Promise<Response> {
+  const body = (await req.json().catch(() => ({}))) as any;
+  const kind = body.kind === "agent" ? "agent" : "browser";
+  const r = hub.auth.pair({ code: String(body.code ?? ""), kind, label: String(body.label ?? ""), ip });
+  if (!r.ok) return bad(r.error, 403);
+  const res = json({ ok: true, deviceId: r.device.id, token: kind === "agent" ? r.token : undefined, hub: originOf(req, url) });
+  if (kind === "browser") {
+    const secure = originOf(req, url).startsWith("https") ? "; Secure" : "";
+    // On the public address the cookie also covers dev-<port>.<domain>, so dev servers open signed in.
+    const domain = hub.net.status().domain;
+    const scope = domain && url.hostname.toLowerCase() === domain.toLowerCase() ? `; Domain=${domain}` : "";
+    res.headers.append("set-cookie", `jam_token=${r.token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}${scope}`);
+  }
+  return res;
+}
+
+/**
+ * GET /agent?c=CODE: setup instructions written for a coding agent. A valid code pairs
+ * the agent on the spot and the instructions carry its token, so the code's short life
+ * doesn't matter once the agent has read the page.
+ */
+function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
+  const origin = originOf(req, url);
+  const code = url.searchParams.get("c") ?? url.searchParams.get("code");
+  const md = (t: string, status = 200) => new Response(t, { status, headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" } });
+  if (!code) return md(agentIntro(origin));
+  const r = hub.auth.pair({ code, kind: "agent", label: url.searchParams.get("name") ?? "Agent", ip });
+  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh screen right now, then fetch ${origin}/agent?c=<code> again.`, 403);
+  return md(agentGuide(origin, r.token));
 }
 
 async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Response> {
@@ -139,6 +259,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     const q = url.searchParams;
     const deviceId = q.get("deviceId");
     if (!deviceId) return bad("deviceId is required");
+    // A timed-out upload is retried; the same segment from the same device only counts once.
+    const segKey = `${deviceId}:${q.get("t0")}`;
+    if (recentSegments.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    remember(recentSegments, segKey, 4000);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array(await req.arrayBuffer().catch(() => new ArrayBuffer(0)));
     const seg = await hub.audio.ingest({
       deviceId,
@@ -181,6 +305,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   }
 
   if (path === "/settings" && req.method === "POST") {
+    if (!isLocal(ip) && (body?.gatewayKey !== undefined || body?.models !== undefined || body?.hostControl !== undefined)) return bad("Change the gateway key, models and host control on the host itself.", 403);
     s.updateSettings(body ?? {});
     hub.brain.refreshStatus();
     return json(s.settings());
@@ -229,15 +354,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
-    // Point the link at the address this person reached the host through (LAN, Tailscale, a tunnel).
-    const raw = isLocal(ip) ? hub.canvas.localWs(kind) : kind === "view" ? s.canvas.wsView : s.canvas.wsEdit;
-    const link = raw && !isLocal(ip) ? raw.replace(/\/\/[^/:]+:/, `//${url.hostname}:`) : raw;
-    return json({ link, status: s.canvas.status, reason: s.canvas.reason, desktop: kind === "view" ? s.canvas.viewLink : s.canvas.editLink });
-  }
-
-  if (path === "/debug/canvas" && isLocal(ip)) {
-    const host = hub.canvas.host;
-    return json({ peers: await host?.command("collab.peers"), doc: await host?.json("inspect_document", { depth: 2, allPages: true }) });
+    // Through the hub's relay at the address this person used (LAN, remote, HTTPS), so the
+    // canvas server itself never has to be reachable from outside this machine.
+    const ws = kind === "view" ? s.canvas.wsView : s.canvas.wsEdit;
+    const q = ws?.match(/\?(file=[^&]+&token=[^&]+)/)?.[1];
+    const origin = originOf(req, url);
+    const relay = q ? `${origin.replace(/^http/, "ws")}/collab/?${q}` : null;
+    const link = isLocal(ip) ? hub.canvas.localWs(kind) : relay;
+    const desktop = q ? `figcraft://join?server=${encodeURIComponent(`${origin.replace(/^http/, "ws")}/collab/`)}&${q}` : null;
+    return json({ link, status: s.canvas.status, reason: s.canvas.reason, desktop });
   }
 
   // ---- shares (screens and cameras) ----
@@ -326,6 +451,48 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
   return bad("not found", 404);
 }
 
+// ---- replayed calls ----
+// Laptops queue changes while they're offline and resend them with the same `x-jam-idem` key,
+// including calls whose response was lost on the way back. A repeated key gets the first
+// answer again instead of running twice; one that arrives mid-flight waits for the first.
+const IDEM_TTL_MS = 24 * 60 * 60_000;
+const idemSeen = new Map<string, { at: number; done: Promise<{ status: number; body: string; type: string }> }>();
+const recentSegments = new Set<string>();
+
+function remember(set: Set<string>, key: string, max: number) {
+  set.add(key);
+  if (set.size > max) set.delete(set.values().next().value!);
+}
+
+async function idempotent(req: Request, path: string, run: () => Promise<Response>): Promise<Response> {
+  const key = req.headers.get("x-jam-idem");
+  if (!key || req.method === "GET" || path === "/api/audio" || key.length > 100) return run();
+  const now = Date.now();
+  for (const [k, v] of idemSeen) {
+    if (now - v.at < IDEM_TTL_MS && idemSeen.size <= 2000) break;
+    idemSeen.delete(k);
+  }
+  const seen = idemSeen.get(key);
+  if (seen) {
+    const r = await seen.done;
+    return new Response(r.body, { status: r.status, headers: { "content-type": r.type, "x-jam-idem-replay": "1" } });
+  }
+  let settle!: (r: { status: number; body: string; type: string }) => void;
+  idemSeen.set(key, { at: now, done: new Promise((res) => (settle = res)) });
+  try {
+    const res = await run();
+    const body = await res.clone().text();
+    // Server errors aren't remembered, so the retry can succeed.
+    if (res.status >= 500) idemSeen.delete(key);
+    settle({ status: res.status, body, type: res.headers.get("content-type") ?? "application/json" });
+    return res;
+  } catch (e) {
+    idemSeen.delete(key);
+    settle({ status: 500, body: JSON.stringify({ error: String(e) }), type: "application/json" });
+    throw e;
+  }
+}
+
 /** The origin the client used to reach this host (proxies forward the original host). */
 function originOf(req: Request, url: URL) {
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
@@ -347,6 +514,7 @@ function file(p: string, root: string, cache = false): Response {
   const headers: Record<string, string> = {};
   if (cache && /\.(js|css|wasm|png|jpg|woff2?)$/.test(full) && /[-.][0-9a-f]{8,}\./.test(full)) headers["cache-control"] = "public, max-age=31536000, immutable";
   else headers["cache-control"] = "no-cache";
+  if (full.endsWith(".webmanifest")) headers["content-type"] = "application/manifest+json";
   return new Response(Bun.file(full), { headers });
 }
 

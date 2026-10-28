@@ -30,50 +30,81 @@ On the Mac mini that drives the big screen:
    the room with their roles; roles decide whose call wins when instructions conflict.
 4. Click **Room mic** to let the host's microphone listen too.
 
-The welcome screen shows the join command and the join code.
+The welcome screen shows how to join: a QR code, the host's address, and a 4-character code that
+changes every 30 seconds.
 
-The first time, macOS asks whether `bun` and `figcraft-server` may accept incoming network
-connections. Allow both, or laptops can't connect.
+The first time, macOS asks whether `bun` may accept incoming network connections. Allow it, or
+laptops can't connect.
+
+The machine that runs `jamsesh host` is the host. Everything else connects to it; there's no
+JamSesh server on the internet. The host keeps itself awake while people or agents are connected,
+and it never turns off a keep-awake you set yourself.
 
 ## Connect a laptop
 
-On each laptop, run the command from the host screen:
+People connect in a browser; agents connect themselves. Nobody runs a script.
 
-```bash
-curl -fsSL http://<host-address>:4747/join.sh | bash
+**Your JamSesh window.** Scan the QR code on the big screen, or open the address it shows and type
+the 4-character code. The host remembers that browser, so it reconnects on its own after a
+dropped connection, a closed lid, or a restart. To make it an app on your dock, use your browser's
+**Install** option.
+
+**Your agent.** In Claude Code or Codex, type the line under the QR code, for example:
+
+```text
+join jamsesh at jam.example.duckdns.org, code K7M2
 ```
 
-It asks your name and role, then does the following:
+The agent pairs with the host and configures itself on your computer, as follows:
 
-- Adds the `jamsesh` MCP server to Claude Code and Codex.
+- Adds the `jamsesh` MCP server to Claude Code and Codex, with its own access token.
 - Installs the JamSesh skill and a `/jamsesh` command.
 - Adds two Claude Code hooks: your prompts go into the room's context, and directives from the room
   reach your agent when it finishes a turn.
-- Offers this laptop's whisper (if installed) for room transcription.
-- Opens your JamSesh window: the live canvas, the room's conversation, and your mic.
 
-Then, in Claude Code or Codex, in each repository you're working in:
+Restart the agent, then type the following in each repository you're working in:
 
 ```text
 /jamsesh mobile nav refresh
 ```
 
-The agent joins, claims its workstream, and shows up on the big screen.
+The agent joins, posts a card describing its repository, claims its workstream, and shows up on
+the big screen.
+
+Every paired browser and agent is listed in **Settings > Connected devices**, where the host can
+disconnect any of them.
+
+## If the connection drops
+
+- Your window shows **Reconnecting** and keeps working. Changes you make and lines your mic hears
+  are saved on your laptop and sent, in order and exactly once, when the host is back.
+- Your name, profile, and settings are remembered for each host you've connected to.
+- If the host disconnects your device, your window asks you to connect again with a fresh code.
 
 ## Join remotely, or mix the two
 
 JamSesh works with everyone in the room, everyone remote, or a group in the room with others
 joining from elsewhere.
 
-1. Give remote people a way to reach the host. The simplest is
-   [Tailscale](https://tailscale.com) on the host and on each remote laptop: the host's welcome
-   screen then shows a second join command with its Tailscale address. For an `https` address
-   (no browser flags needed), run `tailscale serve --bg 4747` on the host and start it with
-   `JAMSESH_PUBLIC_URL=https://<host>.<tailnet>.ts.net jamsesh host`.
-2. Remote people run the remote join command and pick **Remote** when their window asks where
-   they are (JamSesh guesses from their address).
+1. On the host, open **Settings > Remote access** and follow the steps. They do the following:
+   - Give the host a free [DuckDNS](https://www.duckdns.org) name, such as `jam.duckdns.org`, kept
+     pointed at your network.
+   - Get an HTTPS certificate from Let's Encrypt for that name, renewed automatically.
+   - Open one port on your router (automatically when the router allows it, or with instructions).
+   - Check that the address works from outside your network.
+2. Remote people connect the same way as people in the room, with the QR code or the address and
+   the code. They pick **Remote** when their window asks where they are (JamSesh guesses from
+   their address).
 3. Keep your usual call (Meet, Zoom) running for voices. JamSesh doesn't carry audio between
    people; it listens to each laptop.
+
+Microphones in browsers need HTTPS, so set up remote access even if everyone is in the room. Over
+plain `http`, laptop windows still work but can't listen.
+
+If your internet provider doesn't give you a public address (the setup detects this), use
+[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) on the host instead: run
+`tailscale funnel --bg 4747` and start the host with `JAMSESH_PUBLIC_URL=<funnel address>`. Only
+the host needs Tailscale.
 
 What changes for remote people:
 
@@ -100,6 +131,11 @@ Headphones on remote laptops keep the transcript cleanest.
    against the mockup before it reports **shipped**.
 6. If the change belongs on another platform too, the brain asks both agents to coordinate, and
    they present desktop beside mobile.
+
+Agents also talk to each other through the host. An agent asks another agent a question (how its
+repository does something, which tokens it uses) and waits for the answer. Each agent posts a card
+describing its repository, so the others know what it has. The brain pairs agents up to compare
+their work, and sends similar work to the agent already doing it.
 
 ## Save and pick up again
 
@@ -226,5 +262,12 @@ cd ~/jamsesh/jamsesh/hub && bun ../scripts/demo.ts http://127.0.0.1:4747
 
 ## Security
 
-The host listens on the local network. The join code gates the API and the MCP endpoint. Only the
-host's own brain can run commands on the host. Keep the session on a network you trust.
+- Every request needs a paired device's token, except the connect page. The 4-character code only
+  works for 30 seconds (plus the previous code, for someone mid-typing). Wrong codes lock out the
+  address after 8 tries and pause pairing for everyone after 60 in 5 minutes.
+- Tokens are long random keys, stored on the host only as hashes. Browsers keep theirs in an
+  HttpOnly cookie. Disconnect a device in **Settings > Connected devices** to revoke it.
+- From outside the network, the host is reachable only over HTTPS. The canvas server and dev
+  servers listen on the host only; JamSesh relays them to paired devices.
+- Only the host itself can change the gateway key, models, and host control, or run commands on
+  the host.

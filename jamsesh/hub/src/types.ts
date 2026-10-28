@@ -47,6 +47,18 @@ export interface Agent {
   lastSeen: number;
   joinedAt: number;
   canvas: "none" | "joining" | "live" | "failed";
+  /** What this agent's repository is, as the agent describes it. */
+  card?: RepoCard | null;
+}
+
+export interface RepoCard {
+  stack: string;
+  designSystem: string;
+  components: string;
+  branch: string;
+  recentChanges: string;
+  notes: string;
+  updatedAt: number;
 }
 
 export interface Workstream {

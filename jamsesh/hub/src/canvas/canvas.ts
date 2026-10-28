@@ -122,7 +122,7 @@ export class Canvas {
     if (!existsSync(config.figcraftServerBin) && config.figcraftServerBin.includes("/")) {
       throw new Error(`figcraft-server not found at ${config.figcraftServerBin}. Run jamsesh/install.sh.`);
     }
-    this.serverProc = Bun.spawn([config.figcraftServerBin, "--listen", `0.0.0.0:${this.port}`, "--data", this.serverDir], {
+    this.serverProc = Bun.spawn([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir], {
       stdout: "ignore",
       stderr: "pipe",
     });

@@ -12,6 +12,9 @@ import { DevProxy } from "./devproxy";
 import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
+import { Auth } from "./auth";
+import { KeepAwake } from "./awake";
+import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
 import type { Agent, Annotation, Artifact, Platform, Utterance } from "./types";
@@ -54,6 +57,8 @@ export interface HubOptions {
   canvas?: boolean;
   whisper?: boolean;
   dataDir?: string;
+  /** Defaults to <dataDir>/team when dataDir is given (tests), else ~/.jamsesh/team. */
+  teamDir?: string;
 }
 
 export class Hub {
@@ -67,12 +72,25 @@ export class Hub {
   devproxy: DevProxy;
   mcp: McpEndpoint;
   autosave: Autosave;
+  auth: Auth;
+  awake: KeepAwake;
+  /** Reachability from anywhere (DuckDNS, certificates, router); team-level, so it survives sessions. */
+  net: Network;
+  /** Open WebSocket connections from people's devices (not the host's own screen). */
+  peopleOnline = 0;
   uploadsDir: string;
 
   constructor(private opts: HubOptions = {}) {
     const dir = opts.dataDir ?? config.dataDir;
     mkdirSync(dir, { recursive: true });
+    const teamDir = opts.teamDir ?? (opts.dataDir ? join(opts.dataDir, "team") : config.teamDir);
+    mkdirSync(teamDir, { recursive: true });
     this.store = new Store(dir);
+    this.store.team = new Store(teamDir, "team.db");
+    this.auth = new Auth(this.store);
+    this.net = new Network(teamDir);
+    // Awake while anyone's window is open or an agent was active in the last ten minutes.
+    this.awake = new KeepAwake(() => this.peopleOnline + this.session.agents().filter((a) => a.status !== "offline" && Date.now() - a.lastSeen < 10 * 60_000).length);
     this.session = new Session(this.store);
     this.host = new HostControl(this.session);
     this.brain = new Brain(this.session, this.host);
@@ -81,6 +99,11 @@ export class Hub {
     this.canvas = new Canvas(this.session);
     this.devproxy = new DevProxy(this.session);
     this.mcp = new McpEndpoint(this);
+    this.session.extraAddresses = () => {
+      const st = this.net.status();
+      return st.enabled && st.publicUrl && st.cert.state === "ok" ? [{ label: "Anywhere", url: st.publicUrl }] : [];
+    };
+
     this.autosave = new Autosave(this, dir);
     this.brain.autosave = this.autosave;
     this.brain.pages = () => this.canvas.pageCache;
@@ -101,7 +124,7 @@ export class Hub {
   }
 
   async start() {
-    const tasks: Promise<unknown>[] = [];
+    const tasks: Promise<unknown>[] = [this.net.start().catch((e) => console.error("net:", e))];
     if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal().then((ok) => console.log(ok ? "whisper: local whisper.cpp ready" : "whisper: no local model, using the gateway")));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
@@ -113,10 +136,12 @@ export class Hub {
   /** Stops, saving a final snapshot first when there is a canvas to save. */
   async shutdown() {
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
+    await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
     this.stop();
   }
 
   stop() {
+    this.awake.stop();
     this.autosave.stop();
     this.brain.stop();
     this.canvas.stop();
@@ -326,7 +351,7 @@ export class Hub {
     if (decisions.length) this.store.setSetting(`decisionsSeen:${agent.id}`, decisions[decisions.length - 1].id);
     const lines = [
       ...directives.map((d) => `Room directive ${d.id} [${d.mode}] (${d.requestedBy}): ${d.text}`),
-      ...messages.map((m) => `Message from ${m.authorName}: ${m.text}`),
+      ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),
       ...decisions.map((d) => `Room decision: ${d.text}`),
     ];
     if (!lines.length) return {};
@@ -352,7 +377,7 @@ export class Hub {
     const reason = [
       "JamSesh has new work for you:",
       ...directives.map((d) => `- Directive ${d.id} [${d.mode}] from ${d.requestedBy}: ${d.text}`),
-      ...messages.map((m) => `- Message from ${m.authorName}: ${m.text}`),
+      ...messages.map((m) => (m.data.askId ? `- QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer it with jam_answer before anything else)` : `- Message from ${m.authorName}: ${m.text}`)),
       "jam_ack each directive as you take it, follow the JamSesh skill, and post jam_update when done.",
     ].join("\n");
     this.session.touchAgent(agent.id, { status: "working" });

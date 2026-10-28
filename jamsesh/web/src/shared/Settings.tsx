@@ -41,12 +41,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
               <span>Name</span>
               <input defaultValue={s.sessionName} onBlur={(e) => e.target.value.trim() && e.target.value !== s.sessionName && update({ sessionName: e.target.value.trim() })} />
             </label>
-            <div className="row between" style={{ fontSize: 14 }}>
-              <span>
-                Join code <strong className="mono">{state.session.code}</strong>
-              </span>
-              <span className="chip mono">{state.session.hubUrl}</span>
-            </div>
+            <div className="chip mono">{state.session.addresses?.map((a) => a.url).join("  ·  ") ?? state.session.hubUrl}</div>
           </Section>
 
           <Section
@@ -181,12 +176,8 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             ))}
           </Section>
 
-          <Section title="Connect a laptop">
-            <p className="help">On each laptop, run this in a terminal. It sets up Claude Code and Codex and opens the JamSesh window.</p>
-            <code className="mono" style={{ display: "block", padding: 12, background: "var(--panel)", borderRadius: 10, fontSize: 13, userSelect: "all" }}>
-              curl -fsSL {state.session.hubUrl}/join.sh | bash
-            </code>
-          </Section>
+{host && <RemoteAccess />}
+          <Paired host={host} />
         </div>
       </aside>
     </>
@@ -230,6 +221,54 @@ function PersonRow({ p }: { p: Person }) {
         </button>
       </span>
     </div>
+  );
+}
+
+function RemoteAccess() {
+  const [st, setSt] = useState<{ enabled: boolean; configured: boolean; publicUrl?: string; cert: { state: string }; reachable: string } | null>(null);
+  useEffect(() => {
+    api("/net/status").then(setSt).catch(() => {});
+  }, []);
+  const live = st?.enabled && st.cert.state === "ok";
+  return (
+    <Section
+      title="Remote access"
+      help="Make this host reachable from anywhere at its own HTTPS address, so people can join from home and phones work too."
+      right={
+        <a className="btn small" href="/setup">
+          {st?.configured ? "Open setup" : "Set up"}
+        </a>
+      }
+    >
+      <div className="chip" style={{ whiteSpace: "normal" }}>
+        {!st ? "Checking…" : live ? `On at ${st.publicUrl}${st.reachable === "yes" ? "" : " (not confirmed reachable yet)"}` : st.configured ? "Set up, but not finished" : "Room only: people on this network can join."}
+      </div>
+    </Section>
+  );
+}
+
+function Paired({ host }: { host: boolean }) {
+  const [list, setList] = useState<{ id: string; kind: string; label: string; lastSeen: number; ip: string }[]>([]);
+  const load = () => api("/paired").then(setList).catch(() => {});
+  useEffect(() => {
+    load();
+  }, []);
+  return (
+    <Section title="Connected devices" help="Laptops, phones and agents paired with this host. Disconnecting one revokes its access right away; it can pair again with a new code.">
+      {list.length === 0 && <div className="empty-note">Nothing paired yet.</div>}
+      {list.map((d) => (
+        <div key={d.id} className="row" style={{ padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 14 }}>
+          <span className="badge neutral" style={{ width: 62, justifyContent: "center" }}>{d.kind === "agent" ? "Agent" : "App"}</span>
+          <span className="grow ellipsis">{d.label}</span>
+          <span className="chip mono" style={{ fontSize: 12 }}>{ago(d.lastSeen)}</span>
+          {host && (
+            <button className="btn ghost small" onClick={() => confirm(`Disconnect ${d.label}?`) && api(`/paired/${d.id}`, undefined, "DELETE").then(load)}>
+              Disconnect
+            </button>
+          )}
+        </div>
+      ))}
+    </Section>
   );
 }
 

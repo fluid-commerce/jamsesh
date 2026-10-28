@@ -260,6 +260,7 @@ export class Brain {
       `## People\n${people.map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""} (weight ${p.weight})${s.store.all("devices").some((d) => d.personId === p.id && d.location === "remote") ? ", remote (sees the big screen in their Screen tab, hears your voice on their laptop)" : ""}`).join("\n") || "(nobody named yet)"}`,
       `## Agents\n${agents.filter((a) => a.status !== "offline").map(fmtAgent).join("\n") || "(no agents connected)"}`,
       historyBrief(s, batch.map((e) => e.text).join(" ")),
+      agents.some((a) => a.card) ? `## Repo cards (what each agent's repository is)\n${agents.filter((a) => a.card && a.status !== "offline").map((a) => `- ${a.name}: ${a.card!.stack}. Design system: ${a.card!.designSystem.slice(0, 200)}${a.card!.components ? `. Components: ${a.card!.components.slice(0, 160)}` : ""}${a.card!.recentChanges ? `. Recent: ${a.card!.recentChanges.slice(0, 160)}` : ""}`).join("\n")}` : "",
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,
       `## Open directives\n${open.map((d) => `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => s.agent(t)?.name).join(", ")}: ${d.text}`).join("\n") || "(none)"}`,
       digest ? `## Session brief\n${digest}` : "",
@@ -506,6 +507,37 @@ export class Brain {
           const after = before.filter((n) => !n.toLowerCase().includes(contains.toLowerCase()));
           s.updateSettings({ brainNotes: after });
           return before.length === after.length ? "No matching note." : "Dropped.";
+        },
+      }),
+      pair_agents: tool({
+        description:
+          "Get agents to work together: compare their variants or builds, review each other's work, agree on shared behavior or tokens across repositories. Each gets a 'coordinate' directive naming the others and the goal, and is told to use jam_ask / jam_message and canvas_render of each other's frames.",
+        inputSchema: z.object({ agentIds: z.array(z.string()).min(2), goal: z.string().describe("What they should compare or agree on, and what to produce (for example a parity view with differences listed)") }),
+        execute: async ({ agentIds, goal }) => {
+          const agents = agentIds.map((id) => s.agent(id)).filter(Boolean) as Agent[];
+          if (agents.length < 2) return "Need at least two agent ids from the Agents list.";
+          for (const a of agents) {
+            const others = agents.filter((o) => o.id !== a.id);
+            s.createDirective({
+              text: `Work with ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ")}: ${goal} Ask them what you need with jam_ask, answer their questions with jam_answer, look at their frames with canvas_render, and post what you agreed and what still differs with jam_update.`,
+              mode: "coordinate",
+              targets: [a.id],
+              requestedBy: requester,
+              sourceEventIds: sourceIds,
+              rationale: "Paired so their work matches.",
+            });
+          }
+          return `Paired ${agents.map((a) => a.name).join(", ")}.`;
+        },
+      }),
+      ask_agent: tool({
+        description: "Ask one agent a question yourself (for example whether its repo already has a component, what its tokens are, how far along it is). The answer shows up in the room feed and in your context.",
+        inputSchema: z.object({ agentId: z.string(), question: z.string() }),
+        execute: async ({ agentId, question }) => {
+          if (!s.agent(agentId)) return "Unknown agent id.";
+          const { answer } = s.ask(null, agentId, question, 45_000);
+          const a = await answer;
+          return a ? `Answer: ${a}` : "No answer within 45 seconds; it will appear in the feed.";
         },
       }),
       save_snapshot: tool({
@@ -808,6 +840,7 @@ const ROUTER_SYSTEM = `You are the room brain for JamSesh, a live session where 
 How to route:
 - Decide between EXPLORE and IMPLEMENT. "Try", "what if", "show me options", "mock up", "let's see a few directions" = explore: the agent makes variants on the shared canvas, named "<Workstream> / <Letter>: <short description>". "Let's do it", "build it", "ship B", "implement that", "do it for real", "in the app" = implement: the agent changes code in its repository, runs its dev server, and checks the build against the chosen mockup.
 - Keep similar work with the agent that already has its context. Check "Agent work history" and "Best matches": a follow-up, tweak, or new variant of something an agent already worked on goes to that agent, even if another agent is idle. Never split one request between agents in the same repository; JamSesh keeps only the one with the most related history. Fan a request out only when it spans different repositories or platforms. Give genuinely new work to the agent whose repository it belongs in, preferring one with fewer unfinished directives.
+- Agents work as a team. When two agents touch related work (the same feature on desktop and mobile, a component and the screen that uses it, a design system and the apps), use pair_agents so they compare and align instead of diverging. When variants from several agents land on the same theme, pair them to review each other's work before the room decides. Use ask_agent when you need a fact only an agent knows (what's in its repo) to route well.
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.
 - When people disagree, weigh by role weight (higher wins) and say whose call it was in the rationale. Don't silently drop the other view: mention it.
 - A decision ("I like B", "go with direction A") should usually do three things: record_decision, then an implement directive to the agent that owns it (mentioning the chosen artifact by title), and spotlight the chosen artifact.

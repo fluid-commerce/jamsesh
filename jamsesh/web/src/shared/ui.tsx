@@ -50,6 +50,8 @@ export function colorFor(state: HubState | null, ref: { personId?: string | null
 export function localize(url: string) {
   try {
     const u = new URL(url);
+    // On the public HTTPS address, dev servers live on their own subdomain: dev-<port>.<host>.
+    if (location.protocol === "https:" && /^(\d+\.){3}\d+$/.test(u.hostname) && u.port) return `https://dev-${u.port}.${location.hostname}${u.pathname}${u.search}`;
     if (/^(\d+\.){3}\d+$/.test(u.hostname) && u.hostname !== location.hostname && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
       u.hostname = location.hostname;
       return u.toString();

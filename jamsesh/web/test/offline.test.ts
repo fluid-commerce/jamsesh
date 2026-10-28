@@ -1,0 +1,193 @@
+import "fake-indexeddb/auto";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { AudioBuffer, AUDIO_MAX_SECONDS, AUDIO_MAX_SEGMENTS, type AudioSeg } from "../src/shared/mic";
+import { backoffMs, idbTable, Outbox, resetDbHandle, type OutboxEntry, type SendResult } from "../src/shared/offline";
+
+const wav = (seconds: number) => new ArrayBuffer(44 + Math.round(seconds * 32000));
+const settle = () => new Promise((r) => setTimeout(r, 5));
+
+function make(send: (e: OutboxEntry) => Promise<SendResult>, extra: Partial<ConstructorParameters<typeof Outbox>[0]> = {}) {
+  const timers: { fn: () => void; ms: number }[] = [];
+  const ob = new Outbox({
+    table: idbTable<OutboxEntry>("outbox"),
+    send,
+    random: () => 0.5,
+    setTimer: (fn, ms) => (timers.push({ fn, ms }), timers.length),
+    clearTimer: () => {},
+    ...extra,
+  });
+  return { ob, timers };
+}
+
+beforeEach(async () => {
+  await idbTable("outbox").clear();
+  await idbTable("audio").clear();
+  resetDbHandle();
+});
+
+describe("outbox", () => {
+  test("sends FIFO with a unique idempotency key per call", async () => {
+    const seen: OutboxEntry[] = [];
+    let online = false;
+    const { ob, timers } = make(async (e) => {
+      if (!online) return { kind: "retry" };
+      seen.push(e);
+      return { kind: "ok" };
+    });
+    await ob.enqueue("POST", "/say", { text: "one" });
+    await ob.enqueue("POST", "/annotations", { x: 1 });
+    await ob.enqueue("DELETE", "/people/p1");
+    await settle();
+    expect(ob.get().pending).toBe(3);
+    expect(seen).toHaveLength(0);
+    online = true;
+    await ob.kick();
+    expect(seen.map((e) => e.path)).toEqual(["/say", "/annotations", "/people/p1"]);
+    expect(new Set(seen.map((e) => e.idem)).size).toBe(3);
+    expect(ob.get().pending).toBe(0);
+    expect(ob.get().synced).toBe(3);
+    expect(timers.length).toBeGreaterThan(0);
+  });
+
+  test("a retried call keeps the same idempotency key", async () => {
+    const keys: string[] = [];
+    let n = 0;
+    const { ob } = make(async (e) => {
+      keys.push(e.idem);
+      return ++n < 3 ? { kind: "retry" } : { kind: "ok" };
+    });
+    await ob.enqueue("POST", "/say", { text: "x" });
+    await settle();
+    await ob.kick();
+    await ob.kick();
+    expect(keys).toHaveLength(3);
+    expect(new Set(keys).size).toBe(1);
+    expect(ob.get().pending).toBe(0);
+  });
+
+  test("survives a reload", async () => {
+    const a = make(async () => ({ kind: "retry" }));
+    await a.ob.enqueue("POST", "/say", { text: "kept" });
+    await a.ob.enqueue("POST", "/say", { text: "kept 2" });
+    resetDbHandle(); // the page is gone; a new one opens the same database
+    const got: string[] = [];
+    const b = make(async (e) => (got.push((e.body as any).text), { kind: "ok" }));
+    await b.ob.load();
+    expect(b.ob.get().pending).toBe(2);
+    await b.ob.kick();
+    expect(got).toEqual(["kept", "kept 2"]);
+  });
+
+  test("caps the queue by count, oldest dropped first", async () => {
+    const { ob } = make(async () => ({ kind: "retry" }), { maxItems: 3 });
+    for (let i = 0; i < 5; i++) await ob.enqueue("POST", "/say", { i });
+    expect(ob.get().items.map((x: any) => x.body.i)).toEqual([2, 3, 4]);
+    expect(ob.get().dropped).toBe(2);
+  });
+
+  test("drops entries older than the max age on load", async () => {
+    let clock = 1_000_000;
+    const a = make(async () => ({ kind: "retry" }), { now: () => clock });
+    await a.ob.enqueue("POST", "/say", { old: true });
+    clock += 8 * 24 * 3600 * 1000;
+    await a.ob.enqueue("POST", "/say", { fresh: true });
+    resetDbHandle();
+    const b = make(async () => ({ kind: "retry" }), { now: () => clock });
+    await b.ob.load();
+    expect(b.ob.get().items.map((x: any) => x.body)).toEqual([{ fresh: true }]);
+  });
+
+  test("backoff grows, is capped, and is jittered", () => {
+    expect(backoffMs(0, () => 1)).toBe(1000);
+    expect(backoffMs(0, () => 0)).toBe(500);
+    expect(backoffMs(3, () => 1)).toBe(8000);
+    expect(backoffMs(20, () => 1)).toBe(30000);
+    expect(backoffMs(20, () => 0)).toBe(15000);
+  });
+
+  test("failed sends schedule increasing backoff timers", async () => {
+    const { ob, timers } = make(async () => ({ kind: "retry" }));
+    await ob.enqueue("POST", "/say", { a: 1 });
+    await settle();
+    expect(timers).toHaveLength(1);
+    timers[0].fn();
+    await settle();
+    timers[1].fn();
+    await settle();
+    expect(timers.map((t) => t.ms)).toEqual([750, 1500, 3000]);
+  });
+
+  test("a call the hub refuses (4xx) is dropped and does not block the queue", async () => {
+    const sent: string[] = [];
+    const { ob } = make(async (e) => {
+      sent.push(e.path);
+      return e.path === "/bad" ? { kind: "drop", status: 400 } : { kind: "ok" };
+    });
+    await ob.enqueue("POST", "/bad", {});
+    await ob.enqueue("POST", "/good", {});
+    await settle();
+    expect(sent).toEqual(["/bad", "/good"]);
+    expect(ob.get().dropped).toBe(1);
+    expect(ob.get().synced).toBe(1);
+  });
+
+  test("401 stops the queue and keeps the work", async () => {
+    let unauthorized = 0;
+    const { ob } = make(async () => ({ kind: "unauthorized" }));
+    ob.onUnauthorized = () => unauthorized++;
+    await ob.enqueue("POST", "/say", { text: "x" });
+    await settle();
+    expect(unauthorized).toBe(1);
+    expect(ob.get().pending).toBe(1);
+  });
+});
+
+describe("audio buffer", () => {
+  const seg = (t0: number, secs = 2): AudioSeg => ({ deviceId: "d1", t0, t1: t0 + secs * 1000, level: -30, noise: -60, wav: wav(secs) });
+
+  test("buffers while offline, then uploads oldest first with original timestamps", async () => {
+    let up = false;
+    const posted: AudioSeg[] = [];
+    const ab = new AudioBuffer(idbTable<AudioSeg>("audio"), async (s) => (up ? (posted.push(s), "ok") : "retry"), () => up);
+    await ab.submit(seg(5000));
+    await ab.submit(seg(1000));
+    await ab.submit(seg(3000));
+    expect(ab.get().segments).toBe(3);
+    expect(ab.get().seconds).toBe(6);
+    up = true;
+    await ab.kick();
+    expect(posted.map((p) => p.t0)).toEqual([1000, 3000, 5000]);
+    expect(posted.map((p) => p.t1)).toEqual([3000, 5000, 7000]);
+    expect(ab.get().segments).toBe(0);
+    expect(ab.get().uploaded).toBe(3);
+  });
+
+  test("goes straight to the hub when it is reachable", async () => {
+    const posted: number[] = [];
+    const ab = new AudioBuffer(idbTable<AudioSeg>("audio"), async (s) => (posted.push(s.t0), "ok"), () => true);
+    await ab.submit(seg(100));
+    expect(posted).toEqual([100]);
+    expect(ab.get().segments).toBe(0);
+  });
+
+  test("caps at 60 segments and about 3 minutes, dropping the oldest", async () => {
+    const ab = new AudioBuffer(idbTable<AudioSeg>("audio"), async () => "retry", () => false);
+    for (let i = 0; i < 70; i++) await ab.submit(seg(i * 1000, 1));
+    expect(ab.get().segments).toBe(AUDIO_MAX_SEGMENTS);
+    const ab2 = new AudioBuffer(idbTable<AudioSeg>("audio"), async () => "retry", () => false);
+    await idbTable("audio").clear();
+    for (let i = 0; i < 20; i++) await ab2.submit(seg(i * 20000, 20));
+    expect(ab2.get().seconds).toBeLessThanOrEqual(AUDIO_MAX_SECONDS);
+    expect(ab2.get().segments).toBe(9);
+  });
+
+  test("survives a reload", async () => {
+    const a = new AudioBuffer(idbTable<AudioSeg>("audio"), async () => "retry", () => false);
+    await a.submit(seg(1000));
+    resetDbHandle();
+    const posted: number[] = [];
+    const b = new AudioBuffer(idbTable<AudioSeg>("audio"), async (s) => (posted.push(s.t0), "ok"), () => true);
+    await b.drain();
+    expect(posted).toEqual([1000]);
+  });
+});

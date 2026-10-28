@@ -16,6 +16,8 @@ type ToolOut = { content: Content[]; isError?: boolean };
 interface Ctx {
   agentId: string | null;
   ip: string;
+  /** The paired device this agent connected with ("host" for agents on the host). */
+  device: string | null;
 }
 
 const PLATFORMS = ["desktop", "mobile", "web", "design", "backend", "other"];
@@ -115,6 +117,38 @@ const JAM_TOOLS = [
     inputSchema: { type: "object", properties: { to: { type: "string" }, text: { type: "string" } }, required: ["to", "text"] },
   },
   {
+    name: "jam_ask",
+    description:
+      "Ask another agent a question and wait for its answer (it is told to answer right away). Use it whenever another agent's knowledge would save you guessing: how their repo does something, what their mockup's spacing is, whether they already built a component, what they decided. Returns the answer, or tells you it's still pending.",
+    inputSchema: {
+      type: "object",
+      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 300; default 120" } },
+      required: ["to", "question"],
+    },
+  },
+  {
+    name: "jam_answer",
+    description: "Answer a question another agent (or the room brain) asked you. Do this as soon as a QUESTION shows up in your inbox, before continuing your own work. Be concrete: file paths, values, names.",
+    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" } }, required: ["askId", "text"] },
+  },
+  {
+    name: "jam_repo_card",
+    description:
+      "Describe your repository for the room and the other agents, right after joining and whenever it changes meaningfully: the stack, where the design system lives (token files, theme, component library paths), key components, your branch, and recent changes. The room brain uses it to route work and to spot what should match across platforms.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        stack: { type: "string", description: "For example 'Expo SDK 52, React Native, TypeScript, Zustand'" },
+        designSystem: { type: "string", description: "Where tokens, theme and shared components live, with the key values (accent, type scale, radii)" },
+        components: { type: "string", description: "Notable components and screens relevant to today's work" },
+        branch: { type: "string" },
+        recentChanges: { type: "string", description: "What changed recently, including uncommitted work" },
+        notes: { type: "string" },
+      },
+      required: ["stack", "designSystem"],
+    },
+  },
+  {
     name: "jam_agents",
     description: "Who is in the session: agents (owner, repo, platform, focus, status, workstreams) and people (name, role).",
     inputSchema: { type: "object", properties: {} },
@@ -204,7 +238,7 @@ export class McpEndpoint {
     return [...JAM_TOOLS, ...canvas];
   }
 
-  async handle(req: Request, ip: string): Promise<Response> {
+  async handle(req: Request, ip: string, device: string | null = null): Promise<Response> {
     const sid = req.headers.get("mcp-session-id");
     if (sid && this.sessions.has(sid)) {
       const s = this.sessions.get(sid)!;
@@ -213,7 +247,7 @@ export class McpEndpoint {
     }
     // An unknown session (the hub restarted): 404 tells the client to start a new one.
     if (sid || req.method !== "POST") return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
-    const ctx: Ctx = { agentId: null, ip };
+    const ctx: Ctx = { agentId: null, ip, device };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => void this.sessions.set(id, { transport, ctx }),
@@ -273,7 +307,8 @@ export class McpEndpoint {
 
     switch (name) {
       case "jam_join": {
-        const machine = ctx.ip === "127.0.0.1" || ctx.ip === "::1" ? "host" : ctx.ip;
+        // The paired device identifies the machine (an address can change between networks).
+        const machine = ctx.device ?? (ctx.ip === "127.0.0.1" || ctx.ip === "::1" ? "host" : ctx.ip);
         const { agent, resumed } = s.registerAgent({
           ownerName: String(args.owner ?? ""),
           harness: args.harness ?? "other",
@@ -363,6 +398,35 @@ export class McpEndpoint {
         s.sendMessage(agent.id, String(args.to), String(args.text));
         return text("Sent.");
       }
+      case "jam_ask": {
+        const agent = this.requireAgent(ctx);
+        const secs = Math.max(5, Math.min(300, Number(args.waitSeconds ?? 120)));
+        const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000);
+        s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
+        const a = await answer;
+        s.touchAgent(agent.id, { status: "working" });
+        return text(a ? `Answer: ${a}` : `No answer yet (question ${askId}). It will arrive in your inbox; carry on and check jam_inbox.`);
+      }
+      case "jam_answer": {
+        const agent = this.requireAgent(ctx);
+        s.answer(agent.id, String(args.askId), String(args.text));
+        return text("Answered.");
+      }
+      case "jam_repo_card": {
+        const agent = this.requireAgent(ctx);
+        const card = {
+          stack: String(args.stack ?? ""),
+          designSystem: String(args.designSystem ?? ""),
+          components: String(args.components ?? ""),
+          branch: String(args.branch ?? agent.branch ?? ""),
+          recentChanges: String(args.recentChanges ?? ""),
+          notes: String(args.notes ?? ""),
+          updatedAt: Date.now(),
+        };
+        s.touchAgent(agent.id, { card, branch: card.branch || agent.branch });
+        s.store.put("agents", s.agent(agent.id)!);
+        return text("Repo card saved. Other agents and the room brain can see it.");
+      }
       case "jam_agents": {
         this.requireAgent(ctx);
         return text(this.roster());
@@ -435,7 +499,7 @@ export class McpEndpoint {
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${s.person(agent.ownerId)?.role ? ` (${s.person(agent.ownerId)!.role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       s.person(agent.ownerId)?.role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
-      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} "${s.hubUrl}/api/upload?code=${s.code}"`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${s.hubUrl}/api/upload" (JAMSESH_TOKEN is in ~/.jamsesh/client.env)`,
       "",
       this.roster(),
       "",
@@ -459,7 +523,7 @@ export class McpEndpoint {
       "Agents:",
       ...agents.map(
         (a) =>
-          `- ${a.name} (${a.id}): ${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, ${a.status}${a.focus ? `, focus: ${a.focus}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
+          `- ${a.name} (${a.id}): ${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, ${a.status}${a.card ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${a.focus}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
       ),
     ].join("\n");
   }
@@ -506,7 +570,11 @@ export class McpEndpoint {
         `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
-    for (const m of messages) out.push(`MESSAGE from ${m.authorName}: ${m.text}`);
+    for (const m of messages) {
+      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}), then continue.`);
+      else if (m.data.answerTo) out.push(`ANSWER from ${m.authorName} (to your question ${m.data.answerTo}): ${m.text}`);
+      else out.push(`MESSAGE from ${m.authorName}: ${m.text}`);
+    }
     return out.join("\n\n");
   }
 }

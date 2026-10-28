@@ -1085,3 +1085,114 @@ select {
   border-color: rgba(124, 196, 255, 0.6);
   background: var(--decision-bg);
 }
+
+/* ---------- pairing ---------- */
+.connect {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+.connect-card {
+  width: min(460px, 100%);
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 10px;
+}
+.connect-card h1 {
+  margin: 14px 0 0;
+  font-size: clamp(26px, 6vw, 34px);
+  letter-spacing: -0.03em;
+}
+.connect-card p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.code-boxes {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+.code-boxes input {
+  height: clamp(64px, 18vw, 84px);
+  min-width: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: clamp(30px, 9vw, 42px);
+  font-weight: 600;
+  text-transform: uppercase;
+  border-radius: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  caret-color: var(--built);
+}
+.code-boxes input:focus {
+  border-color: rgba(69, 224, 160, 0.6);
+  box-shadow: 0 0 0 4px rgba(69, 224, 160, 0.12);
+}
+.code-boxes.error input {
+  animation: shake 0.35s ease;
+  border-color: rgba(255, 107, 94, 0.5);
+}
+.code-boxes.joining input {
+  opacity: 0.6;
+}
+@keyframes shake {
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+.connect-status {
+  min-height: 22px;
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--dim);
+}
+.code-boxes.error + .connect-status {
+  color: var(--warn);
+}
+.join-card {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.join-address {
+  font-size: 15px;
+  color: var(--muted);
+}
+.join-card.large .join-address {
+  font-size: 18px;
+}
+.join-code {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+}
+.join-code .mono {
+  font-size: 44px;
+  font-weight: 650;
+  letter-spacing: 0.22em;
+  margin-right: -0.22em;
+}
+.join-card.large .join-code .mono {
+  font-size: 64px;
+}
+.join-hint {
+  max-width: 340px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--dim);
+}
+.join-hint .mono {
+  color: var(--muted);
+}
+.join-others {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--dim);
+}

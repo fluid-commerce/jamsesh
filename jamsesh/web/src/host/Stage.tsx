@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
 import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, QR, RoomFeed, ScaledFrame, colorFor, useNow } from "../shared/ui";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, RoomFeed, ScaledFrame, colorFor, useNow } from "../shared/ui";
+import { JoinCard } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
@@ -383,20 +384,8 @@ function Welcome({ state }: { state: HubState }) {
             <br />
             <span style={{ color: "var(--dim)" }}>The agents are listening.</span>
           </h1>
-          <div style={{ fontSize: 18, color: "var(--muted)", marginBottom: 12 }}>On each laptop, run</div>
-          <div style={{ display: "grid", gap: 10 }}>
-            {(state.session.addresses?.length ? state.session.addresses : [{ label: "", url: state.session.hubUrl }]).map((a) => (
-              <div key={a.url} className="row" style={{ gap: 14 }}>
-                {state.session.addresses?.length > 1 && <span className="label" style={{ width: 150 }}>{a.label}</span>}
-                <code className="mono" style={{ display: "inline-block", fontSize: "clamp(15px, 1.2vw, 22px)", padding: "14px 18px", background: "var(--panel)", border: "1px solid var(--line-2)", borderRadius: 14 }}>
-                  curl -fsSL {a.url}/join.sh | bash
-                </code>
-              </div>
-            ))}
-          </div>
-          <div style={{ fontSize: 18, color: "var(--muted)", marginTop: 18 }}>
-            then type <span className="mono" style={{ color: "var(--text)" }}>/jamsesh</span> in Claude Code or Codex. Join code{" "}
-            <span className="mono" style={{ color: "var(--text)", letterSpacing: "0.12em" }}>{state.session.code}</span>
+          <div style={{ fontSize: 20, color: "var(--muted)", maxWidth: 560, lineHeight: 1.5 }}>
+            Scan the code with your phone, or open the address on your laptop and type the code. To bring your agent, tell it the address and the code.
           </div>
           {state.people.length > 0 && (
             <div className="row" style={{ marginTop: 34, gap: 14, flexWrap: "wrap" }}>
@@ -409,10 +398,7 @@ function Welcome({ state }: { state: HubState }) {
             </div>
           )}
         </div>
-        <div style={{ display: "grid", justifyItems: "center", gap: 10 }}>
-          <QR text={`${state.session.hubUrl}/client?code=${state.session.code}`} size={180} />
-          <span className="chip">Open the board on your phone</span>
-        </div>
+        <JoinCard large />
       </div>
     </div>
   );

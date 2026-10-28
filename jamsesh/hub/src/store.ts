@@ -37,6 +37,23 @@ export type CollectionName = keyof Collections;
 
 export const PALETTE = ["#FF6B4A", "#3E8BFF", "#22C08B", "#B36BFF", "#FFB020", "#FF4FA3", "#18C6D6", "#8FD14F"];
 
+/** Collections and settings that belong to the team and outlive any one session. */
+const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
+const TEAM_SETTINGS = new Set<string>([
+  "gatewayKey",
+  "brainName",
+  "brainNotes",
+  "brainEnabled",
+  "voiceReplies",
+  "voice",
+  "models",
+  "transcription",
+  "hostControl",
+  "pairSecret",
+  "pairedDevices",
+  "sessions",
+]);
+
 export function newId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
 }
@@ -44,6 +61,9 @@ export function newId(prefix: string) {
 export class Store {
   db: Database;
   private cache = new Map<CollectionName, Map<string, any>>();
+
+  /** The team store (people, devices, voiceprints, team settings); null when this is the team store. */
+  team: Store | null = null;
 
   constructor(dir: string, file = "jamsesh.db") {
     this.db = new Database(join(dir, file), { create: true });
@@ -91,14 +111,17 @@ export class Store {
   }
 
   all<K extends CollectionName>(c: K): Collections[K][] {
+    if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.all(c);
     return [...this.map(c).values()];
   }
 
   get<K extends CollectionName>(c: K, id: string): Collections[K] | undefined {
+    if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.get(c, id);
     return this.map(c).get(id);
   }
 
   put<K extends CollectionName>(c: K, doc: Collections[K] & { id: string }, broadcast = true): Collections[K] {
+    if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.put(c, doc, broadcast);
     this.map(c).set(doc.id, doc);
     this.db
       .query("INSERT OR REPLACE INTO docs (collection, id, json, updated) VALUES (?, ?, ?, ?)")
@@ -113,7 +136,8 @@ export class Store {
     return this.put(c, { ...cur, ...fields } as any);
   }
 
-  remove(c: CollectionName, id: string) {
+  remove(c: CollectionName, id: string): void {
+    if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.remove(c, id);
     this.map(c).delete(id);
     this.db.query("DELETE FROM docs WHERE collection = ? AND id = ?").run(c, id);
     bus.changed(c);
@@ -122,11 +146,13 @@ export class Store {
   // ---- settings ----
 
   setting<T>(key: string, fallback: T): T {
+    if (this.team && TEAM_SETTINGS.has(key)) return this.team.setting(key, fallback);
     const row = this.db.query("SELECT value FROM settings WHERE key = ?").get(key) as any;
     return row ? (JSON.parse(row.value) as T) : fallback;
   }
 
-  setSetting(key: string, value: unknown) {
+  setSetting(key: string, value: unknown): void {
+    if (this.team && TEAM_SETTINGS.has(key)) return this.team.setSetting(key, value);
     this.db.query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, JSON.stringify(value));
   }
 
@@ -245,7 +271,8 @@ export class Store {
 
   // ---- voiceprints ----
 
-  addVoiceSample(personId: string, embedding: Float32Array) {
+  addVoiceSample(personId: string, embedding: Float32Array): void {
+    if (this.team) return this.team.addVoiceSample(personId, embedding);
     this.db.query("INSERT INTO voiceprints (person_id, ts, embedding) VALUES (?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)));
     // Keep the 40 most recent samples per person.
     this.db
@@ -257,13 +284,15 @@ export class Store {
   }
 
   voiceSamples(): { personId: string; embedding: Float32Array }[] {
+    if (this.team) return this.team.voiceSamples();
     return (this.db.query("SELECT person_id, embedding FROM voiceprints").all() as any[]).map((r) => ({
       personId: r.person_id,
       embedding: new Float32Array(new Uint8Array(r.embedding).buffer),
     }));
   }
 
-  clearVoiceprint(personId: string) {
+  clearVoiceprint(personId: string): void {
+    if (this.team) return this.team.clearVoiceprint(personId);
     this.db.query("DELETE FROM voiceprints WHERE person_id = ?").run(personId);
   }
 }
