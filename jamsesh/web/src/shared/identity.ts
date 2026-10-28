@@ -27,7 +27,22 @@ export interface Identity {
 const MAX_SESSIONS = 20;
 const memory = new Map<string, Identity>();
 
-const origin = () => (typeof location === "undefined" ? "" : location.origin);
+// The host this window talks to. In the Mac app every host is reached at the same local address
+// (its relay), so the host's own id keeps identities apart; set before anything reads them.
+let hostKey = "";
+export function setHostKey(id: string) {
+  if (!id || hostKey) return;
+  hostKey = id;
+  // First time with ids: the identity saved under the plain address belongs to this host.
+  const plain = lsGet(storageKey(location.origin));
+  if (plain && !lsGet(storageKey(`${location.origin}#${id}`))) {
+    try {
+      localStorage.setItem(storageKey(`${location.origin}#${id}`), plain);
+    } catch {}
+  }
+}
+export const currentHostKey = () => hostKey;
+const origin = () => (typeof location === "undefined" ? "" : hostKey ? `${location.origin}#${hostKey}` : location.origin);
 const storageKey = (o: string) => `jamsesh.identity::${o}`;
 
 function blank(hubOrigin: string): Identity {

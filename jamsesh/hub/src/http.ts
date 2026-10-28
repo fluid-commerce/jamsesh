@@ -102,7 +102,13 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           return json({ token: r.token, deviceId: r.device.id });
         }
         if (path === "/api/pair/code") return local ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad("Only the host shows the code.", 403);
-        if (path === "/api/pair/info") return json({ name: s.settings().sessionName, brainName: s.settings().brainName });
+        if (path === "/api/pair/info") {
+          // A stable id for this host, so a window that reaches several hosts at one address (the Mac
+          // app's relay) keeps each host's identity and unsent changes apart.
+          let hostId = s.store.setting<string>("hostId", "");
+          if (!hostId) s.store.setSetting("hostId", (hostId = crypto.randomUUID().slice(0, 12)));
+          return json({ name: s.settings().sessionName, brainName: s.settings().brainName, hostId });
+        }
         if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
         if (path === "/collab" || path.startsWith("/collab/")) {
           // The canvas server checks its own link tokens; JamSesh only relays.

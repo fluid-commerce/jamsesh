@@ -3,6 +3,7 @@
 //
 // The outbox sends every queued call with an `x-jam-idem` header. The hub dedupes on it,
 // so a call that reached the hub but whose response was lost can be retried safely.
+import { currentHostKey } from "./identity";
 import { useSyncExternalStore } from "react";
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,8 @@ export interface Table<T> {
   clear(): Promise<void>;
 }
 
-const DB_NAME = "jamsesh-offline";
+// One queue per host: changes made for one host never replay into another.
+const DB_NAME = () => (currentHostKey() ? `jamsesh-offline-${currentHostKey()}` : "jamsesh-offline");
 const STORES = ["outbox", "audio"] as const;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
@@ -53,7 +55,7 @@ function openDb(): Promise<IDBDatabase | null> {
   dbPromise = new Promise((resolve) => {
     try {
       if (typeof indexedDB === "undefined") return resolve(null);
-      const req = indexedDB.open(DB_NAME, 1);
+      const req = indexedDB.open(DB_NAME(), 1);
       req.onupgradeneeded = () => {
         for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: "seq", autoIncrement: true });
       };

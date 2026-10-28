@@ -17,9 +17,9 @@ export function ConnectionBanner() {
   const au = useBufferedAudio();
   const update = useUpdateAvailable();
   const [tick, setTick] = useState(0);
-  const [outage, setOutage] = useState<{ synced: number; uploaded: number } | null>(null);
-  const latest = useRef({ synced: ob.synced, uploaded: au.uploaded });
-  latest.current = { synced: ob.synced, uploaded: au.uploaded };
+  const [outage, setOutage] = useState<{ synced: number; uploaded: number; dropped: number } | null>(null);
+  const latest = useRef({ synced: ob.synced, uploaded: au.uploaded, dropped: ob.dropped });
+  latest.current = { synced: ob.synced, uploaded: au.uploaded, dropped: ob.dropped };
 
   const down = status === "connecting" || status === "offline";
   const busy = ob.pending > 0 || au.segments > 0;
@@ -60,6 +60,8 @@ export function ConnectionBanner() {
   if (!kind) return null;
 
   const synced = outage ? ob.synced - outage.synced + (au.uploaded - outage.uploaded) : 0;
+  // Changes the host couldn't apply (the thing was deleted meanwhile, or it kept failing): said, not hidden.
+  const dropped = outage ? ob.dropped - outage.dropped : 0;
 
   return (
     <>
@@ -79,6 +81,7 @@ export function ConnectionBanner() {
             <span className="cxb-title">Back online</span>
             <span className="cxb-sub">
               {busy ? `sending what you saved${bits.length ? ` · ${bits.join(" · ")}` : ""}` : synced > 0 ? `synced ${plural(synced, "change")}` : "all caught up"}
+              {!busy && dropped > 0 ? ` · ${plural(dropped, "change")} couldn't be applied (deleted meanwhile)` : ""}
             </span>
           </>
         )}

@@ -40,6 +40,7 @@ export const PALETTE = ["#FF6B4A", "#3E8BFF", "#22C08B", "#B36BFF", "#FFB020", "
 /** Collections and settings that belong to the team and outlive any one session. */
 const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
 const TEAM_SETTINGS = new Set<string>([
+  "hostId",
   "gatewayKey",
   "brainName",
   "brainNotes",
