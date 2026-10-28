@@ -733,3 +733,33 @@ textarea:focus {
     margin-left: 18px;
   }
 }
+
+/* Client header: everything on one line; secondary controls collapse to icons. */
+.client-header > div {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.client-header .shr-controls {
+  flex-wrap: nowrap;
+}
+.client-header .shr-btn:not(.stop) {
+  font-size: 0;
+  gap: 0;
+  padding: 0 10px;
+}
+.client-header .shr-btn .shr-ico {
+  font-size: 14px;
+}
+.client-header .rec-btn,
+.client-header .an-toggle {
+  white-space: nowrap;
+}
+.client-header .big-screen-chip {
+  max-width: 220px;
+  display: inline-block;
+}
+@media (max-width: 1380px) {
+  .client-header .big-screen-chip {
+    display: none;
+  }
+}

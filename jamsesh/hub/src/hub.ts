@@ -187,10 +187,10 @@ export class Hub {
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
-    for (const m of w.pointer.filter((m) => m.kind !== "move")) {
-      s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" });
-    }
     if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
+    const pointed = w.pointer
+      .filter((m) => m.kind !== "move")
+      .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));
     const ev = s.store.addEvent({
       kind: "speech",
       authorType: "person",
@@ -200,6 +200,8 @@ export class Hub {
       relevance: "work",
       data: { direct: true, recorded: true, pointer: marks },
     });
+    // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
+    for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
     this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
     return { ok: true, eventId: ev.id, text: said, pointed: marks };
   }

@@ -4,6 +4,7 @@ import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
 import { Stage } from "./Stage";
+import { AnnotateToggle } from "../shared/annotate";
 
 const DEVICE = deviceId("host");
 const mic = new Mic(DEVICE);
@@ -126,6 +127,7 @@ export function HostView() {
             {micStatus.on ? <Meter db={micStatus.level} /> : null}
             {micStatus.on ? "Room mic" : "Room mic muted"}
           </button>
+          <AnnotateToggle />
           <BrainPill status={brain.status} error={brain.lastError} name={state.settings.brainName} />
           <span className="mono" style={{ color: "var(--muted)", letterSpacing: "0.14em", fontSize: 15 }} title="Join code">
             {state.session.code}

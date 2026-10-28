@@ -6,11 +6,12 @@ import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
+import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
 
-type Tab = "canvas" | "work" | "agents";
+type Tab = "canvas" | "work" | "pins" | "agents";
 
 export function ClientView() {
   const { state, connected } = useHub();
@@ -60,7 +61,7 @@ export function ClientView() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <header className="row between" style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none" }}>
+      <header className="row between client-header" style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none", gap: 12 }}>
         <div className="row" style={{ gap: 12 }}>
           <Logo size={26} />
           <strong style={{ fontWeight: 650 }}>JamSesh</strong>
@@ -71,6 +72,7 @@ export function ClientView() {
             [
               ["canvas", "Canvas"],
               ["work", "Work"],
+              ["pins", `Pins${state.annotations.filter((a) => a.status === "open").length ? ` · ${state.annotations.filter((a) => a.status === "open").length}` : ""}`],
               ["agents", "Agents"],
             ] as const
           ).map(([t, label]) => (
@@ -80,13 +82,15 @@ export function ClientView() {
           ))}
         </nav>
         <div className="row" style={{ gap: 10 }}>
-          <span className="chip" title="What the big screen shows">
+          <span className="chip big-screen-chip" title="What the big screen shows">
             Big screen: {state.stage.mode === "welcome" ? "board" : state.stage.title || state.stage.mode}
           </span>
           <button className={`btn small ${micStatus.on ? "on" : ""}`} onClick={toggleMic} title={micStatus.error ?? "Mute or unmute (M). Your laptop's mic helps JamSesh hear and recognize you."}>
             {micStatus.on ? <Meter db={micStatus.level} /> : null}
             {micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Muted"}
           </button>
+          <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
+          <AnnotateToggle />
           <ShareControls personId={me.id} />
           <button className="row btn ghost small" onClick={() => setProfile(true)} title="Your profile: photo, title, voice">
             <PhotoAvatar person={me} size={22} />
@@ -103,10 +107,16 @@ export function ClientView() {
 
       <main style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>
-          <div style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
+          <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
             <CanvasFrame kind="edit" name={me.name} title="Shared canvas" />
+            <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
           </div>
-          {tab === "work" && <WorkGallery state={state} />}
+          {tab === "work" && <WorkGallery state={state} personId={me.id} />}
+          {tab === "pins" && (
+            <div className="scrollbars-thin" style={{ position: "absolute", inset: 0, overflowY: "auto", padding: 20 }}>
+              <AnnotationsPanel personId={me.id} />
+            </div>
+          )}
           {tab === "agents" && <AgentsPanel state={state} />}
         </section>
 
@@ -207,7 +217,12 @@ function SayBox({ personId, brainName }: { personId: string; brainName: string }
   );
 }
 
-function WorkGallery({ state }: { state: HubState }) {
+function PinSlot({ target, personId }: { target: { kind: "canvas" | "artifact" | "web" | "screen"; ref: string; label: string }; personId: string }) {
+  const mode = useAnnotateMode();
+  return <PinLayer target={target} personId={personId} enabled={mode.on} />;
+}
+
+function WorkGallery({ state, personId }: { state: HubState; personId: string }) {
   const [filter, setFilter] = useState<"all" | "mockup" | "built">("all");
   const groups = useMemo(() => {
     const items = state.artifacts.filter((a) => filter === "all" || a.stage === filter);
@@ -240,8 +255,9 @@ function WorkGallery({ state }: { state: HubState }) {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
             {items.map((a) => (
-              <div key={a.id} style={{ height: 300, display: "flex" }}>
+              <div key={a.id} data-jam-target={JSON.stringify({ kind: "artifact", ref: a.id, label: a.title })} style={{ height: 300, display: "flex", position: "relative" }}>
                 <ArtifactTile art={a} state={state} variant={a.variant || undefined} live={false} onClick={() => show([a], a.title)} />
+                <PinSlot target={{ kind: "artifact", ref: a.id, label: a.title }} personId={personId} />
               </div>
             ))}
           </div>

@@ -268,7 +268,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string): Promise<Respon
     return ev ? json(ev) : bad("No open annotations to send.");
   }
   m = path.match(/^\/annotations\/([\w-]+)$/);
-  if (m && req.method === "PATCH") return json(s.store.patch("annotations", m[1], { text: body?.text, status: body?.status }));
+  if (m && req.method === "PATCH") {
+    const fields: Record<string, unknown> = {};
+    if (typeof body?.text === "string") fields.text = body.text;
+    if (["open", "sent", "done"].includes(body?.status)) fields.status = body.status;
+    return json(s.store.patch("annotations", m[1], fields));
+  }
   if (m && req.method === "DELETE") return (s.store.remove("annotations", m[1]), json({ ok: true }));
 
   // ---- voice enrollment: a person reads a sentence so JamSesh knows their voice ----
