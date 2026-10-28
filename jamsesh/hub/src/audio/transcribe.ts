@@ -20,11 +20,12 @@ const HALLUCINATIONS = [
   /^\s*(thank you|thanks)( (so much|for watching|for listening))?[.!]?\s*$/i,
   /^\s*(you|bye|okay\.?)\s*$/i,
   /^\s*[\[(].*[\])]\s*$/, // [BLANK_AUDIO], (music)
+  /^\s*\*[^*]+\*\s*$/, // *sad music*, *applause*
   /subtitles by|amara\.org|transcribed by/i,
 ];
 
 /** Video-outro lines whisper invents from noise; nobody says these in a working session. */
-const NEVER_SAID = /next video|like and subscribe|see you (in the )?next (one|time)|thanks for watching|don'?t forget to subscribe/i;
+const NEVER_SAID = /next video|like and subscribe|see you (in the )?next (one|time)|thanks for watching|don'?t forget to subscribe|welcome to the show|^\s*\*[^*]+\*\s*$/i;
 
 /**
  * Whisper invents "Thank you." or a lone full stop for silence and steady noise, at any

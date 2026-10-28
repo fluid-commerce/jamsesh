@@ -38,9 +38,17 @@ pub fn runtime(resources: Option<&Path>) -> Result<Runtime, String> {
 
 /// The JamSesh checkout that holds the hub: `$JAMSESH_REPO`, the one this app was built from, or ~/jamsesh.
 fn checkout() -> Result<(PathBuf, PathBuf), String> {
-    let candidates = [std::env::var_os("JAMSESH_REPO").map(PathBuf::from), option_env!("JAMSESH_BUILD_REPO").map(PathBuf::from), Some(home().join("jamsesh"))];
-    let repo = candidates.into_iter().flatten().find(|r| r.join("jamsesh/hub/src/index.ts").is_file()).ok_or("Hosting needs the JamSesh host files on this Mac (run jamsesh/install.sh in the JamSesh repository once).")?;
-    let bun = [home().join(".bun/bin/bun"), PathBuf::from("/opt/homebrew/bin/bun"), PathBuf::from("/usr/local/bin/bun")].into_iter().find(|b| b.is_file()).ok_or("Hosting needs Bun on this Mac: curl -fsSL https://bun.sh/install | bash")?;
+    let candidates =
+        [std::env::var_os("JAMSESH_REPO").map(PathBuf::from), option_env!("JAMSESH_BUILD_REPO").map(PathBuf::from), Some(home().join("jamsesh"))];
+    let repo = candidates
+        .into_iter()
+        .flatten()
+        .find(|r| r.join("jamsesh/hub/src/index.ts").is_file())
+        .ok_or("Hosting needs the JamSesh host files on this Mac (run jamsesh/install.sh in the JamSesh repository once).")?;
+    let bun = [home().join(".bun/bin/bun"), PathBuf::from("/opt/homebrew/bin/bun"), PathBuf::from("/usr/local/bin/bun")]
+        .into_iter()
+        .find(|b| b.is_file())
+        .ok_or("Hosting needs Bun on this Mac: curl -fsSL https://bun.sh/install | bash")?;
     Ok((repo, bun))
 }
 
@@ -62,7 +70,10 @@ impl Hub {
             }
         }
         let rt = runtime(resources)?;
-        let port = PORTS.into_iter().find(|p| std::net::TcpListener::bind(("0.0.0.0", *p)).is_ok() && std::net::TcpListener::bind(("::", *p)).is_ok()).ok_or("Ports 4747, 4848 and 4949 are all in use by other apps.")?;
+        let port = PORTS
+            .into_iter()
+            .find(|p| std::net::TcpListener::bind(("0.0.0.0", *p)).is_ok() && std::net::TcpListener::bind(("::", *p)).is_ok())
+            .ok_or("Ports 4747, 4848 and 4949 are all in use by other apps.")?;
         let _ = create_dir_all(log_dir);
         let log = OpenOptions::new().create(true).append(true).open(log_dir.join("hub.log")).map_err(|e| e.to_string())?;
         let err = log.try_clone().map_err(|e| e.to_string())?;
@@ -114,7 +125,6 @@ impl Hub {
         }
         let _ = child.kill();
     }
-
 }
 
 impl Drop for Hub {
@@ -122,4 +132,3 @@ impl Drop for Hub {
         self.stop();
     }
 }
-

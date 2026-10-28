@@ -211,7 +211,11 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
     if let Some(old) = inner.relay.take() {
         old.stop();
     }
-    let agents = proxy::post(&origin, "/api/pair/agents", None).await.ok().and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()).and_then(|v| v["token"].as_str().map(str::to_string));
+    let agents = proxy::post(&origin, "/api/pair/agents", None)
+        .await
+        .ok()
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["token"].as_str().map(str::to_string));
     inner.relay = proxy::start(proxy::Upstream::parse(&origin)?, None, agents, RELAY_PORT, |_| {}).await.ok();
     inner.cfg.role = Some("host".into());
     state.save(&inner.cfg);
@@ -246,7 +250,10 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
         up = proxy::Upstream::parse(raw)?;
     }
     if !proxy::healthy(&up.origin).await {
-        return Err(format!("No JamSesh host answered at {}. Check the address, and that this Mac is on the same network or the host has remote access set up.", up.origin));
+        return Err(format!(
+            "No JamSesh host answered at {}. Check the address, and that this Mac is on the same network or the host has remote access set up.",
+            up.origin
+        ));
     }
     let origin = up.origin.clone();
     let origin_for_agents = origin.clone();
@@ -290,10 +297,8 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     open_window(app, "client", &url, "JamSesh")?;
     close_start(app);
     refresh_tray(app).await;
-    if needs_agents {
-        if let Some(tok) = token {
-            fetch_agents_token(app, &origin_for_agents, &tok).await;
-        }
+    if needs_agents && let Some(tok) = token {
+        fetch_agents_token(app, &origin_for_agents, &tok).await;
     }
     if paired {
         offer_agents(app.clone());
@@ -434,7 +439,8 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
     let _ = app;
     if out.status.success() {
-        Ok("Claude Code and Codex on this Mac are connected. Restart them, then say \"connect to jamsesh\" in each repository you're working in.".to_string())
+        Ok("Claude Code and Codex on this Mac are connected. Restart them, then say \"connect to jamsesh\" in each repository you're working in."
+            .to_string())
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         Err(format!("Setup didn't finish: {}", err.lines().last().unwrap_or("unknown error")))
@@ -483,26 +489,33 @@ async fn refresh_tray(app: &AppHandle) {
         Some(p) => proxy::get(p, "/api/state").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()),
         None => None,
     };
-    if role.as_deref() == Some("join") {
-        if let Some(st) = &st {
-            sync_mirrors(&state, st).await;
-        }
+    if role.as_deref() == Some("join")
+        && let Some(st) = &st
+    {
+        sync_mirrors(&state, st).await;
     }
     // Who's here: people whose windows checked in during the last two minutes, and live agents.
-    let present = match st {
-        Some(st) => Some({
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
-            let mut people: Vec<String> = st["devices"].as_array().into_iter().flatten().filter(|d| d["kind"] == "client" && now - d["lastSeen"].as_f64().unwrap_or(0.0) < 120_000.0).filter_map(|d| d["personId"].as_str().map(str::to_string)).collect();
-            people.sort();
-            people.dedup();
-            let agents = st["agents"].as_array().into_iter().flatten().filter(|a| a["status"] != "offline").count();
-            let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-            format!("{}, {} here", plural(people.len(), "person", "people"), plural(agents, "agent", "agents"))
-        }),
-        None => None,
-    };
+    let present = st.map(|st| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        let mut people: Vec<String> = st["devices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|d| d["kind"] == "client" && now - d["lastSeen"].as_f64().unwrap_or(0.0) < 120_000.0)
+            .filter_map(|d| d["personId"].as_str().map(str::to_string))
+            .collect();
+        people.sort();
+        people.dedup();
+        let agents = st["agents"].as_array().into_iter().flatten().filter(|a| a["status"] != "offline").count();
+        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        format!("{}, {} here", plural(people.len(), "person", "people"), plural(agents, "agent", "agents"))
+    });
     let code = match hub_port {
-        Some(p) => proxy::get(p, "/api/pair/code").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()).and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string)),
+        Some(p) => proxy::get(p, "/api/pair/code")
+            .await
+            .ok()
+            .and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("code").and_then(|c| c.as_str()).map(str::to_string)),
         None => None,
     };
     let Some(tray) = app.tray_by_id("main") else { return };
@@ -530,7 +543,14 @@ async fn refresh_tray(app: &AppHandle) {
                 menu.append(&MenuItem::with_id(app, "nextdisplay", "Move the big screen to the next display", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
-                menu.append(&tauri::menu::CheckMenuItem::with_id(app, "userless", "Use every display (nobody uses this Mac)", true, userless, None::<&str>)?)?;
+                menu.append(&tauri::menu::CheckMenuItem::with_id(
+                    app,
+                    "userless",
+                    "Use every display (nobody uses this Mac)",
+                    true,
+                    userless,
+                    None::<&str>,
+                )?)?;
                 menu.append(&MenuItem::with_id(app, "setup", "Set up this Mac…", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "remote", "Set up remote access…", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -639,7 +659,12 @@ async fn start_info(app: AppHandle, state: State<'_, Arc<App>>) -> Result<StartI
     let inner = state.inner.lock().await;
     let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
     let problem = host::runtime(resources.as_deref()).err();
-    Ok(StartInfo { can_host: problem.is_none(), host_problem: problem, last_host: inner.cfg.host_url.clone(), last_host_name: inner.cfg.host_name.clone() })
+    Ok(StartInfo {
+        can_host: problem.is_none(),
+        host_problem: problem,
+        last_host: inner.cfg.host_url.clone(),
+        last_host_name: inner.cfg.host_name.clone(),
+    })
 }
 
 #[tauri::command]
@@ -733,15 +758,38 @@ fn relaunch(app: AppHandle) {
 fn main() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![start_info, nearby_hosts, host_here, join, perm_status, perm_request, perm_settings, finish_setup, relaunch, remote_setup, get_userless, toggle_userless])
+        .invoke_handler(tauri::generate_handler![
+            start_info,
+            nearby_hosts,
+            host_here,
+            join,
+            perm_status,
+            perm_request,
+            perm_settings,
+            finish_setup,
+            relaunch,
+            remote_setup,
+            get_userless,
+            toggle_userless
+        ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-            let state = Arc::new(App { inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }), hosts: discover::start(), dir, tray_shown: std::sync::Mutex::new(String::new()) });
+            let state = Arc::new(App {
+                inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }),
+                hosts: discover::start(),
+                dir,
+                tray_shown: std::sync::Mutex::new(String::new()),
+            });
             app.manage(state.clone());
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
-            TrayIconBuilder::with_id("main").icon(icon).icon_as_template(true).show_menu_on_left_click(true).on_menu_event(|app, e| on_menu(app, e.id().as_ref())).build(app)?;
+            TrayIconBuilder::with_id("main")
+                .icon(icon)
+                .icon_as_template(true)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, e| on_menu(app, e.id().as_ref()))
+                .build(app)?;
 
             // Pick up where this Mac left off: keep hosting, or rejoin the same host.
             let handle = app.handle().clone();
@@ -773,10 +821,10 @@ fn main() {
         RunEvent::ExitRequested { api, code: None, .. } => api.prevent_exit(),
         RunEvent::Exit => {
             let state = app.state::<Arc<App>>().inner().clone();
-            if let Ok(mut inner) = state.inner.try_lock() {
-                if let Some(mut h) = inner.hub.take() {
-                    h.stop();
-                }
+            if let Ok(mut inner) = state.inner.try_lock()
+                && let Some(mut h) = inner.hub.take()
+            {
+                h.stop();
             }
         }
         RunEvent::Reopen { .. } => on_menu(app, "reopen"),

@@ -103,7 +103,12 @@ fn automation(ask: bool) -> State {
 }
 
 fn devtools() -> State {
-    let ok = Command::new("/usr/bin/xcrun").args(["simctl", "help"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+    let ok = Command::new("/usr/bin/xcrun")
+        .args(["simctl", "help"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
     if ok { State::Granted } else { State::Missing }
 }
 

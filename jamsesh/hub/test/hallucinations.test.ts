@@ -16,3 +16,9 @@ test("real lines that mention names survive", () => {
   expect(cleanTranscript("That was Chey", 1.5, 20, names)).toBe("That was Chey");
   expect(cleanTranscript("Let's go with B", 1.5, 20, names)).toBe("Let's go with B");
 });
+
+test("sound descriptions in asterisks are dropped (seen on the host: *sad music*)", () => {
+  expect(cleanTranscript("*sad music*", 3, 40)).toBe("");
+  expect(cleanTranscript("Welcome to the show.", 2, 40)).toBe("");
+  expect(cleanTranscript("Show the *new* nav", 2, 40)).toBe("Show the *new* nav");
+});
