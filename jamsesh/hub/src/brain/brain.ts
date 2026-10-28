@@ -28,7 +28,7 @@ const triageSchema = z.object({
   actionable: z.boolean().describe("True when the router should act on these lines now"),
   introductions: z
     .array(z.object({ name: z.string(), role: z.string() }))
-    .describe("People who stated their name or role, for example 'I'm Felipe, I run product'"),
+    .describe("People whose name and role were stated, by themselves ('I'm Felipe, I run product') or by someone else ('this is Dana, she runs support')"),
 });
 
 export type Triage = z.infer<typeof triageSchema>;
@@ -472,6 +472,7 @@ For each new line decide:
 - intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change), "decision" (the team picks a direction: "let's go with B"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "none".
 
 Be conservative. Sarcasm and jokes are never directives ("let's just delete the whole app lol" is banter). Musing ("I wonder if...") is discussion unless it ends in an ask. A directive addressed to a person, not an agent ("Felipe, can you grab lunch"), is not work.
+Introductions: fill "introductions" whenever a name and what the person does come up, whether they say it themselves ("I'm Felipe, I run product") or someone else does ("this is Dana, she runs support"). Use the role they gave, and leave out anyone whose name was only mentioned in passing.
 Set actionable to true only when at least one line is a directive, decision, present, or question with confidence above 0.55.`;
 
 const ROUTER_SYSTEM = `You are the room brain for JamSesh, a live session where several people and their coding agents (Claude Code and Codex, one or more per person) work together. Agents run on people's laptops in different repositories. You route what the room says to the right agents and keep the big screen useful.

@@ -37,6 +37,8 @@ interface Group {
   timer: ReturnType<typeof setTimeout> | null;
   utteranceId: string | null;
   finalizedWith: string | null;
+  /** Set while the group is being transcribed, so a copy arriving now still joins it. */
+  busy: Promise<void> | null;
 }
 
 export interface SpeakerGuess {
@@ -50,11 +52,17 @@ const MIN_OVERLAP = 0.45;
 const BASE_SETTLE_MS = 700;
 const MAX_SETTLE_MS = 3500;
 const KEEP_FINAL_MS = 15_000;
+const CLEAN_SNR = 12;
+const MAX_PRINT_SAMPLES = 40;
+/** Softmax temperature over voiceprint similarities (cosine units). */
+const VOICE_TEMP = 0.05;
 
 export class AudioPipeline {
   private open: Group[] = [];
   private finalized: Group[] = [];
   private lag = new Map<string, number>();
+  /** Unconfirmed first voice samples per person (see autoEnroll). */
+  private candidates = new Map<string, Float32Array[][]>();
   voiceprints: Voiceprints;
   /** Called with each new or updated room line. */
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
@@ -105,12 +113,14 @@ export class AudioPipeline {
     const done = this.finalized.find((g) => overlaps(g, seg));
     if (done) {
       done.segments.push(seg);
+      done.lastArrival = now;
+      if (done.busy) await done.busy;
       await this.revisit(done, seg);
       return seg;
     }
     let g = this.open.find((x) => overlaps(x, seg));
     if (!g) {
-      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null };
+      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, busy: null };
       this.open.push(g);
     }
     g.segments.push(seg);
@@ -129,16 +139,26 @@ export class AudioPipeline {
 
   /** Waits for every open group to finish (tests). */
   async flush() {
-    for (const g of [...this.open]) {
+    const groups = [...this.open];
+    // Stop every timer first: one that fires while an earlier group is transcribing
+    // would finalize its group a second time.
+    for (const g of groups) {
       if (g.timer) clearTimeout(g.timer);
-      await this.finalize(g);
+      g.timer = null;
     }
+    for (const g of groups) if (this.open.includes(g)) await this.finalize(g);
   }
 
   private async finalize(g: Group) {
     this.open = this.open.filter((x) => x !== g);
     g.timer = null;
-    for (const part of this.splitCrosstalk(g)) await this.emit(part);
+    const parts = this.splitCrosstalk(g);
+    // Visible to late copies from now on, including while whisper is still working.
+    for (const part of parts) this.keep(part);
+    for (const part of parts) {
+      part.busy = this.emit(part).finally(() => (part.busy = null));
+      await part.busy;
+    }
   }
 
   /** Two people talking over each other: copies whose voices clearly differ become separate lines. */
@@ -151,13 +171,18 @@ export class AudioPipeline {
     const split: Segment[] = [];
     for (const s of g.segments) {
       if (s === best || !s.embedding) keep.push(s);
-      else if (cosine(s.embedding, best.embedding) < 0.3 && s.levelDb > best.levelDb - 4) split.push(s);
+      // A different voice has to be heard cleanly: a reverberant or babble-laden copy of
+      // the same person embeds far from the clean one too, and must not become a second line.
+      else if (cosine(s.embedding, best.embedding) < 0.3 && s.levelDb > best.levelDb - 4 && s.snr >= CLEAN_SNR) split.push(s);
       else keep.push(s);
     }
     if (!split.length) return [g];
     const mk = (segments: Segment[]): Group => ({
       ...g,
       id: newId("grp"),
+      busy: null,
+      utteranceId: null,
+      finalizedWith: null,
       segments,
       t0: Math.min(...segments.map((s) => s.t0)),
       t1: Math.max(...segments.map((s) => s.t1)),
@@ -176,10 +201,7 @@ export class AudioPipeline {
     const { text, engine } = await this.transcriber.transcribe(best.wav, dur, this.hint());
     const guess = this.identify(g.segments, best);
     g.finalizedWith = best.id;
-    if (!text) {
-      this.keep(g);
-      return;
-    }
+    if (!text) return;
     const person = this.session.person(guess.personId);
     const u: Utterance = {
       id: newId("utt"),
@@ -198,7 +220,6 @@ export class AudioPipeline {
     g.utteranceId = u.id;
     this.autoEnroll(guess, best, g.segments);
     this.session.store.put("utterances", u);
-    this.keep(g);
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
   }
@@ -217,8 +238,8 @@ export class AudioPipeline {
     if (!u) {
       if (!current || best !== current) {
         // The first copy had no words in it; try the better one.
-        this.finalized = this.finalized.filter((x) => x !== g);
-        await this.emit(g);
+        g.busy = this.emit(g).finally(() => (g.busy = null));
+        await g.busy;
       }
       return;
     }
@@ -272,7 +293,19 @@ export class AudioPipeline {
     if (best.embedding === undefined) best.embedding = embed(best.pcm);
     const voice = new Map<string, number>();
     if (best.embedding && this.voiceprints.enrolled) {
-      for (const m of this.voiceprints.match(best.embedding)) voice.set(m.personId, Math.min(1, Math.max(0, (m.similarity - 0.3) / 0.4)));
+      const m = this.voiceprints.match(best.embedding);
+      const topSim = m[0].similarity;
+      if (m.length === 1) voice.set(m[0].personId, clamp((topSim - 0.35) / 0.35));
+      else {
+        // Closed-set: who of the enrolled people does it sound most like? Absolute
+        // similarity drifts with mic and noise (every print "matches" a reverberant
+        // room), so compare people with each other, and trust the result only as far as
+        // someone sounds like the voice at all.
+        const w = m.map((x) => Math.exp((x.similarity - topSim) / VOICE_TEMP));
+        const sum = w.reduce((a, b) => a + b, 0);
+        const informative = clamp((topSim - 0.35) / 0.2);
+        m.forEach((x, i) => voice.set(x.personId, (informative * w[i]) / sum));
+      }
     }
     const candidates = new Set([...deviceScores.keys(), ...voice.keys()]);
     const scores = [...candidates].map((personId) => {
@@ -291,17 +324,44 @@ export class AudioPipeline {
     return { personId: top.personId, confidence, method, scores };
   }
 
-  /** A confident line from someone at their own device teaches the voiceprint. */
+  /**
+   * A confident line from someone at their own device teaches the voiceprint, with
+   * every clear copy of it: the same voice heard through the other laptops and the room
+   * mic is what a later walk-away or host-only line will sound like, and a print made
+   * of one device's channel alone matches that channel more than the person.
+   * The very first samples are held back until two lines from that device sound alike:
+   * one line from a visitor at someone's laptop must not become that owner's voice.
+   */
   private autoEnroll(guess: SpeakerGuess, best: Segment, segments: Segment[]) {
-    if (!guess.personId || guess.confidence < 0.72 || !best.embedding) return;
+    if (!guess.personId || !best.embedding) return;
+    const pid = guess.personId;
+    const enrolled = this.voiceprints.count(pid);
     const top = guess.scores[0];
     const owner = this.session.store.get("devices", best.deviceId)?.personId;
     const byLevel = [...segments].sort((a, b) => b.levelDb - a.levelDb);
     const margin = byLevel.length > 1 ? byLevel[0].levelDb - byLevel[1].levelDb : 99;
-    const atOwnDevice = owner === guess.personId && byLevel[0].deviceId === best.deviceId && margin >= 6;
-    const voiceAgrees = top.voice < 0 || top.voice >= 0.55;
-    if (atOwnDevice && voiceAgrees && this.voiceprints.count(guess.personId) < 25 && best.snr > 12) {
-      this.voiceprints.add(guess.personId, best.embedding);
+    const atOwnDevice = owner === pid && byLevel[0].deviceId === best.deviceId;
+    if (!atOwnDevice || best.snr <= CLEAN_SNR || enrolled >= MAX_PRINT_SAMPLES) return;
+    const voices = [best.embedding];
+    for (const s of segments) {
+      if (s === best || s.snr < 10) continue;
+      if (s.embedding === undefined) s.embedding = embed(s.pcm);
+      // Skip copies that carry someone else's voice (cross-talk bleed).
+      if (s.embedding && cosine(s.embedding, best.embedding) >= 0.35) voices.push(s.embedding);
+    }
+    if (enrolled > 0) {
+      const voiceAgrees = top.voice < 0 || top.voice >= 0.5;
+      if (guess.confidence >= 0.72 && margin >= 6 && voiceAgrees) for (const v of voices) this.voiceprints.add(pid, v);
+      return;
+    }
+    if (guess.confidence < 0.5 || margin < 3) return;
+    const held = this.candidates.get(pid) ?? [];
+    const twin = held.find((c) => cosine(c[0], best.embedding!) >= 0.5);
+    if (twin) {
+      for (const v of [...twin, ...voices]) this.voiceprints.add(pid, v);
+      this.candidates.delete(pid);
+    } else {
+      this.candidates.set(pid, [...held, voices].slice(-4));
     }
   }
 
@@ -348,3 +408,4 @@ export function pickBest(segments: Segment[]): Segment {
 }
 
 const round = (n: number) => Math.round(n * 10) / 10;
+const clamp = (n: number) => Math.min(1, Math.max(0, n));

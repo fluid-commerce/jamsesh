@@ -299,8 +299,18 @@ export class Session {
   }
 
   findAgentByCwd(cwd: string, machine?: string): Agent | undefined {
-    const all = this.store.all("agents").filter((a) => a.cwd && (cwd === a.cwd || cwd.startsWith(a.cwd + "/")));
-    return (machine && all.find((a) => a.machine === machine)) || all.sort((a, b) => b.lastSeen - a.lastSeen)[0];
+    const want = normalizePath(cwd);
+    const agents = this.store.all("agents").filter((a) => a.cwd);
+    const all = agents.filter((a) => {
+      const have = normalizePath(a.cwd);
+      return want === have || want.startsWith(have + "/");
+    });
+    const exact = (machine && all.find((a) => a.machine === machine)) || all.sort((a, b) => b.lastSeen - a.lastSeen)[0];
+    if (exact) return exact;
+    // Same folder name on the same machine (the agent may have reported its path another way).
+    const base = want.split("/").pop();
+    const byName = agents.filter((a) => a.machine === machine && normalizePath(a.cwd).split("/").pop() === base);
+    return byName.length === 1 ? byName[0] : undefined;
   }
 
   postUpdate(agentId: string, kind: UpdateKind, text: string, extra: { workstream?: string; data?: Record<string, any> } = {}) {
@@ -554,6 +564,15 @@ export function publicEvent(e: JamEvent): JamEvent {
   if (!e.data?.embedding) return e;
   const { embedding: _drop, ...data } = e.data;
   return { ...e, data };
+}
+
+/** Compares paths the way macOS resolves them: /private/tmp is /tmp, ~ is home, no trailing slash. */
+export function normalizePath(p: string) {
+  return p
+    .trim()
+    .replace(/^~(?=\/|$)/, process.env.HOME ?? "~")
+    .replace(/^\/private\/(tmp|var|etc)(?=\/|$)/, "/$1")
+    .replace(/\/+$/, "");
 }
 
 function makeCode() {

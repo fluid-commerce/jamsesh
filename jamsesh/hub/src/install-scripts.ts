@@ -115,7 +115,7 @@ hub, code = sys.argv[1], sys.argv[2]
 path = os.path.expanduser("~/.codex/config.toml")
 text = open(path).read() if os.path.exists(path) else ""
 text = re.sub(r"\\n?\\[mcp_servers\\.jamsesh\\][^\\[]*", "\\n", text).rstrip() + "\\n"
-text += f'\\n[mcp_servers.jamsesh]\\nurl = "{hub}/mcp?code={code}"\\ntool_timeout_sec = 600\\n'
+text += f'\\n[mcp_servers.jamsesh]\\nurl = "{hub}/mcp?code={code}"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = "approve"\\n'
 open(path, "w").write(text)
 PY
   curl -fsS -H "x-jam-code: $CODE" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
@@ -146,7 +146,9 @@ fi
 # --- Your JamSesh window ---
 URL="$HUB/client?code=$CODE&name=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1]))' "$NAME")"
 CHROME="/Applications/Google Chrome.app"
-if [ -d "$CHROME" ]; then
+if [ "\${JAMSESH_NO_OPEN:-0}" = "1" ]; then
+  skip "Not opening a window (JAMSESH_NO_OPEN=1). Open $URL"
+elif [ -d "$CHROME" ]; then
   # A separate profile lets the window use your mic on the room's plain-HTTP address.
   open -na "$CHROME" --args --app="$URL" --user-data-dir="$DIR/chrome" \\
     --unsafely-treat-insecure-origin-as-secure="$HUB" --no-first-run >/dev/null 2>&1 || true

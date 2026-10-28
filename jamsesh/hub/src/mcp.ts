@@ -434,12 +434,15 @@ export class McpEndpoint {
       .recentEvents({ kinds: ["speech", "prompt"], since: Date.now() - minutes * 60_000, limit: 80 })
       .filter((e) => e.relevance !== "banter" && e.relevance !== "chatter");
     const updates = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 20 }).filter((e) => e.authorId !== agent.id);
-    const open = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled").slice(0, 12);
+    const open = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled").slice(0, 16);
+    const mine = open.filter((d) => d.targets.includes(agent.id));
+    const others = open.filter((d) => !d.targets.includes(agent.id)).slice(0, 8);
     return [
       `## Session brief\n${brief || "(no brief yet; the session just started)"}`,
       ws ? `## Workstream: ${ws.title}\n${ws.brief || "(no brief yet)"}` : "",
       `## Decisions\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
-      `## Open directives\n${open.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
+      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
+      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
       `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
     ]

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# jamsesh: run the host, or connect this laptop to someone else's host.
+#   jamsesh host [--no-open]     start the session on this machine and open the big screen
+#   jamsesh join <host[:port]>   connect this laptop (Claude Code, Codex, your JamSesh window)
+#   jamsesh off | on             pause or resume this laptop's hooks
+#   jamsesh status               what's running
+#   jamsesh key                  set the Vercel AI Gateway key for this machine
+set -euo pipefail
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+PORT="${JAMSESH_PORT:-4747}"
+ENV_FILE="$HOME/.jamsesh/client.env"
+
+open_big_screen() {
+  local url="http://127.0.0.1:$PORT/host"
+  local chrome="/Applications/Google Chrome.app"
+  if [ -d "$chrome" ]; then
+    open -na "$chrome" --args --app="$url" --start-fullscreen --user-data-dir="$HOME/.jamsesh/chrome-host" \
+      --autoplay-policy=no-user-gesture-required --no-first-run >/dev/null 2>&1
+  else
+    open "$url"
+  fi
+}
+
+case "${1:-help}" in
+  host)
+    shift
+    cd "$DIR"
+    if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+      echo "JamSesh is already running on port $PORT."
+      [ "${1:-}" = "--no-open" ] || open_big_screen
+      exit 0
+    fi
+    ( for _ in $(seq 1 60); do sleep 0.5; curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; done
+      [ "${1:-}" = "--no-open" ] || open_big_screen ) &
+    exec bun run hub/src/index.ts "$@"
+    ;;
+  join)
+    target="${2:?Usage: jamsesh join <host[:port]>}"
+    case "$target" in http*) ;; *) target="http://$target" ;; esac
+    case "$target" in *:[0-9]*) ;; *) target="$target:4747" ;; esac
+    curl -fsSL "$target/join.sh" | bash
+    ;;
+  off | on)
+    [ -f "$ENV_FILE" ] || { echo "This laptop hasn't joined a session."; exit 1; }
+    v=$([ "$1" = on ] && echo 1 || echo 0)
+    sed -i '' "s/^JAMSESH_ACTIVE=.*/JAMSESH_ACTIVE=$v/" "$ENV_FILE"
+    echo "JamSesh hooks are $1."
+    ;;
+  status)
+    if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+      echo "Host: running at http://127.0.0.1:$PORT/host"
+    else
+      echo "Host: not running on this machine"
+    fi
+    if [ -f "$ENV_FILE" ]; then
+      (. "$ENV_FILE"; echo "This laptop: joined $JAMSESH_HUB as $JAMSESH_NAME (hooks $([ "$JAMSESH_ACTIVE" = 1 ] && echo on || echo off))")
+    else
+      echo "This laptop: not joined to a session"
+    fi
+    ;;
+  key)
+    exec "$DIR/scripts/set-gateway-key.sh"
+    ;;
+  *)
+    sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'
+    ;;
+esac
