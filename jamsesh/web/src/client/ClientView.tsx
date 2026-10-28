@@ -6,6 +6,7 @@ import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
+import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
@@ -61,13 +62,13 @@ export function ClientView() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      <header className="row between client-header" style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none", gap: 12 }}>
-        <div className="row" style={{ gap: 12 }}>
+      <header className="app-header client-header" style={{ height: 56, padding: "0 16px", borderBottom: "1px solid var(--line)", flex: "none" }}>
+        <div className="header-left">
           <Logo size={26} />
-          <strong style={{ fontWeight: 650 }}>JamSesh</strong>
-          <span className="chip">{state.settings.sessionName}</span>
+          <strong className="wordmark" style={{ fontWeight: 650 }}>JamSesh</strong>
+          <span className="chip session-name ellipsis" style={{ maxWidth: 180 }}>{state.settings.sessionName}</span>
         </div>
-        <nav className="row" style={{ gap: 2, background: "var(--panel)", padding: 3, borderRadius: 999, border: "1px solid var(--line)" }}>
+        <nav className="header-center row" style={{ gap: 2, background: "var(--panel)", padding: 3, borderRadius: 999, border: "1px solid var(--line)", flex: "none" }}>
           {(
             [
               ["canvas", "Canvas"],
@@ -81,23 +82,24 @@ export function ClientView() {
             </button>
           ))}
         </nav>
-        <div className="row" style={{ gap: 10 }}>
-          <span className="chip big-screen-chip" title="What the big screen shows">
-            Big screen: {state.stage.mode === "welcome" ? "board" : state.stage.title || state.stage.mode}
+        <div className="header-right">
+          <span className="chip big-screen-chip ellipsis" title="What the big screen shows">
+            On screen: {state.stage.mode === "welcome" ? "board" : state.stage.title || state.stage.mode}
           </span>
-          <button className={`btn small ${micStatus.on ? "on" : ""}`} onClick={toggleMic} title={micStatus.error ?? "Mute or unmute (M). Your laptop's mic helps JamSesh hear and recognize you."}>
-            {micStatus.on ? <Meter db={micStatus.level} /> : null}
-            {micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Muted"}
+          <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute (M)" : "Unmute (M)")} aria-label={micStatus.on ? "Mute" : "Unmute"}>
+            {micStatus.on ? <MicIcon size={16} /> : <MicOffIcon size={16} />}
+            {micStatus.on && <Meter db={micStatus.level} />}
+            <span className="mic-label">{micStatus.on ? (micStatus.speaking ? "Hearing you" : "Listening") : "Muted"}</span>
           </button>
           <RecordPrompt personId={me.id} brainName={state.settings.brainName} />
           <AnnotateToggle />
           <ShareControls personId={me.id} />
-          <button className="row btn ghost small" onClick={() => setProfile(true)} title="Your profile: photo, title, voice">
-            <PhotoAvatar person={me} size={22} />
-            {me.name}
+          <button className="row btn ghost small" style={{ height: 36, padding: "0 8px" }} onClick={() => setProfile(true)} title="Your profile: photo, title, voice" aria-label={`Your profile (${me.name})`}>
+            <PhotoAvatar person={me} size={24} />
+            <span className="me-name">{me.name}</span>
           </button>
-          <button className="btn ghost small" onClick={() => setSettings(true)} title="Settings" aria-label="Settings">
-            ⚙︎
+          <button className="icon-btn" onClick={() => setSettings(true)} title="Settings" aria-label="Settings">
+            <GearIcon size={17} />
           </button>
         </div>
       </header>
@@ -105,7 +107,7 @@ export function ClientView() {
         <div style={{ padding: "8px 16px", background: "var(--warn-bg)", color: "var(--warn)", fontSize: 13 }}>{micStatus.error}</div>
       )}
 
-      <main style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
+      <main className="client-main" style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>
           <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
             <CanvasFrame kind="edit" name={me.name} title="Shared canvas" />
@@ -161,13 +163,15 @@ export function ClientView() {
       {!enrollAsked && me.voiceSamples === 0 && (
         <>
           <div className="scrim" />
-          <div className="drawer" style={{ top: "50%", left: "50%", right: "auto", bottom: "auto", transform: "translate(-50%, -50%)", width: "min(520px, 92vw)", borderRadius: 22, border: "1px solid var(--line-2)", padding: "8px 24px 20px" }}>
+          <div className="modal-wrap">
+          <div className="modal" role="dialog" aria-label="Teach JamSesh your voice">
             <VoiceEnroll me={me} brainName={state.settings.brainName} />
-            <div className="row" style={{ justifyContent: "flex-end" }}>
+            <div className="row" style={{ justifyContent: "flex-end", paddingTop: 4 }}>
               <button className="btn ghost small" onClick={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))}>
                 {me.voiceSamples ? "Done" : "Skip for now"}
               </button>
             </div>
+          </div>
           </div>
         </>
       )}
@@ -339,19 +343,27 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
       <div style={{ width: "min(440px, 100%)" }}>
         <Logo size={40} />
         <h1 style={{ fontSize: 34, letterSpacing: "-0.03em", margin: "18px 0 6px" }}>Join {state.settings.sessionName}</h1>
-        <p style={{ color: "var(--muted)", marginTop: 0 }}>Your name and role tell the room brain who's talking and whose call counts.</p>
+        <p style={{ color: "var(--muted)", marginTop: 0 }}>Your name and title tell the room brain who's talking and whose call counts.</p>
         {state.people.length > 0 && (
           <div style={{ display: "grid", gap: 6, margin: "18px 0" }}>
             {state.people.map((p) => (
-              <button key={p.id} className="btn" style={{ justifyContent: "flex-start", height: 44 }} onClick={() => onPick(p.id)}>
-                <PhotoAvatar person={p} size={26} /> I'm {p.name}
-                {p.role && <span style={{ color: "var(--dim)" }}>· {p.role}</span>}
+              <button key={p.id} className="btn" style={{ justifyContent: "flex-start", height: 48, gap: 12, paddingLeft: 10, borderRadius: 14 }} onClick={() => onPick(p.id)}>
+                <PhotoAvatar person={p} size={28} />
+                <span>I'm {p.name}</span>
+                {p.role && <span style={{ color: "var(--dim)", marginLeft: "auto", paddingRight: 6 }}>{p.role}</span>}
               </button>
             ))}
           </div>
         )}
+        {state.people.length > 0 && (
+          <div className="row" style={{ gap: 12, margin: "6px 0 4px", color: "var(--dim)", fontSize: 13 }}>
+            <span style={{ flex: 1, height: 1, background: "var(--line-2)" }} />
+            or someone new
+            <span style={{ flex: 1, height: 1, background: "var(--line-2)" }} />
+          </div>
+        )}
         <form
-          style={{ display: "grid", gap: 10, marginTop: 14 }}
+          style={{ display: "grid", gap: 10, marginTop: 10 }}
           onSubmit={async (e) => {
             e.preventDefault();
             if (!name.trim()) return;
@@ -359,8 +371,8 @@ function Onboarding({ state, onPick }: { state: HubState; onPick: (id: string) =
             onPick(p.id);
           }}
         >
-          <input placeholder="Your first name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          <input placeholder="Your role (for example designer, engineer, CPO)" value={role} onChange={(e) => setRole(e.target.value)} />
+          <input placeholder="Your first name" value={name} onChange={(e) => setName(e.target.value)} autoFocus={!state.people.length} />
+          <input placeholder="Your title (for example designer, engineer, CPO)" value={role} onChange={(e) => setRole(e.target.value)} />
           <button className="btn primary" style={{ height: 44, justifyContent: "center" }}>
             Join the room
           </button>

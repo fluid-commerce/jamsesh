@@ -5,6 +5,7 @@ import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
 import { Stage } from "./Stage";
 import { AnnotateToggle } from "../shared/annotate";
+import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
 
 const DEVICE = deviceId("host");
 const mic = new Mic(DEVICE);
@@ -78,14 +79,14 @@ export function HostView() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: "18px 22px 22px", gap: 16 }}>
-      <header className="row between" style={{ height: 44, flex: "none" }}>
-        <div className="row" style={{ gap: 14 }}>
+      <header className="app-header host-header" style={{ height: 44, flex: "none" }}>
+        <div className="header-left">
           <Logo />
           <span style={{ fontSize: 20, fontWeight: 650, letterSpacing: "-0.02em" }}>JamSesh</span>
-          <span style={{ color: "var(--dim)", fontSize: 18 }}>{state.settings.sessionName}</span>
+          <span className="session-name ellipsis" style={{ color: "var(--dim)", fontSize: 18, maxWidth: 260 }}>{state.settings.sessionName}</span>
         </div>
 
-        <nav className="row" style={{ gap: 4, background: "var(--panel)", border: "1px solid var(--line)", padding: 4, borderRadius: 999 }}>
+        <nav className="header-center row" style={{ gap: 4, background: "var(--panel)", border: "1px solid var(--line)", padding: 4, borderRadius: 999, marginInline: "auto" }}>
           {MODES.map((m) => {
             const active = state.stage.mode === m.mode || (m.mode === "board" && ["board", "welcome"].includes(state.stage.mode));
             return (
@@ -100,15 +101,16 @@ export function HostView() {
             );
           })}
           {!["board", "welcome", "canvas", "agents"].includes(state.stage.mode) && (
-            <button className="btn small" style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent" }} onClick={() => api("/stage", { mode: "board", by: "Host" })} title="Back to the board (Esc)">
-              {state.stage.title || state.stage.mode} ✕
+            <button className="btn small" style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent", minWidth: 0 }} onClick={() => api("/stage", { mode: "board", by: "Host" })} title={`${state.stage.title || state.stage.mode}. Back to the board (Esc)`}>
+              <span className="stage-pill">{state.stage.title || state.stage.mode}</span>
+              <span aria-hidden style={{ color: "var(--muted)" }}>✕</span>
             </button>
           )}
         </nav>
 
-        <div className="row" style={{ gap: 16 }}>
+        <div className="header-right" style={{ gap: 14 }}>
           {thinking && (
-            <span className="chip" style={{ color: "var(--directive)" }}>
+            <span className="chip ellipsis" style={{ color: "var(--directive)", maxWidth: 260 }}>
               <span className="dot" style={{ background: "var(--directive)", animation: "pulse 1s infinite" }} /> {thinking}
             </span>
           )}
@@ -123,20 +125,21 @@ export function HostView() {
               );
             })}
           </span>
-          <button className={`btn small ${micStatus.on ? "on" : ""}`} onClick={toggleMic} title={micStatus.error ?? "The host's room microphone"}>
-            {micStatus.on ? <Meter db={micStatus.level} /> : null}
-            {micStatus.on ? "Room mic" : "Room mic muted"}
+          <button className={`btn small mic-btn ${micStatus.on ? "on" : "muted"}`} style={{ height: 36 }} onClick={toggleMic} title={micStatus.error ?? (micStatus.on ? "Mute the room mic (M)" : "Unmute the room mic (M)")}>
+            {micStatus.on ? <MicIcon size={16} /> : <MicOffIcon size={16} />}
+            {micStatus.on && <Meter db={micStatus.level} />}
+            {micStatus.on ? "Room mic" : "Muted"}
           </button>
           <AnnotateToggle />
           <BrainPill status={brain.status} error={brain.lastError} name={state.settings.brainName} />
           <span className="mono" style={{ color: "var(--muted)", letterSpacing: "0.14em", fontSize: 15 }} title="Join code">
             {state.session.code}
           </span>
-          <span className="mono" style={{ color: "var(--dim)", fontSize: 15 }}>
+          <span className="mono clock" style={{ color: "var(--dim)", fontSize: 15 }}>
             {new Date(now).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
           </span>
-          <button className="btn ghost small" onClick={() => setSettings(true)} title="Settings (,)">
-            <Gear />
+          <button className="icon-btn" onClick={() => setSettings(true)} title="Settings (,)" aria-label="Settings">
+            <GearIcon size={17} />
           </button>
         </div>
       </header>
@@ -189,8 +192,8 @@ function BrainPill({ status, error, name }: { status: string; error: string | nu
   };
   const [c, label] = map[status] ?? map.ready;
   return (
-    <span className="chip" style={{ color: status === "no-key" ? "var(--warn)" : "var(--muted)" }} title={error ?? undefined}>
-      <span className="dot" style={{ background: c }} /> {label}
+    <span className="chip" style={{ color: status === "no-key" ? "var(--warn)" : "var(--muted)" }} title={error ?? label}>
+      <span className="dot" style={{ background: c }} /> <span className="brain-label">{label}</span>
     </span>
   );
 }
@@ -205,14 +208,6 @@ export function Logo({ size = 30 }: { size?: number }) {
   );
 }
 
-function Gear() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
-    </svg>
-  );
-}
 
 function Splash({ connected }: { connected: boolean }) {
   return (

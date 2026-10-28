@@ -763,3 +763,209 @@ textarea:focus {
     display: none;
   }
 }
+
+/* ---------- polish pass ---------- */
+
+#root {
+  overflow: hidden;
+}
+
+.ellipsis {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.agent-row-text {
+  flex: 1;
+  min-width: 0;
+}
+.agent-row-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Long feeds fade at the top instead of slicing a line in half. */
+.feed {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
+  padding-top: 18px;
+}
+
+/* One focus ring for keyboard users, none for mouse clicks. */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: 2px solid rgba(180, 156, 255, 0.75);
+  outline-offset: 2px;
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+}
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23a3a6ac' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  cursor: pointer;
+}
+
+.btn,
+.chip,
+.badge,
+.label {
+  white-space: nowrap;
+}
+
+/* ---------- headers: always one line ---------- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.app-header > * {
+  min-width: 0;
+}
+.app-header .header-left,
+.app-header .header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.app-header .header-right {
+  margin-left: auto;
+  flex: none;
+}
+.app-header .header-center {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.stage-pill {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  flex: none;
+  transition: background 0.15s, color 0.15s;
+}
+.icon-btn:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+.icon-btn.small {
+  width: 32px;
+  height: 32px;
+}
+
+.mic-btn.muted {
+  color: var(--muted);
+}
+.mic-btn.muted svg {
+  color: var(--warn);
+}
+
+@media (max-width: 1560px) {
+  .host-header .session-name,
+  .host-header .clock {
+    display: none;
+  }
+}
+@media (max-width: 1360px) {
+  .client-header .session-name {
+    display: none;
+  }
+  .host-header .brain-label {
+    display: none;
+  }
+}
+@media (max-width: 1240px) {
+  .client-header .rec-btn,
+  .client-header .an-toggle {
+    font-size: 0;
+    gap: 0;
+    padding: 0 11px;
+  }
+  .client-header .rec-btn kbd,
+  .client-header .an-toggle kbd {
+    display: none;
+  }
+  .client-header .rec-btn svg,
+  .client-header .an-toggle svg {
+    width: 16px;
+    height: 16px;
+  }
+  .client-header .me-name,
+  .client-header .mic-label {
+    display: none;
+  }
+}
+@media (max-width: 1100px) {
+  .client-header .wordmark {
+    display: none;
+  }
+  .client-main {
+    grid-template-columns: minmax(0, 1fr) 320px !important;
+  }
+}
+
+.modal-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 72;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  pointer-events: none;
+}
+.modal {
+  pointer-events: auto;
+  width: min(520px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  padding: 4px 24px 18px;
+  border-radius: 22px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.9);
+  animation: rise 0.3s var(--ease) both;
+}
+.modal .section {
+  border-bottom: 0;
+  padding-bottom: 10px;
+}
+
+/* Browser and share tiles: the address gives way before the title does. */
+@container (max-width: 520px) {
+  .tile .meta .chip.mono {
+    display: none;
+  }
+}

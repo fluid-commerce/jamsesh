@@ -48,21 +48,28 @@ export function colorFor(state: HubState | null, ref: { personId?: string | null
 
 export function ScaledFrame({ src, width = 1280, height = 800, title }: { src: string; width?: number; height?: number; title: string }) {
   const box = useRef<HTMLDivElement>(null);
-  const [scale, setScale] = useState(0.5);
+  const [fit, setFit] = useState({ scale: 0, left: 0, top: 0 });
   useLayoutEffect(() => {
     const el = box.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setScale(Math.min(el.clientWidth / width, el.clientHeight / height)));
+    const measure = () => {
+      const scale = Math.min(el.clientWidth / width, el.clientHeight / height);
+      setFit({ scale, left: (el.clientWidth - width * scale) / 2, top: (el.clientHeight - height * scale) / 2 });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
   }, [width, height]);
   return (
-    <div ref={box} style={{ position: "absolute", inset: 18, overflow: "hidden", display: "grid", placeItems: "center" }}>
-      <iframe
-        src={src}
-        title={title}
-        style={{ position: "static", width, height, transform: `scale(${scale})`, transformOrigin: "center", flex: "none", border: 0, borderRadius: 10, background: "#fff" }}
-      />
+    <div ref={box} style={{ position: "absolute", inset: "50px 18px 18px", overflow: "hidden" }}>
+      {fit.scale > 0 && (
+        <iframe
+          src={src}
+          title={title}
+          style={{ position: "absolute", left: fit.left, top: fit.top, width, height, transform: `scale(${fit.scale})`, transformOrigin: "0 0", border: 0, borderRadius: 12 / fit.scale, background: "#fff", boxShadow: "0 16px 50px -18px rgba(0,0,0,.8)" }}
+        />
+      )}
     </div>
   );
 }
@@ -280,27 +287,29 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
   const now = useNow(5000);
   const color = colorFor(state, { agentId: agent.id });
   const ws = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "active");
+  const repo = agent.repo.split(/[/:]/).pop()?.replace(/\.git$/, "");
+  const owner = state.people.find((p) => p.id === agent.ownerId);
   return (
-    <div className="row" style={{ alignItems: "flex-start", padding: compact ? "8px 0" : "10px 0", opacity: agent.status === "offline" ? 0.45 : 1 }}>
-      <span style={{ position: "relative" }}>
-        <Avatar name={agent.ownerName} color={color} size={compact ? 26 : 32} photo={state.people.find((p) => p.id === agent.ownerId)?.photo} />
+    <div className="agent-row" style={{ opacity: agent.status === "offline" ? 0.45 : 1, padding: compact ? "8px 0" : "10px 0" }}>
+      <span style={{ position: "relative", flex: "none" }}>
+        <Avatar name={agent.ownerName} color={color} size={compact ? 28 : 34} photo={owner?.photo} />
         <StatusDot status={agent.status} />
       </span>
-      <div className="grow">
-        <div className="row" style={{ gap: 8 }}>
-          <strong style={{ fontWeight: 600, fontSize: compact ? 14 : 15 }}>{agent.name}</strong>
-          <span className="chip" style={{ fontSize: 12 }}>
-            {agent.platform} · {agent.repo.split(/[/:]/).pop()?.replace(/\.git$/, "")}
+      <div className="agent-row-text">
+        <div className="agent-row-line">
+          <strong className="ellipsis" style={{ fontWeight: 600, fontSize: compact ? 14 : 15 }}>{agent.name}</strong>
+          {!compact && <span className="chip" style={{ fontSize: 12, flex: "none" }}>{agent.platform} · {repo}</span>}
+          <span className="chip mono" style={{ fontSize: 12, color: "var(--dim)", marginLeft: "auto", flex: "none" }}>
+            {ago(agent.lastSeen, now)}
           </span>
         </div>
-        <div className="chip" style={{ display: "block", fontSize: 13, color: "var(--muted)", marginTop: 2 }}>
-          {statusText(agent)} {agent.activity && agent.status !== "offline" ? `· ${agent.activity}` : ""}
+        <div className="ellipsis" style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>
+          {compact ? `${agent.platform} · ${repo} · ` : ""}
+          {statusText(agent)}
+          {agent.activity && agent.status !== "offline" ? ` · ${agent.activity}` : ""}
         </div>
-        {!compact && ws.length > 0 && <div className="chip" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
+        {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
       </div>
-      <span className="chip mono" style={{ fontSize: 12, color: "var(--dim)" }}>
-        {ago(agent.lastSeen, now)}
-      </span>
     </div>
   );
 }

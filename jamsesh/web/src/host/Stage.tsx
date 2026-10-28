@@ -145,17 +145,21 @@ function Agents({ state }: { state: HubState }) {
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 16, gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridAutoRows: "minmax(0, 1fr)" }}>
         {agents.map((a) => {
           const latest = state.artifacts.find((x) => x.agentId === a.id && x.image);
-          const updates = state.events.filter((e) => e.authorId === a.id && ["update", "artifact", "canvas", "message"].includes(e.kind)).slice(-4).reverse();
+          const updates = state.events.filter((e) => e.authorId === a.id && ["update", "artifact", "canvas", "message"].includes(e.kind)).slice(-3).reverse();
           const color = colorFor(state, { agentId: a.id });
           return (
             <div key={a.id} className="tile" style={{ padding: 0, borderColor: a.status === "working" ? `${color}55` : undefined }}>
               <div style={{ padding: "16px 18px 6px" }}>
                 <AgentRow agent={a} state={state} />
               </div>
-              <div className="media" style={{ padding: 14 }}>
-                {latest ? <img src={latest.image!} alt={latest.title} /> : <div className="empty-note">No visuals yet</div>}
-              </div>
-              <div style={{ padding: "10px 18px 16px", borderTop: "1px solid var(--line)", display: "grid", gap: 6 }}>
+              {latest ? (
+                <div className="media" style={{ padding: 14 }}>
+                  <img src={latest.image!} alt={latest.title} />
+                </div>
+              ) : (
+                <div style={{ flex: 1, minHeight: 0 }} />
+              )}
+              <div style={{ padding: "10px 18px 16px", borderTop: "1px solid var(--line)", display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6 }}>
                 {updates.length === 0 && <div className="empty-note" style={{ padding: 0 }}>Nothing posted yet.</div>}
                 {updates.map((u) => (
                   <div key={u.id} className="row" style={{ fontSize: 14, gap: 8 }}>
@@ -308,16 +312,20 @@ function ScreenSlot({ share }: { share: Share }) {
 function AgentCard({ agent: a, state }: { agent: HubState["agents"][number]; state: HubState }) {
   const now = useNow(5000);
   const latest = state.artifacts.find((x) => x.agentId === a.id && x.image);
-  const updates = state.events.filter((e) => e.authorId === a.id && ["update", "artifact", "canvas", "message"].includes(e.kind)).slice(-4).reverse();
+  const updates = state.events.filter((e) => e.authorId === a.id && ["update", "artifact", "canvas", "message"].includes(e.kind)).slice(-3).reverse();
   return (
     <div className="tile" style={{ padding: 0 }}>
       <div style={{ padding: "16px 18px 6px" }}>
         <AgentRow agent={a} state={state} />
       </div>
-      <div className="media" style={{ padding: 14 }}>
-        {latest ? <img src={latest.image!} alt={latest.title} /> : <div className="empty-note">No visuals yet</div>}
-      </div>
-      <div style={{ padding: "10px 18px 16px", borderTop: "1px solid var(--line)", display: "grid", gap: 6 }}>
+      {latest ? (
+        <div className="media" style={{ padding: 14 }}>
+          <img src={latest.image!} alt={latest.title} />
+        </div>
+      ) : (
+        <div style={{ flex: 1, minHeight: 0 }} />
+      )}
+      <div style={{ padding: "10px 18px 16px", borderTop: "1px solid var(--line)", display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6 }}>
         {updates.map((u) => (
           <div key={u.id} className="row" style={{ fontSize: 14, gap: 8 }}>
             <span className="chip mono" style={{ width: 34, color: "var(--dim)", fontSize: 12 }}>{ago(u.ts, now)}</span>

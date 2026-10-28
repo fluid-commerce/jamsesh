@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
+import { ScreenIcon } from "./icons";
 
 export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: boolean }) {
   const { state, levels } = useHub();
@@ -48,7 +49,18 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             </div>
           </Section>
 
-          <Section title="Room brain" help="Say its name to talk to it directly. It keeps notes on how the room wants it to behave.">
+          <Section
+            title="Room brain"
+            help="Say its name to talk to it directly. It keeps notes on how the room wants it to behave."
+            right={
+              host ? (
+                <label className="row" style={{ gap: 8, fontSize: 13, color: "var(--muted)" }}>
+                  {s.brainEnabled ? "On" : "Off"}
+                  <Toggle on={s.brainEnabled} onChange={(v) => update({ brainEnabled: v })} label="Room brain on" />
+                </label>
+              ) : undefined
+            }
+          >
             <label className="field">
               <span>Name</span>
               <input defaultValue={s.brainName} onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== s.brainName && update({ brainName: e.target.value.trim() })} />
@@ -72,7 +84,6 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             <Section
               title="Gateway"
               help="The room brain runs on the Vercel AI Gateway. The key stays on this machine."
-              right={<Toggle on={s.brainEnabled} onChange={(v) => update({ brainEnabled: v })} label="Brain on" />}
             >
               <label className="field">
                 <span>
@@ -84,7 +95,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
                   )}
                 </span>
                 <div className="row">
-                  <input className="grow mono" type="password" placeholder={s.gatewayKeySet ? "Paste a new key to replace it" : "vck_…"} value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
+                  <input className="grow" type="password" placeholder={s.gatewayKeySet ? "Paste a new key to replace it" : "vck_…"} value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
                   <button className="btn" disabled={!key.trim()} onClick={() => update({ gatewayKey: key.trim() }).then(() => setKey(""))}>
                     Save
                   </button>
@@ -204,8 +215,8 @@ function PersonRow({ p }: { p: Person }) {
         <span className="chip" title="Voice samples" style={{ fontSize: 12 }}>
           {p.voiceSamples ? `${p.voiceSamples} 🎙` : "no voice"}
         </span>
-        <button className="btn ghost small" title={`Ask ${p.name} to share their screen`} onClick={() => api("/shares/request", { personId: p.id, kind: "screen", reason: "The room wants to see your screen", by: "Host" }).catch((e) => alert(e.message))}>
-          Screen
+        <button className="icon-btn small" title={`Ask ${p.name} to share their screen`} aria-label={`Ask ${p.name} to share their screen`} onClick={() => api("/shares/request", { personId: p.id, kind: "screen", reason: "The room wants to see your screen", by: "Host" }).catch((e) => alert(e.message))}>
+          <ScreenIcon size={15} />
         </button>
         {p.voiceSamples > 0 && (
           <button className="btn ghost small" title="Forget their voice" onClick={() => api(`/people/${p.id}/voiceprint`, undefined, "DELETE")}>

@@ -209,6 +209,11 @@
   box-shadow: 0 0 0 1.5px var(--panel-2), 0 0 0 2.5px rgba(255, 255, 255, 0.14);
 }
 .an-chip {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   max-width: 150px;
