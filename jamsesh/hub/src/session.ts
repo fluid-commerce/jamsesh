@@ -81,6 +81,12 @@ export class Session {
   onDirective: ((d: Directive) => void) | null = null;
   /** A card landed on the Tasks board (4.1). */
   onTriage: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: writes a wiki card's checked pages when a person accepts it (12.8). */
+  wikiAccept: ((c: TriageCard, pages: string[] | undefined, by: string) => { applied: string[]; skipped: string[] } | { error: string; status: number }) | null = null;
+  /** Set by the hub: a wiki card was closed (added or dismissed), for the wiki to finish with its proposal. */
+  wikiClosed: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: a fact was saved in the session, for the wiki to file as a source. */
+  onFactSaved: ((f: Fact) => void) | null = null;
   /** The Tasks board's triage: proposals wait here until a person acts. */
   readonly board = new Board(this);
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
@@ -2124,7 +2130,7 @@ export function stageLabel(stage: Partial<Stage> & { mode: string }, titleOf: (i
   const first = stage.items?.map(titleOf).find(Boolean);
   if (first) return stage.items!.length > 1 ? `${first} and ${stage.items!.length - 1} more` : first;
   if (stage.mode === "layout") return `${stage.layout?.tiles.length ?? 0} tiles`;
-  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
+  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", wiki: "The wiki", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
 }
 
 export function publicEvent(e: JamEvent): JamEvent {

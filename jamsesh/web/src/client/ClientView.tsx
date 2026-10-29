@@ -20,6 +20,9 @@ import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
 import { TasksView, triageCount } from "../shared/Tasks";
+import { WikiView } from "../wiki/WikiView";
+import { SettledLinks } from "../wiki/SettledLinks";
+import { onWikiOpen } from "../wiki/nav";
 import { AttachButton, AttachTray, composerState, filesFrom, hasFiles, useAttachments } from "../shared/attach";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
@@ -27,7 +30,7 @@ const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
 const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 
-type Tab = "canvas" | "screen" | "work" | "tasks" | "pins" | "agents";
+type Tab = "canvas" | "screen" | "work" | "wiki" | "tasks" | "pins" | "agents";
 
 export function ClientView() {
   const { state, connected } = useHub();
@@ -42,6 +45,11 @@ export function ClientView() {
   const voiceReady = useVoiceprintSync(me);
   const layout = useLayout();
 
+  // A link elsewhere in the app (the Work tab) asked for a wiki page.
+  useEffect(() => {
+    const off = onWikiOpen(() => setTab("wiki"));
+    return () => void off();
+  }, []);
   useEffect(() => {
     const off = mic.onChange(setMicStatus);
     return () => void off();
@@ -227,8 +235,8 @@ function BigScreenChip({ stage }: { stage: StageState }) {
 }
 
 type Tab_ = Tab;
-const TABS: Tab_[] = ["canvas", "screen", "work", "tasks", "pins", "agents"];
-const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", tasks: "Tasks", pins: "Pins", agents: "Agents" };
+const TABS: Tab_[] = ["canvas", "screen", "work", "wiki", "tasks", "pins", "agents"];
+const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", wiki: "Wiki", tasks: "Tasks", pins: "Pins", agents: "Agents" };
 
 function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setTab: (t: Tab) => void; phone?: boolean }) {
   const open = state.annotations.filter((a) => a.status === "open").length;
@@ -270,7 +278,7 @@ function EnrollModal({ me, brainName, done }: { me: HubState["people"][number]; 
   );
 }
 
-/** The six views, the same on every screen size except the Screen tab, which a phone scales down. */
+/** The seven views, the same on every screen size except the Screen tab, which a phone scales down. */
 function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me: HubState["people"][number]; layout: Layout }) {
   const phone = layout !== "desktop";
   return (
@@ -300,6 +308,11 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
           </div>
         ))}
       {tab === "work" && <WorkGallery state={state} personId={me.id} />}
+      {tab === "wiki" && (
+        <div className="tab-pane wiki-pane">
+          <WikiView />
+        </div>
+      )}
       {tab === "tasks" && (
         <div className="tab-pane tasks-pane">
           <TasksView state={state} personId={me.id} />
@@ -650,7 +663,8 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
     cast({ mode: shown.length > 1 ? "compare" : "spotlight", items: shown.map((i) => i.id), title, caption: `${name} put this up`, pinned: false, by: name });
   return (
     <div className="tab-pane scrollbars-thin">
-      <div className="row between wrap-row" style={{ marginBottom: 16 }}>
+      <SettledLinks />
+      <div className="row between wrap-row" style={{ margin: "28px 0 16px" }}>
         <h2 style={{ margin: 0, fontSize: 20, fontWeight: 650 }}>Everything the room has made</h2>
         <div className="row filter-row" style={{ gap: 4 }}>
           {(["all", "mockup", "built"] as const).map((f) => (
@@ -694,8 +708,6 @@ function AgentsPanel({ state }: { state: HubState }) {
           <AgentRow agent={a} state={state} />
         </div>
       ))}
-      <h2 style={{ margin: "28px 0 12px", fontSize: 20, fontWeight: 650 }}>What the session has settled</h2>
-      <Facts state={state} />
       <h2 style={{ margin: "28px 0 12px", fontSize: 20, fontWeight: 650 }}>Session brief</h2>
       <pre style={{ whiteSpace: "pre-wrap", fontFamily: "var(--font)", color: "var(--muted)", margin: 0 }}>{state.digest || "The brief fills in as the session goes."}</pre>
       {state.devservers.length > 0 && (
@@ -712,33 +724,6 @@ function AgentsPanel({ state }: { state: HubState }) {
           ))}
         </>
       )}
-    </div>
-  );
-}
-
-const FACT_COLORS: Record<string, string> = { decision: "var(--decision)", requirement: "var(--built)", constraint: "var(--warn)", preference: "var(--mockup)", question: "var(--directive)", fact: "var(--muted)" };
-
-function Facts({ state }: { state: HubState }) {
-  const active = state.facts.filter((f) => f.status === "active");
-  if (!active.length) return <div className="empty-note">Decisions, requirements and open questions collect here as the room works.</div>;
-  const groups = new Map<string, typeof active>();
-  for (const f of active) groups.set(f.workstream || "Whole session", [...(groups.get(f.workstream || "Whole session") ?? []), f]);
-  return (
-    <div style={{ display: "grid", gap: 16 }}>
-      {[...groups].map(([ws, fs]) => (
-        <div key={ws}>
-          <div className="label" style={{ marginBottom: 6 }}>{ws}</div>
-          {fs.map((f) => (
-            <div key={f.id} className="row" style={{ alignItems: "flex-start", gap: 10, padding: "6px 0" }}>
-              <span className="badge" style={{ color: FACT_COLORS[f.kind], background: "rgba(255,255,255,.05)", flex: "none", width: 92, justifyContent: "center" }}>{f.kind}</span>
-              <span style={{ fontSize: 14 }}>
-                {f.text}
-                {f.by && <span style={{ color: "var(--dim)" }}> · {f.by}</span>}
-              </span>
-            </div>
-          ))}
-        </div>
-      ))}
     </div>
   );
 }

@@ -18,6 +18,7 @@ import { useDriverState } from "../shared/driving";
 import { DriveLayer } from "./DriveLayer";
 import { ScreenRecording } from "../shared/ScreenRecording";
 import { cast, tellNote } from "../client/CastPicker";
+import { WikiStage } from "../wiki/WikiStage";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
@@ -54,6 +55,9 @@ export function Stage({ state, interactive, tilePins = true, bar, drive }: { sta
       break;
     case "join":
       body = <JoinStage state={state} />;
+      break;
+    case "wiki":
+      body = <WikiStage />;
       break;
     case "spotlight":
       body = <Columns title={stage.title} caption={stage.caption} items={pick(stage.items)} state={state} big />;

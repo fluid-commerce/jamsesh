@@ -1,4 +1,5 @@
 // HTTP, WebSocket and MCP on one port.
+import { wikiRoute } from "./wiki/routes";
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
@@ -57,7 +58,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|fonts\/(want|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|fonts\/(want|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots|wiki(\/.*)?)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -892,6 +893,19 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
 
+  // The project wiki (12.8). People read, search and edit; agents use the jam_wiki_* tools and can't edit pages.
+  if (path === "/wiki" || path.startsWith("/wiki/")) {
+    if (paired?.kind === "agent") return bad("That's for people; agents use the jam_wiki_ tools.", 403);
+    // Who writes is who is signed in: a paired person's own device, or the host's window as its person. Never a
+    // personId in the body, which any caller could fill in (HUMAN_ONLY above already refused other loopback callers).
+    const p = paired ? (paired.personId ? s.person(paired.personId) : undefined) : hostWindow ? s.person(s.store.setting<string>("hostPersonId", "")) : undefined;
+    // Every change to the wiki names a person, the host's own window included.
+    if (req.method !== "GET" && !p) return bad("Pick who you are in this window first.", 403);
+    const who = { id: p?.id ?? null, name: p?.name ?? "Someone" };
+    const r = await wikiRoute(hub.wiki, req.method, path, url, body, who);
+    if (r) return Response.json(r.body, { status: r.status, headers: { "cache-control": "no-store" } });
+  }
+
   // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
   // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
   if (path === "/triage" && req.method === "GET") {
@@ -903,8 +917,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   m = path.match(/^\/triage\/([\w-]+)(?:\/(send|add|merge|replace|dismiss))?$/);
   if (m && req.method !== "GET") {
     const who = actor();
-    if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
-    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind };
+    // A wiki card writes pages under the name of whoever accepts it, so it needs a person even in the host's window.
+    if (!who.id && (!hostWindow || s.board.get(m[1])?.type === "wiki")) return bad("Pick who you are in this window first.", 403);
+    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind, pages: body?.pages };
     const verb = m[2];
     const r = !verb
       ? req.method === "PATCH"

@@ -15,7 +15,9 @@ import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
 import { Attachments, pdfText, type AttachmentRef } from "./attachments";
-import { seedFromProject } from "./carryover";
+import { readProjectContext, seedFromProject } from "./carryover";
+import { projectsDir } from "./projects";
+import { WikiService } from "./wiki/service";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
@@ -67,6 +69,8 @@ export interface HubOptions {
   dataDir?: string;
   /** Defaults to <dataDir>/team when dataDir is given (tests), else ~/.jamsesh/team. */
   teamDir?: string;
+  /** The project wiki's folder; by default the project's own, or one inside the data directory. */
+  wikiDir?: string;
 }
 
 const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)>/;
@@ -95,6 +99,7 @@ export class Hub {
   keeper: ProjectKeeper;
   /** Images and files added to messages (SPEC 12.6). */
   attachments: Attachments;
+  wiki: WikiService;
   auth: Auth;
   /** The fonts canvases draw with this session: open ones fetched, others borrowed. Memory only. */
   fonts: FontService;
@@ -188,6 +193,29 @@ export class Hub {
     this.brain.attachments = this.attachments;
     // A new session of a project starts from what the last one settled (SPEC 12.7).
     if (!opts.dataDir && config.project) seedFromProject(config.home, config.project.slug, config.project.sessionId, this.session);
+    // The project's wiki (SPEC 12.8): the fact list lives on as pages. The first session of a project folds its facts in.
+    const wikiDir = opts.wikiDir ?? (!opts.dataDir && config.project ? join(projectsDir(config.home), config.project.slug) : join(dir, "project-wiki"));
+    this.wiki = new WikiService(this.session, wikiDir, this.session.sessionId, !opts.dataDir ? (config.project?.slug ?? "") : "");
+    this.wiki.attachmentBytes = (id) => {
+      const rec = this.attachments.record(id);
+      const bytes = rec ? this.attachments.bytes(id) : null;
+      return rec && bytes ? { name: rec.name, type: rec.kind, bytes } : null;
+    };
+    this.session.wikiAccept = (c, pages, by) => this.wiki.accept(c, pages, by);
+    this.session.wikiClosed = (c) => this.wiki.closed(c);
+    this.session.onFactSaved = (f) => void this.wiki.factSaved(f);
+    try {
+      // Raises the project's open proposals on this session's board, and closes any whose accept finished.
+      this.wiki.restore();
+    } catch (e) {
+      console.error("wiki restore:", e instanceof Error ? e.message : e);
+    }
+    this.brain.curateInDigest = false;
+    try {
+      this.wiki.migrate(!opts.dataDir && config.project ? readProjectContext(config.home, config.project.slug) : null);
+    } catch (e) {
+      console.error("wiki migrate:", e instanceof Error ? e.message : e);
+    }
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
@@ -199,7 +227,10 @@ export class Hub {
       return { ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled, lines: st.lines, byVoice: st.voice, neverUsed: heard > 0 && st.lines >= 12 && st.voice === 0 };
     };
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
-    this.session.onUpdate = (agent, kind, text, ev) => this.brain.agentUpdated(agent, kind, text, ev);
+    this.session.onUpdate = (agent, kind, text, ev) => {
+      this.brain.agentUpdated(agent, kind, text, ev);
+      this.wiki.agentUpdate(agent.name, kind, text, ev.workstreamId ? this.session.store.get("workstreams", ev.workstreamId)?.title : undefined);
+    };
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
     this.brain.relabel = (eventId, name) => {
@@ -223,6 +254,7 @@ export class Hub {
     void this.fonts.scan().catch(() => {});
     this.autosave.start();
     this.keeper.start();
+    this.wiki.start();
     this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000));
     this.intervals[1]?.unref?.();
     await Promise.all(tasks);
@@ -233,17 +265,22 @@ export class Hub {
     }
   }
 
-  /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000 };
+  /**
+   * How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing.
+   * `wiki` is the last stretch of conversation going into the wiki's sources and, if the model answers in time, being read.
+   */
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, wiki: 25_000, network: 3000 };
 
   /**
-   * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
+   * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every save
    * finished: false when a save failed or ran out of time, which the hub's exit code reports (index.ts).
+   * The wiki step doesn't count: a source it didn't get to read stays unread, and the next session reads it.
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
     const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
+    await step(this.wiki.flush(), Hub.SHUTDOWN_MS.wiki);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     this.stop();
     return saved && kept && closed;
@@ -257,6 +294,7 @@ export class Hub {
     this.awake.stop();
     this.autosave.stop();
     this.keeper.stop();
+    this.wiki.stop();
     this.brain.stop();
     this.canvas.stop();
     this.transcriber.stop();

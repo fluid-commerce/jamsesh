@@ -4,7 +4,7 @@
 import { restates, samePolarity, sameScope, sameSpecifics, similar } from "./similarity";
 import type { Session } from "./session";
 import { newId } from "./store";
-import type { Directive, DirectiveMode, Fact, JamEvent, TriageCard, TriageSource } from "./types";
+import type { Directive, DirectiveMode, Fact, JamEvent, TriageCard, TriageSource, WikiCardPayload } from "./types";
 
 const MODES: DirectiveMode[] = ["explore", "implement", "coordinate", "answer", "note"];
 const KINDS: Fact["kind"][] = ["decision", "requirement", "constraint", "preference", "question", "fact"];
@@ -66,6 +66,8 @@ export interface CardEdit {
   targets?: unknown;
   workstream?: unknown;
   kind?: unknown;
+  /** A wiki card: the pages that stay checked (all of them when absent). */
+  pages?: unknown;
 }
 
 export class Board {
@@ -183,6 +185,17 @@ export class Board {
     return this.announce(this.s.store.put("triage", card));
   }
 
+  /** The wiki's maintainer proposes page changes (12.8): one card per ingest, accepted page by page. */
+  proposeWiki(wiki: WikiCardPayload, by: string): TriageCard | null {
+    const now = this.stamp();
+    const text = clean(wiki.summary);
+    const card: TriageCard = {
+      id: newId("tri"), ts: now, updatedAt: now, type: "wiki", status: "open", origin: "agent", text, original: text, by,
+      mode: "note", targets: [], kind: "fact", workstream: "", conflictsWith: null, wiki, sources: [], count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+    };
+    return this.announce(this.s.store.put("triage", card));
+  }
+
   /** The curator would retire a saved fact with nothing worded to take its place: a person decides. */
   proposeRetire(p: { fact: Fact; status: "superseded" | "resolved"; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
     const open = this.all().find((c) => c.status === "open" && c.retire && c.conflictsWith === p.fact.id);
@@ -211,7 +224,21 @@ export class Board {
     const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
     if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && sameName(f.workstream, clean(p.workstream)) && restates(f.text, text, 0.55))) return null;
     const now = Date.now();
-    return this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] });
+    return this.saved(this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] }));
+  }
+
+  /** A fact saved in the session is also filed into the project wiki, which holds what outlasts the session (12.8). */
+  private saved(f: Fact): Fact {
+    this.s.onFactSaved?.(f);
+    return f;
+  }
+
+  /** A card's fact is filed into the wiki once its save has landed, never from inside a save that may roll back. */
+  private filed<T>(r: T): T {
+    const id = r && typeof r === "object" && "factId" in r ? (r as { factId?: unknown }).factId : undefined;
+    const f = typeof id === "string" ? this.s.store.get("facts", id) : undefined;
+    if (f) this.saved(f);
+    return r;
   }
 
   // ---- acting on a card ----
@@ -295,7 +322,7 @@ export class Board {
     const c = this.openCard(id, { status: "sent", by });
     if ("done" in c) return { ok: true, card: c.done, directiveId: c.done.directiveId ?? "" };
     if ("ok" in c) return c;
-    if (c.type !== "task") return fail("That's a context card: add it instead.");
+    if (c.type !== "task") return fail("That's not a task card: add it instead.");
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
     const card = r.card;
@@ -341,16 +368,26 @@ export class Board {
     const c = this.openCard(id, { status: "added", by });
     if ("done" in c) return { ok: true, card: c.done, factId: c.done.factId ?? "" };
     if ("ok" in c) return c;
+    if (c.type === "wiki") {
+      const pages = e.pages === undefined ? undefined : Array.isArray(e.pages) ? e.pages.map(String) : null;
+      if (pages === null) return fail("pages is a list of page names.");
+      const r = this.s.wikiAccept?.(c, pages, by);
+      if (!r) return fail("The wiki isn't available here.", 503);
+      if ("error" in r) return fail(r.error, r.status);
+      const card = this.done(c, "added", by, { wiki: { ...c.wiki!, applied: r.applied, skipped: r.skipped } });
+      this.s.wikiClosed?.(card);
+      return { ok: true, card, factId: "" };
+    }
     if (c.type !== "context") return fail("That's a task card: send it instead.");
     if (c.retire) return fail("That card retires a saved fact: use Retire, or dismiss it.");
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
     if (!this.worded(c, r.card)) return fail("Write what the file says to keep first: Edit, then Add.");
-    return this.commit(() => {
+    return this.filed(this.commit(() => {
       const fact = this.s.store.put("facts", this.newFact(r.card));
       this.announceDecision(r.card, by);
       return { ok: true as const, card: this.done(r.card, "added", by, { factId: fact.id }), factId: fact.id };
-    });
+    }));
   }
 
   private announceDecision(card: TriageCard, by: string) {
@@ -372,10 +409,10 @@ export class Board {
     // The card only has the file's name: the merged wording has to say something of its own, not the name or the fact alone.
     if (c.needsWording && (text === undefined || joined.includes(c.original) || joined.replace(/[.\s]+$/, "") === clean(f.text).replace(/[.\s]+$/, ""))) return fail("Write what to keep from the file into the merged wording first.");
     const ids = [...new Set([...f.sourceEventIds, ...c.sources.map((x) => x.eventId).filter((x): x is number => x != null)])];
-    return this.commit(() => {
+    return this.filed(this.commit(() => {
       this.s.store.put("facts", { ...f, text: joined, sourceEventIds: ids, note: `Merged with a proposal from ${c.by}`, updatedAt: Date.now() });
       return { ok: true as const, card: this.done(c, "merged", by, { factId: f.id }), factId: f.id };
-    });
+    }));
   }
 
   /** Put a context card in place of the fact it contradicts (the one it was flagged with, or `factId`). */
@@ -401,19 +438,22 @@ export class Board {
     if (!r.ok) return r;
     if (!this.worded(c, r.card)) return fail("Write what the file says to keep first: Edit, then Replace.");
     // The old fact is retired only together with its replacement being saved.
-    return this.commit(() => {
+    return this.filed(this.commit(() => {
       this.s.store.put("facts", { ...old, status: "superseded", note: `Replaced by ${by} from the Tasks board`, updatedAt: Date.now() });
       const fact = this.s.store.put("facts", this.newFact(r.card));
       this.announceDecision(r.card, by);
       return { ok: true as const, card: this.done(r.card, "replaced", by, { factId: fact.id }), factId: fact.id };
-    });
+    }));
   }
 
   dismiss(id: string, by: string): BoardResult {
     const c = this.openCard(id, { status: "dismissed", by });
     if ("done" in c) return { ok: true, card: c.done };
     if ("ok" in c) return c;
-    return { ok: true, card: this.done(c, "dismissed", by) };
+    const card = this.done(c, "dismissed", by);
+    // A wiki card's sources are read once a person has said no to it.
+    if (c.type === "wiki") this.s.wikiClosed?.(card);
+    return { ok: true, card };
   }
 
   /**
@@ -474,7 +514,7 @@ export class Board {
       .map((c, i) => {
         const w = Board.waitingMin(c, now);
         const who = c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ");
-        const where = c.cancels ? `cancel ${c.cancels} for ${who}` : c.type === "task" ? `${c.mode} → ${who || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
+        const where = c.type === "wiki" ? `wiki ${c.wiki?.kind ?? ""}: ${c.wiki?.changes.map((x) => x.slug).join(", ") || "findings only"}` : c.cancels ? `cancel ${c.cancels} for ${who}` : c.type === "task" ? `${c.mode} → ${who || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
         return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})${c.overruled ? ` [overruled: ${c.overruled}]` : ""}`;
       })
       .join("\n");

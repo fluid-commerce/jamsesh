@@ -100,7 +100,7 @@ test("shutdown says whether the final save finished: a save that hangs or fails 
   const dir = mkdtempSync(join(tmpdir(), "jam-shutdown-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const budget = Hub.SHUTDOWN_MS;
-  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, network: 200 };
+  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, wiki: 200, network: 200 };
   cleanup.push(() => void (Hub.SHUTDOWN_MS = budget));
   const make = () => new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
   expect(await make().shutdown()).toBe(true);
