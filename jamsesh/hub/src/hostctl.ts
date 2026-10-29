@@ -201,6 +201,10 @@ export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Prom
   return code === 0 ? { status: "ok", code: 0, out: text() } : { status: "failed", code, out: text() };
 }
 
+/** How a helper runs a command: null means it could not be stopped (the caller decides what that means). */
+export type Exec = (cmd: string[], ms?: number) => Promise<{ code: number; out: string } | null>;
+const shortExec: Exec = (cmd, ms) => runShort(cmd, ms);
+
 /** For short helper commands (osascript, open, simctl) where only the exit code and text matter: a command that could not be stopped counts as failed, with that said. */
 export async function runShort(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<{ code: number; out: string }> {
   const r = await run(cmd, timeoutMs, cwd);
@@ -224,7 +228,7 @@ export function urlProblem(text: string, o: { single?: boolean; allowGitUser?: b
   if (o.single && (/\s/.test(text) || CONTROL.test(text))) return "That has whitespace or control characters in it.";
   for (const m of text.matchAll(/[a-z][a-z0-9+.-]*:\/\//gi)) {
     const rest = text.slice(m.index! + m[0].length, m.index! + m[0].length + 2048).replace(/[\u0000-\u001f\u007f]/g, ""); // tabs, newlines and other control characters, which a URL parser drops
-    const authority = rest.split(/[/?#\\\s"'`<>|;()&]/)[0];
+    const authority = rest.split(/[/?#\\\s]/)[0];
     if (authority.includes("@")) {
       const user = authority.slice(0, authority.lastIndexOf("@"));
       if (!(o.allowGitUser && user === "git" && m[0].toLowerCase() === "ssh://")) return creds;
@@ -451,6 +455,8 @@ export class HostControl {
         }
         case "open_url": {
           if (!a.url || !/^(https?|exp|exps):\/\//.test(a.url)) return "Give an http(s) or exp URL.";
+          const leaky = urlProblem(a.url, { single: true });
+          if (leaky) return leaky;
           const r = await runShort(a.app ? ["open", "-a", a.app, a.url] : ["open", a.url]);
           if (r.code) return `Couldn't open it: ${r.out}`;
           this.log(`Opened ${a.url} on the host.`);
@@ -470,7 +476,7 @@ export class HostControl {
           return this.typeText(a.text, "Simulator");
         case "sim_launch": {
           if (!a.app) return "Give the app's bundle id (for example com.apple.mobilesafari).";
-          const sim = await this.pickSim(a.device);
+          const sim = await this.pickSimShort(a.device);
           if (typeof sim === "string") return sim;
           const r = await runShort(["xcrun", "simctl", "launch", sim.udid, a.app]);
           return r.code ? `Couldn't launch ${a.app} in ${sim.name}: ${r.out.slice(0, 200)}` : `Launched ${a.app} in ${sim.name}.`;
@@ -735,7 +741,9 @@ export class HostControl {
           if (o.open?.startsWith("simulator:")) {
             const app = confine(dir, o.open.slice("simulator:".length));
             if (!app) throw new Error("the app to install is outside the checkout or missing");
-            await this.simulator();
+            const up = await this.simulatorUp(undefined, undefined, (c, ms) => step(c, ms ?? HostControl.STEP_MS));
+            if (!up) return "";
+            if (!up.ok) return `Built ${label}, but the Simulator couldn't start: ${up.msg.slice(0, 300)}`;
             const inst = await step(["xcrun", "simctl", "install", "booted", app], 120_000);
             if (!inst) return "";
             if (inst.code) return `Built ${label}, but the Simulator couldn't run it: ${inst.out.slice(0, 300)}`;
@@ -789,8 +797,13 @@ export class HostControl {
   }
 
   /** The simulator to act on: the booted one that matches, else one that's booted for it. */
-  private async pickSim(device?: string): Promise<{ udid: string; name: string } | string> {
-    const list = await runShort(["xcrun", "simctl", "list", "devices", "available", "-j"]);
+  private async pickSimShort(device?: string) {
+    return (await this.pickSim(device, shortExec)) ?? "The Simulator is busy."; // the short exec never reports "couldn't stop" as null
+  }
+
+  private async pickSim(device?: string, exec: Exec = shortExec): Promise<{ udid: string; name: string } | string | null> {
+    const list = await exec(["xcrun", "simctl", "list", "devices", "available", "-j"]);
+    if (!list) return null;
     if (list.code) return `Xcode's simctl isn't available: ${list.out.slice(0, 200)}`;
     const devices = Object.values(JSON.parse(list.out).devices as Record<string, any[]>).flat();
     const want = (device ?? "iPhone").toLowerCase();
@@ -800,25 +813,42 @@ export class HostControl {
       devices.filter((d) => d.name.toLowerCase().includes(want)).pop() ??
       devices.find((d) => d.name.startsWith("iPhone"));
     if (!pick) return "No simulator device is installed.";
-    if (pick.state !== "Booted") await runShort(["xcrun", "simctl", "boot", pick.udid], 120_000);
+    if (pick.state !== "Booted") {
+      const boot = await exec(["xcrun", "simctl", "boot", pick.udid], 120_000);
+      if (!boot) return null;
+      if (boot.code) return `Couldn't boot ${pick.name}: ${boot.out.slice(0, 200)}`;
+    }
     return { udid: pick.udid, name: pick.name };
   }
 
-  async simulator(device?: string, url?: string): Promise<string> {
-    const pick = await this.pickSim(device);
-    if (typeof pick === "string") return pick;
-    await runShort(["open", "-a", "Simulator"]);
+  /** Brings the Simulator up (and opens a URL in it). `exec` is how commands run: null from it means one couldn't be stopped, and this returns null so the caller can stop and hold its lock. */
+  async simulatorUp(device?: string, url?: string, exec: Exec = shortExec): Promise<{ ok: boolean; msg: string } | null> {
     if (url) {
-      const r = await runShort(["xcrun", "simctl", "openurl", pick.udid, url]);
-      if (r.code) return `Booted ${pick.name}, but couldn't open ${url}: ${r.out}`;
+      const bad = urlProblem(url, { single: true });
+      if (bad) return { ok: false, msg: bad };
     }
-    this.log(`Simulator: ${pick.name}${url ? ` → ${url}` : ""}.`);
-    return `${pick.name} is up${url ? ` with ${url}` : ""}.`;
+    const pick = await this.pickSim(device, exec);
+    if (pick === null) return null;
+    if (typeof pick === "string") return { ok: false, msg: pick };
+    const app = await exec(["open", "-a", "Simulator"]);
+    if (!app) return null;
+    if (app.code) return { ok: false, msg: `Couldn't open the Simulator app: ${app.out.slice(0, 200)}` };
+    if (url) {
+      const r = await exec(["xcrun", "simctl", "openurl", pick.udid, url]);
+      if (!r) return null;
+      if (r.code) return { ok: false, msg: `Booted ${pick.name}, but couldn't open ${redactUrls(url)}: ${r.out}` };
+    }
+    this.log(`Simulator: ${pick.name}${url ? ` → ${redactUrls(url)}` : ""}.`);
+    return { ok: true, msg: `${pick.name} is up${url ? ` with ${redactUrls(url)}` : ""}.` };
+  }
+
+  async simulator(device?: string, url?: string): Promise<string> {
+    return (await this.simulatorUp(device, url))!.msg; // the default exec never reports "couldn't stop" as null
   }
 
   /** Saves a PNG of the Simulator's screen. Taps and swipes are then given in this picture's pixels. */
   async simScreenshot(device?: string): Promise<string> {
-    const pick = await this.pickSim(device);
+    const pick = await this.pickSimShort(device);
     if (typeof pick === "string") return pick;
     const dir = join(config.home, "shots");
     mkdirSync(dir, { recursive: true });
@@ -839,7 +869,7 @@ export class HostControl {
   /** A tap (or swipe) on the Simulator: the point is mapped from screenshot pixels into the Simulator window. */
   private async simPoint(device: string | undefined, x?: number, y?: number, x2?: number, y2?: number, ms = 0): Promise<string> {
     if (![x, y, x2, y2].every((v) => typeof v === "number" && Number.isFinite(v))) return "Give x and y (and x2 and y2 for a swipe) in pixels of the latest sim_screenshot.";
-    const pick = await this.pickSim(device);
+    const pick = await this.pickSimShort(device);
     if (typeof pick === "string") return pick;
     const shot = this.simShot && this.simShot.udid === pick.udid ? this.simShot : null;
     if (!shot) return "Take a sim_screenshot first: taps are given in its pixels.";

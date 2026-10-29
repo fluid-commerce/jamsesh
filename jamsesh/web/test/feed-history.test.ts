@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 (globalThis as any).navigator ??= {};
 
 const { historyCursor, capFeed, feedAdmits } = await import("../src/shared/ui");
+const { hub } = await import("../src/shared/hub");
 
 test("history pages from the oldest event the window has, even when the feed shows none of them", () => {
   // The state's window: only canvas and system events, none the feed shows.
@@ -29,12 +30,19 @@ test("while the reader is away nothing newer than the line they left is added, s
   expect(feedAdmits(false, 100, 101)).toBe(false);
   expect(feedAdmits(false, 100, 100)).toBe(true);
   expect(feedAdmits(false, 100, 40)).toBe(true);
-  // Simulated: away at 100, events 101..110 arrive and are only counted; returning rebuilds from the live state.
-  const list = new Map<number, unknown>([[98, 1], [99, 1], [100, 1]]);
-  for (let id = 101; id <= 110; id++) if (feedAdmits(false, 100, id)) list.set(id, 1);
-  expect([...list.keys()]).toEqual([98, 99, 100]);
-  list.clear();
-  for (let id = 61; id <= 110; id++) if (feedAdmits(true, 100, id)) list.set(id, 1);
-  const ids = [...list.keys()];
-  expect(ids[ids.length - 1] - ids[0] + 1).toBe(ids.length); // contiguous, ends at the newest
+});
+
+test("the hub client announces each new event as it arrives, so a burst past the 400-event window is still counted", () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: { events: [], utterances: [] } });
+  let n = 0;
+  const off = hub.onEvent(() => void n++);
+  for (let id = 1; id <= 650; id++) h.handle({ type: "event", event: { id, kind: "speech", text: "x", data: {} } });
+  expect(n).toBe(650);
+  expect(hub.get().state!.events.length).toBe(400); // the window dropped 250, the listener saw them all
+  h.handle({ type: "event", event: { id: 650, kind: "speech", text: "again", data: {} } }); // an update, not a new event
+  expect(n).toBe(650);
+  off();
+  h.handle({ type: "event", event: { id: 651, kind: "speech", text: "x", data: {} } });
+  expect(n).toBe(650);
 });

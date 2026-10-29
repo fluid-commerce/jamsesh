@@ -50,6 +50,13 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 class HubClient {
   snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
   private listeners = new Set<() => void>();
+  private eventListeners = new Set<(e: JamEvent) => void>();
+
+  /** Called for every new event as it arrives off the wire, before the 400-event window can displace it. */
+  onEvent = (fn: (e: JamEvent) => void) => {
+    this.eventListeners.add(fn);
+    return () => void this.eventListeners.delete(fn);
+  };
   private ws: WebSocket | null = null;
   private started = false;
   private retry = 0;
@@ -305,6 +312,7 @@ class HubClient {
       case "event": {
         if (!s) return;
         const i = s.events.findIndex((e) => e.id === m.event.id);
+        if (i < 0) for (const fn of this.eventListeners) fn(m.event);
         const events = i >= 0 ? s.events.map((e) => (e.id === m.event.id ? m.event : e)) : [...s.events, m.event].slice(-400);
         return this.set({ state: { ...s, events } });
       }

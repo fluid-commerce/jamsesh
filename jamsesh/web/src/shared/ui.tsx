@@ -428,6 +428,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const seen = useRef(new Map<number, JamEvent>());
   const following = useRef(true);
   const [away, setAway] = useState(false);
+  const [, tick] = useState(0);
   // The newest line in the list when the reader scrolled away. While they are away nothing newer is added (the list never has a gap); it is counted for the pill, and returning resets to the latest window.
   const frozenAt = useRef(0);
   // How many feed lines came in while the reader was away: a plain counter bumped by each new event as it arrives, with the highest id counted so far (the live state holds only a recent window).
@@ -452,12 +453,6 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || ((older.done || everything) && !trimmed.current);
-  if (!following.current)
-    for (const e of [...(state?.events ?? [])].sort((a, b) => a.id - b.id))
-      if (e.id > awayNew.current.upTo) {
-        awayNew.current.upTo = e.id;
-        if (wanted(e)) awayNew.current.count++;
-      }
   const fresh = following.current ? 0 : awayNew.current.count;
 
   /** Back at the bottom: drop everything and start again from the live state, a contiguous latest window that pages backward. */
@@ -528,6 +523,23 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
       toBottom();
     }
   }, [last]);
+
+  // The away count is bumped at the wire, one event at a time, so a burst can't push lines out of the state window uncounted.
+  const wantedRef = useRef<(e: JamEvent) => boolean>(() => false);
+  wantedRef.current = wanted;
+  useEffect(
+    () =>
+      hub.onEvent((e) => {
+        const a = awayNew.current;
+        if (following.current || e.id <= Math.max(frozenAt.current, a.upTo)) return;
+        a.upTo = e.id;
+        if (wantedRef.current(e)) {
+          a.count++;
+          tick((n) => n + 1);
+        }
+      }),
+    [],
+  );
 
   // A taller or shorter box (keyboard, resize) keeps the reader at the bottom if they were there.
   useEffect(() => {
