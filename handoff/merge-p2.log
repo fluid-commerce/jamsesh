@@ -1,0 +1,12 @@
+Auto-merging jamsesh/SPEC.md
+Auto-merging jamsesh/STATUS.md
+Auto-merging jamsesh/app/src-tauri/src/main.rs
+Auto-merging jamsesh/hub/src/devproxy.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/devproxy.ts
+Auto-merging jamsesh/hub/src/session.ts
+Auto-merging jamsesh/hub/src/types.ts
+Auto-merging jamsesh/hub/test/devtile.test.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/test/devtile.test.ts
+Auto-merging jamsesh/web/src/shared/hub.ts
+Auto-merging jamsesh/web/src/shared/ui.tsx
+Automatic merge failed; fix conflicts and then commit the result.

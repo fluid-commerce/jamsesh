@@ -1,0 +1,20 @@
+Auto-merging jamsesh/SPEC.md
+Auto-merging jamsesh/STATUS.md
+Auto-merging jamsesh/app/bundle-hub.sh
+Auto-merging jamsesh/app/src-tauri/build.rs
+Auto-merging jamsesh/app/src-tauri/src/main.rs
+Auto-merging jamsesh/hub/src/auth.ts
+Auto-merging jamsesh/hub/src/http.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/http.ts
+Auto-merging jamsesh/hub/src/hub.ts
+Auto-merging jamsesh/hub/src/session.ts
+Auto-merging jamsesh/hub/src/store.ts
+Auto-merging jamsesh/hub/src/types.ts
+Auto-merging jamsesh/hub/test/security-fixes.test.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/test/security-fixes.test.ts
+Auto-merging jamsesh/web/src/client/ClientView.tsx
+Auto-merging jamsesh/web/src/shared/Settings.tsx
+Auto-merging jamsesh/web/src/shared/hub.ts
+Auto-merging jamsesh/web/test/voiceprint.test.ts
+CONFLICT (content): Merge conflict in jamsesh/web/test/voiceprint.test.ts
+Automatic merge failed; fix conflicts and then commit the result.

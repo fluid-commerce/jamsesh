@@ -1,0 +1,28 @@
+Auto-merging jamsesh/SPEC.md
+Auto-merging jamsesh/app/src-tauri/src/main.rs
+CONFLICT (content): Merge conflict in jamsesh/app/src-tauri/src/main.rs
+Auto-merging jamsesh/app/src-tauri/src/screens.rs
+CONFLICT (content): Merge conflict in jamsesh/app/src-tauri/src/screens.rs
+Auto-merging jamsesh/hub/src/brain/brain.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/brain/brain.ts
+Auto-merging jamsesh/hub/src/bus.ts
+Auto-merging jamsesh/hub/src/http.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/http.ts
+Auto-merging jamsesh/hub/src/mcp.ts
+Auto-merging jamsesh/hub/src/session.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/session.ts
+Auto-merging jamsesh/hub/src/types.ts
+Auto-merging jamsesh/hub/test/bench.ts
+Auto-merging jamsesh/hub/test/brain.scenarios.test.ts
+Auto-merging jamsesh/hub/test/bughunt.brain.test.ts
+Auto-merging jamsesh/hub/test/review-fixes.test.ts
+Auto-merging jamsesh/hub/test/screens.test.ts
+Auto-merging jamsesh/hub/test/shares.test.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/test/shares.test.ts
+Auto-merging jamsesh/hub/test/stage-lock.test.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/test/stage-lock.test.ts
+Auto-merging jamsesh/web/src/host/Stage.tsx
+Auto-merging jamsesh/web/src/main.tsx
+CONFLICT (content): Merge conflict in jamsesh/web/src/main.tsx
+Auto-merging jamsesh/web/src/shared/StageControls.tsx
+Automatic merge failed; fix conflicts and then commit the result.

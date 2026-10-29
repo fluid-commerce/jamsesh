@@ -1,0 +1,8 @@
+cd /tmp/claude-501
+chey second-opinion --preset staff-engineer --author-model claude-opus-5-5 --title "JamSesh Phase 7: the project wiki" --diff jamsesh/phase-4...jamsesh/phase-7 --repo "$HOME/jamsesh-p7" --context @/tmp/claude-501/p7-context.md \
+ --focus "Proof of write (token in front matter, intent record, reconcile, editPage reconciling first): can a person edit, an identical edit, or a crash at any point make a page count as accepted wrongly or escape the log/index?" \
+ --focus "Shutdown: captureFinal first and apart from ingest, its budget; can the transcript tail still be lost or duplicated? Stored-before full diff." \
+ --focus "State validation (readState) and durable cursors: agent-report event-named sources, replay, damaged state. Anything still malformed that passes?" \
+ --focus "Full-size stage graph (grid name room, name budget, startup time budget, memoized graph): correct and actually bounded?" \
+ --focus "Confirm each finding in /tmp/claude-501/p7-review6.md is fixed" --focus "Are the tests meaningful, and what should be deleted?" > /tmp/claude-501/p7-review7.log 2>&1
+echo "exit $?" >> /tmp/claude-501/p7-review7.log

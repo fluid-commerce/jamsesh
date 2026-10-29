@@ -1,0 +1,227 @@
+--- jamsesh-live.swift	2026-10-29 08:15:49
++++ jamsesh-live.fixed.swift	2026-10-29 08:28:36
+@@ -23,9 +23,9 @@
+ signal(SIGPIPE, SIG_IGN)
+ 
+ /// The button the hub told us is down: where, for whom, and when we last heard. A button never stays down once the hub is gone or quiet.
+-var held: (p: CGPoint, pid: pid_t, at: Date)?
++var held: (p: CGPoint, pid: pid_t, wid: CGWindowID, at: Date)?
+ let heldLock = NSLock()
+-func setHeld(_ h: (p: CGPoint, pid: pid_t, at: Date)?) {
++func setHeld(_ h: (p: CGPoint, pid: pid_t, wid: CGWindowID, at: Date)?) {
+   heldLock.lock()
+   held = h
+   heldLock.unlock()
+@@ -36,7 +36,7 @@
+   let h = held
+   held = nil
+   heldLock.unlock()
+-  if let h { mouse(.leftMouseUp, h.p, h.pid) }
++  if let h { mouse(.leftMouseUp, h.p, h.pid, h.wid) }
+ }
+ 
+ /// Every way out of this program goes through here, so a button the hub told us is down never outlives it.
+@@ -140,55 +140,92 @@
+ var current: Target?
+ let lock = NSLock()
+ 
+-/** The app's largest window (or the one asked for), from the app's own processes only. */
++/**
++ * The app's frontmost window (or the one asked for), from the app's own processes only. The window list is in
++ * front-to-back order, so the first match is the one the person was last using, not a bigger one behind it.
++ */
+ func findWindow() -> Target? {
+-  var best: Target?
+   for w in windowInfos(pids(bundle)) {
+     guard let id = w[kCGWindowNumber as String] as? UInt32, let pid = w[kCGWindowOwnerPID as String] as? Int32,
+       let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+       let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"], width > 60, height > 60
+     else { continue }
+     if let only = wantWindow, only != id { continue }
+-    let t = Target(id: id, pid: pid, bounds: CGRect(x: x, y: y, width: width, height: height))
+-    if let b = best, b.bounds.width * b.bounds.height >= t.bounds.width * t.bounds.height { continue }
+-    best = t
++    return Target(id: id, pid: pid, bounds: CGRect(x: x, y: y, width: width, height: height))
+   }
+-  return best
++  return nil
+ }
+ 
+ guard let first = findWindow() else { fail("nowindow", "No window of \(bundle) is on screen.") }
+ current = first
+ 
++/// Where the captured window is: on screen at some place, off screen for now (minimized, its app hidden, another Space), or gone.
++enum Seen {
++  case shown(Target)
++  case away
++  case gone
++}
++
+ /**
+- * Where the captured window is now: the same window, still owned by the same process of the same app. Nil once it
+- * has closed, gone off screen, or its process has been replaced, and then capture and input stop.
++ * The same window, still owned by the same process of the same app. Only a window that no longer exists (or whose
++ * process has been replaced) is gone. Asking for just this window (.optionIncludingWindow) returns nothing at all while
++ * it is minimized, hidden or on another Space, which looked exactly like a closed window: the whole list (.optionAll)
++ * still has it, without kCGWindowIsOnscreen.
+  */
+-func sameWindow() -> Target? {
++func sameWindow() -> Seen {
+   guard NSRunningApplication(processIdentifier: first.pid)?.bundleIdentifier == bundle,
+-    let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], first.id) as? [[String: Any]],
+-    let w = list.first, (w[kCGWindowNumber as String] as? UInt32) == first.id, (w[kCGWindowOwnerPID as String] as? Int32) == first.pid,
+-    (w[kCGWindowIsOnscreen as String] as? Bool) ?? false,
++    let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]],
++    let w = list.first(where: { ($0[kCGWindowNumber as String] as? UInt32) == first.id }),
++    (w[kCGWindowOwnerPID as String] as? Int32) == first.pid
++  else { return .gone }
++  guard (w[kCGWindowIsOnscreen as String] as? Bool) ?? false,
+     let b = w[kCGWindowBounds as String] as? [String: CGFloat], let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"]
+-  else { return nil }
+-  return Target(id: first.id, pid: first.pid, bounds: CGRect(x: x, y: y, width: width, height: height))
++  else { return .away }
++  return .shown(Target(id: first.id, pid: first.pid, bounds: CGRect(x: x, y: y, width: width, height: height)))
+ }
+ 
+ // ---- input ----
+ let canInput = AXIsProcessTrusted()
+ if !canInput { say(["event": "error", "code": "accessibility", "text": "Accessibility isn't allowed for JamSesh on this Mac, so people can watch but not click."]) }
+ 
+-func point(_ fx: Double, _ fy: Double) -> (CGPoint, pid_t)? {
++func point(_ fx: Double, _ fy: Double) -> (CGPoint, pid_t, CGWindowID)? {
+   lock.lock()
+   defer { lock.unlock() }
+   guard let t = current, fx.isFinite, fy.isFinite else { return nil }
+   let x = t.bounds.minX + min(max(fx, 0), 1) * t.bounds.width
+   let y = t.bounds.minY + min(max(fy, 0), 1) * t.bounds.height
+-  return (CGPoint(x: x, y: y), t.pid)
++  return (CGPoint(x: x, y: y), t.pid, t.id)
+ }
+ 
+-func mouse(_ type: CGEventType, _ p: CGPoint, _ pid: pid_t) {
+-  CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.postToPid(pid)
++/**
++ * An event posted to a process carries no window, and AppKit drops a mouse or scroll event without one (it arrives
++ * with windowNumber 0 and never reaches a view, whether the app is in front or not). The event needs the window's
++ * number (field 51) and the point inside that window, top-left origin. There's no public setter for that point: it's
++ * the "window location" entry of the event's record (tag 0xc039, two big-endian floats), so it's written there. If the
++ * record ever looks different, the event goes out as before rather than with a wrong point.
++ */
++func post(_ e: CGEvent?, _ pid: pid_t, _ wid: CGWindowID) {
++  guard let e else { return }
++  lock.lock()
++  let origin = current?.id == wid ? current?.bounds.origin : nil
++  lock.unlock()
++  if let field = CGEventField(rawValue: 51) { e.setIntegerValueField(field, value: Int64(wid)) }
++  guard let origin, let cf = e.data else { return e.postToPid(pid) }
++  var d = Data(referencing: cf as NSData)
++  let head = d.prefix(64)
++  guard let r = head.range(of: Data([0x00, 0x02, 0xc0, 0x39])), r.upperBound + 8 <= d.count else { return e.postToPid(pid) }
++  let at = e.location
++  var lx = Float(at.x - origin.x).bitPattern.bigEndian
++  var ly = Float(at.y - origin.y).bitPattern.bigEndian
++  d.replaceSubrange(r.upperBound..<r.upperBound + 4, with: Data(bytes: &lx, count: 4))
++  d.replaceSubrange(r.upperBound + 4..<r.upperBound + 8, with: Data(bytes: &ly, count: 4))
++  (CGEvent(withDataAllocator: nil, data: d as CFData) ?? e).postToPid(pid)
+ }
++func mouse(_ type: CGEventType, _ p: CGPoint, _ pid: pid_t, _ wid: CGWindowID) {
++  let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
++  if type == .leftMouseDown || type == .leftMouseUp || type == .leftMouseDragged { e?.setIntegerValueField(.mouseEventClickState, value: 1) }
++  post(e, pid, wid)
++}
+ 
+ 
+ /// While nobody watches the tile the hub says "pause": frames are dropped before they are encoded, "resume" starts them again.
+@@ -213,21 +250,21 @@
+   let fy = (m["y"] as? Double) ?? 0.5
+   switch t {
+   case "tap":
+-    guard let (p, pid) = point(fx, fy) else { return }
+-    mouse(.leftMouseDown, p, pid)
++    guard let (p, pid, wid) = point(fx, fy) else { return }
++    mouse(.leftMouseDown, p, pid, wid)
+     usleep(40_000)
+-    mouse(.leftMouseUp, p, pid)
++    mouse(.leftMouseUp, p, pid, wid)
+   case "down":
+     releaseHeld()
+-    if let (p, pid) = point(fx, fy) {
+-      mouse(.leftMouseDown, p, pid)
+-      setHeld((p, pid, Date()))
++    if let (p, pid, wid) = point(fx, fy) {
++      mouse(.leftMouseDown, p, pid, wid)
++      setHeld((p, pid, wid, Date()))
+     }
+   case "move":
+-    if let (p, pid) = point(fx, fy) {
+-      mouse(.leftMouseDragged, p, pid)
++    if let (p, pid, wid) = point(fx, fy) {
++      mouse(.leftMouseDragged, p, pid, wid)
+       heldLock.lock()
+-      if held != nil { held = (p, pid, Date()) }
++      if held != nil { held = (p, pid, wid, Date()) }
+       heldLock.unlock()
+     }
+   case "up":
+@@ -236,13 +273,15 @@
+     let was = held
+     held = nil
+     heldLock.unlock()
+-    if let (p, pid) = point(fx, fy) { mouse(.leftMouseUp, p, was?.pid ?? pid) } else if let was { mouse(.leftMouseUp, was.p, was.pid) }
++    if let (p, pid, wid) = point(fx, fy) { mouse(.leftMouseUp, p, was?.pid ?? pid, was?.wid ?? wid) } else if let was { mouse(.leftMouseUp, was.p, was.pid, was.wid) }
+   case "scroll":
+-    guard let (p, pid) = point(fx, fy) else { return }
+-    mouse(.mouseMoved, p, pid)
++    guard let (p, pid, wid) = point(fx, fy) else { return }
++    mouse(.mouseMoved, p, pid, wid)
+     let dy = Int32(max(-2000, min(2000, (m["dy"] as? Double) ?? 0)))
+     let dx = Int32(max(-2000, min(2000, (m["dx"] as? Double) ?? 0)))
+-    CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)?.postToPid(pid)
++    let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)
++    e?.location = p
++    post(e, pid, wid)
+   case "text":
+     guard let s = m["text"] as? String, s.count <= 200 else { return }
+     lock.lock()
+@@ -293,7 +332,6 @@
+ // ---- capture ----
+ final class Output: NSObject, SCStreamOutput, SCStreamDelegate {
+   let ci = CIContext()
+-  var last = Date.distantPast
+   func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+     guard !isPaused(), type == .screen, sb.isValid, let px = CMSampleBufferGetImageBuffer(sb) else { return }
+     if let a = (CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
+@@ -313,6 +351,8 @@
+ }
+ 
+ let output = Output()
++/// The running stream. SCStream stops when nothing holds it: kept only in the Task below, it sent one frame and then went quiet.
++var activeStream: SCStream?
+ Task {
+   do {
+     let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+@@ -331,6 +371,7 @@
+     cfg.queueDepth = 3
+     let stream = SCStream(filter: filter, configuration: cfg, delegate: output)
+     try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "frames"))
++    activeStream = stream
+     try await stream.startCapture()
+     say(["event": "window", "w": Int(area.width), "h": Int(area.height)])
+   } catch {
+@@ -342,11 +383,14 @@
+ let timer = DispatchSource.makeTimerSource(queue: .global())
+ timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
+ timer.setEventHandler {
+-  let t = sameWindow()
++  let seen = sameWindow()
++  var t: Target?
++  if case .shown(let s) = seen { t = s }
++  // While the window is away, input has nowhere to go and is dropped; it comes back when the window does.
+   lock.lock()
+   current = t
+   lock.unlock()
+-  if t == nil { fail("nowindow", "The window closed.") }
++  if case .gone = seen { fail("nowindow", "The window closed.") }
+ }
+ timer.resume()
+ RunLoop.main.run()

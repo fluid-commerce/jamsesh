@@ -1,0 +1,12 @@
+Auto-merging jamsesh/SPEC.md
+Auto-merging jamsesh/STATUS.md
+Auto-merging jamsesh/hub/src/http.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/http.ts
+Auto-merging jamsesh/hub/src/hub.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/hub.ts
+Auto-merging jamsesh/hub/src/session.ts
+Auto-merging jamsesh/hub/test/audio-fixes.test.ts
+Auto-merging jamsesh/web/src/client/ClientView.tsx
+CONFLICT (content): Merge conflict in jamsesh/web/src/client/ClientView.tsx
+Auto-merging jamsesh/web/src/shared/ui.tsx
+Automatic merge failed; fix conflicts and then commit the result.

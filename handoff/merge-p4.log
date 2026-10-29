@@ -1,0 +1,13 @@
+Auto-merging jamsesh/SPEC.md
+Auto-merging jamsesh/STATUS.md
+Auto-merging jamsesh/hub/src/board.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/board.ts
+Auto-merging jamsesh/hub/src/brain/brain.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/brain/brain.ts
+Auto-merging jamsesh/hub/src/http.ts
+Auto-merging jamsesh/hub/src/session.ts
+Auto-merging jamsesh/hub/src/types.ts
+Auto-merging jamsesh/hub/test/p4-review.test.ts
+Auto-merging jamsesh/hub/test/projects.run.test.ts
+Auto-merging jamsesh/web/src/shared/Tasks.tsx
+Automatic merge failed; fix conflicts and then commit the result.

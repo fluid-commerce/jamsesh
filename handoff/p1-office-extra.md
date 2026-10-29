@@ -1,0 +1,1 @@
+- 1.10 watchdog: cover and uncover a JamSesh window in the Mac app. The watchdog doesn't crash, and it doesn't restart a healthy page.

@@ -1,0 +1,32 @@
+Auto-merging jamsesh/SPEC.md
+Auto-merging jamsesh/app/src-tauri/src/fonts.rs
+CONFLICT (content): Merge conflict in jamsesh/app/src-tauri/src/fonts.rs
+Auto-merging jamsesh/app/src-tauri/src/main.rs
+CONFLICT (content): Merge conflict in jamsesh/app/src-tauri/src/main.rs
+Auto-merging jamsesh/hub/src/brain/brain.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/brain/brain.ts
+Auto-merging jamsesh/hub/src/canvas/canvas.ts
+Auto-merging jamsesh/hub/src/children.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/children.ts
+Auto-merging jamsesh/hub/src/http.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/http.ts
+Auto-merging jamsesh/hub/src/hub.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/hub.ts
+Auto-merging jamsesh/hub/src/mcp.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/mcp.ts
+Auto-merging jamsesh/hub/src/session.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/session.ts
+Auto-merging jamsesh/hub/src/store.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/src/store.ts
+Auto-merging jamsesh/hub/src/types.ts
+Auto-merging jamsesh/hub/test/agent-news.test.ts
+Auto-merging jamsesh/hub/test/children.test.ts
+CONFLICT (content): Merge conflict in jamsesh/hub/test/children.test.ts
+Auto-merging jamsesh/skill/SKILL.md
+Auto-merging jamsesh/web/src/shared/canvasJoin.ts
+CONFLICT (content): Merge conflict in jamsesh/web/src/shared/canvasJoin.ts
+Auto-merging jamsesh/web/src/shared/ui.tsx
+CONFLICT (content): Merge conflict in jamsesh/web/src/shared/ui.tsx
+Auto-merging jamsesh/web/test/canvas-join.test.ts
+CONFLICT (content): Merge conflict in jamsesh/web/test/canvas-join.test.ts
+Automatic merge failed; fix conflicts and then commit the result.
