@@ -1,7 +1,7 @@
 // The Tasks board's triage (4.1): what JamSesh overhears, and the context agents report themselves, waits here
 // as cards for a person to send, add, edit, merge or dismiss. Things said to JamSesh on purpose skip this.
 // Cards never expire; the ones that have waited a while get a label and a spoken mention (brain.ts).
-import { restates, samePolarity, sameScope, sameSpecifics, similar } from "./similarity";
+import { restates, sameScope, similar } from "./similarity";
 import type { Session } from "./session";
 import { newId } from "./store";
 import type { Directive, DirectiveMode, Fact, JamEvent, TriageCard, TriageSource } from "./types";
@@ -17,7 +17,7 @@ const SOURCES_MAX = 12;
 /** Resolved cards the state carries (the log of what people did with proposals); older ones stay in the store. */
 const RESOLVED_SHOWN = 20;
 
-export { restates, sameCounts, sameSpecifics, similar } from "./similarity";
+export { restates, similar } from "./similarity";
 
 /** Agents' routine notices (shipped, done, progress) are the changelog, not knowledge: curation skips them. */
 export function forCuration(e: JamEvent) {
@@ -128,7 +128,7 @@ export class Board {
   /** An open card (or one dismissed a moment ago) that says the same thing for the same purpose: `extra` checks the purpose. */
   private match(type: TriageCard["type"], text: string, extra: (c: TriageCard) => boolean): TriageCard | undefined {
     const now = Date.now();
-    return this.all().find((c) => c.type === type && (c.status === "open" || (c.status === "dismissed" && now - (c.resolvedAt ?? 0) < DISMISS_QUIET_MS)) && extra(c) && (restates(c.text, text, 0.7) || restates(c.original, text, 0.7)));
+    return this.all().find((c) => c.type === type && (c.status === "open" || (c.status === "dismissed" && now - (c.resolvedAt ?? 0) < DISMISS_QUIET_MS)) && extra(c) && (restates(c.text, text) || restates(c.original, text)));
   }
 
   /** The agents' names when the card was made or edited, so a card can still say who an agent that left was. */
@@ -177,14 +177,14 @@ export class Board {
     // Only when it is the same kind, workstream and platform: a "replace" across those is another fact, not a change to this one.
     const named0 = p.replaces ? active.find((f) => f.id === p.replaces) : undefined;
     const named = named0 && named0.kind === kind && sameName(named0.workstream, workstream) && sameScope(named0.text, text) ? named0 : undefined;
-    // Already known, in other words: nothing for a person to decide. "Not option A" is not "option A" again.
-    if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text, 0.55))) return null;
+    // Already known, word for word: nothing for a person to decide. Any other wording is a card.
+    if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const same = this.match("context", text, (c) => !c.retire && c.kind === kind && sameName(c.workstream, workstream) && (!named || c.conflictsWith === named.id));
     if (same) return this.repeat(same, sources);
     // A close fact that differs in its specifics (option A versus B, 16 versus 24 px) or says the opposite is the one this would replace.
     // Only a fact of the same kind and workstream: "48px in Mobile" doesn't replace "64px in Desktop".
-    const conflict = named ?? active.find((f) => f.kind === kind && sameName(f.workstream, workstream) && sameScope(f.text, text) && similar(f.text, text) > 0.45 && (!sameSpecifics(f.text, text) || !samePolarity(f.text, text)));
+    const conflict = named ?? active.find((f) => f.kind === kind && sameName(f.workstream, workstream) && sameScope(f.text, text) && similar(f.text, text) > 0.45 && !restates(f.text, text));
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "context", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
@@ -219,7 +219,7 @@ export class Board {
   rememberNow(p: ContextProposal): Fact | null {
     const text = clean(p.text);
     const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
-    if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && sameName(f.workstream, clean(p.workstream)) && restates(f.text, text, 0.55))) return null;
+    if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && sameName(f.workstream, clean(p.workstream)) && restates(f.text, text))) return null;
     const now = Date.now();
     return this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] });
   }

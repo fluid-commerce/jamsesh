@@ -21,6 +21,8 @@ function unescapePdf(s: string) {
 const STR = String.raw`\((?:\\[\s\S]|[^\\)])*\)`;
 /** A shown string (`(…) Tj`, `(…) '`, `a b (…) "`), an array of them (`[(…) -20 (…)] TJ`), or a line move. */
 const SHOW = new RegExp(String.raw`(${STR})\s*(?:Tj|')|(${STR})\s*"|\[((?:${STR}|[^\]()])*)\]\s*TJ|\b(T\*|Td|TD|Tm)\b`, "g");
+/** The same, and a text render mode setting (`3 Tr`). */
+const SHOW_OR_MODE = new RegExp(`${SHOW.source}|\\b(\\d)\\s+Tr\\b`, "g");
 
 /** The objects of a PDF by number: each one's text from "N G obj" to its "endobj". */
 function objects(src: string): Map<number, { at: number; body: string }> {
@@ -63,12 +65,14 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
       }
     } else if (/\/Filter/.test(m[1])) continue;
     const ops = latin(body);
+    let hidden = false;
     for (const block of ops.match(/\bBT\b[\s\S]*?\bET\b/g) ?? []) {
-      // Render mode 3 (invisible) and 7 (clip only) draw nothing a reader sees.
-      if (/(?:^|\s)[37]\s+Tr\b/.test(block)) continue;
       let line = "";
-      for (const t of block.matchAll(SHOW)) {
-        if (t[4]) line += " ";
+      for (const t of block.matchAll(SHOW_OR_MODE)) {
+        // Render mode 3 (invisible) and 7 (clip only) draw nothing a reader sees; the mode stays until another is set.
+        if (t[5] !== undefined) hidden = t[5] === "3" || t[5] === "7";
+        else if (hidden) continue;
+        else if (t[4]) line += " ";
         else if (t[3] !== undefined) line += [...t[3].matchAll(new RegExp(STR, "g"))].map((x) => unescapePdf(x[0].slice(1, -1))).join("");
         else line += unescapePdf((t[1] ?? t[2]).slice(1, -1));
       }

@@ -1262,7 +1262,7 @@ the same ask said again doesn't clear it but makes a new card with `renews` nami
 Asked directly, it dismisses it. A document sent with no request is a context card
 with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
 poppler's `pdftotext` when installed, else JamSesh's own reader in a worker with a 5 s limit, which takes only the
-strings shown by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`, in the content streams pages name, skipping blocks set to invisible or clip-only text (`3 Tr`, `7 Tr`; text hidden any other way, such as white on white or off the page, is still read, and so is anything `pdftotext` returns); `pdfText`; the compiled
+strings shown by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`, in the content streams pages name, skipping text shown while the render mode is invisible or clip-only (`3 Tr`, `7 Tr`, until another mode is set; text hidden any other way, such as white on white or off the page, is still read, and so is anything `pdftotext` returns); `pdfText`; the compiled
 hub carries the worker as a second entrypoint, and `jamsesh-hub --pdf-text <file>` checks it); with nothing readable it gets `needsWording`. Agents'
 credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.db`) holds only
 accepted facts, and carries the brief's `goal` and `glossary` as well as its text.

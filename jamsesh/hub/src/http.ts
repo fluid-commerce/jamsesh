@@ -556,6 +556,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/say" && req.method === "POST") {
     // Only people speak as people: agents post through MCP, and a window speaks as its own person.
     if (paired?.kind === "agent") return bad("Agents post with jam_update and jam_message, not as a person.", 403);
+    if (hub.closing) return bad("The session is saving and closing. Try again in the next one.", 503);
     if (paired?.personId && body?.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
     let attached: AttachmentRef[] = [];
     try {

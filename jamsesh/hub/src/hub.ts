@@ -184,8 +184,9 @@ export class Hub {
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
-    // Document cards still being read (a PDF takes up to 5 s) land before anything is saved.
-    const docs = this.pendingDocs.size ? await step(Promise.all([...this.pendingDocs]), Hub.SHUTDOWN_MS.documents) : true;
+    // Intake stops first; then document cards still being read (a PDF takes up to 5 s) land before anything is saved.
+    this.closing = true;
+    const docs = (this.pendingDocs.size ? await step(Promise.all([...this.pendingDocs]), Hub.SHUTDOWN_MS.documents) : true) && !this.documentLost;
     const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
@@ -208,6 +209,10 @@ export class Hub {
 
   private intervals: ReturnType<typeof setInterval>[] = [];
   private pendingDocs = new Set<Promise<unknown>>();
+  /** A document card that couldn't be made: its message is in the feed without the card it promised, so the final save is reported incomplete. */
+  private documentLost = false;
+  /** Set when shutdown begins: no new message is taken in, so nothing arrives after the last document card is waited for. */
+  closing = false;
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
@@ -309,7 +314,10 @@ export class Hub {
     });
     if (document) {
       // Tracked, so a shutdown waits for the card before the final save.
-      const pending = this.proposeDocument(ev, attached).catch((e) => console.error("document card:", e instanceof Error ? e.message : e)).finally(() => this.pendingDocs.delete(pending));
+      const pending = this.proposeDocument(ev, attached).catch((e) => {
+        this.documentLost = true;
+        console.error("document card:", e instanceof Error ? e.message : e);
+      }).finally(() => this.pendingDocs.delete(pending));
       this.pendingDocs.add(pending);
     }
     else if (direct) this.brain.direct(ev);
@@ -324,14 +332,18 @@ export class Hub {
    */
   async proposeDocument(ev: JamEvent, attached: AttachmentRef[]) {
     const texts: string[] = [this.attachments.brainInput(attached.filter((a) => a.kind === "text")).text];
+    const unread = attached.filter((a) => a.kind === "text" && !this.attachments.bytes(a.id)).map((a) => a.name);
     for (const a of attached.filter((x) => x.kind === "pdf")) {
       const f = this.attachments.file(a.id);
       const t = f ? await pdfText(f.path, 1200) : "";
       if (t) texts.push(attached.length > 1 ? `${a.name}: ${t}` : t);
+      else unread.push(a.name);
     }
     const read = texts.filter(Boolean).join("\n\n").replace(/^### .+\n/gm, "").trim().slice(0, 600);
     const names = attached.map((a) => a.name).join(", ");
-    return this.session.proposeContext({ text: read || `${names} (no text to read: write what to keep)`, needsWording: !read, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
+    // Said on the card, so the person who reviews it knows what the text leaves out.
+    const left = unread.length && read ? `\n(Couldn't read: ${unread.join(", ")})` : "";
+    return this.session.proposeContext({ text: `${read || `${names} (no text to read: write what to keep)`}${left}`, needsWording: !read, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
   }
 
   /**

@@ -14,7 +14,7 @@ const { contextExport, contextFile, readProjectContext, saveProjectContext } = a
 const { createProject } = await import("../src/projects");
 const { Attachments } = await import("../src/attachments");
 const { drawnText } = await import("../src/pdfworker");
-const { restates, samePolarity } = await import("../src/similarity");
+const { restates } = await import("../src/similarity");
 
 const dir = mkdtempSync(join(tmpdir(), "jam-r8-"));
 const hubs: InstanceType<typeof Hub>[] = [];
@@ -84,20 +84,22 @@ test("a reader running while another process is still importing sees all of it o
   expect(texts(p.slug)).toEqual(["Left nav, not top tabs"]);
 });
 
-// ---------- negation is per claim ----------
+// ---------- duplicates are identical text only ----------
 
-test("restating needs the same polarity per claim: several negations don't cancel", () => {
-  expect(restates("No banner and no modal", "Banner and modal", 0.55)).toBe(false);
-  expect(restates("Banner and modal", "No banner and no modal", 0.55)).toBe(false);
-  expect(samePolarity("Never use tabs, never use a drawer", "Use tabs and a drawer")).toBe(false);
-  expect(samePolarity("Not tabs, use a drawer", "Use a drawer, not tabs")).toBe(true);
-  expect(samePolarity("Header doesn't use tabs", "Header must not use tabs")).toBe(true);
-  expect(restates("Use the shared token set", "Use the shared token set.", 0.55)).toBe(true);
+test("only identical text (case, spacing, punctuation aside) is a restatement; every other wording is its own item", () => {
+  expect(restates("Use the shared token set", "use  the shared token set.")).toBe(true);
+  for (const [x, y] of [["No banner and no modal", "Banner and modal"], ["Use banner", "Use banner and no modal"], ["Build header with option A", "Build header with option B"], ["Use tabs", "Never use tabs"]]) {
+    expect(restates(x, y)).toBe(false);
+    expect(restates(y, x)).toBe(false);
+  }
   const r = room();
   r.s.board.rememberNow({ text: "Banner and modal on the checkout", kind: "decision", by: "Chey" });
   const card = r.s.proposeContext({ text: "No banner and no modal on the checkout", kind: "decision", by: "Felipe" });
   expect(card).not.toBeNull();
   expect(card!.conflictsWith).not.toBeNull();
+  // A close paraphrase is a card too, not a silent drop.
+  expect(r.s.proposeContext({ text: "Banner and modal on the checkout page", kind: "decision", by: "Felipe" })).not.toBeNull();
+  expect(r.s.proposeContext({ text: "banner and modal on the checkout.", kind: "decision", by: "Felipe" })).toBeNull();
 });
 
 // ---------- a pending document card lands before shutdown saves ----------
@@ -119,13 +121,14 @@ test("shutdown waits for a document card still being read", async () => {
   expect(r.s.board.open().map((c) => c.origin)).toEqual(["document"]);
 });
 
-test("shutdown with a document card that fails doesn't hang or fail the save", async () => {
+test("shutdown with a document card that failed reports the final save as incomplete, and takes no new message once it begins", async () => {
   const r = room();
   r.hub.proposeDocument = async () => {
     throw new Error("unreadable");
   };
   r.hub.typed(r.chey.id, "", false, [{ id: "att_x", name: "x.txt", type: "text/plain", kind: "text", size: 1 }]);
-  expect(await r.hub.shutdown()).toBe(true);
+  expect(await r.hub.shutdown()).toBe(false);
+  expect(r.hub.closing).toBe(true);
 });
 
 // ---------- blobs are whole or absent ----------
@@ -181,5 +184,7 @@ test("the built-in PDF reader skips invisible and clip-only text", () => {
     new TextEncoder().encode(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n%%EOF`);
   expect(drawnText(doc("BT 3 Tr (Hidden) Tj ET BT 0 Tr (Shown) Tj ET"))).toBe("Shown");
   expect(drawnText(doc("BT 7 Tr (Clipped) Tj ET"))).toBe("");
+  // Only the operators that hide are skipped: a block that switches the mode keeps what's drawn visibly.
+  expect(drawnText(doc("BT 0 Tr (Visible) Tj 3 Tr (Hidden) Tj 0 Tr ( again) Tj ET"))).toBe("Visible again");
   expect(drawnText(doc("BT /F1 12 Tf 72 700 Td (Plain) Tj ET"))).toBe("Plain");
 });

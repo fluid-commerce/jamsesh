@@ -241,8 +241,14 @@ function readAll(db: Database): ProjectContext {
   return { version: 1, generation, updatedAt, fromSession: b?.session ?? "", ...brief, facts, workstreams, people, rows: { items, meta } };
 }
 
-/** The project's settled context, or null when there is none or any part of it is malformed. */
-export function readProjectContext(home: string, slug: string): ProjectContext | null {
+export class ContextUnavailable extends Error {}
+
+/**
+ * The project's settled context, or null when there is none or any part of it is malformed. Throws ContextUnavailable
+ * when it exists but can't be read yet (another process is still setting the database up and held its lock for the
+ * whole wait): not "no context", so nothing is seeded from it.
+ */
+export function readProjectContext(home: string, slug: string, waitMs = 2000): ProjectContext | null {
   if (!generations(home, slug).length) {
     // Nothing saved by this build yet: an old context.json, read the way a new database would take it in.
     if (!existsSync(contextExport(home, slug))) return null;
@@ -266,27 +272,29 @@ export function readProjectContext(home: string, slug: string): ProjectContext |
       // A file mid-setup (no tables or WAL files yet) can't be opened read-only either: it's finished below, like an unimported one.
       if (!/unable to open/.test(e instanceof Error ? e.message : "")) throw e;
     }
-    if (db) db.exec("PRAGMA busy_timeout = 2000;");
+    if (db) db.exec(`PRAGMA busy_timeout = ${waitMs};`);
     const ctx = db ? readImported(db) : null;
     if (ctx) return ctx;
     // A database whose setup hasn't finished (a new generation still importing, or one whose creator died first): finish it
     // under the write lock, then read that. Reading it as it stands would seed a session with nothing.
     db?.close();
     db = null;
-    db = openForWrite(home, slug, 2000);
+    db = openForWrite(home, slug, waitMs);
     return readImported(db);
   } catch (e) {
     db?.close();
     db = null;
+    if (busy(e)) throw new ContextUnavailable(`the project's context is busy: ${e instanceof Error ? e.message : e}`);
     if (!damaged(e)) {
       console.error("project context:", e instanceof Error ? e.message : e);
       return null;
     }
     // The newest database is damaged: recover first (the next generation, from the export, under its write lock), then read that.
     try {
-      db = openForWrite(home, slug, 2000);
+      db = openForWrite(home, slug, waitMs);
       return readImported(db);
     } catch (e2) {
+      if (busy(e2)) throw new ContextUnavailable(`the project's context is busy: ${e2 instanceof Error ? e2.message : e2}`);
       console.error("project context: recovery failed:", e2 instanceof Error ? e2.message : e2);
       return null;
     }
@@ -474,9 +482,15 @@ function exportJson(db: Database, file: string) {
     const ctx = readAll(db);
     let shown = -1;
     try {
-      shown = Number(JSON.parse(readFileSync(file, "utf8"))?.generation ?? -1);
+      shown = JSON.parse(readFileSync(file, "utf8"))?.generation ?? -1;
     } catch {}
-    if (shown >= ctx.generation) return;
+    // Exports are written from committed state under this lock, so a valid export is never ahead of the database. One that
+    // claims to be (or isn't a count at all) is ignored and written over from the database.
+    if (!Number.isSafeInteger(shown) || shown < -1 || shown > ctx.generation) {
+      if (shown !== -1) console.error(`project context: context.json's generation (${String(shown)}) isn't valid for this database (${ctx.generation}); writing it again`);
+      shown = -1;
+    }
+    if (shown === ctx.generation) return;
     const tmp = `${file}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
     try {
       const fd = openSync(tmp, "wx");
@@ -493,6 +507,9 @@ function exportJson(db: Database, file: string) {
   }).immediate();
 }
 
+/** How long a new session waits for another process still setting the project's context up. */
+const SEED_WAIT_MS = 30_000;
+
 /**
  * A new session starts from the project's context: every active fact and unfinished workstream comes in marked
  * `carriedFrom` with its project id, and the version seen is remembered, so only what this session then changes is
@@ -503,7 +520,8 @@ function exportJson(db: Database, file: string) {
 export function seedFromProject(home: string, slug: string, sessionId: string, s: Session): number {
   if (s.store.setting("carried", null)) return 0;
   if (s.store.all("facts").some((f) => !f.carriedFrom) || s.store.all("workstreams").some((w) => !w.carriedFrom)) return 0;
-  const ctx = readProjectContext(home, slug);
+  // Waits for another process still setting the context up; if it never finishes this throws, and the session doesn't start empty.
+  const ctx = readProjectContext(home, slug, SEED_WAIT_MS);
   if (!ctx) return 0;
   const now = Date.now();
   let n = 0;

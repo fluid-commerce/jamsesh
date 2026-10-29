@@ -36,7 +36,6 @@ const { applyCuration } = await import("../src/brain/curation");
 const { acceptedEvent } = await import("../src/brain/brain");
 const { pdfText, MAX_UPLOAD_BYTES } = await import("../src/attachments");
 const { drawnText: pdfTextRuns } = await import("../src/pdfworker");
-const { samePolarity } = await import("../src/similarity");
 
 const wasOffline = config.offline;
 config.offline = false;
@@ -204,8 +203,6 @@ test("under the hold, an update with no cited event changes nothing and a contra
 
 test("the board never swallows a negated correction or an explicit replacement, and keeps targets, kinds and workstreams apart", () => {
   const r = room();
-  expect(samePolarity("Header must use option A", "Header must not use option A")).toBe(false);
-  expect(samePolarity("Header doesn't use tabs", "Header must not use tabs")).toBe(true);
   const fact = r.s.board.rememberNow({ text: "Header must use option A", kind: "decision", by: "Chey" })!;
   expect(r.s.proposeContext({ text: "Header must use option A.", kind: "decision", by: "Felipe" })).toBeNull();
   const no = r.s.proposeContext({ text: "Header must not use option A", kind: "decision", by: "Felipe" })!;
@@ -608,12 +605,11 @@ test("Send rechecks the agents: one removed or turned observer while the card wa
 // ---------- third review ----------
 
 const { commitChanges } = await import("../src/carryover");
-const { restates, sameSpecifics } = await import("../src/similarity");
+const { restates } = await import("../src/similarity");
 
 test("opposite option choices are never a restatement: each option's side counts", () => {
-  expect(restates("Use option A, not option B", "Use option B, not option A", 0.55)).toBe(false);
-  expect(restates("Use option A instead of option B", "Use option B instead of option A", 0.55)).toBe(false);
-  expect(sameSpecifics("Use option A, not option B", "Use option A, and not option B")).toBe(true);
+  expect(restates("Use option A, not option B", "Use option B, not option A", )).toBe(false);
+  expect(restates("Use option A instead of option B", "Use option B instead of option A")).toBe(false);
   const r = room();
   r.s.board.rememberNow({ text: "Use option A, not option B", kind: "decision", by: "Chey" });
   expect(r.s.proposeContext({ text: "Use option B, not option A", kind: "decision", by: "Felipe" })).not.toBeNull();

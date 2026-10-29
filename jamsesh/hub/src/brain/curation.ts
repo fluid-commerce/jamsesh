@@ -115,7 +115,7 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold:
       continue;
     }
     // Only the same words again merge; a rewrite that adds detail or scope is a change to approve.
-    if (restates(f.text, u.text, 0.8) && similar(f.text, u.text, true) > 0.8) {
+    if (restates(f.text, u.text)) {
       const merged = { ...f, sourceEventIds: union(f.sourceEventIds, sources), updatedAt: now };
       s.store.put("facts", merged);
       result.merged.push({ fact: merged, into: f.id });
@@ -150,10 +150,9 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold:
       result.dropped.push({ text: a.text, why: "no source event" });
       continue;
     }
-    // Paraphrases of what's already known are duplicates, not new knowledge. Items that differ in their
-    // specifics (option A versus B, 16 versus 24 px) never are. The event is added to the fact's sources.
+    // Only the same words again are a duplicate; a paraphrase is a new item for a person to merge. The event is added to the fact's sources.
     // Scope counts: the same words for another workstream or platform are another fact.
-    const same = s.facts().find((f) => f.status === "active" && f.kind === a.kind && f.workstream.toLowerCase() === streamOf(a.workstream).toLowerCase() && restates(f.text, a.text, 0.55));
+    const same = s.facts().find((f) => f.status === "active" && f.kind === a.kind && f.workstream.toLowerCase() === streamOf(a.workstream).toLowerCase() && restates(f.text, a.text));
     if (same) {
       const merged = { ...same, sourceEventIds: union(same.sourceEventIds, sources), updatedAt: now };
       s.store.put("facts", merged);

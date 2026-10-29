@@ -10,60 +10,8 @@ export function similar(a: string, b: string, both = false) {
   return inter / Math.max(1, both ? Math.max(x.size, y.size) : Math.min(x.size, y.size));
 }
 
-/**
- * Variant letters, numbers and hex colors, each with whether its clause negates it: the details that make two
- * similar sentences different. "Use option A, not option B" and "Use option B, not option A" name the same options
- * and mean the opposite, so each option's side counts, not just which options are named.
- */
-export function sameSpecifics(a: string, b: string) {
-  const specifics = (t: string) => {
-    const out = new Map<string, boolean>();
-    for (const clause of t.split(/[.;,!?]+|\s+\bbut\b\s+/i)) {
-      for (const m of clause.matchAll(/(?:\b(?:option|direction|variant|version)\s+([A-Z])\b)|\b([A-Z])\b(?=[:)\s,.]|$)|(#[0-9a-f]{3,8})\b|\b(\d+(?:\.\d+)?)(?=px|pt|%|ms|\b)/gi)) {
-        const key = (m[1] ?? m[2] ?? m[3] ?? m[4]).toLowerCase();
-        const negated = NEGATED_BEFORE.test(clause.slice(0, m.index ?? 0));
-        out.set(key, (out.get(key) ?? false) || negated);
-      }
-    }
-    return out;
-  };
-  const x = specifics(a);
-  const y = specifics(b);
-  return x.size === y.size && [...x].every(([k, neg]) => y.has(k) && y.get(k) === neg);
-}
-
-const NEGATED_BEFORE = /\b(?:not|no|never|without|avoid|instead of|rather than)\b|n't\b/i;
-
-/** "three variants" and "five variants" are different asks. */
-export function sameCounts(a: string, b: string) {
-  const counts = (t: string) => (t.toLowerCase().match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|couple|pair)\b/g) ?? []).join();
-  return counts(a) === counts(b);
-}
-
-const NEGATION = /\b(?:not|no|never|none|nothing|without|instead|rather|neither|nor|cannot|stop|drop|remove|avoid)\b|n't\b|n’t\b/gi;
-
-/**
- * Each content word with the polarity of every clause it appears in. "No banner and no modal" and "Banner and modal"
- * negate different claims; counting negations (or their parity) can't tell, so each word's own clause decides.
- */
-function polarities(t: string) {
-  const out = new Map<string, Set<boolean>>();
-  for (const clause of t.split(/[.;,!?:]+|\s+(?:and|or|but|then|so|while)\s+/i)) {
-    const negated = new RegExp(NEGATION.source, "i").test(clause);
-    for (const w of terms(clause)) out.set(w, (out.get(w) ?? new Set()).add(negated));
-  }
-  return out;
-}
-
-/** "must use option A" and "must not use option A" share every word but one, and mean the opposite: a shared word may not be negated in one and asserted in the other. */
-export function samePolarity(a: string, b: string) {
-  const y = polarities(b);
-  for (const [w, pa] of polarities(a)) {
-    const pb = y.get(w);
-    if (pb && (pa.size !== pb.size || [...pa].some((v) => !pb.has(v)))) return false;
-  }
-  return true;
-}
+/** Case, whitespace and punctuation don't make a difference between two statements; nothing else is judged here. */
+export const normalized = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
 const PLATFORMS = /\b(desktop|mobile|web|ios|iphone|ipad|android|tablet|phone|mac|macos|windows|linux|watch|tv)\b/gi;
 
@@ -73,7 +21,11 @@ export function sameScope(a: string, b: string) {
   return p(a) === p(b);
 }
 
-/** The same statement said again: close wording, the same specifics, counts and platforms, and not negated one way only. */
-export function restates(a: string, b: string, threshold: number) {
-  return similar(a, b) > threshold && sameSpecifics(a, b) && sameCounts(a, b) && samePolarity(a, b) && sameScope(a, b);
+/**
+ * The same statement said again: identical once case, spacing and punctuation are set aside. Anything else (a paraphrase,
+ * an added clause, another option or number) is a different item, or a Merge card for a person: wording can't be
+ * compared for meaning here, and a missed merge costs one card where a wrong one loses what was said.
+ */
+export function restates(a: string, b: string) {
+  return normalized(a) === normalized(b);
 }

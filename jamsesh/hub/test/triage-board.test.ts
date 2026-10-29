@@ -53,8 +53,8 @@ test("an overheard task waits as a card with its source line; the same ask said 
   expect(a.sources[0]).toMatchObject({ authorName: "Chey", text: a.text });
   expect(a.sources[0].eventId).not.toBeNull();
   expect(r.s.directives()).toHaveLength(0);
-  // Said again, a little differently, by someone else: one card, two sources, a count.
-  const again = r.s.proposeTask({ text: "make three onboarding variants for desktop app", mode: "explore", targets: [r.desktop.id], by: "Felipe", sourceEventIds: [r.said(r.felipe, "make three onboarding variants for desktop app").id] })!;
+  // Said again (case and punctuation aside) by someone else: one card, two sources, a count.
+  const again = r.s.proposeTask({ text: "make three onboarding variants for the desktop app.", mode: "explore", targets: [r.desktop.id], by: "Felipe", sourceEventIds: [r.said(r.felipe, "make three onboarding variants for the desktop app.").id] })!;
   expect(again.id).toBe(a.id);
   expect(again.count).toBe(2);
   expect(again.sources).toHaveLength(2);
@@ -132,7 +132,9 @@ test("agent decisions become cards linked to the update; shipped notes go to the
 test("context that is already known doesn't make a card; one that disagrees with a fact says which", () => {
   const r = room();
   const known = r.s.board.rememberNow({ text: "Settings header uses option A, the big greeting", kind: "decision", by: "Chey" })!;
-  expect(r.s.proposeContext({ text: "The settings header uses option A, the big greeting.", kind: "decision", by: "Felipe" })).toBeNull();
+  expect(r.s.proposeContext({ text: "settings header uses option A, the big greeting.", kind: "decision", by: "Felipe" })).toBeNull();
+  // A paraphrase isn't dropped: it waits as a card for a person.
+  expect(r.s.proposeContext({ text: "The settings header uses option A, the big greeting.", kind: "decision", by: "Felipe" })).not.toBeNull();
   const differs = r.s.proposeContext({ text: "Settings header uses option B, the big greeting", kind: "decision", by: "Felipe" })!;
   expect(differs.conflictsWith).toBe(known.id);
   expect(r.s.proposeContext({ text: "Use 16px gutters on phones", kind: "requirement", by: "Chey" })!.conflictsWith).toBeNull();
