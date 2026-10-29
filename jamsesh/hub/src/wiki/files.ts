@@ -356,11 +356,6 @@ export function graph(dir: string) {
   };
 }
 
-export interface WriteResult {
-  ok: true;
-  page: Page;
-}
-
 /**
  * Writes a page. `body` is the Markdown after the front matter; the front matter is kept up to date
  * here (updated today, sources unioned) so every writer, a person or the maintainer, leaves a page the same way.

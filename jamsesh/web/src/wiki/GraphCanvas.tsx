@@ -106,6 +106,14 @@ export function settleFor(s: { tick: (n?: number) => unknown }, ticks: number, m
 }
 
 /**
+ * How a pulse at `level` (1 at the touch, falling to 0) is drawn: its strength and how far the ring has spread. With
+ * reduced motion it is a still ring for as long as it lasts, so it needs no frames of its own (a slow timer clears it).
+ */
+export function pulseLook(level: number, reduced: boolean): { p: number; t: number; moving: boolean } {
+  return reduced ? { p: 0.6, t: 0.4, moving: false } : { p: level, t: 1 - level, moving: true };
+}
+
+/**
  * Whether the frame loop needs another frame: something is still moving, settling, easing or being dragged. A still map
  * (the big screen included) stops; data, a pulse, a pointer or a resize wakes it again.
  */
@@ -203,10 +211,10 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
         const r = Math.max(stage ? 7 : coarse ? 5.5 : 3.5, n.r * Math.min(1.6, Math.max(0.7, k)));
         const col = CATEGORY_COLOR[n.category];
         const a = lit(n.id) ? 1 : dim;
-        const p = pulses.level(n.id, Date.now());
-        if (p > 0) {
-          moving = true;
-          const t = reduced ? 0.4 : 1 - p;
+        const level = pulses.level(n.id, Date.now());
+        if (level > 0) {
+          const { p, t, moving: m } = pulseLook(level, reduced);
+          moving ||= m;
           g.strokeStyle = hex(col, 0.7 * p);
           g.lineWidth = (stage ? 3 : 2) * (0.5 + p);
           g.beginPath();

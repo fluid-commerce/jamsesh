@@ -2,7 +2,7 @@
 import { expect, test } from "bun:test";
 import { byImportance, labelled, localGraph, MAX_NODES, nodeAt, radiusFor, shapeGraph, walkOrder } from "../src/wiki/graph";
 import { PULSE_MS, PulseStore } from "../src/wiki/pulse";
-import { keepDrawing } from "../src/wiki/GraphCanvas";
+import { keepDrawing, pulseLook } from "../src/wiki/GraphCanvas";
 
 const raw = {
   nodes: [
@@ -136,6 +136,13 @@ test("a settled map stops asking for frames, the big screen's too; motion, easin
   expect(keepDrawing({ ...still, hot: true })).toBe(true);
   expect(keepDrawing({ ...still, k: 1.2 })).toBe(true);
   expect(keepDrawing({ ...still, drag: true })).toBe(true);
+});
+
+test("with reduced motion a pulse is a still ring that asks for no frames; otherwise it spreads and fades", () => {
+  const looks = [1, 0.6, 0.1].map((l) => pulseLook(l, true));
+  for (const l of looks) expect(l).toEqual(looks[0]!);
+  expect(looks[0]!.moving).toBe(false);
+  expect(pulseLook(0.6, false)).toEqual({ p: 0.6, t: 0.4, moving: true });
 });
 
 // ---------- round 5: a full vault ----------
