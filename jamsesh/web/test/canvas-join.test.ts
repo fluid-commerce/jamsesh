@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
 // fails, instead of leaving a blank document up. It also loads fonts from the person's own Mac.
 import { expect, test } from "bun:test";
-import { FontTries, friendlyReason, JoinWatch, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
+import { FontTries, friendlyReason, JoinWatch, RejoinTimer, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -155,3 +155,23 @@ test("a canvas bridge that throws instead of rejecting counts as failed reads, s
   expect(await watch.poll(fc)).toBeNull();
   expect(await watch.poll(fc)).toEqual({ state: "failed", reason: "The canvas stopped answering." });
 });
+
+test("a canvas that comes back live before its scheduled rejoin isn't reloaded", async () => {
+  const failures = { current: 1 };
+  let fired = 0;
+  const timer = new RejoinTimer(failures, () => void fired++);
+  const at = timer.update({ state: "failed", reason: "gone" });
+  expect(at! - Date.now()).toBeGreaterThan(5_000); // 6 s after the second failure in a row
+  // Another failed reading doesn't schedule a second one.
+  expect(timer.update({ state: "failed", reason: "gone" })).toBe(at);
+  expect(timer.update({ state: "live" })).toBeNull();
+  expect(failures.current).toBe(0);
+  // Recovered after a first failure (a 3 s rejoin) and failing elsewhere: only the one still due fires.
+  const recovered = new RejoinTimer({ current: 0 }, () => void fired++);
+  recovered.update({ state: "failed", reason: "gone" });
+  recovered.update({ state: "live" });
+  const failing = new RejoinTimer({ current: 0 }, () => void (fired += 10));
+  failing.update({ state: "failed", reason: "gone" });
+  await Bun.sleep(3100);
+  expect(fired).toBe(10);
+}, 10_000);

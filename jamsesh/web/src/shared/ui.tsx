@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import qrcode from "qrcode-generator";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
-import { CONNECT_TIMEOUT_MS, JoinWatch, START_TIMEOUT_MS, friendlyReason, joinLabel, FontTries, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, START_TIMEOUT_MS, friendlyReason, joinLabel, FontTries, loadLocalFonts, macInvoke, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -973,7 +973,7 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     let since = started;
     let last = "loading";
     let gone = false;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    const retry = new RejoinTimer(failures, () => rejoin("Reconnecting to the host…"));
     const watch = new JoinWatch();
     const tick = async () => {
       const fc = figcraftIn(frame.current);
@@ -988,15 +988,8 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
       if (j.state !== last) ((last = j.state), (since = Date.now()));
       if (j.state === "connecting" && Date.now() - since > CONNECT_TIMEOUT_MS) j = { state: "failed", reason: "The canvas server didn't answer." };
       setJoin(j);
-      if (j.state === "live") ((failures.current = 0), setWhy(null));
-      if (j.state === "failed" && !retry) {
-        const wait = rejoinDelay(failures.current);
-        setRetryAt(Date.now() + wait);
-        retry = setTimeout(() => {
-          failures.current += 1;
-          rejoin("Reconnecting to the host…");
-        }, wait);
-      }
+      if (j.state === "live") setWhy(null);
+      setRetryAt(retry.update(j));
     };
     const safeTick = () => void tick().catch(() => {}); // a tick never leaves an unhandled rejection
     safeTick();
@@ -1004,7 +997,7 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     return () => {
       gone = true;
       clearInterval(t);
-      clearTimeout(retry);
+      retry.cancel();
     };
   }, [link, mount]);
 

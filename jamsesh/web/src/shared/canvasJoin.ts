@@ -94,6 +94,44 @@ export function rejoinDelay(n: number) {
   return Math.min(30_000, 3000 * 2 ** Math.max(0, n));
 }
 
+/**
+ * The automatic rejoin: a failed join schedules one (backing off with each failure in a row); a join
+ * that is live again cancels it, so a canvas that recovered by itself isn't reloaded.
+ */
+export class RejoinTimer {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  /** When the scheduled rejoin happens, for the card's countdown; null when none is scheduled. */
+  at: number | null = null;
+  constructor(
+    private failures: { current: number },
+    private fire: () => void,
+  ) {}
+
+  /** After each reading of the join. Returns when the next rejoin happens, or null. */
+  update(j: JoinState): number | null {
+    if (j.state === "live") {
+      this.failures.current = 0;
+      this.cancel();
+    } else if (j.state === "failed" && !this.timer) {
+      const wait = rejoinDelay(this.failures.current);
+      this.at = Date.now() + wait;
+      this.timer = setTimeout(() => {
+        this.timer = undefined;
+        this.at = null;
+        this.failures.current += 1;
+        this.fire();
+      }, wait);
+    }
+    return this.at;
+  }
+
+  cancel() {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+    this.at = null;
+  }
+}
+
 /** A join error as people should read it: a few plain reasons. The raw error stays for a tooltip. */
 export function friendlyReason(raw: string | null | undefined): string {
   const r = String(raw ?? "");
