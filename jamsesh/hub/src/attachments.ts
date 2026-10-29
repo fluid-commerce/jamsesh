@@ -26,6 +26,10 @@ export class AttachmentError extends Error {
 }
 
 export const MAX_PER_MESSAGE = 6;
+/** All the files on one message together: six big PDFs are each fine, but not one request. */
+export const MAX_MESSAGE_BYTES = 25 * 1024 * 1024;
+/** The most image and PDF bytes one model request carries; files past it are named as not shown. */
+const MODEL_BYTES = 15 * 1024 * 1024;
 const LIMITS: Record<AttachmentKind, number> = { image: 12 * 1024 * 1024, pdf: 20 * 1024 * 1024, text: 1024 * 1024 };
 /** The largest request the upload route reads at all (the biggest file plus form overhead). */
 export const MAX_UPLOAD_BYTES = LIMITS.pdf + 64 * 1024;
@@ -108,10 +112,14 @@ export class Attachments {
     if (!Array.isArray(ids)) return [];
     if (ids.length > MAX_PER_MESSAGE) throw new AttachmentError(`Attach at most ${MAX_PER_MESSAGE} files to a message.`);
     const out: AttachmentRef[] = [];
+    let total = 0;
     for (const id of ids) {
       const ref = this.ref(id);
       if (!ref) throw new AttachmentError("One of the attached files isn't here. Add it again.", 404);
-      if (!out.some((o) => o.id === ref.id)) out.push(ref);
+      if (out.some((o) => o.id === ref.id)) continue;
+      total += ref.size;
+      if (total > MAX_MESSAGE_BYTES) throw new AttachmentError(`The files on one message can be ${MAX_MESSAGE_BYTES / 1024 / 1024} MB together. Send some in another message.`, 413);
+      out.push(ref);
     }
     return out;
   }
@@ -139,11 +147,17 @@ export class Attachments {
     const parts: ReturnType<Attachments["brainInput"]>["parts"] = [];
     const texts: string[] = [];
     let budget = 60_000;
+    let room = MODEL_BYTES;
     for (const r of refs) {
       const bytes = this.bytes(r.id);
       if (!bytes) continue;
-      if (r.kind === "image" || r.kind === "pdf") parts.push({ type: "file", data: bytes, mediaType: r.type });
-      else {
+      if (r.kind === "image" || r.kind === "pdf") {
+        if (bytes.length > room) texts.push(`### ${r.name}\n(not shown: too much attached to this message for one look)`);
+        else {
+          room -= bytes.length;
+          parts.push({ type: "file", data: bytes, mediaType: r.type });
+        }
+      } else {
         const body = new TextDecoder().decode(bytes).slice(0, Math.min(budget, 30_000));
         budget -= body.length;
         texts.push(`### ${r.name}\n${body}${body.length < bytes.length ? "\n(cut off)" : ""}`);

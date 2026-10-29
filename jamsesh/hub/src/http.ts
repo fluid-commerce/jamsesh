@@ -574,6 +574,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
   m = path.match(/^\/attachments\/([\w-]+)$/);
   if (m && (req.method === "GET" || req.method === "HEAD")) {
+    // A file is read by a paired device, an agent of the session, or the host's own window; another process on the host's loopback is none of them.
+    if (!paired && !hostWindow) return bad("This device isn't paired with this JamSesh host.", 401);
     const f = hub.attachments.file(m[1]);
     if (!f) return bad("No such file.", 404);
     const inline = f.rec.kind === "image" || f.rec.kind === "text";
