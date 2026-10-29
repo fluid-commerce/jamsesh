@@ -16,6 +16,8 @@ export interface SnapshotInfo {
   label: string;
   at: number;
   canvas: boolean;
+  /** The canvas copy was tried and failed: the snapshot lacks it. */
+  canvasFailed?: boolean;
   dir: string;
 }
 
@@ -63,8 +65,10 @@ export class Autosave {
       const dir = join(this.dir, id);
       mkdirSync(dir, { recursive: true });
 
+      let canvasFailed = false;
       const canvas = await this.hub.canvas.saveCopy(join(dir, "canvas.figcraft")).catch((e) => {
         console.error("autosave canvas:", e instanceof Error ? e.message : e);
+        canvasFailed = true;
         return false;
       });
       const state = s.state();
@@ -89,7 +93,7 @@ export class Autosave {
       this.lastEventId = lastEvent;
       this.lastCanvasKey = canvasKey;
       this.prune();
-      return { id, label, at, canvas, dir };
+      return { id, label, at, canvas, ...(canvasFailed ? { canvasFailed } : {}), dir };
     };
     this.saving = run().finally(() => (this.saving = null));
     return this.saving;

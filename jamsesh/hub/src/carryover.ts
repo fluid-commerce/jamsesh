@@ -177,25 +177,32 @@ const jsonSchema = z.object({
   people: z.array(z.object({ name: text(200).min(1), role: text(200) })),
 });
 
-/** context.json into an empty database, ids and versions kept; a file with any malformed value is not taken in at all. */
+/** An export that exists but can't be taken in: the database being set up from it must not be called initialized. */
+export class ExportRejected extends Error {}
+const reject = (why: string): never => {
+  console.error(`project context: ${why}`);
+  throw new ExportRejected(why);
+};
+
+/**
+ * context.json into an empty database, ids and versions kept. No file: nothing to take in (a genuinely new project). A file
+ * with any malformed value, or an export that isn't sealed: ExportRejected, so the caller doesn't mark the database
+ * imported and the start fails rather than going on empty.
+ */
 function importJson(db: Database, file: string) {
   if (db.query("SELECT 1 FROM items LIMIT 1").get()) return;
+  if (!existsSync(file)) return;
   let parsed: z.infer<typeof jsonSchema>;
   try {
     const raw = JSON.parse(readFileSync(file, "utf8"));
     // An export (it has the rows) counts only when sealed; the plain file older builds wrote has no rows and no seal.
-    if (raw?.rows && !sealedOk(raw)) {
-      console.error("project context: context.json isn't a complete export; not taken in");
-      return;
-    }
+    if (raw?.rows && !sealedOk(raw)) return reject("context.json isn't a complete export; not taken in");
     const r = jsonSchema.safeParse(raw);
-    if (!r.success) {
-      console.error("project context: context.json is malformed; not taken in");
-      return;
-    }
+    if (!r.success) return reject("context.json is malformed; not taken in");
     parsed = r.data;
-  } catch {
-    return;
+  } catch (e) {
+    if (e instanceof ExportRejected) throw e;
+    return reject("context.json can't be read; not taken in");
   }
   const put = db.query("INSERT OR IGNORE INTO items (id, type, status, data, version, changed_at, session) VALUES (?, ?, ?, ?, ?, ?, ?)");
   const meta = db.query("INSERT OR REPLACE INTO meta (key, value, changed_at, session) VALUES (?, ?, ?, ?)");
@@ -208,8 +215,7 @@ function importJson(db: Database, file: string) {
       for (const m of parsed.rows.meta) check.query("INSERT OR REPLACE INTO meta (key, value, changed_at, session) VALUES (?, ?, ?, ?)").run(m.key, m.value, m.changed_at, m.session);
       readAll(check);
     } catch {
-      console.error("project context: context.json's rows are malformed; not taken in");
-      return;
+      return reject("context.json's rows are malformed; not taken in");
     } finally {
       check.close();
     }
@@ -273,7 +279,8 @@ export function readProjectContext(home: string, slug: string, waitMs = 2000): P
       importJson(mem, contextExport(home, slug));
       const ctx = readAll(mem);
       return ctx.facts.length || ctx.workstreams.length || ctx.brief || ctx.goal || ctx.glossary.length || ctx.people.length ? ctx : null;
-    } catch {
+    } catch (e) {
+      if (e instanceof ExportRejected) throw new ContextUnavailable(`the project's saved context can't be read: ${e.message}`);
       return null;
     } finally {
       mem.close();
@@ -300,6 +307,7 @@ export function readProjectContext(home: string, slug: string, waitMs = 2000): P
     db?.close();
     db = null;
     if (busy(e)) throw new ContextUnavailable(`the project's context is busy: ${e instanceof Error ? e.message : e}`);
+    if (e instanceof ExportRejected) throw new ContextUnavailable(`the project's saved context can't be read: ${e.message}`);
     if (!damaged(e)) {
       console.error("project context:", e instanceof Error ? e.message : e);
       return null;
@@ -310,6 +318,7 @@ export function readProjectContext(home: string, slug: string, waitMs = 2000): P
       return readImported(db);
     } catch (e2) {
       if (busy(e2)) throw new ContextUnavailable(`the project's context is busy: ${e2 instanceof Error ? e2.message : e2}`);
+      if (e2 instanceof ExportRejected) throw new ContextUnavailable(`the project's saved context can't be read: ${e2.message}`);
       console.error("project context: recovery failed:", e2 instanceof Error ? e2.message : e2);
       return null;
     }

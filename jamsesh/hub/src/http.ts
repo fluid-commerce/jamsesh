@@ -95,7 +95,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     return null;
   };
 
-  /** The credential for a loopback attachment read: the Authorization header or the jam_token cookie, never the address. */
+  /** The credential on a loopback request: the Authorization header or the jam_token cookie, never the address. */
   const fileReader = (req: Request) => {
     for (const t of [req.headers.get("authorization")?.replace(/^Bearer\s+/i, ""), cookie(req, "jam_token")]) {
       const d = t ? hub.auth.check(t, "127.0.0.1") : null;
@@ -204,7 +204,13 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // On loopback a request is the host's, except reading an attachment: there a paired agent calling the hub directly
         // is its credential (the route still turns away a local process with neither a credential nor the host's window).
         const readsFile = local && (req.method === "GET" || req.method === "HEAD") && /^\/api\/attachments\/[\w-]+$/.test(path);
-        const device = local ? (readsFile ? fileReader(req) : null) : hub.auth.check(tokenOf(req, url), ip);
+        // The role comes from the credential, never the address: an agent's token over loopback is still an agent (it only ever
+        // lowers a request's standing; a loopback request with no agent credential stays the host's).
+        const agentCredential = () => {
+          const d = fileReader(req);
+          return d?.kind === "agent" ? d : null;
+        };
+        const device = local ? (readsFile ? fileReader(req) : agentCredential()) : hub.auth.check(tokenOf(req, url), ip);
         const ok = local || !!device;
 
         if (path === "/") {

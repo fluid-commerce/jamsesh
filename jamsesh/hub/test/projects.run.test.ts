@@ -22,7 +22,7 @@ const freePort = () =>
 
 const KEY = "ab".repeat(32);
 
-async function start(home: string, env: Record<string, string>) {
+async function start(home: string, env: Record<string, string>, pipeOut = false) {
   const port = await freePort();
   const base: Record<string, string | undefined> = { ...process.env };
   for (const k of ["JAMSESH_DATA", "JAMSESH_TEAM", "JAMSESH_PROJECT", "JAMSESH_NEW_PROJECT", "JAMSESH_NEW_SESSION", "JAMSESH_LOBBY"]) delete base[k];
@@ -41,7 +41,7 @@ async function start(home: string, env: Record<string, string>) {
       ...env,
     },
     stdin: "pipe",
-    stdout: "ignore",
+    stdout: pipeOut ? "pipe" : "ignore",
     stderr: "ignore",
   });
   cleanup.push(() => proc.kill("SIGKILL"));
@@ -95,12 +95,23 @@ test("a hub opened on a project keeps its session there, resumes it, and records
   expect(await third.proc.exited).toBe(0);
 }, 60_000);
 
+test("two stop signals make one shutdown: one save, a clean exit, and the second never exits early", async () => {
+  const home = mkdtempSync(join(tmpdir(), "jam-twice-"));
+  cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const { proc } = await start(home, { JAMSESH_NEW_PROJECT: "Twice" }, true);
+  proc.kill("SIGTERM");
+  proc.kill("SIGTERM");
+  expect(await proc.exited).toBe(0);
+  const out = await new Response(proc.stdout).text();
+  expect(out.split("Saving the session").length - 1).toBe(1);
+}, 60_000);
+
 test("shutdown says whether the final save finished: a save that hangs or fails is reported, not passed off as done", async () => {
   const { Hub } = await import("../src/hub");
   const dir = mkdtempSync(join(tmpdir(), "jam-shutdown-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   const budget = Hub.SHUTDOWN_MS;
-  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, network: 200, documents: 200 };
+  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, network: 200, work: 200 };
   cleanup.push(() => void (Hub.SHUTDOWN_MS = budget));
   const make = () => new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
   expect(await make().shutdown()).toBe(true);
@@ -112,8 +123,8 @@ test("shutdown says whether the final save finished: a save that hangs or fails 
     throw new Error("disk full");
   };
   expect(await failed.shutdown()).toBe(false);
-  // The budget the app's wait is built on: its steps add up to 22 seconds.
-  expect(budget.snapshot + budget.thumbnail + budget.network + budget.documents).toBe(22_000);
+  // The budget the app's wait is built on: its steps add up to 25 seconds.
+  expect(budget.snapshot + budget.thumbnail + budget.network + budget.work).toBe(25_000);
 });
 
 function readdirOnly(dir: string) {

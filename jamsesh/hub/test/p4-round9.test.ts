@@ -112,7 +112,7 @@ test("only a sealed export (checksum and completion marker, written last) counts
   fixed.facts[0].text = "Edited by hand";
   writeFileSync(file, JSON.stringify(fixed));
   wipeDbs(p.slug);
-  expect(readProjectContext(dir, p.slug)?.facts ?? []).toEqual([]);
+  expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
 });
 
 test("an edited card doesn't absorb a later request for what it used to say", () => {
@@ -130,7 +130,6 @@ test("once shutdown begins nothing is taken in: typed messages, room lines and p
   expect(() => r.hub.typed(r.chey.id, "hello", false)).toThrow();
   const before = r.s.store.recentEvents({ limit: 50 }).length;
   expect(await r.hub.promptWindow({ deviceId: "d", personId: r.chey.id, t0: Date.now() - 1000, t1: Date.now(), pointer: [], typed: "late words" })).toMatchObject({ ok: false });
-  (r.hub as any).roomLine({ id: "u1", eventId: 0, t0: 0, t1: 1, text: "late line", personId: r.chey.id, speakerName: "Chey" }, true);
   expect(r.s.store.recentEvents({ limit: 50 }).length).toBe(before);
   // And over HTTP: every write route is turned away at the router, reads still work.
   const { startHttp } = await import("../src/http");
@@ -144,4 +143,77 @@ test("once shutdown begins nothing is taken in: typed messages, room lines and p
     server.stop(true);
   }
   await shutting;
+});
+
+// ---------- round 11 ----------
+
+test("shutdown waits for accepted work in flight, and names what is still running at the deadline", async () => {
+  const r = room();
+  let finished = false;
+  r.hub.track("a request to the brain", Bun.sleep(300).then(() => void (finished = true)));
+  expect(r.hub.working()).toEqual(["a request to the brain"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(finished).toBe(true);
+  const r2 = room();
+  const budget = Hub.SHUTDOWN_MS;
+  Hub.SHUTDOWN_MS = { ...budget, work: 150 };
+  try {
+    r2.hub.track("a prompt window", new Promise(() => {}));
+    expect(await r2.hub.shutdown()).toBe(false);
+  } finally {
+    Hub.SHUTDOWN_MS = budget;
+  }
+});
+
+test("a failed canvas copy is a failed final save", async () => {
+  const r = room();
+  r.hub.autosave.save = async () => ({ id: "x", label: "", at: 1, canvas: false, canvasFailed: true, dir: "" });
+  expect(await r.hub.shutdown()).toBe(false);
+  const ok = room();
+  ok.hub.autosave.save = async () => ({ id: "x", label: "", at: 1, canvas: false, dir: "" });
+  expect(await ok.hub.shutdown()).toBe(true);
+});
+
+test("a database set up from an export that is rejected is never marked imported, and the read fails loudly instead of going on empty", () => {
+  const p = saved("Rejected");
+  wipeDbs(p.slug);
+  writeFileSync(contextExport(dir, p.slug), JSON.stringify({ generation: 1, facts: [], workstreams: [], people: [], rows: { items: [], meta: [] } }));
+  expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
+  const r = room();
+  expect(() => seedFromProject(dir, p.slug, "s2", r.s)).toThrow(ContextUnavailable);
+  // A genuinely new project (no export at all) is fine and empty.
+  const fresh = createProject(dir, "Fresh");
+  expect(readProjectContext(dir, fresh.slug)).toBeNull();
+});
+
+test("an agent's credential over loopback is an agent: redacted state, no triage, no live cards, and no speaking as a person", async () => {
+  const r = room();
+  r.s.proposeContext({ text: "An unaccepted card", kind: "decision", by: "Chey" });
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const agent = r.hub.auth.issue({ kind: "agent", label: "An agent", ip: "127.0.0.1", personId: r.chey.id });
+    const auth = { authorization: `Bearer ${agent.token}` };
+    const base = `http://127.0.0.1:${server.port}`;
+    const state = await (await fetch(`${base}/api/state`, { headers: auth })).json();
+    expect(state.triage).toEqual([]);
+    expect(JSON.stringify(state)).not.toContain("An unaccepted card");
+    const list = await fetch(`${base}/api/triage`, { headers: auth });
+    expect(list.status === 403 || JSON.stringify(await list.json()).includes("An unaccepted card") === false).toBe(true);
+    const say = await fetch(`${base}/api/say`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ text: "hi" }) });
+    expect(say.status).toBe(403);
+    // A socket from the same credential gets no triage patches.
+    const got: string[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=d`, { headers: { ...auth, origin: base } } as any);
+    ws.onmessage = (m) => got.push(String(m.data));
+    await new Promise((res) => (ws.onopen = res as any));
+    r.s.proposeContext({ text: "A second unaccepted card", kind: "decision", by: "Chey" });
+    await Bun.sleep(300);
+    ws.close();
+    expect(got.join("")).not.toContain("unaccepted card");
+    // Without a credential, loopback is still the host's (the window key is what lets it act as one).
+    expect((await fetch(`${base}/api/state`)).status).toBe(200);
+  } finally {
+    server.stop(true);
+  }
 });

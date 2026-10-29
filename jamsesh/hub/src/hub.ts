@@ -176,7 +176,7 @@ export class Hub {
   }
 
   /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000, documents: 7000 };
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000, work: 10000 };
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
@@ -184,10 +184,13 @@ export class Hub {
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
-    // Intake stops first; then document cards still being read (a PDF takes up to 5 s) land before anything is saved.
+    // Intake stops first; then accepted work still running (a request to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
     this.closing = true;
-    const docs = (this.pendingDocs.size ? await step(Promise.all([...this.pendingDocs]), Hub.SHUTDOWN_MS.documents) : true) && !this.documentLost;
-    const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
+    const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
+    if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
+    const docs = !unfinished.length && !this.documentLost;
+    // A snapshot whose canvas copy failed is not a final save.
+    const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     this.stop();
@@ -208,7 +211,32 @@ export class Hub {
   }
 
   private intervals: ReturnType<typeof setInterval>[] = [];
-  private pendingDocs = new Set<Promise<unknown>>();
+  /** Every unit of accepted work still running (a request to the brain, a prompt window, a document card), by what it is. */
+  private inflight = new Map<Promise<unknown>, string>();
+  /** Registers accepted work: shutdown waits for it. Failures stay the caller's to report; the registry only needs to know it ended. */
+  track<T>(what: string, work: Promise<T>): Promise<T> {
+    const done: Promise<unknown> = work.then(() => {}, () => {}).finally(() => this.inflight.delete(done));
+    this.inflight.set(done, what);
+    return work;
+  }
+
+  /** What is still being worked on: tracked work, and room speech still being transcribed. */
+  working(): string[] {
+    const names = [...new Set(this.inflight.values())];
+    if (this.audio.pending > 0) names.push("transcription of speech");
+    return names;
+  }
+
+  /** Waits until nothing is working or the time is up; the names of whatever still is. */
+  private async drain(ms: number): Promise<string[]> {
+    const until = Date.now() + ms;
+    for (let names = this.working(); names.length; names = this.working()) {
+      if (Date.now() >= until) return names;
+      await Promise.race([Promise.all([...this.inflight.keys()]), Bun.sleep(50)]);
+    }
+    return [];
+  }
+
   /** A document card that couldn't be made: its message is in the feed without the card it promised, so the final save is reported incomplete. */
   private documentLost = false;
   /** Set when shutdown begins: no new message is taken in, so nothing arrives after the last document card is waited for. */
@@ -269,8 +297,6 @@ export class Hub {
     // The recorder's own words belong to the prompt (promptWindow reads them from the store);
     // a feed line as well would show them twice.
     if (isNew && this.inPrompt(u)) return;
-    // A line transcribed after the final save began would miss it.
-    if (this.closing) return;
     if (isNew) {
       const ev = s.store.addEvent({
         kind: "speech",
@@ -316,14 +342,13 @@ export class Hub {
       data: { typed: true, direct, ...(attached.length ? { attachments: attached, ...(words ? {} : { noWords: true }) } : {}), ...(document ? { proposedContext: true } : {}) },
     });
     if (document) {
-      // Tracked, so a shutdown waits for the card before the final save.
       const pending = this.proposeDocument(ev, attached).catch((e) => {
         this.documentLost = true;
         console.error("document card:", e instanceof Error ? e.message : e);
-      }).finally(() => this.pendingDocs.delete(pending));
-      this.pendingDocs.add(pending);
+      });
+      this.track("a document card", pending);
     }
-    else if (direct) this.brain.direct(ev);
+    else if (direct) this.track("a request to the brain", this.brain.direct(ev));
     // Pictures with no words have nothing to triage; the feed shows them.
     else if (words) this.brain.hear(ev);
     return ev;
@@ -353,7 +378,12 @@ export class Hub {
    * Record-to-prompt finished: everything this device heard in the window, plus where
    * the person pointed while talking, goes to the brain as one prompt.
    */
-  async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+  promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+    if (this.closing) return Promise.resolve({ ok: false as const, reason: "The session is closing." });
+    return this.track("a prompt window", this.runPromptWindow(w));
+  }
+
+  private async runPromptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
@@ -384,7 +414,6 @@ export class Hub {
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
     if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
-    if (this.closing) return { ok: false, reason: "The session is closing." };
     const pointed = w.pointer
       .filter((m) => m.kind !== "move")
       .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));
@@ -402,7 +431,7 @@ export class Hub {
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
     // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
     for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
-    this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
+    this.track("a request to the brain", this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : ""));
     return { ok: true, eventId: ev.id, text: said, pointed: marks };
   }
 
@@ -424,7 +453,7 @@ export class Hub {
       data: { direct: true, typed: true, annotations: open.map((a) => a.id) },
     });
     for (const a of open) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
-    this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed.");
+    this.track("a request to the brain", this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed."));
     return ev;
   }
 

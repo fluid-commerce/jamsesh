@@ -279,7 +279,7 @@ test("a write that fails partway leaves no directive, no fact and no retired fac
 
 // ---------- 6. carried context is checked whole, and a stale session can't overwrite a newer one ----------
 
-test("a context file with one malformed nested value seeds nothing; two sessions open at once both keep what they settled", () => {
+test("a context file with one malformed nested value fails the seeding and seeds nothing; two sessions open at once both keep what they settled", () => {
   const home = mkdtempSync(join(dir, "home-"));
   const p = createProject(home, "Passport");
   mkdirSync(join(home, "projects", p.slug), { recursive: true });
@@ -292,9 +292,9 @@ test("a context file with one malformed nested value seeds nothing; two sessions
     { ...good, glossary: [{ term: "Passport" }] },
   ]) {
     writeFileSync(contextExport(home, p.slug), JSON.stringify(bad));
-    expect(readProjectContext(home, p.slug)).toBeNull();
+    expect(() => readProjectContext(home, p.slug)).toThrow();
     const r = room();
-    expect(seedFromProject(home, p.slug, "new", r.s)).toBe(0);
+    expect(() => seedFromProject(home, p.slug, "new", r.s)).toThrow();
     expect(r.s.facts()).toHaveLength(0);
   }
   writeFileSync(contextExport(home, p.slug), JSON.stringify(good));

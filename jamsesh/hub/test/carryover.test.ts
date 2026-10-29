@@ -1,7 +1,7 @@
 // Context that carries over (SPEC 12.7): a project's settled context is saved in its context database
 // (exported as JSON) and seeds its next session, marked with where it came from.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { contextExport, contextFile, readProjectContext, saveProjectContext, seedFromProject } from "../src/carryover";
@@ -112,20 +112,20 @@ test("an empty new session never empties the file, and a resumed session isn't r
   expect(seedFromProject(home, p.slug, again.id, again.hub.session)).toBe(0);
 });
 
-test("a missing, corrupt or foreign file seeds nothing", () => {
+test("a missing file seeds nothing; a corrupt or foreign one fails the seeding loudly and seeds nothing", () => {
   const p = createProject(home, "Fifth");
   const a = sessionHub(p.slug, false);
   expect(seedFromProject(home, p.slug, a.id, a.hub.session)).toBe(0);
   mkdirSync(join(home, "projects", p.slug), { recursive: true });
   for (const junk of ["{not json", '{"version":2}', "[]", '{"version":1,"fromSession":"x","facts":"nope","workstreams":[{"title":5}],"people":null}']) {
-    rmSync(contextFile(home, p.slug), { force: true });
+    for (const f of readdirSync(join(home, "projects", p.slug))) if (/^context(-\d+)?\.db/.test(f)) rmSync(join(home, "projects", p.slug, f), { force: true });
     writeFileSync(contextExport(home, p.slug), junk);
     const b0 = sessionHub(p.slug, true);
-    expect(() => seedFromProject(home, p.slug, b0.id, b0.hub.session)).not.toThrow();
+    expect(() => seedFromProject(home, p.slug, b0.id, b0.hub.session)).toThrow(); // fails loudly; never starts empty from a file it can't read
     expect(b0.hub.store.all("facts")).toHaveLength(0);
     writeFileSync(contextFile(home, p.slug), junk);
     const b = sessionHub(p.slug, true);
-    expect(() => seedFromProject(home, p.slug, b.id, b.hub.session)).not.toThrow();
+    expect(() => seedFromProject(home, p.slug, b.id, b.hub.session)).toThrow();
     expect(b.hub.store.all("facts")).toHaveLength(0);
   }
 });
