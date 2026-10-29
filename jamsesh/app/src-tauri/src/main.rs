@@ -4,6 +4,7 @@
 // Join mode shows the host's client view through a local relay (see proxy.rs), so the microphone
 // works without HTTPS, and keeps this Mac's token in the Keychain.
 mod discover;
+mod fonts;
 mod host;
 mod perms;
 mod proxy;
@@ -866,6 +867,13 @@ async fn finish_setup(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), 
     Ok(())
 }
 
+/// The font files of `families` from this Mac's font folders, for this person's canvas, which
+/// can't see installed fonts (fonts.rs). Read off the main thread.
+#[tauri::command]
+async fn local_fonts(families: Vec<String>) -> Vec<fonts::LocalFont> {
+    tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
+}
+
 /// Screen Recording takes effect after a relaunch.
 #[tauri::command]
 fn relaunch(app: AppHandle) {
@@ -898,7 +906,8 @@ fn main() {
             relaunch,
             remote_setup,
             get_userless,
-            toggle_userless
+            toggle_userless,
+            local_fonts
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));

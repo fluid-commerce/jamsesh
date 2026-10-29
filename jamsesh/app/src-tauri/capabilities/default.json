@@ -3,5 +3,21 @@
   "identifier": "default",
   "description": "The start window (bundled page) may call the app's own commands.",
   "windows": ["start", "setup"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "dialog:default",
+    "allow-start-info",
+    "allow-nearby-hosts",
+    "allow-host-here",
+    "allow-join",
+    "allow-perm-status",
+    "allow-perm-request",
+    "allow-perm-settings",
+    "allow-finish-setup",
+    "allow-relaunch",
+    "allow-remote-setup",
+    "allow-get-userless",
+    "allow-toggle-userless"
+  ]
 }
