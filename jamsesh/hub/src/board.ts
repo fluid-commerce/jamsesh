@@ -4,7 +4,7 @@
 import { terms } from "./brain/affinity";
 import type { Session } from "./session";
 import { newId } from "./store";
-import type { DirectiveMode, Fact, JamEvent, TriageCard, TriageSource } from "./types";
+import type { DirectiveMode, Fact, JamEvent, TriageCard, TriageSource, WikiCardPayload } from "./types";
 
 const MODES: DirectiveMode[] = ["explore", "implement", "coordinate", "answer", "note"];
 const KINDS: Fact["kind"][] = ["decision", "requirement", "constraint", "preference", "question", "fact"];
@@ -83,6 +83,8 @@ export interface CardEdit {
   targets?: unknown;
   workstream?: unknown;
   kind?: unknown;
+  /** A wiki card: the pages that stay checked (all of them when absent). */
+  pages?: unknown;
 }
 
 export class Board {
@@ -194,6 +196,17 @@ export class Board {
     return this.announce(this.s.store.put("triage", card));
   }
 
+  /** The wiki's maintainer proposes page changes (12.8): one card per ingest, accepted page by page. */
+  proposeWiki(wiki: WikiCardPayload, by: string): TriageCard | null {
+    const now = this.stamp();
+    const text = clean(wiki.summary);
+    const card: TriageCard = {
+      id: newId("tri"), ts: now, updatedAt: now, type: "wiki", status: "open", origin: "agent", text, original: text, by,
+      mode: "note", targets: [], kind: "fact", workstream: "", conflictsWith: null, wiki, sources: [], count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+    };
+    return this.announce(this.s.store.put("triage", card));
+  }
+
   /** The curator would retire a saved fact with nothing worded to take its place: a person decides. */
   proposeRetire(p: { fact: Fact; status: "superseded" | "resolved"; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
     const open = this.all().find((c) => c.status === "open" && c.retire && c.conflictsWith === p.fact.id);
@@ -286,7 +299,7 @@ export class Board {
   send(id: string, by: string, e: CardEdit = {}): BoardResult<{ directiveId: string }> {
     const c = this.openCard(id);
     if ("ok" in c) return c;
-    if (c.type !== "task") return fail("That's a context card: add it instead.");
+    if (c.type !== "task") return fail("That's not a task card: add it instead.");
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
     const card = r.card;
@@ -313,6 +326,14 @@ export class Board {
   add(id: string, by: string, e: CardEdit = {}): BoardResult<{ factId: string }> {
     const c = this.openCard(id);
     if ("ok" in c) return c;
+    if (c.type === "wiki") {
+      const pages = e.pages === undefined ? undefined : Array.isArray(e.pages) ? e.pages.map(String) : null;
+      if (pages === null) return fail("pages is a list of page names.");
+      const r = this.s.wikiAccept?.(c, pages, by);
+      if (!r) return fail("The wiki isn't available here.", 503);
+      if ("error" in r) return fail(r.error, r.status);
+      return { ok: true, card: this.done(c, "added", by, { wiki: { ...c.wiki!, applied: r.applied, skipped: r.skipped } }), factId: "" };
+    }
     if (c.type !== "context") return fail("That's a task card: send it instead.");
     if (c.retire) return fail("That card retires a saved fact: use Retire, or dismiss it.");
     const r = this.edited(c, e, by);
@@ -400,7 +421,7 @@ export class Board {
     return this.open()
       .map((c, i) => {
         const w = Board.waitingMin(c, now);
-        const where = c.type === "task" ? `${c.mode} → ${c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ") || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
+        const where = c.type === "wiki" ? `wiki ${c.wiki?.kind ?? ""}: ${c.wiki?.changes.map((x) => x.slug).join(", ") || "findings only"}` : c.type === "task" ? `${c.mode} → ${c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ") || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
         return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})`;
       })
       .join("\n");

@@ -1,4 +1,5 @@
 // HTTP, WebSocket and MCP on one port.
+import { wikiRoute } from "./wiki/routes";
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
@@ -649,6 +650,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
 
+  // The project wiki (12.8). People read, search and edit; agents use the jam_wiki_* tools and can't edit pages.
+  if (path === "/wiki" || path.startsWith("/wiki/")) {
+    if (paired?.kind === "agent") return bad("That's for people; agents use the jam_wiki_ tools.", 403);
+    const who = actor();
+    if (req.method !== "GET" && !who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
+    const r = await wikiRoute(hub.wiki, req.method, path, url, body, who);
+    if (r) return Response.json(r.body, { status: r.status, headers: { "cache-control": "no-store" } });
+  }
+
   // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
   // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
   if (path === "/triage" && req.method === "GET") {
@@ -661,7 +671,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method !== "GET") {
     const who = actor();
     if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
-    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind };
+    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind, pages: body?.pages };
     const verb = m[2];
     const r = !verb
       ? req.method === "PATCH"

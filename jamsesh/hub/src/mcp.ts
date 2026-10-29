@@ -1,6 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { wikiBriefing, wikiReadText, wikiSearchText } from "./wiki/agent";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -84,6 +85,26 @@ const JAM_TOOLS = [
         minutes: { type: "number", description: "How many minutes of room conversation to include (default 10)" },
       },
     },
+  },
+  {
+    name: "jam_wiki_read",
+    description: "Read a page of the project wiki (the project's memory across sessions) by its name. The join briefing lists the page names. Pages link each other with [[name]]; the reply shows what links here and the sources.",
+    inputSchema: { type: "object", properties: { page: { type: "string", description: "A page name (slug) or title" } }, required: ["page"] },
+  },
+  {
+    name: "jam_wiki_search",
+    description: "Search the project wiki's pages. Cheaper than jam_context; use it before asking the room something it may already have settled.",
+    inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+  },
+  {
+    name: "jam_wiki_query",
+    description: "Ask the project wiki a question in words and get an answer drawn from its pages, with the pages it came from. You can't edit pages; to add something, use jam_source_add.",
+    inputSchema: { type: "object", properties: { question: { type: "string" } }, required: ["question"] },
+  },
+  {
+    name: "jam_source_add",
+    description: "File a document in the project wiki as a source (meeting notes, a spec, a research write-up, a PR summary) instead of broadcasting it with jam_message. The wiki's maintainer reads it into pages for a person to approve. Up to 30 an hour; long text is cut at 200,000 characters.",
+    inputSchema: { type: "object", properties: { title: { type: "string" }, text: { type: "string", description: "The document, as Markdown or plain text" } }, required: ["title", "text"] },
   },
   {
     name: "jam_search",
@@ -439,6 +460,26 @@ export class McpEndpoint {
       }
       case "jam_context":
         return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10));
+      case "jam_wiki_read":
+        this.requireAgent(ctx);
+        return text(wikiReadText(this.hub.wiki.dir, String(args.page ?? "")));
+      case "jam_wiki_search":
+        this.requireAgent(ctx);
+        return text(wikiSearchText(this.hub.wiki.dir, String(args.query ?? "")));
+      case "jam_wiki_query": {
+        this.requireAgent(ctx);
+        const r = await this.hub.wiki.query(String(args.question ?? ""), { by: "an agent" });
+        return text(`${r.answer}${r.pages.length ? `
+
+From: ${r.pages.join(", ")}` : ""}`);
+      }
+      case "jam_source_add": {
+        const agent = this.requireAgent(ctx);
+        const body = String(args.text ?? "");
+        if (!body.trim()) throw new Error("text is empty.");
+        const src = this.hub.wiki.addAgentSource(String(args.title ?? "Untitled"), body, agent.name);
+        return text(`Filed as source ${src.id}. The wiki's maintainer will read it in; a person approves the page changes on the Tasks board.`);
+      }
       case "jam_search": {
         this.requireAgent(ctx);
         const limit = Math.min(60, Math.max(1, Number(args.limit) || 20));
@@ -690,7 +731,8 @@ export class McpEndpoint {
     const settled = s.facts().filter((f) => f.status === "active").length;
     const mine = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled" && d.targets.includes(agent.id));
     const brief = s.brief().short;
-    return [
+    // The wiki replaces the settled-points list: its index and this agent's workstream pages, within what is left of the briefing budget.
+    const build = (wiki: string | null) => [
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
@@ -698,7 +740,8 @@ export class McpEndpoint {
       "",
       this.roster(true),
       "",
-      `## Session brief\n${brief || "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
+      `## Session brief\n${brief || "(no brief yet; the session just started)"}${settled && !wiki ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
+      wiki ?? "",
       ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
       `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300) + attachmentLine(d, s.hubUrl)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
       this.unreadLine(agent),
@@ -714,6 +757,11 @@ export class McpEndpoint {
     ]
       .filter((x) => x !== "")
       .join("\n");
+    let wiki = wikiBriefing(this.hub.wiki.dir, ws?.title, 2400);
+    let out = build(wiki);
+    // jam_join stays under about 1,500 tokens (6,000 characters): the wiki part gives way first.
+    if (wiki && out.length > 6000) out = build((wiki = wikiBriefing(this.hub.wiki.dir, ws?.title, Math.max(500, 2400 - (out.length - 6000)))));
+    return out;
   }
 
   /** One line on what is waiting in the inbox (the items themselves are read with jam_inbox, which marks them delivered). */

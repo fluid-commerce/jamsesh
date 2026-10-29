@@ -1667,6 +1667,75 @@ resumed session, or the session that wrote the file, is not seeded again. The fi
 so Phase 7's wiki can ingest it. Today's brief is one text; goal and glossary sections arrive with
 the brain's structured brief.
 
+### 12.8 The project wiki
+
+Each project keeps one wiki that outlasts its sessions (`hub/src/wiki/`). It is the project folder itself, so it opens as an
+Obsidian vault with nothing to set up:
+
+```text
+projects/<slug>/WIKI.md   the schema: the maintainer's instructions (one topic per page, [[links]], citations, front matter)
+              index.md    every page by category; rebuilt by the hub after every change
+              log.md      one line per change, newest last
+              raw/        sources: YYYY-MM-DD_slug.md, written once and never edited
+              wiki/       pages: <slug>.md
+              .git        one commit per change set, when `git` is installed (optional; nothing breaks without it)
+              .wiki-state.json, .proposals/   hub bookkeeping (git-ignored; Obsidian hides dot-folders)
+```
+
+A page has front matter `type` (person, workstream, feature, decision, requirement, question, repo, topic), `workstreams`,
+`updated` and `sources` (source ids), then Markdown starting with `# Title`. API `category` is the plural of `type`
+(people, workstreams, features, decisions, requirements, questions, repos, topics). Citations in text are
+`(src: <source id>)` or `(src: <source id>, 14:32)` for a moment in a transcript, whose lines start `[14:32] Name: text`.
+
+**Feeding it.** Sources come from the transcript (every 15 minutes and at session end: non-banter speech, typed prompts, decisions
+and agents' questions), documents (**Add to wiki**, `POST /api/wiki/sources`; `jam_source_add` for agents, 30 an hour), agents'
+`shipped` and `decision` updates (small `agent` sources), and people's page edits (`edit` sources holding the diff). An ingest
+reads up to 8 sources (60,000 characters) with the index and the pages they touch, using the **router** model, and proposes up to
+15 whole pages. Source text reaches the model inside `<source>` tags as data; the model can only return wiki pages (a schema),
+so it cannot assign work or change settings. With no model the sources wait, and lint says so.
+
+**Approval.** One card per ingest on the Tasks board (`type: "wiki"`), not one per page: a busy session raises a card every
+15 minutes at most, and each page has a diff and a toggle. Accepting (`POST /api/triage/:id/add`, optional `{pages:[slug]}`)
+writes the checked pages; unchecked ones are dropped. A page a person edited since the proposal (revision no longer matches) is
+skipped and listed in `card.wiki.skipped`; if every checked page is stale the answer is 409. People's own edits
+(`PUT /api/wiki/page/:slug`) apply directly. The proposal's full text is kept in `.proposals/<card>.json`, not in the card, so the
+live state stays small. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,stale}], findings?, applied?, skipped?}`.
+
+**Query and lint.** `POST /api/wiki/query {question, file?}` answers from the best-matching pages with `[[links]]`; a substantial
+answer with `file:true` raises an `answer` card that creates a page. `POST /api/wiki/lint` finds orphans, broken links, pages not
+updated in 45 days, sources not yet ingested and (with a model) contradictions and stale claims, and raises one `lint` card of
+findings (one open at a time; a changed result replaces it).
+
+**Hub API** (people only; an agent credential gets 403; writes need a picked person like the Tasks board):
+
+| Route | Answer |
+|---|---|
+| `GET /api/wiki/pages` | `{ready, project, pages:[{slug,title,category,summary,links,backlinks,updated,mtime}]}` |
+| `GET /api/wiki/page/:slug` | `{slug,title,category,frontMatter,markdown,rev,backlinks:[{slug,title}],links:[{slug,title,exists}],sources:[{id,title,kind,ts,exists}]}` |
+| `PUT /api/wiki/page/:slug` | body `{markdown, rev?, title?, category?}`; `rev` is required to change a page and absent to create one; 409 `{error,current}` when stale |
+| `GET /api/wiki/search?q=` | `{results:[{slug,title,category,snippet,score}]}` |
+| `GET /api/wiki/graph` | `{nodes:[{id,title,category,backlinks}],edges:[{from,to}]}` |
+| `GET /api/wiki/log` | `{entries:[{ts,text,pages}]}` newest first |
+| `GET /api/wiki/sources`, `GET /api/wiki/source/:id` | the source list (with `ingested`), one source's text |
+| `POST /api/wiki/sources` | `{title, text}`, `{title, url}` (kept as a link; never fetched) or `{title, attachment}` (text file or PDF; a PDF is read by the router model, 503 without a key) |
+| `POST /api/wiki/ingest`, `/query`, `/lint` | run now; see above |
+
+Changes arrive as a bus message `{type:"wiki", kind:"ingest"|"edit"|"apply"|"source", touched:[slug], by, at}` (`ingest` when a card is
+raised, `apply` when one is accepted).
+
+**Agents.** `jam_wiki_read`, `jam_wiki_search`, `jam_wiki_query` and `jam_source_add` (no tool edits pages). `jam_join` returns
+the wiki's index (page names by category) and the agent's workstream pages instead of the "settled points" pointer, with the whole
+briefing kept under 6,000 characters (about 1,500 tokens); what doesn't fit is named for `jam_wiki_read`.
+
+**Safety.** Page names are slugs (`[a-z0-9-]`, 64 characters), so no path can leave `wiki/`; writes are atomic, refuse
+symlinks and are capped (40,000 characters a page, 1,500 pages, 200,000 characters and 6,000 files of sources). Sources are
+created exclusively and never rewritten. Model output is cleaned of front matter and only ever lands in `wiki/`.
+
+**The fact list.** The brain's periodic curation pass no longer runs in a hub (the ingest replaces it; direct "remember this" still
+saves a fact). The first time a project has a wiki, its `context.json` and the session's active facts become pages
+(`decisions`, `requirements`, `open-questions`, `project-brief`, one page per workstream), without a model, with a source holding the
+original text. The **Work** tab links to these pages.
+
 ## 13. Host control and permissions
 
 The brain pilots the host machine as well as the big screen [B44]. Host control is on by default
