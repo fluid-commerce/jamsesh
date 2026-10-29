@@ -269,6 +269,8 @@ export interface Share {
   status: "requested" | "live" | "ended" | "declined";
   reason: string;
   startedAt: number;
+  /** Ended because its window lost the hub (or the hub restarted), not by anyone: only such a share is registered again. */
+  lost?: boolean;
 }
 
 /** One curated piece of session knowledge the brain keeps current. */

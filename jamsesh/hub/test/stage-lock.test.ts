@@ -275,12 +275,12 @@ test("a share doesn't take a screen someone else locked, and shows over its own 
   const a = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   const sh = s.startShare("felipe-laptop", "screen");
-  await hub.brain.placeShare(sh);
+  s.placeShare(sh);
   expect(s.stage().mode).toBe("spotlight");
   s.endShare(sh.id);
   s.setStage({ mode: "spotlight", items: [a.id] }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
   const mine = s.startShare("felipe-laptop", "screen");
-  await hub.brain.placeShare(mine);
+  s.placeShare(mine);
   expect(s.stage().mode).toBe("layout");
 });
 
@@ -719,13 +719,13 @@ test("a show request answers only the lock it asked about: a later cast or an un
 
 test("the owner's own share keeps their lock, and their cast comes back locked when it ends", async () => {
   const { hub, s, felipe } = room();
-  // No model: the share goes up the brain's own way (the path every share falls back to).
+  // The hub places a share itself, brain or no brain.
   (s as any).gatewayKey = () => "";
   const a = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id], title: "Felipe's cast" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
   const since = s.stage().lock!.since;
   const sh = s.startShare("felipe-laptop", "screen");
-  await hub.brain.placeShare(sh);
+  s.placeShare(sh);
   expect(s.stage().mode).toBe("layout");
   expect(s.stage().lock).toMatchObject({ personId: felipe.id, since });
   s.endShare(sh.id);
@@ -733,7 +733,7 @@ test("the owner's own share keeps their lock, and their cast comes back locked w
   expect(s.stage().lock).toMatchObject({ personId: felipe.id, since });
   // Let go of during the share: what comes back is unlocked.
   const again = s.startShare("felipe-laptop", "screen");
-  await hub.brain.placeShare(again);
+  s.placeShare(again);
   s.unlockStage();
   s.endShare(again.id);
   expect(s.stage().title).toBe("Felipe's cast");

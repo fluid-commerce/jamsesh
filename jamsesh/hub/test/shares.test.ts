@@ -17,8 +17,20 @@ function room() {
   const s = new Session(new Store(mkdtempSync(join(dir, "s-"))));
   const felipe = s.upsertPerson({ name: "Felipe" });
   s.touchDevice("felipe-laptop", { label: "Felipe's laptop", personId: felipe.id, kind: "client" });
+  // The host's big screen window is open and reporting.
+  s.reportScreen("main", { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() });
   return { s, felipe };
 }
+
+const display = { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0, at: Date.now() };
+const withGrace = async (ms: number, fn: () => Promise<void>) => {
+  Session.SHARE_GRACE_MS = ms;
+  try {
+    await fn();
+  } finally {
+    Session.SHARE_GRACE_MS = 5_000;
+  }
+};
 
 let sent: BusMessage[] = [];
 const off = bus.on((m) => sent.push(m));
@@ -84,7 +96,7 @@ test("a new share fills the screen alone and the screen comes back when it ends"
   clearInterval((brain as any).digestTimer);
   s.setStage({ mode: "layout", title: "Review", layout: { tiles: [{ kind: "artifact", artifactId: "a1" }, { kind: "artifact", artifactId: "a2" }] } }, "Room brain");
   const sh = s.startShare("felipe-laptop", "screen");
-  await brain.placeShare(sh);
+  s.placeShare(sh);
   expect(s.stage().layout?.tiles).toEqual([{ kind: "screen", shareId: sh.id, label: sh.label }]);
   s.endShare(sh.id);
   expect(s.stage().layout?.tiles.map((t) => t.kind)).toEqual(["artifact", "artifact"]);
@@ -119,6 +131,7 @@ test("a share that no host screen shows stops after the grace period, and the sh
 test("a share on an extra screen is not cut, and a brand-new share gets time to be placed", async () => {
   const { s } = room();
   const sh = s.startShare("felipe-laptop", "screen");
+  s.reportScreen("screen-2", display);
   s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "screen-2");
   s.sweepShares();
   expect(s.store.get("shares", sh.id)?.status).toBe("live");
@@ -181,6 +194,99 @@ test("a share id from someone else's device starts a new share instead of taking
   const asked = s.requestShare(felipe.id, "camera", "", "x")!;
   expect(s.startShare("rae-laptop", "camera", asked.id).id).not.toBe(asked.id);
   expect(s.store.get("shares", asked.id)?.status).toBe("requested");
+});
+
+test("a share shown only on a display that closes, or stops reporting, stops after the grace", async () => {
+  const { s } = room();
+  await withGrace(30, async () => {
+    const closed = s.startShare("felipe-laptop", "screen");
+    s.reportScreen("screen-2", { ...display, at: Date.now() });
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: closed.id }] } }, "x", "screen-2");
+    s.removeScreen("screen-2");
+    expect(s.store.get("shares", closed.id)?.status).toBe("live");
+    await Bun.sleep(120);
+    expect(s.store.get("shares", closed.id)?.status).toBe("ended");
+    // A display that went quiet (its last report is past the 3-minute cutoff) is gone too.
+    const quiet = s.startShare("felipe-laptop", "camera");
+    s.reportScreen("screen-3", { ...display, at: Date.now() - 4 * 60_000 });
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: quiet.id }] } }, "x", "screen-3");
+    s.sweepShares(); // never shown on a display that is there: still within its placement window
+    expect(s.store.get("shares", quiet.id)?.status).toBe("live");
+    s.store.put("shares", { ...s.store.get("shares", quiet.id)!, startedAt: Date.now() - 120_000 });
+    s.sweepShares();
+    expect(s.store.get("shares", quiet.id)?.status).toBe("ended");
+  });
+});
+
+test("stage changes every few seconds can't postpone an off-screen share's end", async () => {
+  const { s } = room();
+  await withGrace(80, async () => {
+    const sh = s.startShare("felipe-laptop", "screen");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x");
+    s.setStage({ mode: "board" }, "x");
+    // Keep changing the stage faster than the grace, past the deadline.
+    for (let i = 0; i < 6; i++) {
+      await Bun.sleep(30);
+      s.setStage({ mode: i % 2 ? "board" : "join" }, "x");
+    }
+    expect(s.store.get("shares", sh.id)?.status).toBe("ended");
+  });
+});
+
+test("with the brain off a new share still goes up, full screen, at once", async () => {
+  const { s } = room();
+  s.updateSettings({ brainEnabled: false });
+  const sh = s.startShare("felipe-laptop", "screen");
+  s.placeShare(sh);
+  expect(s.stage().layout?.tiles).toEqual([{ kind: "screen", shareId: sh.id, label: sh.label }]);
+  s.sweepShares();
+  expect(s.store.get("shares", sh.id)?.status).toBe("live");
+  // A pinned screen stays put; the room is told instead.
+  const { s: s2 } = room();
+  s2.setStage({ mode: "board", pinned: true }, "Felipe");
+  s2.placeShare(s2.startShare("felipe-laptop", "screen"));
+  expect(s2.stage().mode).toBe("board");
+  expect(sent.some((m) => m.type === "toast" && /pinned/.test((m as any).detail))).toBe(true);
+});
+
+test("an extra display gets back what it showed when its share ends", () => {
+  const { s } = room();
+  s.reportScreen("screen-2", { ...display, at: Date.now() });
+  s.setStage({ mode: "compare", title: "Nav", items: ["a1", "a2"] }, "x", "screen-2");
+  const sh = s.startShare("felipe-laptop", "screen");
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "screen-2");
+  s.endShare(sh.id);
+  expect(s.stage("screen-2")).toMatchObject({ mode: "compare", title: "Nav", items: ["a1", "a2"] });
+});
+
+test("a share shown only on the main screen stops once its window closes, or stops reporting", async () => {
+  const { s } = room();
+  await withGrace(30, async () => {
+    const sh = s.startShare("felipe-laptop", "screen");
+    s.placeShare(sh);
+    s.sweepShares();
+    expect(s.store.get("shares", sh.id)?.status).toBe("live");
+    s.removeScreen("main"); // the app says the big screen window closed
+    await Bun.sleep(120);
+    expect(s.store.get("shares", sh.id)?.status).toBe("ended");
+    expect(sent.find((m) => m.type === "share-ended" && m.shareId === sh.id)).toMatchObject({ text: expect.stringContaining("left the big screen") });
+    // A browser big screen that went quiet: its last report is past the 3-minute cutoff.
+    s.reportScreen("main", { ...display, screenX: 0, at: Date.now() });
+    const cam = s.startShare("felipe-laptop", "camera");
+    s.placeShare(cam);
+    s.sweepShares();
+    expect(s.store.get("shares", cam.id)?.status).toBe("live");
+    s.reportScreen("main", { ...display, screenX: 0, at: Date.now() - 4 * 60_000 });
+    s.sweepShares(); // starts its grace
+    await Bun.sleep(120);
+    expect(s.store.get("shares", cam.id)?.status).toBe("ended");
+    // The window opening again makes main a place to show things again.
+    s.reportScreen("main", { ...display, screenX: 0, at: Date.now() });
+    const again = s.startShare("felipe-laptop", "screen");
+    s.placeShare(again);
+    s.sweepShares();
+    expect(s.store.get("shares", again.id)?.status).toBe("live");
+  });
 });
 
 describe("share calls act only for the window that made them", () => {
@@ -251,6 +357,101 @@ describe("share calls act only for the window that made them", () => {
     const again = s.requestShare(felipe.id, "camera", "", "Host")!;
     expect((await call(felipePhone.token, "POST", `/shares/${again.id}/decline`, {})).status).toBe(200);
     expect(s.store.get("shares", again.id)?.status).toBe("declined");
+  });
+
+  test("a share id is never reused for the other kind of capture", async () => {
+    const screen = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen" })).json();
+    const cam = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera", shareId: screen.id })).json();
+    expect(cam.id).not.toBe(screen.id);
+    expect(cam.kind).toBe("camera");
+    expect(s.store.get("shares", screen.id)).toMatchObject({ kind: "screen", status: "live" });
+    // The same kind and device re-registers its own share (after a reconnect).
+    const again = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen", shareId: screen.id })).json();
+    expect(again.id).toBe(screen.id);
+  });
+
+  test("a share the host ends tells its window and can't be registered again; a share lost to a dropped connection can", async () => {
+    const sh = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen" })).json();
+    s.placeShare(s.store.get("shares", sh.id)!);
+    sent = [];
+    expect((await call(null, "DELETE", `/shares/${sh.id}`)).status).toBe(200);
+    const note = sent.find((m) => m.type === "share-ended" && m.shareId === sh.id);
+    expect(note).toMatchObject({ deviceId: "dev-felipe", text: "The host stopped your screen share." });
+    // Its window missed that and re-registers after the 10-second wait: refused, and nothing goes back on screen.
+    const again = await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen", shareId: sh.id });
+    expect(again.status).toBe(409);
+    expect(s.store.get("shares", sh.id)?.status).toBe("ended");
+    expect(s.shares().some((x) => x.status === "live" && x.deviceId === "dev-felipe" && x.kind === "screen")).toBe(false);
+    expect(JSON.stringify(s.stage())).not.toContain(sh.id);
+    // A dropped connection ends it without telling the (unreachable) window; coming back registers it again.
+    const cam = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera" })).json();
+    sent = [];
+    s.endShare(cam.id, "ended", { lost: true });
+    expect(sent.some((m) => m.type === "share-ended")).toBe(false);
+    const back = await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera", shareId: cam.id });
+    expect(back.status).toBe(200);
+    expect(s.store.get("shares", cam.id)?.status).toBe("live");
+  });
+
+  test("a socket speaks only for its own window's device: no spoofed signaling, no ending someone else's share", async () => {
+    const open = (token: string, device: string) =>
+      new Promise<{ ws: WebSocket; got: any[] }>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=${device}`, { headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${token}` } } as any);
+        const got: any[] = [];
+        ws.onmessage = (e) => got.push(JSON.parse(String(e.data)));
+        ws.onopen = () => resolve({ ws, got });
+        ws.onerror = reject;
+      });
+    const closed = (ws: WebSocket) => new Promise((r) => ((ws.onclose = r), ws.close()));
+    const sh = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera" })).json();
+    const felipeWs = await open(felipeLaptop.token, "dev-felipe");
+    const raeWs = await open(raeLaptop.token, "dev-rae");
+    // Rae's window claims to be Felipe's device.
+    const spoof = await open(raeLaptop.token, "dev-felipe");
+    spoof.ws.send(JSON.stringify({ type: "rtc", to: "dev-rae", data: { op: "offer", shareId: sh.id, pc: "x", sdp: "fake" } }));
+    // Felipe's real device can still signal.
+    felipeWs.ws.send(JSON.stringify({ type: "rtc", to: "dev-rae", data: { op: "bye", shareId: sh.id } }));
+    await Bun.sleep(100);
+    const rtc = raeWs.got.filter((m) => m.type === "rtc");
+    expect(rtc).toEqual([{ type: "rtc", from: "dev-felipe", to: "dev-rae", data: { op: "bye", shareId: sh.id } }]);
+    // The spoofing socket closing doesn't end Felipe's share; his own last socket closing does (as a lost share).
+    await closed(spoof.ws);
+    await Bun.sleep(50);
+    expect(s.store.get("shares", sh.id)?.status).toBe("live");
+    await closed(felipeWs.ws);
+    await Bun.sleep(50);
+    expect(s.store.get("shares", sh.id)).toMatchObject({ status: "ended", lost: true });
+    await closed(raeWs.ws);
+  });
+
+  test("a socket opened for a device before another window registers it loses that device", async () => {
+    const open = (token: string, device: string) =>
+      new Promise<{ ws: WebSocket; got: any[] }>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=${device}`, { headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${token}` } } as any);
+        const got: any[] = [];
+        ws.onmessage = (e) => got.push(JSON.parse(String(e.data)));
+        ws.onopen = () => resolve({ ws, got });
+        ws.onerror = reject;
+      });
+    const closed = (ws: WebSocket) => new Promise((r) => ((ws.onclose = r), ws.close()));
+    // Rae's window grabs an id nobody has registered yet; then Felipe's new window registers it.
+    const early = await open(raeLaptop.token, "dev-felipe-tablet");
+    await register(felipeLaptop.token, "dev-felipe-tablet", felipe.id);
+    const real = await open(felipeLaptop.token, "dev-felipe-tablet");
+    const listener = await open(raeLaptop.token, "dev-rae");
+    const sh = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe-tablet", kind: "screen" })).json();
+    early.ws.send(JSON.stringify({ type: "rtc", to: "dev-rae", data: { op: "offer", shareId: sh.id, pc: "x", sdp: "fake" } }));
+    // Signaling addressed to the device reaches only its owner's socket.
+    listener.ws.send(JSON.stringify({ type: "rtc", to: "dev-felipe-tablet", data: { op: "want", shareId: sh.id } }));
+    await Bun.sleep(100);
+    expect(listener.got.filter((m) => m.type === "rtc")).toEqual([]);
+    expect(early.got.filter((m) => m.type === "rtc")).toEqual([]);
+    expect(real.got.filter((m) => m.type === "rtc")).toHaveLength(1);
+    await closed(early.ws);
+    await Bun.sleep(50);
+    expect(s.store.get("shares", sh.id)?.status).toBe("live");
+    await closed(real.ws);
+    await closed(listener.ws);
   });
 
   test("the same person sharing from their second window replaces the first, over HTTP", async () => {

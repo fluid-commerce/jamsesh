@@ -399,45 +399,6 @@ export class Brain {
     });
   }
 
-  /** Someone started sharing a screen or camera: find it a place on the big screen. */
-  async placeShare(share: Share) {
-    const s = this.session;
-    if (this.stopped || !s.settings().brainEnabled) return;
-    const stage = s.stage();
-    if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
-      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
-      return;
-    }
-    // A person's cast stays up: a share doesn't take it over unless it's that person's own.
-    const held = s.lockOf("main");
-    if (held && held.personId !== share.personId) {
-      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: `${held.by} has the screen locked; unlock it or ask the brain to show the share.` });
-      return;
-    }
-    const m = model(s, "presenter");
-    // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
-    s.rememberStageFor(share.id);
-    // The owner's own share over their cast keeps their lock, and the cast comes back with it (SPEC 10.5).
-    const fallback = () => {
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined });
-    };
-    if (!m) return fallback();
-    const pass = { effects: 0 };
-    try {
-      await generateText({
-        abortSignal: AbortSignal.timeout(45_000),
-        model: m,
-        system: this.system(),
-        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
-        tools: { set_layout: this.tools([], pass).set_layout },
-        stopWhen: isStepCount(2),
-      });
-      if (!pass.effects && !this.stopped) fallback();
-    } catch {
-      fallback();
-    }
-  }
-
   /** The system prompt: the router's rules, the brain's name, and what the room told it about itself. */
   system() {
     const { brainName, brainAliases, brainNotes } = this.session.settings();
@@ -878,7 +839,7 @@ export class Brain {
           const share = s.requestShare(p.id, kind, reason, "Room brain");
           if (!share) return refuse(`${p.name} has no JamSesh window open.`);
           if (share.status === "live") {
-            void this.placeShare(share);
+            s.placeShare(share);
             return `${p.name} is already sharing their ${kind}; it is going up on the big screen. Don't ask again.`;
           }
           return `Asked ${p.name}; it appears on screen when they accept.${asked ? " (An earlier request to them is still waiting; no second one was sent.)" : ""}`;
@@ -1200,9 +1161,12 @@ export class Brain {
 
   /** How long to collect ships before one parity check (tests shorten it). */
   shipWindowMs = 25_000;
-  private shipped: { agent: Agent; text: string }[] = [];
+  private shipped: Shipped[] = [];
+  private shipSeq = 0;
   private shipTimer: ReturnType<typeof setTimeout> | null = null;
-  private shipConsidered = new Map<string, number>();
+  /** Shipped notes already considered, and parity checks already sent, in the last ten minutes: deduplicated by feature, not by agent. */
+  private shipConsidered: { agentId: string; text: string; at: number }[] = [];
+  private paritySent: { target: string; feature: string; at: number }[] = [];
 
   /** Ships within a short window (desktop and mobile often land together) are considered once. */
   agentUpdated(agent: Agent, kind: UpdateKind, text: string, ev?: JamEvent) {
@@ -1220,12 +1184,14 @@ export class Brain {
       return;
     }
     if (kind !== "shipped") return;
-    // Commits, refactors, fixes, tooling and deliberately one-platform changes are news, never parity work.
-    if (ev?.data?.platformSpecific === true || !parityCandidate(text)) return;
-    // Several notices from one agent in a window are one notice.
-    const same = this.shipped.find((b) => b.agent.id === agent.id);
+    // Parity starts only from the shipper's own word on what a person sees. Without it, and for commits,
+    // refactors, fixes, tooling and deliberately one-platform changes, a shipped note is news only.
+    const seen = typeof ev?.data?.seen === "string" ? ev?.data.seen.trim() : "";
+    if (!seen || ev?.data?.platformSpecific === true || !parityCandidate(text)) return;
+    // Several notices from one agent about one feature in a window are one notice; a different feature stays its own.
+    const same = this.shipped.find((b) => b.agent.id === agent.id && sameFeature(b.seen, seen));
     if (same) same.text = `${same.text} Then: ${text}`.slice(0, 600);
-    else this.shipped.push({ agent, text });
+    else this.shipped.push({ id: `ship-${++this.shipSeq}`, agent, text, seen });
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
       const batch = this.shipped.splice(0);
@@ -1234,56 +1200,65 @@ export class Brain {
     }, this.shipWindowMs);
   }
 
-  private shippedBatch(batch: { agent: Agent; text: string }[]) {
+  private shippedBatch(batch: Shipped[]) {
     const s = this.session;
-    // The same agent on the same branch was already considered a few minutes ago: it's information now
-    // (jam_context lists it under "Recently shipped"), not another round of coordination.
-    const key = (a: Agent) => `${a.id}@${a.branch}`;
-    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !(Date.now() - (this.shipConsidered.get(key(b.agent)) ?? 0) < 10 * 60_000));
+    // The same agent's note about the same thing was considered a few minutes ago: it's information now
+    // (jam_context lists it under "Recently shipped"). A different feature from it still gets its look.
+    const now = Date.now();
+    this.shipConsidered = this.shipConsidered.filter((c) => now - c.at < 10 * 60_000);
+    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !this.shipConsidered.some((c) => c.agentId === b.agent.id && sameFeature(c.text, b.seen)));
     if (!batch.length) return;
-    for (const b of batch) this.shipConsidered.set(key(b.agent), Date.now());
+    for (const b of batch) this.shipConsidered.push({ agentId: b.agent.id, text: b.seen, at: now });
     // Parity needs an app on another platform in the room; without one there's nobody to coordinate with.
     const apps = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform));
     if (!batch.some((b) => apps.some((a) => a.platform !== b.agent.platform))) return;
     const ids = new Set(batch.map((b) => b.agent.id));
     const others = apps.filter((a) => !ids.has(a.id) && !batch.some((b) => b.agent.platform === a.platform));
     void this.consider(
-      `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
+      `Shipped just now (one line per feature):\n${batch.map((b) => `- ${b.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}\n  What a person sees, in the shipper's words: ${b.seen}`).join("\n")}\n` +
         `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
-        `Every agent can already read this in jam_context ("Recently shipped"); a directive lands in an inbox as work. Commits, refactors, fixes, tooling and changes marked as one platform's never reach you. So a user-visible feature or screen here is a parity question by default: call coordinate_parity naming the feature and the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). Call no_action only when nothing in it is something a person sees, or it plainly can't exist on the other platforms.`,
+        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. Each shipper here said what a person sees. coordinate_parity sends a parity check about it, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it once per feature, with that feature's shipment ids and the other platforms (or, when several platforms shipped the same feature, each of their shipment ids and no platforms). Never put two different features in one call. Call no_action when what they see plainly can't exist on the other platforms.`,
       "agent",
       this.parityTools(batch),
     );
   }
 
   /** The one thing a shipped-news pass can do: ask agents on different platforms to align one named feature. */
-  private parityTools(batch: { agent: Agent; text: string }[]) {
+  private parityTools(batch: Shipped[]) {
     const s = this.session;
-    const open = (id: string) => s.directives().some((d) => d.mode === "coordinate" && d.targets.includes(id) && d.status !== "done" && d.status !== "cancelled" && Date.now() - d.ts < 10 * 60_000);
+    // One check per feature (what the shipper said a person sees) and agent in ten minutes; a different feature to the same agent still goes.
+    const sentAlready = (target: string, seen: string) => this.paritySent.some((p) => p.target === target && Date.now() - p.at < 10 * 60_000 && sameFeature(p.feature, seen));
     return {
       coordinate_parity: tool({
-        description: "Ask the shipping agents and the apps on the named platforms to align one user-visible feature. Each gets one 'coordinate' directive.",
+        description: "Send a parity check about one user-visible feature a shipper described: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
-          feature: z.string().describe("The user-visible feature or screen, as a person would name it"),
-          shippedBy: z.array(z.string()).describe("Ids from 'Shipped just now' of the agents that shipped it"),
+          feature: z.string().describe("The feature's name, as a person would say it"),
+          shipments: z.array(z.string()).describe("Ids from 'Shipped just now' (ship-…) of this one feature's shipments: one, or one per platform that shipped the same feature"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
-        execute: async ({ feature, shippedBy, platforms }) => {
-          const shippers = batch.map((b) => b.agent).filter((a) => shippedBy.includes(a.id));
-          if (!shippers.length) return refuse("Name the shipping agents by id from 'Shipped just now'.");
+        execute: async ({ feature, shipments, platforms }) => {
+          const from = batch.filter((b) => shipments.includes(b.id));
+          if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
+          // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
+          if (from.some((b) => !b.seen)) return refuse("A shipper didn't say what a person sees, so there is nothing to check: call no_action.");
+          // One check is one feature: shipments whose shippers describe different things are separate calls.
+          if (from.some((b) => !sameFeature(b.seen, from[0].seen))) return refuse("Those shipments are different features (their shippers describe different things): send one check per feature.");
+          const shippers = from.map((b) => b.agent);
+          const seen = from.map((b) => b.seen).join("; ");
           const made = new Set(shippers.map((a) => a.platform));
           const partners = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
           const team = [...shippers, ...partners];
           if (new Set(team.map((a) => a.platform)).size < 2) return refuse("That isn't a cross-platform feature: no app on another platform needs it.");
           const sent: string[] = [];
           for (const a of team) {
-            if (open(a.id)) continue;
+            if (sentAlready(a.id, seen)) continue;
+            this.paritySent.push({ target: a.id, feature: seen, at: Date.now() });
             const mates = team.filter((o) => o.id !== a.id).map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ");
             const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
             s.createDirective({
               text: shippers.includes(a)
-                ? `${feature}: you shipped it on ${a.platform}. ${mates} should match it. Answer their questions with jam_message and post a render of yours so the platforms stay consistent, apart from deliberate platform differences.`
-                : `${feature} shipped on ${[...made].join(" and ")} by ${by}. Check whether the ${a.platform} app has it and matches. If it belongs here and is missing or different, build it adapted to ${a.platform}, aligning with ${mates} through jam_message and posting renders.`,
+                ? `Parity check, not a build task: you shipped ${feature} on ${a.platform} (${seen}). ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
+                : `Parity check, not a build task: ${by} shipped ${feature} on ${[...made].join(" and ")} (${seen}). Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
               mode: "coordinate",
               targets: [a.id],
               requestedBy: "JamSesh",
@@ -1291,7 +1266,7 @@ export class Brain {
             });
             sent.push(a.name);
           }
-          return sent.length ? `Asked ${sent.join(", ")} to align.` : "Each of them already has an open coordinate directive.";
+          return sent.length ? `Sent ${sent.join(", ")} a parity check.` : "Each of them already has a parity check for this feature.";
         },
       }),
       no_action: tool({ description: "Nothing for other platforms to do.", inputSchema: z.object({ reason: z.string() }), execute: async () => "ok" }),
@@ -1566,6 +1541,22 @@ const ASKS: Record<string, RegExp> = {
   show_saved_layout: SHOW,
 };
 export const askedFor = (tool: string, own: string) => ANSWERING.has(tool) || (!!ASKS[tool] && asksFor(own, ASKS[tool]));
+/** One shipped note waiting for its parity look: the shipper's text and what they said a person sees. */
+interface Shipped {
+  id: string;
+  agent: Agent;
+  text: string;
+  seen: string;
+}
+
+/** The same feature: most content words shared both ways, so a short name contained in a longer, different one doesn't match. */
+export function sameFeature(a: string, b: string) {
+  const x = new Set(terms(a));
+  const y = new Set(terms(b));
+  const inter = [...x].filter((t) => y.has(t)).length;
+  return inter > 0 && inter / Math.max(x.size, y.size) >= 0.6;
+}
+
 /** Platforms with a user-facing app, where a shipped feature can be a parity question. */
 const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
 /** A shipped note that could be a feature: not a commit, refactor, fix, dependency or tooling change, and not marked one platform's. */
@@ -1783,6 +1774,7 @@ How to route:
 - Decide between EXPLORE and IMPLEMENT. "Try", "what if", "show me options", "mock up", "let's see a few directions" = explore: the agent makes variants on the shared canvas, named "<Workstream> / <Letter>: <short description>". "Let's do it", "build it", "ship B", "implement that", "do it for real", "in the app" = implement: the agent changes code in its repository, runs its dev server, and checks the build against the chosen mockup.
 - NOTE is a third kind of work: "write that down", "log these pain points", "keep a record of", "add that to the doc/notes". Send mode 'note' (not implement) with the content to record and where it goes if the room said; the agent writes it and does not build, run a dev server or draw on the canvas.
 - Keep similar work with the agent that already has its context. Check "Agent work history" and "Best matches": a follow-up, tweak, or new variant of something an agent already worked on goes to that agent, even if another agent is idle. Never split one request between agents in the same repository; JamSesh keeps only the one with the most related history. Fan a request out only when it spans different repositories or platforms. Give genuinely new work to the agent whose repository it belongs in, preferring one with fewer unfinished directives.
+- A 'coordinate' directive about something an agent shipped is a check, not build work: the other platform's agent compares (does this exist on our side, and does it match?), agrees with the shipper through jam_message, and builds only if both confirm a gap. Shipped news that names nothing a person sees gets no directive.
 - Agents work as a team. When two agents touch related work (the same feature on desktop and mobile, a component and the screen that uses it, a design system and the apps), use pair_agents so they compare and align instead of diverging. When variants from several agents land on the same theme, pair them to review each other's work before the room decides. Use ask_agent when you need a fact only an agent knows (what's in its repo) to route well.
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.
 - When people disagree, weigh by role weight (higher wins) and say whose call it was in the rationale. Don't silently drop the other view: mention it.

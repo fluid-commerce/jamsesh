@@ -16,10 +16,37 @@ import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
+type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
+
+/**
+ * A device is now registered to `owner`: sockets another window opened for it earlier (before it was
+ * registered) stop speaking for it. They keep the live session, as a socket for no device.
+ */
+function dropForeignSockets(deviceId: string, owner: string | undefined) {
+  const set = sockets.get(deviceId);
+  if (!set || !owner) return;
+  for (const ws of [...set]) {
+    if (ws.data.caller === owner) continue;
+    set.delete(ws);
+    ws.data.deviceId = null;
+  }
+  if (!set.size) sockets.delete(deviceId);
+}
+
+/** The device a socket still speaks for: checked again on each use, so a later registration by another window wins. */
+function speaker(hub: Hub, ws: ServerWebSocket<WsData>): string | null {
+  const id = ws.data.deviceId;
+  if (!id) return null;
+  const owner = hub.session.store.get("devices", id)?.pairedId;
+  if (owner && owner !== ws.data.caller && (owner === "host" || hub.auth.live(owner))) {
+    dropForeignSockets(id, owner);
+    return null;
+  }
+  return id;
+}
 
 // Nothing to return means the thing was deleted (a queued edit to something gone): 410, not a crash.
 export const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
@@ -57,6 +84,22 @@ function knownHost(req: Request, hub: Hub) {
 }
 
 /** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
+/**
+ * The device a live-session socket speaks for (RTC signaling, mic level, and the share cleanup when
+ * its last socket closes): the one it names only when that device belongs to this window (its pairing,
+ * or "host" for the host's own windows). A device not registered yet, or whose window's pairing is
+ * gone, is claimed for this window. Any other id gets a socket that speaks for no device.
+ */
+function socketDevice(hub: Hub, wanted: string | null, caller: string | null): string | null {
+  if (!wanted || !caller || !/^[\w-]{1,64}$/.test(wanted)) return null;
+  const d = hub.session.store.get("devices", wanted);
+  if (!d) return wanted;
+  const owner = d.pairedId && (d.pairedId === "host" || hub.auth.live(d.pairedId)) ? d.pairedId : null;
+  if (owner && owner !== caller) return null;
+  if (!owner) hub.session.touchDevice(wanted, { pairedId: caller });
+  return wanted;
+}
+
 export function sameOrigin(req: Request) {
   const origin = req.headers.get("origin");
   if (!origin) return true; // not a browser
@@ -217,7 +260,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
+          const caller = hostWindow ? "host" : device?.kind === "browser" ? device.id : null;
+          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -291,11 +335,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         try {
           const m = JSON.parse(String(raw));
-          if (m.type === "level" && ws.data.deviceId) {
-            bus.send({ type: "level", deviceId: ws.data.deviceId, level: m.level });
+          const me = m.type === "level" || m.type === "rtc" ? speaker(hub, ws) : null;
+          if (m.type === "level" && me) {
+            bus.send({ type: "level", deviceId: me, level: m.level });
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
-          else if (m.type === "rtc" && ws.data.deviceId && typeof m.to === "string") {
-            const msg = JSON.stringify({ type: "rtc", from: ws.data.deviceId, to: m.to, data: m.data });
+          else if (m.type === "rtc" && me && typeof m.to === "string") {
+            const msg = JSON.stringify({ type: "rtc", from: me, to: m.to, data: m.data });
             for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
           }
         } catch {}
@@ -307,12 +352,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
         (ws as any).off?.();
-        if (ws.data.deviceId) {
+        if (speaker(hub, ws) && ws.data.deviceId) {
           sockets.get(ws.data.deviceId)?.delete(ws);
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
             s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
-            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id);
+            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id, "ended", { lost: true });
           }
         }
       },
@@ -463,7 +508,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
     const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
-    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location, pairedId: owner }));
+    const registered = s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location, pairedId: owner });
+    // A socket another window opened for this id before it was registered stops speaking for it.
+    dropForeignSockets(registered.id, registered.pairedId);
+    return json(registered);
   }
 
   if (path === "/audio" && req.method === "POST") {
@@ -787,8 +835,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/shares" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
     if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
+    // A share someone ended stays ended: its window re-registering it (after missing the end) is told so and stops.
+    const was = typeof body.shareId === "string" ? s.store.get("shares", body.shareId) : undefined;
+    if (was && was.deviceId === String(body.deviceId) && (was.status === "ended" || was.status === "declined") && !was.lost) return bad("That share was ended.", 409);
     const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
-    hub.brain.placeShare(share);
+    s.placeShare(share);
     return json(share);
   }
   if (path === "/shares/request" && req.method === "POST") {
@@ -805,7 +856,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
     const asked = decline && !!paired?.personId && sh.personId === paired.personId;
     if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
-    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended");
+    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended", { note: !own && sh.status === "live" ? `The host stopped your ${sh.kind} share.` : "" });
     return json({ ok: true });
   }
 
@@ -946,7 +997,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     s.configureScreens(Array.isArray(body?.screens) ? body.screens : []);
     return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
   }
-  // A user-less big-screen window closed: it stops being a place to put things (main always stays).
+  // A big-screen window closed: it stops being a place to put things until a window for it reports again.
   if (path === "/display" && req.method === "DELETE") {
     const screen = String(body?.screen ?? "");
     if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);

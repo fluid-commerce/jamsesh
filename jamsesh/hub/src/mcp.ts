@@ -104,6 +104,7 @@ const JAM_TOOLS = [
         workstream: { type: "string" },
         directiveId: { type: "string", description: "The directive this update answers, if any" },
         platformSpecific: { type: "boolean", description: "With shipped: the change is deliberately for your platform only, so other platforms aren't asked to match it" },
+        seen: { type: "string", description: "With shipped, for a user-visible change: what a person sees, in a sentence (the screen, control, flow or behavior). Agents on other platforms get a parity check about it. Leave it out when nobody sees the change." },
       },
       required: ["kind", "text"],
     },
@@ -473,7 +474,7 @@ export class McpEndpoint {
       }
       case "jam_update": {
         const agent = this.requireAgent(ctx);
-        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}) } });
+        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}), ...(args.kind === "shipped" && typeof args.seen === "string" && args.seen.trim() ? { seen: args.seen.trim().slice(0, 300) } : {}) } });
         if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
         return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}${s.shareNudge(agent.id, String(args.text ?? ""))}`);
@@ -850,7 +851,7 @@ function modeHint(mode: Directive["mode"]) {
     case "implement":
       return "Implement in your repository. Run the dev server (jam_devserver), screenshot the build at the mockup's size, compare with canvas_render of the mockup, fix differences, then post the screenshot and jam_update shipped.";
     case "coordinate":
-      return "Align with the named agents through jam_message. Agree on the behavior, implement your side, post renders, and compare side by side with jam_show parity.";
+      return "Compare with the named agents through jam_message: what each of you has, and what should match. Change code only for a gap you both confirm, then post renders and compare side by side with jam_show parity.";
     case "note":
       return "Write it down where the room said (or a notes file in your repo if it didn't). No code changes beyond that, no canvas, no dev server.";
     case "answer":

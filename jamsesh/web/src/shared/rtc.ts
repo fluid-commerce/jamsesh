@@ -406,9 +406,10 @@ export function watch(share: Pick<Share, "id" | "deviceId">, cb: (state: WatchSt
 /**
  * A dropped connection ends this device's shares on the hub while the capture keeps running here.
  * Once the hub is back, register what we are still publishing again (under the id the hub gives it).
+ * A share someone ended (and whose end this window missed) is refused: its capture stops for good.
  */
 let registering = false;
-async function reregister() {
+export async function reregister() {
   const snap = hub.get();
   if (registering || !snap.connected || !snap.state) return;
   const live = new Set(snap.state.shares.filter((s) => s.status === "live").map((s) => s.id));
@@ -419,7 +420,9 @@ async function reregister() {
       try {
         const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind: pub.kind, shareId: pub.shareId });
         if (!pub.stopped) renamePublication(pub.shareId, share.id);
-      } catch {}
+      } catch (e) {
+        if ((e as { status?: number }).status === 409) await stopPublishing(pub.shareId, { notifyHub: false });
+      }
     }
   } finally {
     registering = false;

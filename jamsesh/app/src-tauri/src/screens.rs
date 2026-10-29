@@ -595,11 +595,15 @@ pub fn moved(app: &AppHandle) {
     }
 }
 
-/// An extra screen's window closed: tell the hub, so the brain stops sending it things.
-/// (Not when a window with the same label is open again by then.)
+/// A big-screen window closed (the main one or an extra one): tell the hub, so the brain stops sending
+/// it things and a share only it showed stops. (Not when a window with the same label is open again by then.)
 pub fn closed(app: &AppHandle, label: &str) {
-    let Some(n) = label.strip_prefix("bigscreen-") else { return };
-    let (app, label, screen) = (app.clone(), label.to_string(), format!("screen-{n}"));
+    let screen = match label.strip_prefix("bigscreen-") {
+        Some(n) => format!("screen-{n}"),
+        None if label == "bigscreen" => "main".to_string(),
+        None => return,
+    };
+    let (app, label) = (app.clone(), label.to_string());
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         if app.get_webview_window(&label).is_some() {

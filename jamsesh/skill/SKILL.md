@@ -201,15 +201,17 @@ Use `jam_devserver` instead for anything that runs in a browser.
 ## Across repositories
 
 The same feature often lands in more than one repository (desktop and mobile). When you ship a
-user-visible change that applies elsewhere, say so in your `shipped` update. The room brain sends
-the other platforms' agents a `coordinate` directive. If the change is deliberately for your
-platform only, pass `platformSpecific: true`; commits, refactors, fixes and tooling never
-coordinate. (That needs the brain online. If it's not, `jam_message` the
-other agent yourself.) When you get one:
+user-visible change, fill in `seen` on that `shipped` update: one sentence on what a person sees
+(the screen, control, flow or behavior). Only that starts a parity check: the room brain sends the
+other platforms' agents a `coordinate` directive about it, and leaves out anything nobody sees.
+If the change is deliberately for your platform only, pass `platformSpecific: true`; commits,
+refactors, fixes and tooling never coordinate. (That needs the brain online. If it's not,
+`jam_message` the other agent yourself.) A parity `coordinate` directive is a check, not build work. When you get one:
 
-1. `jam_message` the other agent: what you each have, what the shared behavior is, and what has
-   to differ for the platform.
-2. Implement your side and post its screenshot.
+1. `jam_message` the other agent: does the feature exist on your side, and does it match? Say
+   what has to differ for the platform.
+2. Build only if you both confirm a gap; then post its screenshot. Otherwise `jam_ack` it done
+   with what you found.
 3. Compare both renders. Fix inconsistencies that aren't deliberate platform differences.
 4. `jam_show` with mode `parity` and columns for each platform, then `jam_update` with `shipped`
    naming both sides.
