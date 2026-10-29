@@ -109,6 +109,19 @@ describe("silent mode reaches the page", () => {
     expect(sent.filter((m) => m.type === "speak")).toEqual([{ type: "speak", audio: null, mime: "", text: "Nothing should be said." }]);
   });
 
+  test("a silent reply keeps all its text and doesn't start the gap before the next spoken reply", async () => {
+    process.env.JAMSESH_SILENT = "1";
+    resetSpeechState();
+    hub.session.updateSettings({ voiceReplies: true });
+    sent.length = 0;
+    const long = "One is done. Two is done. Three is done.";
+    expect(await speak(hub.session, long, { source: "voice", kind: "answer" })).toBe("shown");
+    expect(sent.find((m) => m.type === "speak")).toMatchObject({ text: long });
+    // Not throttled as if something had been said a moment ago.
+    expect(await speak(hub.session, "Next.", { source: "voice", kind: "answer" })).toBe("shown");
+    expect(sent.filter((m) => m.type === "toast")).toEqual([]);
+  });
+
   test("without the flag chime still goes out and the state says not silent", () => {
     delete process.env.JAMSESH_SILENT;
     sent.length = 0;

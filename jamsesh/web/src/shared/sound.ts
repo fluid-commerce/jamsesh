@@ -30,6 +30,9 @@ export function clip(mime: string, audio: string, make: (src: string) => HTMLAud
   // A finished, paused or failed clip is no longer playing: dropped, so a long session doesn't keep every clip and its audio.
   const done = () => clips.delete(a);
   for (const ev of ["ended", "pause", "error"]) a.addEventListener?.(ev, done);
+  // A browser can refuse to play (no user gesture yet) before any of those events: that clip is done too.
+  const play = a.play?.bind(a);
+  if (play) a.play = () => play().catch((e: unknown) => (done(), Promise.reject(e)));
   return a;
 }
 

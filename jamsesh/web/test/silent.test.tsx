@@ -67,6 +67,16 @@ test("a clip that has ended, been paused or failed is forgotten, so a long sessi
   }
 });
 
+test("a clip the browser refuses to play is forgotten too", async () => {
+  let paused = 0;
+  const a = { pause: () => paused++, play: () => Promise.reject(new Error("NotAllowedError")), addEventListener() {} } as unknown as HTMLAudioElement;
+  setSilent(false);
+  const c = clip("audio/mpeg", "Y", () => a)!;
+  await c.play().catch(() => {});
+  stopAllSound();
+  expect(paused).toBe(0);
+});
+
 test("a chime makes no audio context at all in a silent room, and does in a normal one", () => {
   let made = 0;
   (globalThis as any).AudioContext = class {

@@ -112,20 +112,20 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   }
   const decision = speechDecision({ voiceReplies: s.voiceReplies, source, kind, quietRoom: quietRoom(s.brainNotes), sinceLastMs: Date.now() - lastSpokeAt });
   const spoken = decision === "speak";
-  const words = spoken ? trimForSpeech(text) : text;
-  // A silent hub sends the reply as text only: record that it was shown, not that it was said.
+  // A silent hub sends the reply as text only, whole (nothing is said, so there is nothing to keep short): record that it was shown, not said.
   const muted = spoken && silent();
+  const words = spoken && !muted ? trimForSpeech(text) : text;
   session.store.addEvent({ kind: "brain", authorType: "brain", authorName: s.brainName, text: words, relevance: "work", data: { spoken: spoken && !muted, shownNotSpoken: muted, source, speechKind: kind } });
   if (!spoken) {
     bus.send({ type: "toast", tone: kind === "problem" ? "warn" : "info", text: s.brainName, detail: text });
     return "shown";
   }
-  lastSpokeAt = Date.now();
-  // Silent: the text still shows, but no speech is made or sent.
+  // Silent: the text still shows, but no speech is made or sent, and it doesn't count as the last thing said.
   if (silent()) {
     bus.send({ type: "speak", audio: null, mime: "", text: words });
     return "shown";
   }
+  lastSpokeAt = Date.now();
   let reason = "";
   try {
     const { audio, mime } = await synthesize(session, words);
