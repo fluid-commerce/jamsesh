@@ -274,67 +274,17 @@ Developers can run the host from a checkout without the app:
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.
 
-**Run a test build beside the real app.** A build for trying changes shares nothing with the real
-app. Setting `JAMSESH_APP_DATA` is what turns this on: from then on the app and the hub it starts
-treat every resource below as the test build's own. The whole environment is built from that one
-folder; the app and the hub refuse to start if it (or its `home`) resolves, by real path (the real home is the OS account's, never `HOME`; a `..` in a folder that
-doesn't exist is refused), into `~/.jamsesh` or the real app's data folder, and refuse the real app's ports (4790, 4747, 4848,
-4949, 4443, 5100 to 5104, 7979, 8178, 47900) and the real Keychain service and Bonjour type, even
-when given explicitly. The app reads its
-variables once at launch. A value that is set but empty or invalid stops the launch with a message
-(it never falls back to the real app's value), and so does a `JAMSESH_APP_DATA` without its own
-`JAMSESH_RELAY_PORT` and `JAMSESH_HUB_PORTS`. With `JAMSESH_APP_DATA` unset nothing changes.
-
-| Resource | Real app | Test build (what isolates it) |
-| --- | --- | --- |
-| Agent relay port | 4790 | `JAMSESH_RELAY_PORT` (required) |
-| Hosted session's port | 4747, 4848 or 4949 | `JAMSESH_HUB_PORTS` (required) |
-| Remote access (HTTPS on 4443, the router's port forward, DuckDNS) | set up in Settings | never read: a saved `net.json` is ignored, nothing starts, and every `/api/net` change answers 409 |
-| FigCraft canvas server | 47900 | an OS-assigned port (port 0); the hub skips the real ports and never adopts a server already listening |
-| Live builds (dev server proxies) | from 5100 | an OS-assigned port to count up from, skipping the real ports |
-| Speech helper (whisper-server) | 8178 | an OS-assigned port, a helper the hub starts itself; it never probes or adopts a server, requires the process it started (or its child) to be the listener, and never reads `~/.cache/whisper-cpp` |
-| Parakeet speech engine | `~/.jamsesh/models` | starts its own helper on a free port; models from the test `home/models` or the bundle |
-| Keychain item | service `JamSesh` | `JAMSESH_KEYCHAIN_SERVICE`, else `JamSesh Test <tag from the data folder>` |
-| Bonjour type | `_jamsesh._tcp` | `JAMSESH_BONJOUR_SERVICE`, else `_jamsesh-<tag>._tcp` |
-| App data (`app.json`, `logs/`, screen layouts) | the system's app data folder | `JAMSESH_APP_DATA` |
-| Hosted session's data, team, projects, models, `.env`, big-screen Chrome profile | `~/.jamsesh` | `<JAMSESH_APP_DATA>/home` only: inherited `JAMSESH_HOME`, `JAMSESH_DATA`, `JAMSESH_TEAM` and the other location variables are ignored and removed from the hub's environment |
-| Web view store (cookies, local storage) of every window: start, setup, screens, identify, client, big screens | tied to the bundle id | its own store per data folder on macOS 14 and later (all window builders go through one function); on macOS 13 only a different bundle id separates them, so use the test config |
-| Agent setup ("Connect my agents", the offer after pairing) | writes `~/.jamsesh`, `~/.claude`, `~/.claude.json`, `~/.codex` | off: the menu item is greyed, the offer is never made and the action refuses |
-| macOS permissions (microphone, screen) | by bundle id | the test config's own bundle id `com.fluidcommerce.jamsesh.test` |
-| "Bring JamSesh forward" | the real bundle id | `JAMSESH_BUNDLE_ID`, passed by the app |
-| Temporary files | mkdtemp, unique per run | unchanged (never shared) |
-
-The hub is told it is isolated (`JAMSESH_ISOLATED=1`, set by the app whenever `JAMSESH_APP_DATA` is):
-it then has no default ports (a missing or real one stops it), runs no speech helper unless given its
-own port, and reads no other app's model cache. Two things are read, never written, and so stay
-shared: `bundle-hub.sh` copies models from `~/.jamsesh`, and the agent CLIs' locations are looked up
-to say whether to offer setup (no longer offered). Anything a person types into the test app (a
-gateway key) stays in the test home. Silent mode (`JAMSESH_SILENT=1`) is separate and covers sound.
-
-For a fully separate app (own bundle id, so also own macOS permissions and web view folder), build
-with the test config:
-
-```bash
-cd jamsesh/app && ./bundle-hub.sh
-cd src-tauri && cargo tauri build --bundles app --config tauri.test.conf.json   # "JamSesh Test", com.fluidcommerce.jamsesh.test
-TEST=/tmp/jamsesh-test
-open -n -a "$PWD/target/release/bundle/macos/JamSesh Test.app" \
-  --env JAMSESH_APP_DATA=$TEST --env JAMSESH_RELAY_PORT=5890 \
-  --env JAMSESH_HUB_PORTS=5747,5848,5949
-```
-
-(`target/` is under `jamsesh/app/src-tauri` unless `CARGO_TARGET_DIR` is set. Agents on the same
-Mac that should join the test room need the test relay port; `jamsesh join` talks to the real one.
-A test build's agents are connected by hand with the test relay, never with the app's setup.)
-
 **Silent mode.** With `JAMSESH_SILENT=1` the hub sends no audio (`speak` carries text only), no
-chimes, no voice samples and never falls back to the Mac's `say`; a reply is recorded and labelled "Shown, not spoken"; its state says `silent`, and the
-page then plays nothing of its own: no clips (the audio element is never made), no chime, and
-nothing in a frame, and a clip already playing stops the moment the page learns the room is silent (and the chime comes back when sound does). A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame
-cannot be muted from outside, so a quiet card stands in for it. A scripted HTML tile or custom
-stage is drawn without scripts, media or plugins (an empty sandbox, links that open nowhere, put back if the frame loads anything else, plus a content policy of
-`media-src 'none'; script-src 'none'`). A shared screen or camera is captured without audio, its
-`<video>` is muted, and any audio track that arrives is stopped.
+chimes, no voice samples and never falls back to the Mac's `say`; a reply is recorded and labelled
+"Shown, not spoken" (`speak` returns `shown`); its state says `silent`. The page then plays nothing of
+its own: no clips (the audio element is never made), no chime, and nothing in a frame. A clip already
+playing stops the moment the page learns the room is silent, and the chime comes back when sound does.
+A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame cannot be
+muted from outside, so a quiet card stands in for it. A scripted HTML tile or custom stage is drawn
+inert (no clicks or keys reach it, so no link can navigate it), with an empty sandbox (no scripts,
+popups or navigation) and a content policy of `media-src 'none'; script-src 'none'`; if the frame loads
+anything else it is put back. A shared screen or camera is captured without audio, its `<video>` is
+muted, and any audio track that arrives is stopped.
 
 ### 3.6 Projects
 

@@ -10,7 +10,6 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { type HelperRegistry, stopHelper, withStdinWatch } from "../children";
 import { config } from "../config";
-import { freePort, ownsListener } from "../isolate";
 import { downloadVerified, fileMatches, type ModelState, type ModelStatus } from "./models";
 import { encodeWav } from "./wav";
 
@@ -51,9 +50,11 @@ export function findWhisperServer(): string | null {
 export function findWhisperModel(skip: ReadonlySet<string> = new Set()): string | null {
   const cache = join(process.env.HOME || homedir(), ".cache", "whisper-cpp");
   const chosen = process.env.JAMSESH_WHISPER_MODEL;
-  // An isolated hub reads only its own models folder (and a file it was told to use), never the user's cache.
-  const shared = config.isolated ? [] : [join(cache, WHISPER_MODEL.name), join(cache, "ggml-large-v3-turbo.bin"), join(cache, "ggml-medium.en.bin"), join(cache, "ggml-base.en.bin")];
-  return first([chosen, join(config.home, "models", WHISPER_MODEL.name), ...shared].filter((p) => !!p && !skip.has(p) && plausible(p)));
+  return first(
+    [chosen, join(config.home, "models", WHISPER_MODEL.name), join(cache, WHISPER_MODEL.name), join(cache, "ggml-large-v3-turbo.bin"), join(cache, "ggml-medium.en.bin"), join(cache, "ggml-base.en.bin")].filter(
+      (p) => !!p && !skip.has(p) && plausible(p),
+    ),
+  );
 }
 
 /** Checksums already checked this run, by path, size and modification time (574 MB is a second or two to hash). */
@@ -71,15 +72,7 @@ async function verified(path: string): Promise<boolean> {
 }
 
 /** The port the host's whisper-server listens on. */
-/**
- * The port whisper-server uses: JAMSESH_WHISPER_PORT, else 8178. An isolated hub (a test build beside the real
- * app, `config.isolated`) never uses either: the real app's helper answers on 8178, so it takes a port the OS
- * hands out and runs a helper of its own on it.
- */
-export function whisperPort(env: Record<string, string | undefined> = process.env, isolated = config.isolated): number {
-  if (isolated) return freePort();
-  return Number(env.JAMSESH_WHISPER_PORT) || 8178;
-}
+export const whisperPort = () => Number(process.env.JAMSESH_WHISPER_PORT) || 8178;
 
 /** Something answers HTTP at `url` (it may be anything: see `isWhisperServer`). */
 export async function ping(url: string) {
@@ -154,12 +147,10 @@ export class LocalWhisper {
    * else), downloading the model first when there's none and `download` allows it. Resolves with its URL,
    * or null with the reason in status().
    */
-  async start(wanted: number, download: boolean): Promise<string | null> {
+  async start(port: number, download: boolean): Promise<string | null> {
     this.stopped = false;
-    // An isolated hub always runs its own helper on a port the OS just gave it, and never probes or adopts a server.
-    const port = config.isolated ? freePort() : wanted;
     const url = `http://127.0.0.1:${port}`;
-    if (!config.isolated && (await ping(url))) {
+    if (await ping(url)) {
       if (await isWhisperServer(url)) return this.set("ready", "Running on this host."), url;
       return this.set("failed", `Something other than whisper-server is using port ${port}. Free it or set JAMSESH_WHISPER_PORT.`), null;
     }
@@ -195,8 +186,7 @@ export class LocalWhisper {
     });
     const until = Date.now() + this.startupMs;
     while (died === null && !this.stopped && Date.now() < until && !(await ping(url))) await Bun.sleep(250);
-    // An isolated hub also requires that the process it started is the one listening: a server that got there first would hear this room.
-    if (died === null && !this.stopped && (await isWhisperServer(url)) && (!config.isolated || (await ownsListener(port, proc.pid)))) {
+    if (died === null && !this.stopped && (await isWhisperServer(url))) {
       this.set("ready", "Running on this host.");
       return url;
     }

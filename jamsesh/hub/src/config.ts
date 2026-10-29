@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
-import { freePort, isolateEnv, isolatedPort, REAL_PORTS } from "./isolate";
 import { createProject, defaultProject, findProject, migrateLegacy, openSession, takeNewSessionMark } from "./projects";
 
 const HOME = process.env.JAMSESH_HOME ?? join(homedir(), ".jamsesh");
@@ -58,20 +57,6 @@ export function lanAddress(): string {
   return "127.0.0.1";
 }
 
-/**
- * A test build beside the real app (the Mac app sets JAMSESH_ISOLATED=1 and JAMSESH_APP_DATA). Everything then comes
- * from JAMSESH_APP_DATA alone (see isolate.ts): inherited location variables are dropped, the home is
- * <app data>/home, and the ports the hub opens are its own (the one it is given, and OS-assigned ones).
- */
-const isolated = process.env.JAMSESH_ISOLATED === "1";
-if (isolated) isolateEnv(process.env);
-export { REAL_PORTS };
-export function ownPort(name: string, fallback: number, env: Record<string, string | undefined> = process.env, isolatedHub = isolated): number {
-  const v = env[name];
-  if (isolatedHub) return isolatedPort(name, v);
-  return v === undefined || v === "" ? fallback : Number(v);
-}
-
 const envFile = readEnvFile(join(HOME, ".env"));
 const dataDir = process.env.JAMSESH_DATA ?? join(HOME, "host");
 
@@ -89,10 +74,9 @@ export const config = {
   project: null as { slug: string; name: string; sessionId: string; resumed: boolean } | null,
   /** Only the Projects picker runs (JAMSESH_LOBBY=1): no session is opened. */
   lobby: process.env.JAMSESH_LOBBY === "1",
-  isolated,
-  port: ownPort("JAMSESH_PORT", 4747),
-  figcraftPort: isolated ? freePort() : ownPort("JAMSESH_FIGCRAFT_PORT", 47900),
-  devPortStart: isolated ? freePort() : ownPort("JAMSESH_DEV_PORT_START", 5100),
+  port: Number(process.env.JAMSESH_PORT ?? 4747),
+  figcraftPort: Number(process.env.JAMSESH_FIGCRAFT_PORT ?? 47900),
+  devPortStart: Number(process.env.JAMSESH_DEV_PORT_START ?? 5100),
   /** The address clients use to reach this host. */
   publicHost: process.env.JAMSESH_PUBLIC_HOST ?? lanAddress(),
   envGatewayKey: process.env.AI_GATEWAY_API_KEY ?? envFile.AI_GATEWAY_API_KEY,

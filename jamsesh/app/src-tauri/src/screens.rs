@@ -464,7 +464,7 @@ fn place(w: &tauri::WebviewWindow, r: &Rect) {
 fn open_screen(app: &AppHandle, origin: &str, s: &Screen) -> Result<(), String> {
     let parsed: url::Url = host::window_url(origin, &s.path()).parse().map_err(|e: url::ParseError| e.to_string())?;
     // Built on its display, at its size, so it never starts life on the wrong one.
-    let w = crate::own_store(WebviewWindowBuilder::new(app, s.label(), WebviewUrl::External(parsed)))
+    let w = WebviewWindowBuilder::new(app, s.label(), WebviewUrl::External(parsed))
         .devtools(crate::devtools())
         .title("JamSesh big screen")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -653,7 +653,7 @@ pub fn open_setup(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    let _ = crate::own_store(WebviewWindowBuilder::new(app, "screens", WebviewUrl::App("screens.html".into())))
+    let _ = WebviewWindowBuilder::new(app, "screens", WebviewUrl::App("screens.html".into()))
         .devtools(crate::devtools())
         .title("Screens")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -709,7 +709,7 @@ pub async fn screens_identify(app: AppHandle) -> Result<(), String> {
         }
         let url = WebviewUrl::App(format!("identify.html?n={}", i + 1).into());
         let r = &d.raw.rect;
-        let built = crate::own_store(WebviewWindowBuilder::new(&app, &label, url))
+        let built = WebviewWindowBuilder::new(&app, &label, url)
             .title("Identify")
             .decorations(false)
             .resizable(false)

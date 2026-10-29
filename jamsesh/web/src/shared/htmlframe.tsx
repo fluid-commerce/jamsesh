@@ -18,8 +18,8 @@ export function loadGuard(reset: () => void) {
 
 /**
  * A page of the room's own HTML in a frame. In a silent room it has no scripts or media (see htmlFrame), its links
- * and forms go nowhere (`<base target=_blank>` with no popups allowed, forms blocked by the policy), and if it
- * still navigates away it is put back at once, so it can never show a page that makes sound.
+ * and forms can't be used at all (the frame is inert: no clicks or keys reach it, so nothing can navigate it, even with
+ * target=_self), and if it somehow loads anything else it is put back at once.
  */
 export function HtmlFrame({ doc, title, style, frameRef }: { doc: string; title: string; style: CSSProperties; frameRef?: Ref<HTMLIFrameElement> }) {
   const silent = useSilent();
@@ -27,5 +27,5 @@ export function HtmlFrame({ doc, title, style, frameRef }: { doc: string; title:
   const guard = useRef<(() => void) | null>(null);
   const frame = htmlFrame(silent, doc);
   if (silent) guard.current ??= loadGuard(() => setRound((n) => n + 1));
-  return <iframe key={round} ref={frameRef} srcDoc={frame.srcDoc} sandbox={frame.sandbox} allow="" title={title} style={style} onLoad={silent ? () => guard.current?.() : undefined} />;
+  return <iframe key={round} ref={frameRef} srcDoc={frame.srcDoc} sandbox={frame.sandbox} allow="" inert={silent} title={title} style={style} onLoad={silent ? () => guard.current?.() : undefined} />;
 }

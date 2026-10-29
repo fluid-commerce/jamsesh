@@ -182,7 +182,7 @@ export class Transcriber {
    */
   async startLocal(port = whisperPort()) {
     this.whisper.onExit = () => this.engines.delete("local");
-    const now = this.whisper.canStartNow() || (!config.isolated && (await ping(`http://127.0.0.1:${port}`)));
+    const now = this.whisper.canStartNow() || (await ping(`http://127.0.0.1:${port}`));
     const run = this.whisper.start(port, !config.offline).then((url) => {
       console.log(`whisper: ${url ? "ready" : this.whisper.status().detail}`);
       if (!url) return false;

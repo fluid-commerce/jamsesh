@@ -296,7 +296,7 @@ export class HostControl {
           return "Shell commands run only after a person in the room approves them.";
         case "focus_jamsesh": {
           // The Mac app brings its big screen forward when it's reopened; without the app, a browser.
-          const app = await run(["open", "-b", process.env.JAMSESH_BUNDLE_ID || "com.fluidcommerce.jamsesh"]);
+          const app = await run(["open", "-b", "com.fluidcommerce.jamsesh"]);
           if (app.code) await run(["open", `http://127.0.0.1:${new URL(this.session.hubUrl).port}/host`]);
           return "JamSesh is in front.";
         }

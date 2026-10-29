@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde::Serialize;
 
+const SERVICE: &str = "_jamsesh._tcp.local.";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Found {
@@ -214,8 +215,7 @@ pub fn start() -> Hosts {
     });
     std::thread::spawn(move || {
         let Ok(daemon) = ServiceDaemon::new() else { return failed.fail("The network scanner wouldn't start.") };
-        let service = crate::isolation::get().bonjour_type();
-        let Ok(events) = daemon.browse(&service) else { return failed.fail("The network scanner wouldn't start.") };
+        let Ok(events) = daemon.browse(SERVICE) else { return failed.fail("The network scanner wouldn't start.") };
         while let Ok(ev) = events.recv() {
             match ev {
                 ServiceEvent::ServiceResolved(info) => {
@@ -223,7 +223,7 @@ pub fn start() -> Hosts {
                     v4.sort();
                     let Some(addr) = v4.first() else { continue };
                     let full = info.get_fullname().to_string();
-                    let name = plain_name(full.strip_suffix(&format!(".{service}")).unwrap_or(&full));
+                    let name = plain_name(full.strip_suffix(&format!(".{SERVICE}")).unwrap_or(&full));
                     let session = info.get_property_val_str("session").map(str::to_string).filter(|s| !s.is_empty());
                     let url = format!("http://{addr}:{}", info.get_port());
                     found.advertise(full, Found { name, session, url });

@@ -54,6 +54,19 @@ test("a clip already playing stops the moment the hub says the room is silent", 
   expect(paused.length).toBe(2);
 });
 
+test("a clip that has ended, been paused or failed is forgotten, so a long session doesn't keep every one", () => {
+  for (const ev of ["ended", "pause", "error"]) {
+    const handlers = new Map<string, () => void>();
+    let paused = 0;
+    const a = { pause: () => paused++, addEventListener: (e: string, f: () => void) => handlers.set(e, f) } as unknown as HTMLAudioElement;
+    setSilent(false);
+    clip("audio/mpeg", "X", () => a);
+    handlers.get(ev)?.();
+    stopAllSound();
+    expect(paused, ev).toBe(0);
+  }
+});
+
 test("a chime makes no audio context at all in a silent room, and does in a normal one", () => {
   let made = 0;
   (globalThis as any).AudioContext = class {
@@ -143,13 +156,19 @@ test("a link click inside a silent tile that loads another page puts the quiet d
   expect(resets).toBe(2);
 });
 
-test("a silent tile's links open nowhere and its forms go nowhere", () => {
-  const f = htmlFrame(true, "<!doctype html><a href='https://example.com/song'>x</a>");
-  expect(f.srcDoc).toContain('<base target="_blank">');
-  expect(f.sandbox).toBe("");
-  expect(f.sandbox).not.toContain("allow-popups");
-  expect(f.sandbox).not.toContain("allow-top-navigation");
+test("a silent tile is inert (no click or key reaches its links, even target=_self), sandboxed with nothing allowed; a normal one is interactive", () => {
+  const tile = `<a href="https://example.com/song" target="_self">play</a>`;
+  setSilent(true);
+  const quiet = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
+  expect(quiet).toMatch(/\sinert(=""|\s|>)/);
+  expect(quiet).toContain('sandbox=""');
+  expect(quiet).not.toContain("allow-popups");
+  expect(quiet).not.toContain("allow-top-navigation");
+  expect(quiet).not.toContain("allow-same-origin");
   expect(QUIET_CSP).toContain("form-action 'none'");
+  setSilent(false);
+  const loud = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
+  expect(loud).not.toContain("inert");
 });
 
 test("the chime's audio context is suspended when the room turns silent and resumed when sound is back", () => {

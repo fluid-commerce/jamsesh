@@ -8,7 +8,6 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
-import { refusesPort } from "./isolate";
 import { newId } from "./store";
 import type { Session } from "./session";
 import { allowDriveScript, driveScript, scriptHash, withDriveScript } from "./devdrive";
@@ -74,7 +73,7 @@ export class DevProxy {
     const target = normalizeTarget(opts.target);
     // Pointing a dev port at the hub would give every paired device the host's own trust.
     const [targetHost, targetPort] = [target.replace(/:\d+$/, ""), Number(target.replace(/^.*:/, ""))];
-    if ((this.reserved.has(targetPort) || refusesPort(targetPort, config.isolated)) && (isLoopback(targetHost) || hostAddresses().some((a) => a.host === targetHost)))
+    if (this.reserved.has(targetPort) && (isLoopback(targetHost) || hostAddresses().some((a) => a.host === targetHost)))
       throw new Error(`Port ${targetPort} on this machine belongs to JamSesh itself; give your dev server's own port.`);
     const existing = this.session.devservers().find((d) => d.agentId === opts.agentId && (d.name === opts.name || d.target === target));
     if (!existing && this.session.devservers().filter((d) => d.agentId === opts.agentId).length >= MAX_PER_AGENT)
@@ -83,7 +82,7 @@ export class DevProxy {
     // A registration that is being replaced keeps its listener until the new one is bound.
     let hostPort = existing?.hostPort ?? config.devPortStart;
     const own = () => !!existing && this.listeners.get(existing.id)?.server.port === hostPort;
-    while ((used.has(hostPort) && hostPort !== existing?.hostPort) || refusesPort(hostPort, config.isolated) || (!own() && !portFree(hostPort))) hostPort++;
+    while ((used.has(hostPort) && hostPort !== existing?.hostPort) || (!own() && !portFree(hostPort))) hostPort++;
     const d: DevServer = {
       id: existing?.id ?? newId("dev"),
       agentId: opts.agentId,
@@ -159,8 +158,6 @@ export class DevProxy {
   }
 
   private async listen(d: DevServer) {
-    // Every bind goes through here (a new registration, a saved one restored at startup): the real app's ports are never taken.
-    if (refusesPort(d.hostPort, config.isolated)) throw new Error(`Port ${d.hostPort} belongs to the real JamSesh.`);
     const proxy = this;
     const held = this.listeners.get(d.id);
     // The same port again: the listener stays up and only its target changes, so nothing can fail or drop.

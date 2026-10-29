@@ -27,6 +27,9 @@ export function clip(mime: string, audio: string, make: (src: string) => HTMLAud
   if (!soundAllowed()) return null;
   const a = make(`data:${mime};base64,${audio}`);
   clips.add(a);
+  // A finished, paused or failed clip is no longer playing: dropped, so a long session doesn't keep every clip and its audio.
+  const done = () => clips.delete(a);
+  for (const ev of ["ended", "pause", "error"]) a.addEventListener?.(ev, done);
   return a;
 }
 
