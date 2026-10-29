@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
 import { bus } from "./bus";
-import { voiceprintStatus, learningNote } from "./audio/voiceprint";
+import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
+import { learningNote } from "./audio/voiceprint";
 import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
@@ -27,7 +28,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -397,7 +398,7 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
 async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
-  const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  const body = req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE" ? await readBody(req) : null;
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
@@ -476,8 +477,32 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!p) return bad("no such person", 404);
     return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
   }
+  // A voice belongs to its person: only their own window or device reads, reads aloud, brings or forgets it.
+  const own = (id: string) => {
+    if (paired?.kind === "agent") return "That's for people; agents use their jam_ tools.";
+    if (isLocal(ip) && !hostWindow) return NOT_THE_HOST_WINDOW;
+    const me = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
+    return me && me === id ? null : "A voice is only for its own person to give.";
+  };
   m = path.match(/^\/people\/([\w-]+)\/voiceprint$/);
-  if (m && req.method === "DELETE") return (hub.audio.voiceprints.clear(m[1]), s.store.put("people", s.person(m[1])!), json({ ok: true }));
+  if (m) {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    if (!s.person(m[1])) return bad("no such person", 404);
+    if (req.method === "GET") return json(hub.voiceprintOf(m[1]));
+    if (req.method === "PUT") {
+      const r = hub.carryVoiceprint(m[1], body);
+      return r.ok ? json(r) : bad(r.reason);
+    }
+    if (req.method === "DELETE") return (hub.audio.voiceprints.clear(m[1]), s.store.put("people", s.person(m[1])!), json({ ok: true }));
+  }
+  if (path === "/voice/script" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people; agents use their jam_ tools.", 403) : json({ sentences: ENROL_SCRIPT, seconds: ENROL_SECONDS });
+  m = path.match(/^\/people\/([\w-]+)\/voice\/start$/);
+  if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    return (hub.audio.beginEnrolment(m[1]), json({ ok: true }));
+  }
 
   m = path.match(/^\/utterances\/([\w-]+)\/assign$/);
   if (m && req.method === "POST") {
@@ -487,6 +512,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const { utterance, learning } = hub.audio.assign(m[1], personId);
     const person = s.person(personId)!;
     s.store.put("people", person);
+    hub.confirmLearning(person.name, learning);
     return json({ ...utterance, learning: { ...learning, message: learningNote(person.name, learning) } });
   }
 
@@ -634,7 +660,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: s.voiceprints(), problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
@@ -691,6 +717,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // ---- voice enrollment: a person reads a sentence so JamSesh knows their voice ----
   m = path.match(/^\/people\/([\w-]+)\/voice$/);
   if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
     return json(hub.enrollVoice(m[1], bytes));
   }

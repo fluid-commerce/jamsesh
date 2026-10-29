@@ -3,8 +3,8 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
-import { embed, learningNote, voiceprintStatus } from "./audio/voiceprint";
-import { decodeWav, resample, speechLevelDb } from "./audio/wav";
+import { learningNote, parseCarried, voiceprintStatus, type Learning } from "./audio/voiceprint";
+import { decodeWav, resample } from "./audio/wav";
 import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
 import { config } from "./config";
@@ -136,7 +136,12 @@ export class Hub {
     mkdirSync(this.uploadsDir, { recursive: true });
 
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
-    this.session.voiceprints = () => ({ ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled });
+    this.session.voiceprints = () => {
+      const st = this.audio.stats;
+      const heard = this.session.people().filter((p) => p.hasVoiceprint).length;
+      // Voiceprints exist but, over a dozen lines, none was matched by voice: say so instead of failing quietly.
+      return { ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled, lines: st.lines, byVoice: st.voice, neverUsed: heard > 0 && st.lines >= 12 && st.voice === 0 };
+    };
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text) => this.brain.agentUpdated(agent, kind, text);
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
@@ -146,6 +151,7 @@ export class Hub {
       const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });
       if (!ev?.data.utteranceId) return "That line wasn't spoken, so there's no voice to learn.";
       const { learning } = this.audio.assign(ev.data.utteranceId, person.id);
+      this.confirmLearning(person.name, learning);
       return `Line ${eventId} is now ${person.name}'s. ${learningNote(person.name, learning)}`;
     };
   }
@@ -249,7 +255,7 @@ export class Hub {
         authorName: u.speakerName,
         text: u.text,
         ts: u.t0,
-        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, embedding: this.audio.embeddingFor(u.id) },
+        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, embedding: this.audio.embeddingFor(u.id), source: "overheard" },
       });
       s.store.put("utterances", { ...u, eventId: ev.id });
       this.brain.hear(ev);
@@ -275,7 +281,7 @@ export class Hub {
       authorName: p?.name ?? "Someone",
       text: text.trim(),
       relevance: direct ? "work" : null,
-      data: { typed: true, direct },
+      data: { typed: true, direct, source: "typed" },
     });
     if (direct) this.brain.direct(ev);
     else this.brain.hear(ev);
@@ -328,7 +334,7 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
     });
     // One spoken line: it can be relabelled from the prompt, like any line in the feed.
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
@@ -360,21 +366,30 @@ export class Hub {
     return ev;
   }
 
-  /** A deliberate voice sample: split into a few chunks so the voiceprint starts with variety. */
+  /** A deliberate voice sample: the join sentences, read aloud. */
   enrollVoice(personId: string, bytes: Uint8Array) {
-    const p = this.session.person(personId);
-    if (!p) throw new Error("No such person.");
-    const pcm = resample(decodeWav(bytes), 16000);
-    const { levelDb, noiseDb } = speechLevelDb(pcm);
-    if (levelDb - noiseDb < 8 || levelDb < -50) return { ok: false, reason: "That was too quiet. Hold the laptop closer and try again." };
-    const chunk = 16000 * 3;
-    let added = 0;
-    for (let i = 0; i + chunk / 2 <= pcm.samples.length; i += chunk) {
-      const e = embed({ sampleRate: 16000, samples: pcm.samples.subarray(i, Math.min(pcm.samples.length, i + chunk)) });
-      if (e) (this.audio.voiceprints.add(personId, e), added++);
-    }
+    if (!this.session.person(personId)) throw new Error("No such person.");
+    return this.audio.enrol(personId, resample(decodeWav(bytes), 16000));
+  }
+
+  /** What a person's own device keeps of their voice: embeddings only, never audio. */
+  voiceprintOf(personId: string) {
+    return this.audio.voiceprints.exportFor(personId);
+  }
+
+  /** A person's own device brings their voiceprint to this host. */
+  carryVoiceprint(personId: string, body: unknown) {
+    if (!this.session.person(personId)) throw new Error("No such person.");
+    const r = parseCarried(body);
+    if (!r.ok) return r;
+    this.audio.voiceprints.importCarried(personId, r.samples);
     this.session.store.put("people", this.session.person(personId)!);
-    return added ? { ok: true, samples: this.audio.voiceprints.count(personId) } : { ok: false, reason: "Couldn't hear enough speech. Try reading the whole sentence." };
+    return { ok: true as const, samples: r.samples.length };
+  }
+
+  /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */
+  confirmLearning(name: string, learning: Learning) {
+    void speak(this.session, learningNote(name, learning), { source: "voice", kind: "confirm" });
   }
 
   async savePhoto(personId: string, bytes: Uint8Array) {
@@ -481,7 +496,7 @@ export class Hub {
         authorName: owner?.name ?? agent.ownerName,
         text: prompt.slice(0, 4000),
         relevance: "work",
-        data: { agentId: agent.id, agentName: agent.name },
+        data: { agentId: agent.id, agentName: agent.name, source: "typed" },
       });
       this.brain.hear(ev);
     }

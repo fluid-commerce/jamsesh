@@ -1110,6 +1110,17 @@ Every client window and the big screen capture audio; it's consolidated on the h
   are dropped.
 - Two people talking at once: a clear copy (SNR 12 dB or more) shifted a second or more from the
   best copy becomes its own line.
+- **One line, once.** Copies whose clocks disagree by a second or more (a laptop with a drifting
+  clock, a microphone that cut the line in two) can't be grouped by time. A new line is therefore
+  also checked against the lines already shown in the same place: if it starts within 3 seconds of
+  one, has 75 percent of the same words and is at least four words long, it is that line heard
+  again. Its copies join the line already shown, which is relabelled from every copy.
+- **The join read stays out.** While someone reads the join sentences (from **Start reading** until
+  25 seconds after it ends, 90 seconds at most), a line whose words are mostly the script's is
+  dropped on every laptop, so a calibration read never appears in the transcript or reaches the brain.
+- **Where a line came from.** Every speech line records `data.source`: `typed` (typed in the room's
+  box or to an agent), `addressed` (said to JamSesh, or a recorded prompt) or `overheard`. The feed
+  shows it quietly after the line (`typed`, `to JamSesh`; `overheard` only when the line is hovered).
 
 ### 9.3 Transcription
 
@@ -1144,18 +1155,58 @@ Two signals identify the speaker [B34, B38]:
 
 Voiceprints build themselves [B38]: a clear line (SNR above 12 dB, not clipped) from the owner of
 the loudest device, with a confident match, adds a sample. A first sample is held until a second
-line from the same device agrees, so a visitor at a laptop can't become its owner's voice.
+line from the same device agrees, so a visitor at a laptop can't become its owner's voice. A voice
+match that is decisive (0.75 or more, no second voice above 0.2) at a laptop nobody owns teaches
+that channel too, so people who sit at a shared Mac stop being "Someone".
 Voiceprints persist across sessions [B39].
 
-**Teach JamSesh your voice.** In the profile, a person reads one sentence ("Hey <brain>, this is my
-voice…", up to 14 seconds). The host rejects it if it's too quiet or noisy, then adds it in
-3-second samples. New people are offered this on first join.
+**Samples have kinds, and kinds have weights.** A voiceprint is a weighted average: a line heard in
+passing counts 1 (the latest 40 are kept), a sample from the join read 3, a sample from a
+correction 10, and a sample brought from another host 3 (up to 24 of each of those are kept).
+The weights also set how far the voice outvotes the loudest device (`0.45 + 0.05 × weight`, up to
+0.75).
+
+**The join read.** When a person joins and has no voiceprint, a modal shows a few sentences (served
+by `GET /api/voice/script`, about 20 seconds) with **Start reading** and **Skip for now**. Starting
+tells the host (`POST /api/people/:id/voice/start`) so the room's other laptops' copies stay out of
+the transcript, then the recording goes to `POST /api/people/:id/voice` and is added in 3-second
+samples, replacing any earlier read. The host rejects it if it's too quiet. The profile has the same
+read ("Read again") and says what the voiceprint was learned from.
 
 **Relabeling** [B35, B38]:
 
 - Click a speaker's name in the transcript and pick the right person (or add someone new).
 - Or say it ("that was Felipe"); the brain calls `fix_speaker`.
-- Either way, the line becomes Felipe's (confidence 1), and its audio teaches Felipe's voiceprint.
+- Either way, the line becomes Felipe's (confidence 1). Its voice joins Felipe's voiceprint as a
+  correction (weight 10).
+- What the wrong label taught is taken back: the sample from that line leaves the wrong person, and
+  so do that person's automatic samples that sound more like the corrected voice than like what
+  they read or were corrected on.
+- Earlier lines nobody could place ("Someone", among the last 60) that sound like the corrected
+  voice (cosine 0.75 or more) become Felipe's too.
+- JamSesh confirms on screen (the popover) and out loud when the room allows it, through the same
+  speech path as its other replies: "Learning Felipe's voice." (with "Fixed 2 earlier lines too."
+  when it relabeled some). A line with no usable sample says why: "Renamed, but couldn't learn from
+  that line (it is under 0.8 seconds)".
+
+**Voiceprints travel with the person.** The device (browser or the Mac app's webview) keeps a copy
+of the person's voiceprint in its own storage: embeddings only (256 numbers per sample, up to 32,
+tagged with the model name), never audio. The copy exists only if the person ticked **Keep my voice
+on this device and bring it to rooms I join** (shown with the join read, on in the profile too;
+unticking deletes the copy). On joining, a host that has no samples for that person gets the copy
+(`PUT /api/people/:id/voiceprint`); a host that has learned more gives its newer copy back
+(`GET`). A carried voiceprint replaces the person's earlier carried samples; it never piles up. Only
+the person's own window or device may read, push, start a read for, record for, or delete their
+voiceprint: another person's device, an agent's credential (even one acting for that person), and a
+window with no person get 403. The host checks the model name, the 256-number size, that every number is
+finite, that no sample is all zeros, and at most 32 samples.
+
+**Why voice matching might be off.** `voiceprintStatus()` (in `/api/engines` and the state the
+screens read) says `ok`, `missing-model`, `missing-library` or `load-failed`, with a `reason` and a `fix`
+written as an action: for a missing model, where to download `wespeaker_en_voxceleb_resnet34.onnx`
+and the exact path to save it as (`<JamSesh home>/models/wespeaker_en.onnx`; the app bundles it).
+The speaker menu shows the fix. When voiceprints exist but, over twelve lines, none was named by
+voice, the menu says so.
 
 ### 9.5 Remote and hybrid rooms
 

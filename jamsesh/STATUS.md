@@ -56,6 +56,11 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 |---|---|---|
 | Multi-device grouping, lag, echo, degraded copies | Simulated | Real recorded voices, degraded and lagged in tests. |
 | Speaker ID when someone walks away from their laptop | Simulated | About 50 percent without a voice sample; better after "Teach JamSesh your voice". |
+| Join voice read; its calibration copies kept out of the transcript (5.3, 5.4) | Simulated | Four `say` voices on three fake laptops (Cam and Dee share the unowned one); the read heard by all three laptops leaves no line, ordinary talk beside it is kept. The modal is looked at in headless Chromium (desktop and phone width). Real voices and real mics not tried. |
+| Corrections that stick: a correction counts as ten samples, takes back what the wrong label taught, relabels earlier "Someone" lines, says "Learning Felipe's voice." (5.3) | Simulated | Tested on the voice sim and the popover; the spoken line goes through `speak()`, which tests keep silent. Not heard in a real room. |
+| Voiceprint travels: device copy, push on join, only your own (5.3) | Simulated | Moved between two test hubs and identified by voice only; other person, agent, nobody, malformed and repeated pushes tested over HTTP; device side tested through `api()` with a stubbed network. Mac app webview storage not exercised. |
+| Voice matching off: the reason and the fix (5.3) | Simulated | Missing model and a broken model file checked in a child process. The live host's actual cause is still unread. |
+| One line shown once across laptops with clocks 1.5 s apart, late and mis-heard copies; typed / said / overheard on every line (5.4) | Simulated | Same sim: 187 extra lines before, 2 after, across 96 lines. |
 | A real room with real microphones | Not tested | |
 
 ## Agent briefing and live builds

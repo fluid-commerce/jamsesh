@@ -12,7 +12,8 @@ import { newId } from "../store";
 import type { Session } from "../session";
 import type { Utterance } from "../types";
 import type { Transcriber } from "./transcribe";
-import { cosine, embed, MIN_VOICE_SECONDS, voiceprintStatus, Voiceprints, type Learning } from "./voiceprint";
+import { ENROL_GRACE_MS, ENROL_WINDOW_MS, scriptShare } from "./enrol";
+import { cosine, embed, MIN_VOICE_SECONDS, normalize, voiceprintStatus, Voiceprints, type Learning } from "./voiceprint";
 import { clippedShare, decodeWav, encodeWav, resample, speechLevelDb, type Pcm } from "./wav";
 
 export interface Segment {
@@ -82,8 +83,15 @@ const MAX_PRINT_SAMPLES = 40;
 const MAX_CLIPPED = 0.005;
 /** How far a copy's span may slide before it is another utterance. */
 const SPLIT_SPAN_MS = 1000;
+/** Copies of one line, as clocks and microphones see it, start within this of each other. */
+const TWIN_MS = 3000;
+/** An unnamed line is the corrected voice's when it sounds this much like it, among the last few dozen. */
+const RELABEL_SIM = 0.75;
+const RELABEL_LOOKBACK = 60;
 /** Softmax temperature over voiceprint similarities (cosine units). */
 const VOICE_TEMP = 0.05;
+/** A voice match this clear, with no close second, may teach the voiceprint at a shared laptop. */
+const DECISIVE_VOICE = 0.75;
 
 export class AudioPipeline {
   private open: Group[] = [];
@@ -92,6 +100,10 @@ export class AudioPipeline {
   /** Unconfirmed first voice samples per person (see autoEnroll). */
   private candidates = new Map<string, Float32Array[][]>();
   voiceprints: Voiceprints;
+  /** People reading the join sentence right now: what the room's laptops hear of it is not conversation. */
+  private enrolling = new Map<string, { since: number; until: number }>();
+  /** How lines have been labelled since the host started (a host that never uses the voice should say so). */
+  stats = { lines: 0, voice: 0, someone: 0 };
   /** Called with each new or updated room line. */
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
 
@@ -271,6 +283,9 @@ export class AudioPipeline {
     const guess = this.identify(g.segments, best);
     g.finalizedWith = best.id;
     if (!text) return;
+    // Someone reading the join sentence: every laptop hears it, and none of it belongs in the transcript.
+    if (this.isCalibration(text, g)) return;
+    if (await this.mergeTwin(g, text)) return;
     const person = this.session.person(guess.personId);
     const u: Utterance = {
       id: newId("utt"),
@@ -292,10 +307,58 @@ export class AudioPipeline {
     const echo = this.echoOf(u, best.snr);
     if (echo === "drop") return;
     g.utteranceId = u.id;
+    this.stats.lines++;
+    if (guess.method.startsWith("voice")) this.stats.voice++;
+    if (!guess.personId) this.stats.someone++;
     this.autoEnroll(guess, best, g.segments);
     this.session.store.put("utterances", u);
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
+  }
+
+  /** A person starts reading the join sentence. */
+  beginEnrolment(personId: string) {
+    const now = Date.now();
+    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS });
+  }
+
+  /** The read is over; copies still on their way from slow laptops are held out for a little longer. */
+  endEnrolment(personId: string) {
+    const w = this.enrolling.get(personId);
+    if (w) w.until = Date.now() + ENROL_GRACE_MS;
+  }
+
+  private isCalibration(text: string, g: Group) {
+    const now = Date.now();
+    for (const [id, w] of this.enrolling) {
+      if (now > w.until + 60_000) this.enrolling.delete(id);
+      // The line's own clock can be seconds off, so the window is judged by when it arrived.
+      else if (g.lastArrival >= w.since && g.lastArrival <= w.until && scriptShare(text) >= 0.6) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The same words heard again a moment apart in the same place are one line, whatever the copies'
+   * clocks said (a laptop a second off, a line one microphone split in two). The new copies join the
+   * line already shown, which is then labelled from every copy.
+   */
+  private async mergeTwin(g: Group, text: string): Promise<boolean> {
+    const twin = this.session.store
+      .all("utterances")
+      .filter((x) => x.location === g.location && x.id !== g.utteranceId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && wordCount(x.text) >= 4 && wordCount(text) >= 4 && textSimilarity(x.text, text) >= 0.75 && Math.abs(wordCount(x.text) - wordCount(text)) <= 3)
+      .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
+    if (!twin) return false;
+    const home = this.finalized.find((x) => x.utteranceId === twin.id);
+    if (!home) return true; // too old to relabel; still not a second line
+    this.finalized = this.finalized.filter((x) => x !== g);
+    home.segments.push(...g.segments);
+    home.t0 = Math.min(home.t0, g.t0);
+    home.t1 = Math.max(home.t1, g.t1);
+    home.lastArrival = Date.now();
+    if (home.busy) await home.busy;
+    await this.revisit(home, g.segments[0]);
+    return true;
   }
 
   /** "drop" when this line is an echo of a clearer copy heard in the other location. */
@@ -432,12 +495,17 @@ export class AudioPipeline {
     if (!guess.personId || !best.embedding) return;
     const pid = guess.personId;
     const enrolled = this.voiceprints.count(pid);
+    const autos = this.voiceprints.learnedFrom(pid).auto;
     const top = guess.scores[0];
     const owner = this.session.store.get("devices", best.deviceId)?.personId;
     const byLevel = [...segments].sort((a, b) => speechDb(b) - speechDb(a));
     const margin = byLevel.length > 1 ? speechDb(byLevel[0]) - speechDb(byLevel[1]) : 99;
     const atOwnDevice = owner === pid && byLevel[0].deviceId === best.deviceId;
-    if (!atOwnDevice || best.snr <= CLEAN_SNR || best.clipped > MAX_CLIPPED || enrolled >= MAX_PRINT_SAMPLES) return;
+    // Someone with a voiceprint, recognised beyond doubt at a shared laptop (nobody's) or their own, teaches it
+    // that channel too; at someone else's laptop it could be a visitor, so it waits for the owner's own lines.
+    const runnerVoice = guess.scores.filter((x) => x.personId !== pid).reduce((m, x) => Math.max(m, x.voice), 0);
+    const decisive = enrolled > 0 && !owner && top.personId === pid && top.voice >= DECISIVE_VOICE && runnerVoice <= 0.2 && margin >= 3;
+    if (!(atOwnDevice || decisive) || best.snr <= CLEAN_SNR || best.clipped > MAX_CLIPPED || autos >= MAX_PRINT_SAMPLES) return;
     const voices = [best.embedding];
     for (const s of segments) {
       if (s === best || s.snr < 10 || s.clipped > MAX_CLIPPED) continue;
@@ -448,7 +516,7 @@ export class AudioPipeline {
     if (enrolled > 0) {
       // Either the device is clearly the loudest, or it is a bit closer than the rest and
       // the voice says the same: two weak signals that agree are enough to learn from.
-      const sure = guess.confidence >= 0.72 && margin >= 6 && (top.voice < 0 || top.voice >= 0.5);
+      const sure = decisive || (guess.confidence >= 0.72 && margin >= 6 && (top.voice < 0 || top.voice >= 0.5));
       const agreed = guess.confidence >= 0.55 && margin >= 3 && top.voice >= 0.6;
       if (sure || agreed) for (const v of voices) this.voiceprints.add(pid, v);
       return;
@@ -464,43 +532,83 @@ export class AudioPipeline {
     }
   }
 
-  /** Someone says who said a line. The line's voice joins that person's voiceprint. */
+  /** Someone says who said a line. The line's voice joins that person's voiceprint, counted as a correction. */
   assign(utteranceId: string, personId: string): { utterance: Utterance; learning: Learning } {
     const u = this.session.store.get("utterances", utteranceId);
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
-    const g = this.finalized.find((x) => x.utteranceId === utteranceId);
-    // Moving a line off someone it was filed under (by voice or by an earlier click) also takes it out of their voiceprint.
     const prior = u.personId && u.personId !== personId ? u.personId : null;
-    // Teach from the clearest copy that did not clip.
-    const usable = g?.segments.filter((s) => s.clipped <= MAX_CLIPPED) ?? [];
-    const best = g ? (usable.length ? pickBest(usable) : null) : null;
-    // Whether the correction taught the voiceprint, and if not, why (the person is told).
-    let learning: Learning = { learned: false, reason: "no voice sample was kept for that line" };
-    const status = voiceprintStatus();
-    if (!status.available) learning = { learned: false, reason: "voice matching is off on this host" };
-    else if (g && !best) learning = { learned: false, reason: "every copy of it was clipped" };
-    else if (best) {
-      if (best.embedding === undefined) best.embedding = embed(best.pcm);
-      if (best.embedding) {
-        this.voiceprints.add(personId, best.embedding);
-        if (prior) this.voiceprints.remove(prior, best.embedding);
-        learning = { learned: true };
-      } else learning = { learned: false, reason: `the line is under ${MIN_VOICE_SECONDS} seconds` };
-    } else if (!g && u.eventId) {
-      const stored = this.session.store.event(u.eventId)?.data.embedding as number[] | undefined;
-      if (stored) {
-        const e = new Float32Array(stored);
-        this.voiceprints.add(personId, e);
-        if (prior) this.voiceprints.remove(prior, e);
-        learning = { learned: true };
+    const heard = this.voiceOf(u);
+    let learning: Learning;
+    if (!voiceprintStatus().available) learning = { learned: false, reason: "voice matching is off on this host" };
+    else if (heard.embedding) {
+      this.voiceprints.add(personId, heard.embedding, "correction");
+      let cleaned = 0;
+      if (prior) {
+        // What the wrong label taught the wrong person: this line's sample, and others that sound like it.
+        this.voiceprints.remove(prior, heard.embedding);
+        cleaned = this.voiceprints.forgetLike(prior, heard.embedding);
       }
-    }
+      learning = { learned: true, cleaned, relabelled: this.relabelSimilar(heard.embedding, personId, u.id) };
+    } else learning = { learned: false, reason: heard.reason };
     const next: Utterance = { ...u, personId, speakerName: person.name, confidence: 1, method: "manual" };
     this.session.store.put("utterances", next);
     this.onLine?.(next, false);
     bus.send({ type: "utterance", utterance: next });
     return { utterance: next, learning };
+  }
+
+  /** The voice sample of a line, from its copies while they are kept and from its event after that. */
+  private voiceOf(u: Utterance): { embedding: Float32Array | null; reason: string } {
+    const g = this.finalized.find((x) => x.utteranceId === u.id);
+    if (g) {
+      const usable = g.segments.filter((s) => s.clipped <= MAX_CLIPPED);
+      if (!usable.length) return { embedding: null, reason: "every copy of it was clipped" };
+      const best = pickBest(usable);
+      if (best.embedding === undefined) best.embedding = embed(best.pcm);
+      return best.embedding ? { embedding: best.embedding, reason: "" } : { embedding: null, reason: `the line is under ${MIN_VOICE_SECONDS} seconds` };
+    }
+    const stored = u.eventId ? (this.session.store.event(u.eventId)?.data.embedding as number[] | undefined) : undefined;
+    return stored?.length ? { embedding: new Float32Array(stored), reason: "" } : { embedding: null, reason: "no voice sample was kept for that line" };
+  }
+
+  /** Lines nobody could name that sound like the voice just corrected: they were that person too. */
+  private relabelSimilar(e: Float32Array, personId: string, exceptId: string) {
+    const person = this.session.person(personId);
+    if (!person) return 0;
+    const unlabeled = this.session.store.all("utterances").filter((x) => !x.personId && x.id !== exceptId).sort((a, b) => b.t0 - a.t0).slice(0, RELABEL_LOOKBACK);
+    let n = 0;
+    for (const x of unlabeled) {
+      const other = this.voiceOf(x).embedding;
+      if (!other || cosine(normalize(other), e) < RELABEL_SIM) continue;
+      const next: Utterance = { ...x, personId, speakerName: person.name, confidence: 0.6, method: "voice" };
+      this.session.store.put("utterances", next);
+      this.onLine?.(next, false);
+      bus.send({ type: "utterance", utterance: next });
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * A person read the join sentences. The read replaces any earlier one, and it is kept as three-second
+   * chunks so the voiceprint starts with variety.
+   */
+  enrol(personId: string, pcm: Pcm): { ok: true; samples: number } | { ok: false; reason: string } {
+    const { levelDb, noiseDb } = speechLevelDb(pcm);
+    if (levelDb - noiseDb < 8 || levelDb < -50) return { ok: false, reason: "That was too quiet. Hold the laptop closer and try again." };
+    const chunk = 16000 * 3;
+    const fresh: Float32Array[] = [];
+    for (let i = 0; i + chunk / 2 <= pcm.samples.length; i += chunk) {
+      const e = embed({ sampleRate: 16000, samples: pcm.samples.subarray(i, Math.min(pcm.samples.length, i + chunk)) });
+      if (e) fresh.push(e);
+    }
+    if (!fresh.length) return { ok: false, reason: "Couldn't hear enough speech. Try reading the whole thing." };
+    this.session.store.clearVoiceKind(personId, "enrol");
+    for (const e of fresh) this.session.store.addVoiceSample(personId, e, "enrol");
+    this.voiceprints.reload();
+    this.endEnrolment(personId);
+    return { ok: true, samples: this.voiceprints.learnedFrom(personId).enrol };
   }
 
   /** The embedding of an utterance's best copy, kept with its event so labels work after restarts. */
@@ -512,6 +620,8 @@ export class AudioPipeline {
     return best.embedding ? [...best.embedding] : null;
   }
 }
+
+const wordCount = (t: string) => t.split(/\s+/).filter(Boolean).length;
 
 function textSimilarity(a: string, b: string) {
   const words = (t: string) => new Set(t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2));

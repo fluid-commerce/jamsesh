@@ -9,6 +9,8 @@ export interface Person {
   color: string;
   hasVoiceprint: boolean;
   voiceSamples: number;
+  /** What the voiceprint was learned from: reads aloud, corrections, lines heard, and a copy brought from another host. */
+  voiceLearned?: { read: number; corrections: number; heard: number; carried: number };
   createdAt: number;
   /** Profile photo URL (from the person's camera), or null. */
   photo?: string | null;
@@ -442,7 +444,7 @@ export interface HubState {
   totals: { events: number; utterances: number; directives: number; artifacts: number };
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
   /** Voice matching labels lines by voice; off when the speaker model or its native library fails to load. */
-  voiceprints: { available: boolean; reason: string; enrolled: number };
+  voiceprints: { available: boolean; reason: string; code: string; fix: string; enrolled: number; lines: number; byVoice: number; neverUsed: boolean };
 }
 
 export interface CanvasInfo {

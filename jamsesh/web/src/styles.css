@@ -3168,3 +3168,12 @@ html.in-app .app-header {
 .cast-wrap {
   z-index: 312;
 }
+
+/* The join voice read: the sentences, lit while someone is reading. */
+.voice-read { margin: 0 0 14px; padding: 4px 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
+.voice-read p { margin: 12px 0; font-size: 16px; line-height: 1.45; }
+.voice-read[data-reading="true"] { color: var(--text); border-color: rgba(255,107,94,.4); }
+/* Where a line came from: typed, said to JamSesh, or overheard. Quiet unless it's the interesting kind. */
+.line .src { margin-left: 8px; font-size: 11px; color: var(--faint); letter-spacing: .01em; white-space: nowrap; }
+.line .src.overheard { opacity: 0; transition: opacity .12s; }
+.line:hover .src.overheard, .line:focus-within .src.overheard { opacity: 1; }

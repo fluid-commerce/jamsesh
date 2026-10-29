@@ -9,6 +9,7 @@ import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, m
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
+import { useVoiceprintSync } from "../shared/voiceprint";
 import { Stage, expandTile, stageTiles } from "../host/Stage";
 import { cast } from "./CastPicker";
 import { InviteButton } from "./Invite";
@@ -35,6 +36,8 @@ export function ClientView() {
   const [enrollAsked, setEnrollAsked] = useState(pref("enrollAsked") === "1");
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const me = state?.people.find((p) => p.id === personId);
+  // A voiceprint this device carries is offered to the host before the join read is asked for.
+  const voiceReady = useVoiceprintSync(me);
   const layout = useLayout();
 
   useEffect(() => {
@@ -140,7 +143,7 @@ export function ClientView() {
             <Toasts />
             <ShareRequestPrompt />
             {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
-            {!enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
+            {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
             {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
           </>
         }
@@ -193,7 +196,7 @@ export function ClientView() {
       <Toasts />
       <ShareRequestPrompt />
       {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
-      {!enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
+      {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
       {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
     </div>
   );
