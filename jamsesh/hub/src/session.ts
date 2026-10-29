@@ -445,6 +445,8 @@ export class Session {
     name?: string;
     /** The chat joining (see Agent.chatId). */
     chatId?: string;
+    /** How earlier versions spelled this chat's id: records kept under it are still this chat. */
+    legacyChatId?: string;
     role?: "worker" | "observer";
     broadcasts?: boolean;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
@@ -461,10 +463,11 @@ export class Session {
     // A chat is its own agent: one that names its chat resumes only that chat's record from the same
     // machine (or an older record from before chats were told apart), and a chat that doesn't never
     // takes a named chat's.
-    const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
+    const isChat = (a: Agent) => a.chatId === info.chatId || (!!info.legacyChatId && a.chatId === info.legacyChatId);
+    const sameChat = (a: Agent) => (info.chatId ? !a.chatId || isChat(a) : !a.chatId);
     const existing =
       // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
-      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
+      (info.chatId ? agents.find((a) => isChat(a) && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
       agents.find((a) => sameChat(a) && a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
@@ -573,10 +576,11 @@ export class Session {
    * `folder`: a join that can't name its chat (a Claude Code chat without its chat id, on a fresh MCP
    * session) is refused if a chat removed from that machine, folder and harness hasn't been let back.
    */
-  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }): RemovedChat | undefined {
+  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }, legacyChatId?: string): RemovedChat | undefined {
     return this.removedChats().find(
       (r) =>
         (!!chatId && r.chatId === chatId) ||
+        (!!legacyChatId && r.chatId === legacyChatId) ||
         (!!agentId && r.agentId === agentId) ||
         (!!folder?.cwd && r.machine === folder.machine && r.cwd === folder.cwd && r.harness === folder.harness),
     );

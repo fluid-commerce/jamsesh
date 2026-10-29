@@ -146,3 +146,52 @@ test("on the host's own file system a folder is its real path, so a link to it i
   expect(canonicalCwd("/no/such/./place/", true)).toBe("/no/such/place");
   expect(canonicalCwd("rel/path", true)).toBe("");
 });
+
+test("two long folders that share their first 300 characters are two Codex chats, and removing one leaves the other", async () => {
+  const fresh = () => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID(), harness: "codex" });
+  const prefix = `/w/${"d".repeat(320)}`;
+  const a = `${prefix}/one`;
+  const b = `${prefix}/two`;
+  expect((await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: a })).isError).toBeFalsy();
+  expect((await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: b })).isError).toBeFalsy();
+  const agents = s.store.all("agents").filter((x: any) => x.cwd === a || x.cwd === b);
+  expect(agents).toHaveLength(2);
+  expect(new Set(agents.map((x: any) => x.chatId)).size).toBe(2);
+  expect(agents.every((x: any) => x.chatId.length < 100)).toBe(true);
+  s.removeAgent(agents.find((x: any) => x.cwd === a)!.id);
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: a })).rejects.toThrow("removed this chat");
+  expect((await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: b })).isError).toBeFalsy();
+});
+
+test("an agent from before the hashed id keeps its record, and its removal still holds", async () => {
+  const fresh = () => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID(), harness: "codex" });
+  const machine = win.device.id;
+  const old = s.registerAgent({ ownerName: "Chey", harness: "codex", repo: "app", cwd: "/w/legacy", machine: hub.auth.machineOf(cred.device.id) ?? machine, chatId: `codex:${hub.auth.machineOf(cred.device.id) ?? machine}:/w/legacy` }).agent;
+  const again: any = await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/legacy" });
+  expect(again.isError).toBeFalsy();
+  expect(s.store.all("agents").filter((x: any) => x.cwd === "/w/legacy")).toHaveLength(1);
+  s.removeAgent(old.id);
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/legacy" })).rejects.toThrow("removed this chat");
+});
+
+test("over the MCP protocol: a connection that initializes as Codex stays Codex whatever jam_join says", async () => {
+  const post = (body: object, sid?: string) =>
+    fetch(`${base}/mcp`, { method: "POST", headers: { authorization: `Bearer ${cred.token}`, "x-forwarded-for": "9.9.9.9", "content-type": "application/json", accept: "application/json, text/event-stream", ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body) });
+  const open = async (name: string) => {
+    const init = await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name, version: "1" } } });
+    const sid = init.headers.get("mcp-session-id")!;
+    await init.body?.cancel();
+    await (await post({ jsonrpc: "2.0", method: "notifications/initialized" }, sid)).body?.cancel();
+    return sid;
+  };
+  const join = async (sid: string, args: object) => (await post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "jam_join", arguments: args } }, sid)).text();
+  const first = await join(await open("codex-mcp-client"), { harness: "codex", repo: "app", cwd: "/w/proto" });
+  expect(first).not.toContain("removed this chat");
+  const mine = s.store.all("agents").find((x: any) => x.cwd === "/w/proto")!;
+  expect(mine.harness).toBe("codex");
+  s.removeAgent(mine.id);
+  // Calling itself another harness, or naming a chat, doesn't make a new identity.
+  for (const args of [{ harness: "other" }, { harness: "claude-code", chat: "made-up" }, { harness: "codex" }]) {
+    expect(await join(await open("codex-mcp-client"), { repo: "app", cwd: "/w/proto", ...args })).toContain("removed this chat");
+  }
+});

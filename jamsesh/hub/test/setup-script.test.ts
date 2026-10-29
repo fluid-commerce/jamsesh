@@ -394,18 +394,71 @@ describe("agent setup script", () => {
     expect(toml.endsWith("# <<< jamsesh\n")).toBe(true);
   });
 
-  test("Codex: the table an earlier JamSesh wrote, without markers, is moved into the markers on the next setup", async () => {
+  const OLD_TABLE = (url: string, token: string) =>
+    `[mcp_servers.jamsesh]\nurl = "${url}"\ntool_timeout_sec = 600\ndefault_tools_approval_mode = "approve"\n\n[mcp_servers.jamsesh.http_headers]\nauthorization = "Bearer ${token}"\n`;
+
+  test("Codex: the table an earlier JamSesh wrote, without markers, is moved into the markers when it carries that install's credential and host", async () => {
     const box = sandbox();
+    const { dir } = earlierInstall(box); // stored credential "old-room", host http://old-host:4747
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
-    const old = '[mcp_servers.jamsesh]\nurl = "http://old-host:4747/mcp"\ntool_timeout_sec = 600\ndefault_tools_approval_mode = "approve"\n\n[mcp_servers.jamsesh.http_headers]\nauthorization = "Bearer old"\n';
-    writeFileSync(config, `model = "gpt"\n\n${old}\n[mcp_servers.other]\nurl = "http://x"\n\n[profiles.a]\nk = 1\n`);
+    writeFileSync(config, `model = "gpt"\n\n${OLD_TABLE("http://old-host:4747/mcp", "old-room")}\n[mcp_servers.other]\nurl = "http://x"\n\n[profiles.a]\nk = 1\n`);
     for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
     const toml = readFileSync(config, "utf8");
     expect(toml).not.toContain("old-host");
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "${origin}/mcp"`);
     expect(Bun.TOML.parse(toml)).toMatchObject({ model: "gpt", mcp_servers: { other: { url: "http://x" } }, profiles: { a: { k: 1 } } });
+    expect(dir).toBeTruthy();
+  });
+
+  test("Codex: a hand-written table with the earlier shape but another credential, another host, or no earlier install is refused untouched", async () => {
+    for (const [token, url, earlier] of [
+      ["hand-token", "http://old-host:4747/mcp", true],
+      ["old-room", "http://elsewhere:9/mcp", true],
+      ["old-room", "http://old-host:4747/mcp", false],
+    ] as const) {
+      const box = sandbox();
+      const prior = earlier ? earlierInstall(box) : null;
+      mkdirSync(join(box.home, ".codex"), { recursive: true });
+      const config = join(box.home, ".codex/config.toml");
+      const body = `model = "gpt"\n\n${OLD_TABLE(url, token)}`;
+      writeFileSync(config, body);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("as it is");
+      expect(r.stderr).not.toContain("hand-token");
+      expect(readFileSync(config, "utf8")).toBe(body);
+      if (prior) connectionIntact(prior.dir, prior.files);
+    }
+  });
+
+  test("Codex: a save to the config between the check and the write is not lost, and nothing is left changed", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    // The setup's Bun is a wrapper: it checks, then someone saves the file before the write.
+    rmSync(join(box.bin, "bun"));
+    writeFileSync(join(box.bin, "bun"), `#!/bin/sh\nBUN_BE_BUN=1 "${process.execPath}" "$@" && echo '# saved by the person' >> "$HOME/.codex/config.toml"\n`, { mode: 0o755 });
+    const { dir, files } = earlierInstall(box);
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    writeFileSync(config, 'model = "gpt"\n');
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("Codex settings changed while setting up; run Connect my agents again");
+    expect(readFileSync(config, "utf8")).toBe('model = "gpt"\n# saved by the person\n');
+    connectionIntact(dir, files);
+  });
+
+  test("the first error line is marked ERROR:", async () => {
+    const box = sandbox();
+    hookBody = null;
+    try {
+      const r = await run(box);
+      expect(r.stderr.split("\n").some((l) => l.startsWith("ERROR: "))).toBe(true);
+    } finally {
+      hookBody = HOOK_OK;
+    }
   });
 
   test("Codex: valid TOML that looks like a marker or a table is never mistaken for one", async () => {

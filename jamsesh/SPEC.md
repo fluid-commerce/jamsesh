@@ -268,11 +268,12 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   Codex's `config.toml` only between its own marker comments (`# >>> jamsesh` / `# <<< jamsesh`), by
   lines, and then checks the result with Bun's TOML parser before writing: the edited file must parse,
   hold exactly one `mcp_servers.jamsesh` table with JamSesh's settings, and equal the original
-  everywhere else. The one table an earlier JamSesh wrote (its exact two headers and keys) is moved into
-  the markers; any other `mcp_servers.jamsesh` table, a file that is not valid TOML or a broken marker
+  everywhere else. The one table an earlier JamSesh wrote (its exact two headers and keys, carrying the credential and
+  host that install stored) is moved into the markers; any other `mcp_servers.jamsesh` table, a file that is not valid TOML or a broken marker
   pair leaves the file untouched with a message. The parser is the one on PATH or in the usual places,
   or the JamSesh app's own hub run as Bun (`JAMSESH_BUN`); with none, Codex is left as it is and the
-  person is told what to add by hand. Reinstalling
+  person is told what to add by hand. The file is re-read just before the write and setup aborts if
+  it changed since it was read. Reinstalling
   removes only JamSesh's own hook commands (its `~/.jamsesh/hook.sh` with one of its verbs), keeping a
   person's hooks even in the same group.
 - **Every file the setup writes goes through one primitive, `safe_write`.** It resolves a symlink to
@@ -370,7 +371,7 @@ between the markers, is yours and isn't mentioned). Nothing JamSesh installs joi
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
 which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
 harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect
-or hub restart, so its chat is its folder on its machine (`codex:<machine>:<cwd>`, with the harness taken from the client name at `initialize`, never from a tool argument, and the folder an absolute normalized path, its real path on the host's own file system; a blank or relative folder is refused and a supplied `chat` is ignored): a reconnect
+or hub restart, so its chat is its folder on its machine (keyed `<harness>:<sha256 of harness:machine:cwd>`, so long paths never collide, with the harness taken from the client name at `initialize`, never from a tool argument, and the folder an absolute normalized path, its real path on the host's own file system; a blank or relative folder is refused and a supplied `chat` is ignored): a reconnect
 resumes the same agent with its workstreams and tasks, and a removal sticks across reconnects and
 restarts. Two Codex chats open in one folder at once are one agent. The hooks ask the host whether the chat has joined
 (`POST /api/hooks/joined`, session id only) and do nothing, and send nothing, for a chat that hasn't;

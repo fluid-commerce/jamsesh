@@ -85,6 +85,7 @@ describe("the install", () => {
     mkdirSync(join(home, ".codex"), { recursive: true });
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    symlinkSync(process.execPath, join(bin, "bun"));
     // A claude that registers the entry the way Claude Code does.
     writeFileSync(join(bin, "claude"), `#!/bin/sh\ncase "$*" in *add-json*) for last; do :; done; printf '{"mcpServers":{"jamsesh":%s}}' "$last" > "$HOME/.claude.json" ;; esac\nexit 0\n`, { mode: 0o755 });
     writeFileSync(join(home, ".claude/CLAUDE.md"), `# Me\n\n${BLOCK}`);

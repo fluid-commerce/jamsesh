@@ -1,6 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute, normalize } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -436,10 +437,14 @@ export class McpEndpoint {
         const cwd = canonicalCwd(String(args.cwd ?? ""), machine === "host");
         if (!cwd) throw new Error("Pass cwd, this chat's working directory as an absolute path, to jam_join: without it the room can't tell which chat this is.");
         const claudeChat = harness === "claude-code" && typeof args.chat === "string" ? args.chat.trim().slice(0, 80) : "";
-        const chatId = claudeChat || (harness !== "claude-code" ? `${harness}:${machine}:${cwd}`.slice(0, 300) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
+        // The key is a hash of the whole folder path, so two long paths that share a beginning stay two chats;
+        // the readable folder is the agent's own `cwd`.
+        const keyed = harness !== "claude-code";
+        const chatId = claudeChat || (keyed ? `${harness}:${createHash("sha256").update(`${harness}:${machine}:${cwd}`).digest("hex")}` : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
+        const legacyChatId = !claudeChat && keyed ? `${harness}:${machine}:${cwd}`.slice(0, 300) : undefined;
         // A chat the room removed stays out until a person lets it back in. A Claude Code join without its chat
         // id can't show it isn't the removed one: a removal in this folder counts.
-        if (s.rejoinBlocked(chatId, ctx.agentId, claudeChat ? undefined : { machine, cwd, harness }))
+        if (s.rejoinBlocked(chatId, ctx.agentId, claudeChat ? undefined : { machine, cwd, harness }, legacyChatId))
           throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
         // Rejoining keeps the stored role unless the caller names one (the session settles it).
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
@@ -453,6 +458,7 @@ export class McpEndpoint {
           cwd,
           machine,
           chatId, // see above
+          legacyChatId,
           platform: args.platform,
           focus: args.focus,
           name: args.name,

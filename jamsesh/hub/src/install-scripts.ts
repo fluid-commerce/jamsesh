@@ -292,15 +292,15 @@ resolve() { perl -MCwd=abs_path -MFile::Basename=dirname,basename -e 'my $p = sh
 inhome() {
   local real="$1" home
   home="$(resolve "$HOME")"
-  case "$real" in "$HOME"/*|"$home"/*) ;; *) echo "JamSesh won't write $real: it is outside your home folder." >&2; return 1 ;; esac
+  case "$real" in "$HOME"/*|"$home"/*) ;; *) echo "ERROR: JamSesh won't write $real: it is outside your home folder." >&2; return 1 ;; esac
 }
 guard() {
   local real="$1" f
   inhome "$real" || return 1
-  [ ! -d "$real" ] || { echo "JamSesh won't write $real: it is a folder." >&2; return 1; }
-  case "$(basename "$real" | tr 'A-Z' 'a-z')" in claude.md|agents.md) echo "JamSesh won't write $real: it is an instruction file." >&2; return 1 ;; esac
+  [ ! -d "$real" ] || { echo "ERROR: JamSesh won't write $real: it is a folder." >&2; return 1; }
+  case "$(basename "$real" | tr 'A-Z' 'a-z')" in claude.md|agents.md) echo "ERROR: JamSesh won't write $real: it is an instruction file." >&2; return 1 ;; esac
   for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
-    if [ -e "$f" ] && [ "$real" -ef "$f" ]; then echo "JamSesh won't write $real: it is an instruction file." >&2; return 1; fi
+    if [ -e "$f" ] && [ "$real" -ef "$f" ]; then echo "ERROR: JamSesh won't write $real: it is an instruction file." >&2; return 1; fi
   done
 }
 DIR="$HOME/.jamsesh"
@@ -311,10 +311,10 @@ mkdir -p "$DIR" && chmod 700 "$DIR"
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
 # Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
-case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing token: pair first at $HUB/agent?c=<code>" >&2; exit 1; } ;; esac
+case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "ERROR: Missing token: pair first at $HUB/agent?c=<code>" >&2; exit 1; } ;; esac
 # JSON and text edits run in Perl: every Mac has it, while python3 on a Mac without the developer
 # tools only opens Apple's "install the command line tools" dialog.
-command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
+command -v perl >/dev/null 2>&1 || { echo "ERROR: JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 # The credential goes in files (mode 600) that curl and Claude Code read, never in a command's
 # arguments, which any process on this computer can list. Empty: the JamSesh app's relay adds it.
 # Only one setup runs at a time: two would share these files and the one MCP entry, and a failing run
@@ -322,12 +322,12 @@ command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this 
 # the system drops it when this process ends however it ends, so there is no stale lock to recover and
 # no way to take over a live one. A second run waits a few seconds, then gives up.
 # A link there is refused: opening the lock would create or follow whatever it leads to.
-[ ! -L "$DIR/setup.lock" ] || { echo "JamSesh won't use $DIR/setup.lock: it is a link." >&2; exit 1; }
+[ ! -L "$DIR/setup.lock" ] || { echo "ERROR: JamSesh won't use $DIR/setup.lock: it is a link." >&2; exit 1; }
 exec 9>>"$DIR/setup.lock"
 waited=0
 until perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or exit 2; flock($f, LOCK_EX | LOCK_NB) or exit 1'; do
   if [ "$waited" -ge $((\${JAMSESH_LOCK_WAIT:-10} * 5)) ]; then
-    echo "Another JamSesh setup is running on this computer. Wait for it to finish, then connect again." >&2
+    echo "ERROR: Another JamSesh setup is running on this computer. Wait for it to finish, then connect again." >&2
     exit 1
   fi
   sleep 0.2
@@ -342,6 +342,11 @@ done
 SAVED="$(mktemp -d "$DIR/.saved.XXXXXXXX")"
 J="$SAVED/journal"
 mkdir "$J"
+# What an earlier JamSesh install stored, kept to tell its Codex table from a hand-written one (never printed).
+mkdir "$SAVED/prev"
+for f in auth.header client.env; do
+  if [ -f "$DIR/$f" ] && [ ! -L "$DIR/$f" ]; then cp "$DIR/$f" "$SAVED/prev/$f"; fi
+done
 # A folder where a file was is neither the file nor its absence, so it never matches either.
 sha() { perl -MDigest::SHA=sha256_hex -e 'if (-d $ARGV[0]) { print "folder" } elsif (open(my $f, "<:raw", $ARGV[0])) { local $/; print sha256_hex(<$f> // "") } else { print "absent" }' "$1"; }
 key_of() { printf '%s' "$1" | perl -MDigest::SHA=sha1_hex -e 'local $/; print sha1_hex(<STDIN>)'; }
@@ -364,6 +369,13 @@ safe_write() {
   case "$mode" in keep:*) if [ -f "$real" ]; then mode="$(mode_of "$real")"; else mode="\${mode#keep:}"; fi ;; esac
   chmod "$mode" "$t" || { rm -f "$t"; return 1; }
   sha "$t" > "$J/$k/after"
+  # A caller that read the file earlier names what it read (EXPECT_SHA): if the file has changed since, a
+  # person or a program saved it meanwhile, and replacing it would lose that.
+  if [ -n "\${EXPECT_SHA:-}" ] && [ "$(sha "$real")" != "$EXPECT_SHA" ]; then
+    rm -f "$t"
+    echo "ERROR: \${EXPECT_LABEL:-$real} changed while setting up; run Connect my agents again." >&2
+    return 1
+  fi
   mv -f "$t" "$real"
 }
 # Downloads go to the saved folder (private, ours), and are checked before safe_write puts them in place.
@@ -465,8 +477,8 @@ on_exit() {
   if [ "$restored" = 1 ]; then
     rm -rf "$SAVED"
     case "$reason" in
-      hook) echo "JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2 ;;
-      mcp) if [ "$mcp_result" = restored ]; then echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2; else echo "JamSesh couldn't register its MCP server with Claude Code, so none is registered. Try connecting again." >&2; fi ;;
+      hook) echo "ERROR: JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2 ;;
+      mcp) if [ "$mcp_result" = restored ]; then echo "ERROR: JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2; else echo "ERROR: JamSesh couldn't register its MCP server with Claude Code, so none is registered. Try connecting again." >&2; fi ;;
       quiet) ;;
       *) echo "Setup didn't finish, so your earlier connection was put back. Try connecting again." ;;
     esac
@@ -549,7 +561,7 @@ if [ -n "$CLAUDE" ]; then
   guard "$(resolve "$CLAUDEJSON")" || exit 1
   cred="$DIR/mcp-headers.json"
   # A config that can't be read or parsed is not an absent entry: nothing is changed until it can be.
-  mcp_before="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)" || { echo "JamSesh can't read $CLAUDEJSON (it isn't valid JSON, or can't be opened), so nothing was changed. Fix or move it, then connect again." >&2; exit 1; }
+  mcp_before="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)" || { echo "ERROR: JamSesh can't read $CLAUDEJSON (it isn't valid JSON, or can't be opened), so nothing was changed. Fix or move it, then connect again." >&2; exit 1; }
   printf '%s' "$mcp_before" > "$SAVED/mcp_before.json"
   # Claude Code asks a helper for the credential header each time it connects, so the token is in
   # neither its arguments nor its config. Without a token the app's relay adds it.
@@ -598,12 +610,12 @@ $path = abs_path($path) // $path if -l $path;
 $cmd = "'$cmd'";
 my $data = {};
 if (-e $path) {
-  open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
+  open(my $in, '<', $path) or die "ERROR: JamSesh: can't read $path: $!\\n";
   my $text = do { local $/; <$in> };
   close $in;
   if ($text =~ /\\S/) {
     $data = eval { JSON::PP->new->relaxed->decode($text) };
-    die "JamSesh: $path isn't valid JSON, so it was left as it is. Fix it, then connect again.\\n" unless ref $data eq 'HASH';
+    die "ERROR: JamSesh: $path isn't valid JSON, so it was left as it is. Fix it, then connect again.\\n" unless ref $data eq 'HASH';
   }
 }
 $data->{hooks} = {} unless ref $data->{hooks} eq 'HASH';
@@ -662,6 +674,7 @@ if [ "$CODEX_HERE" = 1 ] && [ -n "$BUN" ]; then
   # Codex's config is TOML, which setup does not parse with string matching: the edit below is by lines, and
   # Bun's real parser then checks the result (toml-check.js) before anything is written.
   CODEXCFG="$HOME/.codex/config.toml"
+  codex_sha="$(sha "$CODEXCFG")"
   perl - "$HUB" "$DIR/auth.header" "$CODEXCFG" > "$SAVED/config.new" <<'PL'
 use strict; use warnings; use Cwd qw(abs_path);
 my ($hub, $header, $path) = @ARGV;
@@ -672,7 +685,7 @@ if (open(my $h, '<', $header)) { ($token) = (<$h> // '') =~ /Bearer\\s+(\\S+)/; 
 $token //= '';
 my $text = '';
 if (-e $path) {
-  open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
+  open(my $in, '<', $path) or die "ERROR: JamSesh: can't read $path: $!\\n";
   $text = do { local $/; <$in> };
   close $in;
 }
@@ -687,7 +700,7 @@ for my $i (0 .. $#lines) {
   push @from, $i if $l eq $open;
   push @to, $i if $l eq $close;
 }
-die "JamSesh: $path has a broken pair of '$open' / '$close' lines, so it was left as it is. Delete them and the JamSesh lines between them, then connect again.\\n"
+die "ERROR: JamSesh: $path has a broken pair of '$open' / '$close' lines, so it was left as it is. Delete them and the JamSesh lines between them, then connect again.\\n"
   unless (@from == 0 && @to == 0) || (@from == 1 && @to == 1 && $from[0] < $to[0]);
 (my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
 (my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
@@ -716,7 +729,7 @@ PL
 const fs = require("fs");
 const env = process.env;
 const read = (p) => { try { return fs.readFileSync(p, "utf8"); } catch (e) { return ""; } };
-const fail = (m) => { console.error(m); process.exit(1); };
+const fail = (m) => { console.error("ERROR: " + m); process.exit(1); };
 const parse = (t, what) => {
   if (!t.trim()) return {};
   try { return Bun.TOML.parse(t); } catch (e) { return fail(what + " isn't valid TOML (" + String(e.message || e).split("\\n")[0] + ")."); }
@@ -743,15 +756,22 @@ const isOld = (o) => o && typeof o === "object" && keys(o) === "default_tools_ap
   && typeof o.url === "string" && o.url.endsWith("/mcp") && o.tool_timeout_sec === 600 && o.default_tools_approval_mode === "approve"
   && o.http_headers && typeof o.http_headers === "object" && keys(o.http_headers) === "authorization"
   && typeof o.http_headers.authorization === "string" && o.http_headers.authorization.startsWith("Bearer ");
-if (had && !marked && !isOld(had)) fail("It has an [mcp_servers.jamsesh] table that JamSesh didn't write.");
+// An unmarked table counts as an earlier JamSesh install's only with that install's own evidence: the
+// credential it stored (compared here, never printed) and the host it was connected to.
+const prevHeader = read(env.JAMSESH_PREV_HEADER);
+const prevToken = (prevHeader.split("Bearer ")[1] || "").trim();
+const prevHubLine = read(env.JAMSESH_PREV_ENV).split("\\n").find((l) => l.startsWith("JAMSESH_HUB=")) || "";
+const prevHub = prevHubLine.slice("JAMSESH_HUB=".length).trim().replace(/^["']|["']$/g, "");
+const fromEarlierInstall = (o) => prevHeader.includes("Bearer ") && prevHub !== "" && o.http_headers.authorization === "Bearer " + prevToken && o.url === prevHub + "/mcp";
+if (had && !marked && !(isOld(had) && fromEarlierInstall(had))) fail("It has an [mcp_servers.jamsesh] table that JamSesh didn't write.");
 if (!same(next.mcp_servers && next.mcp_servers.jamsesh, want)) fail("The edit would not leave exactly one [mcp_servers.jamsesh] table with JamSesh's settings.");
 if (!same(without(orig), without(next))) fail("The edit would change something outside JamSesh's table.");
 JS
-  JAMSESH_OLD="$CODEXCFG" JAMSESH_NEW="$SAVED/config.new" JAMSESH_HEADER="$DIR/auth.header" JAMSESH_URL="$HUB/mcp" BUN_BE_BUN=1 "$BUN" "$SAVED/toml-check.js" || {
+  JAMSESH_OLD="$CODEXCFG" JAMSESH_NEW="$SAVED/config.new" JAMSESH_HEADER="$DIR/auth.header" JAMSESH_PREV_HEADER="$SAVED/prev/auth.header" JAMSESH_PREV_ENV="$SAVED/prev/client.env" JAMSESH_URL="$HUB/mcp" BUN_BE_BUN=1 "$BUN" "$SAVED/toml-check.js" || {
     echo "JamSesh left $CODEXCFG as it is. If it has an [mcp_servers.jamsesh] table of your own, delete it and its subtables, then connect again." >&2
     exit 1
   }
-  safe_write "$HOME/.codex/config.toml" 600 < "$SAVED/config.new"
+  EXPECT_SHA="$codex_sha" EXPECT_LABEL="Codex settings" safe_write "$HOME/.codex/config.toml" 600 < "$SAVED/config.new"
   mkdir -p "$HOME/.codex/skills/jamsesh"
   fetch launcher.md "$SAVED/codex-launcher.md"
   safe_write "$HOME/.codex/skills/jamsesh/SKILL.md" 644 < "$SAVED/codex-launcher.md"
@@ -772,7 +792,7 @@ else
 fi
 # Saying "done" when no agent was set up sent people off to restart agents that would never connect.
 if [ "$configured" -eq 0 ]; then
-  echo "Didn't find Claude Code or Codex on this computer, so no agent was connected. Install one (or open it once), then connect again." >&2
+  echo "ERROR: Didn't find Claude Code or Codex on this computer, so no agent was connected. Install one (or open it once), then connect again." >&2
   reason=quiet
   exit 1
 fi

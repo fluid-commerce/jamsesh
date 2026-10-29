@@ -583,35 +583,35 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
         Ok(msg)
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
-        Err(format!("Setup didn't finish:\n{}", failure_lines(&err)))
+        Err(format!("Setup didn't finish:\n{}", failure_lines(&err, &String::from_utf8_lossy(&out.stdout))))
     }
 }
 
-/// What setup printed to stderr, for the dialog: the first lines (the root error) and the last ones (what
-/// was put back, what was not, and where the saved copies are), with a mark where lines were left out,
-/// and capped so a runaway script can't fill the dialog.
-fn failure_lines(stderr: &str) -> String {
-    const HEAD: usize = 4;
-    const TAIL: usize = 8;
-    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.is_empty() {
-        return "unknown error".to_string();
+/// What setup printed, for the dialog: the line it marked `ERROR:` (the root error, always kept), the last
+/// lines of stderr (what was put back, what was not, where the saved copies are) and the last lines of
+/// stdout. Each line is cut to a fixed length, so the root error survives however much follows it.
+fn failure_lines(stderr: &str, stdout: &str) -> String {
+    const TAIL_ERR: usize = 8;
+    const TAIL_OUT: usize = 3;
+    const LINE: usize = 300;
+    let cut = |l: &str| if l.chars().count() > LINE { format!("{}…", l.chars().take(LINE).collect::<String>()) } else { l.to_string() };
+    let nonblank = |t: &str| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(cut).collect::<Vec<_>>();
+    let err = nonblank(stderr);
+    let out = nonblank(stdout);
+    let Some(root) = err.iter().position(|l| l.starts_with("ERROR:")).or(if err.is_empty() { None } else { Some(0) }) else {
+        return if out.is_empty() { "unknown error".to_string() } else { out[out.len().saturating_sub(TAIL_OUT)..].join("\n") };
+    };
+    let tail_from = err.len().saturating_sub(TAIL_ERR).max(root + 1);
+    let mut shown = vec![err[root].clone()];
+    if tail_from > root + 1 {
+        shown.push("…".to_string());
     }
-    let mut shown: Vec<&str> = Vec::new();
-    if lines.len() <= HEAD + TAIL {
-        shown.extend(&lines);
-    } else {
-        shown.extend(&lines[..HEAD]);
-        shown.push("…");
-        shown.extend(&lines[lines.len() - TAIL..]);
+    shown.extend(err[tail_from..].iter().cloned());
+    if !out.is_empty() {
+        shown.push("Setup also printed:".to_string());
+        shown.extend(out[out.len().saturating_sub(TAIL_OUT)..].iter().cloned());
     }
-    let text = shown.join("\n");
-    if text.chars().count() > 1800 {
-        // Keep the end: the recovery details are there.
-        let tail: String = text.chars().rev().take(1800).collect::<Vec<_>>().into_iter().rev().collect();
-        return format!("…{tail}");
-    }
-    text
+    shown.join("\n")
 }
 
 /// Held while the agent setup runs; taking it fails if another run holds it.
@@ -639,17 +639,20 @@ mod tests {
     use super::{failure_lines, old_block_notices};
 
     #[test]
-    fn the_whole_failure_is_shown_but_capped() {
-        assert_eq!(failure_lines(""), "unknown error");
-        assert_eq!(failure_lines("a\n\nb\n"), "a\nb");
-        let many = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let shown = failure_lines(&many);
-        // The root error at the top and the recovery details at the end both survive.
-        assert!(shown.starts_with("line 0\n") && shown.contains("line 3\n…\nline 22") && shown.ends_with("line 29"));
-        assert!(!shown.contains("line 10"));
-        let long = format!("root\n{}\nlast", "x".repeat(5000));
-        let shown = failure_lines(&long);
-        assert!(shown.chars().count() <= 1801 && shown.ends_with("last"));
+    fn the_root_error_and_the_end_are_shown_whatever_comes_between() {
+        assert_eq!(failure_lines("", ""), "unknown error");
+        assert_eq!(failure_lines("a\n\nb\n", ""), "a\nb");
+        let mut lines = vec!["noise 0".to_string(), "ERROR: the root".to_string()];
+        lines.extend((0..30).map(|i| format!("line {i}")));
+        let shown = failure_lines(&lines.join("\n"), "ok one\nok two\nok three\nDone\n");
+        assert!(shown.starts_with("ERROR: the root\n…\nline 22"), "{shown}");
+        assert!(shown.contains("line 29\nSetup also printed:\nok two\nok three\nDone") && !shown.contains("noise 0") && !shown.contains("line 10"));
+        // One huge line can't push the root error out, and is cut itself.
+        let long = format!("ERROR: root\n{}\nlast", "x".repeat(5000));
+        let shown = failure_lines(&long, "");
+        assert!(shown.starts_with("ERROR: root\n") && shown.ends_with("last") && shown.chars().count() < 700);
+        // With no ERROR: line the first line stands in.
+        assert!(failure_lines("first\nsecond", "").starts_with("first"));
     }
 
     #[test]
