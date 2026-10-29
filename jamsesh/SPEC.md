@@ -1578,11 +1578,13 @@ unanswered question goes stale after 5 minutes.
 
 **One item per built screen (3.5).** A new `jam_post_image` of the same agent and stage, with the
 same title once "(built)", "v2" and similar marks are dropped, or an explicit `replaces` id, becomes
-the next version of the existing item rather than a new one. An `/api/upload` is always a new item:
-a machine's agents share its credential, so an upload can't prove which agent sent it. It must name
-one of the caller's machine's agents; only the host's own window uploads for the room or makes
-versions over HTTP. An uploaded image must be a whole PNG or JPEG (PNG chunks, CRCs, pixel data that
-inflates to its declared size with valid row filters, at most 80 MB decoded; JPEG segments, a frame,
+the next version of the existing item rather than a new one. An `/api/upload` from anyone but the
+host's own window is always a new item: a machine's agents share its credential, so an upload can't
+prove which agent sent it. It must name one of the caller's machine's agents. The host's own window
+may upload for the room (no agent) and make versions (same title or `replaces`), as `jam_post_image`
+does. An uploaded image must be a whole PNG or JPEG (PNG chunks, CRCs, IHDR methods, pixel data that
+inflates to exactly its declared size, Adam7's seven passes included, with a valid filter on every
+row, at most 80 MB decoded and refused before inflating when more is claimed; JPEG segments, a frame,
 a scan and its end marker), checked before anything is written. JPEG scan data itself isn't decoded
 (owner decision): a JPEG whose compressed data is damaged is stored and shows as a broken image. Variants
 ("Nav / A", "Nav / B") stay separate, and one agent can't replace another's item. The item keeps its

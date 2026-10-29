@@ -21,6 +21,32 @@ export function checkImage(b: Uint8Array): CheckedImage | string {
 const sized = (kind: CheckedImage["kind"], width: number, height: number): CheckedImage | string =>
   width > 0 && height > 0 && width <= MAX_SIDE && height <= MAX_SIDE ? { kind, width, height } : "That image's size isn't one a screen could have.";
 
+export const TOO_LARGE = "That image is too large.";
+
+/** Adam7: each pass's first column and row, and its column and row steps. */
+const ADAM7 = [
+  [0, 0, 8, 8],
+  [4, 0, 8, 8],
+  [0, 4, 4, 8],
+  [2, 0, 4, 4],
+  [0, 2, 2, 4],
+  [1, 0, 2, 2],
+  [0, 1, 1, 2],
+];
+
+/** The rows a PNG's pixel data holds, in order: their byte width (without the filter byte) and how many. */
+function pngRows(width: number, height: number, colorType: number, depth: number, interlaced: boolean) {
+  if (!interlaced) return [{ bytes: rowBytes(width, colorType, depth), count: height }];
+  const out: { bytes: number; count: number }[] = [];
+  for (const [x0, y0, dx, dy] of ADAM7) {
+    const w = width > x0 ? Math.ceil((width - x0) / dx) : 0;
+    const h = height > y0 ? Math.ceil((height - y0) / dy) : 0;
+    // An empty pass has no rows at all, not even filter bytes.
+    if (w && h) out.push({ bytes: rowBytes(w, colorType, depth), count: h });
+  }
+  return out;
+}
+
 /** Bytes per pixel row of a non-interlaced PNG, by colour type and bit depth (0 when the pair isn't valid). */
 function rowBytes(width: number, colorType: number, depth: number) {
   const channels = ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[colorType];
@@ -35,7 +61,7 @@ function rowBytes(width: number, colorType: number, depth: number) {
 function checkPng(b: Uint8Array): CheckedImage | string {
   const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
   let off = 8;
-  let size: { width: number; height: number; colorType: number; depth: number; interlaced: boolean } | null = null;
+  let size: { width: number; height: number; colorType: number; depth: number; interlace: number } | null = null;
   const data: Uint8Array[] = [];
   while (off + 12 <= b.length) {
     const len = v.getUint32(off);
@@ -45,28 +71,31 @@ function checkPng(b: Uint8Array): CheckedImage | string {
     if ((Bun.hash.crc32(b.subarray(off + 4, off + 8 + len)) >>> 0) !== v.getUint32(off + 8 + len)) return "That PNG is damaged.";
     if (!size) {
       if (type !== "IHDR" || len !== 13) return "That PNG is damaged.";
-      size = { width: v.getUint32(off + 8), height: v.getUint32(off + 12), depth: b[off + 16], colorType: b[off + 17], interlaced: b[off + 20] === 1 };
+      // Compression and filter method 0 are the only ones there are; interlace is none (0) or Adam7 (1).
+      if (b[off + 18] !== 0 || b[off + 19] !== 0 || b[off + 20] > 1) return "That PNG is damaged.";
+      size = { width: v.getUint32(off + 8), height: v.getUint32(off + 12), depth: b[off + 16], colorType: b[off + 17], interlace: b[off + 20] };
     }
     if (type === "IDAT") data.push(b.subarray(off + 8, off + 8 + len));
     if (type === "IEND") {
       if (end !== b.length) return "That PNG has bytes after its end.";
       const fit = sized("png", size.width, size.height);
       if (typeof fit === "string") return fit;
-      const row = rowBytes(size.width, size.colorType, size.depth);
-      if (!row || !data.length) return "That PNG has no image data.";
+      if (!rowBytes(1, size.colorType, size.depth) || !data.length) return "That PNG has no image data.";
+      // The rows the pixel data must hold: one image, or Adam7's seven passes (each a smaller image of its own).
+      const rows = pngRows(size.width, size.height, size.colorType, size.depth, size.interlace === 1);
+      const expected = rows.reduce((n, r) => n + (r.bytes + 1) * r.count, 0);
       // Refused before inflating: a small file can claim gigabytes of pixels.
-      const expected = (row + 1) * size.height;
-      if (expected > MAX_DECODED_BYTES) return "That image is too large.";
+      if (expected > MAX_DECODED_BYTES) return TOO_LARGE;
       let pixels: Uint8Array;
       try {
         pixels = inflateSync(Buffer.concat(data), { maxOutputLength: expected + 1 });
       } catch {
         return "That PNG's image data is damaged.";
       }
-      if (size.interlaced) return pixels.length ? fit : "That PNG's image data is damaged.";
       if (pixels.length !== expected) return "That PNG's image data is damaged.";
-      // Every row starts with one of the five filter types.
-      for (let y = 0; y < size.height; y++) if (pixels[y * (row + 1)] > 4) return "That PNG's image data is damaged.";
+      // Every row of every pass starts with one of the five filter types.
+      let at = 0;
+      for (const r of rows) for (let y = 0; y < r.count; y++, at += r.bytes + 1) if (pixels[at] > 4) return "That PNG's image data is damaged.";
       return fit;
     }
     off = end;
