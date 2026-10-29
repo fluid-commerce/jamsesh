@@ -22,6 +22,7 @@ import type {
   JamEvent,
   Person,
   Platform,
+  RemovedChat,
   Settings,
   Share,
   Stage,
@@ -67,6 +68,7 @@ export class Session {
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
   private waiters = new Map<string, Set<Waiter>>();
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
+  private lockSweep: ReturnType<typeof setInterval> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   onDirective: ((d: Directive) => void) | null = null;
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
@@ -99,7 +101,8 @@ export class Session {
       this.stageRevert.unref?.();
     }
     // A lock whose owner left lets go without anyone asking.
-    setInterval(() => this.sweepLocks(), 30_000).unref?.();
+    this.lockSweep = setInterval(() => this.sweepLocks(), 30_000);
+    this.lockSweep.unref?.();
     bus.resolver = (key) => this.resolve(key);
   }
 
@@ -182,7 +185,7 @@ export class Session {
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),
-      agents: this.agents(),
+      agents: this.agents().map(publicAgent),
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
       directives: this.directives().slice(0, 60),
       artifacts: this.artifacts().slice(0, 120),
@@ -251,7 +254,7 @@ export class Session {
       case "devices":
         return { key, value: this.store.all("devices") };
       case "agents":
-        return { key, value: this.agents() };
+        return { key, value: this.agents().map(publicAgent) };
       case "workstreams":
         return { key, value: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt) };
       case "directives":
@@ -409,6 +412,7 @@ export class Session {
       micOn: fields.micOn ?? cur?.micOn ?? false,
       level: fields.level ?? cur?.level ?? 0,
       lastSeen: Date.now(),
+      pairedId: fields.pairedId ?? cur?.pairedId,
     };
     const changed = !cur || cur.label !== d.label || cur.personId !== d.personId || cur.micOn !== d.micOn || cur.kind !== d.kind || cur.location !== d.location;
     this.store.put("devices", d, changed);
@@ -468,7 +472,8 @@ export class Session {
     // record from before chats were told apart), and a chat that doesn't never takes a named chat's.
     const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
-      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness) : undefined) ??
+      // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
+      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
       agents.find((a) => sameChat(a) && a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
@@ -491,7 +496,7 @@ export class Session {
       ownerId: owner?.id ?? null,
       ownerName: owner?.name ?? info.ownerName,
       harness: info.harness,
-      repo: info.repo,
+      repo: (info.role ?? existing?.role) === "observer" ? "" : info.repo,
       branch: info.branch ?? existing?.branch ?? "",
       cwd: info.cwd ?? existing?.cwd ?? "",
       machine: info.machine,
@@ -525,8 +530,9 @@ export class Session {
 
   /**
    * Takes an agent out of the room: it no longer exists to the hub (its tools and hooks stop working
-   * until it joins again), its workstreams are free, and with `purge` everything it caused goes too:
-   * its updates, the prompts forwarded for it, messages to it and its join notices.
+   * until it joins again), its workstreams are free, and with `purge` what it authored goes too: its
+   * events (updates, messages, join notices) and its long documents. Messages others sent it, prompts
+   * its person wrote and its artifacts stay.
    */
   /** Agents the room took out, so a tool call from one says so instead of asking it to join again. */
   readonly removedAgents = new Set<string>();
@@ -537,10 +543,49 @@ export class Session {
     for (const w of this.store.all("workstreams")) if (w.ownerAgentId === id) this.store.put("workstreams", { ...w, ownerAgentId: null, status: "paused", updatedAt: Date.now() });
     this.store.remove("agents", id);
     this.removedAgents.add(id);
+    this.blockRejoin(agent);
+    // Nothing waits on it any more: its share of each open task is cancelled (and the room told which),
+    // what was being handed to it is dropped, and a listener or jam_wait of its ends now.
+    const open = this.directives().filter((d) => d.targets.includes(id) && !["done", "cancelled"].includes(d.progress?.[id] ?? d.status));
+    for (const d of open) this.setDirectiveFor(d.id, id, "cancelled", `${agent.name} was removed from the session`);
+    if (open.length)
+      this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed with ${open.length === 1 ? "an open task" : `${open.length} open tasks`}, now cancelled: ${open.map((d) => `"${d.text.slice(0, 80)}"`).join("; ")}. Ask the room to give ${open.length === 1 ? "it" : "them"} to another agent.`, data: { directiveIds: open.map((d) => d.id) } });
+    this.store.setSetting(`deliveries:${id}`, []);
+    this.wake(id);
     const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
+    if (opts.purge) for (const d of this.store.all("documents")) if (d.authorId === id) this.store.remove("documents", d.id);
     if (ids.length) bus.send({ type: "events-removed", ids });
     if (!opts.purge) this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed from the session.` });
     return { removed: true, events: ids.length };
+  }
+
+  /**
+   * Chats the room removed. Their jam_join is refused until a person lets them back in: "Allow again"
+   * in Settings, or the person saying "connect to jamsesh" in that chat (its hook tells us, from the
+   * same machine). Kept in the session, so a hub restart doesn't let them straight back.
+   */
+  removedChats(): RemovedChat[] {
+    return this.store.setting<RemovedChat[]>("removedChats", []);
+  }
+
+  private blockRejoin(agent: Agent) {
+    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
+    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec].slice(-200));
+  }
+
+  /** The removal that keeps this chat out, if any (by its chat id, or the agent id its connection had). */
+  rejoinBlocked(chatId: string | undefined, agentId: string | null): RemovedChat | undefined {
+    return this.removedChats().find((r) => (!!chatId && r.chatId === chatId) || (!!agentId && r.agentId === agentId));
+  }
+
+  /** Lets a removed chat join again. By chat id, only a removal from the same machine (the chat's own hook asking). */
+  allowRejoin(match: { id?: string; chatId?: string; machine?: string }): boolean {
+    const all = this.removedChats();
+    const gone = all.filter((r) => (match.id ? r.id === match.id : !!match.chatId && r.chatId === match.chatId && r.machine === match.machine));
+    if (!gone.length) return false;
+    for (const r of gone) this.removedAgents.delete(r.agentId);
+    this.store.setSetting("removedChats", all.filter((r) => !gone.includes(r)));
+    return true;
   }
 
   touchAgent(id: string, fields: Partial<Agent> = {}) {
@@ -632,6 +677,8 @@ export class Session {
     const status = kind === "blocked" || kind === "question" ? "blocked" : kind === "done" || kind === "shipped" ? "idle" : "working";
     this.touchAgent(agentId, { status, activity: (kind === "done" || kind === "shipped" ? `Done: ${text}` : text).slice(0, 140) });
     if (kind === "question" || kind === "blocked") bus.send({ type: "toast", tone: "warn", text: `${agent.name} needs the room`, detail: text });
+    const linked = typeof extra.data?.directiveId === "string" ? extra.data.directiveId : "";
+    if (linked) this.noteProgress(linked, agentId);
     this.onUpdate?.(this.agent(agentId)!, kind, text, ev);
     return ev;
   }
@@ -650,6 +697,8 @@ export class Session {
         return { workstream: existing, conflict: owner };
       }
     }
+    // The first claim right after joining is what the join prompt asked for (the chat's prompt was ignored before it joined).
+    const firstAfterJoin = !!agent && Date.now() - agent.joinedAt < ASKED_WINDOW_MS && !this.store.all("workstreams").some((w) => w.ownerAgentId === agentId);
     const ws: Workstream = existing
       ? { ...existing, ownerAgentId: agentId, status: "active", updatedAt: Date.now() }
       : { id: newId("w"), title: t, ownerAgentId: agentId, status: "active", brief: "", updatedAt: Date.now() };
@@ -657,7 +706,7 @@ export class Session {
     this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
       // Work nobody asked for (no open task, no prompt from its person lately) is announced as such.
-      const onItsOwn = !!existing && existing.ownerAgentId === agentId && existing.status === "active" ? false : this.startedOnItsOwn(agent);
+      const onItsOwn = !!existing && existing.ownerAgentId === agentId && existing.status === "active" ? false : !firstAfterJoin && this.startedOnItsOwn(agent);
       this.store.addEvent({
         kind: "system",
         authorType: "agent",
@@ -714,7 +763,7 @@ export class Session {
         const nudged = nudgeAt && nudgeAt > this.lastSign(d, t) ? nudgeAt : undefined; // an answer to the nudge starts the clock again
         // An agent that's gone can't answer a nudge: the room is offered the reassignment right away.
         if (agent.status === "offline" || (nudged && now - nudged >= TASK_OFFER_MS)) {
-          if (!d.reassignOfferedAt) this.offerReassign(d, agent, now);
+          if (!d.reassignOfferedAt?.[t]) this.offerReassign(d, agent, now);
         } else if (!nudged) {
           this.store.patch("directives", d.id, { nudgedAt: { ...(d.nudgedAt ?? {}), [t]: now } });
           this.store.addEvent({
@@ -736,25 +785,37 @@ export class Session {
     return this.directives().filter((d) => d.status !== "done" && d.status !== "cancelled");
   }
 
-  /** The last time anything moved on this task for this agent: when it reached the agent, was acked, or the agent reported since. */
+  /** The last time anything moved on this task for this agent: when it reached the agent, was acked, or the agent reported on it. */
   private lastSign(d: Directive, agentId: string) {
-    const acked = (d.progress?.[agentId] ?? d.status) === "acked";
-    const last = this.store.recentEvents({ kinds: ["update"], limit: 200 }).filter((e) => e.authorId === agentId).pop();
-    return Math.max(d.ts, d.deliveredAt ?? 0, acked ? d.updatedAt : 0, last && last.ts > d.ts ? last.ts : 0);
+    return Math.max(d.ts, d.signs?.[agentId] ?? 0);
+  }
+
+  /** This agent showed progress on this task: the clock starts again and a standing reassignment offer goes. */
+  noteProgress(directiveId: string, agentId: string, at = Date.now()) {
+    const d = this.store.get("directives", directiveId);
+    if (!d || !d.targets.includes(agentId)) return;
+    const { [agentId]: _offer, ...offers } = d.reassignOfferedAt ?? {};
+    this.store.patch("directives", directiveId, { signs: { ...(d.signs ?? {}), [agentId]: at }, reassignOfferedAt: offers });
   }
 
   private offerReassign(d: Directive, agent: Agent, now: number) {
-    const mins = Math.round((now - d.ts) / 60_000);
-    this.store.patch("directives", d.id, { reassignOfferedAt: now });
-    this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${agent.name} hasn't reported on "${d.text.slice(0, 100)}" in ${mins} minutes. Reassign it from the agent's tile.`, data: { directiveId: d.id, reassignOffer: true } });
+    const mins = Math.round((now - this.lastSign(d, agent.id)) / 60_000);
+    this.store.patch("directives", d.id, { reassignOfferedAt: { ...(d.reassignOfferedAt ?? {}), [agent.id]: now } });
+    this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${agent.name} hasn't reported on "${d.text.slice(0, 100)}" in ${mins} minutes. Reassign it from the agent's tile.`, data: { directiveId: d.id, agentId: agent.id, reassignOffer: true } });
     bus.send({ type: "toast", tone: "warn", text: `${agent.name} is quiet on a task`, detail: `${mins} minutes on "${d.text.slice(0, 80)}". Reassign it from its tile.` });
   }
 
-  /** Moves a stalled task to another worker (the best match for it, or `to`); the old target is released. */
-  reassignDirective(id: string, by: string, to?: string): Directive | undefined {
+  /**
+   * Moves a stalled task to another worker (the best match for it, or `to`). Only `target` is released
+   * (default: the targets the room was offered a reassignment for, else every unfinished one); the other targets keep working.
+   */
+  reassignDirective(id: string, by: string, to?: string, target?: string): Directive | undefined {
     const d = this.store.get("directives", id);
     if (!d || d.status === "done" || d.status === "cancelled") return undefined;
-    const from = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
+    const open = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
+    const offered = open.filter((t) => d.reassignOfferedAt?.[t]);
+    const from = target ? open.filter((t) => t === target) : offered.length ? offered : open;
+    if (!from.length) return undefined;
     const taken = new Set(d.targets);
     const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
     const pick = (to ? live.find((a) => a.id === to) : undefined) ?? (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
@@ -766,7 +827,8 @@ export class Session {
       this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
       this.wake(t);
     }
-    this.store.patch("directives", id, { reassignOfferedAt: undefined });
+    const left = this.store.get("directives", id);
+    if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
     return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
   }
 
@@ -843,7 +905,10 @@ export class Session {
   }
 
   setDirective(id: string, fields: Partial<Directive>) {
-    return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
+    const d = this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
+    // A status set on the directive itself (not through one target's progress) is news for every target.
+    if (d && fields.status && !fields.progress) for (const t of d.targets) this.noteProgress(id, t);
+    return d;
   }
 
   /** One agent's progress on a directive; the directive's status follows the slowest target. */
@@ -858,7 +923,9 @@ export class Session {
     const finished = states.every((x) => x === "done" || x === "cancelled");
     const overall = finished ? (states.includes("done") ? "done" : "cancelled") : states.map((x) => order.indexOf(x)).reduce((a, b) => Math.min(a, b)) >= 2 ? "acked" : states.some((x) => x !== "pending") ? "delivered" : "pending";
     const res = result ? [d.result, `${this.agent(agentId)?.name ?? agentId}: ${result}`].filter(Boolean).join("\n") : d.result;
-    return this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+    const out = this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+    this.noteProgress(id, agentId);
+    return out;
   }
 
   /** Directives this agent took but hasn't finished. */
@@ -926,10 +993,17 @@ export class Session {
   /** Decisions the room made (the brain's; agents' own decisions are updates), relevant to this agent's workstream when it has one. */
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
-    return this.store
-      .recentEvents({ kinds: ["decision"], afterId: opts.afterId, limit: opts.limit * 3 })
-      .filter((e) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId)))
-      .slice(-opts.limit);
+    const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
+    // Page back until enough are relevant: other workstreams' decisions can't crowd one out.
+    const out: JamEvent[] = [];
+    let beforeId: number | undefined;
+    for (let pages = 0; out.length < opts.limit && pages < 20; pages++) {
+      const page = this.store.recentEvents({ kinds: ["decision"], afterId: opts.afterId, beforeId, limit: 100 });
+      out.unshift(...page.filter(relevant));
+      if (page.length < 100) break;
+      beforeId = page[0].id;
+    }
+    return out.slice(-opts.limit);
   }
 
   sendMessage(fromAgentId: string, to: string, text: string, data: Record<string, any> = {}) {
@@ -1126,13 +1200,15 @@ export class Session {
   startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string): Share {
     const device = this.store.get("devices", deviceId);
     const person = this.person(device?.personId);
-    const existing = shareId ? this.store.get("shares", shareId) : undefined;
+    // An id is this device's own share, or a request made to its person; any other id starts a new share.
+    const found = shareId ? this.store.get("shares", shareId) : undefined;
+    const existing = found && (found.deviceId === deviceId ? found.status !== "requested" || found.personId === (person?.id ?? null) : found.status === "requested" && !!person && found.personId === person.id) ? found : undefined;
     const id = existing?.id ?? newId("sh");
-    // One share of a kind per device: an earlier one from this device is replaced, and requests for
-    // the same thing that are still waiting are answered by this share.
+    // One share of a kind per person (per device for a device nobody claimed): an earlier one, from
+    // this window or another, is replaced, and requests for the same thing still waiting are answered.
     for (const old of this.shares()) {
       if (old.id === id || old.kind !== kind) continue;
-      if (old.status === "live" && old.deviceId === deviceId) {
+      if (old.status === "live" && (old.deviceId === deviceId || (person && old.personId === person.id))) {
         this.endShare(old.id);
         bus.send({ type: "share-ended", shareId: old.id, deviceId: old.deviceId, text: "" });
       } else if (old.status === "requested" && person && old.personId === person.id) this.endShare(old.id);
@@ -1177,6 +1253,7 @@ export class Session {
     const sh = this.store.get("shares", id);
     if (!sh) return;
     this.store.put("shares", { ...sh, status });
+    this.sharesShown.delete(id);
     const before = this.beforeShare.get(id);
     this.beforeShare.delete(id);
     const hosts = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
@@ -1194,7 +1271,7 @@ export class Session {
   // ---- shares that left the big screen ----
 
   private shareSweep: ReturnType<typeof setTimeout> | null = null;
-  /** Shares a host screen has shown at some point, so the sharer hears why theirs stopped. */
+  /** Shares a host screen has shown at some point: they had their placement, and the sharer hears why theirs stopped. */
   private sharesShown = new Set<string>();
   /** Long enough for the brain to place a brand-new share before it counts as "not on screen". */
   static SHARE_PLACE_MS = 60_000;
@@ -1223,6 +1300,11 @@ export class Session {
     this.shareSweep.unref?.();
   }
 
+  /** Every stage change: a share any host screen shows now has been placed, however briefly. */
+  private noteSharesShown() {
+    for (const id of this.shownShareIds()) this.sharesShown.add(id);
+  }
+
   sweepShares() {
     this.shareSweep = null;
     const shown = this.shownShareIds();
@@ -1230,14 +1312,14 @@ export class Session {
     let recheck = 0;
     for (const sh of this.shares()) {
       if (sh.status !== "live" || shown.has(sh.id)) continue;
-      const young = Session.SHARE_PLACE_MS - (Date.now() - sh.startedAt);
+      // Only a share that was never shown gets the placement window; one taken down had its grace already.
+      const young = this.sharesShown.has(sh.id) ? 0 : Session.SHARE_PLACE_MS - (Date.now() - sh.startedAt);
       if (young > 0) {
         recheck = Math.max(recheck, young);
         continue;
       }
-      this.endShare(sh.id);
       const text = this.sharesShown.has(sh.id) ? `Your ${sh.kind} left the big screen, so sharing stopped.` : `Your ${sh.kind} wasn't put on the big screen, so sharing stopped.`;
-      this.sharesShown.delete(sh.id);
+      this.endShare(sh.id);
       bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text });
     }
     if (recheck) this.scheduleShareSweep(recheck + 50);
@@ -1322,6 +1404,13 @@ export class Session {
   }
 
   private screenReverts = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** The hub is stopping: no timer of this session touches its store again (it may be closed or deleted next). */
+  stop() {
+    for (const t of [this.lockSweep, this.stageRevert, this.shareSweep, ...this.screenReverts.values()]) if (t) clearTimeout(t);
+    this.screenReverts.clear();
+    this.lockSweep = this.stageRevert = this.shareSweep = null;
+  }
 
   /** A big-screen window reported its size; windows that stop reporting drop off after 3 minutes. */
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
@@ -1448,6 +1537,7 @@ export class Session {
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
+      this.noteSharesShown();
       this.scheduleShareSweep();
       clearTimeout(this.screenReverts.get(screen));
       if (this.revertsToBoard(stage))
@@ -1456,6 +1546,7 @@ export class Session {
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
+    this.noteSharesShown();
     this.scheduleShareSweep();
     if (this.bigScreens.size > 1) bus.changed("screens");
     if (this.stageRevert) clearTimeout(this.stageRevert);
@@ -1670,6 +1761,13 @@ export function publicEvent(e: JamEvent): JamEvent {
   if (!e.data?.embedding) return e;
   const { embedding: _drop, ...data } = e.data;
   return { ...e, data };
+}
+
+/** An agent as the room sees it: its chat id is a transport handle (Claude Code's session id, an MCP session), never shown. */
+export function publicAgent(a: Agent): Agent {
+  if (!a.chatId) return a;
+  const { chatId: _drop, ...rest } = a;
+  return rest;
 }
 
 /** A folder as a person would say it: the home folder is ~. */

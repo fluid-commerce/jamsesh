@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
 // fails, instead of leaving a blank document up. It also loads fonts from the person's own Mac.
 import { expect, test } from "bun:test";
-import { friendlyReason, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
+import { friendlyReason, JoinWatch, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -78,4 +78,33 @@ test("in a browser there's no Mac to ask: the missing families are only listed",
   const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
   expect(await loadLocalFonts(fc, null, new Set())).toEqual(["Helvetica Neue"]);
   expect(loaded).toEqual([]);
+});
+
+test("a hung or failing collab.peers becomes a failed join, one read at a time", async () => {
+  let calls = 0;
+  let mode: "hang" | "reject" | "live" = "hang";
+  const fc = {
+    execute: (cmd: string) => {
+      expect(cmd).toBe("collab.peers");
+      calls++;
+      if (mode === "hang") return new Promise<any>(() => {});
+      if (mode === "reject") return Promise.reject(new Error("canvas gone"));
+      return Promise.resolve({ status: "live" });
+    },
+  };
+  const watch = new JoinWatch(20);
+  // Polls while one is still hanging don't start another.
+  const first = watch.poll(fc);
+  expect(await watch.poll(fc)).toBeNull();
+  expect(await watch.poll(fc)).toBeNull();
+  expect(calls).toBe(1);
+  expect(await first).toBeNull(); // one miss is a blip
+  expect(await watch.poll(fc)).toEqual({ state: "failed", reason: "The canvas stopped answering." });
+  // A rejection counts the same; an answer resets the count.
+  mode = "live";
+  expect(await watch.poll(fc)).toEqual({ state: "live" });
+  mode = "reject";
+  expect(await watch.poll(fc)).toBeNull();
+  expect((await watch.poll(fc))?.state).toBe("failed");
+  expect(calls).toBe(5);
 });

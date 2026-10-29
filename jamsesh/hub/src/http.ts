@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -399,6 +399,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
+  /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
+  const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
 
@@ -430,17 +433,25 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    // A browser becomes the person it first says it is; after that a request can't make it someone else
-    // (only a person who was removed frees it to pick again). Owner-only answers rest on this.
-    if (paired?.kind === "browser" && body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId)))
-      hub.auth.update(paired.id, { personId: String(body.personId) });
+    const cur = s.store.get("devices", String(body.deviceId));
+    // The first window to register a device owns it until that pairing is gone. Only it, or the host's
+    // own window, changes whose it is: another window can't take it over or speak and share as it.
+    const owner = cur?.pairedId && (cur.pairedId === "host" || hub.auth.live(cur.pairedId)) ? cur.pairedId : (caller ?? undefined);
+    if (owner && owner !== caller && !hostWindow) return bad("That device belongs to another window.", 403);
+    if (paired?.kind === "browser") {
+      // So this is the browser's own device. The browser becomes the person it first says it is; after that a
+      // request can't make it someone else (only a person who was removed frees it to pick again), and its
+      // devices are that person's. Owner-only answers rest on this.
+      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) hub.auth.update(paired.id, { personId: String(body.personId) });
+      if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
+    }
     // The person using the host's own window: agents on the host Mac work for them.
-    if (hostWindow && body.kind !== "host" && body.personId) {
+    if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
-    const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
-    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
+    const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
+    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location, pairedId: owner }));
   }
 
   if (path === "/audio" && req.method === "POST") {
@@ -589,6 +600,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const r = s.removeAgent(rm[1], { purge: !!body?.purge });
     return r.removed ? json(r) : bad("no such agent", 404);
   }
+  // Chats the room removed (kept out of jam_join), and letting one back in: people only.
+  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : json(s.removedChats().map(({ id, name, ownerName, at }) => ({ id, name, ownerName, at })));
+  const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
+  if (rc && req.method === "POST") return s.allowRejoin({ id: rc[1] }) ? json({ ok: true }) : bad("No removed chat with that id.", 404);
 
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
@@ -601,7 +616,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
   m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
   if (m && req.method === "POST") {
-    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined);
+    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
   }
 
@@ -620,12 +635,36 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
 
-  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/joined" && req.method === "POST") return json({ joined: hub.chatJoined(body) });
-  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/tool" && req.method === "POST") return json(hub.onTool(body, ip, hub.auth.machineOf(paired?.id)));
-  // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
-  if (path === "/hooks/listen" && req.method === "POST") return new Response(await hub.onListen(body, ip, hub.auth.machineOf(paired?.id)), { headers: { "content-type": "text/plain; charset=utf-8" } });
+  // Claude Code's hooks. They speak for an agent, so only an agent's credential sends them, or the
+  // host's own loopback, which is the host's agents (the app's relay hands any process there that
+  // credential anyway; relayed requests never count as loopback). A hook only reaches a chat that
+  // joined from the same machine as its credential, so no other device can read or drain its inbox
+  // or post prompts as its person.
+  const hook = path.match(/^\/hooks\/(prompt|joined|stop|tool|listen)$/)?.[1];
+  if (hook && req.method === "POST") {
+    if (paired && paired.kind !== "agent") return bad("Hooks are for agents' credentials.", 403);
+    const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
+    if (!machine) return bad("This device isn't paired with this JamSesh host.", 401);
+    const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine) });
+    // What the hook script passed on to the agent since its last call (see Hub.offer).
+    const promptId = req.headers.get("x-jam-prompt-id") ?? "";
+    if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;
+    b.jamAcks = (req.headers.get("x-jam-ack") ?? "").split(",").map((x) => x.trim()).filter((x) => /^[\w-]{1,40}$/.test(x)).slice(0, 50);
+    // A chat that isn't (or is no longer) in the room: the script stops sending for it.
+    const joined = !!hub.hookAgent(b, ip, machine);
+    const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
+    if (hook === "listen") {
+      // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
+      const r = joined ? await hub.listen(b, ip, machine) : { text: "", delivery: null };
+      if (r.delivery) headers["x-jam-delivery"] = r.delivery;
+      return new Response(r.text, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+    }
+    const out: any = !joined ? {} : hook === "prompt" ? hub.onPrompt(b, ip, machine) : hook === "tool" ? hub.onTool(b, ip, machine) : hub.onStop(b, ip, machine);
+    const { jamDelivery, ...rest } = out;
+    if (jamDelivery) headers["x-jam-delivery"] = jamDelivery;
+    return Response.json(rest, { headers });
+  }
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");
@@ -657,9 +696,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // ---- shares (screens and cameras) ----
+  // Every share call acts for the window that made it: a share starts from that window's own
+  // device and ends or is declined only by it (or, for a request, by the person asked). The host's
+  // own window is the one separate authority: it can end or decline any share in its room.
   if (path === "/shares" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", body.shareId, body.label);
+    if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
+    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
     hub.brain.placeShare(share);
     return json(share);
   }
@@ -671,7 +714,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
   m = path.match(/^\/shares\/([\w-]+)(\/decline)?$/);
   if (m && (req.method === "DELETE" || (req.method === "POST" && m[2]))) {
-    s.endShare(m[1], m[2] ? "declined" : "ended");
+    const sh = s.store.get("shares", m[1]);
+    if (!sh) return json({ ok: true }); // already gone: a repeated call
+    const decline = !!m[2] && sh.status === "requested";
+    const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
+    const asked = decline && !!paired?.personId && sh.personId === paired.personId;
+    if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
+    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended");
     return json({ ok: true });
   }
 

@@ -169,9 +169,8 @@ Ask a person to open, save or share files.
 5. Post the screenshot so the room sees mockup and build together:
 
    ```sh
-   . ~/.jamsesh/client.env
    curl -s -F file=@build.png -F title="Mobile nav / B: bottom tabs (built)" -F stage=built \
-     -F agent=<your agent id> -H "authorization: Bearer $JAMSESH_TOKEN" "{{HUB}}/api/upload"
+     -F agent=<your agent id> -H @"$HOME/.jamsesh/auth.header" "{{HUB}}/api/upload"
    ```
 
    Title it like the mockup it matches, with "(built)", so the screen can pair them. Posting your
@@ -202,8 +201,10 @@ Use `jam_devserver` instead for anything that runs in a browser.
 ## Across repositories
 
 The same feature often lands in more than one repository (desktop and mobile). When you ship a
-change that applies elsewhere, say so in your `shipped` update. The room brain sends the other
-agent a `coordinate` directive. (That needs the brain online. If it's not, `jam_message` the
+user-visible change that applies elsewhere, say so in your `shipped` update. The room brain sends
+the other platforms' agents a `coordinate` directive. If the change is deliberately for your
+platform only, pass `platformSpecific: true`; commits, refactors, fixes and tooling never
+coordinate. (That needs the brain online. If it's not, `jam_message` the
 other agent yourself.) When you get one:
 
 1. `jam_message` the other agent: what you each have, what the shared behavior is, and what has

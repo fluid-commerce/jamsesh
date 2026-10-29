@@ -596,3 +596,17 @@ test("a named lock with no window of its owner's on record lets go after the gra
   expect(s.stage().lock).toBeUndefined();
   expect(s.stage().mode).toBe("spotlight");
 });
+
+test("a stopped hub's screen timers stop too: none of them touches its store after it closes", () => {
+  const { hub, s, chey } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const timers = () => [(s as any).lockSweep, (s as any).stageRevert, (s as any).shareSweep, ...(s as any).screenReverts.values()].filter(Boolean);
+  expect(timers().length).toBeGreaterThan(0);
+  hub.stop();
+  expect(timers()).toEqual([]);
+});
