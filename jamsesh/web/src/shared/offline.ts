@@ -277,11 +277,18 @@ export class Outbox {
       this.again = true;
       return;
     }
-    await this.load();
+    // Claimed before the first await: two calls that both saw `flushing` false would otherwise run
+    // two loops over the same entries (each sent twice).
     this.flushing = true;
-    this.publish();
     try {
+      await this.load();
+      this.publish();
+      let rerun = false;
       do {
+        // Anything that re-arms `again` every pass (a store listener that calls flush) must not
+        // turn this into a loop of back-to-back microtasks: give timers and painting a turn first.
+        if (rerun) await new Promise<void>((r) => setTimeout(r, 0));
+        rerun = true;
         this.again = false;
         await this.prune();
         if (this.d.canSend && !(await Promise.resolve(this.d.canSend()).catch(() => false))) {

@@ -142,6 +142,42 @@ describe("outbox", () => {
   });
 });
 
+describe("outbox flush loop", () => {
+  test("two flushes started together send each call once", async () => {
+    await idbTable<OutboxEntry>("outbox").add({ idem: "a", method: "POST", path: "/say", body: {}, createdAt: Date.now(), serverFails: 0, hostId: "" });
+    const sent: string[] = [];
+    // A fresh page: nothing loaded yet when a kick and a timer both flush.
+    const { ob } = make(async (e) => {
+      sent.push(e.idem);
+      await settle();
+      return { kind: "ok" };
+    });
+    await Promise.all([ob.flush(), ob.flush()]);
+    expect(sent).toEqual(["a"]);
+    expect(ob.get().synced).toBe(1);
+  });
+
+  test("a flush that something re-arms on every pass still lets timers run", async () => {
+    let passes = 0;
+    let timerRan = false;
+    const holder: { ob?: Outbox } = {};
+    const { ob } = make(async () => ({ kind: "ok" }), {
+      // Stands in for a store listener that calls flush() each time the outbox changes.
+      canSend: () => {
+        passes++;
+        if (!timerRan && passes < 5000) void holder.ob?.flush();
+        return true;
+      },
+    });
+    holder.ob = ob;
+    setTimeout(() => (timerRan = true), 0);
+    await ob.flush();
+    // Back-to-back microtask passes never reach the timer: the loop would run all 5000 first.
+    expect(timerRan).toBe(true);
+    expect(passes).toBeLessThan(5000);
+  });
+});
+
 describe("audio buffer", () => {
   const seg = (t0: number, secs = 2): AudioSeg => ({ deviceId: "d1", t0, t1: t0 + secs * 1000, level: -30, noise: -60, wav: wav(secs) });
 
