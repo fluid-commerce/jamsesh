@@ -623,10 +623,10 @@ fn on_menu(app: &AppHandle, id: &str) {
     let id = id.to_string();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<Arc<App>>().inner().clone();
-        let (role, hub_origin, relay, userless, lobby) = {
+        let (role, hub_origin, relay, lobby) = {
             let inner = state.inner.lock().await;
             let relay = inner.relay.as_ref().map(|r| r.window_url("/client"));
-            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.cfg.userless, inner.lobby)
+            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.lobby)
         };
         match id.as_str() {
             "open" => match (role.as_deref(), hub_origin, relay) {

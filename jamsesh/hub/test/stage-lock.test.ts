@@ -501,3 +501,23 @@ test("the people-only stage routes refuse an agent, a caller that isn't the host
     server.stop(true);
   }
 });
+
+test("locks, the queue and history are per screen: a lock on main doesn't hold the other display", async () => {
+  const { s, chey, tools, said, felipe } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  expect(s.lockOf("screen-2")).toBeNull();
+  expect(await tools([said(felipe, "show it on the right")]).show_on_screen.execute({ mode: "agents", screen: "screen-2" })).toBe("On screen.");
+  expect(s.stage("screen-2").mode).toBe("agents");
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Locking the second display holds only it; its queue and history are its own.
+  s.setStage({ mode: "spotlight", items: [a.id], title: "Right" }, "Felipe", "screen-2", { person: { id: felipe.id, name: "Felipe" } });
+  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2").title).toBe("Right");
+  s.queueReady({ screen: "screen-2", agentId: "x", agentName: "Agent", label: "For the right", stage: { mode: "agents" } });
+  expect(s.readyToShow().map((r) => r.screen)).toEqual(["screen-2"]);
+  expect(s.stageHistory()["screen-2"].map((e) => e.by)).toEqual(["Felipe", "Room brain"]);
+  expect(s.stageHistory().main.map((e) => e.by)).toEqual(["Chey"]);
+});

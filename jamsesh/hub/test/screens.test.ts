@@ -72,6 +72,8 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     expect(s.stage().title).toBe("nowhere");
     expect(s.stage("screen-2").title).toBe("to the right");
     // The brain: "put it on the left TV".
+    s.unlockStage(); // Maya's casts above locked the screens she cast to
+    s.unlockStage("screen-2");
     const tools = hub.brain.tools([], { effects: 0 });
     await (tools as any).show_on_screen.execute({ mode: "agents", screen: "the Left TV" }, { toolCallId: "t", messages: [] });
     expect(s.stage().mode).toBe("agents");
