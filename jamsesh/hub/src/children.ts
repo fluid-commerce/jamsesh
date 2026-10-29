@@ -12,7 +12,10 @@ export function withParentWatch(cmd: string[], parentPid = process.pid, graceMs 
   const ticks = Math.max(1, Math.round(graceMs / 100));
   const script = [
     'parent=$1; shift',
-    '"$@" <&0 &', // a backgrounded command would otherwise lose stdin (the MCP child reads it)
+    // A backgrounded command would otherwise lose stdin (the MCP child reads it). dash (Linux /bin/sh)
+    // swaps in /dev/null before applying `<&0`, so stdin is held on fd 3 first and handed over from there.
+    "exec 3<&0",
+    '"$@" <&3 3<&- &',
     "child=$!",
     // TERM first; a helper that ignores it gets KILL after the grace, so nothing the wrapper stops outlives it.
     `stop() { kill $child 2>/dev/null; i=0; while kill -0 $child 2>/dev/null && [ $i -lt ${ticks} ]; do sleep 0.1; i=$((i+1)); done; kill -0 $child 2>/dev/null && kill -9 $child 2>/dev/null; wait $child 2>/dev/null; }`,
@@ -46,14 +49,16 @@ type Helper = { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS
  */
 export class HelperRegistry {
   private procs = new Set<Helper>();
+  private closed = false;
 
-  /** Registers a spawned helper (started with withParentWatch) until it exits. */
+  /** Registers a spawned helper (started with withParentWatch) until it exits. One started after stopAll is stopped at once. */
   track<P extends Helper>(proc: P): P {
     this.procs.add(proc);
     proc.exited.then(
       () => this.procs.delete(proc),
       () => this.procs.delete(proc),
     );
+    if (this.closed) void stopHelper(proc).catch(() => false);
     return proc;
   }
 
@@ -61,9 +66,19 @@ export class HelperRegistry {
     return this.procs.size;
   }
 
-  /** Stops every tracked helper (TERM, then KILL). True only when each one's exit was observed. */
+  /**
+   * Stops every tracked helper (TERM, then KILL), including any tracked while this runs, and closes
+   * the registry. True only when each one's exit was observed.
+   */
   async stopAll(graceMs?: number): Promise<boolean> {
-    const all = await Promise.all([...this.procs].map((p) => stopHelper(p, graceMs).catch(() => false)));
-    return all.every(Boolean);
+    this.closed = true;
+    const done = new Set<Helper>();
+    let ok = true;
+    for (let batch = [...this.procs]; batch.length; batch = [...this.procs].filter((p) => !done.has(p))) {
+      for (const p of batch) done.add(p);
+      const all = await Promise.all(batch.map((p) => stopHelper(p, graceMs).catch(() => false)));
+      ok = all.every(Boolean) && ok;
+    }
+    return ok;
   }
 }

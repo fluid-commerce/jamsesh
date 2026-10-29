@@ -2,7 +2,7 @@
 // canvas server again when it stops (it crashed, or something killed it).
 import { expect, test } from "bun:test";
 import { Canvas } from "../src/canvas/canvas";
-import { withParentWatch } from "../src/children";
+import { HelperRegistry, withParentWatch } from "../src/children";
 
 test("each announcement of the canvas is a new generation, so people's canvases fetch their link again", () => {
   const session = {
@@ -127,7 +127,7 @@ test("stop() clears the watchdog and the reaper", () => {
   try {
     const a = setInterval(() => {}, 60_000);
     const b = setInterval(() => {}, 30_000);
-    const canvas: any = { poller: null, timers: [a, b], agents: new Map(), host: null, serverProc: null };
+    const canvas: any = { poller: null, timers: [a, b], agents: new Map(), host: null, serverProc: null, helpers: new HelperRegistry(), halt: (Canvas.prototype as any).halt };
     (Canvas.prototype as any).stop.call(canvas);
     expect(cleared).toEqual([a, b]);
     expect(canvas.stopped).toBe(true);
@@ -197,8 +197,8 @@ test("the watchdog makes a failed canvas live again once the server answers and 
 function startable(steps: { server?: () => Promise<void>; host?: () => Promise<void> }) {
   const log: string[] = [];
   const session = { canvas: { status: "off" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; } };
-  const canvas: any = { session, stopped: false, startFailures: 0, startRetry: null, timers: [], poller: null, agents: new Map(), host: null, serverProc: null };
-  for (const k of ["start", "stop", "checkRunning"]) canvas[k] = (Canvas.prototype as any)[k];
+  const canvas: any = { session, stopped: false, startFailures: 0, startRetry: null, timers: [], poller: null, agents: new Map(), host: null, serverProc: null, helpers: new HelperRegistry() };
+  for (const k of ["start", "stop", "halt", "checkRunning"]) canvas[k] = (Canvas.prototype as any)[k];
   canvas.poll = () => {};
   canvas.reapIdleAgents = () => {};
   canvas.watchdog = async () => {};
@@ -414,7 +414,11 @@ for await (const chunk of Bun.stdin.stream()) {
   mkdirSync(join(dir, "files"));
   return { dir, bin, pidFile: join(dir, "pid") };
 }
-const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** Running: a killed process its new parent hasn't reaped yet (a zombie) holds nothing and counts as gone. */
+const isAlive = (pid: number) => {
+  try { process.kill(pid, 0); } catch { return false; }
+  return !Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)]).stdout.toString().trim().startsWith("Z");
+};
 async function waitFor(fn: () => boolean, ms = 8000) {
   const end = Date.now() + ms;
   while (Date.now() < end && !fn()) await Bun.sleep(50);
@@ -496,7 +500,7 @@ test("Stop reaps a canvas server that ignores SIGTERM, and a key helper still ru
   const canvas: any = new Canvas(session);
   try {
     const key = canvas.serverKey().catch((e: Error) => e);
-    canvas.serverProc = Bun.spawn(withParentWatch([bin, "--listen", "127.0.0.1:1"]), { stdout: "ignore", stderr: "ignore" });
+    canvas.serverProc = canvas.helpers.track(Bun.spawn(withParentWatch([bin, "--listen", "127.0.0.1:1"]), { stdout: "ignore", stderr: "ignore" }));
     expect(await waitFor(() => existsSync(join(dir, "key.pid")) && existsSync(join(dir, "serve.pid")))).toBe(true);
     const pids = ["key", "serve"].map((m) => Number(readFileSync(join(dir, `${m}.pid`), "utf8").trim()));
     expect(pids.every(isAlive)).toBe(true);
@@ -509,3 +513,24 @@ test("Stop reaps a canvas server that ignores SIGTERM, and a key helper still ru
     rmSync(dir, { recursive: true, force: true });
   }
 }, 40_000);
+
+test("a failed start whose helper didn't exit says so in the canvas status, and is still retried", async () => {
+  const was = Canvas.START_RETRY_MS;
+  Canvas.START_RETRY_MS = 60_000;
+  try {
+    const { canvas, session, log } = startable({ host: async () => { throw new Error("figcraft-cli exited"); } });
+    canvas.startHost = async () => {
+      log.push("host");
+      canvas.host = { alive: true, close: async () => (log.push("host closed"), false) }; // its exit was never seen
+      throw new Error("figcraft-cli exited");
+    };
+    await canvas.start();
+    expect(log).toEqual(["server", "host", "host closed", "server stopped"]);
+    expect(session.canvas.status).toBe("failed");
+    expect(session.canvas.reason).toBe("figcraft-cli exited (a helper from that start is still running)");
+    expect(canvas.startRetry).not.toBeNull();
+    canvas.halt();
+  } finally {
+    Canvas.START_RETRY_MS = was;
+  }
+});

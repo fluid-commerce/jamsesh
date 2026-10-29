@@ -118,12 +118,14 @@ export class Canvas {
       // Nothing half-started stays behind: the host participant and the server this start spawned stop.
       // (Each is awaited to its observed exit before its reference is dropped; the registry still holds any that didn't.)
       const host = this.host;
-      if (host) await host.close();
+      const hostGone = host ? await Promise.resolve(host.close()).catch(() => false) : true;
       this.host = null;
-      if (this.serverProc) await stopHelper(this.serverProc).catch(() => false);
+      const serverGone = this.serverProc ? await stopHelper(this.serverProc).catch(() => false) : true;
       this.serverProc = null;
       if (this.stopped) return; // stopped mid-start: cleaned up, nothing to report or retry
-      this.session.setCanvas({ status: "failed", reason });
+      const stuck = hostGone === false || !serverGone;
+      if (stuck) console.warn("canvas: a helper from the failed start is still running; the retry picks a free port");
+      this.session.setCanvas({ status: "failed", reason: stuck ? `${reason} (a helper from that start is still running)` : reason });
       if (this.stopped || ++this.startFailures > Canvas.START_RETRIES) return;
       const wait = Math.min(5 * 60_000, Canvas.START_RETRY_MS * 2 ** (this.startFailures - 1));
       this.startRetry = setTimeout(() => void this.start(), wait);
