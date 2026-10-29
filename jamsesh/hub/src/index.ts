@@ -105,10 +105,12 @@ const shutdown = async () => {
   stopping = true;
   console.log("Saving the session…");
   stopAdvertising();
-  await hub.shutdown();
+  const complete = await hub.shutdown();
   secure?.stop(true);
   server.stop(true);
-  process.exit(0);
+  // 0: everything was saved. 3: a save failed or ran out of time (the Mac app says the save is incomplete).
+  if (!complete) console.error("The session's final save didn't finish.");
+  process.exit(complete ? 0 : 3);
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

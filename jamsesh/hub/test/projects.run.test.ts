@@ -91,8 +91,30 @@ test("a hub opened on a project keeps its session there, resumes it, and records
   const third = await start(home, { JAMSESH_PROJECT: slug, JAMSESH_NEW_SESSION: "1" });
   expect(listProjects(home)[0].sessions).toBe(2);
   third.proc.kill("SIGTERM");
-  await third.proc.exited;
+  // Exit 0 is the hub saying its final save finished (the Mac app waits for it before opening another project).
+  expect(await third.proc.exited).toBe(0);
 }, 60_000);
+
+test("shutdown says whether the final save finished: a save that hangs or fails is reported, not passed off as done", async () => {
+  const { Hub } = await import("../src/hub");
+  const dir = mkdtempSync(join(tmpdir(), "jam-shutdown-"));
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+  const budget = Hub.SHUTDOWN_MS;
+  Hub.SHUTDOWN_MS = { snapshot: 200, thumbnail: 200, network: 200 };
+  cleanup.push(() => void (Hub.SHUTDOWN_MS = budget));
+  const make = () => new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
+  expect(await make().shutdown()).toBe(true);
+  const hung = make();
+  hung.keeper.save = () => new Promise(() => {});
+  expect(await hung.shutdown()).toBe(false);
+  const failed = make();
+  failed.autosave.save = async () => {
+    throw new Error("disk full");
+  };
+  expect(await failed.shutdown()).toBe(false);
+  // The budget the app's wait is built on: its steps add up to 15 seconds.
+  expect(budget.snapshot + budget.thumbnail + budget.network).toBe(15_000);
+});
 
 function readdirOnly(dir: string) {
   return require("node:fs").readdirSync(dir)[0] as string;

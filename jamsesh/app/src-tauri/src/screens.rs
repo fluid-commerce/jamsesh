@@ -280,11 +280,14 @@ pub fn resolve(ds: &[Display], saved: Option<&Saved>, userless: bool) -> Vec<Scr
         .collect()
 }
 
-/// A big-screen window as it is now, and the display rect it sits on (None when that is unknown).
+/// A big-screen window as it is now: the display rect it sits on, and its own frame (None when unknown).
+/// Full screen in the same Space (`place`) isn't reported back by the OS, so a window is full screen when
+/// its frame covers its whole display, menu bar included.
 #[derive(Clone, Debug)]
 pub struct Existing {
     pub label: String,
     pub on: Option<Rect>,
+    pub frame: Option<Rect>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -295,7 +298,8 @@ pub enum Act {
 }
 
 /// What to do to get from the windows there are to one per screen, each full screen on its own
-/// display. A window already on its display is left alone (no reload).
+/// display. A window already on its display and filling it is left alone (no reload); one on the right
+/// display that was resized or left full screen is put back.
 pub fn plan(screens: &[Screen], existing: &[Existing]) -> Vec<Act> {
     let mut acts = vec![];
     for e in existing {
@@ -306,7 +310,7 @@ pub fn plan(screens: &[Screen], existing: &[Existing]) -> Vec<Act> {
     for s in screens {
         match existing.iter().find(|e| e.label == s.label()) {
             None => acts.push(Act::Open(s.clone())),
-            Some(e) if !e.on.is_some_and(|r| r.near(&s.rect)) => acts.push(Act::Move(s.clone())),
+            Some(e) if !(e.on.is_some_and(|r| r.near(&s.rect)) && e.frame.is_some_and(|r| r.near(&s.rect))) => acts.push(Act::Move(s.clone())),
             Some(_) => {}
         }
     }
@@ -442,6 +446,13 @@ fn window_display(w: &tauri::WebviewWindow) -> Option<Rect> {
     Some(Rect { x: m.position().x as f64 / s, y: m.position().y as f64 / s, w: m.size().width as f64 / s, h: m.size().height as f64 / s })
 }
 
+/// A window's own frame, in points.
+fn window_frame(w: &tauri::WebviewWindow) -> Option<Rect> {
+    let s = w.scale_factor().ok().filter(|s| *s > 0.0)?;
+    let (p, z) = (w.outer_position().ok()?, w.outer_size().ok()?);
+    Some(Rect { x: p.x as f64 / s, y: p.y as f64 / s, w: z.width as f64 / s, h: z.height as f64 / s })
+}
+
 fn place(w: &tauri::WebviewWindow, r: &Rect) {
     let _ = w.set_simple_fullscreen(false);
     let _ = w.set_position(tauri::LogicalPosition::new(r.x, r.y));
@@ -491,7 +502,7 @@ pub async fn arrange(app: &AppHandle, origin: &str) -> Result<Vec<Screen>, Strin
         .webview_windows()
         .into_iter()
         .filter(|(l, _)| l.starts_with("bigscreen"))
-        .map(|(label, w)| Existing { label, on: window_display(&w) })
+        .map(|(label, w)| Existing { label, on: window_display(&w), frame: window_frame(&w) })
         .collect();
     for act in plan(&screens, &existing) {
         match act {
@@ -597,7 +608,8 @@ pub fn closed(app: &AppHandle, label: &str) {
         let origin = app.state::<Arc<App>>().inner.lock().await.hub.as_ref().map(|h| h.origin());
         if let Some(origin) = origin {
             let body = serde_json::json!({ "screen": screen }).to_string();
-            let _ = proxy::send("DELETE", &origin, "/api/display", None, &body).await;
+            // As this app's window: only the host's own windows retire a screen.
+            let _ = proxy::send_as_window("DELETE", &origin, "/api/display", &body).await;
         }
     });
 }
@@ -871,33 +883,51 @@ mod tests {
         // Nothing open: open both.
         assert_eq!(plan(&s, &[]).len(), 2);
         // Both already on their displays: nothing to do.
-        let placed = vec![Existing { label: "bigscreen".into(), on: Some(s[0].rect) }, Existing { label: "bigscreen-2".into(), on: Some(s[1].rect) }];
+        let placed = vec![
+            Existing { label: "bigscreen".into(), on: Some(s[0].rect), frame: Some(s[0].rect) },
+            Existing { label: "bigscreen-2".into(), on: Some(s[1].rect), frame: Some(s[1].rect) },
+        ];
         assert!(plan(&s, &placed).is_empty());
         // The main one drifted onto the laptop: move it back. A leftover window closes.
         let drifted = vec![
-            Existing { label: "bigscreen".into(), on: Some(ds[0].raw.rect) },
-            Existing { label: "bigscreen-2".into(), on: Some(s[1].rect) },
-            Existing { label: "bigscreen-3".into(), on: Some(s[1].rect) },
+            Existing { label: "bigscreen".into(), on: Some(ds[0].raw.rect), frame: Some(ds[0].raw.rect) },
+            Existing { label: "bigscreen-2".into(), on: Some(s[1].rect), frame: Some(s[1].rect) },
+            Existing { label: "bigscreen-3".into(), on: Some(s[1].rect), frame: Some(s[1].rect) },
         ];
         let acts = plan(&s, &drifted);
         assert_eq!(acts.len(), 2);
         assert!(acts.contains(&Act::Close("bigscreen-3".into())));
         assert!(acts.iter().any(|a| matches!(a, Act::Move(m) if m.id == "main")));
         // A window whose display is unknown is put in place.
-        assert_eq!(plan(&s[..1], &[Existing { label: "bigscreen".into(), on: None }]).len(), 1);
+        assert_eq!(plan(&s[..1], &[Existing { label: "bigscreen".into(), on: None, frame: None }]).len(), 1);
+    }
+
+    #[test]
+    fn a_window_resized_or_out_of_full_screen_on_its_own_display_is_put_back() {
+        let ds = displays(vec![laptop(), tv(1512.0, 0.0)]);
+        let s = resolve(&ds, None, false);
+        let at = |frame: Rect| vec![Existing { label: "bigscreen".into(), on: Some(s[0].rect), frame: Some(frame) }];
+        assert!(plan(&s, &at(s[0].rect)).is_empty());
+        // Still on the TV, but someone made it smaller (or it left full screen and has a title bar's worth less).
+        let smaller = Rect { w: 1280.0, h: 720.0, ..s[0].rect };
+        assert!(matches!(&plan(&s, &at(smaller))[..], [Act::Move(m)] if m.id == "main"));
+        let windowed = Rect { y: s[0].rect.y + 38.0, h: s[0].rect.h - 38.0, ..s[0].rect };
+        assert!(matches!(&plan(&s, &at(windowed))[..], [Act::Move(_)]));
+        // Its frame unknown: put in place to be sure.
+        assert_eq!(plan(&s, &[Existing { label: "bigscreen".into(), on: Some(s[0].rect), frame: None }]).len(), 1);
     }
 
     #[test]
     fn a_tv_unplugged_closes_its_window_and_a_new_one_opens() {
         let before = displays(vec![laptop(), tv(1512.0, 0.0), tv(3432.0, 0.0)]);
         let sb = resolve(&before, None, false);
-        let open: Vec<Existing> = sb.iter().map(|s| Existing { label: s.label(), on: Some(s.rect) }).collect();
+        let open: Vec<Existing> = sb.iter().map(|s| Existing { label: s.label(), on: Some(s.rect), frame: Some(s.rect) }).collect();
         let after = displays(vec![laptop(), tv(1512.0, 0.0)]);
         let sa = resolve(&after, None, false);
         let acts = plan(&sa, &open);
         assert_eq!(acts, vec![Act::Close("bigscreen-2".into())]);
         // Plugged back in: it opens again as screen-2.
-        let acts = plan(&sb, &[Existing { label: "bigscreen".into(), on: Some(sb[0].rect) }]);
+        let acts = plan(&sb, &[Existing { label: "bigscreen".into(), on: Some(sb[0].rect), frame: Some(sb[0].rect) }]);
         assert!(matches!(&acts[..], [Act::Open(s)] if s.id == "screen-2"));
     }
 

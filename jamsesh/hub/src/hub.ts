@@ -167,12 +167,20 @@ export class Hub {
     }
   }
 
-  /** Stops, saving a final snapshot first when there is a canvas to save. */
-  async shutdown() {
-    await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
-    await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);
-    await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
+  /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000 };
+
+  /**
+   * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
+   * finished: false when a save failed or ran out of time, which the hub's exit code reports (index.ts).
+   */
+  async shutdown(): Promise<boolean> {
+    const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
+    const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
+    const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
+    const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     this.stop();
+    return saved && kept && closed;
   }
 
   stop() {

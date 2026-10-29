@@ -61,8 +61,6 @@ struct Config {
 struct Inner {
     cfg: Config,
     hub: Option<host::Hub>,
-    /// Counts the hubs this app has started, so a project switch that fails cleans up only its own.
-    hub_gen: u64,
     relay: Option<proxy::Proxy>,
     /// Join mode: the host's dev-server ports, mirrored on this Mac (see `Proxy::mirror`).
     mirrors: std::collections::HashMap<u16, proxy::Proxy>,
@@ -80,7 +78,7 @@ struct App {
     dir: PathBuf,
     /// Heartbeats from the windows' pages (see watchdog.rs).
     beats: Arc<std::sync::Mutex<watchdog::Beats>>,
-    /// Held for the whole of a change of session (hosting, a project switch, joining), so two never overlap.
+    /// Held for the whole of a change of session (hosting, a project switch, joining, leaving), so two never overlap.
     switching: Mutex<()>,
 }
 
@@ -176,7 +174,6 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
     let origin = hub.origin();
     let port = hub.port;
     inner.hub = Some(hub);
-    inner.hub_gen += 1;
     // Hosting begins at the Projects picker: one window, no session until a project is chosen.
     if let Launch::Lobby { new_project } = launch {
         inner.cfg.lobby = true;
@@ -383,7 +380,14 @@ fn open_setup(app: &AppHandle) {
         .build();
 }
 
+/// Stop hosting or leave: waits its turn behind any project switch, hosting or joining under way.
 async fn leave(app: &AppHandle, state: &App) {
+    let _turn = state.switching.lock().await;
+    leave_now(app, state).await;
+}
+
+/// `leave` for a caller that already holds `state.switching` (a switch cleaning up after itself).
+async fn leave_now(app: &AppHandle, state: &App) {
     let mut inner = state.inner.lock().await;
     if let Some(r) = inner.relay.take() {
         r.stop();
@@ -391,13 +395,17 @@ async fn leave(app: &AppHandle, state: &App) {
     for (_, m) in inner.mirrors.drain() {
         m.stop();
     }
-    if let Some(mut h) = inner.hub.take() {
-        tauri::async_runtime::spawn_blocking(move || h.stop());
-    }
+    let hub = inner.hub.take();
     inner.cfg.role = None;
     inner.cfg.lobby = false;
     state.save(&inner.cfg);
     drop(inner);
+    // The session saves before anything else starts.
+    if let Some(mut h) = hub
+        && let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || h.stop()).await
+    {
+        app.dialog().message(e).title("The session didn't finish saving").kind(MessageDialogKind::Warning).show(|_| {});
+    }
     // Every window the session opened, including a user-less host's extra screens.
     for (label, w) in app.webview_windows() {
         if label == "client" || label.starts_with("bigscreen") {
@@ -774,19 +782,14 @@ async fn open_project(
     switch_project(&app, &state, launch).await
 }
 
-/// A switch that failed tears down only what it started (its own hub, or nothing yet): never a hub
-/// something else started since.
-fn failed_switch_owns(gen_before: u64, gen_now: u64) -> bool {
-    gen_now <= gen_before + 1
-}
-
 async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<(), String> {
-    // One switch at a time, from stopping the old hub to cleaning up after a failed start.
+    // One transition at a time (switches, hosting, joining, leaving), from stopping the old hub to
+    // cleaning up after a failed start: so the hub here is always this switch's own.
     let _turn = state.switching.lock().await;
-    let (hub, relay, mirrors, gen_before) = {
+    let (hub, relay, mirrors) = {
         let mut inner = state.inner.lock().await;
         inner.cfg.lobby = false;
-        (inner.hub.take(), inner.relay.take(), inner.mirrors.drain().map(|(_, m)| m).collect::<Vec<_>>(), inner.hub_gen)
+        (inner.hub.take(), inner.relay.take(), inner.mirrors.drain().map(|(_, m)| m).collect::<Vec<_>>())
     };
     if let Some(r) = relay {
         r.stop();
@@ -794,9 +797,14 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
     for m in mirrors {
         m.stop();
     }
-    // Wait for the old session to save and stop before the next one opens its files.
+    // Wait for the old session to save and stop before the next one opens its files. A save that
+    // didn't finish is said, and the next project isn't opened over it.
     if let Some(mut h) = hub {
-        let _ = tauri::async_runtime::spawn_blocking(move || h.stop()).await;
+        let stopped = tauri::async_runtime::spawn_blocking(move || h.stop()).await.unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = stopped {
+            leave_now(app, state).await;
+            return Err(e);
+        }
     }
     for (label, w) in app.webview_windows() {
         if label.starts_with("bigscreen") {
@@ -804,8 +812,8 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
         }
     }
     let started = start_hosting(app, state, launch).await;
-    if started.is_err() && failed_switch_owns(gen_before, state.inner.lock().await.hub_gen) {
-        leave(app, state).await;
+    if started.is_err() {
+        leave_now(app, state).await;
     }
     started
 }
@@ -1011,7 +1019,7 @@ fn main() {
             if let Ok(mut inner) = state.inner.try_lock()
                 && let Some(mut h) = inner.hub.take()
             {
-                h.stop();
+                let _ = h.stop();
             }
         }
         RunEvent::Reopen { .. } => on_menu(app, "reopen"),
@@ -1038,15 +1046,6 @@ mod tests {
         assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/client"), Some("host"), hub));
         assert!(!picker_may_open("client", &at("http://localhost:4801/projects"), Some("host"), hub));
         assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/projects"), None, None));
-    }
-
-    #[test]
-    fn a_failed_switch_cleans_up_only_its_own_start() {
-        // Its own start failed before or after the hub came up.
-        assert!(failed_switch_owns(3, 3));
-        assert!(failed_switch_owns(3, 4));
-        // Another start came after it: what runs now is that one's.
-        assert!(!failed_switch_owns(3, 5));
     }
 
     #[test]

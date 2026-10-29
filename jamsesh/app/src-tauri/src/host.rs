@@ -174,7 +174,7 @@ impl Hub {
         };
         let mut hub = Hub { port, child: Some(child) };
         if !handed {
-            hub.stop();
+            let _ = hub.stop();
             return Err("Couldn't hand the session its window key, so this Mac's windows couldn't act for you. Try hosting again.".into());
         }
         for _ in 0..120 {
@@ -186,7 +186,7 @@ impl Hub {
                     }
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
-                hub.stop();
+                let _ = hub.stop();
                 return Err(format!(
                     "The session started but didn't accept this app's window key. Details are in {}.",
                     log_dir.join("hub.log").display()
@@ -197,29 +197,73 @@ impl Hub {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        hub.stop();
+        let _ = hub.stop();
         Err("The session took too long to start.".into())
     }
 
-    /// Asks the hub to save and exit, then waits up to ten seconds.
-    pub fn stop(&mut self) {
-        let Some(mut child) = self.child.take() else { return };
+    /// Asks the hub to save and exit, and waits for it (see `stop_child`).
+    pub fn stop(&mut self) -> Result<(), String> {
+        let Some(child) = self.child.take() else { return Ok(()) };
         if let Ok(mut links) = LINKS.lock() {
             *links = None;
         }
-        let _ = Command::new("/bin/kill").args(["-TERM", &child.id().to_string()]).status();
-        for _ in 0..100 {
-            if let Ok(Some(_)) = child.try_wait() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let _ = child.kill();
+        stop_child(child, SHUTDOWN_WAIT)
     }
 }
 
 impl Drop for Hub {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
+    }
+}
+
+/// How long the hub may take to save and exit: longer than its own shutdown steps add up to
+/// (8 + 4 + 3 seconds, hub.ts `Hub.SHUTDOWN_MS`), so a slow save is never cut short.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
+
+/// Stops a hub process: SIGTERM, then wait for it. Ok only when it exits 0, which is the hub saying
+/// its final save finished (hub/src/index.ts). An unfinished save (exit 3), or a hub still running
+/// after `wait` (then killed), is an error, so the caller never treats a cut-off save as done.
+fn stop_child(mut child: Child, wait: Duration) -> Result<(), String> {
+    let _ = Command::new("/bin/kill").args(["-TERM", &child.id().to_string()]).status();
+    let until = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < until {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("The session's last save didn't finish ({status}); its newest changes may be missing.")),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => return Err(format!("Couldn't tell whether the session finished saving: {e}")),
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err("The session took too long to save and was stopped; its newest changes may be missing.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sh(script: &str) -> Child {
+        let child = Command::new("/bin/sh").args(["-c", script]).spawn().unwrap();
+        // Give the shell a moment to install its trap.
+        std::thread::sleep(Duration::from_millis(200));
+        child
+    }
+
+    #[test]
+    fn stopping_waits_for_the_save_and_says_when_it_didnt_finish() {
+        // Saves for a while, then exits 0: waited for, however long the save takes within the budget.
+        let t0 = std::time::Instant::now();
+        assert_eq!(stop_child(sh("trap 'sleep 1; exit 0' TERM; while :; do sleep 0.05; done"), Duration::from_secs(5)), Ok(()));
+        assert!(t0.elapsed() >= Duration::from_millis(900));
+        // Says its save didn't finish (exit 3).
+        assert!(stop_child(sh("trap 'exit 3' TERM; while :; do sleep 0.05; done"), Duration::from_secs(5)).unwrap_err().contains("didn't finish"));
+        // Never exits: killed after the wait, and reported.
+        let t0 = std::time::Instant::now();
+        assert!(stop_child(sh("trap '' TERM; while :; do sleep 0.05; done"), Duration::from_millis(500)).unwrap_err().contains("too long"));
+        assert!(t0.elapsed() < Duration::from_secs(3));
+        // The app's wait outlasts the hub's own shutdown steps (8 + 4 + 3 seconds).
+        assert!(SHUTDOWN_WAIT > Duration::from_secs(15));
     }
 }
