@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { closeRecording, leaveActions, newRecordToken, pointerOrNone, reapOrphans, type RecStatus, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { notesToSend, closeRecording, leaveActions, newRecordToken, pointerOrNone, reapOrphans, type RecStatus, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -100,4 +100,13 @@ test("leaving hands every kind of recording to the hub, including one waiting on
   expect(leaveActions(null, "t2", true)).toEqual({ cancel: { token: "t2" }, restoreMic: true });
   expect(leaveActions(null, "t2", false).restoreMic).toBe(false);
   expect(leaveActions(null, null, true)).toEqual({ restoreMic: false });
+});
+
+test("a send carries the notes as first submitted: edits made after it began, or on a retry, don't change what is sent", () => {
+  const first = [note("a", "make it bigger")];
+  const review: { notes: RecordNote[]; submitted?: RecordNote[] } = { notes: [note("a", "make it bigger"), note("b", "  ")] };
+  expect(notesToSend(review).map((n) => n.id)).toEqual(["a"]);
+  review.submitted = notesToSend(review);
+  review.notes = [note("a", "make it much bigger")];
+  expect(notesToSend(review)).toEqual(first);
 });

@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { closeRecording, leaveActions, newRecordToken, pointerOrNone, reapOrphans, sendSummary, type RecStatus, type RecordNote, type SendReply } from "./notes";
+import { closeRecording, leaveActions, newRecordToken, notesToSend, pointerOrNone, reapOrphans, sendSummary, type RecStatus, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -732,7 +732,7 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
 type RecState = { phase: "idle" } | { phase: "live"; t0: number; id: string; screen: string | null; token: string } | { phase: "sending" };
 type RecResult = { ok: boolean; title: string; text: string; pills: string[]; note?: string; out?: boolean };
 type StopReply = { ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[] };
-type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null };
+type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null; /** The notes a Send first carried: once there is one, the list is read-only and a retry sends exactly these. */ submitted?: RecordNote[] };
 /** The laptop mic, as far as recording needs it. */
 type MicLike = { status: { on: boolean; error: string | null }; lend: () => Promise<{ release: () => void; turnedOn: boolean } | null>; flush?: () => Promise<void> };
 
@@ -931,8 +931,8 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
 
   const send = async () => {
     if (!review || review.busy) return;
-    const notes = review.notes.filter((n) => n.text.trim());
-    setReview({ ...review, busy: true, error: null });
+    const notes = notesToSend(review);
+    setReview({ ...review, busy: true, error: null, submitted: notes });
     try {
       const res = await api<SendReply & { queued?: boolean }>("/record/send", { recordingId: review.recordingId, personId, notes }, undefined, { queue: false, timeoutMs: 25_000 });
       if (res.queued) throw new OfflineError(NOT_SENT);
@@ -1049,8 +1049,9 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
           notes={review.notes}
           brain={brainName}
           busy={review.busy}
+          locked={review.busy || !!review.submitted}
           error={review.error}
-          onChange={(notes) => setReview((r) => (r ? { ...r, notes } : r))}
+          onChange={(notes) => setReview((r) => (r && !r.busy && !r.submitted ? { ...r, notes } : r))}
           onSend={() => void send()}
           onDiscard={() => setReview(null)}
         />

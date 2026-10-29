@@ -77,6 +77,8 @@ interface Rec {
   nextT0?: number;
   token?: string;
   outcome?: Outcome;
+  /** Text typed with a Stop that has not committed, kept so a recording that ends some other way still gives it to the room. */
+  typed?: string;
 }
 /** What a recording came to, kept on the hub: how it ended and, for a close that made something, what it made. The hub is the only source of truth for it. */
 type Outcome = { kind: EndReason | "unknown"; result?: unknown };
@@ -399,6 +401,9 @@ export class Hub {
    * room as ordinary speech. The one place that happens. Without gathered lines it reads what is still held from the store.
    */
   private release(rec: Rec | undefined, personId: string | null, deviceId: string, t0: number, lines: Utterance[] | undefined, typed?: string, t1?: number) {
+    // The recording's speech window goes first: while it stands its lines are held for the recording, not given to the room.
+    const win = this.promptMode.get(deviceId);
+    if (win && rec && win.rec === rec.id) (clearTimeout(win.timer), this.promptMode.delete(deviceId));
     // Only this recording's own speech: from its start, to its close (and the same slack) and never past the next recording's start.
     const end = Math.min(t0 + Hub.RECORD_MAX_MS, t1 === undefined ? Infinity : t1 + 300);
     const held = lines ?? this.session.store.all("utterances").filter((u) => !u.eventId && u.t0 >= t0 && u.t0 <= end && u.t0 < (rec?.nextT0 ?? Infinity) && this.fromRecorder(u, deviceId, personId));
@@ -542,11 +547,8 @@ export class Hub {
     if (!gather || !commit) {
       if (rec.state !== "ended") {
         // A replaced recording's window belongs to its replacement already; the others hand their held words to the room.
-        if (reason !== "replaced" && this.recs.get(rec.deviceId) === rec) {
-          // A close that failed to commit has already taken the speech window away: its words are read from the store instead.
-          if (this.promptMode.get(rec.deviceId)?.rec === rec.id) this.releasePrompt(rec.deviceId);
-          else this.release(rec, rec.personId, rec.deviceId, rec.t0, undefined);
-        }
+        // Text typed with a Stop that failed stays with the recording until now; one still in flight gives its own through `abort`.
+        if (reason !== "replaced" && this.recs.get(rec.deviceId) === rec) this.release(rec, rec.personId, rec.deviceId, rec.t0, undefined, rec.state === "ending" ? undefined : rec.typed);
         this.teardown(rec, { kind: reason });
       }
       return Promise.resolve({ kind: "done", value: undefined as R });
@@ -621,6 +623,7 @@ export class Hub {
     if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
     if (rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
     const person = this.session.person(w.personId ?? rec.personId);
+    if (w.typed?.trim()) rec.typed = w.typed;
     // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
     const t0 = rec.t0;
     const t1 = this.clock();

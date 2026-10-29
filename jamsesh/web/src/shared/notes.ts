@@ -120,6 +120,14 @@ export function leaveActions(own: { id: string; token: string } | null, pendingT
   return { ...(token ? { cancel: { token, ...(own ? { orphanId: own.id } : {}) } } : {}), restoreMic: micWasOff && !!token };
 }
 
+/**
+ * The notes a Send carries: the exact set first submitted, if there was one, so a send tried again after an uncertain failure says the
+ * same thing (the hub refuses a changed one); otherwise what is on screen now, without the empty ones.
+ */
+export function notesToSend(review: { notes: RecordNote[]; submitted?: RecordNote[] }): RecordNote[] {
+  return review.submitted ?? review.notes.filter((n) => n.text.trim());
+}
+
 /** What the pointer recorder made of the gesture, or nothing if it can't be read: the recording still ends, with the words alone. */
 export async function pointerOrNone<P>(read: () => Promise<P[]>): Promise<P[]> {
   try {

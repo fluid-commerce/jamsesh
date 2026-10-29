@@ -1132,6 +1132,44 @@ test("a Stop whose notes can't be made leaves the recording's words to the room 
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("words before the write failed");
 }, 60_000);
 
+test("text typed with a Stop that failed is given to the room when the recording then ends by cancel or cap", async () => {
+  for (const fault of ["read", "write"] as const) {
+    for (const end of ["cancel", "cap"] as const) {
+      const r = room();
+      const tok = "rt_pppppppppppppppp";
+      const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+      if (!a.ok) throw new Error("start");
+      if (fault === "read") (r.hub as any).audio.pendingFor = () => { throw new Error("read failed"); };
+      else (r.hub as any).stopNotes = () => { throw new Error("database is locked"); };
+      await expect(r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: `typed ${fault} ${end}` })).rejects.toThrow();
+      if (end === "cancel") r.hub.recordCancel("mayaLaptop", tok, "host");
+      else void (r.hub as any).endRecording((r.hub as any).recs.get("mayaLaptop"), "cap");
+      const texts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
+      expect(texts.filter((t) => t === `typed ${fault} ${end}`).length).toBe(1);
+    }
+  }
+}, 60_000);
+
+test("a cancel while the real read is running, then the read failing, still gives the words to the room at once", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const tok = "rt_qqqqqqqqqqqqqqqq";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "said in the window", r.maya.id, "mayaLaptop", base + 500);
+  r.at(base + 4000);
+  // The real windowLines runs; its read fails on the first look after the cancel.
+  let calls = 0;
+  (r.hub as any).audio.pendingFor = () => { if (++calls > 1) throw new Error("read failed"); return 1; };
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  await Bun.sleep(50);
+  r.hub.recordCancel("mayaLaptop", tok, "host");
+  expect(await stopping).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("said in the window");
+  expect((r.hub as any).promptMode.get("mayaLaptop")).toBeUndefined();
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {
