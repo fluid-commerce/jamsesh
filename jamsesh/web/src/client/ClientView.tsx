@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "../host/HostView";
 import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState, type Stage as StageState } from "../shared/hub";
 import { fadeOut, playChime } from "../shared/sound";
+import { HistoryStrip, StageBar } from "../shared/StageControls";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
@@ -270,10 +271,21 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
       </div>
       {tab === "screen" &&
         (phone ? (
-          <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "0 12px" }}>
+            <div style={{ flex: "none", paddingTop: 8 }}>
+              <StageBar state={state} />
+            </div>
+            <div style={{ position: "relative", flex: 1, minHeight: 0, margin: "0 -12px" }}>
+              <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
+            </div>
+            <HistoryStrip state={state} />
+          </div>
         ) : (
           <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
-            <Stage state={state} interactive />
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <Stage state={state} interactive />
+            </div>
+            <HistoryStrip state={state} />
           </div>
         ))}
       {tab === "work" && <WorkGallery state={state} personId={me.id} />}

@@ -3,6 +3,7 @@ import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
+import { VersionBadge } from "./StageControls";
 import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
@@ -333,9 +334,13 @@ export function ArtifactTile({
           {art.title}
         </span>
         <span className="chip">{art.agentName || "Canvas"}</span>
-        <span className="chip mono" style={{ color: "var(--dim)" }}>
-          {ago(art.updatedAt)}
-        </span>
+        {art.version && art.version > 1 ? (
+          <VersionBadge art={art} />
+        ) : (
+          <span className="chip mono" style={{ color: "var(--dim)" }}>
+            {ago(art.updatedAt)}
+          </span>
+        )}
       </div>
     </div>
   );

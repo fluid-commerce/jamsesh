@@ -11,6 +11,7 @@ const TilePins = createContext(true);
 function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
+import { StageBar } from "../shared/StageControls";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
@@ -55,6 +56,7 @@ export function Stage({ state, interactive, tilePins = true }: { state: HubState
   }
   return (
     <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
+      {interactive && tilePins && <StageBar state={state} />}
       <TilePins.Provider value={tilePins}>{body}</TilePins.Provider>
     </div>
   );
