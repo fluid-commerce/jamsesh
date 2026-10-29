@@ -41,7 +41,7 @@ test("a removed Claude Code chat can't rejoin through a fresh MCP session that d
   const said = await (await fetch(`${base}/api/hooks/joined`, { method: "POST", headers: { ...remote, authorization: `Bearer ${cred.token}` }, body: JSON.stringify({ session_id: "chat-gone7" }) })).json();
   expect(said).toMatchObject({ joined: false, removed: true });
   await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).rejects.toThrow("removed from the room");
-  expect(s.allowRejoin({ id: s.removedChats().find((r) => r.chatId === "chat-gone7")!.id })).toBe(true);
+  expect(s.allowRejoin({ id: s.removedChats().find((r) => r.chatId === "chat-gone7")!.id })).toBe(1);
   expect((await hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).isError).toBeFalsy();
 });
 
@@ -101,7 +101,7 @@ test("hook.sh: a host switch between the room check and the replay leaves the pr
     const now = Math.floor(Date.now() / 1000);
     const entry = `${now}_pq-1_room-A`;
     writeFileSync(join(home, "outbox", entry), JSON.stringify({ session_id: "chat-sw", prompt: "for room A" }));
-    const proc = Bun.spawn(["bash", "-c", hookScript(hub), "hook", "tool"], {
+    const proc = Bun.spawn(["bash", "-c", hookScript(), "hook", "tool"], {
       stdin: new Blob([JSON.stringify({ session_id: "chat-sw", tool_name: "Edit" })]),
       env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: join(home, "client.env"), JAMSESH_DIR: home },
     });
@@ -260,4 +260,25 @@ test("a removal stored with the folder as typed still blocks the folder after th
   const host = () => ({ agentId: null as string | null, ip: "127.0.0.1", device: "host", sessionId: crypto.randomUUID(), harness: "claude-code" });
   await expect(two.mcp.call(host(), "jam_join", { owner: "Chey", harness: "claude-code", repo: "app", cwd: "/w/typed", chat: "brand-new" })).rejects.toThrow("A chat in this folder was removed");
   two.stop();
+});
+
+test("Allow again clears every removal for the same machine and folder together, so it never reports success while the folder stays blocked", async () => {
+  const mk = (chatId: string, cwd: string) => {
+    const a = s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "app", cwd, machine: win.device.id, chatId }).agent;
+    s.removeAgent(a.id);
+  };
+  mk("chat-g1", "/w/group");
+  mk("chat-g2", "/w/group");
+  mk("chat-g3", "/w/group-other");
+  const list = await (await fetch(`${base}/api/removed-chats`, { headers: { authorization: `Bearer ${win.token}`, ...remote } })).json();
+  const ours = new Set(s.removedChats().filter((r) => r.chatId?.startsWith("chat-g")).map((r) => r.id));
+  const mine = list.filter((r: any) => ours.has(r.id));
+  expect(mine.map((r: any) => r.inFolder).sort()).toEqual([1, 2, 2]);
+  const one = s.removedChats().find((r) => r.chatId === "chat-g1")!;
+  const res = await fetch(`${base}/api/removed-chats/${one.id}/allow`, { method: "POST", headers: { authorization: `Bearer ${win.token}`, ...remote }, body: "{}" });
+  expect(await res.json()).toMatchObject({ ok: true, cleared: 2 });
+  const fresh = () => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID() });
+  expect((await hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/group", chat: "chat-g2" })).isError).toBeFalsy();
+  // The other folder's removal is untouched.
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/group-other", chat: "brand-new-g" })).rejects.toThrow("A chat in this folder was removed");
 });

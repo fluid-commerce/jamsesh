@@ -179,7 +179,7 @@ describe("agent setup script", () => {
       const sourced = Bun.spawnSync(["/bin/bash", "-c", '. "$1"; printf %s "$JAMSESH_NAME"', "x", env], { env: { HOME: box.home, PATH: "/usr/bin:/bin" } });
       expect(sourced.stdout.toString()).toBe(hostile);
       // The hook reads client.env without running it.
-      const hook = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "prompt"], { env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: join(box.home, ".jamsesh") }, stdin: new Blob(['{"session_id":"c1","prompt":"hi"}']) });
+      const hook = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "prompt"], { env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: join(box.home, ".jamsesh") }, stdin: new Blob(['{"session_id":"c1","prompt":"hi"}']) });
       await hook.exited;
       expect(pwned(box.home)).toEqual([]);
       // An older client.env (double quotes) holding such a name, read back when the host doesn't answer.
@@ -205,7 +205,7 @@ describe("agent setup script", () => {
     expect(new Set(auths)).toEqual(new Set(["Bearer tok"]));
     expect(readFileSync(join(box.home, ".jamsesh/auth.header"), "utf8")).toBe("authorization: Bearer tok\n");
     // The CLI argument log and the request checks above are what prove it, not the script's text.
-    expect(hookScript({} as Hub)).not.toContain("Bearer");
+    expect(hookScript()).not.toContain("Bearer");
   });
 
   test("the pairing guide never puts the token in a command: the agent writes it to a private file first", () => {
@@ -235,7 +235,7 @@ describe("agent setup script", () => {
       // The host failed a moment ago.
       writeFileSync(join(box.home, "hub-down"), String(Math.floor(Date.now() / 1000)));
       const hook = async (prompt: string) => {
-        const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "prompt"], {
+        const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "prompt"], {
           env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: box.home },
           stdin: new Blob([JSON.stringify({ prompt, session_id: "chat-9" })]),
           stdout: "pipe",
@@ -269,7 +269,7 @@ describe("agent setup script", () => {
       const env = join(box.home, "client.env");
       writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${hub.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
       const hook = async (prompt: string) => {
-        const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "prompt"], {
+        const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "prompt"], {
           env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: box.home },
           stdin: new Blob([JSON.stringify({ prompt, session_id: "chat-1" })]),
         });

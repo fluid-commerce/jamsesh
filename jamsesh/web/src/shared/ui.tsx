@@ -591,6 +591,13 @@ function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Gone from the room (this removal, or someone's): nothing left to confirm, even if the answer to our call was lost.
+  useEffect(() => {
+    if (!here) {
+      setAsking(false);
+      setError("");
+    }
+  }, [here]);
   const remove = async (purge: boolean) => {
     setBusy(true);
     setError("");

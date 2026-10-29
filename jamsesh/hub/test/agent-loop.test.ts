@@ -277,7 +277,7 @@ test("hook.sh listen holds in the background and exits 2 with the room's news", 
     const cred = hub.auth.issue({ kind: "agent", label: "Agents", ip: "127.0.0.1", ownerDeviceId: "host" });
     const home = join(dir, "client");
     require("node:fs").mkdirSync(home, { recursive: true });
-    writeFileSync(join(home, "hook.sh"), hookScript(hub), { mode: 0o755 });
+    writeFileSync(join(home, "hook.sh"), hookScript(), { mode: 0o755 });
     writeFileSync(join(home, "client.env"), `JAMSESH_ACTIVE=1\nJAMSESH_HUB=http://127.0.0.1:${server.port}\n`);
     writeFileSync(join(home, "auth.header"), `authorization: Bearer ${cred.token}\n`, { mode: 0o600 });
     const run = (seconds: number) => Bun.spawn(["bash", join(home, "hook.sh"), "listen"], { stdin: new Blob([JSON.stringify({ session_id: "chat-1" })]), stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_CLIENT_ENV: join(home, "client.env"), JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: String(seconds) } });

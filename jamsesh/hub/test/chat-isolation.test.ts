@@ -251,7 +251,7 @@ afterAll(() => relay.stop(true));
 
 function box(hubUrl: string, token: string) {
   const home = mkdtempSync(join(dir, "client-"));
-  writeFileSync(join(home, "hook.sh"), hookScript(hub), { mode: 0o755 });
+  writeFileSync(join(home, "hook.sh"), hookScript(), { mode: 0o755 });
   writeFileSync(join(home, "client.env"), `JAMSESH_HUB='${hubUrl}'\nJAMSESH_TOKEN='${token}'\nJAMSESH_NAME='Chey'\nJAMSESH_ACTIVE=1\n`);
   if (token) writeFileSync(join(home, "auth.header"), `authorization: Bearer ${token}\n`, { mode: 0o600 });
   const run = async (kind: string, body: object, extraEnv: Record<string, string> = {}) => {
@@ -559,7 +559,7 @@ test("hook.sh listen keeps asking through a host that is down, then wakes the id
     const home = mkdtempSync(join(tmpdir(), "jam-listen-"));
     const env = join(home, "client.env");
     writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
-    const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "listen"], {
+    const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "listen"], {
       env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "30", JAMSESH_RETRY_SECONDS: "0.2" },
       stdin: new Blob([JSON.stringify({ session_id: "chat-idle" })]),
       stderr: "pipe",
@@ -587,7 +587,7 @@ test("hook.sh listen at its time limit wakes the agent into jam_wait, so an idle
     const env = join(home, "client.env");
     writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
     const run = async (extra: Record<string, string>) => {
-      const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "listen"], {
+      const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "listen"], {
         env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "2", JAMSESH_RETRY_SECONDS: "0.2", ...extra },
         stdin: new Blob([JSON.stringify({ session_id: "chat-end" })]),
         stderr: "pipe",
@@ -597,6 +597,24 @@ test("hook.sh listen at its time limit wakes the agent into jam_wait, so an idle
     const r = await run({});
     expect(r.code).toBe(2);
     expect(r.err).toContain("keep listening: call jam_wait");
+  } finally {
+    fake.stop(true);
+  }
+});
+
+test("hook.sh listen that can't reach the host until its time is up still wakes the agent into jam_wait", async () => {
+  const fake = Bun.serve({ port: 0, fetch: async () => new Response("down", { status: 503 }) });
+  try {
+    const home = mkdtempSync(join(tmpdir(), "jam-listen-out-"));
+    const env = join(home, "client.env");
+    writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+    const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", "listen"], {
+      env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "2", JAMSESH_RETRY_SECONDS: "0.2" },
+      stdin: new Blob([JSON.stringify({ session_id: "chat-out" })]),
+      stderr: "pipe",
+    });
+    expect(await proc.exited).toBe(2);
+    expect(await new Response(proc.stderr).text()).toContain("keep listening: call jam_wait");
   } finally {
     fake.stop(true);
   }

@@ -2,8 +2,7 @@
 // session, /hook.sh is what Claude Code's hooks call.
 import type { Hub } from "./hub";
 
-export function hookScript(hub: Hub) {
-  void hub;
+export function hookScript() {
   return `#!/usr/bin/env bash
 # JamSesh hook for Claude Code: hook.sh prompt|tool|stop|listen, with the hook's JSON on stdin.
 # Does nothing for a chat that hasn't joined the room: only a chat whose person said "connect to
@@ -77,7 +76,7 @@ if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eiq '"prompt"[[:space:]]*:
 have_ans=0
 if [ "$1" = "listen" ]; then
   until ans="$(joined "$sid")"; do
-    [ "$(date +%s)" -lt $((now + \${JAMSESH_LISTEN_SECONDS:-3000})) ] || exit 0
+    [ "$(date +%s)" -lt $((now + \${JAMSESH_LISTEN_SECONDS:-3000})) ] || { printf 'JamSesh: keep listening: call jam_wait.\\n' >&2; exit 2; }
     sleep "\${JAMSESH_RETRY_SECONDS:-5}"
   done
   have_ans=1

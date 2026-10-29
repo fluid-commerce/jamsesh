@@ -138,7 +138,7 @@ describe("hooks do nothing for a chat that didn't join", () => {
     try {
       const env = join(dir, "client.env");
       writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${hub.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
-      const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", mode], {
+      const proc = Bun.spawn(["/bin/bash", "-c", hookScript(), "hook", mode], {
         env: { HOME: dir, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: dir },
         stdin: new Blob([JSON.stringify(payload)]),
         stdout: "pipe",

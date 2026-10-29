@@ -405,6 +405,8 @@ export type BusMessage =
   | { type: "state"; state: HubState }
   | { type: "event"; event: JamEvent }
   | { type: "events-removed"; ids: number[] }
+  /** The list of removed chats changed (a chat removed, or allowed again): windows showing it reload. */
+  | { type: "removed-chats" }
   | { type: "patch"; key: keyof HubState; value: any }
   | { type: "utterance"; utterance: Utterance }
   | { type: "stage"; stage: Stage }

@@ -210,7 +210,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
         if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
-        if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
+        if (path === "/hook.sh") return new Response(hookScript(), { headers: { "content-type": "text/x-shellscript" } });
         if (path === "/agent/setup.sh") {
           // From the Mac app: agents talk to the app's relay on this computer, which adds the
           // Mac's credentials, so the script carries no token and survives switching hosts.
@@ -534,9 +534,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return r.removed ? json(r) : bad("no such agent", 404);
   }
   // Chats the room removed (kept out of jam_join), and letting one back in: people only.
-  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : json(s.removedChats().map(({ id, name, ownerName, at }) => ({ id, name, ownerName, at })));
+  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : json(s.removedChats().map(({ id, name, ownerName, at, cwd, machine, harness }, _i, all) => ({ id, name, ownerName, at, inFolder: all.filter((r) => !!cwd && r.cwd === cwd && r.machine === machine && r.harness === harness).length })));
   const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
-  if (rc && req.method === "POST") return s.allowRejoin({ id: rc[1] }) ? json({ ok: true }) : bad("No removed chat with that id.", 404);
+  if (rc && req.method === "POST") {
+    const cleared = s.allowRejoin({ id: rc[1] });
+    return cleared ? json({ ok: true, cleared }) : bad("No removed chat with that id.", 404);
+  }
 
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));

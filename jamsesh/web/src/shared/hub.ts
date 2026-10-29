@@ -33,6 +33,8 @@ interface Snapshot {
   /** Feed lines the hub deleted (an agent removed with its messages), newest last. All of them, never
    * capped: a window that already showed a line must be able to forget it, however big the purge. */
   removed: number[];
+  /** Bumps when the list of removed chats changes anywhere in the room. */
+  removedChatsRev: number;
   thinking: string | null;
   levels: Record<string, number>;
   speaking: string | null;
@@ -51,7 +53,7 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 }
 
 class HubClient {
-  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
+  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], removedChatsRev: 0, thinking: null, levels: {}, speaking: null, clockOffset: 0 };
   private listeners = new Set<() => void>();
   private ws: WebSocket | null = null;
   private started = false;
@@ -327,6 +329,8 @@ class HubClient {
         const events = i >= 0 ? s.events.map((e) => (e.id === m.event.id ? m.event : e)) : [...s.events, m.event].slice(-400);
         return this.set({ state: { ...s, events } });
       }
+      case "removed-chats":
+        return this.set({ removedChatsRev: this.snap.removedChatsRev + 1 });
       case "events-removed": {
         const gone = new Set(m.ids);
         this.set({ removed: [...this.snap.removed, ...m.ids] });

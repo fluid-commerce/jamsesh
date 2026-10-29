@@ -612,6 +612,7 @@ export class Session {
     const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, cwd: agent.cwd || undefined, harness: agent.harness, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
     // Kept until a person lets the chat back in (or the session goes): never dropped for space.
     this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec]);
+    bus.send({ type: "removed-chats" });
   }
 
   /** The removal that keeps this chat out, if any (by its chat id, or the agent id its connection had). */
@@ -628,14 +629,22 @@ export class Session {
     );
   }
 
-  /** Lets a removed chat join again: only a person's Allow again (a people-only route) calls this. */
-  allowRejoin(match: { id: string }): boolean {
+  /**
+   * Lets a removed chat join again: only a person's Allow again (a people-only route) calls this. A removal
+   * keeps the whole folder out (every new chat from that machine and folder), so allowing one clears every
+   * removal for that machine, folder and harness together: the person is never told it worked while the
+   * folder is still blocked. Returns how many were cleared.
+   */
+  allowRejoin(match: { id: string }): number {
     const all = this.removedChats();
-    const gone = all.filter((r) => r.id === match.id);
-    if (!gone.length) return false;
+    const picked = all.find((r) => r.id === match.id);
+    if (!picked) return 0;
+    const sameFolder = (r: RemovedChat) => r.id === picked.id || (!!picked.cwd && r.cwd === picked.cwd && r.machine === picked.machine && r.harness === picked.harness);
+    const gone = all.filter(sameFolder);
     for (const r of gone) this.removedAgents.delete(r.agentId);
     this.store.setSetting("removedChats", all.filter((r) => !gone.includes(r)));
-    return true;
+    bus.send({ type: "removed-chats" });
+    return gone.length;
   }
 
   touchAgent(id: string, fields: Partial<Agent> = {}) {

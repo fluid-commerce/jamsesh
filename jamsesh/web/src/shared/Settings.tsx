@@ -286,8 +286,8 @@ function Paired({ host }: { host: boolean }) {
 
 /** Chats the room removed: they can't join again by themselves until someone lets them back in. */
 function RemovedChats() {
-  const { state } = useHub();
-  const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number }[]>([]);
+  const { state, removedChatsRev } = useHub();
+  const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number; inFolder: number }[]>([]);
   const [error, setError] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
   // The list belongs to a room: a window that outlived a room switch, or a chat removed by someone else
@@ -303,8 +303,12 @@ function RemovedChats() {
   };
   useEffect(() => {
     setList([]);
+    setError("");
     void load();
-  }, [roomId, agentCount]);
+  }, [roomId]);
+  useEffect(() => {
+    void load();
+  }, [agentCount, removedChatsRev]);
   // Letting a chat back in is a permission change: it is never queued for later, and a failure leaves the list as it was.
   const allow = (id: string) =>
     api(`/removed-chats/${id}/allow`, {}, "POST", { queue: false })
@@ -326,6 +330,7 @@ function RemovedChats() {
         <div key={c.id} className="row" style={{ padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 14 }}>
           <span className="grow ellipsis">
             {c.name} <span style={{ color: "var(--dim)" }}>· {c.ownerName}</span>
+            {c.inFolder > 1 && <span style={{ color: "var(--dim)" }}> · {c.inFolder} chats in this folder, allowed together</span>}
           </span>
           <span className="chip mono" style={{ fontSize: 12 }}>{ago(c.at)}</span>
           <button className="btn ghost small" onClick={() => allow(c.id)}>

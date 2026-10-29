@@ -114,7 +114,7 @@ test("a slow host never holds the hook: queued prompts replay in the background"
     mkdirSync(join(home, "outbox"), { recursive: true });
     for (const i of [1, 2]) writeFileSync(join(home, "outbox", `${now}_q${i}_room-1`), JSON.stringify({ session_id: "chat-slow", prompt: `queued ${i}` }));
     const t0 = Date.now();
-    const proc = Bun.spawn(["bash", "-c", hookScript(hub), "hook", "tool"], {
+    const proc = Bun.spawn(["bash", "-c", hookScript(), "hook", "tool"], {
       stdin: new Blob([JSON.stringify({ session_id: "chat-slow", tool_name: "Edit" })]),
       stdout: "pipe",
       env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: join(home, "client.env"), JAMSESH_DIR: home },
