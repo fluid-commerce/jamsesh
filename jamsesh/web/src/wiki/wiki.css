@@ -848,6 +848,7 @@ button.wk-chip:hover:not(:disabled) {
   margin: 8px 0 4px;
   padding: 0;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
 }
 .wk-card-list li {
@@ -856,6 +857,7 @@ button.wk-chip:hover:not(:disabled) {
   align-items: center;
   gap: 4px 8px;
   padding: 4px 0;
+  min-width: 0;
 }
 .wk-card-list li.off .wk-card-t {
   color: var(--dim);

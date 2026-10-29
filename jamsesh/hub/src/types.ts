@@ -337,6 +337,11 @@ export interface WikiChange {
   diff: string;
   /** The page changed (a person edited it) since this was proposed: it is skipped on accept. */
   stale: boolean;
+  /** Lines the change adds and removes, counted over the whole page even when the diff is cut. */
+  added?: number;
+  removed?: number;
+  /** The change takes out a large part of the page: the card says so. */
+  largeDeletion?: boolean;
 }
 
 export interface WikiCardPayload {

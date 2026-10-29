@@ -10,6 +10,9 @@ import { api } from "../src/shared/hub";
 import { wikiApi } from "../src/wiki/wikiApi";
 import { shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
+import { onRefresh, saveRev } from "../src/wiki/draft";
+import { settled } from "../src/wiki/SettledLinks";
+import { bus } from "../../hub/src/bus";
 import type { Decider } from "../../hub/src/wiki/service";
 
 process.env.JAMSESH_SILENT = "1";
@@ -178,4 +181,62 @@ test("the Work tab's links count a page's items by its bullets", async () => {
   expect(nav.takePendingWikiPage()).toBe("decisions");
   expect(nav.takePendingWikiPage()).toBeNull();
   off();
+});
+
+test("two people editing: the update that arrives mid-draft never moves the draft's revision, so Save is a conflict with the choice, not an overwrite", async () => {
+  // Client A opens the page and starts editing; its draft is pinned to that revision.
+  const opened = await wikiApi.page("session-length");
+  const base = opened.rev;
+  let draftText = `${opened.markdown}\nA's addition.\n`;
+  let theirs: Awaited<ReturnType<typeof wikiApi.page>> | null = null;
+  // Client B saves through the same api() path; the hub tells every window the wiki changed.
+  const heard = new Promise<void>((done) => {
+    const off = bus.on((m) => m.type === "wiki" && m.kind === "edit" && (off(), done()));
+  });
+  const b = await wikiApi.save("session-length", { markdown: `${opened.markdown}\nB's addition.\n`, rev: opened.rev });
+  expect("page" in b).toBe(true);
+  await heard;
+  // A's window refreshes on that notification, while A is still editing.
+  const refresh = onRefresh(true, base, await wikiApi.page("session-length"));
+  expect(refresh.page).toBeUndefined(); // the page under the draft stays as it was
+  theirs = refresh.theirs ?? null;
+  expect(theirs?.markdown).toContain("B's addition.");
+  // A saves: checked against the revision the draft began from, so it's a conflict with B's page, not an overwrite.
+  const save = await wikiApi.save("session-length", { markdown: draftText, rev: saveRev(base, theirs, false) });
+  if (!("conflict" in save)) throw new Error("expected a conflict");
+  expect(save.conflict.markdown).toContain("B's addition.");
+  expect((await wikiApi.page("session-length")).markdown).not.toContain("A's addition.");
+  // A chooses: save over B's on purpose.
+  draftText = `${save.conflict.markdown}\nA's addition.\n`;
+  const over = await wikiApi.save("session-length", { markdown: draftText, rev: saveRev(base, save.conflict, true) });
+  if (!("page" in over)) throw new Error("expected a save");
+  expect(over.page.markdown).toContain("B's addition.");
+  expect(over.page.markdown).toContain("A's addition.");
+  // Nobody editing: a refresh simply shows the newer page.
+  expect(onRefresh(false, base, over.page).page?.rev).toBe(over.page.rev);
+  expect(onRefresh(true, over.page.rev, over.page)).toEqual({});
+});
+
+test("a write that names a person but carries no window key or paired person is refused", async () => {
+  const base = `http://127.0.0.1:${server.port}`;
+  const chey = hub.session.upsertPerson({ name: "Chey" });
+  const forged = await realFetch(`${base}/api/wiki/page/felipe`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ markdown: "# Felipe\n\nforged", personId: chey.id }) });
+  expect(forged.status).toBe(403);
+  const src = await realFetch(`${base}/api/wiki/sources`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "forged", personId: chey.id }) });
+  expect(src.status).toBe(403);
+  expect((await wikiApi.page("felipe")).markdown).not.toContain("forged");
+});
+
+test("the Work tab finds settled pages by category, with or without the list pages", () => {
+  const meta = (slug: string, category: any, mtime: number) => ({ slug, title: slug, category, summary: "", links: [], backlinks: 0, updated: "", mtime });
+  // A fresh project: a page per decision and question, no list pages.
+  const fresh = settled([meta("use-passkeys", "decisions", 2), meta("drop-magic-link", "decisions", 3), meta("tv-sign-in", "questions", 1), meta("notes", "topics", 9)], {});
+  expect(fresh).toEqual([
+    { label: "Decisions", count: 2, unit: "decisions", open: "drop-magic-link", latest: "drop-magic-link" },
+    { label: "Open questions", count: 1, unit: "question", open: "tv-sign-in", latest: "tv-sign-in" },
+  ]);
+  // A migrated project: the list page counts its bullets, and the pages beside it count too.
+  const both = settled([meta("decisions", "decisions", 1), meta("use-passkeys", "decisions", 2)], { decisions: 3 });
+  expect(both).toEqual([{ label: "Decisions", count: 4, unit: "decisions", open: "decisions", latest: "use-passkeys" }]);
+  expect(settled([], {})).toEqual([]);
 });

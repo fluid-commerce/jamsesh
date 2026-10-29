@@ -385,7 +385,10 @@ export class Board {
   dismiss(id: string, by: string): BoardResult {
     const c = this.openCard(id);
     if ("ok" in c) return c;
-    return { ok: true, card: this.done(c, "dismissed", by) };
+    const card = this.done(c, "dismissed", by);
+    // A wiki card's sources are read once a person has said no to it.
+    if (c.type === "wiki") this.s.wikiDismiss?.(c);
+    return { ok: true, card };
   }
 
   // ---- reading the board ----

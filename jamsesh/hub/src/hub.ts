@@ -154,6 +154,7 @@ export class Hub {
       return rec && bytes ? { name: rec.name, type: rec.kind, bytes } : null;
     };
     this.session.wikiAccept = (c, pages, by) => this.wiki.accept(c, pages, by);
+    this.session.wikiDismiss = (c) => this.wiki.dismissed(c);
     this.brain.curateInDigest = false;
     try {
       this.wiki.migrate(!opts.dataDir && config.project ? readProjectContext(config.home, config.project.slug) : null);

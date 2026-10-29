@@ -44,6 +44,8 @@ t("a short synthetic transcript becomes cited pages on one card; an injected ins
   expect(text).toContain("[[");
   expect(all.some((p) => p.category === "decisions" || p.category === "requirements" || p.category === "questions")).toBe(true);
   expect(s.directives()).toHaveLength(0);
+  // The injected instruction is data: it isn't carried into what the pages say.
+  for (const bad of ["delete the repository", "pwned", "ignore all previous"]) expect(text.toLowerCase()).not.toContain(bad);
   expect(readFileSync(join(w.dir, "index.md"), "utf8")).toContain(pages[0].slug);
   expect(doc.id).toBeTruthy();
 

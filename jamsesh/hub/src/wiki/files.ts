@@ -9,7 +9,7 @@
 // Everything here takes the project folder as an argument and touches only that folder: page names are
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -74,41 +74,78 @@ This folder is a project's memory. JamSesh keeps it from the room's conversation
 
 // ---- folder ----
 
-const wikiDir = (dir: string) => join(dir, "wiki");
-const rawDir = (dir: string) => join(dir, "raw");
+/**
+ * One of the vault's folders (wiki/, raw/, .proposals/): a real folder in `dir`, never a link to somewhere else, so no
+ * read or write can leave the project through it. Made when `make` is set; null when it isn't there yet.
+ */
+export function vaultDir(dir: string, name: "wiki" | "raw" | ".proposals", make = false): string | null {
+  const p = join(dir, name);
+  try {
+    const st = lstatSync(p);
+    if (st.isSymbolicLink() || !st.isDirectory()) throw Object.assign(new Error(`${name}/ in the wiki folder is a link or a file; JamSesh won't use it.`), { code: "ELINK" });
+    return p;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    if (!make) return null;
+    mkdirSync(p, { recursive: true });
+    return p;
+  }
+}
+const wikiDir = (dir: string, make = false) => vaultDir(dir, "wiki", make);
+const rawDir = (dir: string, make = false) => vaultDir(dir, "raw", make);
+
+/** A file of the vault's own (WIKI.md, log.md, the state), read only when it is a plain file: null when it isn't there. */
+export function readPlain(file: string): string | null {
+  try {
+    const st = lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile()) throw Object.assign(new Error(`${file.split("/").pop()} in the wiki folder is a link or a folder; JamSesh won't read it.`), { code: "ELINK" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  return readFileSync(file, "utf8");
+}
 
 /** Makes the vault in `dir` if it isn't one yet, and starts a git history when git is there. Safe to call every time. */
 export function initWiki(dir: string): void {
-  mkdirSync(wikiDir(dir), { recursive: true });
-  mkdirSync(rawDir(dir), { recursive: true });
+  mkdirSync(dir, { recursive: true });
+  wikiDir(dir, true);
+  rawDir(dir, true);
   if (!existsSync(join(dir, "WIKI.md"))) writeAtomic(join(dir, "WIKI.md"), SCHEMA);
   if (!existsSync(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!existsSync(join(dir, "index.md"))) rebuildIndex(dir);
   if (!existsSync(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.proposals/\n*.tmp\n");
   if (gitAvailable() && !existsSync(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
-    commitAll(dir, "Start the wiki");
+    commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
   }
 }
 
+/** Writes beside the file, then renames over it: a reader sees the old text or the new, never half of either. */
 function writeAtomic(file: string, text: string) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 7)}.tmp`;
-  writeFileSync(tmp, text);
-  renameSync(tmp, file);
+  try {
+    writeFileSync(tmp, text, { flag: "wx" });
+    renameSync(tmp, file);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
 }
 
 // ---- git (optional) ----
 
-let gitOk: boolean | null = null;
+// Asked again when PATH changes, so a PATH without git (a test, or a fix to PATH) is seen as one.
+let gitOk: { path: string | undefined; ok: boolean } | null = null;
 export function gitAvailable(): boolean {
-  if (gitOk === null) {
+  if (!gitOk || gitOk.path !== process.env.PATH) {
+    let ok = false;
     try {
-      gitOk = Bun.spawnSync(["git", "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
-    } catch {
-      gitOk = false;
-    }
+      ok = !!Bun.which("git", { PATH: process.env.PATH ?? "" }) && Bun.spawnSync(["git", "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+    } catch {}
+    gitOk = { path: process.env.PATH, ok };
   }
-  return gitOk;
+  return gitOk.ok;
 }
 
 function git(dir: string, args: string[]) {
@@ -119,10 +156,16 @@ function git(dir: string, args: string[]) {
   }
 }
 
-/** One commit per change set. Does nothing without git or a repository, and never throws. */
-export function commitAll(dir: string, message: string): boolean {
+/**
+ * One commit per change set, of the wiki's own files named in `paths` (relative to `dir`) and nothing else: a vault can
+ * hold people's notes and work they staged themselves, and those stay as they were. Does nothing without git or a
+ * repository, and never throws.
+ */
+export function commitPaths(dir: string, message: string, paths: string[]): boolean {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return false;
-  return git(dir, ["add", "-A"]) && git(dir, ["commit", "-q", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200)]);
+  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+)?$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && existsSync(join(dir, p)));
+  if (!own.length) return false;
+  return git(dir, ["add", "--", ...own]) && git(dir, ["commit", "-q", "--only", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200), "--", ...own]);
 }
 
 // ---- pages ----
@@ -207,9 +250,10 @@ export function linksOf(body: string): string[] {
   return out;
 }
 
-function pageFile(dir: string, slug: string): string {
+function pageFile(dir: string, slug: string, make = false): string | null {
   if (!isPageSlug(slug)) throw new Error("That isn't a page name.");
-  return join(wikiDir(dir), `${slug}.md`);
+  const d = wikiDir(dir, make);
+  return d && join(d, `${slug}.md`);
 }
 
 /** A regular file inside wiki/, never a link out of it. */
@@ -224,8 +268,13 @@ function plainFile(file: string): boolean {
 
 export function readPage(dir: string, slug: string): Page | null {
   if (!isPageSlug(slug)) return null;
-  const file = pageFile(dir, slug);
-  if (!plainFile(file)) return null;
+  let file: string | null;
+  try {
+    file = pageFile(dir, slug);
+  } catch {
+    return null;
+  }
+  if (!file || !plainFile(file)) return null;
   const text = readFileSync(file, "utf8");
   const { fm, body } = parseFrontMatter(text);
   const type = fm.type && TYPES[fm.type] ? fm.type : "topic";
@@ -242,8 +291,10 @@ export function readPage(dir: string, slug: string): Page | null {
 
 export function pageSlugs(dir: string): string[] {
   try {
-    return readdirSync(wikiDir(dir))
-      .filter((f) => f.endsWith(".md") && isPageSlug(f.slice(0, -3)) && plainFile(join(wikiDir(dir), f)))
+    const d = wikiDir(dir);
+    if (!d) return [];
+    return readdirSync(d)
+      .filter((f) => f.endsWith(".md") && isPageSlug(f.slice(0, -3)) && plainFile(join(d, f)))
       .map((f) => f.slice(0, -3))
       .sort();
   } catch {
@@ -291,12 +342,11 @@ export interface WriteResult {
  * here (updated today, sources unioned) so every writer, a person or the maintainer, leaves a page the same way.
  */
 export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number } = {}): Page {
-  const file = pageFile(dir, slug);
+  const file = pageFile(dir, slug, true)!;
   if (body.length > PAGE_MAX) throw new Error(`A page can hold ${PAGE_MAX.toLocaleString("en-US")} characters; split this one.`);
   const prior = readPage(dir, slug);
   if (!prior && pageSlugs(dir).length >= MAX_PAGES) throw new Error("This wiki is full.");
   if (existsSync(file) && !plainFile(file)) throw new Error("That page can't be written.");
-  mkdirSync(wikiDir(dir), { recursive: true });
   const type = opts.category ? typeOf(opts.category) : (prior?.frontMatter.type ?? "topic");
   const fm: FrontMatter = {
     type,
@@ -326,15 +376,18 @@ export function rebuildIndex(dir: string): void {
 export function appendLog(dir: string, text: string, pages: string[] = [], now = Date.now()): void {
   const file = join(dir, "log.md");
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}\n`;
-  const cur = existsSync(file) ? readFileSync(file, "utf8") : "# Log\n\n";
-  writeAtomic(file, cur + line);
+  writeAtomic(file, (readPlain(file) ?? "# Log\n\n") + line);
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {
-  const file = join(dir, "log.md");
-  if (!existsSync(file)) return [];
+  let text: string | null;
+  try {
+    text = readPlain(join(dir, "log.md"));
+  } catch {
+    return [];
+  }
   const out: { ts: number; text: string; pages: string[] }[] = [];
-  for (const line of readFileSync(file, "utf8").split("\n")) {
+  for (const line of (text ?? "").split("\n")) {
     const m = line.match(/^- (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}) (.*)$/);
     if (!m) continue;
     const ts = Date.parse(`${m[1]}T${m[2]}:00Z`);
@@ -385,9 +438,9 @@ export interface Source {
 
 /** Saves a source under a new id. A file is created exclusively and never rewritten, so a source can't change after it lands. */
 export function addSource(dir: string, s: { kind: SourceKind; title: string; text: string; by: string; now?: number }): Source {
-  mkdirSync(rawDir(dir), { recursive: true });
+  const raw = rawDir(dir, true)!;
   const now = s.now ?? Date.now();
-  if (readdirSync(rawDir(dir)).length >= MAX_SOURCES) throw new Error("This wiki holds as many sources as it can.");
+  if (readdirSync(raw).length >= MAX_SOURCES) throw new Error("This wiki holds as many sources as it can.");
   const title = s.title.replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled";
   const text = s.text.length > SOURCE_MAX ? `${s.text.slice(0, SOURCE_MAX)}\n\n[Cut here: the source was longer than ${SOURCE_MAX.toLocaleString("en-US")} characters.]` : s.text;
   const stem = `${today(now)}_${slugifyTitle(title).slice(0, 50)}`;
@@ -395,7 +448,7 @@ export function addSource(dir: string, s: { kind: SourceKind; title: string; tex
     const id = n === 1 ? stem : `${stem}-${n}`;
     const header = `---\nkind: ${s.kind}\ntitle: ${JSON.stringify(title)}\nby: ${JSON.stringify(s.by.slice(0, 80))}\nts: ${now}\n---\n`;
     try {
-      writeFileSync(join(rawDir(dir), `${id}.md`), header + text, { flag: "wx" });
+      writeFileSync(join(raw, `${id}.md`), header + text, { flag: "wx" });
       return { id, title, kind: s.kind, ts: now, by: s.by, text };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
@@ -406,8 +459,14 @@ export function addSource(dir: string, s: { kind: SourceKind; title: string; tex
 
 export function readSource(dir: string, id: string): Source | null {
   if (!isSourceId(id)) return null;
-  const file = join(rawDir(dir), `${id}.md`);
-  if (!plainFile(file)) return null;
+  let raw: string | null;
+  try {
+    raw = rawDir(dir);
+  } catch {
+    return null;
+  }
+  const file = raw && join(raw, `${id}.md`);
+  if (!file || !plainFile(file)) return null;
   const text = readFileSync(file, "utf8");
   const m = text.match(/^---\nkind: (\w+)\ntitle: (".*")\nby: (".*")\nts: (\d+)\n---\n/);
   if (!m) return { id, title: id, kind: "document", ts: statSync(file).mtimeMs, by: "", text };
@@ -420,7 +479,8 @@ export function readSource(dir: string, id: string): Source | null {
 
 export function sourceIds(dir: string): string[] {
   try {
-    return readdirSync(rawDir(dir)).filter((f) => f.endsWith(".md") && isSourceId(f.slice(0, -3))).map((f) => f.slice(0, -3)).sort();
+    const raw = rawDir(dir);
+    return !raw ? [] : readdirSync(raw).filter((f) => f.endsWith(".md") && isSourceId(f.slice(0, -3))).map((f) => f.slice(0, -3)).sort();
   } catch {
     return [];
   }
@@ -434,14 +494,18 @@ export interface WikiState {
   /** Per session: the last event id the transcript source covered. */
   cursors: Record<string, number>;
   migrated?: boolean;
+  /** The source a first-use migration works from until it finishes, so a retry reuses it. */
+  migrating?: string;
 }
 
 const stateFile = (dir: string) => join(dir, ".wiki-state.json");
 
 export function readState(dir: string): WikiState {
+  // A link in place of the state file throws: better no ingest than one that starts again from nothing.
+  const text = readPlain(stateFile(dir));
   try {
-    const j = JSON.parse(readFileSync(stateFile(dir), "utf8")) as Partial<WikiState>;
-    return { ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {}, cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {}, migrated: !!j.migrated };
+    const j = JSON.parse(text ?? "{}") as Partial<WikiState>;
+    return { ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {}, cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {}, migrated: !!j.migrated, ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}) };
   } catch {
     return { ingested: {}, cursors: {} };
   }

@@ -261,6 +261,11 @@ export class Store {
     return (this.db.query(sql).all(...args) as any[]).map(rowToEvent).reverse();
   }
 
+  /** Events after an id, oldest first: for reading forward through everything, a page at a time. */
+  eventsAfter(afterId: number, limit = 500): JamEvent[] {
+    return (this.db.query("SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?").all(afterId, limit) as any[]).map(rowToEvent);
+  }
+
   /** The people who spoke or typed in this session, most recent first. */
   speakers(limit = 24): string[] {
     const rows = this.db

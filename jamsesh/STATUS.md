@@ -88,20 +88,20 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 
 | Capability | Status | Notes |
 |---|---|---|
-| The project folder as a vault (WIKI.md, index, log, raw, wiki; git history when `git` is there) | Simulated | Files and git checked in a temp folder; with git missing it still works. Not opened in Obsidian itself. |
-| Ingest from transcript, documents, agent reports and edits into one board card with diffs | Tested live | Scripted decider in tests; one run with the real router model on a short synthetic transcript produced 8 cited pages, and an injected instruction in a document stayed data. Not run on a real room's hour of talk. |
-| Accepting a card page by page; people's edits win over a stale proposal | Simulated | |
+| The project folder as a vault (WIKI.md, index, log, raw, wiki; git history when `git` is there) | Simulated | Files and git checked in a temp folder; with git off PATH it still works. Commits hold only the wiki's own files (a person's notes and staged work stay out). A linked `wiki/`, `raw/` or log is refused, never followed. Not opened in Obsidian itself. |
+| Ingest from transcript, documents, agent reports and edits into one board card with diffs | Tested live | Scripted decider in tests (1,300 events between passes all kept; a failed source write keeps the cursor; session end keeps a one-line exchange). The model only replaces pages it was shown whole. One run with the real router model on a short synthetic transcript produced 7 cited pages, and an injected instruction in a document stayed out of them. Not run on a real room's hour of talk. |
+| Accepting a card page by page; people's edits win over a stale proposal; a card left open carries to the next session | Simulated | Cards raised again on a new session's board through its own routes; failed page writes and a failed log or index (fault-injected) keep the card open, and accepting again writes nothing twice. A large cut is flagged on the card. |
 | People's page edits (direct, logged as sources) and Add to wiki (text, link, text file) | Simulated | Through the real routes. |
 | Add to wiki from a PDF | Not tested | Read by the router model; needs a real PDF and the key. |
 | Query, filing an answer, lint (orphans, broken links, stale, unread sources, contradictions) | Tested live | Query and lint ran once with the live model; the contradiction check has only seen a clean wiki. |
 | `jam_wiki_read` / `search` / `query` / `jam_source_add`; join briefing carries index and workstream pages under 1,500 tokens | Simulated | Scripted agent over the tool path. A real Claude Code chat hasn't used them. |
-| Fact list folded into pages on first use | Simulated | From a context.json and session facts; not from a real project's history. |
-| Wiki tab: index and search, page view with backlinks and citations, editing with stale-save handling, history, Add to wiki (text, link, file) | Simulated | The client calls (`api()`) run against a throwaway hub with a 40-page seeded folder; looked at in headless Chromium at 1440 px and 390 px. A PDF upload was not run (needs the router key). |
+| Fact list folded into pages on first use | Simulated | From a context.json and session facts; create-only (a person's page is left alone and the merge goes to a card); an interrupted run reuses its source. Not from a real project's history. |
+| Wiki tab: index and search, page view with backlinks and citations, editing pinned to the revision it began from (another person's save mid-draft is a conflict, tested with two clients and seen in Chromium), history, Add to wiki (text, link, file) | Simulated | The client calls (`api()`) run against a throwaway hub with a 40-page seeded folder; looked at in headless Chromium at 1440 px and 390 px. A PDF upload was not run (needs the router key). |
 | Wiki graph (hover, click, drag, keyboard, local graph, phone, reduced motion) and the pulse when an ingest touches pages | Simulated | Looked at in headless Chromium with 41 pages; the pulse was triggered by a real page edit through the hub's own message. Not tried with a real ingest or on a touch device. |
 | The graph on the big screen ("show the wiki graph") | Simulated | Brain tool tested; drawn at 1920 x 1080 in headless Chromium. Not seen on a real TV, and not asked by voice. |
 | Wiki cards on the Tasks board: per-page toggles and diffs, Add N pages | Simulated | Accepting through `api()` tested; the card was looked at in Chromium. |
 | Rendered page text: raw HTML, `javascript:` and `data:` links, pictures, hostile titles | Simulated | Unit tests on the markdown layer; a hostile page opened in headless Chromium ran nothing (DOMPurify itself is only exercised in a browser, by hand). |
-| The Work tab links to the decisions, requirements and open-questions pages, each with a count; the old fact list is gone from the app | Simulated | Counts are bullet lines on each page; clicking opens the page in the Wiki tab. Looked at in headless Chromium. |
+| The Work tab shows the project's decisions, requirements and open questions by page category, each with a count; the old fact list is gone from the app | Simulated | A page per item counts one, a list page counts its bullets; clicking opens the list page or the newest. Looked at in headless Chromium. |
 
 ## Big screen: locks, versions, history
 

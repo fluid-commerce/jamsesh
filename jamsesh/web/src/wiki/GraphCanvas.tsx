@@ -70,6 +70,14 @@ function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
   return force as any;
 }
 
+/**
+ * Whether the frame loop needs another frame: something is still moving, settling, easing or being dragged. A still map
+ * (the big screen included) stops; data, a pulse, a pointer or a resize wakes it again.
+ */
+export function keepDrawing(f: { moving: boolean; settling: boolean; emph: number; hot: boolean; k: number; kFit: number; drag: boolean }): boolean {
+  return f.moving || f.settling || Math.abs(f.emph - (f.hot ? 1 : 0)) > 0.01 || Math.abs(f.k - f.kFit) > 0.002 || f.drag;
+}
+
 export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse = false, label = "Link map of the wiki" }: Props) {
   const wrap = useRef<HTMLDivElement>(null);
   const cv = useRef<HTMLCanvasElement>(null);
@@ -231,7 +239,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
 
       const s = sim.current;
       const settling = !!s && s.alpha() > s.alphaMin();
-      return moving || settling || Math.abs(L.emph - (hot ? 1 : 0)) > 0.01 || Math.abs(L.k - kFit) > 0.002 || !!L.drag || stage;
+      return keepDrawing({ moving, settling, emph: L.emph, hot: !!hot, k: L.k, kFit, drag: !!L.drag });
     },
     [graph, size, focus, picked, stage, mode, coarse, S],
   );

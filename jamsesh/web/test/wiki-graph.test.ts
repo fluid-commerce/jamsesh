@@ -2,6 +2,7 @@
 import { expect, test } from "bun:test";
 import { labelled, localGraph, MAX_NODES, nodeAt, radiusFor, shapeGraph, walkOrder } from "../src/wiki/graph";
 import { PULSE_MS, PulseStore } from "../src/wiki/pulse";
+import { keepDrawing } from "../src/wiki/GraphCanvas";
 
 const raw = {
   nodes: [
@@ -119,4 +120,14 @@ test("names go to the important pages first: backlinks, then people and workstre
   expect(byImportance(g).map((n) => n.id).slice(0, 4)).toEqual(["big", "p", "w", "t"]);
   expect([...labelledAtLeast(g, 2, 1)].sort()).toEqual(["a", "big", "p", "t", "w"]);
   expect(labelledAtLeast(g, 2, 0).size).toBe(4);
+});
+
+test("a settled map stops asking for frames, the big screen's too; motion, easing and drags keep it going", () => {
+  const still = { moving: false, settling: false, emph: 0, hot: false, k: 1, kFit: 1, drag: false };
+  expect(keepDrawing(still)).toBe(false);
+  expect(keepDrawing({ ...still, moving: true })).toBe(true);
+  expect(keepDrawing({ ...still, settling: true })).toBe(true);
+  expect(keepDrawing({ ...still, hot: true })).toBe(true);
+  expect(keepDrawing({ ...still, k: 1.2 })).toBe(true);
+  expect(keepDrawing({ ...still, drag: true })).toBe(true);
 });

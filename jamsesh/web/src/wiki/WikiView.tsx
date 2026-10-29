@@ -6,6 +6,7 @@ import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { onWikiOpen, takePendingWikiPage } from "./nav";
+import { onRefresh, saveRev } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -280,14 +281,23 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<WikiPage | null>(null);
   const [saveErr, setSaveErr] = useState<string | null>(null);
+  // The revision the open edit started from. A refresh never changes it (draft.ts).
+  const [base, setBase] = useState("");
   const meta = wiki.pages.find((p) => p.slug === slug);
-  const editingRef = useRef(editing);
-  editingRef.current = editing;
+  const draft = useRef({ editing, base });
+  draft.current = { editing, base };
+  const begin = (text: string, rev: string) => (setEditing(text), setBase(rev), setConflict(null));
 
   useEffect(() => {
     let live = true;
     wikiApi.page(slug).then(
-      (p) => live && (setPage(p), setErr(null)),
+      (p) => {
+        if (!live) return;
+        const r = onRefresh(draft.current.editing !== null, draft.current.base, p);
+        if (r.page) setPage(r.page);
+        if (r.theirs) setConflict(r.theirs);
+        setErr(null);
+      },
       (e) => live && setErr({ status: e?.status, message: pretty(e, "Couldn't open this page.") }),
     );
     return () => void (live = false);
@@ -316,7 +326,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
     setSaving(true);
     setSaveErr(null);
     try {
-      const r = await wikiApi.save(slug, { markdown: editing, rev: (keepMine ? conflict?.rev : page?.rev) || undefined });
+      const r = await wikiApi.save(slug, { markdown: editing, rev: saveRev(base, conflict, keepMine) });
       if ("conflict" in r) return void (setConflict(r.conflict), setSaving(false));
       setPage(r.page);
       setEditing(null);
@@ -334,7 +344,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
         <h2>{err.status === 404 ? "No page called this yet" : "Couldn't open this page"}</h2>
         <p>{err.status === 404 ? "Someone linked to it before it was written. You can start it." : err.message}</p>
         {err.status === 404 ? (
-          <button className="btn primary" onClick={() => (setErr(null), setPage({ slug, title: slug.replace(/-/g, " "), category: "topics", frontMatter: {}, markdown: "", rev: "", backlinks: [], links: [], sources: [] }), setEditing(""))}>Start this page</button>
+          <button className="btn primary" onClick={() => (setErr(null), setPage({ slug, title: slug.replace(/-/g, " "), category: "topics", frontMatter: {}, markdown: "", rev: "", backlinks: [], links: [], sources: [] }), begin("", ""))}>Start this page</button>
         ) : (
           <button className="btn" onClick={wiki.reload}>Try again</button>
         )}
@@ -353,7 +363,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
           {page.frontMatter.updated && <span className="wk-upd">Updated {page.frontMatter.updated}</span>}
           <span className="grow" />
           {!phone && <button className="btn ghost small" onClick={onHistory}>History</button>}
-          {editing === null && <button className="btn small" onClick={() => setEditing(page.markdown)}>Edit</button>}
+          {editing === null && <button className="btn small" onClick={() => begin(page.markdown, page.rev)}>Edit</button>}
         </div>
         <h1 className="wk-title">{page.title}</h1>
         {editing !== null ? (
@@ -361,17 +371,17 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
             value={editing}
             onChange={setEditing}
             onSave={() => void save(!!conflict)}
-            onCancel={() => (setEditing(null), setConflict(null), setSaveErr(null))}
+            onCancel={() => (conflict && setPage(conflict), setEditing(null), setConflict(null), setSaveErr(null))}
             saving={saving}
             dirty={editing !== page.markdown}
             conflict={conflict}
-            onTheirs={() => conflict && (setPage(conflict), setEditing(conflict.markdown), setConflict(null))}
+            onTheirs={() => conflict && (setPage(conflict), begin(conflict.markdown, conflict.rev))}
             error={saveErr}
           />
         ) : page.markdown.trim() ? (
           <div className="wk-body" onClick={clicked} dangerouslySetInnerHTML={{ __html: html }} />
         ) : (
-          <p className="wk-blank">This page is empty. <button className="btn ghost small" onClick={() => setEditing("")}>Write it</button></p>
+          <p className="wk-blank">This page is empty. <button className="btn ghost small" onClick={() => begin("", page.rev)}>Write it</button></p>
         )}
         {page.sources.length > 0 && (
           <section className="wk-sec">
