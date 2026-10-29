@@ -346,7 +346,10 @@ export class Brain {
 
   private async directPass(ev: JamEvent, extra: string) {
     const m = this.live("router");
-    if (!m) return this.offlineDirect(ev);
+    // The rules act on the words straight away, so with files attached they don't run: the person is told instead.
+    const attached = Array.isArray(ev.data.attachments) && ev.data.attachments.length > 0;
+    const fallback = () => (attached ? void speak(this.session, "I couldn't work through those files just now. Try again in a moment.", { source: speechSource([ev]), kind: "problem" }) : this.offlineDirect(ev));
+    if (!m) return fallback();
     const pass = { effects: 0 };
     this.session.setBrain("thinking");
     bus.send({ type: "thinking", on: true, label: `${this.session.settings().brainName} is on it` });
@@ -364,13 +367,13 @@ export class Brain {
       // A plain-text reply with no tool call is still an answer: say it rather than drop the request.
       if (!pass.effects && !this.stopped) {
         if (text?.trim()) void speak(this.session, text.trim(), { source: speechSource([ev]), kind: "answer" });
-        else this.offlineDirect(ev);
+        else fallback();
       }
     } catch (e) {
       this.gatewayTrouble(e);
       console.error("direct:", describeError(e));
       // Only when the pass did nothing yet: otherwise the rules would do some of it a second time.
-      if (!pass.effects) this.offlineDirect(ev);
+      if (!pass.effects) fallback();
     } finally {
       bus.send({ type: "thinking", on: false });
     }

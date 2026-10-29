@@ -119,6 +119,23 @@ test("without a file the same request still acts directly, so the gate is the fi
   answer = async () => ({ text: "ok" });
 });
 
+test("with files, a failed or empty model pass never falls back to the keyword rules, which would act on the words", async () => {
+  const r = room();
+  const rec = r.hub.attachments.save(new TextEncoder().encode("Header spec."), "spec.md", "Chey");
+  const ask = (text: string) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text, relevance: "work", data: { typed: true, direct: true, attachments: [r.hub.attachments.ref(rec.id)] } });
+  for (const fail of [async () => { throw new Error("gateway down"); }, async () => ({ text: "" })]) {
+    answer = fail;
+    await (r.hub.brain as any).directPass(ask("Send this to Felipe's agent and cancel the old task"), "");
+  }
+  // And with no model at all.
+  r.s.store.setSetting("gatewayKey", "");
+  await (r.hub.brain as any).directPass(ask("Send this to Felipe's agent"), "");
+  expect(r.s.directives()).toHaveLength(0);
+  expect(r.s.board.open()).toHaveLength(0);
+  r.s.store.setSetting("gatewayKey", "test-key-not-real");
+  answer = async () => ({ text: "ok" });
+});
+
 // ---------- 2. overlapping sessions both keep what they settled ----------
 
 const fact = (id: string, text: string, at: number, status: "active" | "superseded" = "active") => ({ id, changedAt: at, status, kind: "decision" as const, text, workstream: "", by: "Chey", note: "", ts: at });
