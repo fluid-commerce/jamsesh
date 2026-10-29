@@ -9,6 +9,11 @@ type Request = { stage: Partial<StageState> & { mode: StageState["mode"] }; done
 let ask: ((r: Request) => void) | null = null;
 let tell: ((note: string) => void) | null = null;
 
+/** Says on screen that a screen control didn't go through (in people's apps, where `CastHost` is mounted). */
+export function tellNote(note: string) {
+  if (note) tell?.(note);
+}
+
 /** Sends a cast now (never later: see `stageAction`); a failure is said on screen. Resolves with whether it went up. */
 export async function putOnScreen(stage: Request["stage"] & { screen?: string }): Promise<boolean> {
   const note = await stageAction("/stage", stage);

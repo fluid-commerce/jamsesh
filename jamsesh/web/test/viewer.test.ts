@@ -55,7 +55,7 @@ test("a frame is drawn larger only when its box would upscale the stored 1600 px
   expect(fullSize({ ...frame, nodeId: null }, { w: 3600, h: 2000 }, 1)).toBeNull();
 });
 
-test("Expand goes out through the real api() helper to the hub's expand route, and is never queued for later", async () => {
+test("Expand goes out through the real api() helper to the hub's expand route, is never queued for later, and says when it fails", async () => {
   (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
   (globalThis as any).navigator ??= {};
   Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });
@@ -77,8 +77,13 @@ test("Expand goes out through the real api() helper to the hub's expand route, a
     // Offline, nothing is held back to replay minutes later over a screen that has moved on.
     Object.defineProperty(globalThis.navigator, "onLine", { value: false, configurable: true });
     seen.length = 0;
-    await expandTile("art_1");
+    // ...and the person is told rather than left wondering.
+    expect(await expandTile("art_1")).toBe("Not connected to the host. Try again when you're back.");
     expect(seen).toEqual([]);
+    // The hub refusing (a tile that's gone) is said in its words.
+    Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });
+    globalThis.fetch = (async (url: string) => (url === "/api/pair/info" ? Response.json({ hostId: "h" }) : Response.json({ error: "That isn't on the screen right now." }, { status: 404 }))) as typeof fetch;
+    expect(await expandTile("art_gone")).toBe("That isn't on the screen right now.");
   } finally {
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });

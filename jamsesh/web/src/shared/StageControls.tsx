@@ -1,19 +1,11 @@
 // What a person put on the big screen is theirs until they unlock it; agents' items wait here (3.1).
 // Also the strip of recent screens people can tap to bring back (3.6) and the badge that opens a
 // built screen's earlier versions (3.5).
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import { api, pref, useHub, type Artifact, type HubState, type ShowRequest } from "./hub";
+import { useNow } from "./ui";
 import "./stagecontrols.css";
-
-function useNow(ms: number) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
-}
 
 /** "2 min ago", for badges where "2m" would read as a unit. */
 export function agoWords(ts: number, now = Date.now()) {
