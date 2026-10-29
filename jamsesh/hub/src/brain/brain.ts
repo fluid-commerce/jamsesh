@@ -685,7 +685,7 @@ export class Brain {
           "Build a custom full-screen view for the big screen as self-contained HTML (inline CSS and JS, no external requests). It receives window.JAM = {state} with agents, artifacts (with image URLs), events, and updates live through a 'jam' message event. Use it for requests no built-in mode covers, for example a four-way split of what each agent is doing.",
         inputSchema: z.object({
           title: z.string(),
-          html: z.string().describe("Sized for the screen it's on: check its width and height in Screens"),
+          html: z.string().max(500_000).describe("Sized for the screen it's on: check its width and height in Screens"),
           screen: z.string().optional().describe("Which big screen, by its name or id from Screens (\"Left TV\", \"screen-2\"). Leave out for the main one, or when the room didn't name one."),
         }),
         execute: async (i) => {
@@ -973,7 +973,9 @@ export class Brain {
           const held = this.lockBlock(id, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!s.restoreHistory(entry.id, id, castBy(id), "Room brain")) return refuse("That screen is no longer in the history.");
+          const back = s.restoreHistory(entry.id, id, castBy(id), "Room brain");
+          if (back === "stale") return refuse(MOVED_ON);
+          if (!back) return refuse("That screen is no longer in the history.");
           return `Brought back ${entry.label}, which ${entry.by} had up.`;
         },
       }),
@@ -1067,7 +1069,7 @@ export class Brain {
       if (line.intent === "present") {
         const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
         const hit = s.artifacts().find((a) => words.some((w) => a.title.toLowerCase().includes(w)));
-        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) }, "Room brain", "main", wo);
+        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: (hit.group ? s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) : [hit.id]).slice(0, 60) }, "Room brain", "main", wo);
         else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain", "main", wo);
         else s.setStage({ mode: "board" }, "Room brain", "main", wo);
         continue;

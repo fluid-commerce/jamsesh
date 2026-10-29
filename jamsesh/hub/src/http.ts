@@ -579,7 +579,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const lock = s.lockOf(screen);
     if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
     const stage = s.restoreHistory(String(body?.id ?? ""), screen, { person: who });
-    return stage ? json(stage) : bad("That screen is no longer in the history.", 404);
+    return stage === "stale" ? bad("The screen changed; look again.", 409) : stage ? json(stage) : bad("That screen is no longer in the history.", 404);
   }
   m = path.match(/^\/stage\/ready\/([\w-]+)$/);
   if (m && req.method === "POST") {

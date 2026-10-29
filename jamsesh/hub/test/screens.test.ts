@@ -37,7 +37,7 @@ test("screens carry the names the host app gave them, and are found by name", ()
   expect(s.findScreen("kitchen")).toBeUndefined();
   expect(s.findScreen("")).toBeUndefined();
   // Each screen has its own stage, stamped with its id.
-  s.setStage({ mode: "spotlight", title: "A" }, "Maya", "screen-2", { claim: s.stageClaim() });
+  s.setStage({ mode: "spotlight", items: ["x"], title: "A" }, "Maya", "screen-2", { claim: s.stageClaim() });
   expect(s.stage("screen-2").screenId).toBe("screen-2");
   expect(s.stage().screenId).toBeUndefined();
   s.setStage({ mode: "board" }, "Maya", "main", { claim: s.stageClaim() });
@@ -67,12 +67,12 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     const named = await (await post("/screens/config", { screens: [{ id: "main", name: "Left TV" }, { id: "screen-2", name: "Right TV" }] })).json();
     expect(named.screens.map((sc: any) => sc.name)).toEqual(["Left TV", "Right TV"]);
     const s = hub.session;
-    await post("/stage", { mode: "spotlight", title: "to the right", by: "Maya", screen: "right tv" });
+    await post("/stage", { mode: "spotlight", items: ["x"], title: "to the right", by: "Maya", screen: "right tv" });
     expect(s.stage("screen-2").title).toBe("to the right");
     expect(s.stage().title).not.toBe("to the right");
     // No screen named: the main one. One that isn't there is refused, never put on the main screen instead.
-    await post("/stage", { mode: "spotlight", title: "default", by: "Maya" });
-    expect((await post("/stage", { mode: "spotlight", title: "nowhere", by: "Maya", screen: "kitchen" })).status).toBe(404);
+    await post("/stage", { mode: "spotlight", items: ["x"], title: "default", by: "Maya" });
+    expect((await post("/stage", { mode: "spotlight", items: ["x"], title: "nowhere", by: "Maya", screen: "kitchen" })).status).toBe(404);
     expect(s.stage().title).toBe("default");
     expect(s.stage("screen-2").title).toBe("to the right");
     // The brain: "put it on the left TV".

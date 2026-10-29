@@ -410,3 +410,17 @@ test("an owner who unlocks during their own pinned share doesn't get the pin bac
   expect(r.s.stage().pinnedById).toBeUndefined();
   expect((r.s as any).stageRevert).not.toBeNull();
 });
+
+test("a pin that had no lock survives its sharer's share ending", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  // The brain pinned this view for nobody in particular (no person, no lock).
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], pinned: true }, "Room brain", "main", { override: true });
+  expect(r.s.stage().lock).toBeUndefined();
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("layout");
+  r.s.endShare(sh.id);
+  expect(r.s.stage().mode).toBe("spotlight");
+  expect(r.s.stage().pinned).toBe(true);
+});

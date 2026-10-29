@@ -1308,7 +1308,8 @@ export class Session {
         // A lock still held when the share ends stays with what comes back (the owner's share over their own cast, SPEC 10.5).
         // One its owner let go of during the share stays gone.
         // The pin comes back only with the lock that held it: an owner who unlocked during the share released the pin with it.
-        const restored = back && !st.lock ? { ...back, pinned: false, pinnedById: undefined } : back;
+        // A pin that had no lock was never anyone's to release, and stays.
+        const restored = back && back.lock && !st.lock ? { ...back, pinned: false, pinnedById: undefined } : back;
         this.setStage(tiles.length ? { ...st, layout: { tiles } } : restored ? restored : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
       }
     }
@@ -1662,6 +1663,12 @@ export class Session {
     const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
+    // The one check every stage passes before it is stored, whoever wrote it: what the read path would reject isn't written.
+    const checked = parseStage(stage);
+    if (!checked.ok) {
+      console.error(`refused a stage for ${screen}: ${checked.error}`);
+      return cur;
+    }
     // Who pinned it, by identity (never by name): only a person with an id of their own is recorded.
     if (stage.pinned && opts.person) stage.pinnedById = opts.person.id ?? "";
     else if (!stage.pinned || opts.person) delete stage.pinnedById;
@@ -2079,9 +2086,11 @@ export class Session {
   }
 
   /** Brings an earlier screen back. A person's tap takes the lock; anyone else is held off by one. */
-  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): Stage | null {
+  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): Stage | null | "stale" {
     const entry = (this.stageHistory(screen)[screen] ?? []).find((e) => e.id === id);
     if (!entry) return null;
+    // The screen changed since the caller decided: nothing is restored, and the caller is told so.
+    if (who.claim && !this.claimHolds(who.claim, screen)) return "stale";
     return this.setStage({ ...entry.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);
   }
 }

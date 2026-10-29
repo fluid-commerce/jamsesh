@@ -38,7 +38,13 @@ const stageShape = {
   screenId: z.string().max(100).optional(),
   lock: z.object({ by: z.string().max(200), personId: z.string().max(200).nullable(), since: z.number().finite(), lastActive: z.number().finite() }).optional(),
 };
-const stageSchema = z.object(stageShape);
+const stageSchema = z.object(stageShape).superRefine((s, ctx) => {
+  // A screen that locks should show what was asked for.
+  const need = (ok: boolean, path: string, message: string) => ok || ctx.addIssue({ code: "custom", path: [path], message });
+  if (s.mode === "spotlight" || s.mode === "compare") need((s.items?.length ?? 0) > 0, "items", "needs at least one item");
+  if (s.mode === "layout") need((s.layout?.tiles.length ?? 0) > 0, "layout", "needs at least one tile");
+  if (s.mode === "custom") need(!!s.html, "html", "needs content");
+});
 
 /** A stage's fields checked and cleaned (unknown fields dropped), or why it isn't one. */
 export function parseStage(raw: unknown): { ok: true; stage: Partial<Stage> & { mode: Stage["mode"] } } | { ok: false; error: string } {

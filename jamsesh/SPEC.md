@@ -519,7 +519,8 @@ A26c].
 
 ### 5.2 Saved state and merge
 
-- **Outbox.** Every change the client makes (POST, PATCH, DELETE) goes into a durable outbox in
+- **Outbox.** Every change the client makes (POST, PATCH, DELETE), except the live-only screen controls
+  (Expand and Collapse of a tile, which are never queued for later), goes into a durable outbox in
   IndexedDB when the host can't take it. Calls replay in order, one at a time, with an idempotency
   key, so the host applies each exactly once even if it saw the first attempt. Caps: 500 changes
   and 7 days. Pairing, audio, hooks, share requests, and debug calls are never queued.
@@ -613,7 +614,7 @@ Every tool except `jam_join` requires a joined agent.
 The MCP server also offers the skill as the prompt `jamsesh`.
 
 The live state carries only the newest of long lists (60 directives, 120 artifacts, 200 utterances,
-the recent events) and says how many the session holds in all. Older ones are read with
+the recent events); the one exception is an artifact a screen is showing, which is always included however old and says how many the session holds in all. Older ones are read with
 `GET /api/history/<events|utterances|directives|artifacts>?before=<cursor>&limit=50` (events also
 take `kinds=speech,prompt`); people and agents may both read it. `limit` is 1 to 200 and defaults to
 50 when it isn't a number.

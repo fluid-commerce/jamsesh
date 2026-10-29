@@ -10,7 +10,7 @@ import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { buildKey, Session } from "../src/session";
-import type { Agent, JamEvent, ShowRequest } from "../src/types";
+import type { Agent, JamEvent, ShowRequest, Stage } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
 const dir = mkdtempSync(join(tmpdir(), "jam-stage-"));
@@ -402,12 +402,12 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   expect(s.historyBy("felipe")?.label).toBe("Checkout");
   const hit = s.historyBy("Felipe")!;
   (s as any).dropLock("main");
-  const back = s.restoreHistory(hit.id, "main", { claim: s.stageClaim() }, "Room brain")!;
+  const back = s.restoreHistory(hit.id, "main", { claim: s.stageClaim() }, "Room brain") as Stage;
   expect(back.mode).toBe("spotlight");
   expect(back.by).toBe("Room brain");
   // A locked screen holds off a restore that isn't a person's.
   s.setStage({ mode: "agents" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.restoreHistory(s.previousScreens()[0].id, "main", { claim: s.stageClaim() }, "Room brain")!.mode).toBe("agents");
+  expect((s.restoreHistory(s.previousScreens()[0].id, "main", { claim: s.stageClaim() }, "Room brain") as Stage).mode).toBe("agents");
   expect(s.restoreHistory("his-nope", "main", { claim: s.stageClaim() })).toBeNull();
 });
 
@@ -427,7 +427,7 @@ test("the brain brings back what a person had up, and says so when nothing match
 
 test("history keeps at most 20 screens per screen", () => {
   const { s } = room();
-  for (let i = 0; i < 30; i++) s.setStage({ mode: "spotlight", items: [], title: `Screen ${i}` }, "Room brain", "main", { override: true });
+  for (let i = 0; i < 30; i++) s.setStage({ mode: "spotlight", items: ["x"], title: `Screen ${i}` }, "Room brain", "main", { override: true });
   expect(s.stageHistory().main).toHaveLength(Session.HISTORY_MAX);
   expect(s.stageHistory().main[0].label).toBe("Screen 29");
 });
@@ -1282,4 +1282,36 @@ test("an artifact a screen shows stays in the state payload however many newer o
   expect(s.state().artifacts.length).toBeLessThanOrEqual(121);
   s.store.setSetting("stage", { ...s.stage(), junk: "x".repeat(10) });
   expect((s.stage() as any).junk).toBeUndefined();
+});
+
+test("internal writes pass the same check as casts: an oversized or empty stage is refused and visible to the caller", () => {
+  const { s } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { override: true });
+  const rev = s.stageRev();
+  const err = console.error;
+  console.error = () => {};
+  try {
+    s.setStage({ mode: "spotlight", items: Array.from({ length: 61 }, (_, i) => `a${i}`) }, "Room brain", "main", { override: true });
+    s.setStage({ mode: "custom", html: "x".repeat(600_000) }, "Room brain", "main", { override: true });
+    s.setStage({ mode: "layout", layout: { tiles: [] } }, "Room brain", "main", { override: true });
+  } finally {
+    console.error = err;
+  }
+  expect(s.stageRev()).toBe(rev);
+  expect(s.stage().items).toEqual([a.id]);
+});
+
+test("a restore whose claim is stale says so, and restores nothing", async () => {
+  const { s, chey, tools } = room();
+  const a = artifact(s, "Checkout");
+  const b = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { override: true });
+  s.setStage({ mode: "spotlight", items: [b.id] }, "Chey", "main", { override: true });
+  const entry = s.previousScreens()[0];
+  const claim = s.stageClaim();
+  s.setStage({ mode: "agents" }, "Chey", "main", { override: true });
+  expect(s.restoreHistory(entry.id, "main", { claim }, "Room brain")).toBe("stale");
+  expect(s.stage().mode).toBe("agents");
+  void chey; void tools;
 });
