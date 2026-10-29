@@ -1528,6 +1528,41 @@ the same way, by voice or button. Asking for it isn't approval: the request stil
 "approve" said after it was announced, so nothing someone said in passing, and nothing the model
 decides, can start a command.
 
+### 13.3a Live app tiles (6.3)
+
+An iPhone build in the iOS Simulator, or a Mac or Electron app, running on the host can stream into a
+tile, full resolution, and be driven from any person's own screen. The tile is `{ kind: "app", appId }`;
+the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps` in `liveapps.ts`).
+
+- **Starting one.** An approved build that opened a Simulator app or a `.app` starts a tile and puts it
+  on the main screen (a locked screen is left alone). A person can also start one for what's already
+  running: `POST /api/apps` `{ kind: "ios", device? }` or `{ kind: "mac", name }`, from the host's own
+  window only, with host control on. Starting a tile builds nothing, so the build approval flow
+  ([8.11](#811-build-approvals)) is unchanged: an unapproved, denied or expired request never opens one.
+  At most four tiles are live at once.
+- **Picture, iOS.** `simctl io <device> screenshot --type=jpeg`, three calls in flight, newest first, a
+  frame identical to the last dropped, running only while someone watches. `recordVideo` can't stream (its
+  file is finished only when it stops) and idb's MJPEG stream fails to start on macOS 26. Frames travel as
+  binary WebSocket messages on `/ws/app/<id>` (people only; a slow viewer skips frames).
+- **Picture, Mac.** `jamsesh-live` (`hub/native/jamsesh-live.swift`, compiled by the hub on first use into
+  `~/.jamsesh/bin`): ScreenCaptureKit on one window at its native pixel size, 30 frames a second, JPEG,
+  length-prefixed on stdout. Needs Screen Recording for the app that runs the hub.
+- **Taps, iOS.** idb's companion (`brew install facebook/fb/idb-companion`), one per tile on a unix socket in
+  the hub's folder, over gRPC (`idb.ts`). No Simulator window, no Accessibility. Without it people can
+  watch, switch Light/Dark, and nothing else (the tile says so). Touches don't land while the screen is
+  turned (checked on iOS 18.6), so taps wait for portrait.
+- **Taps, Mac.** The same helper posts CGEvents to the app's pid at points inside its window (the Mac's own
+  cursor never moves). Needs Accessibility; without it the tile is watch-only.
+- **Controls (iOS).** Home, Rotate, Light/Dark. Appearance is `simctl ui appearance`; Home and Rotate go
+  through the companion. The device frame is a plain rounded rectangle drawn in CSS.
+- **Who is driving.** One controller per tile (`controller: { personId, name, since }`). `POST
+  /api/apps/<id>/control` `{ action: "take" | "release" | "pass", to? }`: taking a free tile works; taking
+  one someone holds is refused with their name unless it's the host's window or their hold lapsed (5
+  minutes with no input); only the holder (or the host) releases or passes, and `to` must be a person in the
+  room. `POST /api/apps/<id>/input` takes `tap`, `swipe`, `down|move|up`, `scroll`, `text`, `home`,
+  `rotate`, `appearance`, with `x` and `y` as 0..1 fractions of the screen; anyone but the controller gets
+  409 with the reason. Agents' credentials are refused on every `/api/apps` route and on the socket.
+
 ### 13.4 Displays
 
 See [8.10](#810-screen-tools): the brain knows every display's resolution, aspect ratio, scale, and

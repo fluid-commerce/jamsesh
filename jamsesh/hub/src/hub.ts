@@ -10,6 +10,7 @@ import { Canvas } from "./canvas/canvas";
 import { config } from "./config";
 import { DevProxy } from "./devproxy";
 import { HostControl } from "./hostctl";
+import { LiveApps } from "./liveapps";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
@@ -70,6 +71,7 @@ export class Hub {
   store: Store;
   session: Session;
   host: HostControl;
+  live: LiveApps;
   brain: Brain;
   transcriber: Transcriber;
   audio: AudioPipeline;
@@ -100,6 +102,11 @@ export class Hub {
     this.awake = new KeepAwake(() => this.peopleOnline + this.session.agents().filter((a) => a.status !== "offline" && Date.now() - a.lastSeen < 10 * 60_000).length);
     this.session = new Session(this.store);
     this.host = new HostControl(this.session);
+    this.live = new LiveApps(this.session);
+    this.live.pickSim = (d) => this.host.pickSim(d);
+    this.live.log = (text) => this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text });
+    this.session.liveApps = () => this.live.list();
+    this.host.onOpened = (app, by) => void this.showLive(app, by);
     this.session.buildRequests = () => this.host.buildRequests();
     this.host.onRequest = (r) => this.onBuildRequest(r);
     this.session.onShowRequest = (r) => this.onShowRequest(r);
@@ -176,6 +183,7 @@ export class Hub {
   }
 
   stop() {
+    this.live.stopAll();
     this.awake.stop();
     this.autosave.stop();
     this.keeper.stop();
@@ -425,6 +433,19 @@ export class Hub {
   }
 
   // ---------- host build requests (approved by people, by voice or a button) ----------
+
+  /** An approved build opened an app: stream it live and put it on the big screen (unless a person's screen is locked). */
+  private async showLive(app: { kind: "ios" } | { kind: "mac"; name: string }, by: string) {
+    let r: Awaited<ReturnType<LiveApps["startIos"]>> = "";
+    // A Mac app's window takes a moment to appear.
+    for (let i = 0; i < (app.kind === "mac" ? 8 : 1); i++) {
+      r = app.kind === "ios" ? await this.live.startIos(undefined, by) : await this.live.startMac(app.name, by);
+      if (typeof r !== "string" || !/No window/.test(r)) break;
+      await Bun.sleep(2000);
+    }
+    if (typeof r === "string") return void this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `Couldn't stream the app live: ${r}` });
+    this.session.setStage({ mode: "layout", title: r.name, layout: { tiles: [{ kind: "app", appId: r.id, label: r.name }] } }, "JamSesh", "main");
+  }
 
   private onBuildRequest(r: BuildRequest) {
     const s = this.session;

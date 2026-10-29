@@ -32,6 +32,16 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Host starts at the picker; choosing a project opens its session in the same window | Not tested | Built and compiles; needs the app run on a Mac (the picker's `open_project` call only exists inside the app). |
 | Menu bar Projects submenu; switching ends the session cleanly, then opens the other | Not tested | Needs the app run on a Mac. |
 
+## Live app tiles (phase 6.3)
+
+| Capability | Status | Notes |
+|---|---|---|
+| iPhone Simulator streamed into a tile, device frame, Home, Rotate, Light/Dark, taps and swipes from the tile | Tested live | Real Simulator (iOS 18.6, a throwaway device), real idb companion, headless Chromium: a tap on the tile turned a test app green in about 160 ms; Dark, Home and Rotate checked in screenshots. About 8 frames a second at full resolution on a busy Mac (15 to 18 on an idle one). |
+| Taps while the screen is turned | Not working | The companion's touches don't land in landscape; the hub refuses them with a reason. Rotating and watching work. |
+| Control passing, agents refused, a person without control refused, a device that vanishes mid-stream | Simulated | `hub/test/liveapps.test.ts` with a fake `xcrun`, a fake companion and a fake Mac helper. |
+| Mac and Electron apps: capture and input | Not tested | The Swift helper compiles and refuses cleanly without Screen Recording; capture and CGEvent input need those permissions on a real host (office checklist). |
+| Idb companion missing | Simulated | The tile starts watch-only with the install line. Not tried on a Mac without it. |
+
 ## Room and brain
 
 | Capability | Status | Notes |

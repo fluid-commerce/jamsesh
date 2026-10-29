@@ -14,7 +14,7 @@ import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
+type WsData = { deviceId: string | null; appId?: string; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|apps(\/[\w-]+(\/(control|input))?)?|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -207,6 +207,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
         if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+        // A live Simulator or Mac app's frames (binary JPEGs). Agents have nothing to watch there.
+        const appWs = path.match(/^\/ws\/app\/([\w-]+)$/);
+        if (appWs) {
+          if (!sameOrigin(req)) return bad("Not from this site.", 403);
+          if (device?.kind === "agent") return bad("That's for people.", 403);
+          if (!hub.live.get(appWs[1])) return bad("That app isn't live.", 404);
+          if (srv.upgrade(req, { data: { deviceId: null, appId: appWs[1], pairedId: device?.id ?? null } as any })) return undefined as any;
+          return bad("expected a WebSocket");
+        }
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
@@ -247,6 +256,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     websocket: {
       idleTimeout: 120,
       open(ws: ServerWebSocket<WsData>) {
+        if (ws.data.appId) {
+          const pid = (ws.data as any).pairedId;
+          const offRevoked = bus.on((msg) => (msg as any).type === "revoked" && pid && (msg as any).deviceId === pid && ws.close(4401, "disconnected"));
+          // A slow viewer skips frames instead of falling behind: only the newest picture matters.
+          const unsub = hub.live.subscribe(ws.data.appId, (f) => ws.getBufferedAmount() < 1_500_000 && ws.sendBinary(f));
+          (ws as any).off = () => (offRevoked(), unsub?.());
+          if (!unsub) ws.close(4404, "not live");
+          return;
+        }
         if (ws.data.collab != null) {
           // Disconnected in Settings: the canvas (or dev server) connection closes too.
           const pid = (ws.data as any).pairedId;
@@ -273,6 +291,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
       },
       message(ws: ServerWebSocket<WsData>, raw) {
+        if (ws.data.appId) return;
         if (ws.data.collab != null) {
           const up = ws.data.upstream;
           if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
@@ -291,6 +310,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         } catch {}
       },
       close(ws: ServerWebSocket<WsData>) {
+        if (ws.data.appId) return void (ws as any).off?.();
         if (ws.data.collab != null) {
           (ws as any).off?.();
           return void ws.data.upstream?.close();
@@ -776,6 +796,34 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "DELETE") {
     if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can disconnect devices.", 403);
     return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
+  }
+
+  // Live apps (6.3): a person starts a tile for a running Simulator or Mac app, takes or passes control, and drives it.
+  // Starting one builds nothing (builds still wait for approval); it only shows what's already running on the host.
+  m = path.match(/^\/apps(?:\/([\w-]+)(?:\/(control|input))?)?$/);
+  if (m && req.method !== "GET") {
+    const personId = paired?.personId ?? (hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null);
+    const person = personId ? s.person(personId) : undefined;
+    if (!person) return bad("Pick who you are in this window first.", 403);
+    const who = { personId: person.id, name: person.name, host: hostWindow };
+    if (!m[1] && req.method === "POST") {
+      if (!hostWindow) return bad("Only the host can put an app on a tile.", 403);
+      if (!s.settings().hostControl) return bad("Host control is turned off in Settings.", 409);
+      const r = body?.kind === "mac" ? await hub.live.startMac(String(body?.name ?? ""), person.name) : await hub.live.startIos(body?.device ? String(body.device) : undefined, person.name);
+      return typeof r === "string" ? bad(r, 409) : json({ app: r });
+    }
+    if (m[1] && !m[2] && req.method === "DELETE") return hostWindow || who.personId === hub.live.get(m[1])?.controller?.personId ? (hub.live.stop(m[1]) ? json({ ok: true }) : bad("No such app.", 404)) : bad("Only the host or whoever is driving can stop it.", 403);
+    if (m[1] && m[2] === "control" && req.method === "POST") {
+      const toPerson = body?.to ? s.person(String(body.to)) : undefined;
+      if (body?.action === "pass" && !toPerson) return bad("Say who to pass control to.", 400);
+      const act = body?.action === "release" || body?.action === "pass" ? body.action : "take";
+      return json({ result: hub.live.control(m[1], act, who, toPerson ? { personId: toPerson.id, name: toPerson.name } : undefined) });
+    }
+    if (m[1] && m[2] === "input" && req.method === "POST") {
+      const why = await hub.live.input(m[1], who, { ...(body ?? {}) } as any);
+      return why ? json({ ok: false, error: why }, 409) : json({ ok: true });
+    }
+    return bad("not found", 404);
   }
 
   // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.

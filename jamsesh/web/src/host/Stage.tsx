@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
 import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
+import { LiveAppView } from "../shared/liveapp";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, ExpandButton, ExpandCtx, RecordCatch, RoomFeed, ScaledFrame, Slot, TileKeyCtx, artifactTarget, colorFor, stripMd, tileSlots, useIsExpanded, useNow, type SlotTarget } from "../shared/ui";
 
 export { tileSlots };
@@ -122,6 +123,8 @@ function tileLabel(t: Tile, state: HubState): string {
       return state.agents.find((a) => a.id === t.agentId)?.name ?? "Agent";
     case "screen":
       return t.label ?? state.shares.find((x) => x.id === t.shareId)?.label ?? "Shared screen";
+    case "app":
+      return (state.liveApps ?? []).find((x) => x.id === t.appId)?.name ?? t.label ?? "Live app";
     default:
       return t.label ?? KIND_LABEL[t.kind] ?? t.kind;
   }
@@ -370,6 +373,15 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
       if (!a) return <TileFrame label="Agent" kind="agent"><div className="empty-note">Agent left.</div></TileFrame>;
       return <AgentCard agent={a} state={state} />;
     }
+    case "app": {
+      const app = (state.liveApps ?? []).find((x) => x.id === tile.appId);
+      if (!app) return <TileFrame label={tile.label ?? "Live app"} kind="app"><div className="empty-note">This app is no longer live.</div></TileFrame>;
+      return (
+        <TileFrame label={tile.label ?? app.name} kind="app">
+          <LiveAppView app={app} people={state.people} />
+        </TileFrame>
+      );
+    }
     case "feed":
       return (
         <TileFrame label={tile.label ?? "The room"} kind="feed">
@@ -396,7 +408,7 @@ function hostOf(url: string) {
   }
 }
 
-const KIND_LABEL: Record<string, string> = { web: "Browser", screen: "Live share", canvas: "Canvas", agent: "Agent", feed: "Room", html: "Custom view", artifact: "Artifact" };
+const KIND_LABEL: Record<string, string> = { app: "Live app", web: "Browser", screen: "Live share", canvas: "Canvas", agent: "Agent", feed: "Room", html: "Custom view", artifact: "Artifact" };
 const shortHost = (u: string) => {
   try {
     return new URL(u).host.replace(/^www\./, "");

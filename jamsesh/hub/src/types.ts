@@ -209,12 +209,34 @@ export type Tile =
   | { kind: "screen"; shareId: string; label?: string }
   | { kind: "agent"; agentId: string; label?: string }
   | { kind: "html"; html: string; label?: string }
-  | { kind: "feed"; label?: string };
+  | { kind: "feed"; label?: string }
+  | { kind: "app"; appId: string; label?: string };
 
 export interface Layout {
   tiles: Tile[];
   /** CSS grid; omitted = JamSesh picks a bento for the tile count. */
   grid?: { columns: string; rows: string; areas: string[] };
+}
+
+/** An iPhone build in the Simulator, or a Mac app, streaming live from the host (6.3). */
+export interface LiveApp {
+  id: string;
+  kind: "ios" | "mac";
+  name: string;
+  status: "live" | "gone";
+  /** The screen in points (a Mac app's window; 0 until its first frame). Taps are mapped onto this. */
+  width: number;
+  height: number;
+  orientation: "portrait" | "landscape-left";
+  appearance: "light" | "dark" | null;
+  /** Whether taps can reach it. Watching works without. */
+  canTap: boolean;
+  /** Who is driving: one person at a time. */
+  controller: { personId: string | null; name: string; since: number } | null;
+  startedBy: string;
+  startedAt: number;
+  /** Why it can't be driven, or why it ended, in words for the tile. */
+  note?: string;
 }
 
 /** A live screen or camera someone shares from their device. */
@@ -429,6 +451,8 @@ export interface HubState {
   annotations: Annotation[];
   facts: Fact[];
   buildRequests: BuildRequest[];
+  /** Simulator and Mac apps streaming live from the host (6.3). */
+  liveApps: LiveApp[];
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];
   /** Agents' items waiting because a screen was locked (3.1). */
