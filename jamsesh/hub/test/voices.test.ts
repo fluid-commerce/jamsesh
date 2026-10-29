@@ -128,7 +128,7 @@ sim("two voices saying the same words on two laptops at once are two lines", asy
   expect(ofRoom(room).map((u) => u.devices[0].deviceId)).toEqual(["lap-a", "lap-b"]);
 }, T);
 
-sim("a late copy whose first line is too old to join is shown, never dropped", async () => {
+sim("a late copy whose first line is too old to join is dropped only on the very same words", async () => {
   const room = makeRoom();
   const spoken = line("ana", "Let me check the spacing on the pricing cards and send a screenshot to the room.", base());
   const [a, b] = copiesOf(spoken, rng(17), { skew: { "lap-b": 1500 } });
@@ -137,6 +137,14 @@ sim("a late copy whose first line is too old to join is shown, never dropped", a
   await room.pipeline.flush();
   (room.pipeline as any).finalized = [];
   await room.pipeline.ingest({ deviceId: b.laptop, t0: b.t0, t1: b.t1, wav: b.wav });
+  await room.pipeline.flush();
+  // Ana's own words from another laptop: the line already shown, not a second one.
+  expect(ofRoom(room)).toHaveLength(1);
+  // Ben at the same moment with other words at his own laptop: shown, though only time lines it up.
+  const ben = copiesOf(line("ben", "The build finished on my side, so I can push the new checkout screen now.", spoken.t0 + 300), rng(18))[1];
+  room.say.set(String(Bun.hash(ben.wav)), ben.text);
+  (room.pipeline as any).finalized = [];
+  await room.pipeline.ingest({ deviceId: ben.laptop, t0: ben.t0, t1: ben.t1, wav: ben.wav });
   await room.pipeline.flush();
   expect(ofRoom(room)).toHaveLength(2);
 }, T);

@@ -188,9 +188,10 @@ export class AudioPipeline {
       await this.revisit(done, seg);
       return seg;
     }
+    // A copy so late its group is gone (an offline buffer flushed) is transcribed like any other: lining
+    // up in time with a line already shown isn't enough to drop it (someone else may have spoken then).
+    // mergeTwin drops it only when its words are that line's, from other laptops.
     let g = this.open.find((x) => near(x) && overlaps(x, seg));
-    // A copy so late its group is gone (an offline buffer flushed): the line is already in the feed.
-    if (!g && this.session.store.all("utterances").some((u) => u.location === location && sameUtterance(u, seg))) return seg;
     if (!g) {
       g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, busy: null, location };
       this.open.push(g);
@@ -357,12 +358,16 @@ export class AudioPipeline {
   /**
    * The same words heard a moment apart in the same place by other laptops are one line, whatever the
    * copies' clocks said (a laptop a second off, a copy that arrived late). The new copies join the line
-   * already shown, which is then labelled from every copy. Only other devices' copies: a microphone that
-   * already gave the line hearing the same words again is someone saying them again. And not when the
-   * voices sound like two people (one repeats what another said), nor when the line is too old to join.
+   * already shown, which is then labelled from every copy. The evidence has to be positive:
+   * - only other devices' copies (a microphone that already gave the line, hearing the same words
+   *   again, is someone saying them again), within a few seconds;
+   * - the voices agree (both copies embedded, alike); when either can't be embedded (voice matching
+   *   off, a line under 0.8 seconds such as "Looks good"), the words must be exactly the same;
+   * - a line too old to join is dropped only on exactly the same words; anything less is kept.
    */
   private async mergeTwin(g: Group, text: string, best: Segment): Promise<boolean> {
     const mine = new Set(g.segments.map((s) => s.deviceId));
+    const same = (a: string) => plainText(a) === plainText(text) && plainText(text) !== "";
     const twin = this.session.store
       .all("utterances")
       .filter(
@@ -372,17 +377,16 @@ export class AudioPipeline {
           Math.abs(x.t0 - g.t0) < TWIN_MS &&
           Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 &&
           !x.devices.some((d) => mine.has(d.deviceId)) &&
-          wordCount(x.text) >= 4 &&
-          wordCount(text) >= 4 &&
-          textSimilarity(x.text, text) >= 0.75 &&
-          Math.abs(wordCount(x.text) - wordCount(text)) <= 3,
+          (same(x.text) || (wordCount(x.text) >= 4 && wordCount(text) >= 4 && textSimilarity(x.text, text) >= 0.75 && Math.abs(wordCount(x.text) - wordCount(text)) <= 3)),
       )
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
     if (!twin) return false;
+    const theirs = this.voiceOf(twin).embedding;
+    if (best.embedding && theirs) {
+      if (cosine(best.embedding, theirs) < SAME_VOICE) return false;
+    } else if (!same(twin.text)) return false;
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
-    if (!home) return false;
-    const theirs = pickBest(home.segments).embedding;
-    if (best.embedding && theirs && cosine(best.embedding, theirs) < SAME_VOICE) return false;
+    if (!home) return same(twin.text);
     this.finalized = this.finalized.filter((x) => x !== g);
     home.segments.push(...g.segments);
     home.t0 = Math.min(home.t0, g.t0);
@@ -661,6 +665,8 @@ export class AudioPipeline {
 }
 
 const wordCount = (t: string) => t.split(/\s+/).filter(Boolean).length;
+/** Lowercase words only: "Looks good." and "looks good" are the same words. */
+const plainText = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}\s']+/gu, " ").replace(/\s+/g, " ").trim();
 
 function textSimilarity(a: string, b: string) {
   const words = (t: string) => new Set(t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2));
