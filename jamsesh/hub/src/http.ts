@@ -17,10 +17,49 @@ import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { ONLY_OBSERVERS, publicEvent } from "./session";
 import { projectsRoute } from "./projects-api";
+import { FRAME_OVERHEAD, Upstream } from "./relay";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, DriveEvent, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; caller?: string | null; appId?: string; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; pairedId?: string | null; hostWindow?: boolean; driveDenied?: number };
+type WsData = { deviceId: string | null; caller?: string | null; appId?: string; collab?: string; upstream?: Upstream; queue?: (string | Buffer)[]; queueBytes?: number; openTimer?: ReturnType<typeof setTimeout>; pairedId?: string | null; hostWindow?: boolean; driveDenied?: number };
+
+/** What a relay holds for a canvas server that hasn't opened yet, and how long it waits: past either the client is told to try again. */
+export const RELAY_LIMITS = { bytes: 8 * 1024 * 1024, frames: 1000, openMs: 10_000 };
+
+/** Holds a frame for the canvas server; false when the relay is already holding as much as it may. */
+export function queueRelayFrame(data: WsData, raw: string | Buffer | ArrayBuffer | Uint8Array): boolean {
+  const size = (typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength) + FRAME_OVERHEAD;
+  const q = (data.queue ??= []);
+  if (q.length >= RELAY_LIMITS.frames || (data.queueBytes ?? 0) + size > RELAY_LIMITS.bytes) return false;
+  q.push(raw as any);
+  data.queueBytes = (data.queueBytes ?? 0) + size;
+  return true;
+}
+
+/** Ends both legs of a relay with a retryable close: used when either side can't drain what it's been sent. */
+function endRelay(ws: ServerWebSocket<WsData>, reason: string) {
+  ws.close(1013, reason); // first: the upstream's own close below must not turn it into a plain one
+  ws.data.upstream?.close();
+}
+
+/**
+ * Every frame between the canvas client and the canvas server goes through here, so one rule holds
+ * for both directions and before and after the upstream opens: a leg that is already holding more
+ * than RELAY_LIMITS.bytes (a peer that stopped reading) ends the relay instead of growing.
+ */
+export function relayUp(ws: ServerWebSocket<WsData>, raw: string | Buffer | ArrayBuffer | Uint8Array) {
+  const up = ws.data.upstream;
+  if (up?.open) {
+    // The upstream counts what the canvas server hasn't read; over the cap it stopped reading.
+    if (!up.send(typeof raw === "string" ? raw : new Uint8Array(raw as ArrayBuffer))) endRelay(ws, "canvas can't keep up, try again");
+  } else if (!queueRelayFrame(ws.data, raw)) endRelay(ws, "canvas not ready, try again");
+}
+
+export function relayDown(ws: ServerWebSocket<WsData>, data: string | Uint8Array) {
+  const sent = ws.send(data);
+  // 0 means dropped, except for an empty message (nothing to send is a success).
+  if ((sent === 0 && data.length > 0) || ws.getBufferedAmount() > RELAY_LIMITS.bytes) endRelay(ws, "can't keep up, try again");
+}
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -353,10 +392,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       message(ws: ServerWebSocket<WsData>, raw) {
         if (ws.data.appId) return;
         if (ws.data.collab != null) {
-          const up = ws.data.upstream;
-          if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
-          else (ws.data.queue ??= []).push(raw);
-          return;
+          return relayUp(ws, raw as any);
         }
         try {
           const m = JSON.parse(String(raw));
@@ -375,6 +411,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (ws.data.appId) return void (ws as any).off?.();
         if (ws.data.collab != null) {
           (ws as any).off?.();
+          clearTimeout(ws.data.openTimer);
+          ws.data.queue = [];
           return void ws.data.upstream?.close();
         }
         hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
@@ -449,16 +487,28 @@ export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
 /** Relays a canvas WebSocket to the canvas server, which only listens on this machine. */
 function openCollab(ws: ServerWebSocket<WsData>, hub: Hub) {
   const port = (ws.data as any).devPort ?? hub.canvas.port;
-  const up = new WebSocket(`ws://127.0.0.1:${port}${ws.data.collab}`);
-  up.binaryType = "arraybuffer";
+  const up = new Upstream(
+    port,
+    ws.data.collab ?? "/",
+    {
+      open() {
+        clearTimeout(ws.data.openTimer);
+        const held = ws.data.queue ?? [];
+        ws.data.queue = [];
+        ws.data.queueBytes = 0;
+        for (const m of held) relayUp(ws, m as any);
+      },
+      message: (data) => relayDown(ws, data),
+      close: () => ws.close(),
+    },
+    () => RELAY_LIMITS.bytes,
+  );
   ws.data.upstream = up;
-  up.onopen = () => {
-    for (const m of ws.data.queue ?? []) up.send(m as any);
-    ws.data.queue = [];
-  };
-  up.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer));
-  up.onclose = () => ws.close();
-  up.onerror = () => ws.close();
+  // A canvas server that doesn't open in time (stalled, restarting) ends the relay with a retryable close.
+  ws.data.openTimer = setTimeout(() => {
+    ws.close(1013, "canvas not ready, try again");
+    up.close();
+  }, RELAY_LIMITS.openMs);
 }
 
 /** The dev server port for a dev-<port>.<domain> request, when <domain> is this host's. */
@@ -889,7 +939,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const mode = body.mode ?? "explore";
     if (mode !== "answer" && mode !== "note" && targets.every((t: string) => s.agent(t)?.role === "observer")) return bad(ONLY_OBSERVERS);
     const p = s.person(body.personId);
-    return json(s.createDirective({ text: body.text.trim(), mode, targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    try {
+      const counterparts = Array.isArray(body.counterparts) ? body.counterparts.filter((c: unknown) => typeof c === "string") : [...targets];
+      return json(s.createDirective({ text: body.text.trim(), mode, targets, ...(mode === "coordinate" ? { counterparts: [...new Set([...targets, ...counterparts])] } : {}), requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    } catch (e) {
+      return bad(e instanceof Error ? e.message : String(e));
+    }
   }
 
   m = path.match(/^\/directives\/([\w-]+)$/);

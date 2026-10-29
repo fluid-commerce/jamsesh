@@ -157,7 +157,7 @@ const JAM_TOOLS = [
   {
     name: "jam_message",
     description: "Message another agent directly (by name or id), or 'all'. Message the room brain by its name to ask it something or have it route or note something. Use it to align on shared changes, hand work off, or ask who owns something.",
-    inputSchema: { type: "object", properties: { to: { type: "string" }, text: { type: "string" } }, required: ["to", "text"] },
+    inputSchema: { type: "object", properties: { to: { type: "string" }, text: { type: "string" }, directiveId: { type: "string", description: "The coordinate directive this is about (also on your reply to one that names it)" } }, required: ["to", "text"] },
   },
   {
     name: "jam_ask",
@@ -165,14 +165,14 @@ const JAM_TOOLS = [
       "Ask another agent a question and wait for its answer (it is told to answer right away). Use it whenever another agent's knowledge would save you guessing: how their repo does something, what their mockup's spacing is, whether they already built a component, what they decided. Returns the answer, or tells you it's still pending.",
     inputSchema: {
       type: "object",
-      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 230; default 120" } },
+      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 230; default 120" }, directiveId: { type: "string", description: "The coordinate directive this is about" } },
       required: ["to", "question"],
     },
   },
   {
     name: "jam_answer",
     description: "Answer a question another agent (or the room brain) asked you. Do this as soon as a QUESTION shows up in your inbox, before continuing your own work. Be concrete: file paths, values, names.",
-    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" } }, required: ["askId", "text"] },
+    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" }, directiveId: { type: "string", description: "The coordinate directive the question was about, if it names one" } }, required: ["askId", "text"] },
   },
   {
     name: "jam_repo_card",
@@ -533,10 +533,15 @@ From: ${r.pages.join(", ")}` : ""}`);
       }
       case "jam_update": {
         const agent = this.requireAgent(ctx);
+        const aimed = args.directiveId ? s.store.get("directives", String(args.directiveId)) : undefined;
+        if (aimed && !aimed.targets.includes(agent.id)) throw new Error("That directive isn't addressed to you.");
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}), ...(args.kind === "shipped" && typeof args.seen === "string" && args.seen.trim() ? { seen: args.seen.trim().slice(0, 300) } : {}) } });
-        if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
+        // A report never closes a coordinate directive: that waits for jam_ack done after the exchange.
+        const coordinate = args.directiveId && s.store.get("directives", String(args.directiveId))?.mode === "coordinate";
+        if (args.directiveId && !coordinate && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
-        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}${s.shareNudge(agent.id, String(args.text ?? ""))}`);
+        const open = coordinate && (args.kind === "done" || args.kind === "shipped") ? "\n\nThat directive is a comparison with another agent, so it stays open: compare through jam_message, then jam_ack it done." : "";
+        return text(`Posted (#${ev.id}).${open}${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}${s.shareNudge(agent.id, String(args.text ?? ""))}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
@@ -567,6 +572,7 @@ From: ${r.pages.join(", ")}` : ""}`);
         const agent = this.requireAgent(ctx);
         const d = s.store.get("directives", String(args.directiveId));
         if (!d) throw new Error("No directive with that id.");
+        if (d.progress?.[agent.id] === "done" || d.progress?.[agent.id] === "cancelled") return text("Already closed.");
         s.setDirectiveFor(d.id, agent.id, args.status, args.result);
         if (args.status === "acked") s.touchAgent(agent.id, { status: "working", activity: d.text.slice(0, 140) });
         if (args.status !== "acked")
@@ -575,13 +581,13 @@ From: ${r.pages.join(", ")}` : ""}`);
       }
       case "jam_message": {
         const agent = this.requireAgent(ctx);
-        s.sendMessage(agent.id, String(args.to), String(args.text));
+        s.sendMessage(agent.id, String(args.to), String(args.text), args.directiveId ? { directiveId: String(args.directiveId) } : {});
         return text(`Sent.${s.shareNudge(agent.id, String(args.text ?? ""))}`);
       }
       case "jam_ask": {
         const agent = this.requireAgent(ctx);
         const secs = Math.max(5, Math.min(230, Number(args.waitSeconds ?? 120)));
-        const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000);
+        const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000, args.directiveId ? { directiveId: String(args.directiveId) } : {});
         s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
         const a = await answer;
         // Removed, or its device disconnected, while it waited: nothing more for it.
@@ -592,7 +598,7 @@ From: ${r.pages.join(", ")}` : ""}`);
       }
       case "jam_answer": {
         const agent = this.requireAgent(ctx);
-        s.answer(agent.id, String(args.askId), String(args.text));
+        s.answer(agent.id, String(args.askId), String(args.text), args.directiveId ? { directiveId: String(args.directiveId) } : {});
         return text("Answered.");
       }
       case "jam_repo_card": {
@@ -898,18 +904,24 @@ From: ${r.pages.join(", ")}` : ""}`);
     if (!directives.length && !messages.length) {
       const open = s.openFor(agent.id);
       if (!open.length) return "Nothing new.";
-      return `Nothing new, but you haven't finished: ${open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ")}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
+      const list = open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ");
+      // A coordinate directive is a comparison with the other agent first: finishing it means talking, so don't tell anyone to skip that.
+      if (open.some((d) => d.mode === "coordinate"))
+        return `Nothing new, but you haven't finished: ${list}. For a [coordinate] one, compare with the named agents through jam_message first and build only for a gap you both confirm; finish the others now. Then jam_ack each done.`;
+      return `Nothing new, but you haven't finished: ${list}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
     }
     const out: string[] = [];
     for (const d of directives) {
+      // A comparison names who with (only those count toward finishing it), whatever its text says.
+      const mates = (d.counterparts ?? []).filter((c) => c !== agent.id).map((c) => s.agent(c)?.name).filter(Boolean);
       out.push(
-        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${attachmentLine(d, s.hubUrl)}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
+        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${attachmentLine(d, s.hubUrl)}${d.rationale ? `\n  why you: ${d.rationale}` : ""}${d.mode === "coordinate" && mates.length ? `\n  compare with: ${mates.join(", ")}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
     for (const m of messages) {
-      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}), then continue.`);
+      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}${m.data.directiveId ? `, directiveId ${m.data.directiveId}` : ""}), then continue.`);
       else if (m.data.answerTo) out.push(`ANSWER from ${m.authorName} (to your question ${m.data.answerTo}): ${m.text}`);
-      else out.push(`MESSAGE from ${m.authorName}: ${m.text}`);
+      else out.push(`MESSAGE from ${m.authorName}${m.data.directiveId ? ` (about directive ${m.data.directiveId}: reply with directiveId ${m.data.directiveId})` : ""}: ${m.text}`);
     }
     return out.join("\n\n");
   }
@@ -922,7 +934,7 @@ function modeHint(mode: Directive["mode"]) {
     case "implement":
       return "Implement in your repository. Run the dev server (jam_devserver), screenshot the build at the mockup's size, compare with canvas_render of the mockup, fix differences, then post the screenshot and jam_update shipped.";
     case "coordinate":
-      return "Compare with the named agents through jam_message: what each of you has, and what should match. Change code only for a gap you both confirm, then post renders and compare side by side with jam_show parity.";
+      return "Compare with the named agents through jam_message or jam_ask, always with this directive's id as directiveId: what each of you has, and what should match. Change code only for a gap you both confirm, then post renders and compare side by side with jam_show parity.";
     case "note":
       return "Write it down where the room said (or a notes file in your repo if it didn't). No code changes beyond that, no canvas, no dev server.";
     case "answer":

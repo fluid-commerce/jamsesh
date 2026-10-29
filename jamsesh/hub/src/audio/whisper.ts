@@ -8,7 +8,7 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { stopHelper, withStdinWatch } from "../children";
+import { type HelperRegistry, stopHelper, withStdinWatch } from "../children";
 import { config } from "../config";
 import { downloadVerified, fileMatches, type ModelState, type ModelStatus } from "./models";
 import { encodeWav } from "./wav";
@@ -102,6 +102,9 @@ export async function isWhisperServer(url: string, timeoutMs = 15_000): Promise<
 }
 
 export class LocalWhisper {
+  /** The hub's helper list, so stopping the hub finds the server this starts (none when used alone). */
+  constructor(private helpers?: HelperRegistry) {}
+
   private proc: ReturnType<typeof Bun.spawn> | null = null;
   private state: ModelState = "missing";
   private detail = "Not started.";
@@ -173,6 +176,7 @@ export class LocalWhisper {
     // Its stdin is a pipe from the hub, so it ends when the hub does, even after kill -9 or a crash.
     const proc = Bun.spawn(withStdinWatch([bin, "-m", model, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "auto"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
     this.proc = proc;
+    this.helpers?.track(proc);
     let died: number | null = null;
     void proc.exited.then((code) => {
       died = code;

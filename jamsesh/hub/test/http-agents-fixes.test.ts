@@ -134,3 +134,24 @@ test("a canvas join that fails closes its headless participant", async () => {
   expect(closed).toBe(1);
   expect(c.agents.size).toBe(0);
 });
+
+test("POST /directives: a coordinate directive needs another agent to compare with, and keeps only agents in the room", async () => {
+  const reg = (repo: string, platform: "desktop" | "mobile") => hub.session.registerAgent({ ownerName: "Jo", harness: "claude-code", repo, cwd: `/${repo}`, machine: "m1", platform, branch: "main" }).agent;
+  const desktop = reg("acme/desktop", "desktop");
+  const mobile = reg("acme/mobile", "mobile");
+  const h = { "content-type": "application/json", authorization: `Bearer ${browser.token}`, ...hostWindow };
+  const post = (b: object) => fetch(`${base}/api/directives`, { method: "POST", headers: h, body: JSON.stringify({ text: "Compare the sidebars", mode: "coordinate", ...b }) });
+  const before = hub.session.directives().length;
+  for (const b of [{ targets: [mobile.id] }, { targets: [mobile.id], counterparts: ["a_gone"] }, { targets: [mobile.id], counterparts: "nope" }]) {
+    const r = await post(b);
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).error).toContain("compare with");
+  }
+  expect(hub.session.directives()).toHaveLength(before);
+  const one = (await (await post({ targets: [mobile.id], counterparts: [desktop.id, "a_gone"] })).json()) as any;
+  expect(one.counterparts.slice().sort()).toEqual([desktop.id, mobile.id].sort());
+  const two = (await (await post({ targets: [mobile.id, desktop.id] })).json()) as any;
+  expect(two.counterparts.slice().sort()).toEqual([desktop.id, mobile.id].sort());
+  // Other modes are unaffected.
+  expect((await fetch(`${base}/api/directives`, { method: "POST", headers: h, body: JSON.stringify({ text: "Add the footer", mode: "implement", targets: [mobile.id] }) })).status).toBe(200);
+});

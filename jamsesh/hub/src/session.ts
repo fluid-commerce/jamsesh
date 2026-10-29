@@ -916,7 +916,7 @@ export class Session {
     }
     const left = this.store.get("directives", id);
     if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
-    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
+    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], ...(d.mode === "coordinate" ? { counterparts: (d.counterparts ?? []).filter((c) => c !== pick.id && !from.includes(c)) } : {}), requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
   }
 
   // ---- directives ----
@@ -943,6 +943,7 @@ export class Session {
     mode: DirectiveMode;
     rationale?: string;
     targets: string[];
+    counterparts?: string[];
     priority?: number;
     requestedBy: string;
     sourceEventIds?: number[];
@@ -960,6 +961,10 @@ export class Session {
       if (d.targets.length && !workers.length) throw new Error(ONLY_OBSERVERS);
       d = { ...d, targets: workers };
     }
+    // Only agents in the room are kept as counterparts. A coordinate directive is a comparison, so it must
+    // name who with, whatever made it: each target needs a known counterpart other than itself.
+    const counterparts = [...new Set(d.counterparts ?? [])].filter((c) => this.agent(c));
+    if (d.mode === "coordinate" && (!d.targets.length || d.targets.some((t) => !counterparts.some((c) => c !== t)))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
     const directive: Directive = {
       id: newId("d"),
       ts: Date.now(),
@@ -967,6 +972,7 @@ export class Session {
       mode: d.mode,
       rationale: d.rationale ?? "",
       targets: d.targets,
+      ...(counterparts.length ? { counterparts } : {}),
       status: "pending",
       progress: Object.fromEntries(d.targets.map((t) => [t, "pending" as const])),
       priority: d.priority ?? 1,
@@ -1056,14 +1062,41 @@ export class Session {
     return out;
   }
 
-  /** One agent's progress on a directive; the directive's status follows the slowest target. */
+  /**
+   * Why an agent can't finish a coordinate directive yet, or null. A comparison with another agent is
+   * the whole job, so "done" needs a recorded exchange on that directive (messages and asks carry its
+   * id; an answer carries the id of the ask it answers), with no time window: a message this agent
+   * sent to one of the named counterparts, and a message or answer from one of them back to it.
+   * (Dropping it, "cancelled", is always allowed.)
+   */
+  exchangeGap(d: Directive, agentId: string): string | null {
+    if (d.mode !== "coordinate") return null;
+    const msgs = this.store.messagesAbout(d.id);
+    const named = (d.counterparts ?? []).filter((c) => c !== agentId);
+    if (!named.length) return "This coordinate directive names nobody to compare with, so it can't be completed: jam_ack it cancelled and ask the room to send it again.";
+    // Both directions with the same counterpart: one agent's replies don't stand in for another's.
+    const both = named.some((c) => c !== agentId && msgs.some((e) => e.authorId === agentId && e.data.to === c) && msgs.some((e) => e.authorId === c && e.data.to === agentId));
+    const sent = msgs.some((e) => e.authorId === agentId && named.includes(String(e.data.to)));
+    if (both) return null;
+    return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message or jam_ask, with directiveId " + d.id}. Their reply has to carry directiveId ${d.id} too. If nobody can answer, jam_ack it cancelled and say why.`;
+  }
+
+  /** One agent's progress on a directive; the directive's status follows the slowest target. A target's done or cancelled is final. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
+    if (!d.targets.includes(agentId)) throw new Error("That directive isn't addressed to you.");
     // Finished stays finished: a late ack or "done" doesn't reopen a task that is done or cancelled,
-    // for this agent or as a whole.
+    // for this agent or as a whole, or add to its result.
     const over = (x: string | undefined) => x === "done" || x === "cancelled";
-    if (over(d.status) || over(d.progress?.[agentId])) return d;
+    const mine = d.progress?.[agentId];
+    if (over(d.status) || over(mine)) return d;
+    const rank = ["pending", "delivered", "acked"];
+    if (mine && rank.includes(mine) && rank.includes(status) && rank.indexOf(status) < rank.indexOf(mine)) return d; // never backwards
+    if (status === "done") {
+      const gap = this.exchangeGap(d, agentId);
+      if (gap) throw new Error(gap);
+    }
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
@@ -1217,7 +1250,7 @@ export class Session {
   }
 
   /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
-  ask(fromId: string | null, to: string, question: string, waitMs: number): { askId: string; answer: Promise<string | null> } {
+  ask(fromId: string | null, to: string, question: string, waitMs: number, data: Record<string, any> = {}): { askId: string; answer: Promise<string | null> } {
     const target = this.agent(to) ?? this.store.all("agents").find((a) => a.name.toLowerCase() === to.toLowerCase());
     if (!target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
     const from = this.agent(fromId);
@@ -1229,7 +1262,7 @@ export class Session {
       authorName: from?.name ?? this.settings().brainName,
       text: question,
       relevance: "work",
-      data: { to: target.id, toName: target.name, askId },
+      data: { to: target.id, toName: target.name, askId, ...data },
     });
     this.wake(target.id);
     const answer = new Promise<string | null>((resolve) => {
@@ -1239,10 +1272,16 @@ export class Session {
     return { askId, answer };
   }
 
-  answer(fromId: string, askId: string, text: string) {
+  private answered(askId: string) {
+    return this.store.messagesAnswering(askId).length > 0;
+  }
+
+  answer(fromId: string, askId: string, text: string, data: Record<string, any> = {}) {
     const from = this.agent(fromId);
-    const q = this.store.recentEvents({ kinds: ["message"], limit: 400 }).find((e) => e.data.askId === askId);
+    const q = this.store.messageByAsk(askId);
     if (!q) throw new Error("No question with that id.");
+    if (q.data.to !== fromId) throw new Error("That question wasn't asked of you.");
+    if (this.answered(askId)) throw new Error("That question was already answered.");
     const waiting = this.asks.get(askId);
     this.store.addEvent({
       kind: "message",
@@ -1252,7 +1291,7 @@ export class Session {
       text,
       relevance: "work",
       // A waiting jam_ask returns the answer itself: the inbox doesn't repeat it.
-      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...(waiting ? { inline: true } : {}) },
+      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...data, ...(waiting ? { inline: true } : {}) },
     });
     if (waiting) waiting.resolve(text);
     else if (q.authorId) this.wake(q.authorId); // the asker stopped waiting; it gets the answer in its inbox

@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { stopHelper } from "../children";
+import { type HelperRegistry, stopHelper } from "../children";
 import { config } from "../config";
 import { downloadVerified, type ModelState, type ModelStatus } from "./models";
 
@@ -38,6 +38,9 @@ function serverArgv(dir: string): string[] {
 }
 
 export class Parakeet {
+  /** The hub's helper list, so stopping the hub finds the server this starts (none when used alone). */
+  constructor(private helpers?: HelperRegistry) {}
+
   private proc: ReturnType<typeof Bun.spawn> | null = null;
   private state: ModelState = "off";
   private detail = "Off. Turn on the faster engine in Settings.";
@@ -105,6 +108,7 @@ export class Parakeet {
     // Its stdin is a pipe from the hub, so it ends when the hub does, even after kill -9 or a crash.
     const proc = Bun.spawn(serverArgv(dir), { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_STT_PARENT_PIPE: "1" } });
     this.proc = proc;
+    this.helpers?.track(proc);
     // Keep the end of its error output for the reason, and keep the pipe drained so it never blocks.
     let tail = "";
     void (async () => {

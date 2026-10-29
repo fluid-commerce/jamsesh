@@ -332,6 +332,32 @@ export class Store {
     return (this.db.query(sql).all(afterId, ...kinds, limit) as any[]).map(rowToEvent);
   }
 
+  /** Every message tied to a directive (sent or answered with its id), oldest first, with no window. */
+  messagesAbout(directiveId: string): JamEvent[] {
+    const rows = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.directiveId') = ? ORDER BY id ASC").all(directiveId) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** Messages for one agent after an id (direct, or to everyone from someone else), oldest first: the filter is in the query, so unrelated traffic can't push them out. */
+  messagesTo(agentId: string, afterId: number, limit: number): JamEvent[] {
+    const rows = this.db
+      .query("SELECT * FROM events WHERE kind = 'message' AND id > ? AND json_extract(data, '$.inline') IS NULL AND (json_extract(data, '$.to') = ? OR (json_extract(data, '$.to') = 'all' AND (author_id IS NULL OR author_id != ?))) ORDER BY id ASC LIMIT ?")
+      .all(afterId, agentId, agentId, limit) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** Answers already recorded for an ask. */
+  messagesAnswering(askId: string): JamEvent[] {
+    const rows = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.answerTo') = ?").all(askId) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** The message with this ask id, wherever it is in the history. */
+  messageByAsk(askId: string): JamEvent | undefined {
+    const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.askId') = ? ORDER BY id ASC LIMIT 1").get(askId);
+    return row ? rowToEvent(row) : undefined;
+  }
+
   /** How many events there are (before an id, of some kinds), for "N more" counts. */
   countEvents(opts: { beforeId?: number; kinds?: EventKind[] } = {}): number {
     const where: string[] = [];

@@ -574,6 +574,7 @@ export class Brain {
           rationale: z.string().describe("One short sentence: why these agents, and whose call it was if people disagreed"),
           workstream: z.string().optional().describe("Workstream title this belongs to"),
           priority: z.number().int().min(1).max(3).optional(),
+          counterparts: z.array(z.string()).optional().describe("For mode 'coordinate': the agent ids the targets compare with (other targets count too). Required unless two or more targets are given."),
         }),
         execute: async (i) => {
           const known = agentIds();
@@ -587,9 +588,12 @@ export class Brain {
             (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6 && sameCounts(d.text, i.text),
           );
           if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
+          // Coordination names who compares with whom: the other targets, plus any counterparts given.
+          const counterparts = i.mode === "coordinate" ? [...new Set([...targets, ...(i.counterparts ?? []).filter((c) => known.has(c))])] : undefined;
+          if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return refuse("A coordinate directive needs another agent to compare with: give two or more targets, or counterparts.");
           // Overheard work waits on the Tasks board for a person to send; what someone asked JamSesh for goes straight out.
           if (route === "overheard") {
-            const card = s.proposeTask({ text: i.text, mode: i.mode, targets, workstream: i.workstream, by: requester, sourceEventIds: sourceIds });
+            const card = s.proposeTask({ text: i.text, mode: i.mode, targets, ...(counterparts ? { counterparts } : {}), workstream: i.workstream, by: requester, sourceEventIds: sourceIds });
             return card ? `Proposed on the Tasks board for ${targets.map((t) => s.agent(t)?.name).join(", ")} (card ${card.id}). A person sends it; it isn't sent yet.` : "Nothing to propose.";
           }
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
@@ -598,6 +602,7 @@ export class Brain {
             mode: i.mode,
             rationale: i.rationale,
             targets,
+            ...(counterparts ? { counterparts } : {}),
             priority: i.priority,
             requestedBy: requester,
             sourceEventIds: sourceIds,
@@ -902,13 +907,14 @@ export class Brain {
           for (const a of agents) {
             const others = agents.filter((o) => o.id !== a.id);
             const text = `Work with ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ")}: ${goal} Ask them what you need with jam_ask, answer their questions with jam_answer, look at their frames with canvas_render, and post what you agreed and what still differs with jam_update.`;
+            const counterparts = others.map((o) => o.id);
             // Overheard pairing waits on the Tasks board like any other overheard work.
             if (route === "overheard") {
-              const card = s.proposeTask({ text, mode: "coordinate", targets: [a.id], by: requester, sourceEventIds: sourceIds });
+              const card = s.proposeTask({ text, mode: "coordinate", targets: [a.id], counterparts, by: requester, sourceEventIds: sourceIds });
               if (card) cards.push(card.id);
               continue;
             }
-            s.createDirective({ text, mode: "coordinate", targets: [a.id], requestedBy: requester, sourceEventIds: sourceIds, rationale: "Paired so their work matches." });
+            s.createDirective({ text, mode: "coordinate", targets: [a.id], counterparts, requestedBy: requester, sourceEventIds: sourceIds, rationale: "Paired so their work matches." });
           }
           return route === "overheard" ? `Proposed pairing ${agents.map((a) => a.name).join(", ")} on the Tasks board (cards ${cards.join(", ")}); a person sends them.` : `Paired ${agents.map((a) => a.name).join(", ")}.`;
         },
@@ -1196,7 +1202,7 @@ export class Brain {
     if (kind === "question" || kind === "blocked") {
       // The room already sees a toast and the feed entry; the brain adds an answer when the record has one.
       void this.consider(
-        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) is ${kind === "blocked" ? "blocked" : "asking the room"}: ${text}\nThe room already sees this in the feed. If the room's decisions, knowledge or an earlier line answer it, send an 'answer' directive to ${agent.name} (id ${agent.id}). If another agent is better placed to unblock it, send that agent a 'coordinate' directive. Otherwise call no_action and leave it for a person.`,
+        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) is ${kind === "blocked" ? "blocked" : "asking the room"}: ${text}\nThe room already sees this in the feed. If the room's decisions, knowledge or an earlier line answer it, send an 'answer' directive to ${agent.name} (id ${agent.id}). If another agent is better placed to unblock it, send that agent a 'coordinate' directive with counterparts ["${agent.id}"]. Otherwise call no_action and leave it for a person.`,
       );
       return;
     }
@@ -1249,11 +1255,10 @@ export class Brain {
       coordinate_parity: tool({
         description: "Send a parity check about one user-visible feature a shipper described: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
-          feature: z.string().describe("The feature's name, as a person would say it"),
           shipments: z.array(z.string()).describe("Ids from 'Shipped just now' (ship-…) of this one feature's shipments: one, or one per platform that shipped the same feature"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
-        execute: async ({ feature, shipments, platforms }) => {
+        execute: async ({ shipments, platforms }) => {
           const from = batch.filter((b) => shipments.includes(b.id) && b.agent.role !== "observer");
           if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
           // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
@@ -1274,12 +1279,13 @@ export class Brain {
             const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
             s.createDirective({
               text: shippers.includes(a)
-                ? `Parity check, not a build task: you shipped ${feature} on ${a.platform} (${seen}). ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
-                : `Parity check, not a build task: ${by} shipped ${feature} on ${[...made].join(" and ")} (${seen}). Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
+                ? `Parity check, not a build task: you shipped this on ${a.platform}: ${seen}. ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
+                : `Parity check, not a build task: ${by} shipped this on ${[...made].join(" and ")}: ${seen}. Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
               mode: "coordinate",
               targets: [a.id],
+              counterparts: team.filter((o) => o.id !== a.id).map((o) => o.id),
               requestedBy: "JamSesh",
-              rationale: `Parity: ${feature} shipped on ${[...made].join(" and ")}.`,
+              rationale: `Parity: ${seen} shipped on ${[...made].join(" and ")}.`,
             });
             sent.push(a.name);
           }
@@ -1584,7 +1590,8 @@ const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
 export function parityCandidate(text: string) {
   const t = text.toLowerCase().replace(/^\s*(shipped|landed|merged|pushed|done)\b[:,\s-]*/, "");
   if (/^(commit|refactor|fix|fixed|fixes|bugfix|hotfix|bump|bumped|chore|ci\b|lint|test|tests|upgrade|upgraded|tidied|tidy|cleanup|cleaned|format|typo|deps?\b|dependenc|tooling|build script)/.test(t)) return false;
-  if (/\b(refactor(ed|ing)?|a fix for|fix(ed|es)? (a |the )?(bug|crash|regression)|dependenc(y|ies)|tooling|linter|typos?|ci pipeline)\b/.test(t)) return false;
+  // A fix is news wherever the word sits ("crash fix for the sidebar", "corrected login flow"); missing a feature here only costs a parity check.
+  if (/\b(refactor(ed|ing)?|fix(ed|es|ing)?|bugfix(es)?|hotfix(es)?|patch(ed|es)?|corrected|correct(s|ing)? (a|an|the) (bug|crash|error)|crash(es)?|bugs?|regressions?|workarounds?|dependenc(y|ies)|tooling|linter|typos?|ci pipeline)\b/.test(t)) return false;
   return !/\b(platform[- ]specific|(desktop|mobile|web|ios|android|mac|windows)[- ]only|only (on|for|in) (the )?(desktop|mobile|web|ios|android)( app)?|deliberately|on purpose)\b/.test(t);
 }
 /** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */

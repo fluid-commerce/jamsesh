@@ -1,6 +1,7 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
 import { mkdirSync, realpathSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
+import { HelperRegistry } from "./children";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
 import { learningNote, parseCarried, voiceprintStatus, type Learning } from "./audio/voiceprint";
@@ -110,6 +111,9 @@ export class Hub {
   peopleOnline = 0;
   uploadsDir: string;
 
+  /** Every helper process the hub starts; stop() walks it. */
+  readonly helpers = new HelperRegistry();
+
   constructor(private opts: HubOptions = {}) {
     const dir = opts.dataDir ?? config.dataDir;
     mkdirSync(dir, { recursive: true });
@@ -156,9 +160,9 @@ export class Hub {
       this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: ok ? `Preview build finished: ${label}. ${text}`.trim() : `Preview build failed: ${label}. ${text}`.trim() });
     };
     this.brain = new Brain(this.session, this.host);
-    this.transcriber = new Transcriber(this.session);
+    this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
-    this.canvas = new Canvas(this.session);
+    this.canvas = new Canvas(this.session, this.helpers);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();
     // The host's own canvas and its agents' participants draw frames too: they get the fonts as well.
@@ -282,13 +286,15 @@ export class Hub {
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
     await step(this.wiki.flush(), Hub.SHUTDOWN_MS.wiki);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
-    this.stop();
+    // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
+    if (!(await this.stop())) console.warn("a helper process was still running at shutdown");
     return saved && kept && closed;
   }
 
   private offRevoked: () => void;
 
-  stop() {
+  /** Stops everything; true when every helper process was seen to exit. */
+  stop(): Promise<boolean> {
     this.offRevoked();
     this.live.stopAll();
     this.awake.stop();
@@ -296,8 +302,7 @@ export class Hub {
     this.keeper.stop();
     this.wiki.stop();
     this.brain.stop();
-    this.canvas.stop();
-    this.transcriber.stop();
+    this.canvas.halt();
     this.devproxy.stop();
     this.fonts.clear();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
@@ -305,6 +310,7 @@ export class Hub {
     clearInterval(this.recSweep);
     for (const t of this.intervals.splice(0)) clearInterval(t);
     this.session.stop();
+    return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
   }
 
   private intervals: ReturnType<typeof setInterval>[] = [];

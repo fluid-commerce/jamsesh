@@ -37,6 +37,8 @@ export interface TaskProposal {
   text: string;
   mode: DirectiveMode;
   targets: string[];
+  /** For a `coordinate` task: who its targets compare with. */
+  counterparts?: string[];
   workstream?: string;
   by: string;
   origin?: TriageCard["origin"];
@@ -156,7 +158,7 @@ export class Board {
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, kind: "fact", workstream, conflictsWith: null, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, ...(mode === "coordinate" && p.counterparts?.length ? { counterparts: [...new Set(p.counterparts)] } : {}), kind: "fact", workstream, conflictsWith: null, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -338,12 +340,16 @@ export class Board {
     // The card may have waited while an agent left or became an observer: only agents that can still take it get it.
     const targets = this.validTargets(card.targets, card.mode);
     if (!targets.length) return fail("The agent it was for isn't in the session any more, or only watches. Pick another with Edit.", 409);
+    // A comparison needs someone to compare with: the card's counterparts and the other targets, while they're in the room.
+    const counterparts = card.mode === "coordinate" ? [...new Set([...targets, ...(card.counterparts ?? [])])].filter((c) => this.s.agent(c)) : undefined;
+    if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return fail("A comparison needs another agent to compare with. Add one with Edit.", 409);
     const ws = card.workstream ? this.s.store.all("workstreams").find((w) => w.title.toLowerCase() === card.workstream.toLowerCase()) : undefined;
     return this.commit(() => {
       const d = this.s.createDirective({
         text: card.text,
         mode: card.mode,
         targets,
+        ...(counterparts ? { counterparts } : {}),
         requestedBy: card.by,
         sourceEventIds: card.sources.map((x) => x.eventId).filter((x): x is number => x != null),
         workstreamId: ws?.id ?? null,

@@ -105,7 +105,7 @@ Directives say which:
 
 - **explore**: make variants on the canvas. Don't touch your repository.
 - **implement**: change code in your repository, then verify against the chosen mockup.
-- **coordinate**: align with another agent (often desktop and mobile) before or while building.
+- **coordinate**: align with another agent (often desktop and mobile) before or while building. It names who with ("compare with: ..."); only an exchange with one of them, both ways, lets you finish it.
 - **answer**: a person answered your question.
 - **note**: write something down for the room (pain points, a list, meeting notes) in the form it asks for. No code to build, nothing to draw.
 
@@ -218,7 +218,9 @@ refactors, fixes and tooling never coordinate. (That needs the brain online. If 
 1. `jam_message` the other agent: does the feature exist on your side, and does it match? Say
    what has to differ for the platform.
 2. Build only if you both confirm a gap; then post its screenshot. Otherwise `jam_ack` it done
-   with what you found.
+   with what you found. It closes only that way, after the other agent has replied on it: pass the directive's id as
+   `directiveId` to `jam_message`, `jam_ask` and `jam_answer`, in your replies too (only a message that carries it counts) (a `jam_update`
+   never closes it); if nobody answers, `jam_ack` it cancelled and say why.
 3. Compare both renders. Fix inconsistencies that aren't deliberate platform differences.
 4. `jam_show` with mode `parity` and columns for each platform, then `jam_update` with `shipped`
    naming both sides.

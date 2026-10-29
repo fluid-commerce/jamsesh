@@ -1,6 +1,7 @@
 // A client for one headless `figcraft-cli mcp` process: newline-delimited
 // JSON-RPC 2.0 over stdio.
 import type { Subprocess } from "bun";
+import { HelperRegistry, stopHelper, withParentWatch } from "../children";
 
 export type McpContent =
   | { type: "text"; text: string }
@@ -20,13 +21,14 @@ export class FigcraftMcp {
   private closed = false;
   tools: { name: string; description?: string; inputSchema?: any }[] = [];
 
-  constructor(bin: string, args: string[] = ["mcp"], env: Record<string, string> = {}) {
-    this.proc = Bun.spawn([bin, ...args], {
+  constructor(bin: string, args: string[] = ["mcp"], env: Record<string, string> = {}, helpers?: HelperRegistry) {
+    this.proc = Bun.spawn(withParentWatch([bin, ...args]), {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env, ...env },
     });
+    helpers?.track(this.proc);
     this.readLoop();
     this.drainStderr();
     this.proc.exited.then(() => {
@@ -138,7 +140,8 @@ export class FigcraftMcp {
     }
   }
 
-  close() {
-    if (!this.closed) this.proc.kill();
+  /** TERM, then KILL for one that ignores it; true once its exit was seen. */
+  close(): Promise<boolean> {
+    return this.closed ? Promise.resolve(true) : stopHelper(this.proc).catch(() => false);
   }
 }

@@ -20,6 +20,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Big screen on a second display, same-Space full screen | Not tested | Needs a second display. |
 | Screens setup: display map, roles, names, Identify, remembered per display set (3.4) | Simulated | Placement, naming, roles, ids and window plans unit-tested with simulated layouts (side by side, stacked, mixed scales, laptop lid closed, a TV unplugged); setup page rendered in headless Chromium with a stub. Real TVs not tried: see the office checklist in the 3.4 report. |
 | Put on screen picker with live thumbnails; "put it on the left TV" (3.4) | Simulated | Two screens reported to a throwaway hub; picker screenshot checked, the cast landed on the chosen screen; brain tool tested with a screen name. |
+| Helpers stop with the hub (canvas server, participants, key helper, local whisper), graceful or killed | Simulated | Hub tests with stand-in helpers, including ones that ignore `SIGTERM` and a hub killed outright; the bundled app's hung-page, hub-restart and port-release check is still to run on a Mac. |
 | Opening the app on another Mac | Not tested | Ad-hoc signed: needs **Open Anyway** once in Privacy & Security. Permissions reset if the app is rebuilt. |
 
 ## Projects (phase 3.7)
@@ -86,6 +87,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Curation updates, retires and cites sources; ship notes and JamSesh's own trouble stay out (4.3) | Tested live | Six-batch set of restated specs: active facts 13 → 9, restated topics 3 → 1 (rail) and 2 → 1 (badge), commit notes in facts 2 → 0. The model was already good on JamSesh's own trouble (0 → 0); the regex backstop is covered offline. |
 | Session brief with fixed sections and a 600-character excerpt (4.4) | Tested live | The digest returned goal, decisions, questions and glossary from a few lines; owners, repositories, live links and progress come from state. Not yet read by a real agent joining. |
 | Items filed under their workstream; titles and groups tidied; versioned titles stay (4.5) | Simulated | Covered by offline tests against a real hub. Not yet seen on a real session's artifacts. |
+| Parity and pairing: `coordinate` directives name their counterparts and finish only after a two-way exchange with one of them | Simulated | Hub tests through the session, the brain's tools, MCP and `POST /directives`; not yet run with two real agents. |
 | Brain routing, decisions, affinity, curation | Tested live | 37 live scenarios on the gateway pass; a few are occasionally flaky under parallel load. |
 | "How do I join?" puts the Join view up | Tested live | Two phrasings, about 3 seconds. |
 | Brain knows the big screen and display sizes | Tested live | It answered with the exact resolution and aspect ratio. |

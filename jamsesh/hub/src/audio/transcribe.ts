@@ -3,6 +3,7 @@
 // biased toward the room's vocabulary, and its text goes through the same correction pass.
 import { transcribe as aiTranscribe } from "ai";
 import { bus } from "../bus";
+import { HelperRegistry } from "../children";
 import { config } from "../config";
 import type { Session } from "../session";
 import { describeError, gateway } from "../brain/llm";
@@ -64,8 +65,8 @@ const RANK = { parakeet: 0, local: 1, worker: 2 };
 
 export class Transcriber {
   private engines = new Map<string, Engine>();
-  readonly whisper = new LocalWhisper();
-  readonly parakeet = new Parakeet();
+  readonly whisper: LocalWhisper;
+  readonly parakeet: Parakeet;
   /** Project terms beyond the session's own names (the brief's glossary); the hub sets this. */
   glossary: () => string[] = () => [];
 
@@ -73,7 +74,14 @@ export class Transcriber {
   private trouble: string | null = null;
   private warnedAt = 0;
 
-  constructor(private session: Session) {}
+  constructor(
+    private session: Session,
+    /** whisper-server and Parakeet are tracked here so stopping the hub finds them. */
+    private helpers: HelperRegistry = new HelperRegistry(),
+  ) {
+    this.whisper = new LocalWhisper(helpers);
+    this.parakeet = new Parakeet(helpers);
+  }
 
   /** The "language" setting: an ISO code, or "auto" to let whisper detect it. Default English. */
   private language() {
@@ -185,9 +193,11 @@ export class Transcriber {
     return now ? run : false;
   }
 
-  stop() {
+  /** Stops the host's engines; whisper-server and Parakeet are tracked in the registry, so this resolves true only once their exits were seen. */
+  stop(): Promise<boolean> {
     this.whisper.stop();
     this.parakeet.stop();
+    return this.helpers.stopAll();
   }
 
   /** A client machine offers its own whisper server for the room. */

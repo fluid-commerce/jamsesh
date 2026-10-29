@@ -1,13 +1,14 @@
 import { expect, test } from "bun:test";
-import { stopHelper, withParentWatch, withStdinWatch } from "../src/children";
+import { HelperRegistry, stopHelper, withParentWatch, withStdinWatch } from "../src/children";
 
+/** Running: a killed process its new parent hasn't reaped yet (a zombie) holds nothing and counts as gone. */
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
-    return true;
   } catch {
     return false;
   }
+  return !Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)]).stdout.toString().trim().startsWith("Z");
 };
 async function until(fn: () => boolean, ms: number) {
   const end = Date.now() + ms;
@@ -112,4 +113,90 @@ test("a stdin-watched helper: stopping the wrapper stops it, leaving nothing beh
   expect(Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim()).toBe("");
   const own = Bun.spawn(withStdinWatch(["sh", "-c", "exit 7"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
   expect(await own.exited).toBe(7);
+});
+
+test("a helper that ignores SIGTERM dies after the grace when the hub is killed outright", async () => {
+  const code = `
+    import { withParentWatch } from ${JSON.stringify(import.meta.dir + "/../src/children")};
+    const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 500), { stdio: ["ignore", "ignore", "ignore"] });
+    await Bun.sleep(700);
+    const kids = Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim();
+    console.log(JSON.stringify({ wrapper: p.pid, hung: Number(kids.split("\\n")[0]) }));
+    await Bun.sleep(300000);
+  `;
+  const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit" });
+  const { value } = await hub.stdout.getReader().read();
+  const { wrapper, hung } = JSON.parse(new TextDecoder().decode(value)) as { wrapper: number; hung: number };
+  expect(alive(hung)).toBe(true);
+  hub.kill("SIGKILL");
+  expect(await until(() => !alive(hung) && !alive(wrapper), 8000)).toBe(true);
+});
+
+test("the wrapper itself kills a TERM-resistant helper after its own grace", async () => {
+  const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 400), { stdio: ["ignore", "ignore", "ignore"] });
+  await Bun.sleep(500);
+  const hung = Number(Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim().split("\n")[0]);
+  expect(alive(hung)).toBe(true);
+  p.kill(); // plain TERM to the wrapper, no stopHelper
+  await p.exited;
+  expect(alive(hung)).toBe(false);
+});
+
+test("stopHelper reports true only for an exit it saw: a TERM-ignoring helper after KILL, and false for one that never exits", async () => {
+  const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 60_000), { stdio: ["ignore", "ignore", "ignore"] });
+  await Bun.sleep(500);
+  expect(await stopHelper(p, 500)).toBe(true);
+  expect(alive(p.pid)).toBe(false);
+  // A process whose exit never arrives (even after SIGKILL) is not reported as reaped.
+  const kills: (string | undefined)[] = [];
+  const stuck = { pid: 999999, exited: new Promise<number>(() => {}), kill: (sig?: any) => void kills.push(sig) };
+  const t0 = Date.now();
+  expect(await stopHelper(stuck, 200)).toBe(false);
+  expect(kills).toEqual([undefined, "SIGKILL"]);
+  expect(Date.now() - t0).toBeLessThan(2000);
+});
+
+test("a rejected exit promise is not an observed exit: stopHelper goes on to KILL and reports false", async () => {
+  const kills: (string | undefined)[] = [];
+  const failing = { pid: 999999, exited: Promise.reject(new Error("wait failed")) as Promise<number>, kill: (sig?: any) => void kills.push(sig) };
+  failing.exited.catch(() => {});
+  expect(await stopHelper(failing, 100)).toBe(false);
+  expect(kills).toEqual([undefined, "SIGKILL"]);
+});
+
+test("the helper registry stops everything it tracks and says true only when every exit was seen", async () => {
+  const reg = new HelperRegistry();
+  const spawn = () => reg.track(Bun.spawn(withParentWatch(["sleep", "300"]), { stdio: ["ignore", "ignore", "ignore"] }));
+  const a = spawn();
+  const b = reg.track(Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 60_000), { stdio: ["ignore", "ignore", "ignore"] }));
+  // One that exits by itself leaves the registry.
+  const quick = reg.track(Bun.spawn(withParentWatch(["true"]), { stdio: ["ignore", "ignore", "ignore"] }));
+  await quick.exited;
+  await Bun.sleep(10);
+  expect(reg.size).toBe(2);
+  await Bun.sleep(400);
+  expect(await reg.stopAll(500)).toBe(true);
+  expect(alive(a.pid) || alive(b.pid)).toBe(false);
+  expect(reg.size).toBe(0);
+  // Closed: a helper started after stopAll (a start that was still pending) is stopped at once.
+  const late = spawn();
+  expect(await until(() => !alive(late.pid), 4000)).toBe(true);
+  // One whose exit never arrives makes the result false, while the others are still stopped.
+  const reg2 = new HelperRegistry();
+  const c = reg2.track(Bun.spawn(withParentWatch(["sleep", "300"]), { stdio: ["ignore", "ignore", "ignore"] }));
+  reg2.track({ pid: 999999, exited: new Promise<number>(() => {}), kill: () => {} });
+  expect(await reg2.stopAll(200)).toBe(false);
+  expect(alive(c.pid)).toBe(false);
+});
+
+test("a helper tracked while stopAll runs is part of the same stop and its result", async () => {
+  const reg = new HelperRegistry();
+  let late: { pid: number } | null = null;
+  let exit!: (n: number) => void;
+  // Stopping the first one starts another (a spawn landing mid-shutdown).
+  const first = { pid: 999998, exited: new Promise<number>((r) => (exit = r)), kill: () => { exit(0); late ??= reg.track(Bun.spawn(withParentWatch(["sleep", "300"]), { stdio: ["ignore", "ignore", "ignore"] })); } };
+  reg.track(first);
+  expect(await reg.stopAll(500)).toBe(true);
+  expect(late).not.toBeNull();
+  expect(alive(late!.pid)).toBe(false);
 });

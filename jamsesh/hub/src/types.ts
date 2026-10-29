@@ -146,6 +146,8 @@ export interface Directive {
   mode: DirectiveMode;
   rationale: string;
   targets: string[];
+  /** The agents a coordinate directive's target compares with: finishing it needs a reply from one of them. */
+  counterparts?: string[];
   status: DirectiveStatus;
   /** Each target agent's own progress; status is done only when every target is. */
   progress: Record<string, DirectiveStatus>;
@@ -359,6 +361,8 @@ export interface TriageCard {
   /** Task: how to work, and who. */
   mode: DirectiveMode;
   targets: string[];
+  /** For a `coordinate` task: the agents its targets compare with (the other targets count too). */
+  counterparts?: string[];
   /** Context: what kind of knowledge it is. */
   kind: Fact["kind"];
   workstream: string;
