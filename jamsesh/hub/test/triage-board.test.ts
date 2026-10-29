@@ -159,6 +159,16 @@ test("send: edits are kept beside what was heard, the directive carries the sour
   expect(r.s.board.dismiss(c.id, "Chey")).toMatchObject({ ok: false, status: 409 });
 });
 
+test("a card for two agents sends one directive to both; the repeat of the click does nothing more", () => {
+  const r = room();
+  const c = task(r, "Keep the nav in parity between desktop and mobile", { mode: "coordinate", targets: [r.desktop.id, r.mobile.id] });
+  expect(c.targets).toHaveLength(2);
+  expect(r.s.board.send(c.id, "Chey").ok).toBe(true);
+  expect(r.s.board.send(c.id, "Felipe").ok).toBe(false);
+  expect(r.s.directives()).toHaveLength(1);
+  expect(r.s.directives()[0].targets.sort()).toEqual([r.desktop.id, r.mobile.id].sort());
+});
+
 test("send needs an agent, and edit rejects things that aren't valid", () => {
   const r = room();
   const c = task(r, "Look into the checkout flow", { targets: [] });
@@ -299,6 +309,11 @@ test("the board's routes: people act through the host window, agents and strange
     }
     expect(r.s.board.get(c.id)!.status).toBe("open");
 
+    // An agent can't read the proposals; the changelog is for everyone.
+    const far = { "x-forwarded-for": "9.9.9.9" };
+    const remoteAgent = r.hub.auth.issue({ kind: "agent", label: "Agents", ip: "9.9.9.9", ownerDeviceId: "host" });
+    expect((await call("GET", "/triage", undefined, { ...far, authorization: `Bearer ${remoteAgent.token}` })).status).toBe(403);
+    expect((await call("POST", `/triage/${c.id}/send`, {}, { ...far, authorization: `Bearer ${remoteAgent.token}` })).status).toBe(403);
     // GET shows the cards and what people do with them.
     const listed = await (await call("GET", "/triage", undefined)).json();
     expect(listed.cards.map((x: any) => x.id).sort()).toEqual([c.id, ctx.id].sort());
@@ -321,6 +336,14 @@ test("the board's routes: people act through the host window, agents and strange
     expect((await call("POST", `/triage/${ctx.id}/add`, { personId: r.chey.id, kind: "constraint" }, { cookie: win() })).status).toBe(200);
     expect(r.s.facts()[0]).toMatchObject({ kind: "constraint", text: "Greeting uses the first name" });
     expect((await call("POST", "/triage/tri_nope/dismiss", { personId: r.chey.id }, { cookie: win() })).status).toBe(404);
+
+    // A person on another laptop acts as their own person, whatever the body says; a device with no person is refused.
+    const laptop = r.hub.auth.issue({ kind: "browser", label: "Felipe's laptop", ip: "9.9.9.9", personId: r.felipe.id });
+    const stray = r.hub.auth.issue({ kind: "browser", label: "A laptop", ip: "9.9.9.9" });
+    const next = task(r, "Try a pricing page with three tiers", { targets: [r.desktop.id] });
+    expect((await call("POST", `/triage/${next.id}/dismiss`, {}, { ...far, authorization: `Bearer ${stray.token}` })).status).toBe(403);
+    expect((await call("POST", `/triage/${next.id}/send`, { personId: r.chey.id }, { ...far, authorization: `Bearer ${laptop.token}` })).status).toBe(200);
+    expect(r.s.board.get(next.id)).toMatchObject({ status: "sent", resolvedBy: "Felipe" });
 
     // The live state carries the board, and the changelog is readable.
     const state = await (await call("GET", "/state", undefined)).json();

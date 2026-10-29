@@ -78,7 +78,7 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: decision", [5], async (r) => {
       r.say("chey", "I like direction B");
       await r.settle();
-      expect(r.decisions()).toHaveLength(0);
+      expect(r.hub.session.store.recentEvents({ kinds: ["decision"] })).toHaveLength(0);
       expect(r.hub.session.board.open().filter((c) => c.type === "context" && c.kind === "decision").length).toBeGreaterThanOrEqual(1);
     });
   }, 30_000);

@@ -588,7 +588,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
   // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
-  if (path === "/triage" && req.method === "GET") return json({ cards: s.board.shown(), stats: s.board.stats() });
+  if (path === "/triage" && req.method === "GET") {
+    // Agents don't see proposals nobody has accepted; they read the knowledge, the inbox and the changelog.
+    if (paired?.kind === "agent") return bad("That's for people; agents use their jam_ tools.", 403);
+    return json({ cards: s.board.shown(), stats: s.board.stats() });
+  }
   if (path === "/changelog" && req.method === "GET") return json(s.changelog(Math.min(200, Number(url.searchParams.get("limit")) || 50)).map(publicEvent));
   m = path.match(/^\/triage\/([\w-]+)(?:\/(send|add|merge|replace|dismiss))?$/);
   if (m && req.method !== "GET") {
