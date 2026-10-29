@@ -1504,7 +1504,10 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
 - **What it produces.** Stop (`POST /api/record/stop`) names the recording it ends (`recordingId`, from Start) The window runs from the
   hub's clock at Start to the hub's clock when Stop arrives: a time sent by the caller is never used, and pointer moments outside it
   (with a second of slack) are dropped. Closing a prompt window (`POST /api/prompt-window`) works the same way, by recording id; an id
-  that is no longer the device's current recording closes nothing. A Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
+  that is no longer the device's current recording closes nothing. The older `POST /api/prompt-window/start` is refused (409, nothing changes)
+  while a recording runs on that device. A line belongs to the recording it began in: it began at or after Start and before Stop, with
+  300 ms more for the recording being stopped (a last word still in transcription), never past the Start of the next recording on the
+  same device, so no line is in two recordings. A line that began before Start is ordinary speech. A Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
   returns **notes**, one per thing said, each pinned to the spot being pointed at while it was said.
   Nothing is sent yet. A note keeps the item, the position in it, the page of a build, the scroll
   position, the canvas frame or node id and canvas point, the big screen it was on, and who said it.
@@ -1523,7 +1526,9 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   its frame by node id, a build by its dev server URL); observers own nothing. Notes on nothing an
   agent owns, or on nothing at all, go to the room brain as one prompt, and the sender is told how
   many went where. A repeated send (a lost reply, a double click, two at once) does nothing twice: the hub
-  reserves the send by recording id before any work starts, and keeps each pin by its note id. A recording
+  reserves the send by recording id before any work starts, and keeps each pin by its note id. The right to send a recording's notes
+  and the receipt of its send are one record, so they are kept and dropped together: the hub keeps the last 200 stopped recordings, and
+  a send for one it no longer keeps is refused (404), never sent a second time. A recording
   id is the hub's own (from Record or Stop); an id it didn't issue is refused (404). A crop's file name is
   the hub's own too, and the picture is read from the renders folder and written to its uploads folder only
   (paths resolved through links).
