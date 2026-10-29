@@ -51,7 +51,7 @@ test("the join screen has nothing to expand; an extra screen keeps its own expan
   expect(s.expandTile("b", "screen-2").expanded).toBe("b");
   expect(s.stage("screen-2").expanded).toBe("b");
   expect(s.stage().expanded).toBeUndefined();
-  expect(s.expandTile("x".repeat(200), "screen-2").expanded?.length).toBe(80);
+  expect(s.expandTile("x".repeat(200), "screen-2").expanded?.length).toBe(200);
 });
 
 test("a locked screen can still be expanded: the lock, its owner and its history stay, and each screen keeps its own", () => {

@@ -98,7 +98,7 @@ test("by voice: the second tile, a named artifact, a count that's too big, and c
   // A layout is counted by tile, and a tile can be found by its artifact.
   s.setStage({ mode: "layout", layout: { tiles: [{ kind: "web", url: "http://x.test" }, { kind: "artifact", artifactId: b.id }] } }, "Room brain", "main", { claim: s.stageClaim() });
   expect(s.expandWhich({ artifactId: b.id })).toMatchObject({ ok: true });
-  expect(s.stage().expanded).toBe("t1");
+  expect(s.stage().expanded).toMatch(/^t1\.[0-9a-z]+$/);
   s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() });
   expect(s.expandWhich({ position: 1 })).toMatchObject({ ok: false });
   // Another screen is its own stage.
@@ -162,10 +162,11 @@ test("windows get each screen's tile keys from the hub: in the state, and again 
   const off = bus.on((m: any) => m.type === "patch" && m.key === "stageTiles" && patches.push(m.value));
   try {
     s.setStage({ mode: "layout", layout: { tiles: [{ kind: "artifact", artifactId: a.id }, { kind: "feed" }] } }, "Chey", "main", { claim: s.stageClaim() });
-    expect(s.state().stageTiles.main).toEqual([{ key: "t0", layoutIndex: 0, artifactId: a.id }, { key: "t1", layoutIndex: 1 }]);
+    expect(s.state().stageTiles.main).toEqual([{ key: expect.stringMatching(/^t0\./), layoutIndex: 0, artifactId: a.id }, { key: expect.stringMatching(/^t1\./), layoutIndex: 1 }]);
     await Bun.sleep(80);
-    expect(patches.at(-1).main.map((t: any) => t.key)).toEqual(["t0", "t1"]);
-    // An extra screen's stage has its own list.
+    expect(patches.at(-1).main.map((t: any) => t.key.split(".")[0])).toEqual(["t0", "t1"]);
+    // An extra screen's stage has its own list (once it is connected).
+    s.reportScreen("screen-2", { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0, at: Date.now() });
     s.setStage({ mode: "compare", items: [b.id, a.id] }, "Chey", "screen-2", { claim: s.stageClaim() });
     await Bun.sleep(80);
     expect(patches.at(-1)["screen-2"].map((t: any) => t.key)).toEqual([a.id, b.id]);

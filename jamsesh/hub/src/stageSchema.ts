@@ -30,7 +30,7 @@ const stageShape = {
   html: z.string().max(500_000).optional(),
   follow: id.nullish(),
   page: id.nullish(),
-  expanded: z.string().max(100).optional(),
+  expanded: z.string().max(400).optional(),
   pinned: z.boolean().optional(),
   pinnedById: z.string().max(200).optional(),
   since: z.number().finite().optional(),

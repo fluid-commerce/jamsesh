@@ -1500,19 +1500,33 @@ export class Session {
 
   /** The hub is stopping: no timer of this session touches its store again (it may be closed or deleted next). */
   stop() {
-    for (const t of [this.lockSweep, this.stageRevert, this.shareSweep, ...this.screenReverts.values()]) if (t) clearTimeout(t);
+    for (const t of [this.lockSweep, this.stageRevert, this.shareSweep, ...this.screenReverts.values(), ...this.screenExpiry.values()]) if (t) clearTimeout(t);
+    this.screenExpiry.clear();
     this.screenReverts.clear();
     this.lockSweep = this.stageRevert = this.shareSweep = null;
   }
 
   /** A big-screen window reported its size; windows that stop reporting drop off after 3 minutes. */
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
-    const known = this.bigScreens.has(id);
     this.bigScreens.set(id, { id, ...info });
-    if (!known) {
-      bus.changed("screens");
-      bus.changed("stageTiles");
-    }
+    this.sweepScreens();
+    // A screen not heard from for 3 minutes stops being listed: say so then (its stored stage stays for when it returns).
+    clearTimeout(this.screenExpiry.get(id));
+    const t = setTimeout(() => this.sweepScreens(), Session.SCREEN_LIVE_MS + 500);
+    t.unref?.();
+    this.screenExpiry.set(id, t);
+  }
+
+  static SCREEN_LIVE_MS = 3 * 60_000;
+  private screenExpiry = new Map<string, ReturnType<typeof setTimeout>>();
+  private liveScreens = new Set<string>(["main"]);
+  /** Publishes the screens and their tiles when the set of listed (live) screens changed: one appeared, came back, or went quiet. */
+  sweepScreens() {
+    const now = new Set(this.screens().map((x) => x.id));
+    if (now.size === this.liveScreens.size && [...now].every((i) => this.liveScreens.has(i))) return;
+    this.liveScreens = now;
+    bus.changed("screens");
+    bus.changed("stageTiles");
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,
@@ -1522,14 +1536,15 @@ export class Session {
     clearTimeout(this.screenReverts.get(id));
     this.screenReverts.delete(id);
     this.defaultStages.delete(id);
-    bus.changed("screens");
-    bus.changed("stageTiles");
+    clearTimeout(this.screenExpiry.get(id));
+    this.screenExpiry.delete(id);
+    this.sweepScreens();
   }
 
   screens(): ScreenInfo[] {
     const now = Date.now();
     return [...this.bigScreens.values()]
-      .filter((sc) => now - sc.at < 3 * 60_000)
+      .filter((sc) => now - sc.at < Session.SCREEN_LIVE_MS)
       .sort((a, b) => (a.id === "main" ? -1 : b.id === "main" ? 1 : a.screenX - b.screenX))
       .map((sc, i, all) => {
         const known = this.screenNames()[sc.id];
@@ -1588,7 +1603,7 @@ export class Session {
    */
   expandTile(key: string | null, screen = "main", claim?: StageClaim): Stage {
     const cur = this.stage(screen);
-    const tile = typeof key === "string" ? key.trim().slice(0, 80) : "";
+    const tile = typeof key === "string" ? key.trim() : "";
     if (!this.claimHolds(claim, screen) || cur.mode === "join" || (tile ? cur.expanded === tile : !cur.expanded)) return cur;
     const { expanded: _drop, ...rest } = cur;
     const stage: Stage = tile ? { ...rest, expanded: tile } : rest;
@@ -1600,7 +1615,8 @@ export class Session {
   /** Every screen's tile keys (`stageTileKeys`), as windows get them: they draw tiles from these and never work keys out themselves. */
   stageTiles(): Record<string, StageTileKey[]> {
     // Every connected screen has tiles, even one nothing was put on yet (its default board).
-    const ids = new Set(["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {})), ...this.screens().map((x) => x.id)]);
+    // (A disconnected screen keeps its stored stage for when it returns, but isn't listed.)
+    const ids = new Set(["main", ...this.screens().map((x) => x.id)]);
     return Object.fromEntries([...ids].map((id) => [id, this.stageTileKeys(id)]));
   }
 
@@ -1626,7 +1642,8 @@ export class Session {
         // goes, the others keep their keys and the gone one's key names nothing, so a key never points at different content.
         return (st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c, ci) => c.items.flatMap((id, place) => (known.has(id) ? [{ key: `p${ci}.${place}.${id}`, artifactId: id, parity: { column: ci, place } }] : [])));
       case "layout":
-        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
+        // The place plus a short fingerprint of what is there: a click on the old first tile can't expand a different new one.
+        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}.${fingerprint(t)}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
       default:
         return [];
     }
@@ -2155,6 +2172,14 @@ class NotShown extends Error {
   constructor(reason: string) {
     super(reason);
   }
+}
+
+/** A short fingerprint of a layout tile's content (for tile keys). */
+function fingerprint(t: unknown): string {
+  const s = JSON.stringify(t) ?? "";
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
 }
 
 /** A lock's identity for questions about it: its id, or (for one stored before ids) its start time. */

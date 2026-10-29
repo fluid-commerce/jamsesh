@@ -1592,3 +1592,58 @@ test("same-millisecond recast: a pending show request about the first lock expir
   expect(s.stage().items).toEqual([a.id]);
   void felipe;
 });
+
+test("a screen that goes quiet and comes back is published both ways, and a disconnected screen isn't listed", () => {
+  const { s } = room();
+  artifact(s, "A");
+  const seen: string[] = [];
+  const real = bus.changed.bind(bus) as (key: string) => void;
+  (bus as any).changed = (key: string) => { seen.push(key); real(key); };
+  try {
+    const info = { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0 };
+    s.reportScreen("screen-2", { ...info, at: Date.now() });
+    expect(Object.keys(s.stageTiles())).toContain("screen-2");
+    // 4 minutes of silence: the next look (the expiry timer's) says it's gone.
+    seen.length = 0;
+    s.reportScreen("screen-2", { ...info, at: Date.now() - 4 * 60_000 });
+    s.sweepScreens();
+    expect(seen).toContain("screens");
+    expect(seen).toContain("stageTiles");
+    expect(Object.keys(s.stageTiles())).not.toContain("screen-2");
+    // It reports again: back, published, and its saved stage is still there.
+    seen.length = 0;
+    s.reportScreen("screen-2", { ...info, at: Date.now() });
+    expect(seen).toContain("stageTiles");
+    expect(Object.keys(s.stageTiles())).toContain("screen-2");
+  } finally {
+    (bus as any).changed = real;
+  }
+});
+
+test("an expand request is for the content that was clicked: a long parity key expands exactly, and a layout click across two layout writes is turned away", async () => {
+  const { hub, s } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    const longTitle = "L".repeat(190);
+    const a = s.upsertArtifact({ kind: "screenshot", stage: "built", title: longTitle, image: "/renders/l.png" });
+    s.store.remove("artifacts", a.id);
+    const longId = "art_" + "x".repeat(190);
+    s.store.put("artifacts", { ...a, id: longId });
+    s.setStage({ mode: "parity", columns: [{ label: "L", items: [longId] }] }, "Chey", "main", { override: true });
+    const key = s.stageTileKeys()[0].key;
+    expect(key.length).toBeGreaterThan(190);
+    expect((await post("/stage/expand", { tile: key })).status).toBe(200);
+    expect(s.stage().expanded).toBe(key);
+    expect(s.stageTileKeys().some((k) => k.key === s.stage().expanded)).toBe(true);
+    // A layout: the click on its first tile is in flight while two layouts replace it.
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "feed" }, { kind: "html", html: "<p>b</p>" }] } }, "Chey", "main", { override: true });
+    const clicked = s.stageTileKeys()[0].key;
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "html", html: "<p>other</p>" }, { kind: "feed" }] } }, "Chey", "main", { override: true });
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "html", html: "<p>third</p>" }] } }, "Chey", "main", { override: true });
+    expect((await post("/stage/expand", { tile: clicked })).status).toBe(404);
+    expect(s.stage().expanded).toBeUndefined();
+  } finally {
+    server.stop();
+  }
+});
