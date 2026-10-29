@@ -289,7 +289,11 @@ in place of the picker. The menu bar's **Projects** submenu lists the recent pro
 ticked), **All projects…** (the picker) and **New project…** (the picker with the name field open).
 Choosing another project ends the session first: the hub saves a snapshot and the project's
 thumbnail and exits, and only then does the next one start. The app remembers the project it
-hosted last and relaunches into it.
+hosted last and relaunches into it. Every change of session (host, join, leave, a project, Quit, the
+setup's Reopen) waits its turn in one queue and acts only on the session it was asked in; arranging
+the screens waits too and acts only for the session there is. Reopen restarts only after the hub's
+save finished: a save that didn't, then or before, keeps the app from reopening until the person
+chooses **Reopen anyway**.
 
 **Migration.** The first time a hub or lobby starts with no `JAMSESH_DATA`, the sessions from before
 projects (`~/.jamsesh/host` and the `host-YYYY-MM-DD-HHMM` archives) are copied into projects named

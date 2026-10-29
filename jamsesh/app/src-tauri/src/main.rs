@@ -94,21 +94,28 @@ struct Turns {
     epoch: std::sync::atomic::AtomicU64,
     /// The final stop finished and the person was told how it went: only now may the app exit.
     ended: std::sync::atomic::AtomicBool,
+    /// A session's last save didn't finish. It can't be retried (the hub is gone), so it blocks every restart until the
+    /// person chooses to reopen anyway.
+    unsaved: std::sync::Mutex<Option<String>>,
 }
 
 /// The session a request was made against.
 #[derive(Clone, Copy)]
 struct Ticket(u64);
 
-/// A transition's turn. Letting go of it counts the transition as run, so requests made before it are stale.
+/// A transition's turn. Letting go of it counts the transition as run, so requests made before it are stale; a quiet
+/// turn (arranging the screens of the session there is) doesn't.
 struct Turn<'a> {
     turns: &'a Turns,
+    counts: bool,
     _held: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        self.turns.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.counts {
+            self.turns.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -121,7 +128,7 @@ impl Turn<'_> {
 
 impl Turns {
     fn new() -> Self {
-        Turns { lock: Mutex::new(()), quitting: false.into(), epoch: 0.into(), ended: false.into() }
+        Turns { lock: Mutex::new(()), quitting: false.into(), epoch: 0.into(), ended: false.into(), unsaved: Default::default() }
     }
     /// The session as a request finds it, taken when the request is made (before it waits).
     fn ticket(&self) -> Ticket {
@@ -130,13 +137,18 @@ impl Turns {
     /// The turn for a request made against `ticket`: `None` if the app is quitting, or if another transition ran
     /// since the request was made, so what it asked for no longer applies.
     async fn lock(&self, ticket: Ticket) -> Option<Turn<'_>> {
-        self.take(Some(ticket)).await
+        self.take(Some(ticket), true).await
     }
     /// Leave's turn: it ends whatever session is there by then, so it is never stale; only Quit stops it.
     async fn lock_now(&self) -> Option<Turn<'_>> {
-        self.take(None).await
+        self.take(None, true).await
     }
-    async fn take(&self, ticket: Option<Ticket>) -> Option<Turn<'_>> {
+    /// A turn for work on the session `ticket` was taken in that doesn't change which session runs (arranging its
+    /// windows, telling its hub about displays): no transition runs meanwhile, and it never makes others stale.
+    async fn lock_quiet(&self, ticket: Ticket) -> Option<Turn<'_>> {
+        self.take(Some(ticket), false).await
+    }
+    async fn take(&self, ticket: Option<Ticket>, counts: bool) -> Option<Turn<'_>> {
         let held = self.lock.lock().await;
         let quitting = self.quitting.load(std::sync::atomic::Ordering::SeqCst);
         let stale = ticket.is_some_and(|t| self.epoch.load(std::sync::atomic::Ordering::SeqCst) != t.0);
@@ -144,13 +156,29 @@ impl Turns {
         if quitting || stale {
             return None;
         }
-        Some(Turn { turns: self, _held: held })
+        Some(Turn { turns: self, counts, _held: held })
     }
-    /// The last turn (Quit, Reopen): everyone after it gets `None`.
+    /// The last turn (Quit): everyone after it gets `None`.
     async fn quit(&self) -> Turn<'_> {
         let held = self.lock.lock().await;
         self.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
-        Turn { turns: self, _held: held }
+        Turn { turns: self, counts: true, _held: held }
+    }
+    /// Reopen's last turn, for a request made against `ticket`: `None` when another transition (an earlier Reopen
+    /// among them) ran since, so two Reopens never both act.
+    async fn quit_for(&self, ticket: Ticket) -> Option<Turn<'_>> {
+        let turn = self.lock(ticket).await?;
+        self.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+        Some(turn)
+    }
+    /// Why the app may not restart: a save that didn't finish and that the person hasn't chosen to leave behind.
+    fn unsaved(&self) -> Option<String> {
+        self.unsaved.lock().ok().and_then(|u| u.clone())
+    }
+    fn set_unsaved(&self, why: Option<String>) {
+        if let Ok(mut u) = self.unsaved.lock() {
+            *u = why;
+        }
     }
 }
 
@@ -503,12 +531,22 @@ const STALE: &str = "The session changed while this was waiting, so nothing was 
 /// and waits for it to say its final save finished.
 async fn final_stop(state: &App) -> (Turn<'_>, Result<(), String>) {
     let turn = state.switching.quit().await;
+    let stopped = stop_hub(state).await;
+    (turn, stopped)
+}
+
+/// Takes this Mac's hub and waits for it to say its final save finished. The caller holds its turn. A save that didn't
+/// finish is remembered (`Turns::unsaved`): no restart goes ahead over it until the person says so.
+async fn stop_hub(state: &App) -> Result<(), String> {
     let hub = state.inner.lock().await.hub.take();
     let stopped = match hub {
         Some(mut h) => tauri::async_runtime::spawn_blocking(move || h.stop()).await.unwrap_or_else(|e| Err(e.to_string())),
         None => Ok(()),
     };
-    (turn, stopped)
+    if let Err(e) = &stopped {
+        state.switching.set_unsaved(Some(e.clone()));
+    }
+    stopped
 }
 
 /// A transition (hosting, joining, resuming) that failed part way leaves nothing behind: its hub or
@@ -542,6 +580,7 @@ async fn leave_now(app: &AppHandle, state: &App) {
     if let Some(mut h) = hub
         && let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || h.stop()).await
     {
+        state.switching.set_unsaved(Some(e.clone()));
         app.dialog().message(e).title("The session didn't finish saving").kind(MessageDialogKind::Warning).show(|_| {});
     }
     // Every window the session opened, including a user-less host's extra screens.
@@ -809,9 +848,7 @@ fn on_menu(app: &AppHandle, id: &str) {
             },
             // Every screen keeps its own display, so only reopen what's missing.
             "bigscreen" => {
-                if let Some(o) = hub_origin {
-                    let _ = screens::arrange(&app, &o).await;
-                }
+                let _ = screens::arrange_for(&app, ticket).await;
             }
             "screens" => screens::open_setup(&app),
             "agents" => {
@@ -838,7 +875,7 @@ fn on_menu(app: &AppHandle, id: &str) {
                     }
                     inner.cfg.userless
                 };
-                set_userless(&app, on, hub_origin.as_deref());
+                set_userless(&app, ticket, on, hub_origin.as_deref());
                 refresh_tray(&app).await;
             }
             "setup" => open_setup(&app),
@@ -848,7 +885,7 @@ fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "reopen" => match (role.as_deref(), hub_origin) {
-                (Some("host"), Some(o)) => drop(screens::arrange(&app, &o).await),
+                (Some("host"), Some(_)) => drop(screens::arrange_for(&app, ticket).await),
                 _ => on_menu(&app, "open"),
             },
             "leave" => leave(&app, &state).await,
@@ -973,6 +1010,7 @@ async fn switch_now(app: &AppHandle, state: &App, launch: Launch) -> Result<(), 
     if let Some(mut h) = hub {
         let stopped = tauri::async_runtime::spawn_blocking(move || h.stop()).await.unwrap_or_else(|e| Err(e.to_string()));
         if let Err(e) = stopped {
+            state.switching.set_unsaved(Some(e.clone()));
             leave_now(app, state).await;
             return Err(e);
         }
@@ -1000,11 +1038,11 @@ async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Opt
 
 /// Switches between a host someone uses (one big screen plus their window) and a user-less one
 /// (a big screen on every display).
-fn set_userless(app: &AppHandle, on: bool, origin: Option<&str>) {
+fn set_userless(app: &AppHandle, ticket: Ticket, on: bool, origin: Option<&str>) {
     let Some(origin) = origin else { return };
     // The displays' defaults differ (a user-less host also presents on the laptop's own display).
-    let (a, o) = (app.clone(), origin.to_string());
-    tauri::async_runtime::spawn(async move { drop(screens::arrange(&a, &o).await) });
+    let a = app.clone();
+    tauri::async_runtime::spawn(async move { drop(screens::arrange_for(&a, ticket).await) });
     if on {
         if let Some(w) = app.get_webview_window("client") {
             let _ = w.close();
@@ -1021,13 +1059,14 @@ async fn get_userless(state: State<'_, Arc<App>>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn toggle_userless(app: AppHandle, state: State<'_, Arc<App>>) -> Result<bool, String> {
+    let ticket = state.switching.ticket();
     let (on, origin) = {
         let mut inner = state.inner.lock().await;
         inner.cfg.userless = !inner.cfg.userless;
         state.save(&inner.cfg)?;
         (inner.cfg.userless, inner.hub.as_ref().map(|h| h.origin()))
     };
-    set_userless(&app, on, origin.as_deref());
+    set_userless(&app, ticket, on, origin.as_deref());
     refresh_tray(&app).await;
     Ok(on)
 }
@@ -1085,26 +1124,51 @@ fn resume_launch(cfg: &Config) -> Launch {
     cfg.project.clone().map_or(Launch::Last, Launch::Project)
 }
 
-/// Screen Recording takes effect after a relaunch. Like Quit: the last turn, and the hub's acknowledged save,
-/// before the app reopens (into the same session). A save that didn't finish is said and the app doesn't reopen.
+/// Screen Recording takes effect after a relaunch. Like Quit: the last turn, and the hub's acknowledged save, before
+/// the app reopens (into the same session). Made against the session it was asked in: a second Reopen queued behind
+/// the first does nothing. A save that didn't finish, now or before, blocks the reopen until the person chooses to
+/// reopen anyway.
 #[tauri::command]
 async fn relaunch(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
-    let (turn, stopped) = final_stop(&state).await;
-    match stopped {
-        Ok(()) => {
-            state.switching.ended.store(true, std::sync::atomic::Ordering::SeqCst);
-            app.request_restart();
-            Ok(())
-        }
-        Err(e) => {
-            // The hub is stopped either way; the app stays, back at the start, and says what happened.
-            turn.keep_running();
-            leave_now(&app, &state).await;
-            let e = format!("{e} JamSesh didn't reopen; open the session again when you're ready.");
-            warn(&app, "The session didn't finish saving", e.clone());
-            Err(e)
-        }
+    let ticket = state.switching.ticket();
+    let Err(e) = reopen(&app, &state, ticket).await else { return Ok(()) };
+    // Ask; "Reopen anyway" is the person leaving that save behind, for the session they were asked about.
+    let ticket = state.switching.ticket();
+    let (handle, st) = (app.clone(), state.inner().clone());
+    app.dialog()
+        .message(format!("{e} JamSesh hasn't reopened. Reopen anyway, leaving those changes behind?"))
+        .title("The session didn't finish saving")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom("Reopen anyway".into(), "Not now".into()))
+        .show(move |anyway| {
+            if anyway {
+                tauri::async_runtime::spawn(async move {
+                    st.switching.set_unsaved(None);
+                    if let Err(e) = reopen(&handle, &st, ticket).await {
+                        warn(&handle, "The session didn't finish saving", e);
+                    }
+                });
+            }
+        });
+    Err(e)
+}
+
+/// One Reopen: the last turn for the session `ticket` was taken in (a second Reopen queued behind it does nothing),
+/// the hub's acknowledged stop, then a restart, unless a save didn't finish, now or before (`Turns::unsaved`): then
+/// the app stays, back at the start, and says why.
+async fn reopen(app: &AppHandle, state: &App, ticket: Ticket) -> Result<(), String> {
+    let Some(turn) = state.switching.quit_for(ticket).await else { return Ok(()) };
+    let stopped = stop_hub(state).await;
+    let Some(e) = state.switching.unsaved() else {
+        state.switching.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.request_restart();
+        return Ok(());
+    };
+    turn.keep_running();
+    if stopped.is_err() {
+        leave_now(app, state).await;
     }
+    Err(e)
 }
 
 fn main() {
@@ -1316,6 +1380,49 @@ mod tests {
         assert!(turns.lock(before).await.is_none());
         assert!(turns.lock(turns.ticket()).await.is_some());
         assert!(!turns.ended.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn two_reopens_queued_together_act_once_and_a_failed_save_blocks_every_restart() {
+        let turns = Turns::new();
+        // Two Reopen clicks, both made against the same session.
+        let ticket = turns.ticket();
+        let first = turns.quit_for(ticket).await.unwrap();
+        let second = turns.quit_for(ticket);
+        tokio::pin!(second);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second).await.is_err());
+        // The first one's save fails: remembered, the app goes on.
+        turns.set_unsaved(Some("The session's last save didn't finish.".into()));
+        first.keep_running();
+        drop(first);
+        // The second never acts (it would find no hub and take that for a finished save).
+        assert!((&mut second).await.is_none());
+        // A fresh Reopen gets its turn, but the failed save still stands until the person leaves it behind.
+        let again = turns.quit_for(turns.ticket()).await.unwrap();
+        assert_eq!(turns.unsaved().as_deref(), Some("The session's last save didn't finish."));
+        again.keep_running();
+        drop(again);
+        turns.set_unsaved(None);
+        assert!(turns.unsaved().is_none());
+    }
+
+    #[tokio::test]
+    async fn arranging_screens_waits_out_a_transition_and_never_acts_on_the_session_after_it() {
+        let turns = Turns::new();
+        // A display change is noticed while a project switch runs: its arrangement waits for the switch...
+        let ticket = turns.ticket();
+        let switching = turns.lock(ticket).await.unwrap();
+        let arranging = turns.lock_quiet(ticket);
+        tokio::pin!(arranging);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut arranging).await.is_err());
+        drop(switching);
+        // ...and, made for the old session, does nothing to the new one.
+        assert!((&mut arranging).await.is_none());
+        // One made now runs, and doesn't make a project pick made before it stale.
+        let pick = turns.ticket();
+        let quiet = turns.lock_quiet(turns.ticket()).await.unwrap();
+        drop(quiet);
+        assert!(turns.lock(pick).await.is_some());
     }
 
     #[test]
