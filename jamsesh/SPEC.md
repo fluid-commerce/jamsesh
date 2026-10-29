@@ -1355,7 +1355,7 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   runs, the screen's lock is kept fresh.
 - **The rainbow trail.** While recording, a trail follows the pointer (on the big screen, the dart)
   and fades out behind it over about a second. The spectrum runs along the path by distance travelled,
-  so colour follows the stroke and not the clock; it is drawn on a canvas overlay at display rate, and
+  with the whole spectrum (red at the head to violet at the tail) shown across every stroke however short, drifting slowly; it is drawn on a canvas overlay at display rate, and
   runs only while something is fading (an idle recording costs nothing). With reduced motion it is
   shorter (under half a second), thinner and fainter, in a calm band of colour. On the big screen the
   overlay also shows a chip, "Recording · <name>", and every recording driver has their own trail.

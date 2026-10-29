@@ -8,23 +8,23 @@ export interface TrailStyle {
   width: number;
   /** Peak opacity at the head. */
   alpha: number;
-  /** Degrees of hue per pixel travelled: how fast the spectrum cycles along the path. */
-  hueRate: number;
-  /** The hue range used; reduced motion keeps to a narrow cool band instead of the full spectrum. */
+  /** Degrees of hue from the head of the visible trail to its tail: the whole trail always shows this much of the spectrum. */
+  sweep: number;
+  /** Degrees per ms the whole gradient drifts, so it feels alive. */
+  drift: number;
+  /** The hue band used; reduced motion keeps to a narrow cool band instead of the full wheel. */
   hueFrom: number;
   hueSpan: number;
 }
 
-export const FULL: TrailStyle = { life: 1000, width: 7, alpha: 0.95, hueRate: 0.32, hueFrom: 0, hueSpan: 360 };
+export const FULL: TrailStyle = { life: 1000, width: 7, alpha: 0.95, sweep: 285, drift: 0.02, hueFrom: 0, hueSpan: 360 };
 /** Reduced motion: shorter, thinner, fainter, and a calm band of colour instead of the whole spectrum. */
-export const CALM: TrailStyle = { life: 450, width: 3, alpha: 0.55, hueRate: 0.12, hueFrom: 190, hueSpan: 110 };
+export const CALM: TrailStyle = { life: 450, width: 3, alpha: 0.55, sweep: 100, drift: 0, hueFrom: 190, hueSpan: 110 };
 
 export interface TrailPoint {
   x: number;
   y: number;
   at: number;
-  /** Degrees along the spectrum, set by how far the pointer has travelled, so colour follows the path and not the clock. */
-  h: number;
   /** A gap in time starts a new stroke instead of joining two places the pointer never crossed. */
   cut: boolean;
 }
@@ -50,7 +50,6 @@ const MAX_POINTS = 400;
 
 export class Trail {
   pts: TrailPoint[] = [];
-  private travelled = 0;
   constructor(public style: TrailStyle = FULL) {}
 
   push(x: number, y: number, at: number) {
@@ -59,8 +58,7 @@ export class Trail {
     const d = last ? Math.hypot(x - last.x, y - last.y) : 0;
     if (last && d < MIN_STEP && at - last.at < GAP_MS) return;
     const cut = !last || at - last.at > GAP_MS;
-    this.travelled += cut ? 0 : d;
-    this.pts.push({ x, y, at, h: this.travelled * this.style.hueRate, cut });
+    this.pts.push({ x, y, at, cut });
     if (this.pts.length > MAX_POINTS) this.pts.splice(0, this.pts.length - MAX_POINTS);
   }
 
@@ -80,18 +78,21 @@ export class Trail {
   /**
    * Smooth curve pieces. Within each unbroken stroke the line runs midpoint to midpoint with each
    * sample as the control point, so coarse mouse samples still draw as one flowing line. A piece takes
-   * its colour, opacity and width from its control sample, so the spectrum stays put along the path
-   * while the tail thins and fades.
+   * its colour, opacity and width from its control sample. Colour runs the spectrum from the head
+   * (red) to the oldest visible point (violet), however short the stroke, and the whole gradient drifts slowly.
    */
   pieces(now: number): TrailPiece[] {
     this.prune(now);
-    const { life, width, alpha, hueFrom, hueSpan } = this.style;
+    const { life, width, alpha, hueFrom, hueSpan, sweep, drift } = this.style;
     const out: TrailPiece[] = [];
     const p = this.pts;
-    const look = (q: TrailPoint) => {
+    // The spectrum spans each stroke from its head back to where it has mostly faded (or its start, if shorter).
+    const lookAt = (q: TrailPoint, headAt: number, span: number) => {
+      const u = Math.min(1, Math.max(0, (headAt - q.at) / span));
       const k = Math.min(1, Math.max(0, (now - q.at) / life));
-      const fade = Math.pow(1 - k, 1.6) * (1 - 0.3 * k);
-      return { hue: hueFrom + (((q.h % hueSpan) + hueSpan) % hueSpan), alpha: alpha * fade, width: Math.max(0.6, width * (1 - 0.85 * k)) };
+      // Time takes the trail away; the tail end dims only a little ahead of that, so the whole spectrum stays visible.
+      const fade = (1 - Math.pow(k, 1.5)) * (1 - 0.5 * u);
+      return { hue: hueFrom + ((((u * sweep + now * drift) % hueSpan) + hueSpan) % hueSpan), alpha: alpha * fade, width: Math.max(0.6, width * (1 - 0.85 * k)) };
     };
     const mid = (u: TrailPoint, v: TrailPoint) => ({ x: (u.x + v.x) / 2, y: (u.y + v.y) / 2 });
     for (let from = 0; from < p.length; ) {
@@ -100,6 +101,9 @@ export class Trail {
       const run = p.slice(from, to);
       from = to;
       if (run.length < 2) continue;
+      const headAt = run[run.length - 1].at;
+      const span = Math.min(life * 0.65, Math.max(200, headAt - run[0].at));
+      const look = (q: TrailPoint) => lookAt(q, headAt, span);
       const first = mid(run[0], run[1]);
       out.push({ x0: run[0].x, y0: run[0].y, cx: run[0].x, cy: run[0].y, x1: first.x, y1: first.y, ...look(run[0]) });
       for (let i = 1; i < run.length - 1; i++) {

@@ -16,23 +16,35 @@ describe("the rainbow trail", () => {
     // The head is bright, the tail faint and thin.
     expect(fresh[fresh.length - 1].alpha).toBeGreaterThan(fresh[0].alpha);
     expect(fresh[fresh.length - 1].width).toBeGreaterThan(fresh[0].width);
-    // Half a second on, the head has faded to under a third; a second on, nothing is left.
-    expect(Math.max(...t.pieces(end + 500).map((p) => p.alpha))).toBeLessThan(0.3);
+    // Most of the way through its life the head is faint; a second on, nothing is left.
+    expect(Math.max(...t.pieces(end + 900).map((p) => p.alpha))).toBeLessThan(0.3);
     expect(t.pieces(end + 1001)).toEqual([]);
     expect(t.live(end + 1001)).toBe(false);
     expect(t.pts.length).toBe(0);
   });
 
-  test("the spectrum runs along the path: the hue follows distance travelled, not time", () => {
-    const slow = new Trail(FULL);
-    const fast = new Trail(FULL);
-    drag(slow, 40, 8, 100);
-    drag(fast, 40, 8, 5);
-    const hues = (t: Trail) => t.pts.map((p) => Math.round(p.h));
-    expect(hues(slow)).toEqual(hues(fast));
-    // It cycles through a good part of the wheel over a long sweep.
-    const span = fast.pts[fast.pts.length - 1].h - fast.pts[0].h;
-    expect(span).toBeGreaterThan(90);
+  test("the whole spectrum shows from head to tail, even on a short slow stroke", () => {
+    const t = new Trail(FULL);
+    // A slow 12 px crawl over half a second.
+    for (let i = 0; i < 12; i++) t.push(100 + i, 100, i * 45);
+    const ps = t.pieces(12 * 45);
+    const hues = ps.map((p) => p.hue);
+    expect(Math.min(...hues)).toBeLessThan(25);
+    // The tail end is violet, not just a step along.
+    const spread = Math.max(...hues) - Math.min(...hues);
+    expect(spread).toBeGreaterThan(230);
+    // Head is the red end, tail the violet end.
+    expect(ps[ps.length - 1].hue).toBeLessThan(ps[0].hue);
+  });
+
+  test("the gradient drifts slowly over time without changing the head-to-tail order", () => {
+    const t = new Trail(FULL);
+    drag(t, 20, 8, 16);
+    const a = t.pieces(19 * 16);
+    const b = new Trail(FULL);
+    drag(b, 20, 8, 16);
+    const later = b.pieces(19 * 16 + 100);
+    expect(Math.abs(later[later.length - 1].hue - a[a.length - 1].hue)).toBeGreaterThan(0.5);
   });
 
   test("a pause starts a new stroke instead of drawing a line across the gap", () => {

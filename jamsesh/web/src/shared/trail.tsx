@@ -85,7 +85,7 @@ export function RainbowTrail({ feed, fixed = true, head = true }: { feed: { curr
       const at = performance.now();
       trail.push(x, y, at);
       const last = trail.pts[trail.pts.length - 1];
-      if (last) hue = trail.style.hueFrom + (((last.h % trail.style.hueSpan) + trail.style.hueSpan) % trail.style.hueSpan);
+      if (last) hue = trail.style.hueFrom;
       if (Math.hypot(x - anchor.x, y - anchor.y) > 6) anchor = { x, y, at };
       if (!raf) raf = requestAnimationFrame(draw);
     };
