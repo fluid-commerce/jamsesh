@@ -72,6 +72,16 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     }
   };
   // Trace every router tool call so failures show what the model actually did.
+  // Every pass (triage, route, direct) runs through brain.exclusive; count them so settle() sees a flushed batch as busy.
+  const origExclusive = brain.exclusive.bind(brain);
+  brain.exclusive = async (fn: () => Promise<unknown>) => {
+    inflight.n++;
+    try {
+      return await origExclusive(fn);
+    } finally {
+      inflight.n--;
+    }
+  };
   const trace: string[] = [];
   const origTools = brain.tools.bind(brain);
   brain.tools = (batch: JamEvent[], pass: { effects: number }) => {
@@ -107,7 +117,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     async settle(timeoutMs = 90_000) {
       const t0 = Date.now();
       await sleep(50);
-      while (brain.timer || brain.shipTimer || brain.busy || brain.pending.length || inflight.n) {
+      while (brain.timer || brain.shipTimer || brain.pending.length || inflight.n) {
         if (Date.now() - t0 > timeoutMs) throw new Error("brain never went idle");
         await sleep(150);
       }

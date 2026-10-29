@@ -88,7 +88,9 @@ test("with one microphone there is nothing to wait for; with two the slowest set
 });
 
 test("with no engine and no gateway the room says it can't hear", () => {
-  const { hub } = room();
+  const { hub, s } = room();
+  // A machine-wide gateway key (env or ~/.jamsesh file) would otherwise count as a gateway.
+  s.gatewayKey = () => null;
   expect(hub.transcriber.problem()).toMatch(/can't be turned into text/);
   hub.stop();
 });
