@@ -37,7 +37,7 @@ test("R2: clear requests route, questions, negations and chit-chat do not", () =
   const route = (text: string) => {
     const before = s.directives().length;
     const ev = line(s, text);
-    r.hub.brain.ruleRoute([ev], ruleTriage([ev]));
+    r.hub.brain.ruleRoute([ev], ruleTriage([ev]), true);
     return s.directives().length - before;
   };
   expect(route("can you hear me")).toBe(0);
@@ -55,7 +55,7 @@ test("R2: 'let's go with B' still builds variant B", () => {
   const s = r.hub.session;
   s.setStage({ mode: "compare", title: "Nav", items: s.artifacts().filter((a) => a.group === "Nav").map((a) => a.id) }, "t");
   const ev = line(s, "ok let's go with B");
-  r.hub.brain.ruleRoute([ev], ruleTriage([ev]));
+  r.hub.brain.ruleRoute([ev], ruleTriage([ev]), true);
   expect(s.directives().some((d) => d.mode === "implement" && /Nav \/ B/.test(d.text))).toBe(true);
   r.stop();
 });

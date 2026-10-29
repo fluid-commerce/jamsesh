@@ -244,6 +244,53 @@ export interface Fact {
   sourceEventIds: number[];
 }
 
+/** One line the card came from: what was heard, who said it, and the transcript moment it links to. */
+export interface TriageSource {
+  eventId: number | null;
+  authorName: string;
+  text: string;
+  ts: number;
+}
+
+/**
+ * A proposal waiting for a person on the Tasks board (4.1): a task the room seemed to ask for, or a piece
+ * of context (a decision, a constraint…) JamSesh heard or an agent reported. Nothing reaches the agents
+ * until someone sends or adds it. Cards never expire; they only leave the board when someone acts.
+ */
+export interface TriageCard {
+  id: string;
+  ts: number;
+  updatedAt: number;
+  type: "task" | "context";
+  status: "open" | "sent" | "added" | "merged" | "replaced" | "dismissed";
+  /** Overheard in the room, reported by an agent, or taken from a document someone attached. */
+  origin: "overheard" | "agent" | "document";
+  /** The wording now (a person may have changed it); `original` is what was proposed. */
+  text: string;
+  original: string;
+  /** The person (or agent) it came from. */
+  by: string;
+  /** Task: how to work, and who. */
+  mode: DirectiveMode;
+  targets: string[];
+  /** Context: what kind of knowledge it is. */
+  kind: Fact["kind"];
+  workstream: string;
+  /** Context that disagrees with a saved fact: Replace puts this one in its place. */
+  conflictsWith: string | null;
+  sources: TriageSource[];
+  /** How many times it was proposed: repeats join this card. */
+  count: number;
+  edits: { by: string; at: number; fields: string[] }[];
+  resolvedBy: string;
+  resolvedAt: number | null;
+  /** What accepting it made. */
+  directiveId: string | null;
+  factId: string | null;
+  /** When JamSesh last mentioned it out loud as waiting. */
+  mentionedAt: number | null;
+}
+
 export interface Annotation {
   id: string;
   ts: number;
@@ -426,6 +473,8 @@ export interface HubState {
   shares: Share[];
   annotations: Annotation[];
   facts: Fact[];
+  /** Cards on the Tasks board: every open one, and the last few that were acted on. */
+  triage: TriageCard[];
   buildRequests: BuildRequest[];
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];

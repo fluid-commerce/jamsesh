@@ -8,6 +8,7 @@ import type {
   Annotation,
   Artifact,
   Fact,
+  TriageCard,
   Device,
   DevServer,
   Directive,
@@ -33,6 +34,7 @@ type Collections = {
   shares: Share;
   annotations: Annotation;
   facts: Fact;
+  triage: TriageCard;
   documents: Document;
 };
 export type CollectionName = keyof Collections;

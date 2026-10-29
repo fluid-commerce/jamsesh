@@ -58,7 +58,8 @@ describe("speaking out loud", () => {
     const r = room();
     r.say("felipe", "Let's get the mobile agent to mock up two onboarding variants with illustrations.");
     await settleDirect(r);
-    expect(r.newDirectives().length).toBeGreaterThan(0);
+    // Overheard, so it waits on the Tasks board rather than going out.
+    expect(r.hub.session.board.open().length).toBeGreaterThan(0);
     expect(spoken(r).length).toBe(0);
     r.stop();
   }, 120_000);

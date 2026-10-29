@@ -35,9 +35,11 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: explore", [2], async (r) => {
       r.say("chey", "let's try some variants of the profile screen");
       await r.settle();
-      const ds = r.newDirectives();
-      expect(ds.length).toBe(1);
-      expect(ds[0].mode).toBe("explore");
+      // Overheard, so it waits on the Tasks board.
+      expect(r.newDirectives()).toHaveLength(0);
+      const cs = r.hub.session.board.open();
+      expect(cs.length).toBe(1);
+      expect(cs[0].mode).toBe("explore");
     });
   }, 30_000);
 
@@ -45,10 +47,11 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: implement mobile", [2, 3], async (r) => {
       r.say("chey", "let's ship the bottom tabs in the mobile app");
       await r.settle();
-      const ds = r.newDirectives();
-      expect(ds.length).toBe(1);
-      expect(ds[0].mode).toBe("implement");
-      expect(ds[0].targets).toEqual([r.agents.mobile.id]);
+      expect(r.newDirectives()).toHaveLength(0);
+      const cs = r.hub.session.board.open();
+      expect(cs.length).toBe(1);
+      expect(cs[0].mode).toBe("implement");
+      expect(cs[0].targets).toEqual([r.agents.mobile.id]);
     });
   }, 30_000);
 
@@ -71,11 +74,12 @@ describe("offline rule-based brain", () => {
     });
   }, 30_000);
 
-  test("decision is recorded", async () => {
+  test("an overheard decision waits on the board; agents don't see it until it's added", async () => {
     await runScenario("offline: decision", [5], async (r) => {
       r.say("chey", "I like direction B");
       await r.settle();
-      expect(r.decisions().length).toBeGreaterThanOrEqual(1);
+      expect(r.decisions()).toHaveLength(0);
+      expect(r.hub.session.board.open().filter((c) => c.type === "context" && c.kind === "decision").length).toBeGreaterThanOrEqual(1);
     });
   }, 30_000);
 
@@ -96,14 +100,14 @@ describe("offline rule-based brain", () => {
     });
   }, 30_000);
 
-  test("a decision has the chosen variant built by its agent", async () => {
+  test("a decision proposes the chosen variant be built by its agent", async () => {
     await runScenario("offline: decision builds", [6], async (r) => {
       r.say("felipe", "ok let's go with B");
       await r.settle();
-      const ds = r.newDirectives();
-      expect(ds.length).toBe(1);
-      expect(ds[0].mode).toBe("implement");
-      expect(ds[0].text).toContain(r.art.navB.title);
+      expect(r.newDirectives()).toHaveLength(0);
+      const task = r.hub.session.board.open().find((c) => c.type === "task");
+      expect(task?.mode).toBe("implement");
+      expect(task?.text).toContain(r.art.navB.title);
     });
   }, 30_000);
 });
