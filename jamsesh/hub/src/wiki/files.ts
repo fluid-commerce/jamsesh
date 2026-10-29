@@ -191,16 +191,15 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
 }
 
 /**
- * The source files in raw/ and raw/archive/ that changed since the last commit, for a commit to name: new ones, and the two
- * sides of a move to the archive (a deletion and a new file). Only what git says changed, so the list stays as long as the
- * change and not as long as the archive; a person's own files there are not sources and are never named.
+ * What git says changed under `folder` (raw/ or wiki/) since the last commit, filtered to the wiki's own file names: new
+ * and modified files, deletions, and both sides of a move. Null when git can't say. Only what changed, so the list is as
+ * long as the change; a person's own files there are not the wiki's and are never named.
  */
-export function rawPaths(dir: string): string[] | null {
+function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boolean): string[] | null {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
   const out = new Set<string>();
-  const own = (f: string) => /^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3));
   try {
-    const r = Bun.spawnSync(["git", "status", "--porcelain=v1", "-z", "-uall", "--", "raw"], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    const r = Bun.spawnSync(["git", "status", "--porcelain=v1", "-z", "-uall", "--", folder], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
     if (r.exitCode !== 0) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
     const parts = r.stdout.toString().split("\0");
     for (let i = 0; i < parts.length; i++) {
@@ -217,6 +216,12 @@ export function rawPaths(dir: string): string[] | null {
   }
   return [...out];
 }
+
+/** The source files in raw/ and raw/archive/ that changed: new ones, and the two sides of a move to the archive. */
+export const rawPaths = (dir: string) => changedOwn(dir, "raw", (f) => /^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3)));
+
+/** The page files in wiki/ that changed, deletions included. This is the commit debt itself: it is read from git, so no state file has to survive for it to be owed. */
+export const pagePaths = (dir: string) => changedOwn(dir, "wiki", (f) => /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(f) && isPageSlug(f.slice(5, -3)));
 
 // ---- pages ----
 

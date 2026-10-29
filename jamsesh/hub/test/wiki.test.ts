@@ -2660,7 +2660,7 @@ test("a page whose commit failed stays owed across a restart until a commit succ
   expect(readState(dir).owed).toBeUndefined();
 });
 
-test("commit debt is bounded: past the cap it becomes every page file in the wiki folder, named one by one, and a person's other files there stay out", () => {
+test("commit debt is bounded and needs no state: git's list of changed pages is taken, a person's other files stay out", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
   w.editPage("seed", "# Seed\n\nA page.", { by: "Chey" });
@@ -2675,7 +2675,7 @@ test("commit debt is bounded: past the cap it becomes every page file in the wik
   } finally {
     console.error = err;
   }
-  expect(readState(dir).owed).toEqual(["wiki"]); // collapsed, not 205 paths
+  expect(readState(dir).owed ?? []).toEqual([]); // not 205 paths in the state: git itself knows what changed
   writeFileSync(join(dir, ".git", "index"), index);
   (w as any).commitOwn("recovered", []);
   const history = Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString();
@@ -2704,4 +2704,19 @@ test("a failed write of the commit debt is reported, not swallowed", () => {
     writeFileSync(join(dir, ".git", "index"), index);
   }
   expect(errors.join("\n")).toContain("waiting for a commit");
+});
+
+test("commit debt survives losing the state file: a deleted page and a changed one are recovered from git itself", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("keep", "# Keep\n\nA page.", { by: "Chey" });
+  w.editPage("gone", "# Gone\n\nAbout to be deleted.", { by: "Chey" });
+  // Changes made while nothing recorded them as owed: no state, git otherwise unable to commit.
+  rmSync(join(dir, "wiki", "gone.md"));
+  writePage(dir, "keep", "# Keep\n\nChanged behind the wiki's back.");
+  (w as any).owedPaths = new Set();
+  (w as any).commitOwn("recover", []);
+  const history = Bun.spawnSync(["git", "log", "--name-status", "--pretty=format:%s"], { cwd: dir }).stdout.toString();
+  expect(history).toMatch(/D\s+wiki\/gone\.md/);
+  expect(Bun.spawnSync(["git", "status", "--porcelain", "--", "wiki"], { cwd: dir }).stdout.toString().trim()).toBe("");
 });

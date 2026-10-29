@@ -17,6 +17,7 @@ import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
+  pagePaths,
   rawPaths,
 } from "./files";
 
@@ -257,11 +258,13 @@ export class WikiService {
     // On disk and in memory both: a state file that can't be read or written doesn't lose what is owed.
     for (const p of [...(st?.owed ?? []), ...paths]) this.owedPaths.add(p);
     // Past the cap the list collapses to the wiki folder as a whole (a full add of it): the debt stays small however long git is unwell.
-    if (this.owedPaths.size > OWED_MAX) this.owedPaths = new Set(["wiki"]);
+    if (this.owedPaths.size > OWED_MAX) this.owedPaths = new Set(); // git's own list of changed pages (below) takes over
     // "wiki" stands for every page file in the folder, named one by one: a person's other files there are never swept in.
-    const named = [...this.owedPaths].flatMap((p) => (p === "wiki" ? listPages(this.dir).map((i) => `wiki/${i.slug}.md`) : [p]));
+    // What git says is changed among the pages is owed too, whatever any state file remembers (deletions included).
+    const changed = pagePaths(this.dir);
+    const named = changed ? [...new Set([...this.owedPaths, ...changed])] : [...this.owedPaths];
     const raw = rawPaths(this.dir);
-    const result = raw ? commitPaths(this.dir, message, [...named, "index.md", "log.md", ...raw]) : "failed";
+    const result = raw && changed ? commitPaths(this.dir, message, [...named, "index.md", "log.md", ...raw]) : "failed";
     if (result !== "failed") this.owedPaths.clear();
     const left = [...this.owedPaths];
     try {
