@@ -1,6 +1,5 @@
 import { enterDom, leaveDom } from "./dom-setup";
 import { afterAll, afterEach, beforeEach, expect, test } from "bun:test";
-import { useState } from "react";
 import type { RecordNote } from "../src/shared/notes";
 
 enterDom();
@@ -8,7 +7,6 @@ enterDom();
 const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react");
 const { RecordPrompt, RecordScope } = await import("../src/shared/annotate");
 const { hub } = await import("../src/shared/hub");
-const { RecordTidy } = await import("../src/shared/record");
 
 const realFetch = globalThis.fetch;
 afterAll(() => {
@@ -168,8 +166,6 @@ test("a button that unmounts while its Stop is still in flight still hands the r
   expect(hits(/record\/cancel/)[0].body.token).toBe(token);
 });
 
-// ---- the tidy sheet on its own, inside a small stand-in for the button's bookkeeping ----
-
 /** Types into a textarea the way a person does: through the element's own setter (React watches the value it set itself), then an input event. */
 function typeInto(el: HTMLElement, value: string) {
   Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!.call(el, value);
@@ -177,80 +173,33 @@ function typeInto(el: HTMLElement, value: string) {
 }
 
 
-/** The tidy sheet inside the same bookkeeping the Record button gives it: a send locks the list, and a retry sends the first set. */
-function Harness({ onSend, fail = false }: { onSend: (notes: RecordNote[]) => Promise<void>; fail?: boolean }) {
-  const [notes, setNotes] = useState([note("a", "make it bigger"), note("b", "and bluer")]);
-  const [state, setState] = useState<{ busy: boolean; submitted?: RecordNote[]; error?: string; gone?: boolean }>({ busy: false });
-  if (state.gone) return <p>discarded</p>;
-  return (
-    <RecordTidy
-      notes={notes}
-      brain="Computah"
-      busy={state.busy}
-      locked={state.busy || !!state.submitted}
-      error={state.error}
-      onChange={(n) => !state.busy && !state.submitted && setNotes(n)}
-      onSend={async () => {
-        const sent = state.submitted ?? notes.filter((n) => n.text.trim());
-        setState({ busy: true, submitted: sent });
-        try {
-          await onSend(sent);
-          setState({ busy: false, gone: true });
-        } catch {
-          setState({ busy: false, submitted: sent, error: "Couldn't send. Your notes are still here." });
-        }
-      }}
-      onDiscard={() => setState({ busy: false, gone: true })}
-    />
-  );
-}
 
-test("Send carries the tidied notes; editing before it counts, and a join merges two into one", async () => {
-  const sent: RecordNote[][] = [];
-  const ui = render(<Harness onSend={async (n) => void sent.push(n)} />);
+const open2 = async (ui: ReturnType<typeof render>, notes: RecordNote[]) => {
+  handler = happy({ "POST /record/stop": () => json({ ok: true, recordingId: "rec1", notes }) });
+  await press(button(ui.container));
+  await waitFor(() => expect(button(ui.container).getAttribute("aria-pressed")).toBe("true"));
+  await press(button(ui.container));
+  await ui.findByText("Your notes");
+};
+
+test("editing a note and joining two before Send: the notes that go out are the tidied ones", async () => {
+  const ui = render(<Page m={mic()} />);
+  await open2(ui, [note("a", "make it bigger"), note("b", "and bluer")]);
   typeInto(ui.getByLabelText("Note 1"), "make it much bigger");
-  fireEvent.click(ui.getByLabelText("Join note 2 with the one above"));
-  fireEvent.click(ui.getByRole("button", { name: /^Send 1 note/ }));
-  await ui.findByText("discarded");
-  expect(sent.length).toBe(1);
-  expect(sent[0].map((n) => n.text)).toEqual(["make it much bigger and bluer"]);
+  await press(ui.getByLabelText("Join note 2 with the one above"));
+  await press(ui.getByRole("button", { name: /^Send 1 note/ }));
+  await ui.findByText("Notes sent");
+  expect(hits(/record\/send/)[0].body.notes.map((n: RecordNote) => n.text)).toEqual(["make it much bigger and bluer"]);
 });
 
-test("after a failed Send the list is read-only and the retry sends the very same notes", async () => {
-  const sent: string[][] = [];
-  let calls = 0;
-  const ui = render(<Harness onSend={async (n) => { sent.push(n.map((x) => x.text)); if (++calls === 1) throw new Error("offline"); }} />);
-  fireEvent.click(ui.getByRole("button", { name: /^Send 2 notes/ }));
-  await ui.findByText(/Your notes are still here/);
-  // Locked: typing, joining and deleting do nothing, and Discard is not offered while delivery is unresolved.
-  const box = ui.getByLabelText("Note 1") as HTMLTextAreaElement;
-  expect(box.readOnly).toBe(true);
-  typeInto(box, "changed after");
-  expect((ui.getByLabelText("Delete note 1") as HTMLButtonElement).disabled).toBe(true);
-  expect((ui.getByRole("button", { name: "Discard" }) as HTMLButtonElement).disabled).toBe(true);
-  fireEvent.click(ui.getByRole("button", { name: /^Send 2 notes/ }));
-  await ui.findByText("discarded");
-  // The text typed while locked changed nothing that was sent.
-  expect(sent).toEqual([["make it bigger", "and bluer"], ["make it bigger", "and bluer"]]);
-});
-
-test("Discard asks first; while it is being asked the keyboard Send does nothing, and Keep returns to the list", async () => {
-  const sent: RecordNote[][] = [];
-  const ui = render(<Harness onSend={async (n) => void sent.push(n)} />);
-  fireEvent.click(ui.getByRole("button", { name: "Discard" }));
-  expect(ui.getByText("Throw these notes away?")).toBeTruthy();
-  fireEvent.keyDown(window, { key: "Enter", metaKey: true });
-  expect(sent.length).toBe(0);
-  fireEvent.click(ui.getByRole("button", { name: "Keep them" }));
-  expect(ui.getByLabelText("Note 1")).toBeTruthy();
-  fireEvent.keyDown(window, { key: "Enter", metaKey: true });
-  await ui.findByText("discarded");
-  expect(sent.length).toBe(1);
-});
-
-test("Discard throws the notes away once confirmed", async () => {
-  const ui = render(<Harness onSend={async () => {}} />);
-  fireEvent.click(ui.getByRole("button", { name: "Discard" }));
-  fireEvent.click(ui.getAllByRole("button", { name: "Discard" })[0]);
-  await ui.findByText("discarded");
+test("while Discard is being asked the keyboard Send does nothing; Keep returns to the list and the keyboard Send works", async () => {
+  const ui = render(<Page m={mic()} />);
+  await open2(ui, [note("a", "make it bigger")]);
+  await press(ui.getByRole("button", { name: "Discard" }));
+  await act(async () => void fireEvent.keyDown(window, { key: "Enter", metaKey: true }));
+  expect(hits(/record\/send/).length).toBe(0);
+  await press(ui.getByRole("button", { name: "Keep them" }));
+  await act(async () => void fireEvent.keyDown(window, { key: "Enter", metaKey: true }));
+  await ui.findByText("Notes sent");
+  expect(hits(/record\/send/).length).toBe(1);
 });

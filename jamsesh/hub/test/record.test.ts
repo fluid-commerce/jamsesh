@@ -1214,7 +1214,7 @@ test("a send that fails part-way and is retried after ownership changed still se
   expect(ds.find((d) => d.targets[0] === juno.id)!.text).toContain("fix B");
 }, 60_000);
 
-test("speech already published to the room during a Stop that then fails is not read into the retry's notes", async () => {
+test("a line already published to the room (it has an event) is not read into a Stop's notes", async () => {
   const r = room();
   const base = Date.now() - 20_000;
   r.at(base);
@@ -1242,6 +1242,44 @@ test("every note's destination is fixed before the first wait: an ownership chan
   const out = (await (await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).json()) as any;
   expect(out.sent.map((x: any) => x.agentName).sort()).toEqual([atlas.name, juno.name].sort());
   expect(r.s.directives().find((d) => d.targets[0] === juno.id)!.text).toContain("fix B");
+}, 30_000);
+
+test("a line transcribed late, after a newer recording started, still goes to the recording it was said in", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  r.at(base + 3000);
+  const real = (r.hub as any).windowLines.bind(r.hub);
+  (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(300), real(...args));
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  r.at(base + 3100);
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!b.ok) throw new Error("start");
+  // Transcription of what was said in A comes back only now, after B took the window.
+  line(r.hub, "said in A, heard late", r.maya.id, "mayaLaptop", base + 2800);
+  const done = await stopping;
+  expect(done.ok && done.notes.map((n) => n.text).join(" ")).toContain("said in A, heard late");
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).not.toContain("said in A, heard late");
+}, 30_000);
+
+test("a line that began exactly 300 ms after Stop is held and collected by the same rule: it reaches the notes, not nowhere", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  r.at(base + 3000);
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  line(r.hub, "right on the boundary", r.maya.id, "mayaLaptop", base + 3300);
+  line(r.hub, "a moment past it", r.maya.id, "mayaLaptop", base + 3301);
+  const done = await stopping;
+  const text = done.ok ? done.notes.map((n) => n.text).join(" ") : "";
+  expect(text).toContain("right on the boundary");
+  expect(text).not.toContain("a moment past it");
+  // The one past the boundary is ordinary room speech.
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("a moment past it");
 }, 30_000);
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {

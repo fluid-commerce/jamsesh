@@ -77,6 +77,8 @@ interface Rec {
   nextT0?: number;
   token?: string;
   outcome?: Outcome;
+  /** The hub's clock when its Stop began: its speech runs to 300 ms after this. */
+  closeAt?: number;
   /** Text typed with a Stop that has not committed, kept so a recording that ends some other way still gives it to the room. */
   typed?: string;
 }
@@ -302,9 +304,16 @@ export class Hub {
     return !u.personId || !owner || u.personId === owner;
   }
 
+  /** Whether a line that began at `t` belongs to a recording's window: after its start, within its cap, up to 300 ms after its close, and before the next recording's start. One rule for holding speech and for collecting it. */
+  private inSpan(t: number, s: { t0: number; max: number; t1?: number; nextT0?: number }) {
+    return t >= s.t0 && t <= s.t0 + s.max && (s.t1 === undefined || t <= s.t1 + 300) && t < (s.nextT0 ?? Infinity);
+  }
+
   private inPrompt(u: Utterance) {
     // Inside the recording only: once Stop is pressed, or past the window's cap, what the person says is ordinary speech.
-    for (const [deviceId, w] of this.promptMode) if (u.t0 >= w.t0 && u.t0 <= w.t0 + w.max && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
+    for (const [deviceId, w] of this.promptMode) if (this.inSpan(u.t0, w) && this.fromRecorder(u, deviceId)) return true;
+    // A recording whose Stop is still gathering words keeps its speech even after a newer recording took the window.
+    for (const [deviceId, recs] of this.stoppingRecs) for (const r of recs) if (this.inSpan(u.t0, { t0: r.t0, max: Hub.RECORD_MAX_MS, t1: r.closeAt, nextT0: r.nextT0 }) && this.fromRecorder(u, deviceId, r.personId)) return true;
     return false;
   }
 
@@ -371,9 +380,9 @@ export class Hub {
     // 300 ms for a last word still being transcribed, and never past the start of the next recording on this device: no line is in two.
     // The bound is the start of the recording that followed this one, written on this recording when that start happened: it holds
     // however that successor ends, and nothing is dropped from it to make room.
-    const upto = () => Math.min(w.t1 + 300, rec?.nextT0 ?? Infinity);
+    const span = () => ({ t0: w.t0, max, t1: w.t1, nextT0: rec?.nextT0 });
     // (Lines already published to the room are not this recording's: a retry after a failed Stop must not read them again.)
-    const heard = () => s.store.all("utterances").filter((u) => !u.eventId && u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
+    const heard = () => s.store.all("utterances").filter((u) => !u.eventId && this.inSpan(u.t0, span()) && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
     try {
@@ -630,6 +639,7 @@ export class Hub {
     // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
     const t0 = rec.t0;
     const t1 = this.clock();
+    rec.closeAt = t1;
     const open = this.promptMode.get(w.deviceId);
     const out = await this.endRecording(
       rec,
