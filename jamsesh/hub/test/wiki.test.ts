@@ -2635,6 +2635,8 @@ test("a page whose commit was skipped because git couldn't list raw/ is named by
   const tracked = Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString();
   expect(tracked).toContain("wiki/skipped.md");
   expect(tracked).toContain("wiki/later.md");
+  const history = Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString();
+  expect(history).toContain("wiki/skipped.md"); // in a commit, not only in the index
 });
 
 test("a page whose commit failed stays owed across a restart until a commit succeeds", () => {
@@ -2654,6 +2656,6 @@ test("a page whose commit failed stays owed across a restart until a commit succ
   writeFileSync(join(dir, ".git", "index"), index);
   const again = new WikiService(s, dir, s.sessionId); // a restart
   again.editPage("after", "# After\n\nLater.", { by: "Chey" });
-  expect(Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString()).toContain("wiki/owed-page.md");
+  expect(Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString()).toContain("wiki/owed-page.md"); // committed
   expect(readState(dir).owed).toBeUndefined();
 });

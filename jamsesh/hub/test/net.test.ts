@@ -184,7 +184,8 @@ describe("Network config", () => {
       }
     }
     const a = new Flaky(file);
-    (a as any).current = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "192.168.1.5" };
+    (a as any).current = (a as any).owed = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "192.168.1.5" };
+    writeFileSync(file, JSON.stringify((a as any).current)); // (map() writes the record before it asks the router)
     await a.unmap(); // fails
     expect(existsSync(file)).toBe(true);
     expect(a.owing?.externalPort).toBe(443);
@@ -265,5 +266,47 @@ describe("port mapper state", () => {
     const [a, b] = await Promise.all([m.settleOwed(), m.settleOwed()]);
     expect([a, b, calls]).toEqual([true, true, 1]);
     expect(existsSync(file)).toBe(false);
+  });
+  test("an empty first cleanup does not stand in for later ones; a NAT-PMP removal counts only with a confirming reply for its port", async () => {
+    const { PortMapper } = await import("../src/net/router");
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const file = join(dir, "router-map.json");
+    const reply = (result: number, port: number) => {
+      const b = Buffer.alloc(16);
+      b[1] = 130;
+      b.writeUInt16BE(result, 2);
+      b.writeUInt16BE(port, 8);
+      return b;
+    };
+    let answer: Buffer | null = null;
+    class Pmp extends PortMapper {
+      sent = 0;
+      protected override async exchange() {
+        this.sent++;
+        return answer;
+      }
+    }
+    const m = new Pmp(file);
+    expect(await m.settleOwed()).toBe(true); // nothing owed yet
+    (m as any).owed = { method: "nat-pmp", gateway: "10.0.0.1", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+    writeFileSync(file, JSON.stringify((m as any).owed));
+    answer = null; // silence
+    expect(await m.settleOwed()).toBe(false);
+    answer = reply(2, 4443); // an error
+    expect(await m.settleOwed()).toBe(false);
+    answer = reply(0, 9999); // about another port
+    expect(await m.settleOwed()).toBe(false);
+    expect(existsSync(file)).toBe(true);
+    expect(m.sent).toBe(3); // each was a real attempt, not a cached answer
+    answer = reply(0, 4443);
+    expect(await m.settleOwed()).toBe(true);
+    expect(existsSync(file)).toBe(false);
+  });
+  test("a mapping that cannot be written down is not made", async () => {
+    const { PortMapper } = await import("../src/net/router");
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const m = new PortMapper(join(dir, "missing-folder", "router-map.json")); // the record can't be written there
+    const status = await m.map(443, 4443, "10.0.0.2");
+    expect(status.method).toBe("none");
   });
 });

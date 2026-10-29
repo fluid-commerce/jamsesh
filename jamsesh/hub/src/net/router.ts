@@ -1,6 +1,6 @@
 // Automatic port forwarding: NAT-PMP first (tiny UDP protocol), then UPnP IGD (SSDP + SOAP).
 import dgram from "node:dgram";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 
 export type RouterStatus = {
   method: "nat-pmp" | "upnp" | "none";
@@ -192,12 +192,16 @@ export class PortMapper {
   private timer?: ReturnType<typeof setInterval>;
   private igd: Igd | null = null;
   private current?: Mapping;
-  /** A mapping whose removal failed: kept on disk (when there is a `statePath`) and tried again at the next start, so a port is never left open with nothing remembering it. */
+  /**
+   * The mapping this machine has asked the router for and not seen removed. For UPnP (which can be permanent) it is on disk
+   * from before the request until the router confirms the deletion, so a crash or a failed removal never leaves a port open
+   * that nothing remembers.
+   */
   private owed?: Mapping;
-
   /** The record on disk exists but can't be read: a port may be open with nothing to say which, so no new mapping is made over it. */
   private damaged = false;
-  private settling?: Promise<boolean>;
+  /** Everything that touches the router or the record runs one at a time. */
+  private chain: Promise<unknown> = Promise.resolve();
 
   constructor(private statePath?: string) {
     try {
@@ -211,55 +215,73 @@ export class PortMapper {
     }
   }
 
-  /** Writes the record of a mapping before it is made. Throws if it can't be written: no mapping without a way to find it again. */
-  private intend(m: Mapping) {
-    if (this.statePath) writeFileSync(this.statePath, JSON.stringify(m), { mode: 0o600 });
-    this.owed = m;
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(fn, fn);
+    this.chain = run.catch(() => {});
+    return run;
   }
 
-  private remember(m: Mapping | undefined) {
-    this.owed = m;
+  /** Replaces the record whole (written beside it, then renamed over it): the old one is never half overwritten. Throws if it can't be written. */
+  private write(m: Mapping) {
     if (!this.statePath) return;
+    const tmp = `${this.statePath}.${process.pid}.tmp`;
     try {
-      if (m) writeFileSync(this.statePath, JSON.stringify(m), { mode: 0o600 });
-      else rmSync(this.statePath, { force: true });
-    } catch {}
+      writeFileSync(tmp, JSON.stringify(m), { mode: 0o600 });
+      renameSync(tmp, this.statePath);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
   }
 
-  /** Takes down a mapping an earlier run could not (called at start, before a new mapping). True when none is owed any more. One at a time. */
+  /** The record goes only after the router confirmed the removal; if the file can't be removed the mapping stays owed (removing a gone mapping is harmless). */
+  private clear(): boolean {
+    try {
+      if (this.statePath) rmSync(this.statePath, { force: true });
+      this.owed = undefined;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Takes down what is owed. True when nothing is. Callers hold the lock. */
+  private async settle(): Promise<boolean> {
+    if (this.damaged) return false;
+    const m = this.owed;
+    if (!m) return true;
+    try {
+      await this.remove(m);
+    } catch {
+      return false; // still owed: stays on disk for the next start
+    }
+    return this.clear();
+  }
+
+  /** Takes down a mapping an earlier run could not (called at start, before a new mapping). True when none is owed any more. */
   settleOwed(): Promise<boolean> {
-    return (this.settling ??= (async () => {
-      try {
-        if (this.damaged) return false;
-        const m = this.owed;
-        if (!m) return true;
-        try {
-          await this.remove(m);
-          this.remember(undefined);
-          return true;
-        } catch {
-          return false; // still owed: stays on disk for the next start
-        }
-      } finally {
-        this.settling = undefined;
-      }
-    })());
+    return this.exclusive(() => this.settle());
   }
 
   get owing() {
     return this.owed;
   }
 
-  /** Deletes one mapping at the router. Throws when the router did not confirm. */
+  /** Asks the router for one NAT-PMP exchange (a seam for tests). */
+  protected exchange(gateway: string, req: Buffer, tries?: number) {
+    return pmpExchange(gateway, req, tries);
+  }
+
+  /** Deletes one mapping at the router. Throws when the router did not confirm it. */
   protected async remove(c: Mapping) {
     if (c.method === "nat-pmp") {
       const gateway = c.gateway ?? (await defaultGateway());
       if (!gateway) throw new Error("no router to ask");
-      const raw = await pmpExchange(gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
+      const raw = await this.exchange(gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
       const reply = raw && decodeNatPmp(raw);
-      if (!reply || reply.kind !== "map" || reply.result !== 0) throw new Error("the router did not confirm the removal"); // silence or an error is not a deletion
-    }
-    else if (c.method === "upnp") {
+      // Silence, an error, or an answer about another port is not a removal.
+      if (!reply || reply.kind !== "map" || reply.result !== 0 || reply.internalPort !== c.internalPort) throw new Error("the router did not confirm the removal");
+    } else if (c.method === "upnp") {
       this.igd ??= await findIgd();
       if (!this.igd) throw new Error("no router answered");
       const r = await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
@@ -268,10 +290,24 @@ export class PortMapper {
   }
 
   /** Opens externalPort -> lanIp:internalPort. Never throws; the status says what happened. */
-  async map(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
+  map(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
+    return this.exclusive(() => this.mapLocked(externalPort, internalPort, lanIp, publicIp));
+  }
+
+  private async mapLocked(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
     this.unrenew();
-    // A mapping an earlier run couldn't remove goes first, and while it is still there no new one is made over its record.
-    if (!(await this.settleOwed())) {
+    // What is already open (this run's, or an earlier run's that could not be removed) goes first; while it is still there no new mapping is made over its record.
+    if (this.current) {
+      const c = this.current;
+      this.current = undefined;
+      try {
+        await this.remove(c);
+        if (c.method === "upnp") this.clear();
+      } catch {
+        if (c.method === "upnp") this.owed = c;
+      }
+    }
+    if (!(await this.settle())) {
       return { method: "none", externalPort, error: "an earlier port mapping could not be removed", message: `${manualMessage(externalPort, lanIp, internalPort)} (An earlier automatic mapping is still open and will be retried at the next start.)` };
     }
     const gateway = await defaultGateway();
@@ -306,15 +342,18 @@ export class PortMapper {
               NewPortMappingDescription: "JamSesh",
               NewLeaseDuration: lease,
             });
-          this.intend({ method: "upnp", internalPort, externalPort, lanIp }); // written before the mapping exists; if it can't be written, no mapping is made
+          const record: Mapping = { method: "upnp", internalPort, externalPort, lanIp };
+          this.write(record); // on disk before the mapping exists; if it can't be written, no mapping is made
+          this.owed = record;
           let add = await map(LEASE);
+          let permanent = false;
           // Many routers accept only permanent mappings (error 725): ask again without a lease.
-          if (!add.ok && String(add.errorCode) === "725") add = await map(0);
+          if (!add.ok && String(add.errorCode) === "725") (add = await map(0), (permanent = add.ok));
           if (add.ok) {
-            this.current = { method: "upnp", internalPort, externalPort, lanIp };
-            status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: LEASE, message: `Your router opened port ${externalPort} automatically (UPnP).` };
+            this.current = record;
+            status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: permanent ? undefined : LEASE, message: `Your router opened port ${externalPort} automatically (UPnP${permanent ? ", with no expiry" : ""}).` };
           } else {
-            this.remember(undefined); // the router said no: nothing was opened
+            this.clear(); // the router said no: nothing was opened
             status = { method: "none", externalPort, routerIp: gateway, externalIp, error: `UPnP error ${add.errorCode ?? "unknown"}`, message: manualMessage(externalPort, lanIp, internalPort) };
           }
         }
@@ -349,16 +388,19 @@ export class PortMapper {
   }
 
   /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). A removal the router doesn't confirm is remembered and tried again at the next start. */
-  async unmap() {
-    this.unrenew();
-    const c = this.current;
-    this.current = undefined;
-    if (!c) return void (await this.settleOwed());
-    try {
-      await this.remove(c);
-      this.remember(undefined);
-    } catch {
-      this.remember(c);
-    }
+  unmap(): Promise<void> {
+    return this.exclusive(async () => {
+      this.unrenew();
+      const c = this.current;
+      this.current = undefined;
+      if (c) {
+        try {
+          await this.remove(c);
+          if (c.method === "upnp") this.clear();
+        } catch {
+          if (c.method === "upnp") this.owed = c; // the record on disk already says so
+        }
+      } else await this.settle();
+    });
   }
 }

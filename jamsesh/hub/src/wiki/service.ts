@@ -252,15 +252,19 @@ export class WikiService {
     try {
       st = readState(this.dir);
     } catch {}
-    const owed = new Set([...(st?.owed ?? []), ...paths]);
+    // On disk and in memory both: a state file that can't be read or written doesn't lose what is owed.
+    for (const p of [...(st?.owed ?? []), ...paths]) this.owedPaths.add(p);
     const raw = rawPaths(this.dir);
-    const result = raw ? commitPaths(this.dir, message, [...owed, "index.md", "log.md", ...raw]) : "failed";
-    const left = result === "failed" ? [...owed].slice(-200) : [];
+    const result = raw ? commitPaths(this.dir, message, [...this.owedPaths, "index.md", "log.md", ...raw]) : "failed";
+    if (result !== "failed") this.owedPaths.clear();
+    const left = [...this.owedPaths];
     try {
       const now = readState(this.dir);
       if ((now.owed ?? []).join("\n") !== left.join("\n")) writeState(this.dir, { ...now, ...(left.length ? { owed: left } : { owed: undefined }) });
-    } catch {}
+    } catch {} // still in memory; written at the next commit
   }
+
+  private owedPaths = new Set<string>();
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
   private finish(message: string, pages: string[], key?: string) {

@@ -181,7 +181,8 @@ function git(dir: string, args: string[]) {
  * repository, and never throws.
  */
 export function commitPaths(dir: string, message: string, paths: string[]): "done" | "nothing" | "failed" {
-  if (!gitAvailable() || !existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
+  if (!existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
+  if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
   const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+){0,2}$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && (existsSync(join(dir, p)) || git(dir, ["ls-files", "--error-unmatch", "--", p]))); // a file that is gone is committed only if git tracked it (a deletion)
   if (!own.length) return "nothing";
   if (!git(dir, ["add", "--", ...own])) return "failed";
@@ -674,7 +675,7 @@ function parseState(j: unknown): WikiState {
   const own = pair<{ slug: string; rev: string }>(j.own, (x) => typeof x.slug === "string" && typeof x.rev === "string");
   const filing = pair<{ slug: string; rev: string; id: string }>(j.filing, (x) => typeof x.slug === "string" && typeof x.rev === "string" && isSourceId(x.id));
   const owedRaw = j.owed;
-  if (owedRaw !== undefined && !(Array.isArray(owedRaw) && owedRaw.every((x) => typeof x === "string" && x.length < 200))) throw new Error("bad owed");
+  if (owedRaw !== undefined && !(Array.isArray(owedRaw) && owedRaw.every((x) => typeof x === "string" && x.length < 200) && owedRaw.length <= 5000)) throw new Error("bad owed");
   const need = j.need;
   if (need !== undefined && !(Array.isArray(need) && need.every((x) => typeof x === "string"))) throw new Error("bad need");
   if (j.migrated !== undefined && typeof j.migrated !== "boolean") throw new Error("bad migrated");

@@ -1,11 +1,11 @@
 // Network: makes the host reachable at https://<name>.duckdns.org from anywhere.
 // DuckDNS name -> Let's Encrypt cert (DNS-01) -> router port forward -> self-check.
 import { assertLive } from "../room-context";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { CertStore, issueOne, needsRenewal, safeError, type CertKind } from "./acme";
-import { parseDomain, publicIp as lookupIp, startUpdater, updateIp, type Domain, type FetchFn } from "./duckdns";
+import { clearTxt, parseDomain, publicIp as lookupIp, startUpdater, updateIp, type Domain, type FetchFn } from "./duckdns";
 import { externalCheck, localCheck } from "./reach";
 import { PortMapper, type RouterStatus } from "./router";
 
@@ -62,6 +62,7 @@ export class Network {
     this.cfg = this.readConfig();
     this.refreshCertState();
     this.mapper = new PortMapper(join(dir, "router-map.json"));
+    void this.settleTxt();
     void this.mapper.settleOwed(); // a port an earlier run couldn't close is closed now, whether or not a new one is opened
   }
 
@@ -96,6 +97,27 @@ export class Network {
     this.abort.signal.throwIfAborted();
     return this.fetchFn(u, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, this.abort.signal]) : this.abort.signal });
   };
+
+  /** A TXT proof record this run wrote and has not seen cleared: remembered on disk so a later start clears it. */
+  private get txtFile() {
+    return join(this.dir, "acme-txt-owed");
+  }
+
+  private noteTxt(s: "set" | "cleared" | "failed") {
+    try {
+      if (s === "set") writeFileSync(this.txtFile, "1", { mode: 0o600 });
+      else if (s === "cleared") rmSync(this.txtFile, { force: true });
+    } catch {}
+  }
+
+  private async settleTxt() {
+    const d = this.domain();
+    if (!this.cfg || !d || !existsSync(this.txtFile)) return;
+    try {
+      const r = await clearTxt(d, this.cfg.token, (u, init) => this.fetchFn(u, { ...init, signal: AbortSignal.timeout(8000) }));
+      if (r.ok) this.noteTxt("cleared");
+    } catch {}
+  }
 
   close() {
     this.closed = true;
@@ -139,6 +161,7 @@ export class Network {
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
+    await this.issuing?.catch(() => {}); // an issuance in flight finishes its cleanup (the TXT record it set) first
     await this.mapper.unmap();
     this.st.router = { state: "idle" };
   }
@@ -188,7 +211,7 @@ export class Network {
       try {
         for (const kind of todo) {
           if (this.closed) break;
-          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.f, cleanupF: (u, init) => this.fetchFn(u, { ...init, signal: AbortSignal.timeout(8000) }), signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.f, onTxt: (s) => this.noteTxt(s), cleanupF: (u, init) => this.fetchFn(u, { ...init, signal: AbortSignal.timeout(8000) }), signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
           if (this.closed) break; // issued as the room closed: not kept
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };
