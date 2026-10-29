@@ -15,6 +15,7 @@ export const MAX_FACE = 24 * 1024 * 1024;
 export const MAX_FACES = 12;
 export const MAX_FAMILY_BYTES = 32 * 1024 * 1024;
 export const MAX_LENT_BYTES = 128 * 1024 * 1024;
+export const MAX_TICKETS_PER_CALLER = 8;
 export const MAX_OPEN_BYTES = 96 * 1024 * 1024;
 export const MAX_FAMILIES = 48;
 const MAX_OPEN_PER_SCAN = 16;
@@ -215,18 +216,22 @@ export class FontService {
   private googleCss: string;
   private googleHost: string;
   private offline: boolean;
+  private maxOpen: number;
+  /** Bytes read by downloads still in flight: they count against the room cap before they are held. */
+  private reserved = 0;
 
   /** `opts`: where open fonts come from and whether to skip the network (the config's, unless a test says otherwise). */
   constructor(
     private agents: () => Agent[],
     private personName: (id: string) => string | undefined,
-    opts: { api?: string; cdn?: string; googleCss?: string; googleHost?: string; offline?: boolean } = {},
+    opts: { api?: string; cdn?: string; googleCss?: string; googleHost?: string; offline?: boolean; maxOpen?: number } = {},
   ) {
     this.api = opts.api ?? config.fontApi;
     this.cdn = opts.cdn ?? config.fontCdn;
     this.googleCss = opts.googleCss ?? config.fontGoogleCss;
     this.googleHost = opts.googleHost ?? config.fontGoogleHost;
     this.offline = opts.offline ?? config.fontsOffline;
+    this.maxOpen = opts.maxOpen ?? MAX_OPEN_BYTES;
   }
 
   // ---- what the room sees (names and counts; never the bytes) ----
@@ -338,7 +343,7 @@ export class FontService {
   }
 
   /** Downloads each url: a face is kept only if it is a font of this family within the caps. */
-  private async download(urls: string[], key: string): Promise<Face[]> {
+  private async download(urls: string[], key: string, claim: { n: number }): Promise<Face[]> {
     const faces: Face[] = [];
     let total = 0;
     for (const url of urls.slice(0, 8)) {
@@ -348,15 +353,19 @@ export class FontService {
         continue;
       }
       // Read no more than this face may be: the face cap, and what's left of the family's and the session's.
-      const data = await readUpTo(r, Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, MAX_OPEN_BYTES - this.openBytes() - total));
+      // Other families downloading at the same time have already spoken for part of the room's allowance (`reserved`).
+      const data = await readUpTo(r, Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, this.maxOpen - this.openBytes() - this.reserved));
       if (!data) break;
       total += data.length;
+      claim.n += data.length;
+      this.reserved += data.length;
       if (fontFamilies(data)?.some((n) => normalizeFamily(n) === key)) faces.push({ data });
     }
     return faces;
   }
 
   private async fetchOpen(key: string): Promise<boolean> {
+    const claim = { n: 0 };
     try {
       const cat = await this.load();
       const e = cat?.get(key);
@@ -364,11 +373,14 @@ export class FontService {
       let faces: Face[] = [];
       let source = "Fontsource";
       if (e.type === "google") {
-        faces = await this.download(await this.googleUrls(e).catch(() => []), key).catch(() => []);
+        faces = await this.download(await this.googleUrls(e).catch(() => []), key, claim).catch(() => []);
         source = "Google Fonts";
       }
       if (!faces.length) {
-        faces = await this.download(await this.fontsourceUrls(e), key);
+        // Nothing was kept from the first source: its bytes are no longer spoken for.
+        this.reserved -= claim.n;
+        claim.n = 0;
+        faces = await this.download(await this.fontsourceUrls(e), key, claim);
         source = e.type === "google" ? "Google Fonts via Fontsource" : "Fontsource";
       }
       if (!faces.length || this.closed) return false;
@@ -380,6 +392,9 @@ export class FontService {
     } catch (err) {
       if (!this.closed) console.warn(`[fonts] couldn't fetch ${key}: ${(err as Error)?.message ?? err}`);
       return false;
+    } finally {
+      // Held now (counted by openBytes) or dropped: either way the reservation is over.
+      this.reserved -= claim.n;
     }
   }
 
@@ -497,6 +512,9 @@ export class FontService {
   lendTicket(caller: string, personId: string, family: unknown, now = Date.now()): string | null {
     if (this.closed || typeof family !== "string" || !family.trim() || family.length > 200) return null;
     for (const [t, v] of this.tickets) if (v.until < now) this.tickets.delete(t);
+    // One window can't use up the pool: past its share, its oldest ticket is replaced.
+    const mine = [...this.tickets].filter(([, v]) => v.caller === caller);
+    if (mine.length >= MAX_TICKETS_PER_CALLER) this.tickets.delete(mine[0][0]);
     if (this.tickets.size >= 100) return null;
     const ticket = randomBytes(16).toString("hex");
     this.tickets.set(ticket, { caller, personId, key: normalizeFamily(family), until: now + 2 * 60_000 });

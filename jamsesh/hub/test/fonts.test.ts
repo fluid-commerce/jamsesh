@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forbiddenCommand } from "../src/canvas/canvas";
-import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
+import { cardText, decodeBase64, FontService, MAX_TICKETS_PER_CALLER, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { FONT_BODY_MAX, startHttp } from "../src/http";
@@ -106,6 +106,8 @@ const catalogue = [
   { id: "lookalike", family: "Lookalike", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
   { id: "broken", family: "Broken Sans", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
   { id: "huge", family: "Huge Display", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
+  { id: "fira-test", family: "Fira Test", license: OFL, type: "google", styles: ["normal"], weights: [400, 700], defSubset: "latin" },
+  { id: "plex-test", family: "Plex Test", license: OFL, type: "google", styles: ["normal"], weights: [400, 700], defSubset: "latin" },
   { id: "elsewhere", family: "Elsewhere", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
 ];
 beforeAll(() => {
@@ -153,7 +155,7 @@ beforeAll(() => {
 afterAll(() => stub.stop(true));
 
 const agentWith = (designSystem: string, status: Agent["status"] = "working"): Agent => ({ id: "a1", status, card: { stack: "React", designSystem, components: "", branch: "main", recentChanges: "", notes: "", updatedAt: 1 } }) as Agent;
-const service = (agents: Agent[] = [], opts: { offline?: boolean } = {}) => new FontService(() => agents, (id) => ({ p1: "Dana", p2: "Lee" })[id], { api, cdn, ...google, offline: opts.offline ?? false });
+const service = (agents: Agent[] = [], opts: { offline?: boolean; maxOpen?: number } = {}) => new FontService(() => agents, (id) => ({ p1: "Dana", p2: "Lee" })[id], { api, cdn, ...google, offline: opts.offline ?? false, maxOpen: opts.maxOpen });
 
 // ---------- open fonts ----------
 
@@ -574,4 +576,28 @@ test("an open font whose server sends a never-ending file is dropped, not held i
   } finally {
     flood.stop(true);
   }
+});
+
+test("families fetched at the same time share the room's allowance: together they never hold more than the cap", async () => {
+  const one = makeFont("Roboto Slab").length;
+  // Room for three faces. Three families (two faces each from Google's stylesheet) start at once and each would take the whole remainder if it were not spoken for.
+  const fonts = service([], { maxOpen: one * 3 + 20 });
+  const got = await Promise.all(["Roboto Slab", "Fira Test", "Plex Test"].map((f) => fonts.resolveOpen(f)));
+  const bytes = fonts.state().available.reduce((n: number, f: any) => n + f.bytes, 0);
+  expect(got.some(Boolean)).toBe(true);
+  expect(bytes).toBeGreaterThan(0);
+  expect(bytes).toBeLessThanOrEqual(one * 3 + 20);
+  // Nothing stays reserved afterwards: the allowance is all spent on faces actually held.
+  expect((fonts as any).reserved).toBe(0);
+  fonts.clear();
+});
+
+test("one window can't use up every lend ticket; its oldest is replaced and the others' stay good", () => {
+  const fonts = service();
+  const mine = Array.from({ length: MAX_TICKETS_PER_CALLER + 5 }, (_, i) => fonts.lendTicket("dev_a", "p1", `Font ${i}`, 1000)!);
+  expect(mine.every(Boolean)).toBe(true);
+  expect(fonts.redeemTicket(mine[0], "dev_a", "p1", "Font 0", 1000)).toBe(false);
+  expect(fonts.redeemTicket(mine[mine.length - 1], "dev_a", "p1", `Font ${mine.length - 1}`, 1000)).toBe(true);
+  // Even with the pool full of dev_a's tickets (many windows would be needed), dev_b still gets one.
+  expect(fonts.lendTicket("dev_b", "p2", "Gotham", 1000)).toBeTruthy();
 });
