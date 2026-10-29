@@ -166,6 +166,10 @@ export interface DevServer {
   platform: Platform | null;
   createdAt: number;
   up: boolean;
+  /** Why it isn't answering, in words for the tile ("Chey's Context Gatherer stopped this build"). */
+  problem?: string;
+  /** Since when it hasn't answered; the tile clears itself a few minutes after. */
+  downSince?: number;
 }
 
 export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";

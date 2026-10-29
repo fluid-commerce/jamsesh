@@ -422,7 +422,7 @@ export class McpEndpoint {
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId } });
         if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
-        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);
+        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}${s.shareNudge(agent.id, String(args.text ?? ""))}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
@@ -460,7 +460,7 @@ export class McpEndpoint {
       case "jam_message": {
         const agent = this.requireAgent(ctx);
         s.sendMessage(agent.id, String(args.to), String(args.text));
-        return text("Sent.");
+        return text(`Sent.${s.shareNudge(agent.id, String(args.text ?? ""))}`);
       }
       case "jam_ask": {
         const agent = this.requireAgent(ctx);

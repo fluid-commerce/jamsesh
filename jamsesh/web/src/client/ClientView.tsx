@@ -620,7 +620,7 @@ function AgentsPanel({ state }: { state: HubState }) {
               <a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--text)" }}>
                 {d.name}
               </a>
-              <span className="chip mono ellipsis">{d.url}</span>
+              <span className="chip mono ellipsis">{d.problem ?? d.url}</span>
             </div>
           ))}
         </>

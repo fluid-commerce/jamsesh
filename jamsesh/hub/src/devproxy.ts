@@ -12,8 +12,8 @@ import { newId } from "./store";
 import type { Session } from "./session";
 import type { DevServer, Platform } from "./types";
 
-/** How long a dev server may stay unreachable before it's taken off the board. */
-export const DEV_GONE_MS = 30 * 60_000;
+/** How long a dev server may stay unreachable before its tile clears itself. */
+export const DEV_GONE_MS = 5 * 60_000;
 /** Most dev servers one agent can keep on the host. */
 export const MAX_PER_AGENT = 6;
 
@@ -30,7 +30,6 @@ const HOP = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorizat
 
 export class DevProxy {
   private listeners = new Map<string, Server<WsData>>();
-  private downSince = new Map<string, number>();
   private tokenCache: { at: number; hashes: Map<string, string> } = { at: 0, hashes: new Map() };
   /** Open WebSockets on every dev port. */
   private sockets = new Set<ServerWebSocket<WsData>>();
@@ -83,8 +82,7 @@ export class DevProxy {
     };
     await this.listen(d);
     const up = await this.check(d);
-    this.downSince.delete(d.id);
-    this.session.store.put("devservers", { ...d, up });
+    this.session.store.put("devservers", { ...d, up, problem: undefined, downSince: undefined });
     const agent = this.session.agent(opts.agentId);
     this.session.upsertArtifact({
       id: this.artifactOf(d)?.id,
@@ -190,19 +188,35 @@ export class DevProxy {
     }
   }
 
-  /** Re-checks every dev server; ones that stay unreachable for a long while are taken down. */
-  async refresh() {
-    const now = Date.now();
+  /** How long a dev server may stay unreachable before it's taken off the board (a field so a test can shorten it). */
+  goneMs = DEV_GONE_MS;
+
+  /** What happened to a build that stopped answering, in plain words. */
+  explain(d: DevServer): string {
+    const owner = this.session.agents().find((a) => a.id === d.agentId);
+    if (!owner || owner.status === "offline") return `${owner?.ownerName ?? "Its owner"}'s ${owner?.name ?? "agent"} stopped this build`;
+    return `The build at port ${d.target.replace(/^.*:/, "")} stopped responding`;
+  }
+
+  /**
+   * Re-checks every dev server. One that stops answering says why on its tile and tells its agent;
+   * if it stays down a few minutes its tile clears itself.
+   */
+  async refresh(now = Date.now()) {
     for (const d of this.session.devservers()) {
       const up = await this.check(d);
-      if (up !== d.up) this.session.store.patch("devservers", d.id, { up });
       if (up) {
-        this.downSince.delete(d.id);
+        if (!d.up || d.problem || d.downSince) this.session.store.patch("devservers", d.id, { up: true, problem: undefined, downSince: undefined });
         continue;
       }
-      const since = this.downSince.get(d.id) ?? now;
-      this.downSince.set(d.id, since);
-      if (now - since > DEV_GONE_MS) this.remove(d.id);
+      const since = d.downSince ?? now;
+      const problem = this.explain(d);
+      if (!d.downSince) this.session.tellAgent(d.agentId, `${problem}. Its tile on the big screen says so and clears in ${Math.round(this.goneMs / 60_000)} minutes. Start it again and call jam_devserver to put it back.`);
+      if (d.up || d.problem !== problem || !d.downSince) this.session.store.patch("devservers", d.id, { up: false, problem, downSince: since });
+      if (now - since > this.goneMs) {
+        this.session.tellAgent(d.agentId, `Took "${d.name}" off the board: it didn't answer for ${Math.round(this.goneMs / 60_000)} minutes. Call jam_devserver again when it runs.`);
+        this.remove(d.id);
+      }
     }
   }
 
@@ -215,7 +229,6 @@ export class DevProxy {
   remove(id: string) {
     const d = this.session.devservers().find((x) => x.id === id);
     this.close(id);
-    this.downSince.delete(id);
     this.session.store.remove("devservers", id);
     const art = d && this.artifactOf(d);
     if (art) this.session.store.remove("artifacts", art.id);
@@ -252,7 +265,7 @@ async function forward(req: Request, target: string, path: string): Promise<Resp
     if (loc?.startsWith(`http://${target}`)) out.set("location", loc.slice(`http://${target}`.length) || "/");
     return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
   } catch {
-    return new Response("That dev server isn't answering right now. Its agent may have stopped it.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
+    return new Response("That build isn't answering right now. Its agent may have stopped it, or it crashed.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
   }
 }
 

@@ -505,6 +505,34 @@ export class Session {
     return byName.length === 1 ? byName[0] : undefined;
   }
 
+  /** A note from JamSesh itself to one agent; it arrives in the inbox and wakes a waiting `jam_wait`. */
+  tellAgent(agentId: string, text: string) {
+    const a = this.agent(agentId);
+    if (!a) return;
+    this.store.addEvent({ kind: "message", authorType: "system", authorId: null, authorName: "JamSesh", text, relevance: "work", data: { to: a.id, toName: a.name } });
+    this.wake(a.id);
+  }
+
+  private nudged = new Set<string>();
+
+  /**
+   * A reply for an agent that mentioned a localhost address it hasn't shared: the exact step to share it.
+   * Once per URL per agent; empty when there is nothing to say.
+   */
+  shareNudge(agentId: string, text: string): string {
+    const shared = this.devservers().filter((d) => d.agentId === agentId).map((d) => d.target.replace(/^.*:/, ""));
+    const out: string[] = [];
+    for (const m of text.matchAll(/\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})\b[^\s)>\]"']*/gi)) {
+      const port = m[1];
+      const url = `http://localhost:${port}`;
+      const key = `${agentId}|${port}`;
+      if (shared.includes(port) || this.nudged.has(key) || out.some((o) => o.includes(`"${url}"`))) continue;
+      this.nudged.add(key);
+      out.push(`You mentioned ${m[0]} but the room can't open it yet. To share it: make sure the server listens on 0.0.0.0 (for example vite --host 0.0.0.0), then call jam_devserver with url "${url}" and a name for the tile.`);
+    }
+    return out.length ? `\n\n${out.join("\n")}` : "";
+  }
+
   /**
    * A long text is stored once as a document. Returns what the feed and other agents' inboxes carry
    * instead: its opening and where to fetch the rest.

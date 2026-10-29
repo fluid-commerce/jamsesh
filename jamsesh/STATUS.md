@@ -39,6 +39,15 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Speaker ID when someone walks away from their laptop | Simulated | About 50 percent without a voice sample; better after "Teach JamSesh your voice". |
 | A real room with real microphones | Not tested | |
 
+## Agent briefing and live builds
+
+| Capability | Status | Notes |
+|---|---|---|
+| Short `jam_join` briefing (about 1,000 tokens on a seeded busy session, was 8,000) | Simulated | Test with 4 agents, 14 facts, 30 decisions, 12 directives. Not run with a real agent. |
+| Long notes stored once with a pointer in other agents' inboxes | Simulated | `jam_artifacts` with `id` returns the full text. |
+| Localhost mention gets the "share it" step | Simulated | Via `jam_update` and `jam_message` results. Needs a real agent to see if it acts on it. |
+| A stopped build's tile says why, tells its agent, clears after 5 minutes | Simulated | Throwaway local server started and stopped; tile screenshot checked in headless Chromium. |
+
 ## Phones and browsers
 
 | Capability | Status | Notes |
