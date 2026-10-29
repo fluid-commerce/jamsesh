@@ -845,7 +845,7 @@ export class Brain {
 
   /** How long to collect ships before one parity check (tests shorten it). */
   shipWindowMs = 25_000;
-  private shipped: { agent: Agent; text: string }[] = [];
+  private shipped: Shipped[] = [];
   private shipTimer: ReturnType<typeof setTimeout> | null = null;
   /** Shipped notes already considered, and parity checks already sent, in the last ten minutes: deduplicated by feature, not by agent. */
   private shipConsidered: { agentId: string; text: string; at: number }[] = [];
@@ -869,12 +869,14 @@ export class Brain {
       return;
     }
     if (kind !== "shipped") return;
-    // Commits, refactors, fixes, tooling and deliberately one-platform changes are news, never parity work.
-    if (data?.platformSpecific === true || !parityCandidate(text)) return;
+    // Parity starts only from the shipper's own word on what a person sees. Without it, and for commits,
+    // refactors, fixes, tooling and deliberately one-platform changes, a shipped note is news only.
+    const seen = typeof data?.seen === "string" ? data.seen.trim() : "";
+    if (!seen || data?.platformSpecific === true || !parityCandidate(text)) return;
     // Several notices from one agent in a window are one notice.
     const same = this.shipped.find((b) => b.agent.id === agent.id);
-    if (same) same.text = `${same.text} Then: ${text}`.slice(0, 600);
-    else this.shipped.push({ agent, text });
+    if (same) ((same.text = `${same.text} Then: ${text}`.slice(0, 600)), (same.seen = `${same.seen}; ${seen}`.slice(0, 600)));
+    else this.shipped.push({ agent, text, seen });
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
       const batch = this.shipped.splice(0);
@@ -883,64 +885,63 @@ export class Brain {
     }, this.shipWindowMs);
   }
 
-  private shippedBatch(batch: { agent: Agent; text: string }[]) {
+  private shippedBatch(batch: Shipped[]) {
     const s = this.session;
     // The same agent's note about the same thing was considered a few minutes ago: it's information now
     // (jam_context lists it under "Recently shipped"). A different feature from it still gets its look.
     const now = Date.now();
     this.shipConsidered = this.shipConsidered.filter((c) => now - c.at < 10 * 60_000);
-    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !this.shipConsidered.some((c) => c.agentId === b.agent.id && similar(c.text, b.text) >= 0.6));
+    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !this.shipConsidered.some((c) => c.agentId === b.agent.id && sameFeature(c.text, b.seen)));
     if (!batch.length) return;
-    for (const b of batch) this.shipConsidered.push({ agentId: b.agent.id, text: b.text, at: now });
+    for (const b of batch) this.shipConsidered.push({ agentId: b.agent.id, text: b.seen, at: now });
     // Parity needs an app on another platform in the room; without one there's nobody to coordinate with.
     const apps = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform));
     if (!batch.some((b) => apps.some((a) => a.platform !== b.agent.platform))) return;
     const ids = new Set(batch.map((b) => b.agent.id));
     const others = apps.filter((a) => !ids.has(a.id) && !batch.some((b) => b.agent.platform === a.platform));
     void this.consider(
-      `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
+      `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}\n  What a person sees, in the shipper's words: ${b.seen}`).join("\n")}\n` +
         `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
-        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. coordinate_parity sends a parity check, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it when the shipper's text names something a person sees (a screen, control, flow or visible behavior), saying what that is in 'seen' in the shipper's own words, with the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). When the text names nothing a person sees, call no_action.`,
+        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. Each shipper here said what a person sees. coordinate_parity sends a parity check about it, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it with the feature's name and the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). Call no_action when what they see plainly can't exist on the other platforms.`,
       "agent",
       this.parityTools(batch),
     );
   }
 
   /** The one thing a shipped-news pass can do: ask agents on different platforms to align one named feature. */
-  private parityTools(batch: { agent: Agent; text: string }[]) {
+  private parityTools(batch: Shipped[]) {
     const s = this.session;
-    // One check per feature and agent in ten minutes; a different feature to the same agent still goes.
-    const sentAlready = (target: string, feature: string) => this.paritySent.some((p) => p.target === target && Date.now() - p.at < 10 * 60_000 && similar(p.feature, feature) >= 0.6);
+    // One check per feature (what the shipper said a person sees) and agent in ten minutes; a different feature to the same agent still goes.
+    const sentAlready = (target: string, seen: string) => this.paritySent.some((p) => p.target === target && Date.now() - p.at < 10 * 60_000 && sameFeature(p.feature, seen));
     return {
       coordinate_parity: tool({
-        description: "Send a parity check about one user-visible feature: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
+        description: "Send a parity check about one user-visible feature a shipper described: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
-          feature: z.string().describe("The user-visible feature or screen, as a person would name it"),
-          seen: z.string().describe("What a person sees of it, in the shipper's own words (a screen, control, flow or visible behavior); never something the update doesn't say"),
+          feature: z.string().describe("The feature's name, as a person would say it"),
           shippedBy: z.array(z.string()).describe("Ids from 'Shipped just now' of the agents that shipped it"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
-        execute: async ({ feature, seen, shippedBy, platforms }) => {
-          if (!seen.trim()) return refuse("The shipped text names nothing a person sees: call no_action.");
-          const shippers = batch.map((b) => b.agent).filter((a) => shippedBy.includes(a.id));
-          if (!shippers.length) return refuse("Name the shipping agents by id from 'Shipped just now'.");
-          // What a person sees has to come from what the shipper wrote, not be supplied for it.
-          if (!grounded(seen, batch.filter((b) => shippedBy.includes(b.agent.id)).map((b) => b.text).join(" ")))
-            return refuse("'seen' has to be in the shipper's own words: their update doesn't say that. If it names nothing a person sees, call no_action.");
+        execute: async ({ feature, shippedBy, platforms }) => {
+          const from = batch.filter((b) => shippedBy.includes(b.agent.id));
+          if (!from.length) return refuse("Name the shipping agents by id from 'Shipped just now'.");
+          // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
+          if (from.some((b) => !b.seen)) return refuse("A shipper didn't say what a person sees, so there is nothing to check: call no_action.");
+          const shippers = from.map((b) => b.agent);
+          const seen = from.map((b) => b.seen).join("; ");
           const made = new Set(shippers.map((a) => a.platform));
           const partners = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
           const team = [...shippers, ...partners];
           if (new Set(team.map((a) => a.platform)).size < 2) return refuse("That isn't a cross-platform feature: no app on another platform needs it.");
           const sent: string[] = [];
           for (const a of team) {
-            if (sentAlready(a.id, feature)) continue;
-            this.paritySent.push({ target: a.id, feature, at: Date.now() });
+            if (sentAlready(a.id, seen)) continue;
+            this.paritySent.push({ target: a.id, feature: seen, at: Date.now() });
             const mates = team.filter((o) => o.id !== a.id).map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ");
             const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
             s.createDirective({
               text: shippers.includes(a)
-                ? `Parity check, not a build task: you shipped ${feature} on ${a.platform} (${seen.trim()}). ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
-                : `Parity check, not a build task: ${by} shipped ${feature} on ${[...made].join(" and ")} (${seen.trim()}). Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
+                ? `Parity check, not a build task: you shipped ${feature} on ${a.platform} (${seen}). ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
+                : `Parity check, not a build task: ${by} shipped ${feature} on ${[...made].join(" and ")} (${seen}). Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
               mode: "coordinate",
               targets: [a.id],
               requestedBy: "JamSesh",
@@ -1216,12 +1217,19 @@ const refuse = (text: string) => new Refusal(text);
 /** Tools that never change anything, so calling them isn't an effect of the pass. */
 const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
 /** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
-/** Whether `claim` is in `source`'s words: at least two shared content words (all of them when it has fewer). */
-export function grounded(claim: string, source: string) {
-  const have = new Set(terms(source));
-  const want = [...new Set(terms(claim))];
-  const shared = want.filter((w) => have.has(w)).length;
-  return shared >= Math.min(2, want.length) && shared > 0;
+/** One shipped note waiting for its parity look: the shipper's text and what they said a person sees. */
+interface Shipped {
+  agent: Agent;
+  text: string;
+  seen: string;
+}
+
+/** The same feature: most content words shared both ways, so a short name contained in a longer, different one doesn't match. */
+export function sameFeature(a: string, b: string) {
+  const x = new Set(terms(a));
+  const y = new Set(terms(b));
+  const inter = [...x].filter((t) => y.has(t)).length;
+  return inter > 0 && inter / Math.max(x.size, y.size) >= 0.6;
 }
 
 /** Platforms with a user-facing app, where a shipped feature can be a parity question. */

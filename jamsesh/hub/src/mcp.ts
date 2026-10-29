@@ -95,6 +95,7 @@ const JAM_TOOLS = [
         workstream: { type: "string" },
         directiveId: { type: "string", description: "The directive this update answers, if any" },
         platformSpecific: { type: "boolean", description: "With shipped: the change is deliberately for your platform only, so other platforms aren't asked to match it" },
+        seen: { type: "string", description: "With shipped, for a user-visible change: what a person sees, in a sentence (the screen, control, flow or behavior). Agents on other platforms get a parity check about it. Leave it out when nobody sees the change." },
       },
       required: ["kind", "text"],
     },
@@ -420,7 +421,7 @@ export class McpEndpoint {
       }
       case "jam_update": {
         const agent = this.requireAgent(ctx);
-        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}) } });
+        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}), ...(args.kind === "shipped" && typeof args.seen === "string" && args.seen.trim() ? { seen: args.seen.trim().slice(0, 300) } : {}) } });
         if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
         return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);

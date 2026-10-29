@@ -520,15 +520,17 @@ is context, not a direct address to the room brain, even when it mentions the br
   `coordinate` directive per agent naming the others and the goal [A27c, B22].
 - **Cross-repository parity.** A `shipped` update is news first: every agent reads it in
   `jam_context`. Commits, refactors, fixes, tooling, changes the agent marks `platformSpecific`, and
-  rooms with no app on another platform never go further. Otherwise the brain sends a **parity
-  check** only when the shipper's own text names something a person sees (the claim is checked
-  against that text) [B21]. The check is a `coordinate` directive, not build work: the other
+  rooms with no app on another platform never go further. A parity check starts only from
+  the shipper's own declaration: `jam_update` (shipped) takes an optional `seen`, what a person
+  sees, written by the shipping agent; the brain never writes it, uses it verbatim, and sends
+  nothing without it [B21]. The check is a `coordinate` directive, not build work: the other
   platform's agent compares (does this exist on our side, and does it match?), agrees with the
   shipper through `jam_message`, and builds only if both confirm a gap; then they compare renders
   for inconsistencies that aren't platform conventions [B22, B23]. When both platforms have built
   artifacts, the big screen shows a **parity** view: desktop beside mobile, labeled, with what
   differs [B23]. Shipped updates within 25 seconds of each other are considered together; the same
-  feature isn't checked again with the same agent within 10 minutes, while a different feature is.
+  feature (by what the shipper said a person sees) isn't checked again with the same agent within 10
+  minutes, while a different feature is.
 - **Routing to the agent already on it.** See [8.5](#85-affinity-and-one-agent-per-repository)
   [A3].
 
@@ -576,8 +578,8 @@ It tells agents:
   compare layout, spacing, type, color, and states with the `canvas_render` of the chosen frame,
   fix differences, post the screenshot as **Built**, and say what still differs before reporting
   `shipped` [B31].
-- **Cross-repository parity.** Mention in a `shipped` update when a user-visible change belongs on
-  another platform (or pass `platformSpecific: true` when it doesn't). A parity `coordinate`
+- **Cross-repository parity.** For a user-visible change, fill in `seen` on the `shipped` update
+  (what a person sees), or pass `platformSpecific: true` when it belongs on your platform only. A parity `coordinate`
   directive is a check: compare with the other agent, build only a gap you both confirm, compare
   both renders, and show parity [B21–B23].
 - **Host previews.** To show a desktop or iPhone build on the host, push the branch and call
