@@ -1286,7 +1286,9 @@ window only. Four columns: **Triage** (open cards, oldest first, numbered for "t
 `pending` or `delivered`), **Working** (`acked`), **Done** (`done`, the newest 30). Cancelled tasks aren't shown. At
 narrow widths (below 820 px of view width) the columns become tabs. Task cards offer Send, Edit and Dismiss; context
 cards Add, Edit, Merge into…, Dismiss, and Replace (with the saved fact and the new one side by side) when
-they conflict. Edit is in place (wording, agent, mode or kind, workstream); Send and Add apply it. A focused card takes
+they conflict. Merge into… offers, and accepts, only saved facts of the card's kind, workstream and platform (the
+same check as Replace). Send with any chosen agent gone or only watching sends nothing: the card says which
+(`unavailable`, named from `targetNames`) until a person changes the agents. Edit is in place (wording, agent, mode or kind, workstream); Send and Add apply it. A focused card takes
 the keys ↑ ↓, Enter (open), E, S (send or add) and D. Clicking a card opens a sheet: the wording, who asked and when,
 each agent's progress, the lines it came from (with the conversation around each, from `/api/history/events`), what
 people changed, and for a sent task what it produced: the frames and builds its agents put up since it was sent (each
@@ -1767,7 +1769,9 @@ fact cites) differs from the version it last saw (carried in, or saved), each wi
 session's settings); items it only carried in, or whose sources alone changed, are never written. Each row is merged
 on its own inside one SQLite `BEGIN IMMEDIATE` transaction: a change made on the row's current version applies, a
 retirement always applies, a tombstone is never made active again, and of two edits made without seeing each other
-the later (by time, then session id) wins. So two sessions of a project open at once both keep their changes, and an
+the later (by time, then session id) wins. Only a change the merge applied counts as saved; one that lost is
+brought into the session as the row stands (retired, or the other wording), and its own wording becomes a context
+card on the Tasks board for a person to add again or dismiss. So two sessions of a project open at once both keep their changes, and an
 older session can't bring back what another retired. Nothing is cut or left out for size: a change that doesn't fit
 the reader's limits fails the whole save, which the keeper reports. The write lock belongs to the connection, is
 released when its process exits, and is never taken over: a paused writer keeps it and others wait (two seconds) and
@@ -1778,7 +1782,10 @@ without a title get theirs back. A resumed session, or one that already has fact
 seeded. Every row is checked when read (types, statuses, sizes): one malformed value and nothing is seeded. After a
 save commits, the committed state is exported as plain JSON in `projects/<slug>/context.json` for Phase 7's wiki:
 read and written while holding the write lock, to a temporary file renamed into place, and never over an export of
-a later `generation`. A database that isn't one is left where it is and the next generation (`context-1.db`, ...) is
+a later `generation`. It holds every row as stored (`rows`: tombstones and versions included) besides the readable
+lists, so recovery restores it exactly. An export that can't be written fails the save (the keeper reports it) and
+is written by the next save, even one with nothing new. Reading a damaged database (seeding a new session included)
+recovers first, so a valid export is never read as no context. A database that isn't one is left where it is and the next generation (`context-1.db`, ...) is
 started, taking in the export; every process that finds the damage opens the same next file, so recovery happens
 once. A new database takes in `context.json` (the export, or the file builds before the database wrote) once, only if
 the whole file is valid.
