@@ -901,7 +901,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/prompt-window" && req.method === "POST") {
     if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
     if (!ownDeviceOf(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
-    return json(await hub.promptWindow({ deviceId: body.deviceId, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
+    return json(await hub.promptWindow({ deviceId: body.deviceId, recordingId: typeof body.recordingId === "string" ? body.recordingId : undefined, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
   }
 
   // ---- Record: talk and point, review the notes, send them to the agents that own the work ----
@@ -916,9 +916,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       return r.ok ? json(r) : bad(r.reason, r.status);
     }
     if (path === "/record/stop") {
-      if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+      if (!body?.deviceId || !body?.recordingId || !body?.t1) return bad("deviceId, recordingId and t1 are required");
       if (!ownDevice(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
-      const r = await hub.recordStop({ deviceId: String(body.deviceId), caller, personId: actor().id, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
+      const r = await hub.recordStop({ deviceId: String(body.deviceId), recordingId: String(body.recordingId), caller, personId: actor().id, t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
       return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
     }
     if (path === "/record/send") {

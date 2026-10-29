@@ -126,7 +126,10 @@ function room() {
   const post = (path: string, body: unknown, h: Record<string, string> = win()) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", ...h }, body: JSON.stringify(body) });
   /** A recording id the hub handed out (Stop on Maya's laptop with a typed note), for the sends below. */
   const stopped = async (personId = maya.id) => {
-    const r = await hub.recordStop({ deviceId: "mayaLaptop", caller: "host", personId, t0: Date.now() - 1000, t1: Date.now(), pointer: [], typed: "a note" });
+    const t0 = Date.now() - 1000;
+    const started = hub.recordStart("mayaLaptop", personId, t0);
+    if (!started.ok) throw new Error(started.reason);
+    const r = await hub.recordStop({ deviceId: "mayaLaptop", recordingId: started.id, caller: "host", personId, t1: Date.now(), pointer: [], typed: "a note" });
     if (!r.ok) throw new Error(r.reason);
     return r.recordingId;
   };
@@ -158,13 +161,17 @@ function line(hub: Hub, text: string, personId: string, device: string, t0: numb
   return u;
 }
 
+/** The id of the recording running on a laptop (what Start handed back). */
+const rid = (r: ReturnType<typeof room>, device: string): string => (r.hub as any).recs.get(device)?.id;
+
 type StopOk = { ok: true; recordingId: string; notes: RecordNote[] };
 async function record(r: ReturnType<typeof room>, speak: (t0: number) => void, pointer: (t0: number) => RecordMark[], extra: Record<string, unknown> = {}) {
   const t0 = Date.now() - 8000;
   const start = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, ...extra });
   expect(start.status).toBe(200);
+  const recordingId = ((await start.json()) as { id: string }).id;
   speak(t0);
-  const stop = await r.post("/record/stop", { deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10_000, pointer: pointer(t0), ...extra });
+  const stop = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId, personId: r.maya.id, t1: t0 + 10_000, pointer: pointer(t0), ...extra });
   return { t0, res: stop, body: (await stop.clone().json()) as StopOk };
 }
 
@@ -287,7 +294,8 @@ test("unhappy sends: nothing to send, garbage notes, someone else's recording, a
   expect(pin.text.length).toBe(2000);
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 5 }).find((e) => e.data.recordingId === sent2)!.text.split("\n").length).toBeLessThanOrEqual(82);
   // Someone else's recording can't be sent by another person.
-  const mine = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", personId: r.maya.id, t0: Date.now() - 5000, t1: Date.now(), pointer: [], text: "typed note" })).json()) as StopOk;
+  const mineStart = (await (await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0: Date.now() - 5000 })).json()) as { id: string };
+  const mine = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: mineStart.id, personId: r.maya.id, t1: Date.now(), pointer: [], text: "typed note" })).json()) as StopOk;
   expect(mine.ok).toBe(true);
   expect(mine.notes[0]).toMatchObject({ id: "typed", text: "typed note", pin: null });
   const stolen = await r.post("/record/send", { recordingId: mine.recordingId, personId: r.ben.id, notes: mine.notes });
@@ -295,7 +303,7 @@ test("unhappy sends: nothing to send, garbage notes, someone else's recording, a
   // An agent's credential, and a stranger with none, can neither record nor send.
   const agent = r.hub.auth.issue({ kind: "agent", label: "Agents on Mac", ip: "10.0.0.5", ownerDeviceId: "dev_mac0" });
   const asAgent = { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${agent.token}` };
-  for (const [p, b] of [["/record/start", { deviceId: "x", t0: 1 }], ["/record/stop", { deviceId: "x", t0: 1, t1: 2 }], ["/record/send", { recordingId: "z", notes: [{ text: "hi" }] }]] as const) {
+  for (const [p, b] of [["/record/start", { deviceId: "x", t0: 1 }], ["/record/stop", { deviceId: "x", recordingId: "rec_x", t1: 2 }], ["/record/send", { recordingId: "z", notes: [{ text: "hi" }] }]] as const) {
     expect((await r.post(p, b, asAgent)).status).toBe(403);
     expect((await r.post(p, b, { "x-forwarded-for": "9.9.9.9" })).status).toBe(401);
   }
@@ -307,21 +315,23 @@ test("stop with nothing said says so, ends the recording, and a second Stop is h
   const t0 = Date.now() - 4000;
   await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0 });
   expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
-  const stop = () => r.post("/record/stop", { deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 3000, pointer: [{ t: t0 + 100, kind: "click", x: 0.5, y: 0.5, target: { kind: "artifact", ref: "a", label: "A" } }] });
+  const recordingId = rid(r, "mayaLaptop");
+  const stop = () => r.post("/record/stop", { deviceId: "mayaLaptop", recordingId, personId: r.maya.id, t1: t0 + 3000, pointer: [{ t: t0 + 100, kind: "click", x: 0.5, y: 0.5, target: { kind: "artifact", ref: "a", label: "A" } }] });
   const first = (await (await stop()).json()) as any;
   expect(first).toMatchObject({ ok: false, reason: "Nothing was heard in that recording." });
   expect(r.s.recordings()).toEqual([]);
-  expect(((await (await stop()).json()) as any).ok).toBe(false);
+  // The recording has ended, so a repeat Stop ends nothing.
+  expect((await stop()).status).toBe(409);
 }, 30_000);
 
 test("another person's window can't stop my recording", async () => {
   const r = room();
   const t0 = Date.now() - 4000;
   await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0 });
-  const res = await r.post("/record/stop", { deviceId: "mayaLaptop", personId: r.ben.id, t0, t1: t0 + 3000, pointer: [] });
+  const res = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: rid(r, "mayaLaptop"), personId: r.ben.id, t1: t0 + 3000, pointer: [] });
   expect(res.status).toBe(403);
   expect(r.s.recordings().length).toBe(1);
-  await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 1 , pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 1 , pointer: [] });
 }, 30_000);
 
 // ---------- the big screen ----------
@@ -342,7 +352,7 @@ test("on the big screen: Record takes a free screen's lock and gives it back; a 
   expect(r.s.recordings().length).toBe(1);
   // Stopping lists the notes (marked with the screen) and releases the lock it took.
   line(r.hub, "move the logo to the left", r.maya.id, "mayaLaptop", t0 + 500);
-  const stop = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 4000, pointer: [{ t: t0 + 600, kind: "click", x: 0.1, y: 0.1, target: { kind: "artifact", ref: "x", label: "Logo" } }], screen: "main" })).json()) as StopOk;
+  const stop = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: rid(r, "mayaLaptop"), personId: r.maya.id, t1: t0 + 4000, pointer: [{ t: t0 + 600, kind: "click", x: 0.1, y: 0.1, target: { kind: "artifact", ref: "x", label: "Logo" } }], screen: "main" })).json()) as StopOk;
   expect(stop.notes[0]).toMatchObject({ screenId: "main", pin: { x: 0.1 } });
   expect(r.s.lockOf("main")).toBeNull();
   expect(r.s.recordings()).toEqual([]);
@@ -353,7 +363,7 @@ test("a screen the person already holds stays held after Record; an unknown scre
   const t0 = Date.now() - 3000;
   r.s.setStage({ mode: "spotlight", items: ["a"] }, "Maya", "main", { person: { id: r.maya.id, name: "Maya" } });
   expect((await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, screen: "main" })).status).toBe(200);
-  await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 100, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 100, pointer: [] });
   expect(r.s.lockOf("main")?.personId).toBe(r.maya.id);
   expect((await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, screen: "screen-9" })).status).toBe(404);
   expect(r.hub.recordStart("x", null, t0, "main")).toMatchObject({ ok: false, status: 403 });
@@ -372,10 +382,10 @@ test("driving together: each driver is recorded, and the lock is let go only aft
   line(r.hub, "ben wants the footer shorter", r.ben.id, "benLaptop", t0 + 600);
   const mt = { kind: "artifact" as const, ref: "h", label: "Header" };
   const bt = { kind: "artifact" as const, ref: "f", label: "Footer" };
-  const m = await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 4000, pointer: [{ t: t0 + 550, kind: "click", x: 0.5, y: 0.1, target: mt }] });
+  const m = await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 4000, pointer: [{ t: t0 + 550, kind: "click", x: 0.5, y: 0.1, target: mt }] });
   // Ben is still recording: the screen stays locked.
   expect(r.s.lockOf("main")).not.toBeNull();
-  const b = await r.hub.recordStop({ caller: "host", deviceId: "benLaptop", personId: r.ben.id, t0, t1: t0 + 4000, pointer: [{ t: t0 + 650, kind: "click", x: 0.5, y: 0.9, target: bt }] });
+  const b = await r.hub.recordStop({ recordingId: rid(r, "benLaptop"), caller: "host", deviceId: "benLaptop", personId: r.ben.id, t1: t0 + 4000, pointer: [{ t: t0 + 650, kind: "click", x: 0.5, y: 0.9, target: bt }] });
   expect(m.ok && b.ok).toBe(true);
   if (m.ok && b.ok) {
     expect(m.notes.map((x) => x.text)).toEqual(["maya wants the header taller"]);
@@ -392,7 +402,7 @@ test("a new Record on the same device replaces a recording whose Stop never came
   r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main");
   r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 10, "main");
   expect(r.s.recordings().length).toBe(1);
-  await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 }, 30_000);
 
@@ -430,10 +440,10 @@ test("a lock refresh while recording never cuts off drivers, and Record taking t
   r.s.touchLock("main");
   expect(r.s.driversOf("main")).toEqual([r.maya.id, r.ben.id]);
   expect(r.hub.recordStart("benLaptop", r.ben.id, t0, "main").ok).toBe(true);
-  await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
   // Ben is still recording and still driving.
   expect(r.s.driversOf("main")).toEqual([r.maya.id, r.ben.id]);
-  await r.hub.recordStop({ caller: "host", deviceId: "benLaptop", personId: r.ben.id, t0, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "benLaptop"), caller: "host", deviceId: "benLaptop", personId: r.ben.id, t1: t0 + 10, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 }, 30_000);
 
@@ -527,7 +537,7 @@ test("nobody records, stops or sends on another window's device, even knowing it
   r.s.touchDevice("benOwn", { personId: r.ben.id, pairedId: bens.device.id });
   const asBen = { "x-forwarded-for": "10.0.0.7", authorization: `Bearer ${bens.token}` };
   expect((await r.post("/record/start", { deviceId: "mayaLaptop", t0 }, asBen)).status).toBe(403);
-  expect((await r.post("/record/stop", { deviceId: "mayaLaptop", t0, t1: t0 + 10 }, asBen)).status).toBe(403);
+  expect((await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: "rec_x", t1: t0 + 10 }, asBen)).status).toBe(403);
   expect((await r.post("/record/start", { deviceId: "nobody-has-this", t0 }, asBen)).status).toBe(403);
   // Maya's recording and her lock are untouched.
   expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
@@ -553,7 +563,7 @@ test("a recording replacing its own keeps the screen locked; one that ends gives
   // The replacement is recording a locked screen, still Maya's.
   expect(r.s.lockOf("main")?.personId).toBe(r.maya.id);
   expect(r.s.recordings().length).toBe(1);
-  await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 
   // Maya records the free screen; it is unlocked while she records, and Ben puts something up.
@@ -563,7 +573,7 @@ test("a recording replacing its own keeps the screen locked; one that ends gives
   const bens = r.s.lockOf("main");
   expect(bens?.personId).toBe(r.ben.id);
   // Her recording ending (stopped, abandoned or swept) leaves Ben's lock alone.
-  await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
   expect(r.s.lockOf("main")).toEqual(bens);
   r.s.unlockStage("main");
   expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
@@ -617,7 +627,7 @@ test("a Stop still gathering words doesn't end the recording that started after 
   const t0 = Date.now() - 3000;
   const first = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
   expect(first.ok).toBe(true);
-  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", caller: "host", personId: r.maya.id, t0, t1: t0 + 10, pointer: [], typed: "first" });
+  const stopping = r.hub.recordStop({ recordingId: (first as any).id, deviceId: "mayaLaptop", caller: "host", personId: r.maya.id, t1: t0 + 10, pointer: [], typed: "first" });
   const second = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 20);
   expect(second.ok).toBe(true);
   await stopping;
@@ -642,4 +652,54 @@ test("a Start that is refused leaves the recording already running", async () =>
   r.s.setStage({ mode: "spotlight", items: ["b"] }, "Ben", "main", { person: { id: r.ben.id, name: "Ben" } });
   expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 6, "main")).toMatchObject({ ok: false, status: 409 });
   expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
+}, 30_000);
+
+test("a delayed Stop for recording A that arrives after B started ends nothing, and B keeps running", async () => {
+  const r = room();
+  const t0 = Date.now() - 3000;
+  const a = (await (await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0 })).json()) as { id: string };
+  // A is replaced by B (a second Start from the same window) before A's Stop reaches the hub.
+  const b = (await (await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0: t0 + 50 })).json()) as { id: string };
+  expect(b.id).not.toBe(a.id);
+  const late = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, t1: t0 + 100, pointer: [], text: "from A" });
+  expect(late.status).toBe(409);
+  expect(r.s.recordings().map((x) => x.id)).toEqual([b.id]);
+  expect((r.hub as any).promptMode.has("mayaLaptop")).toBe(true);
+  // B's own Stop still works.
+  const ok = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: b.id, personId: r.maya.id, t1: t0 + 200, pointer: [], text: "from B" });
+  expect(ok.status).toBe(200);
+  expect(r.s.recordings()).toEqual([]);
+}, 30_000);
+
+test("Stop with no recording, or with an id nobody was given, issues no notes", async () => {
+  const r = room();
+  const noRec = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: "rec_none", personId: r.maya.id, t1: Date.now(), pointer: [], text: "typed" });
+  expect(noRec.status).toBe(409);
+  expect(await r.post("/record/stop", { deviceId: "mayaLaptop", personId: r.maya.id, t1: Date.now(), pointer: [], text: "typed" }).then((x) => x.status)).toBe(400);
+  const t0 = Date.now() - 1000;
+  await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0 });
+  const wrong = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: "rec_guess", personId: r.maya.id, t1: Date.now(), pointer: [], text: "typed" });
+  expect(wrong.status).toBe(409);
+  expect(r.s.recordings().length).toBe(1);
+}, 30_000);
+
+test("the notes' window is the hub's own record of Start: a Stop can't widen it, and two Stops race to one answer", async () => {
+  const r = room();
+  const t0 = Date.now() - 2000;
+  const start = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
+  if (!start.ok) throw new Error("start");
+  const base = { deviceId: "mayaLaptop", recordingId: start.id, caller: "host", personId: r.maya.id, t1: t0 + 10, pointer: [], typed: "x" };
+  const [one, two] = await Promise.all([r.hub.recordStop(base), r.hub.recordStop(base)]);
+  expect([one.ok, two.ok].sort()).toEqual([false, true]);
+  expect((one.ok ? two : one)).toMatchObject({ ok: false, status: 409 });
+}, 30_000);
+
+test("an old prompt window naming a replaced recording ends nothing", async () => {
+  const r = room();
+  const t0 = Date.now() - 2000;
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 10);
+  if (!a.ok || !b.ok) throw new Error("start");
+  await r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, t0, t1: t0 + 10, pointer: [], typed: "x" });
+  expect(r.s.recordings().map((x) => x.id)).toEqual([b.id]);
 }, 30_000);
