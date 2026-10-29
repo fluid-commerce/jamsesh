@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { groupArtifacts, keyAction, settle, step } from "../src/client/viewerNav";
+import { groupArtifacts, keyAction, step } from "../src/client/viewerNav";
 import { fullSize } from "../src/shared/frames";
 import type { Artifact } from "../src/shared/hub";
 
@@ -31,13 +31,6 @@ test("groups gather by group or title, variants read A, B, C, and the filter app
   const mock = groupArtifacts(list, "mockup");
   expect(mock[0][1].map((a) => a.id)).toEqual(["a", "b"]);
   expect(groupArtifacts(list, "built").map(([g]) => g)).toEqual(["Login"]);
-});
-
-test("the viewer keeps its item when the group changes; when it's gone it lands on the first", () => {
-  const items = [art("a"), art("b"), art("c")];
-  expect(settle(items, "b")).toBe(1);
-  expect(settle(items, "gone")).toBe(0);
-  expect(settle([], "gone")).toBe(0);
 });
 
 test("a frame is drawn larger only when its box would upscale the stored 1600 px render", () => {

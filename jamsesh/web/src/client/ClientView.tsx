@@ -13,7 +13,7 @@ import { Stage, expandTile, stageTiles } from "../host/Stage";
 import { cast, putOnScreen } from "./CastPicker";
 import { InviteButton } from "./Invite";
 import { WorkViewer } from "./WorkViewer";
-import { groupArtifacts, settle, type WorkFilter } from "./viewerNav";
+import { groupArtifacts, type WorkFilter } from "./viewerNav";
 import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
@@ -595,7 +595,7 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
   const [viewing, setViewing] = useState<{ group: string; id: string } | null>(null);
   const name = state.people.find((p) => p.id === personId)?.name ?? "Someone in the room";
   const items = viewing ? groups.find(([g]) => g === viewing.group)?.[1] ?? [] : [];
-  const index = viewing ? settle(items, viewing.id) : 0;
+  const index = viewing ? Math.max(0, items.findIndex((a) => a.id === viewing.id)) : 0;
   const close = useCallback(() => setViewing(null), []);
   const goTo = useCallback((i: number) => items[i] && setViewing((v) => v && { group: v.group, id: items[i].id }), [items]);
   // Putting work on the big screen is a deliberate act, shown to the room under the person's name.

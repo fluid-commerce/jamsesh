@@ -4,7 +4,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { showVerdict } from "../src/brain/brain";
+import { asksForScreen, ruleTriage, showVerdict } from "../src/brain/brain";
 import { showRequestSpeech } from "../src/brain/speech";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
@@ -1129,11 +1129,11 @@ test("every path where a person asks JamSesh directly replaces their own lock wi
     expect([name, owner()]).toEqual([name, chey.id]);
     if (name === "restore_screen") expect(s.stage().items).toEqual([b.id]);
   }
-  // The rule-based path (no gateway) does the same.
+  // With no model the simple rules never replace a person's screen, even the owner's direct request: they say so.
   mine();
   const ev = direct("JamSesh, show pricing");
   hub.brain.ruleRoute([ev], { lines: [{ id: ev.id, relevance: "work", intent: "present" }] } as any);
-  expect(s.stage().items).toEqual([b.id]);
+  expect(s.stage().items).toEqual([a.id]);
   expect(owner()).toBe(chey.id);
   // Someone else's lock is never replaced by these paths.
   cast(felipe, [a.id]);
@@ -1151,4 +1151,23 @@ test("an owner's overheard line, through the rule-based path, leaves their lock 
   hub.brain.ruleRoute([ev], { lines: [{ id: ev.id, relevance: "work", intent: "present" }] } as any);
   expect(s.stage().items).toEqual([a.id]);
   expect(s.stage().lock).toEqual(before.lock);
+});
+
+test("refusals are never a request to put something up: not by the simple rules, not as consent to replace a lock", async () => {
+  const { hub, s, chey, said } = room();
+  const a = artifact(s, "Checkout");
+  artifact(s, "Pricing");
+  for (const text of ["JamSesh, don't show me pricing", "stop showing pricing", "hide the pricing page", "JamSesh, do not put up pricing"]) {
+    const ev = { ...said(chey, text), data: { direct: true } } as JamEvent;
+    expect(asksForScreen(ev)).toBe(false);
+    expect(ruleTriage([ev]).lines[0].intent).not.toBe("present");
+    s.setStage({ mode: "board" }, "Room brain", "main", { override: true });
+    hub.brain.ruleRoute([ev], { lines: [{ id: ev.id, relevance: "work", intent: "present" }] } as any);
+    expect(s.stage().mode).toBe("board");
+  }
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const no = { ...said(chey, "JamSesh, don't show me pricing"), data: { direct: true } } as JamEvent;
+  hub.brain.ruleRoute([no], ruleTriage([no]));
+  expect(s.stage().items).toEqual([a.id]);
+  expect(s.stage().lock?.personId).toBe(chey.id);
 });

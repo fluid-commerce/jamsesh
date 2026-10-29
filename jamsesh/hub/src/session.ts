@@ -94,6 +94,7 @@ export class Session {
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
     for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
+    this.reconcileShares();
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
     if (this.revertsToBoard(st)) {
@@ -1267,8 +1268,16 @@ export class Session {
   endShare(id: string, status: Share["status"] = "ended") {
     const sh = this.store.get("shares", id);
     if (!sh) return;
-    this.store.put("shares", { ...sh, status });
-    this.sharesShown.delete(id);
+    // The share's status, every screen's restore and the removal of its snapshot are one write: a crash between them can't leave an ended share on screen.
+    this.store.atomic(() => {
+      this.store.put("shares", { ...sh, status });
+      this.sharesShown.delete(id);
+      this.releaseShareTiles(id);
+    });
+  }
+
+  /** Takes an ended share off every screen (giving back what it hid) and drops its snapshot. */
+  private releaseShareTiles(id: string) {
     const { [id]: before, ...others } = this.priorStages();
     if (before) this.store.setSetting("beforeShare", others);
     const hosts = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
@@ -1283,6 +1292,14 @@ export class Session {
         // One its owner let go of during the share stays gone.
         this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
       }
+    }
+  }
+
+  /** At startup: a share that already ended but whose snapshot is still stored (the hub stopped between the steps of an older ending) is released now. */
+  private reconcileShares() {
+    for (const id of Object.keys(this.priorStages())) {
+      if (this.store.get("shares", id)?.status === "live") continue;
+      this.store.atomic(() => this.releaseShareTiles(id));
     }
   }
 
@@ -1581,6 +1598,7 @@ export class Session {
     // The lock's owner asked for this very write: it replaces their lock in the same step (nothing is released ahead of it).
     if (!opts.person && !opts.override && held && !(opts.mayReplaceLock && opts.mayReplaceLock === held.personId)) return cur;
     // Work bound to one share (the presenter's placement) lands only while that share is live and in the layout.
+    if (opts.onlyScreen && opts.onlyScreen !== screen) return cur;
     if (opts.requireShare) {
       const need = opts.requireShare;
       const inLayout = next.mode === "layout" && !!next.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === need);
@@ -1956,6 +1974,8 @@ interface StageOptsBase {
   claim?: StageClaim;
   /** The write needs this share live and in the layout, or none of it lands (a presenter's placement of one share). */
   requireShare?: string;
+  /** With `requireShare`: the one screen the write may land on. */
+  onlyScreen?: string;
   /** The write may replace the lock this person owns, and does so only if it lands. */
   mayReplaceLock?: string;
 }

@@ -340,7 +340,9 @@ export class Brain {
     const eligible = (id: string) => {
       const st = s.stage(id);
       const lock = s.lockOf(id);
-      return !(st.pinned && st.by !== "Room brain" && st.by !== "JamSesh") && !(lock && lock.personId !== share.personId);
+      // A screen the sharer themself pinned or locked is theirs to share over.
+      if (lock) return lock.personId === share.personId;
+      return !(st.pinned && st.by !== "Room brain" && st.by !== "JamSesh") || st.by === share.personName;
     };
     const target = ["main", ...s.screens().filter((x) => x.role === "extra").map((x) => x.id)].find(eligible);
     if (!target) {
@@ -370,7 +372,7 @@ export class Brain {
         model: m,
         system: this.system(),
         prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on ${target === "main" ? "the big screen" : `the screen with id ${target} (the main screen is held by someone else), passing screen: "${target}"`} with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
-        tools: { set_layout: this.tools([], pass, "person", claim, share.id).set_layout },
+        tools: { set_layout: this.tools([], pass, "person", claim, { shareId: share.id, screen: target }).set_layout },
         stopWhen: isStepCount(2),
       });
       if (!pass.effects && !this.stopped) fallback();
@@ -498,7 +500,7 @@ export class Brain {
    * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
    * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
    */
-  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim(), onlyShare?: string) {
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim(), bind?: { shareId: string; screen: string }) {
     const s = this.session;
     this.unlockRefused.clear();
     this.replaceOk.clear();
@@ -522,7 +524,7 @@ export class Brain {
     const asker = batch.find(isDirectRequest);
     // Every stage write of this pass carries the claim taken when the pass began (see StageClaim): nothing it decided
     // lands on a screen someone changed while the model thought.
-    const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(onlyShare ? { requireShare: onlyShare } : {}), ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
+    const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(bind ? { requireShare: bind.shareId, onlyScreen: bind.screen } : {}), ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
     // The pass's stage writes: whether it went up (a screen changed meanwhile, or a share that ended, refuses it).
     const put = (next: Partial<Stage> & { mode: Stage["mode"] }, screen: string) => {
       const before = s.stageRev(screen);
@@ -805,9 +807,10 @@ export class Brain {
           }
           if (!tiles.length) return refuse("None of those tiles resolved. Use artifact ids, share ids and agent ids from the lists, dev server URLs from 'Dev servers on the host', or full public URLs.");
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
-          const screen = screenId(i.screen);
+          const screen = bind && !i.screen ? bind.screen : screenId(i.screen);
           if (!screen) return noScreen();
-          if (onlyShare && !tiles.some((t) => t.kind === "screen" && t.shareId === onlyShare)) return refuse("The layout must include the share you are placing.");
+          if (bind && screen !== bind.screen) return refuse(`Put the share on the screen with id ${bind.screen}, not another one.`);
+          if (bind && !tiles.some((t) => t.kind === "screen" && t.shareId === bind.shareId)) return refuse("The layout must include the share you are placing.");
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
@@ -1046,17 +1049,15 @@ export class Brain {
       const ev = batch.find((e) => e.id === line.id);
       if (!ev || !roomTalk(ev)) continue;
       const text = ev.text;
+      if (line.intent === "present" && refusesScreen(text)) continue;
+      // With no model the simple rules never replace a screen a person put up: they say so and leave the choice to the room.
       const held = line.intent === "present" ? s.lockOf("main") : null;
-      if (held && held.personId !== ev.authorId) {
-        void speak(s, `${held.by} has the screen locked. Unlock it first, or ask ${held.by}.`, { source: speechSource([ev]), kind: "problem" });
+      if (held) {
+        void speak(s, held.personId === ev.authorId ? `Your screen is locked, so I'm leaving it. Unlock it first, or say what to put up once the AI is back.` : `${held.by} has the screen locked. Unlock it first, or ask ${held.by}.`, { source: speechSource([ev]), kind: "problem" });
         this.lockRefused = true;
         continue;
       }
-      // Only a direct request replaces the owner's lock, in the write itself (nothing is released ahead of it). The same
-      // person's overheard line leaves their screen as it is.
-      const direct = isDirectRequest(ev);
-      if (held && !direct) continue;
-      const wo = { claim, ...(direct ? { person: { id: ev.authorId!, name: ev.authorName }, ...(held ? { mayReplaceLock: ev.authorId! } : {}) } : {}) };
+      const wo = { claim, ...(isDirectRequest(ev) ? { person: { id: ev.authorId, name: ev.authorName } } : {}) };
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
         s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", wo);
         continue;
@@ -1548,9 +1549,15 @@ const UNLOCK_YES = new Set(
  * there is one; a request that skipped triage (spoken or typed straight to the brain) is read by its words:
  * a screen verb, and not a wh-question or a yes/no question about something else.
  */
+/** Words that refuse or undo a screen request ("don't show", "stop showing", "hide"): never a request to put something up. */
+export function refusesScreen(text: string) {
+  return /\b(?:don'?t|do not|dont|never|stop|quit|no longer|hide|not now|no need|without)\b|\bnot\s+(?:show|put|bring|pull|display)/i.test(text);
+}
+
 export function asksForScreen(ev: JamEvent) {
   const intent = ev.data?.intent;
   if (typeof intent === "string") return intent === "present";
+  if (refusesScreen(ev.text)) return false;
   const t = ev.text.trim().toLowerCase().replace(/^(?:hey |ok |okay )?(?:jamsesh|jam|the room)[,:]?\s+/, "");
   if (/^(?:what|why|who|when|where|how|which|is|are|do|does|did|has|have)\b/.test(t)) return false;
   return /\b(?:show|put|bring|pull|display|switch|swap|replace|cast|throw|open|pin|unlock|clear|take)\b/.test(t);
@@ -1655,7 +1662,7 @@ export function ruleTriage(batch: JamEvent[]): Triage {
     let relevance: Relevance = "discussion";
     if (!roomTalk(e)) return { id: e.id, relevance, intent, confidence: 0.5 };
     // In order: asking to see something (or how to join), a decision, then a request for work.
-    if (JOIN_WORDS.test(t) || /\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t)) intent = "present";
+    if (!refusesScreen(t) && (JOIN_WORDS.test(t) || /\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t))) intent = "present";
     else if (/\b(let'?s go with|we('re| are) going with|decided|i like (direction|option|variant) [a-z]\b|go with [a-z]\b)/.test(t)) intent = "decision";
     else if (looksLikeRequest(t)) intent = "directive";
     if (/\b(haha|lol|lmao|dude|bro|shut up|your (mom|shirt|face))\b/.test(t) && intent === "none") relevance = "banter";

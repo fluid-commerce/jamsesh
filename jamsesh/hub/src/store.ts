@@ -153,6 +153,32 @@ export class Store {
 
   // ---- settings ----
 
+  private txDepth = 0;
+  /** Everything `fn` writes lands together or not at all (a crash or a throw in between leaves the earlier state). Nests. */
+  atomic<T>(fn: () => T): T {
+    if (this.txDepth++ > 0) {
+      try {
+        return fn();
+      } finally {
+        this.txDepth--;
+      }
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      this.cache.clear();
+      throw e;
+    } finally {
+      this.txDepth--;
+    }
+  }
+
   // ---- replayed calls: the first answer to each idempotency key, kept across restarts for as long
   // as a laptop keeps a change queued (seven days) ----
 

@@ -1063,7 +1063,7 @@ Screen rules:
   shows a compare on its own, unless a person pinned the screen or the brain changed it in the
   last 90 seconds [B12].
 - **New shares.** When someone pushes a share, the brain places it next to the most useful tile;
-  without a model, the share goes first with up to three existing tiles [A5b].
+  without a model, the share goes up alone and fills the screen, and the screen gets back what it showed when the share ends [A5b]. With the main screen held by someone else's lock or pin, it goes to a free extra screen.
 - **Pinning.** A person who picks a view pins it; the brain and agents don't override a pinned
   screen (agents' requests become a toast).
 - **Locks.** What a person puts up is locked, which is stronger than a pin: the brain's show tools,

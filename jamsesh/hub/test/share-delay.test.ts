@@ -159,7 +159,7 @@ test("a share the presenter places on an extra screen gives that screen back wha
   r.s.reportScreen("main", info);
   r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
   r.s.setStage({ mode: "spotlight", items: [r.a.id], title: "Pricing" }, "Chey", "screen-2", { override: true });
-  r.s.setStage({ mode: "agents" }, "Chey", "main", { override: true });
+  r.s.setStage({ mode: "agents", pinned: true }, "Chey", "main", { override: true });
   const sh = r.s.startShare("felipe-laptop", "screen");
   await r.hub.brain.placeShare(sh);
   expect(r.s.stage("screen-2").mode).toBe("layout");
@@ -199,4 +199,65 @@ test("a restart with a live share still gives the screens back what the share hi
   expect(again.store.get("shares", sh.id)?.status).toBe("ended");
   expect(again.stage().mode).toBe("spotlight");
   expect(again.stage().lock?.by).toBe("Felipe");
+});
+
+test("a screen the sharer pinned and locked themself (an HTTP cast is pinned by default) takes their own share on a single display", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], pinned: true }, "Felipe", "main", { person: { id: r.felipe.id, name: "Felipe" } });
+  expect(r.s.stage().pinned).toBe(true);
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("layout");
+  expect(r.s.stage().lock?.by).toBe("Felipe");
+  r.s.endShare(sh.id);
+  expect(r.s.stage().mode).toBe("spotlight");
+});
+
+test("the presenter's set_layout is bound to the screen chosen for the share: another screen, or none (main), is refused", async () => {
+  let said: string[] = [];
+  mock.module("ai", () => ({
+    ...ai,
+    generateText: async (o: any) => {
+      const id = o.prompt.match(/share id (\S+)\)/)[1];
+      said = [];
+      for (const screen of ["main", undefined, "screen-2"]) said.push(String(await o.tools.set_layout.execute({ tiles: [{ kind: "screen", ref: id }], ...(screen ? { screen } : {}) })));
+      return {};
+    },
+  }));
+  const r = room();
+  const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
+  r.s.reportScreen("main", info);
+  r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  // Main is pinned by a person (no lock), so the share is bound for screen-2.
+  r.s.setStage({ mode: "agents", pinned: true }, "Chey", "main", { override: true });
+  r.s.store.setSetting("stage", { ...r.s.stage(), by: "Chey", pinned: true });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("agents");
+  expect(said[0]).toContain("not another one");
+  expect(r.s.stage("screen-2").layout?.tiles.length).toBe(1);
+});
+
+test("an interrupted ending is finished at startup: an ended share whose snapshot remains gives the screen back", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], title: "Pricing" }, "Felipe", "main", { person: { id: r.felipe.id, name: "Felipe" } });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  // The old ending's first write landed (status) and nothing after it.
+  r.s.store.put("shares", { ...r.s.store.get("shares", sh.id)!, status: "ended" });
+  const { Session } = await import("../src/session");
+  const again = new Session(r.s.store);
+  expect(again.stage().mode).toBe("spotlight");
+  expect(again.store.setting<Record<string, unknown>>("beforeShare", {})[sh.id]).toBeUndefined();
+});
+
+test("store.atomic: a throw in the middle undoes every write in it", () => {
+  const r = room();
+  const before = r.s.store.setting("probe", "none");
+  expect(() => r.s.store.atomic(() => { r.s.store.setSetting("probe", "half"); throw new Error("boom"); })).toThrow("boom");
+  expect(r.s.store.setting("probe", "none")).toBe(before);
+  r.s.store.atomic(() => r.s.store.setSetting("probe", "done"));
+  expect(r.s.store.setting("probe", "none")).toBe("done");
 });
