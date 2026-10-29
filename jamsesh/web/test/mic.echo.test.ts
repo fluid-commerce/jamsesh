@@ -6,4 +6,3 @@ test("the brain's echo is dropped, a close voice over it is not", () => {
   expect(isEchoSegment(-60 + BARGE_MARGIN_DB + 3, -60, true)).toBe(false);
   expect(isEchoSegment(-50, -60, false)).toBe(false);
 });
-

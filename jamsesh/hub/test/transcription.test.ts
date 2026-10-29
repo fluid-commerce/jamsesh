@@ -643,6 +643,35 @@ test("a model with the pinned name but the wrong checksum is never used: deleted
   }
 }), 60_000);
 
+test("a corrupt model chosen with JAMSESH_WHISPER_MODEL is passed over after one check, wherever it lives", () => online(async () => {
+  const home = join(dir, "chosen-home");
+  mkdirSync(join(dir, "chosen-elsewhere"), { recursive: true });
+  mkdirSync(join(home, ".cache", "whisper-cpp"), { recursive: true });
+  const chosen = sized(join(dir, "chosen-elsewhere", WHISPER_MODEL.name), WHISPER_MODEL.bytes);
+  const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: chosen, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "chosen-bin")) });
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init?: any) => (String(url) === WHISPER_MODEL.url ? new Response("no") : real(url, init))) as typeof fetch;
+  try {
+    const cache = join(home, ".cache", "whisper-cpp");
+    const other = sized(join(cache, "ggml-base.en.bin"), 147_964_211);
+    // Falls back to another good candidate once the chosen file is in the bad set.
+    expect(findWhisperModel()).toBe(chosen);
+    expect(findWhisperModel(new Set([chosen]))).toBe(other);
+    rmSync(other);
+    const w = new LocalWhisper();
+    expect(await w.start(freePort(), false)).toBeNull();
+    // Checked once, then skipped: not reported installed, and left alone (it isn't in the managed folder).
+    expect(w.status()).toMatchObject({ state: "missing", installed: false });
+    expect(existsSync(chosen)).toBe(true);
+    // A chosen file that is cut short is passed over without any hashing.
+    sized(chosen, 1000);
+    expect(findWhisperModel()).toBeNull();
+  } finally {
+    globalThis.fetch = real;
+    restore();
+  }
+}), 60_000);
+
 test("install.sh downloads the model beside its name and keeps it only when it matches the hub's pin", () => {
   const sh = readFileSync(join(import.meta.dir, "../../install.sh"), "utf8");
   expect(sh).toContain(`WHISPER_SHA256=${WHISPER_MODEL.sha256}`);

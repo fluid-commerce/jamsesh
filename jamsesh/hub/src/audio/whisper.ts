@@ -45,15 +45,14 @@ export function findWhisperServer(): string | null {
 
 /**
  * The model: a chosen file, ~/.jamsesh/models, then what install.sh or a person put in ~/.cache/whisper-cpp.
- * A file cut short (an interrupted download) is passed over; `skip` holds files that failed their checksum.
+ * A file cut short (an interrupted download), chosen or not, is passed over; `skip` holds files that failed their checksum.
  */
 export function findWhisperModel(skip: ReadonlySet<string> = new Set()): string | null {
   const cache = join(process.env.HOME || homedir(), ".cache", "whisper-cpp");
   const chosen = process.env.JAMSESH_WHISPER_MODEL;
-  if (chosen && existsSync(chosen)) return chosen;
   return first(
-    [join(config.home, "models", WHISPER_MODEL.name), join(cache, WHISPER_MODEL.name), join(cache, "ggml-large-v3-turbo.bin"), join(cache, "ggml-medium.en.bin"), join(cache, "ggml-base.en.bin")].filter(
-      (p) => !skip.has(p) && plausible(p),
+    [chosen, join(config.home, "models", WHISPER_MODEL.name), join(cache, WHISPER_MODEL.name), join(cache, "ggml-large-v3-turbo.bin"), join(cache, "ggml-medium.en.bin"), join(cache, "ggml-base.en.bin")].filter(
+      (p) => !!p && !skip.has(p) && plausible(p),
     ),
   );
 }

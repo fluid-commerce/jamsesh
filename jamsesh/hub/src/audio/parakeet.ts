@@ -45,18 +45,18 @@ const hashFile = async (path: string) => {
 export const writeManifest = async (dir: string) => writeFileSync(join(dir, MANIFEST), JSON.stringify(Object.fromEntries(await Promise.all(PARAKEET.files.map(async (f) => [f, await hashFile(join(dir, f))])))));
 
 /**
- * Whether the unpacked files are still the ones that were verified. A folder without a manifest
- * (installed before there was one) is accepted once and recorded; a chosen folder or the app bundle
- * is the person's own and isn't second-guessed.
+ * Whether the unpacked files are still the ones that were verified. A managed folder without a
+ * readable manifest can't be verified, so it isn't intact (the caller reinstalls it from the pinned
+ * archive); a chosen folder or the app bundle is the person's own and isn't second-guessed.
  */
 export async function installedIntact(dir: string, managed = true): Promise<boolean> {
   if (!managed) return true;
-  let want: Record<string, string>;
+  let want: Record<string, unknown>;
   try {
     want = JSON.parse(readFileSync(join(dir, MANIFEST), "utf8"));
+    if (!want || typeof want !== "object") return false;
   } catch {
-    await writeManifest(dir);
-    return true;
+    return false;
   }
   for (const f of PARAKEET.files) if ((await hashFile(join(dir, f))) !== want[f]) return false;
   return true;

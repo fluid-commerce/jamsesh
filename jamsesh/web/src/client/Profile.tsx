@@ -105,6 +105,8 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       return setMsg(`The host couldn't get ready for your read, so nothing was recorded. ${e instanceof Error ? e.message : ""}`.trim());
     }
     let stream: MediaStream | null = null;
+    let tick: ReturnType<typeof setInterval> | undefined;
+    let auto: ReturnType<typeof setTimeout> | undefined;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
       const live = stream;
@@ -112,8 +114,8 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       const mr = new MediaRecorder(live);
       mr.ondataavailable = (e) => chunks.push(e.data);
       const t0 = Date.now();
-      const tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
-      const auto = setTimeout(() => mr.state === "recording" && mr.stop(), 45_000);
+      tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
+      auto = setTimeout(() => mr.state === "recording" && mr.stop(), 45_000);
       mr.onstop = async () => {
         clearInterval(tick);
         clearTimeout(auto);
@@ -144,7 +146,9 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       setSecs(0);
       setState("recording");
     } catch (e) {
-      // No microphone, or the recorder wouldn't start: let the microphone go, and the room is heard again at once.
+      // No microphone, or the recorder wouldn't start: stop the timers, let the microphone go, and the room is heard again at once.
+      clearInterval(tick);
+      clearTimeout(auto);
       stream?.getTracks().forEach((t) => t.stop());
       void endRead(me.id, false);
       setState("error");
