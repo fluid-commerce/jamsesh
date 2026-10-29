@@ -93,6 +93,8 @@ export class Autosave {
       this.lastEventId = lastEvent;
       this.lastCanvasKey = canvasKey;
       this.prune();
+      // No copy from a canvas that was running is a failure too (its host is gone), not just a thrown error.
+      if (!canvas && this.hub.canvas.hostStarted) canvasFailed = true;
       return { id, label, at, canvas, ...(canvasFailed ? { canvasFailed } : {}), dir };
     };
     this.saving = run().finally(() => (this.saving = null));

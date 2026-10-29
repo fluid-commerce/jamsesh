@@ -45,6 +45,8 @@ export class Canvas {
   static START_TRIES = 40;
   private serverProc: ReturnType<typeof Bun.spawn> | null = null;
   host: FigcraftMcp | null = null;
+  /** The canvas host ran at some point: a copy that can't be made after that is a failure, not "no canvas". */
+  hostStarted = false;
   private agents = new Map<string, AgentCanvas>();
   private tracked = new Map<string, Tracked>();
   private touched = new Map<string, { agentId: string; at: number }>();
@@ -162,6 +164,7 @@ export class Canvas {
   private async startHost() {
     const host = await this.spawnParticipant(join(this.filesDir, "host")).init();
     this.host = host;
+    this.hostStarted = true;
     await host.command("pref.userName", { name: "JamSesh" });
     const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
     if (saved) {

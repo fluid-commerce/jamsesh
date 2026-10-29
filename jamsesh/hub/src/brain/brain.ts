@@ -197,8 +197,11 @@ export class Brain {
   private queue: Promise<unknown> = Promise.resolve();
   private exclusive<T>(fn: () => Promise<T>): Promise<T | undefined> {
     const guarded = () => (this.stopped ? Promise.resolve(undefined) : fn());
+    // Counted when queued, not when it starts: every pass is accounted for from the moment it is accepted.
+    this.active++;
     const run = this.queue.then(guarded, guarded);
     this.queue = run.catch(() => {});
+    void run.then(() => this.active--, () => this.active--);
     return run;
   }
 
@@ -304,7 +307,37 @@ export class Brain {
   }
 
   /** Someone spoke to the brain directly (its name, Ask, or a recorded prompt). Always acts or answers. */
-  async direct(ev: JamEvent, extra = "") {
+  /** Anything the brain is working on is counted here, from the moment it is accepted: shutdown waits for the count to reach zero. */
+  private active = 0;
+  private async counted<T>(fn: () => Promise<T>): Promise<T> {
+    this.active++;
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+    }
+  }
+
+  /** What the brain still owes: passes queued or running, direct requests, and overheard lines waiting for their pass. */
+  busy(): string[] {
+    const out: string[] = [];
+    if (this.active > 0) out.push("the brain's requests");
+    if (this.pending.length || this.timer) out.push("overheard speech waiting to be read");
+    return out;
+  }
+
+  /** Starts the pass for lines waiting out the debounce now (a shutdown doesn't wait for them to age). */
+  settle() {
+    if (this.stopped || !this.pending.length) return;
+    if (this.timer) clearTimeout(this.timer);
+    void this.flush();
+  }
+
+  direct(ev: JamEvent, extra = "") {
+    return this.counted(() => this.directRun(ev, extra));
+  }
+
+  private async directRun(ev: JamEvent, extra = "") {
     if (this.stopped || !this.session.settings().brainEnabled) return;
     // Heard you: an instant chime for spoken requests, before any thinking.
     if (!ev.data.typed) chime(this.session, ev.data.deviceId);

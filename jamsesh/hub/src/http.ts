@@ -204,13 +204,13 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // On loopback a request is the host's, except reading an attachment: there a paired agent calling the hub directly
         // is its credential (the route still turns away a local process with neither a credential nor the host's window).
         const readsFile = local && (req.method === "GET" || req.method === "HEAD") && /^\/api\/attachments\/[\w-]+$/.test(path);
-        // The role comes from the credential, never the address: an agent's token over loopback is still an agent (it only ever
-        // lowers a request's standing; a loopback request with no agent credential stays the host's).
-        const agentCredential = () => {
-          const d = fileReader(req);
-          return d?.kind === "agent" ? d : null;
-        };
-        const device = local ? (readsFile ? fileReader(req) : agentCredential()) : hub.auth.check(tokenOf(req, url), ip);
+        // A credential is the caller's role wherever it comes from: an agent's token over loopback is an agent. It only ever
+        // lowers standing; loopback with no credential gets no more than the agents' view of room data (seesAll below).
+        const loopbackCredential = local ? fileReader(req) : null;
+        const device = local ? (readsFile || loopbackCredential?.kind === "agent" ? loopbackCredential : null) : hub.auth.check(tokenOf(req, url), ip);
+        // Who is reading room data: the host's own window (its key), or a paired person's browser. Loopback alone grants nothing:
+        // an agent's token, or no credential at all, gets the agents' view (no Tasks board proposals).
+        const seesAll = hostWindow || (local ? loopbackCredential : device)?.kind === "browser";
         const ok = local || !!device;
 
         if (path === "/") {
@@ -237,7 +237,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: !seesAll } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -254,7 +254,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
           const meant = req.headers.get("x-jam-host");
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
-          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
+          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow, !seesAll));
         }
         // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
         const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
@@ -424,7 +424,7 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   return md(agentGuide(origin, r.token));
 }
 
-async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
+async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false, redact = paired?.kind === "agent"): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
@@ -434,7 +434,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
 
-  if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
+  if (path === "/state") return json(forCaller(s.state(), redact));
   if (path === "/clock") return json({ now: Date.now() });
 
   // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt
@@ -704,7 +704,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
   if (path === "/triage" && req.method === "GET") {
     // Agents don't see proposals nobody has accepted; they read the knowledge, the inbox and the changelog.
-    if (paired?.kind === "agent") return bad("That's for people; agents use their jam_ tools.", 403);
+    if (redact) return bad("That's for people; agents use their jam_ tools.", 403);
     return json({ cards: s.board.shown(), stats: s.board.stats() });
   }
   if (path === "/changelog" && req.method === "GET") return json(s.changelog(Math.min(200, Number(url.searchParams.get("limit")) || 50)).map(publicEvent));

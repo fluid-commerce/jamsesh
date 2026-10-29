@@ -150,8 +150,8 @@ test("once shutdown begins nothing is taken in: typed messages, room lines and p
 test("shutdown waits for accepted work in flight, and names what is still running at the deadline", async () => {
   const r = room();
   let finished = false;
-  r.hub.track("a request to the brain", Bun.sleep(300).then(() => void (finished = true)));
-  expect(r.hub.working()).toEqual(["a request to the brain"]);
+  r.hub.track("a document card", Bun.sleep(300).then(() => void (finished = true)));
+  expect(r.hub.working()).toEqual(["a document card"]);
   expect(await r.hub.shutdown()).toBe(true);
   expect(finished).toBe(true);
   const r2 = room();
@@ -186,34 +186,96 @@ test("a database set up from an export that is rejected is never marked imported
   expect(readProjectContext(dir, fresh.slug)).toBeNull();
 });
 
-test("an agent's credential over loopback is an agent: redacted state, no triage, no live cards, and no speaking as a person", async () => {
+test("over loopback, no credential and an agent's token both get the agents' view of the room; only the host window's key or a person's browser sees the Tasks board", async () => {
   const r = room();
-  r.s.proposeContext({ text: "An unaccepted card", kind: "decision", by: "Chey" });
+  const card = r.s.proposeContext({ text: "An unaccepted card", kind: "decision", by: "Chey" })!;
   const { startHttp } = await import("../src/http");
   const server = startHttp(r.hub, 0);
   try {
+    const key = "ab".repeat(32);
+    r.hub.auth.windows.adopt(key);
     const agent = r.hub.auth.issue({ kind: "agent", label: "An agent", ip: "127.0.0.1", personId: r.chey.id });
-    const auth = { authorization: `Bearer ${agent.token}` };
+    const person = r.hub.auth.issue({ kind: "browser", label: "A laptop", ip: "127.0.0.1", personId: r.chey.id });
     const base = `http://127.0.0.1:${server.port}`;
-    const state = await (await fetch(`${base}/api/state`, { headers: auth })).json();
-    expect(state.triage).toEqual([]);
-    expect(JSON.stringify(state)).not.toContain("An unaccepted card");
-    const list = await fetch(`${base}/api/triage`, { headers: auth });
-    expect(list.status === 403 || JSON.stringify(await list.json()).includes("An unaccepted card") === false).toBe(true);
-    const say = await fetch(`${base}/api/say`, { method: "POST", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ text: "hi" }) });
+    const callers: Record<string, Record<string, string>> = { none: {}, agent: { authorization: `Bearer ${agent.token}` }, host: { cookie: `jam_window=${key}` }, person: { authorization: `Bearer ${person.token}` } };
+    for (const [who, headers] of Object.entries(callers)) {
+      const sees = who === "host" || who === "person";
+      const state = await (await fetch(`${base}/api/state`, { headers })).json();
+      expect(state.triage.length > 0).toBe(sees);
+      const list = await fetch(`${base}/api/triage`, { headers });
+      expect(list.status).toBe(sees ? 200 : 403);
+      // The socket: its first message is the state, then patches.
+      const got: string[] = [];
+      const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=d-${who}`, { headers: { ...headers, origin: base } } as any);
+      ws.onmessage = (m) => got.push(String(m.data));
+      await new Promise((res) => (ws.onopen = res as any));
+      r.s.proposeContext({ text: `A card for ${who}`, kind: "decision", by: "Chey" });
+      await Bun.sleep(250);
+      ws.close();
+      const heard = got.join("");
+      expect(heard.includes(card.text)).toBe(sees);
+      expect(heard.includes(`A card for ${who}`)).toBe(sees);
+    }
+    // An agent's token is still an agent when it asks to speak as a person.
+    const say = await fetch(`${base}/api/say`, { method: "POST", headers: { ...callers.agent, "content-type": "application/json" }, body: JSON.stringify({ text: "hi" }) });
     expect(say.status).toBe(403);
-    // A socket from the same credential gets no triage patches.
-    const got: string[] = [];
-    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=d`, { headers: { ...auth, origin: base } } as any);
-    ws.onmessage = (m) => got.push(String(m.data));
-    await new Promise((res) => (ws.onopen = res as any));
-    r.s.proposeContext({ text: "A second unaccepted card", kind: "decision", by: "Chey" });
-    await Bun.sleep(300);
-    ws.close();
-    expect(got.join("")).not.toContain("unaccepted card");
-    // Without a credential, loopback is still the host's (the window key is what lets it act as one).
-    expect((await fetch(`${base}/api/state`)).status).toBe(200);
   } finally {
     server.stop(true);
   }
+});
+
+// ---------- round 12 ----------
+
+test("the brain counts what it owes from the moment it is accepted: shutdown waits for a queued pass, and starts overheard lines now", async () => {
+  const r = room();
+  const brain = r.hub.brain as any;
+  expect(brain.busy()).toEqual([]);
+  let ran = false;
+  brain.exclusive(async () => {
+    await Bun.sleep(250);
+    ran = true;
+  });
+  expect(brain.busy()).toEqual(["the brain's requests"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(ran).toBe(true);
+  // Lines waiting out the debounce are named, and a shutdown flushes them rather than waiting for the timer.
+  const r2 = room();
+  const b2 = r2.hub.brain as any;
+  b2.pending.push({ id: 1 });
+  b2.timer = setTimeout(() => {}, 60_000);
+  expect(b2.busy()).toEqual(["overheard speech waiting to be read"]);
+  clearTimeout(b2.timer);
+  b2.timer = null;
+  b2.pending.length = 0;
+});
+
+test("a drain with only transcription pending doesn't starve the timers that finish it", async () => {
+  const r = room();
+  let pending = 1;
+  Object.defineProperty(r.hub.audio, "pending", { get: () => pending });
+  setTimeout(() => (pending = 0), 200);
+  expect(await r.hub.shutdown()).toBe(true);
+});
+
+test("stopping the hub with a recording still open hands its held words to the room first", () => {
+  const r = room();
+  const hub = r.hub as any;
+  const t0 = Date.now() - 2000;
+  hub.promptStart("dev1", t0);
+  r.s.store.put("devices", { id: "dev1", personId: r.chey.id, label: "L", kind: "client", lastSeen: Date.now() } as any);
+  const u = { id: "u_held", t0, t1: t0 + 1000, text: "Held words from the recording", personId: r.chey.id, speakerName: "Chey", devices: [{ deviceId: "dev1", db: -20 }], eventId: null, confidence: 1, method: "voice" } as any;
+  r.s.store.put("utterances", u);
+  hub.stop();
+  expect(r.s.store.recentEvents({ limit: 20 }).some((e) => e.text === "Held words from the recording")).toBe(true);
+});
+
+test("a canvas that was running and can't be copied makes the final save fail; no canvas at all doesn't", async () => {
+  const r = room();
+  (r.hub.canvas as any).hostStarted = true;
+  r.hub.canvas.saveCopy = async () => false;
+  const snap = await r.hub.autosave.save("end", {});
+  expect(snap?.canvasFailed).toBe(true);
+  const none = room();
+  const ok = await none.hub.autosave.save("end", {});
+  expect(ok?.canvasFailed).toBeUndefined();
 });

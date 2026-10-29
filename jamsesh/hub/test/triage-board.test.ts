@@ -317,7 +317,8 @@ test("the board's routes: people act through the host window, agents and strange
     expect((await call("GET", "/triage", undefined, { ...far, authorization: `Bearer ${remoteAgent.token}` })).status).toBe(403);
     expect((await call("POST", `/triage/${c.id}/send`, {}, { ...far, authorization: `Bearer ${remoteAgent.token}` })).status).toBe(403);
     // GET shows the cards and what people do with them.
-    const listed = await (await call("GET", "/triage", undefined)).json();
+    expect((await call("GET", "/triage", undefined)).status).toBe(403); // loopback alone is not the host
+    const listed = await (await call("GET", "/triage", undefined, { cookie: win() })).json();
     expect(listed.cards.map((x: any) => x.id).sort()).toEqual([c.id, ctx.id].sort());
     expect(listed.stats.task.open).toBe(1);
 
@@ -348,7 +349,7 @@ test("the board's routes: people act through the host window, agents and strange
     expect(r.s.board.get(next.id)).toMatchObject({ status: "sent", resolvedBy: "Felipe" });
 
     // The live state: a person's copy carries the cards; an agent's, over HTTP and over the socket, never does.
-    expect((await (await call("GET", "/state", undefined)).json()).triage.length).toBeGreaterThan(0);
+    expect((await (await call("GET", "/state", undefined, { cookie: win() })).json()).triage.length).toBeGreaterThan(0);
     expect((await (await call("GET", "/state", undefined, { ...far, authorization: `Bearer ${remoteAgent.token}` })).json()).triage).toEqual([]);
     const seen: any[] = [];
     const sock = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=agent-sock`, { headers: { ...far, authorization: `Bearer ${remoteAgent.token}`, origin: `http://127.0.0.1:${server.port}` } } as any);
@@ -364,7 +365,7 @@ test("the board's routes: people act through the host window, agents and strange
     expect(seen.some((m) => m.type === "patch" && m.key === "facts")).toBe(true);
 
     // The live state carries the board, and the changelog is readable.
-    const state = await (await call("GET", "/state", undefined)).json();
+    const state = await (await call("GET", "/state", undefined, { cookie: win() })).json();
     expect(state.triage.some((x: any) => x.status === "sent")).toBe(true);
     r.s.postUpdate(r.mobile.id, "shipped", "Tabs are in");
     expect((await (await call("GET", "/changelog", undefined)).json()).map((e: any) => e.text)).toEqual(["Tabs are in"]);

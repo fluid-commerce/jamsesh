@@ -184,8 +184,10 @@ export class Hub {
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
-    // Intake stops first; then accepted work still running (a request to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
+    // Intake stops first; then accepted work still running (requests to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
     this.closing = true;
+    // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
+    for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
     const docs = !unfinished.length && !this.documentLost;
@@ -205,13 +207,15 @@ export class Hub {
     this.canvas.stop();
     this.transcriber.stop();
     this.devproxy.stop();
+    // A recording still open when the hub stops hands what it held back to the room before its fallback timer goes.
+    for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
     for (const t of this.intervals.splice(0)) clearInterval(t);
     this.session.stop();
   }
 
   private intervals: ReturnType<typeof setInterval>[] = [];
-  /** Every unit of accepted work still running (a request to the brain, a prompt window, a document card), by what it is. */
+  /** Every unit of accepted work still running (requests to the brain, a prompt window, a document card), by what it is. */
   private inflight = new Map<Promise<unknown>, string>();
   /** Registers accepted work: shutdown waits for it. Failures stay the caller's to report; the registry only needs to know it ended. */
   track<T>(what: string, work: Promise<T>): Promise<T> {
@@ -224,7 +228,7 @@ export class Hub {
   working(): string[] {
     const names = [...new Set(this.inflight.values())];
     if (this.audio.pending > 0) names.push("transcription of speech");
-    return names;
+    return [...names, ...this.brain.busy()];
   }
 
   /** Waits until nothing is working or the time is up; the names of whatever still is. */
@@ -232,7 +236,9 @@ export class Hub {
     const until = Date.now() + ms;
     for (let names = this.working(); names.length; names = this.working()) {
       if (Date.now() >= until) return names;
-      await Promise.race([Promise.all([...this.inflight.keys()]), Bun.sleep(50)]);
+      // Lines waiting out the brain's debounce start their pass now; then poll on a timer, so the settle and transcription timers get to run.
+      this.brain.settle();
+      await Bun.sleep(50);
     }
     return [];
   }
@@ -348,7 +354,7 @@ export class Hub {
       });
       this.track("a document card", pending);
     }
-    else if (direct) this.track("a request to the brain", this.brain.direct(ev));
+    else if (direct) this.brain.direct(ev);
     // Pictures with no words have nothing to triage; the feed shows them.
     else if (words) this.brain.hear(ev);
     return ev;
@@ -431,7 +437,7 @@ export class Hub {
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
     // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
     for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
-    this.track("a request to the brain", this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : ""));
+    this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
     return { ok: true, eventId: ev.id, text: said, pointed: marks };
   }
 
@@ -453,7 +459,7 @@ export class Hub {
       data: { direct: true, typed: true, annotations: open.map((a) => a.id) },
     });
     for (const a of open) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
-    this.track("a request to the brain", this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed."));
+    this.brain.direct(ev, "These are pins people dropped on the canvas, builds and screens. Group them by what they're about and send each group to the agent that owns that work (one directive per agent), quoting each note with where it was placed.");
     return ev;
   }
 
