@@ -1152,13 +1152,13 @@ export class Session {
    * item of the same stage with the same title once "(built)" and version marks are dropped.
    * `replaces` that names nothing usable throws, so the agent hears it.
    */
-  upsertVersion(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, replaces?: string): Artifact {
+  upsertVersion(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, replaces?: string, fold = true): Artifact {
     let prior: Artifact | undefined;
     if (replaces) {
       prior = this.store.get("artifacts", replaces);
       if (!prior) throw new Error(`No artifact ${replaces} to replace. Use jam_artifacts for ids.`);
       if (prior.agentId !== (a.agentId ?? null)) throw new Error("That item belongs to someone else's agent; post yours as a new item.");
-    } else if (a.kind === "screenshot" || a.kind === "html") {
+    } else if (fold && (a.kind === "screenshot" || a.kind === "html")) {
       const key = buildKey(a.title);
       prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(x.title) === key);
     }

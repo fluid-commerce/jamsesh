@@ -356,7 +356,7 @@ test("a request whose body doesn't arrive whole runs nothing, and the same key s
 // ---- images: whole before anything is written; a photo is its own person's; an agent posts from its own machine
 
 /** A real w x h grey PNG. */
-function png(w = 2, h = 2) {
+function png(w = 2, h = 2, rowsOverride?: Uint8Array) {
   const chunk = (type: string, data: Uint8Array) => {
     const out = new Uint8Array(12 + data.length);
     const v = new DataView(out.buffer);
@@ -373,7 +373,7 @@ function png(w = 2, h = 2) {
   ihdr.set([8, 0, 0, 0, 0], 8);
   const rows = new Uint8Array(h * (w + 1)).fill(128);
   for (let y = 0; y < h; y++) rows[y * (w + 1)] = 0;
-  const parts = [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(rows))), chunk("IEND", new Uint8Array())];
+  const parts = [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(rowsOverride ?? rows))), chunk("IEND", new Uint8Array())];
   const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0));
   let at = 0;
   for (const p of parts) (out.set(p, at), (at += p.length));
@@ -409,26 +409,60 @@ test("a photo is its own person's: another person's laptop can't set it; a broke
   expect(hub.session.person(q.id)?.photo).toBeFalsy();
 });
 
-test("an agent posts a screenshot as itself only from its own machine; another's screenshot isn't its to replace", async () => {
-  const mine = hub.auth.issue({ kind: "agent", label: "My agent", ip: "10.0.0.31" });
-  const theirs = hub.auth.issue({ kind: "agent", label: "Their agent", ip: "10.0.0.32" });
-  const a = hub.session.registerAgent({ ownerName: "Me", harness: "claude-code", repo: "r", cwd: "/a", machine: hub.auth.machineOf(mine.device.id)!, platform: "desktop" }).agent;
-  const b = hub.session.registerAgent({ ownerName: "Them", harness: "claude-code", repo: "r", cwd: "/b", machine: hub.auth.machineOf(theirs.device.id)!, platform: "desktop" }).agent;
-  const posted = await post(theirs.token, "/upload", formOf(png(), { agent: b.id, title: "Theirs" }));
+test("over HTTP an agent posts only as one of its own machine's agents, always as a new item; versions are the host's or jam_post_image's", async () => {
+  const mine = hub.auth.issue({ kind: "agent", label: "My agents", ip: "10.0.0.31" });
+  const theirs = hub.auth.issue({ kind: "agent", label: "Their agents", ip: "10.0.0.32" });
+  const reg = (owner: string, cwd: string, cred: { device: { id: string } }) => hub.session.registerAgent({ ownerName: owner, harness: "claude-code", repo: "r", cwd, machine: hub.auth.machineOf(cred.device.id)!, platform: "desktop" }).agent;
+  const a = reg("Me", "/a", mine);
+  const a2 = reg("Me", "/a2", mine);
+  const b = reg("Them", "/b", theirs);
+  const posted = await post(theirs.token, "/upload", formOf(png(), { agent: b.id, title: "Checkout (built)" }));
   expect(posted.status).toBe(200);
   const theirShot = (await posted.json()).id;
+  const mineShot = (await (await post(mine.token, "/upload", formOf(png(), { agent: a.id, title: "Nav" }))).json()).id;
   const before = uploads();
-  // Naming the other machine's agent, or replacing its screenshot: refused, nothing written.
+  const items = () => hub.session.artifacts().length;
+  const count = items();
+  // Another machine's agent, nobody's (the room's), an unknown agent, or any replacement: refused, nothing written.
   expect((await post(mine.token, "/upload", formOf(png(), { agent: b.id }))).status).toBe(403);
-  expect((await post(mine.token, "/upload", formOf(png(), { agent: a.id, replaces: theirShot }))).status).toBe(403);
+  expect((await post(mine.token, "/upload", formOf(png(), {}))).status).toBe(403);
   expect((await post(mine.token, "/upload", formOf(png(), { agent: "agent_nobody" }))).status).toBe(404);
-  // A truncated image: 400, and no file is left behind.
-  expect((await post(mine.token, "/upload", formOf(png().slice(0, 30), { agent: a.id }))).status).toBe(400);
+  for (const replaces of [theirShot, mineShot]) expect((await post(mine.token, "/upload", formOf(png(), { agent: a2.id, replaces }))).status).toBe(403);
   expect(uploads()).toBe(before);
-  // Its own agent: taken. The host's window may post for any agent.
-  expect((await post(mine.token, "/upload", formOf(png(), { agent: a.id }))).status).toBe(200);
-  const win = `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
-  expect((await fetch(`${base}/api/upload`, { method: "POST", headers: { cookie: win }, body: formOf(png(), { agent: b.id, replaces: theirShot }) })).status).toBe(200);
+  expect(items()).toBe(count);
+  // The same title from another agent on the same machine is a new item, not a version of a's.
+  const same = await (await post(mine.token, "/upload", formOf(png(), { agent: a2.id, title: "Nav" }))).json();
+  expect(same.id).not.toBe(mineShot);
+  expect(hub.session.store.get("artifacts", mineShot)?.version ?? 1).toBe(1);
+  // The host's window may post for any agent and make versions; a replacement that names nothing writes nothing.
+  const win = () => `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
+  const asHost = (form: FormData) => fetch(`${base}/api/upload`, { method: "POST", headers: { cookie: win() }, body: form });
+  const filesBefore = uploads();
+  expect((await asHost(formOf(png(), { agent: b.id, replaces: "art_nothing" }))).status).toBe(400);
+  expect(uploads()).toBe(filesBefore);
+  expect((await asHost(formOf(png(), { agent: b.id, replaces: theirShot }))).status).toBe(200);
+  expect(hub.session.store.get("artifacts", theirShot)?.version).toBe(2);
+});
+
+test("an image with no picture in it (a PNG without image data, a JPEG without a scan) is a 400 for a photo and an upload", async () => {
+  const p = hub.session.upsertPerson({ name: "Nel" });
+  const lap = browser("Nel's laptop");
+  expect((await call(lap.token, "POST", "/devices", { deviceId: "d-nel", personId: p.id })).status).toBe(200);
+  const whole = png();
+  // Drop the IDAT chunk: IHDR (8+25 bytes) then IEND (last 12).
+  const noData = new Uint8Array([...whole.subarray(0, 33), ...whole.subarray(whole.length - 12)]);
+  // Right chunks and CRCs, but image data with too few pixels for its size.
+  const fewPixels = png(2, 2, new Uint8Array(3));
+  const jpegNoScan = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0, 0xff, 0xd9]);
+  const jpegEmptyScan = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0, 0xff, 0xda, 0, 8, 1, 1, 0, 0, 0x3f, 0, 0xff, 0xd9]);
+  const before = uploads();
+  for (const broken of [noData, fewPixels, jpegNoScan, jpegEmptyScan]) {
+    expect((await post(lap.token, `/people/${p.id}/photo`, broken, { "content-type": "image/png" })).status).toBe(400);
+  }
+  const agentCred = hub.auth.issue({ kind: "agent", label: "Nel's agents", ip: "10.0.0.33" });
+  const ag = hub.session.registerAgent({ ownerName: "Nel", harness: "claude-code", repo: "r", cwd: "/n", machine: hub.auth.machineOf(agentCred.device.id)!, platform: "desktop" }).agent;
+  for (const broken of [noData, fewPixels, jpegNoScan, jpegEmptyScan]) expect((await post(agentCred.token, "/upload", formOf(broken, { agent: ag.id }))).status).toBe(400);
+  expect(uploads()).toBe(before);
 });
 
 test("a form that arrived whole but is broken is a 400 (the sender's error), not a 408 to retry", async () => {

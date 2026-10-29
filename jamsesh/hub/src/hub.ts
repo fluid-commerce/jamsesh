@@ -1,6 +1,6 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
-import { checkImage } from "./image";
-import { mkdirSync } from "node:fs";
+import { BadImage, checkImage } from "./image";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
@@ -419,28 +419,34 @@ export class Hub {
     return this.session.setPhoto(personId, `/renders/uploads/${file}`);
   }
 
-  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string }): Promise<Artifact> {
+  /**
+   * A screenshot: checked whole (BadImage, the sender's error) and its replacement checked before anything is
+   * written; a file whose item then can't be stored is removed. `fold: false` makes it a new item, never the next
+   * version of an earlier one by title (for callers that can't prove which agent they are).
+   */
+  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string; fold?: boolean }): Promise<Artifact> {
     if (bytes.length > 12 * 1024 * 1024) throw new BadImage("Images must be under 12 MB.");
-    // A whole PNG or JPEG, checked before anything is written: a broken one leaves no file behind.
     const img = checkImage(bytes);
     if (typeof img === "string") throw new BadImage(img);
+    if (meta.replaces) {
+      const prior = this.session.store.get("artifacts", meta.replaces);
+      if (!prior) throw new BadImage(`No artifact ${meta.replaces} to replace. Use jam_artifacts for ids.`);
+      if (prior.agentId !== (agent?.id ?? null)) throw new BadImage("That item belongs to someone else's agent; post yours as a new item.");
+    }
     const file = `${newId("up")}.${img.kind === "jpeg" ? "jpg" : "png"}`;
-    await Bun.write(join(this.uploadsDir, file), bytes);
-    const size = img;
-    const art = this.session.upsertVersion(
-      {
-        kind: "screenshot",
-        stage: meta.stage,
-        title: meta.title,
-        note: meta.note ?? "",
-        image: `/renders/uploads/${file}`,
-        agentId: agent?.id ?? null,
-        platform: meta.platform,
-        width: size?.width ?? null,
-        height: size?.height ?? null,
-      },
-      meta.replaces,
-    );
+    const path = join(this.uploadsDir, file);
+    await Bun.write(path, bytes);
+    let art: Artifact;
+    try {
+      art = this.session.upsertVersion(
+        { kind: "screenshot", stage: meta.stage, title: meta.title, note: meta.note ?? "", image: `/renders/uploads/${file}`, agentId: agent?.id ?? null, platform: meta.platform, width: img.width, height: img.height },
+        meta.replaces,
+        meta.fold ?? true,
+      );
+    } catch (e) {
+      rmSync(path, { force: true });
+      throw e;
+    }
     this.brain.artifactsLanded([art]);
     return art;
   }
@@ -739,8 +745,6 @@ export class Hub {
   }
 }
 
-/** An image that isn't a whole PNG or JPEG (or is too big): the sender's error. */
-export class BadImage extends Error {}
 
 /** One handover by a hook or the listener, waiting for the hook script to acknowledge it (Hub.offer). */
 type Delivery = { id: string; at: number; via: "hook" | "listen"; directives: string[]; msgUpTo: number; decisionUpTo: number };

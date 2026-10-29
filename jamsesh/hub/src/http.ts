@@ -1,6 +1,5 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
-import { checkImage } from "./image";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
@@ -12,6 +11,7 @@ import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
+import { BadImage } from "./image";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
@@ -705,27 +705,32 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const form = body?.__form as FormData | undefined;
     const bytes: unknown = body?.__files?.file;
     if (!(form instanceof FormData) || !(bytes instanceof Uint8Array)) return bad("send the image as form field 'file'");
-    const img = checkImage(bytes);
-    if (typeof img === "string") return bad(img);
-    // An agent posts as itself only from its own machine (its credential's, or the host's own windows for the host's
-    // agents); the host's window may post for any. Anyone else naming an agent is refused.
+    // Who it's from. The host's window posts for anyone, or for the room (no agent), and may make versions. Anyone
+    // else posts as one of its own machine's agents. A machine's agents share its credential, so a post over HTTP
+    // can't prove which of them sent it: it is always a new item, never a version of an earlier one (an agent makes
+    // versions with jam_post_image, which knows which agent it is).
     const named = String(form.get("agent") ?? "");
     const agent = named ? s.agent(named) ?? null : null;
     if (named && !agent) return bad("No such agent.", 404);
-    const machine = hostWindow ? "host" : paired ? hub.auth.machineOf(paired.id) : null;
-    if (agent && !hostWindow && agent.machine !== machine) return bad("That agent is on another machine; post as yourself.", 403);
-    // A replaced artifact must be one this agent (or, for the host window, anyone) posted.
-    const replaces = String(form.get("replaces") ?? "") || undefined;
-    const old = replaces ? s.store.get("artifacts", replaces) : undefined;
-    if (replaces && old && !hostWindow && (!agent || old.agentId !== agent.id)) return bad("That screenshot isn't yours to replace.", 403);
-    const art = await hub.saveUpload(agent, bytes, {
-      title: String(form!.get("title") ?? "Screenshot"),
-      stage: form!.get("stage") === "mockup" ? "mockup" : "built",
-      note: String(form!.get("note") ?? ""),
-      platform: (form!.get("platform") as any) ?? undefined,
-      replaces,
-    });
-    return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
+    if (!hostWindow) {
+      if (!agent) return bad("Name your agent (-F agent=<id>); only the host posts for the room.", 403);
+      if (agent.machine !== (paired ? hub.auth.machineOf(paired.id) : null)) return bad("That agent is on another machine; post as yourself.", 403);
+      if (form.get("replaces")) return bad("To post a new version of a screen, use jam_post_image with replaces.", 403);
+    }
+    try {
+      const art = await hub.saveUpload(agent, bytes, {
+        title: String(form.get("title") ?? "Screenshot"),
+        stage: form.get("stage") === "mockup" ? "mockup" : "built",
+        note: String(form.get("note") ?? ""),
+        platform: (form.get("platform") as any) ?? undefined,
+        replaces: hostWindow ? String(form.get("replaces") ?? "") || undefined : undefined,
+        fold: hostWindow,
+      });
+      return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
+    } catch (e) {
+      if (e instanceof BadImage) return bad(e.message);
+      throw e;
+    }
   }
 
   // Claude Code's hooks. They speak for an agent, so only an agent's credential sends them, or the
@@ -861,9 +866,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const sent: unknown = body?.__raw ?? body?.__files?.file;
     const bytes = sent instanceof Uint8Array ? sent : new Uint8Array();
     // What the sender got wrong (no file, not a whole JPEG or PNG) is a 400, not the host's error.
-    const img = checkImage(bytes);
-    if (typeof img === "string") return bad(img);
-    return json(await hub.savePhoto(m[1], bytes));
+    try {
+      return json(await hub.savePhoto(m[1], bytes));
+    } catch (e) {
+      if (e instanceof BadImage) return bad(e.message);
+      throw e;
+    }
   }
 
   // ---- prompts addressed to the brain ----
