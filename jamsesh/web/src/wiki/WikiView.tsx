@@ -2,7 +2,7 @@
 // the host share it; the host passes `big` for the larger type.
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useLayout } from "../client/mobile";
-import { api } from "../shared/hub";
+import { cast } from "../client/CastPicker";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { onWikiOpen, takePendingWikiPage } from "./nav";
@@ -268,7 +268,7 @@ function GraphPane({ wiki, phone, onOpen }: { wiki: WikiData; phone: boolean; on
       </ul>
       <div className="wk-hint">
         <span>{phone ? "Tap a dot to look, tap again to open." : "Hover to see what a page links with. Click to open. Press / to search."}</span>
-        <button className="btn small" onClick={() => api("/stage", { mode: "wiki", pinned: true, by: "Someone in the room" })} title="Put the graph on the big screen">On the big screen</button>
+        <button className="btn small" onClick={() => void cast({ mode: "wiki", pinned: true, by: "Someone in the room" })} title="Put the graph on the big screen">On the big screen</button>
       </div>
     </div>
   );

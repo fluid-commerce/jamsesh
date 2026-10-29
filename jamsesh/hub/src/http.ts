@@ -896,12 +896,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // The project wiki (12.8). People read, search and edit; agents use the jam_wiki_* tools and can't edit pages.
   if (path === "/wiki" || path.startsWith("/wiki/")) {
     if (paired?.kind === "agent") return bad("That's for people; agents use the jam_wiki_ tools.", 403);
-    // Who writes is who is signed in: a paired person's own device, or the host's window as its person. Never a
-    // personId in the body, which any caller could fill in (HUMAN_ONLY above already refused other loopback callers).
-    const p = paired ? (paired.personId ? s.person(paired.personId) : undefined) : hostWindow ? s.person(s.store.setting<string>("hostPersonId", "")) : undefined;
+    // Who writes is the acting person (actor above): a paired device's own person, whatever the body says, or for
+    // the host's own windows the person they name, else the person at the host. Other loopback callers were refused above.
+    const actingAs = actor();
     // Every change to the wiki names a person, the host's own window included.
-    if (req.method !== "GET" && !p) return bad("Pick who you are in this window first.", 403);
-    const who = { id: p?.id ?? null, name: p?.name ?? "Someone" };
+    if (req.method !== "GET" && !actingAs.id) return bad("Pick who you are in this window first.", 403);
+    const who = { id: actingAs.id, name: actingAs.id ? actingAs.name : "Someone" };
     const r = await wikiRoute(hub.wiki, req.method, path, url, body, who);
     if (r) return Response.json(r.body, { status: r.status, headers: { "cache-control": "no-store" } });
   }

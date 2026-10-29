@@ -914,6 +914,11 @@ test("the host's window must pick a person before it changes the wiki or resolve
     expect((await call("POST", `/triage/${card.id}/add`, {})).status).toBe(403);
     expect((await call("POST", `/triage/${card.id}/dismiss`, {})).status).toBe(403);
     expect(r.s.board.get(card.id)!.status).toBe("open");
+    // Like every other person's route (actor), the host's window may name who is acting; a name nobody has is no one.
+    expect((await call("POST", "/wiki/sources", { text: "nobody", personId: "p_nobody" })).status).toBe(403);
+    const named = await call("POST", "/wiki/sources", { text: "named", personId: r.chey.id });
+    expect(named.status).toBe(201);
+    expect(r.w.readSource((await named.json()).source.id)!.by).toBe("Chey");
     r.s.store.setSetting("hostPersonId", r.chey.id);
     expect((await call("POST", `/triage/${card.id}/add`, {})).status).toBe(200);
     expect(readLog(r.dir)[0].text).toContain("accepted by Chey");
