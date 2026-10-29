@@ -119,6 +119,25 @@ test("families the Mac didn't get to are asked again, not marked absent", async 
   expect(loaded).toEqual(["A", "B"]);
 });
 
+test("a family the Mac sent only in part is not settled and stays listed as substituted", async () => {
+  const { fc, loaded } = fakeCanvas(["Acme", "Huge"]);
+  const invoke = async () => ({
+    // Acme: one file arrived, another was over the limit. Huge: nothing arrived (all its files too big).
+    fonts: [{ family: "Acme", data: btoa("Acme") }],
+    deferred: [],
+    incomplete: ["Acme", "Huge"],
+  });
+  const tried = new FontTries();
+  const left = await loadLocalFonts(fc, invoke, tried);
+  expect(loaded).toEqual(["Acme"]);
+  expect(left.sort()).toEqual(["Acme", "Huge"]);
+  expect(tried.done.has("acme")).toBe(false);
+  expect(tried.done.has("huge")).toBe(false);
+  // Not asked again until the backoff, but still listed.
+  expect((await loadLocalFonts(fc, invoke, tried)).sort()).toEqual(["Acme", "Huge"]);
+  expect(tried.due("Huge", Date.now() + 5_001)).toBe(true);
+});
+
 test("in a browser there's no Mac to ask: the missing families are only listed", async () => {
   const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
   expect(await loadLocalFonts(fc, null, new FontTries())).toEqual(["Helvetica Neue"]);

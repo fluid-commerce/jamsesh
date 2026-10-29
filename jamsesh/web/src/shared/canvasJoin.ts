@@ -177,6 +177,8 @@ export async function missingFamilies(fc: Fc): Promise<string[]> {
 /** Which families a canvas is done asking the Mac for (loaded, or this Mac doesn't have them), and when to try again those whose load failed. */
 export class FontTries {
   done = new Set<string>();
+  /** Families the Mac has only in part (a file too big or unreadable, or some faces failed): listed as substituted, retried with backoff. */
+  partial = new Set<string>();
   private retry = new Map<string, { n: number; at: number }>();
   /** Whether to ask for a family now. */
   due(family: string, now = Date.now()) {
@@ -185,6 +187,7 @@ export class FontTries {
   }
   settle(family: string) {
     this.done.add(family.toLowerCase());
+    this.partial.delete(family);
     this.retry.delete(family.toLowerCase());
   }
   /** A load that failed for a passing reason: ask again after 5 s, 10 s, 20 s … up to 5 minutes. */
@@ -204,18 +207,21 @@ export class FontTries {
 export async function loadLocalFonts(fc: Fc, invoke: Invoke | null, tries: FontTries): Promise<string[]> {
   const missing = await missingFamilies(fc);
   const ask = missing.filter((f) => tries.due(f));
-  if (!invoke || !ask.length) return missing;
+  const listed = (left: string[]) => [...left, ...[...tries.partial].filter((f) => !left.includes(f))];
+  if (!invoke || !ask.length) return listed(missing);
   let fonts: { family: string; data: string }[];
   let deferred: string[];
+  let incomplete: string[] = [];
   try {
     const r = await invoke("local_fonts", { families: ask });
     // One entry per font file; `deferred` names the families the Mac didn't get to (asked again next time).
     fonts = Array.isArray(r) ? r : r?.fonts;
     deferred = Array.isArray(r) ? [] : r?.deferred ?? [];
-    if (!Array.isArray(fonts) || !Array.isArray(deferred)) throw new Error("no font list");
+    incomplete = Array.isArray(r) ? [] : r?.incomplete ?? [];
+    if (!Array.isArray(fonts) || !Array.isArray(deferred) || !Array.isArray(incomplete)) throw new Error("no font list");
   } catch {
     for (const f of ask) tries.failed(f);
-    return missing;
+    return listed(missing);
   }
   const files = new Map<string, string[]>();
   for (const f of fonts) {
@@ -223,24 +229,30 @@ export async function loadLocalFonts(fc: Fc, invoke: Invoke | null, tries: FontT
     files.set(k, [...(files.get(k) ?? []), f.data]);
   }
   const later = new Set(deferred.map((f) => String(f).toLowerCase()));
+  const partial = new Set(incomplete.map((f) => String(f).toLowerCase()));
   for (const family of ask) {
     const k = family.toLowerCase();
     if (later.has(k) && !files.has(k)) continue; // not looked at yet: neither settled nor failed
     const mine = files.get(k);
-    if (!mine) {
+    if (!mine && !partial.has(k)) {
       tries.settle(family); // this Mac doesn't have it
       continue;
     }
     let ok = true;
-    for (const data of mine) {
+    for (const data of mine ?? []) {
       try {
         await fc.execute("text.loadFont", { data }); // every face of the family, each in its own file
       } catch {
         ok = false;
       }
     }
-    if (ok) tries.settle(family);
-    else tries.failed(family);
+    // Settled only when the Mac sent every file and every one loaded.
+    if (ok && !partial.has(k)) tries.settle(family);
+    else {
+      tries.failed(family);
+      tries.partial.add(family); // stays listed as substituted until a load completes it
+    }
   }
-  return fonts.length ? missingFamilies(fc) : missing;
+  const left = fonts.length ? await missingFamilies(fc) : missing;
+  return listed(left);
 }

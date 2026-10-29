@@ -82,6 +82,9 @@ pub struct LocalFonts {
     /// this response ([`MAX_TOTAL`]): ask for them again. A family absent from both lists and from
     /// `fonts` is one this Mac doesn't have.
     pub deferred: Vec<String>,
+    /// Families this Mac has but that did not arrive whole: a file over [`MAX_FILE`], one that
+    /// couldn't be read, or too many for one response. The page keeps showing them as substituted.
+    pub incomplete: Vec<String>,
 }
 
 /// The font files of the families this Mac has, read and base64-encoded: each file once, files
@@ -110,12 +113,14 @@ fn read_files_capped(found: Vec<(String, Vec<PathBuf>)>, max_total: u64) -> Loca
     let mut total = 0u64;
     let mut out = LocalFonts::default();
     for (family, files) in found {
-        let sizes: Vec<(PathBuf, u64)> = files
-            .into_iter()
-            .filter(|p| !sent.contains(p))
-            .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len())))
-            .filter(|(_, len)| *len <= MAX_FILE)
-            .collect();
+        let mut whole = true;
+        let mut sizes: Vec<(PathBuf, u64)> = Vec::new();
+        for p in files.into_iter().filter(|p| !sent.contains(p)) {
+            match std::fs::metadata(&p) {
+                Ok(m) if m.len() <= MAX_FILE => sizes.push((p, m.len())),
+                _ => whole = false, // too big, or can't be read
+            }
+        }
         let size: u64 = sizes.iter().map(|(_, len)| len).sum();
         if total > 0 && total + size > max_total {
             out.deferred.push(family);
@@ -123,12 +128,19 @@ fn read_files_capped(found: Vec<(String, Vec<PathBuf>)>, max_total: u64) -> Loca
         }
         for (path, len) in sizes {
             if total + len > max_total {
-                continue; // a family too big for one response sends what fits
+                whole = false; // a family too big for one response sends what fits
+                continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(bytes) = std::fs::read(&path) else {
+                whole = false;
+                continue;
+            };
             total += bytes.len() as u64;
             sent.insert(path);
             out.fonts.push(LocalFont { family: family.clone(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
+        }
+        if !whole {
+            out.incomplete.push(family);
         }
     }
     out
@@ -200,6 +212,15 @@ mod tests {
         let names: Vec<_> = got.fonts.iter().map(|f| f.family.as_str()).collect();
         assert_eq!(names, ["A", "A", "C"]);
         assert_eq!(got.deferred, ["B"]);
+        assert!(got.incomplete.is_empty());
+        // A family that doesn't arrive whole is named, so the page doesn't settle it: here the cap fits one of its two files…
+        let got = read_files_capped(vec![("D".to_string(), vec![file("d1.ttf", 30), file("d2.ttf", 30)])], 40);
+        assert_eq!(got.fonts.len(), 1);
+        assert_eq!(got.incomplete, ["D"]);
+        // …and a file that can't be read (gone) does the same.
+        let got = read_files_capped(vec![("E".to_string(), vec![file("e1.ttf", 3), dir.join("missing.ttf")])], 40);
+        assert_eq!(got.fonts.len(), 1);
+        assert_eq!(got.incomplete, ["E"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
