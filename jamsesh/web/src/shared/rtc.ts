@@ -133,6 +133,18 @@ export async function capture(kind: Kind): Promise<MediaStream> {
 export async function publish(kind: Kind, shareId: string = `sh-${rid()}${rid()}`): Promise<Publication> {
   init();
   if (pubs.has(shareId)) return pubs.get(shareId)!;
+  // One picker per kind at a time: a second start while the first is still choosing gets that capture,
+  // so no stream is ever acquired that Stop can't reach.
+  const pending = capturing.get(kind);
+  if (pending) return pending;
+  const started = startCapture(kind, shareId).finally(() => capturing.delete(kind));
+  capturing.set(kind, started);
+  return started;
+}
+
+const capturing = new Map<Kind, Promise<PubInternal>>();
+
+async function startCapture(kind: Kind, shareId: string): Promise<PubInternal> {
   const stream = await capture(kind);
   const pub: PubInternal = { shareId, kind, stream, peers: new Map(), stopped: false, since: Date.now() };
   pubs.set(shareId, pub);

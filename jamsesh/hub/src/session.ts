@@ -51,11 +51,16 @@ const ASKED_WINDOW_MS = 30 * 60_000;
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
   router: "anthropic/claude-sonnet-5.5",
-  presenter: "anthropic/claude-sonnet-5.5",
   digest: "google/gemini-3.5-flash",
   speech: "microsoft/mai-voice-2.1",
   transcribe: "openai/gpt-transcribe",
 };
+
+/** The room's model choices for the roles that exist: a role that was dropped (an older room's "presenter") doesn't come back. */
+function knownModels(stored: Partial<Settings["models"]>): Settings["models"] {
+  const merged: Record<string, string> = { ...DEFAULT_MODELS, ...stored };
+  return Object.fromEntries(Object.keys(DEFAULT_MODELS).map((k) => [k, merged[k]])) as Settings["models"];
+}
 
 /** The old default speech model is the one rooms were never asked about; they move to the current default with it. */
 function withCurrentSpeech(models: Settings["models"]): Settings["models"] {
@@ -159,7 +164,7 @@ export class Session {
       brainEnabled: s.setting("brainEnabled", true),
       voiceReplies: s.setting("voiceReplies", true),
       voice: s.setting("voice", ""),
-      models: withCurrentSpeech({ ...DEFAULT_MODELS, ...s.setting<Partial<Settings["models"]>>("models", {}) }),
+      models: withCurrentSpeech(knownModels(s.setting<Partial<Settings["models"]>>("models", {}))),
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),

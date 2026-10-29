@@ -603,7 +603,6 @@ export interface Settings {
   models: {
     triage: string;
     router: string;
-    presenter: string;
     digest: string;
     speech: string;
     transcribe: string;

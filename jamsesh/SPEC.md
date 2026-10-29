@@ -983,7 +983,6 @@ it, and every model is a setting [B49]:
 |---|---|---|
 | `triage` | `google/gemini-3.5-flash-lite` | Sorting every incoming line; fast and cheap |
 | `router` | `anthropic/claude-sonnet-5.5` | Routing, direct requests, parity checks, every tool call |
-| `presenter` | `anthropic/claude-sonnet-5.5` | Placing a new screen share on the big screen |
 | `digest` | `google/gemini-3.5-flash` | Session brief, workstream briefs, fact curation |
 | `speech` | `microsoft/mai-voice-2.1` (the provider's default voice) | Speaking to the room [B46] |
 | `transcribe` | `openai/gpt-transcribe` | Transcription when no local engine is available |
@@ -1167,8 +1166,10 @@ Screen rules:
 - **Self-piloting.** When a variant group of 2 to 6 has all updated within 60 seconds, the screen
   shows a compare on its own, unless a person pinned the screen or the brain changed it in the
   last 90 seconds [B12].
-- **New shares.** When someone pushes a share, the brain places it next to the most useful tile;
-  without a model, the share goes first with up to three existing tiles [A5b].
+- **New shares.** When someone pushes a share, the hub puts it on the main screen at once, full
+  screen as the only tile, whether or not the brain is on; a screen a person pinned stays put and
+  the room gets a note instead. The brain lays it out beside other things only when the room asks
+  [A5b].
 - **Pinning.** A person who picks a view pins it; the brain and agents don't override a pinned
   screen (agents' requests become a toast).
 - **Locks.** What a person puts up is locked, which is stronger than a pin: the brain's show tools,
@@ -1950,9 +1951,9 @@ Pins are app-wide [A7a, A7c]:
 
 ### 11.6 Sharing a screen or camera
 
-- **Share screen** or **Camera** in your window puts it on the big screen; the brain finds it a
-  place [A5b, A4c]. The browser's picker is the consent. Stopping in the browser ends it for
-  everyone.
+- **Share screen** or **Camera** in your window puts it on the main big screen at once, full
+  screen, unless a person pinned that screen [A5b, A4c]. The browser's picker is the consent.
+  Stopping in the browser ends it for everyone.
 - The brain (`request_share`), or anyone from **Settings > People**, can ask you to share [A5a].
   Your window asks first: "<who> would like to see your screen", **Share** or **Not now**. A
   request lasts 2 minutes.
@@ -1960,12 +1961,14 @@ Pins are app-wide [A7a, A7c]:
   when needed, a relay on the host. A screen is captured at up to 3840×2160 at 15 fps and sent to
   the host at 14 Mbps; people's own windows get a scaled-down preview (about 1 Mbps). A camera is
   1280×720.
-- **One share of a kind per person's device.** Starting a new screen share ends the earlier one
-  from that device and answers any request still waiting for it.
-- **A share must be on a big screen.** A new share has 60 seconds for the brain to place it; the
-  hub checks every 5 seconds after a stage change, and once at the end of that window if nothing
-  changed. A live share that no big screen shows then stops, and its sharer is told why ("wasn't
-  put on the big screen" if it never was, "left the big screen" if it was). A stage that shows a
+- **One share of a kind per person.** Starting a new screen share, from any of your windows, ends
+  your earlier one (its window is told and stops capturing) and answers any request still waiting
+  for it. A window that isn't anyone's yet has one per device.
+- **A share must be on a big screen.** Only displays whose windows still report count (a window
+  that closes or goes quiet doesn't). A share never shown has 60 seconds from its start to be
+  placed; one taken off every display has 5 seconds from that moment. Those deadlines are fixed:
+  later stage changes don't push them back. A live share past its deadline stops, and its sharer is
+  told why ("wasn't put on the big screen" if it never was, "left the big screen" if it was). A stage that shows a
   live share never reverts to the board on its timer; the share's end gives the screen back what
   it hid.
 
@@ -2687,7 +2690,7 @@ in [`docs/spec-gaps.md`](docs/spec-gaps.md). Paths are under `jamsesh/` unless t
 | A4b | Tiles show a browser on reference designs or the host's dev servers | 10.3 | `web/src/host/Stage.tsx`, `hub/src/brain/brain.ts` | Partial |
 | A4c | Tiles show client screen casts, with permission on the client | 10.3, 11.6 | `web/src/shared/rtc.ts`, `web/src/shared/share.tsx` | Partial |
 | A5a | The brain can ask for a screen share | 11.6 | `hub/src/brain/brain.ts`, `hub/src/session.ts`, `web/src/shared/share.tsx` | Implemented |
-| A5b | Someone pushes a share and the brain finds a place for it | 8.10, 11.6 | `hub/src/brain/brain.ts`, `web/src/shared/share.tsx` | Implemented |
+| A5b | Someone pushes a share and it goes up full screen at once | 8.10, 11.6 | `hub/src/session.ts`, `web/src/shared/share.tsx` | Implemented |
 | A6 | The brain has full tool control of arrangement and layouts | 8.10, 10.3 | `hub/src/brain/brain.ts`, `web/src/host/Stage.tsx` | Implemented |
 | A7a | Premium pins on the canvas | 11.5 | `web/src/shared/annotate.tsx`, `hub/src/canvas/canvas.ts` | Implemented |
 | A7b | Pins on the host-hosted dev server view | 11.5 | `web/src/shared/annotate.tsx`, `web/src/host/Stage.tsx` | Partial |
