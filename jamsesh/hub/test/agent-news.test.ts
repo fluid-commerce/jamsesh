@@ -179,6 +179,7 @@ test("other workstreams' decisions can't crowd out an older relevant one, or mov
   for (let i = 0; i < 250; i++) add(`Checkout rule ${i}`, checkout.id);
   expect(s.roomDecisions(desktop.id, { limit: 10 }).map((e) => e.text)).toEqual(["Nav goes in a sidebar"]);
   // The prompt hook hands it over (and only then marks it seen).
-  expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "next" }, "127.0.0.1"))).toContain("Nav goes in a sidebar");
-  expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "again" }, "127.0.0.1"))).not.toContain("Nav goes in a sidebar");
+  expect(JSON.stringify(hooksOf(hub).prompt(desktop, { prompt: "next" }))).toContain("Nav goes in a sidebar");
+  // The driver acknowledges on its next call, so the decision is seen and not handed over again.
+  expect(JSON.stringify(hooksOf(hub).prompt(desktop, { prompt: "again" }))).not.toContain("Nav goes in a sidebar");
 });
