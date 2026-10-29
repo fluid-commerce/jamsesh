@@ -222,8 +222,8 @@ export class Hub {
     this.autosave.start();
     this.keeper.start();
     this.wiki.start();
-    setInterval(() => this.devproxy.refresh(), 30_000);
-    setInterval(() => this.session.tick(), 60_000).unref?.();
+    this.session.timers.every(() => this.devproxy.refresh(), 30_000);
+    this.session.timers.every(() => this.session.tick(), 60_000);
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -267,11 +267,17 @@ export class Hub {
     // and finishes; (4) the brain triages what it heard, takes nothing new, and its pass finishes. Only then does it stop, and the
     // local whisper after it. A step that overruns the deadline is given up on: what it adds afterwards is refused.
     this.closing = true;
+    this.session.timers.stop(); // no timer of the room fires from here on: none can write past the seal
+    this.autosave.stop();
+    this.keeper.stop();
+    this.awake.stop();
     const until = Date.now() + Hub.SHUTDOWN_WAIT_MS;
     const left = () => Math.max(0, until - Date.now());
     let ok = await this.quiet(left());
+    if (!ok) this.audio.closed = true; // an upload still sending after the deadline is refused, not taken in behind the flush
     void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
     ok = (await this.quiet(left())) && ok;
+    this.audio.closed = true;
     this.brain.drain();
     void this.track(this.brain.idle());
     ok = (await this.quiet(left())) && ok;
@@ -313,8 +319,7 @@ export class Hub {
     this.releasePrompt(deviceId);
     const w: { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> } = { t0 };
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
-    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), Hub.PROMPT_MAX_MS + 1000);
-    w.timer.unref?.();
+    w.timer = this.session.timers.after(() => this.releasePrompt(deviceId, w), Hub.PROMPT_MAX_MS + 1000) ?? undefined;
     this.promptMode.set(deviceId, w);
   }
 
@@ -322,7 +327,7 @@ export class Hub {
   private releasePrompt(deviceId: string, only?: { t0: number; t1?: number }) {
     const w = this.promptMode.get(deviceId);
     if (!w || (only && w !== only) || w.t1 !== undefined) return;
-    clearTimeout(w.timer);
+    this.session.timers.clear(w.timer);
     this.promptMode.delete(deviceId);
     for (const u of this.session.store.all("utterances")) {
       if (u.eventId || u.t1 < w.t0 - 500 || u.t0 > w.t0 + Hub.PROMPT_MAX_MS || !this.fromRecorder(u, deviceId)) continue;
@@ -546,7 +551,7 @@ export class Hub {
     const ask = showRequestSpeech(r);
     void speak(this.session, ask, { source: "voice", kind: "request" });
     // Once more after a minute if the owner hasn't answered.
-    setTimeout(() => this.session.showRequests().find((x) => x.id === r.id)?.status === "pending" && void speak(this.session, `Still waiting, ${first(r.ownerName)}: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
+    this.session.timers.after(() => this.session.showRequests().find((x) => x.id === r.id)?.status === "pending" && void speak(this.session, `Still waiting, ${first(r.ownerName)}: ${ask}`, { source: "voice", kind: "request" }), 60_000);
   }
 
   // ---------- host build requests (approved by people, by voice or a button) ----------
@@ -563,7 +568,7 @@ export class Hub {
         : `${r.agentName} wants to build ${what} on the host. Approve or deny?`;
       void speak(s, ask, { source: "voice", kind: "request" });
       // Once more after a minute if nobody answered (people may have been mid-conversation).
-      setTimeout(() => r.status === "pending" && void speak(s, `Still waiting: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
+      this.session.timers.after(() => r.status === "pending" && void speak(s, `Still waiting: ${ask}`, { source: "voice", kind: "request" }), 60_000);
     } else {
       const outcome = r.status === "approved" ? `approved by ${r.decidedBy}; it's building on the host now and opens when it's done` : r.status === "denied" ? `denied by ${r.decidedBy}` : "not answered in 10 minutes, so it expired";
       if (r.status !== "approved") bus.send({ type: "toast", tone: "info", text: r.status === "denied" ? `Denied ${r.agentName}'s build` : `${r.agentName}'s build request expired`, detail: r.decidedBy ? `By ${r.decidedBy}` : undefined });

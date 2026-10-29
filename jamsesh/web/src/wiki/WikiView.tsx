@@ -6,7 +6,7 @@ import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
-import { onRefresh, pageAfterLoad, restore, saveRev, track } from "./draft";
+import { drafts, onRefresh, pageAfterLoad, restore, saveRev, track } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -334,14 +334,17 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
 
   const save = async (keepMine = false) => {
     if (editing === null) return;
+    const sent = drafts.edit(slug); // which edit this save carries; typing while it is out is a later one
     setSaving(true);
     setSaveErr(null);
     try {
       const r = await wikiApi.save(slug, { markdown: editing, rev: saveRev(base, conflict, keepMine) });
       if ("conflict" in r) return void (setConflict(r.conflict), setSaving(false));
       setPage(r.page);
-      setEditing(null);
       setConflict(null);
+      // Settled in the store, so it holds whether or not this view is still on screen.
+      if (drafts.saved(slug, sent, r.page.rev)) setEditing(null);
+      else setBase(r.page.rev);
       wiki.reload();
     } catch (e) {
       setSaveErr(pretty(e, "Couldn't save. Your edit is still here."));

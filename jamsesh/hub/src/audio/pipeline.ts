@@ -135,7 +135,11 @@ export class AudioPipeline {
     return this.lag.get(deviceId)?.ms ?? 0;
   }
 
+  /** Set when the room has given up waiting for uploads (shutdown): nothing more is taken in, and the request that brought it is refused. */
+  closed = false;
+
   async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array; levelDb?: number; noiseDb?: number }): Promise<Segment> {
+    if (this.closed) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
     const raw = decodeWav(input.wav);
     const pcm = resample(raw, 16000);
     const measured = speechLevelDb(pcm);

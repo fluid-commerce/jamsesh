@@ -91,9 +91,9 @@ export class Canvas {
     try {
       await this.startServer();
       await this.startHost();
-      this.poller = setInterval(() => this.poll(), POLL_MS);
-      setInterval(() => this.reapIdleAgents(), 60_000);
-      setInterval(() => this.watchdog().catch(() => {}), 30_000);
+      this.poller = this.session.timers.every(() => this.poll(), POLL_MS);
+      this.session.timers.every(() => this.reapIdleAgents(), 60_000);
+      this.session.timers.every(() => this.watchdog().catch(() => {}), 30_000);
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       console.error("canvas:", reason);
@@ -102,7 +102,7 @@ export class Canvas {
   }
 
   stop() {
-    if (this.poller) clearInterval(this.poller);
+    this.session.timers.clear(this.poller);
     this.host?.close();
     for (const a of this.agents.values()) a.mcp.close();
     this.serverProc?.kill();

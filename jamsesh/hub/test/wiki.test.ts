@@ -2272,3 +2272,48 @@ test("a category-only edit whose write fails is refused and logs no edit: the un
   expect(sourceIds(dir)).toEqual(before);
   expect(readLog(dir, 50).some((e: any) => JSON.stringify(e).includes("edited a page"))).toBe(false);
 });
+
+test("past the shutdown deadline an upload still sending is refused with 503 and nothing is ingested", async () => {
+  const { hub, s, chey } = room();
+  const server = startHttp(hub, 0);
+  const wait = Hub.SHUTDOWN_WAIT_MS;
+  Hub.SHUTDOWN_WAIT_MS = 200;
+  try {
+    s.touchDevice("cheyLaptop", { personId: chey.id, location: "room", micOn: true });
+    let transcribed = 0;
+    (hub.transcriber as any).transcribe = async () => (transcribed++, { text: "too late", engine: "fake" });
+    const cookie = `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
+    const t = Date.now() - 3000;
+    const held = await heldBytes(server.port!, `/api/audio?deviceId=cheyLaptop&t0=${t}&t1=${t + 2000}&level=-25&noise=-55`, "audio/wav", tone(2), cookie);
+    await hub.shutdown(); // gives up on the upload after its wait
+    expect(await held.finish()).toBe(503);
+    await Bun.sleep(100);
+    expect(transcribed).toBe(0);
+    expect(s.store.eventsAfter(0).some((e) => e.text.includes("too late"))).toBe(false);
+  } finally {
+    Hub.SHUTDOWN_WAIT_MS = wait;
+    server.stop(true);
+  }
+}, 30_000);
+
+test("closing a room ends its timers first: a pending stage revert never fires past the seal", async () => {
+  const { hub, s } = room();
+  const errors: unknown[] = [];
+  const catcher = (e: unknown) => void errors.push(e);
+  process.on("uncaughtException", catcher);
+  process.on("unhandledRejection", catcher);
+  try {
+    let fired = 0;
+    hub.session.timers.after(() => fired++, 50);
+    s.setStage({ mode: "spotlight", items: [], pinned: false } as any, "JamSesh", "main");
+    await hub.shutdown();
+    expect(hub.session.timers.size).toBe(0);
+    expect(hub.session.timers.after(() => fired++, 1)).toBeNull();
+    await Bun.sleep(120);
+    expect(fired).toBe(0);
+    expect(errors).toEqual([]);
+  } finally {
+    process.off("uncaughtException", catcher);
+    process.off("unhandledRejection", catcher);
+  }
+}, 30_000);

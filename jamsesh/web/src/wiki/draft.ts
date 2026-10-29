@@ -17,18 +17,33 @@ export const saveRev = (base: string, theirs: WikiPage | null, overTheirs: boole
  * host-mode switch, the Wiki view closing) leaves the text here, and the page opens back into it. It goes only when the
  * person saves or cancels. Closing or reloading the window asks first while anything is held.
  */
-const held = new Map<string, { text: string; base: string }>();
+const held = new Map<string, { text: string; base: string; n: number }>();
 let armed = false;
 
 export const drafts = {
   hold(slug: string, text: string, base: string) {
-    held.set(slug, { text, base });
+    // Each change of text is one more edit; a save remembers which edit it sent.
+    const was = held.get(slug);
+    held.set(slug, { text, base, n: was && was.text === text ? was.n : (was?.n ?? 0) + 1 });
     if (!armed && typeof window !== "undefined") {
       armed = true;
       window.addEventListener("beforeunload", (e) => void (held.size && e.preventDefault()));
     }
   },
   get: (slug: string) => held.get(slug),
+  /** The edit number of the text held now (what a save sends along with the text). */
+  edit: (slug: string) => held.get(slug)?.n ?? 0,
+  /**
+   * A save of edit `n` was answered with the page now at `rev`. The draft goes only if it is still that edit; typing done
+   * while the save was out stays as the draft, built on the saved revision. Works the same whether or not the view is still mounted.
+   */
+  saved(slug: string, n: number, rev: string): boolean {
+    const d = held.get(slug);
+    if (!d) return true;
+    if (d.n === n) return held.delete(slug), true;
+    held.set(slug, { ...d, base: rev });
+    return false;
+  },
   drop: (slug: string) => void held.delete(slug),
 };
 

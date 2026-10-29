@@ -10,7 +10,7 @@ import { api } from "../src/shared/hub";
 import { wikiApi } from "../src/wiki/wikiApi";
 import { shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
-import { onRefresh, pageAfterLoad, restore, saveRev, track } from "../src/wiki/draft";
+import { drafts, onRefresh, restore, saveRev, track } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
 import { diffView, metaLine } from "../src/wiki/WikiCard";
 import { sourceWindow } from "../src/wiki/WikiView";
@@ -288,7 +288,7 @@ test("a card's cut change is fetched whole through the client's api(): every add
 
 // These drive the same functions PageView calls (track on each text change, restore on mount). Unmounting calls nothing, so
 // "leaving by X" is the same store sequence for every X; they do not render the component (no DOM library in this package).
-test("store level: an edit survives an unmount and remount, with the revision it began from, for any way of leaving", () => {
+test("store level: a held draft comes back with its revision after the view unmounts and mounts again (the labels name exits that all unmount the same way; nothing is rendered)", () => {
   for (const way of ["page link", "phone Index button", "backlink", "tab switch", "host mode switch", "wiki view closed"]) {
     track("pricing", `edited, then left by ${way}`, "rev1"); // typing
     // (the view unmounts here; nothing is called)
@@ -306,13 +306,38 @@ test("store level: Save or Cancel drops the draft, and only that page's", () => 
   track("b", null, "r2");
 });
 
-test("store level: a reopened draft still gets its page: the fetched one fills an empty view, an open one is left alone", () => {
-  const page = (rev: string) => ({ slug: "p", rev, markdown: rev }) as any;
-  const editingNow = onRefresh(true, "r1", page("r2")); // editing from r1, the page moved on
-  expect(editingNow.page).toBeUndefined();
-  expect(pageAfterLoad(null, page("r2"), editingNow).rev).toBe("r2"); // remounted with a draft: no page yet, so the fetched one
-  expect(pageAfterLoad(page("r1"), page("r2"), editingNow).rev).toBe("r1"); // already open and being edited: left alone
-  expect(pageAfterLoad(page("r1"), page("r2"), onRefresh(false, "", page("r2"))).rev).toBe("r2"); // not editing: replaced
+test("store level: typing while a save is out stays as the draft, on the saved revision; an untouched edit is cleared", () => {
+  track("p", "first", "r1");
+  const sent = drafts.edit("p");
+  track("p", "first, and more typed while saving", "r1"); // a later edit
+  expect(drafts.saved("p", sent, "r2")).toBe(false);
+  expect(restore("p")).toEqual({ editing: "first, and more typed while saving", base: "r2" });
+  // The next save answers for the newer edit and clears it.
+  const next = drafts.edit("p");
+  expect(drafts.saved("p", next, "r3")).toBe(true);
+  expect(restore("p").editing).toBeNull();
+});
+
+test("store level: a save answered after the view unmounted applies the same rule", () => {
+  track("q", "text", "r1");
+  const sent = drafts.edit("q");
+  // (the view unmounts; the save is still out) ... the answer arrives with nothing mounted:
+  expect(drafts.saved("q", sent, "r2")).toBe(true);
+  expect(restore("q").editing).toBeNull();
+  track("q2", "text", "r1");
+  const sent2 = drafts.edit("q2");
+  track("q2", "typed after leaving? no: typed before leaving", "r1");
+  expect(drafts.saved("q2", sent2, "r5")).toBe(false);
+  expect(restore("q2")).toEqual({ editing: "typed after leaving? no: typed before leaving", base: "r5" });
+  track("q2", null, "r5");
+});
+
+test("store level: the same text tracked again is not a new edit", () => {
+  track("same", "abc", "r1");
+  const n = drafts.edit("same");
+  track("same", "abc", "r1");
+  expect(drafts.edit("same")).toBe(n);
+  track("same", null, "r1");
 });
 
 test("a long source draws a window around the cited moment and grows a window at a time", () => {

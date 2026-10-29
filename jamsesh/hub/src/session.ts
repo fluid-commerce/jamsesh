@@ -8,6 +8,7 @@ import { affinity } from "./brain/affinity";
 import { Board, type ContextProposal, type TaskProposal } from "./board";
 import { buildBrief, hasBrief } from "./brief";
 import { newId, PALETTE, Store } from "./store";
+import { Timers } from "./timers";
 import type {
   EventKind,
   Agent,
@@ -70,6 +71,8 @@ export class Session {
   canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null, generation: 0 };
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
   private waiters = new Map<string, Set<Waiter>>();
+  /** Every timer of the room that can write (see timers.ts); closing the room ends them all. */
+  readonly timers = new Timers();
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   onDirective: ((d: Directive) => void) | null = null;
@@ -111,15 +114,10 @@ export class Session {
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
     if (this.revertsToBoard(st)) {
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
-      this.stageRevert.unref?.();
+      this.stageRevert = this.timers.after(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
     }
     // A lock whose owner left lets go without anyone asking.
-    setInterval(() => {
-      try {
-        this.sweepLocks();
-      } catch {}
-    }, 30_000).unref?.();
+    this.timers.every(() => this.sweepLocks(), 30_000);
     bus.resolver = (key) => this.resolve(key);
   }
 
@@ -864,12 +862,12 @@ export class Session {
     const gone = d.targets.filter(asleep).map((t) => this.agent(t)?.name ?? "That agent");
     if (gone.length) bus.send({ type: "toast", tone: "warn", text: `${gone.join(", ")} isn't connected right now`, detail: "It gets this as soon as it's back." });
     if (d.mode === "explore" || d.mode === "implement")
-      setTimeout(() => {
+      this.timers.after(() => {
         const now = this.store.get("directives", directive.id);
         if (!now || now.status === "done" || now.status === "cancelled") return;
         const idle = d.targets.filter((t) => now.progress[t] === "pending" && !asleep(t) && this.agent(t)?.status !== "waiting").map((t) => this.agent(t)!);
         for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
-      }, 45_000).unref?.();
+      }, 45_000);
     this.onDirective?.(directive);
     return directive;
   }
@@ -1277,15 +1275,8 @@ export class Session {
 
   /** After any stage change: a live share that no host screen shows stops, once the grace period passes. */
   private scheduleShareSweep(delay = Session.SHARE_GRACE_MS) {
-    if (this.shareSweep) clearTimeout(this.shareSweep);
-    this.shareSweep = setTimeout(() => {
-      try {
-        this.sweepShares();
-      } catch (e) {
-        console.error("shares: sweep failed:", e instanceof Error ? e.message : e); // a timer must never take the hub down
-      }
-    }, delay);
-    this.shareSweep.unref?.();
+    this.timers.clear(this.shareSweep);
+    this.shareSweep = this.timers.after(() => this.sweepShares(), delay);
   }
 
   sweepShares() {
@@ -1423,7 +1414,7 @@ export class Session {
    *  not 3 minutes later. The main screen always stays. */
   removeScreen(id: string) {
     if (id === "main" || !this.bigScreens.delete(id)) return;
-    clearTimeout(this.screenReverts.get(id));
+    this.timers.clear(this.screenReverts.get(id));
     this.screenReverts.delete(id);
     bus.changed("screens");
   }
@@ -1538,19 +1529,19 @@ export class Session {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
       this.scheduleShareSweep();
-      clearTimeout(this.screenReverts.get(screen));
+      this.timers.clear(this.screenReverts.get(screen));
       if (this.revertsToBoard(stage))
-        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
+        this.screenReverts.set(screen, this.timers.after(() => this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS)!);
       return;
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
     this.scheduleShareSweep();
     if (this.bigScreens.size > 1) bus.changed("screens");
-    if (this.stageRevert) clearTimeout(this.stageRevert);
+    this.timers.clear(this.stageRevert);
     this.stageRevert = null;
     // Anything the brain brought up returns to the live board after a while.
-    if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
+    if (this.revertsToBoard(stage)) this.stageRevert = this.timers.after(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
   }
 
   // ---- locks: what a person puts up stays up (3.1) ----
