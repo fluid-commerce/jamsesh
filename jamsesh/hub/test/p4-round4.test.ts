@@ -1,7 +1,6 @@
-// Phase 4, fourth review: an explanation never asks for work; curation and Replace stay within a fact's kind,
-// workstream and platform; the context lock has one live owner; a failed carry-over save is a failed shutdown;
-// one message can't carry 120 MB of PDFs; an unpaired process on loopback can't read attachments; an ask said
-// again clears an old "overruled" mark. The model is a stand-in; no gateway key is needed.
+// Phase 4, fourth review: curation and Replace stay within a fact's kind, workstream and platform; a failed
+// carry-over save is a failed shutdown; one message can't carry 120 MB of PDFs; an unpaired process on loopback
+// can't read attachments; an ask said again after a veto is a new card. The model is a stand-in; no gateway key is needed.
 import { afterAll, expect, mock, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,10 +21,10 @@ mock.module("ai", () => ({
 const { Hub } = await import("../src/hub");
 const { startHttp } = await import("../src/http");
 const { config } = await import("../src/config");
-const { acquireLock, commitContext, contextFile, readProjectContext, releaseLock, saveProjectContext } = await import("../src/carryover");
+const { contextFile, readProjectContext, saveProjectContext } = await import("../src/carryover");
+const { Database } = await import("bun:sqlite");
 const { createProject, openSession } = await import("../src/projects");
 const { applyCuration } = await import("../src/brain/curation");
-const { askedFor } = await import("../src/brain/brain");
 const { MAX_MESSAGE_BYTES, AttachmentError } = await import("../src/attachments");
 const { ProjectKeeper } = await import("../src/projectkeeper");
 
@@ -52,20 +51,6 @@ function room() {
   const said = (who: { id: string; name: string }, text: string, data: Record<string, any> = {}) => s.store.addEvent({ kind: "speech", authorType: "person", authorId: who.id, authorName: who.name, text, relevance: "work", data });
   return { hub, s, chey, felipe, desktop, said };
 }
-
-// ---------- 1. an explanation is not a request for work ----------
-
-test("a file plus a question about building or fixing offers no work tool; a plain instruction still does", () => {
-  const explain = ["Summarize how to build the header in this file", "Explain what we need to fix in this document", "Can you explain how to build it?", "What should we build next?", "Ask what we need to fix", "Tell me how to make this work", "Describe how to implement the sidebar"];
-  for (const t of explain) expect([t, askedFor("create_directive", t)]).toEqual([t, false]);
-  const work = ["Build the header from this file", "Can you build the header from this", "Please send this to Felipe's agent", "Use this file to build the nav", "Tell the desktop agent to build it", "Let's make three variants", "Don't summarize it, just send it to Felipe"];
-  for (const t of work) expect([t, askedFor("create_directive", t)]).toEqual([t, true]);
-  // Not offered at all with an explanatory request, and refused if called anyway.
-  const r = room();
-  const batch = [r.said(r.chey, "Summarize how to build the header in this file")];
-  const tools = (r.hub.brain as any).tools(batch, { effects: 0 }, "person", "direct", "Summarize how to build the header in this file");
-  expect(Object.keys(tools).sort()).toEqual(["no_action", "say_to_room", "search_artifacts"]);
-});
 
 // ---------- 2. a replacement stays within a fact's kind, workstream and platform ----------
 
@@ -107,53 +92,6 @@ test("a named replacement across platforms is another fact, and Replace re-check
   expect(r.s.store.get("facts", desk.id)!.status).toBe("superseded");
 });
 
-// ---------- 3. the context lock has one live owner ----------
-
-test("a lock whose writer is paused (alive) is never taken over, however old; a dead or unreadable owner's is; release only removes your own", () => {
-  const lock = join(dir, "ctx.json.lock");
-  const old = new Date(Date.now() - 60_000);
-  // Alive owner (this process's parent), lock far older than the threshold: the writer is only paused. Not taken.
-  writeFileSync(lock, `${process.ppid} someone-elses-token`);
-  utimesSync(lock, old, old);
-  expect(acquireLock(lock, 150)).toBeNull();
-  expect(existsSync(lock)).toBe(true);
-  // A release by someone who doesn't hold it removes nothing.
-  releaseLock(lock, "not-the-token");
-  expect(existsSync(lock)).toBe(true);
-  // A dead owner's old lock is taken over, and the new owner's release clears it.
-  writeFileSync(lock, `2147483646 dead-token`);
-  utimesSync(lock, old, old);
-  const mine = acquireLock(lock, 150)!;
-  expect(mine).toBeTruthy();
-  releaseLock(lock, mine);
-  expect(existsSync(lock)).toBe(false);
-  // Empty or garbage and old: an owner that died between creating and filling it.
-  writeFileSync(lock, "garbage");
-  utimesSync(lock, old, old);
-  const again = acquireLock(lock, 150)!;
-  expect(again).toBeTruthy();
-  // Fresh dead-owner locks wait out the threshold.
-  releaseLock(lock, again);
-  writeFileSync(lock, `2147483646 dead-token`);
-  expect(acquireLock(lock, 100)).toBeNull();
-  rmSync(lock, { force: true });
-});
-
-test("a lock someone else took is not removed by the writer that lost it, and the file stays whole", () => {
-  const home = mkdtempSync(join(dir, "home-"));
-  const p = createProject(home, "Settings");
-  const base = { version: 1 as const, updatedAt: 1, brief: "", goal: "", glossary: [], workstreams: [], people: [], activeAt: 5, fromSession: "a" };
-  const fact = (t: string) => ({ kind: "fact" as const, text: t, workstream: "", by: "", note: "", ts: 1, session: "a" });
-  expect(commitContext(home, p.slug, { ...base, facts: [fact("first")] })).toBe(true);
-  const lock = `${contextFile(home, p.slug)}.lock`;
-  const token = acquireLock(lock, 100)!;
-  writeFileSync(lock, `${process.pid} intruder`);
-  releaseLock(lock, token);
-  expect(existsSync(lock)).toBe(true);
-  rmSync(lock, { force: true });
-  expect(readProjectContext(home, p.slug)!.facts[0].text).toBe("first");
-});
-
 // ---------- 4. a failed carry-over save is a failed shutdown ----------
 
 test("a context save that fails fails the keeper step and the shutdown; a deliberate skip doesn't", async () => {
@@ -166,14 +104,15 @@ test("a context save that fails fails the keeper step and the shutdown; a delibe
   const keeper = new ProjectKeeper(r.hub, home, { slug: p.slug, sessionId: opened.sessionId });
   await expect(keeper.save()).resolves.toBeUndefined();
   expect(readProjectContext(home, p.slug)!.facts).toHaveLength(1);
-  // A session with nothing settled never empties the file: a skip, not a failure.
+  // A session with nothing settled writes nothing: a skip, not a failure.
   const idle = room();
   expect(saveProjectContext(home, p.slug, "idle-session", idle.s)).toBe("skipped");
   await expect(new ProjectKeeper(idle.hub, home, { slug: p.slug, sessionId: "idle-session" }).save()).resolves.toBeUndefined();
-  // The lock held by a live process: the write can't happen. That is a failure the keeper reports.
-  const lock = `${contextFile(home, p.slug)}.lock`;
-  writeFileSync(lock, `${process.ppid} held-token`);
-  expect(saveProjectContext(home, p.slug, opened.sessionId, r.s)).toBe("failed");
+  // The write lock held by another connection: the write can't happen. That is a failure the keeper reports.
+  const holder = new Database(contextFile(home, p.slug));
+  holder.exec("BEGIN IMMEDIATE");
+  r.s.board.rememberNow({ text: "Sidebar uses option C", kind: "decision", by: "Chey" });
+  expect(saveProjectContext(home, p.slug, opened.sessionId, r.s, 100)).toBe("failed");
   r.s.board.rememberNow({ text: "Footer uses option B", kind: "decision", by: "Chey" });
   const hung = new ProjectKeeper(r.hub, home, { slug: p.slug, sessionId: opened.sessionId });
   await expect(hung.save()).rejects.toThrow("wasn't saved");
@@ -182,7 +121,8 @@ test("a context save that fails fails the keeper step and the shutdown; a delibe
   (r.hub as any).autosave.save = async () => {};
   (r.hub as any).net.stop = async () => {};
   expect(await r.hub.shutdown()).toBe(false);
-  rmSync(lock, { force: true });
+  holder.exec("ROLLBACK");
+  holder.close();
 }, 30_000);
 
 // ---------- 5. one message can't carry unbounded files ----------
@@ -258,15 +198,18 @@ test("attached files that are gone still make a file pass, with the person told 
 
 // ---------- 8. the scenario: the same ask from a second person ----------
 
-test("an ask said again joins its card and clears an old 'overruled' mark", () => {
+test("an ask said again after a veto is a new card; the vetoed card keeps its veto", () => {
   const r = room();
   const text = "Make three variants of the mobile profile screen";
   const first = r.s.proposeTask({ text, mode: "explore", targets: [r.desktop.id], by: "Chey" })!;
   r.s.board.overrule(first.id, "Room confirmed the request, so it is being sent directly");
   expect(r.s.board.get(first.id)!.overruled).toBeTruthy();
   const again = r.s.proposeTask({ text, mode: "explore", targets: [r.desktop.id], by: "Britain" })!;
-  expect(again.id).toBe(first.id);
-  expect(again.count).toBe(2);
+  expect(again.id).not.toBe(first.id);
+  expect(again.renews).toBe(first.id);
   expect(again.overruled).toBeUndefined();
-  expect(r.s.board.open()).toHaveLength(1);
+  expect(r.s.board.get(first.id)!.overruled).toBeTruthy();
+  // Said a third time: it joins the new card.
+  expect(r.s.proposeTask({ text, mode: "explore", targets: [r.desktop.id], by: "Felipe" })!.id).toBe(again.id);
+  expect(r.s.board.open()).toHaveLength(2);
 });

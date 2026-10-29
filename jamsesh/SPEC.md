@@ -256,7 +256,7 @@ the app, not a terminal command.
 
 ```text
 project.json        name, created, lastUsed, people [{name, color}]
-context.json        what the latest session settled, carried into the next (12.7)
+context.db          what the project's sessions settled, carried into the next (12.7); context.json is its export
 thumbnail.png       the canvas, small (480 px), saved every 5 minutes while a session runs and when it ends
 sessions/<id>/      one session: a hub data directory (jamsesh.db, renders, snapshots) plus session.json
                     {id, startedAt, lastActive}
@@ -1257,12 +1257,14 @@ other update becomes a Replace card for that fact; a resolve or supersede with n
 (a Retire card always shows a room line behind it); new facts become context cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
 curator would resolve or supersede with nothing to take its place becomes a **Retire** card (`retire` on the card;
 accepting it only changes the fact's status). Overheard, the brain's `cancel_directive` marks a waiting task card
-`overruled` for a person to dismiss; asked directly, it dismisses it. A document sent with no request is a context card
+`overruled` for a person to dismiss, and keeps the veto (`vetoes`: why, who, when, the lines) on that card for good;
+the same ask said again doesn't clear it but makes a new card with `renews` naming the overruled one ("Asked again").
+Asked directly, it dismisses it. A document sent with no request is a context card
 with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
 poppler's `pdftotext` when installed, else JamSesh's own reader in a worker with a 5 s limit, which takes only the
 strings drawn by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`, in the content streams pages name; `pdfText`; the compiled
 hub carries the worker as a second entrypoint, and `jamsesh-hub --pdf-text <file>` checks it); with nothing readable it gets `needsWording`. Agents'
-credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.json`) holds only
+credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.db`) holds only
 accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
 
 A frame or build records the task it was made for (`Artifact.directiveId`): the one its agent had picked up (or the
@@ -1735,14 +1737,15 @@ try again to send.") until it is removed or retried; it is never dropped from a 
   text (as `text/plain`) and as a download for PDFs. Uploading is for people only (agents: 403).
 - **Brain.** A direct message's files go to the router model in a message of their own before the
   request: images and PDFs as parts, text files fenced in random `<attached-…>` markers and labelled as
-  material, never instructions. In that pass only the tools the person's own words ask for are
-  offered, and each is checked again when it runs (`askedFor`). The words are read clause by clause
-  (`brain/intent.ts`): quoted passages are dropped, and an action with a negation before it in its clause
-  ("don't send", "no need to build") isn't asked for. Reading, summarizing or asking about a
-  file gets answering and searching only; `create_directive` needs an explicit request for work ("send",
-  "ask X to", "build", "make"), `cancel_directive` "cancel" or "stop", the screen tools "show"; the Tasks
-  board, host control, naming and behaviour notes are never offered with a file, so a file's text can't
-  cancel or send anything. A message with files and no words is not a request to the brain.
+  material, never instructions. No wording decides what that pass may do: it is offered answering and
+  searching (`say_to_room`, `no_action`, `search_artifacts`) and the four tools that make work
+  (`create_directive`, `record_decision`, `pair_agents`, `cancel_directive`), and those four only
+  propose (the same `proposeOnly` path as overheard work): a task, decision, pairing or cancellation
+  becomes a card on the Tasks board (origin `document`) that a person sends or adds, and nothing
+  reaches an agent or the saved context before that. A file can't mark a waiting card overruled. The
+  Tasks board, the screen, host control, asking an agent, naming and behaviour notes are never
+  offered with a file, and each call is checked again when it runs. So a file's text, or an
+  explanatory request the model misreads, can at most propose. A message with files and no words is not a request to the brain (answering tools only).
 - **Tasks.** A directive created from an event carries that event's attachments
   (`Directive.attachments`). `jam_inbox`, the briefing, `jam_context` and `jam_directives` list each
   file with its fetch URL; agents fetch it with their credential.
@@ -1752,25 +1755,23 @@ try again to send.") until it is removed or retried; it is never dropped from a 
 
 ### 12.7 Context carries over
 
-A project keeps `projects/<slug>/context.json` (version 1): the active facts (decisions,
-requirements and the rest), unfinished workstreams, the session brief text, and people's titles,
-each fact and workstream with the session that first settled it. `ProjectKeeper` rewrites it
-every five minutes and when the session ends; a session with nothing settled never empties it. A
-new session of the project is seeded from it once (`seedFromProject`): facts and workstreams come in
-as active with `carriedFrom {sessionId, at}`, the brief shows in the agents' briefing and
-`jam_context` until the session writes its own, and people without a title get theirs back. A
-resumed session, or the session that wrote the file, is not seeded again. The file is checked whole
-(every field's type, the fact kinds and workstream statuses, sizes): one malformed value and nothing is seeded. Each
-file carries `activeAt`, when its session last did something; a session less recently active than that doesn't
-overwrite it (two sessions of a project open at once: the one used last owns the file). Changes to carried items
-count as activity, and a session that retired something settled (carried or its own) writes the file even when
-nothing is left, so a retired fact doesn't come back. Every field is cut to the reader's limits and the snapshot is
-checked against the reader's schema before it is written, and the read, compare and rename happen under a lock file
-(`context.json.lock`, made with O_EXCL; one left by a dead process is taken over after 10 s), so two hub processes
-can't both pass the check. A session that already has facts or workstreams of its own is never seeded. An unreadable file is moved
-aside (`context.json.unreadable-<time>`) before a new one is written. The file is plain JSON
-so Phase 7's wiki can ingest it. Today's brief is one text; goal and glossary sections arrive with
-the brain's structured brief.
+A project keeps its settled context in `projects/<slug>/context.db` (SQLite): one row per accepted fact
+(decisions, requirements and the rest) and workstream, active or retired, the session brief with its goal and
+glossary, and people's titles. `ProjectKeeper` saves every five minutes and when the session ends. A session writes
+only what it changed: facts and workstreams it settled, rewrote or retired, each under its project id (a carried item
+keeps the id it came in with), and its own brief once it has one. Items it only carried in are never written, so two
+sessions of a project open at once both keep their changes, and an item both changed keeps the later change (by when
+it changed, not when it was saved). Nothing is cut or left out for size: a change that doesn't fit the reader's limits
+fails the whole save, which the keeper reports. Each save is one SQLite `BEGIN IMMEDIATE` transaction: the write lock
+belongs to the connection, is released when its process exits, and is never taken over, so a paused writer keeps it
+and others wait (two seconds) and report a failed save. A new session of the project is seeded from it once
+(`seedFromProject`): active facts and unfinished workstreams come in with `carriedFrom {sessionId, at, id}`, the brief
+shows in the agents' briefing and `jam_context` until the session writes its own, and people without a title get
+theirs back. A resumed session, or one that already has facts or workstreams of its own, is not seeded. Every row is
+checked when read (types, fact kinds, workstream statuses, sizes): one malformed value and nothing is seeded. A file
+that isn't a database is moved aside (`context.db.unreadable-<time>`) and a new one started. After each save the
+whole context is exported, under the same lock, as plain JSON in `projects/<slug>/context.json` (version 1, every
+active item) for Phase 7's wiki; a `context.json` from before the database is read into it once.
 
 ## 13. Host control and permissions
 
