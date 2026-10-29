@@ -1,4 +1,5 @@
 // HTTP, WebSocket and MCP on one port.
+import { inRequest } from "./room-context";
 import { wikiRoute } from "./wiki/routes";
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -263,9 +264,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     idleTimeout: 255,
     maxRequestBodySize: 64 * 1024 * 1024,
     async fetch(req, srv) {
-      const res = await respond(req, srv);
-      // A write answered after the room stopped was dropped by the store (it cannot be part of the saved session): say so, don't say 200.
-      if (res && hub.session.store.closed && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad(CLOSING, 503);
+      // Everything this request starts carries its context (room-context.ts): past the shutdown deadline its writes are dropped or refused wherever it resumes.
+      const res = await inRequest({ over: () => hub.late }, () => respond(req, srv));
+      // A write answered after the room stopped or past the deadline was dropped (it cannot be part of the saved session): say so, don't say 200.
+      if (res && (hub.session.store.closed || hub.late) && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad(CLOSING, 503);
       return res;
     },
     websocket: {
@@ -432,8 +434,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
-  // A request admitted before the room closed, still sending its body when shutdown gave up waiting: refused here, after the body and before any handler can write.
-  if (body !== null && hub.late) return bad(CLOSING, 503);
 
   if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
   if (path === "/clock") return json({ now: Date.now() });

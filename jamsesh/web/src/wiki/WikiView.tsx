@@ -8,7 +8,7 @@ import { isTypingTarget, plain } from "../shared/keys";
 import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
 import { drafts, onRefresh, restore, saveRev, track } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
-import { localGraph } from "./graph";
+import { localGraph, localOf } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
 import { wikiApi, useWiki, type WikiData } from "./wikiApi";
 import { CATEGORIES, CATEGORY_COLOR, CATEGORY_LABEL, type Category, type LogEntry, type PageMeta, type SearchHit, type SourceText, type WikiPage } from "./types";
@@ -291,6 +291,16 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   draft.current = { editing, base: drafts.get(slug)?.base ?? base };
   const begin = (text: string, rev: string) => (drafts.hold(slug, text, rev), setEditing(text), setBase(rev), setConflict(null));
   // The edit is kept outside this view (draft.ts): leaving the page any way at all leaves it there.
+  // A save made from another view of this page settles this one's draft too.
+  useEffect(
+    () =>
+      drafts.listen(slug, (o) => {
+        const held = drafts.get(slug);
+        if (o === "cleared") (setEditing(null), setConflict(null));
+        else if (held) (setEditing(held.text), setBase(held.base));
+      }),
+    [slug],
+  );
   useEffect(() => {
     track(slug, editing, drafts.get(slug)?.base ?? base); // the held revision is the truth: a save answered meanwhile moved it
   }, [slug, editing, base]);
@@ -318,7 +328,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
 
   const sources = useMemo(() => new Set(page?.sources.map((s) => s.id) ?? []), [page]);
   const html = useMemo(() => (page ? renderMarkdown(dropTitle(page.markdown, page.title), { pages: pageSet, sources }) : ""), [page, pageSet, sources]);
-  const local = useMemo(() => localGraph(wiki.graph, slug), [wiki.graph, slug]);
+  const local = useMemo(() => (page ? localOf(page, wiki.pages) : localGraph(wiki.graph, slug)), [page, wiki.pages, wiki.graph, slug]);
 
   const clicked = (e: MouseEvent) => {
     const a = (e.target as HTMLElement).closest("a");

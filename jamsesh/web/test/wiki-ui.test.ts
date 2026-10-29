@@ -8,7 +8,7 @@ import { Hub } from "../../hub/src/hub";
 import { startHttp } from "../../hub/src/http";
 import { api } from "../src/shared/hub";
 import { wikiApi } from "../src/wiki/wikiApi";
-import { shapeGraph } from "../src/wiki/graph";
+import { localOf, shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
 import { drafts, onRefresh, restore, saveRev, track } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
@@ -375,4 +375,31 @@ test("the card says how a page is filed, as far as the change alters it", () => 
   expect(metaLine({ from: { category: "topics", workstreams: [] }, to: { category: "decisions", workstreams: ["billing"] } })).toBe("Filed under Decisions (was Topics). Workstreams: billing (was none).");
   expect(metaLine({ from: { category: "topics", workstreams: ["a"] }, to: { category: "topics", workstreams: [] } })).toBe("Workstreams: none (was a).");
   expect(metaLine({ to: { category: "people", workstreams: ["x", "y"] } })).toBe("Filed under People. Workstreams: x, y.");
+});
+
+test("store level: a save made from another view settles this view's draft too (cleared or rebased)", () => {
+  const heard: string[] = [];
+  const stop = drafts.listen("shared", (o) => heard.push(o));
+  track("shared", "text", "r1");
+  const sent = drafts.edit("shared");
+  track("shared", "text and more", "r1");
+  drafts.saved("shared", sent, "r2");
+  const next = drafts.edit("shared");
+  drafts.saved("shared", next, "r3");
+  expect(heard).toEqual(["rebased", "cleared"]);
+  stop();
+  track("shared", "x", "r3");
+  drafts.saved("shared", drafts.edit("shared"), "r4");
+  expect(heard.length).toBe(2); // no longer listening
+});
+
+test("the local map shows every neighbour a page has, even when the global map was thinned", () => {
+  const metas = Array.from({ length: 40 }, (_, i) => ({ slug: `p${i}`, title: `P${i}`, category: "topics", backlinks: 1 }));
+  const page = { slug: "p0", title: "P0", category: "topics", links: metas.slice(1, 31).map((m) => ({ slug: m.slug, exists: true })), backlinks: metas.slice(31).map((m) => ({ slug: m.slug, title: m.title })) };
+  const g = localOf(page, metas);
+  expect(g.nodes.length).toBe(40);
+  expect(g.edges.length).toBe(39);
+  expect(g.near.get("p0")!.size).toBe(39);
+  // A link to a page that doesn't exist yet is not a node.
+  expect(localOf({ ...page, links: [{ slug: "nope", exists: false }], backlinks: [] }, metas).nodes.map((n) => n.id)).toEqual(["p0"]);
 });

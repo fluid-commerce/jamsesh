@@ -96,8 +96,11 @@ export class Hub {
   peopleOnline = 0;
   /** The hub is saving its last state: nothing new is taken in (http.ts answers 503), so nothing arrives after the wiki's final capture. */
   closing = false;
-  /** Shutdown has finished waiting for requests: one that is still in is refused as soon as it reaches a handler. */
-  late = false;
+  /** When shutdown stops waiting; work that began in a request and is still going then is over (room-context.ts). Infinity until shutdown. */
+  deadline = Infinity;
+  get late() {
+    return Date.now() > this.deadline;
+  }
   /** Work under way that may still add to the room: requests being answered, speech being transcribed, the brain's pass. Shutdown waits for it. */
   private inflight = new Set<Promise<void>>();
   /** How long shutdown waits for work in flight before sealing the store; anything later is refused. */
@@ -274,13 +277,13 @@ export class Hub {
     this.keeper.stop();
     this.awake.stop();
     const until = Date.now() + Hub.SHUTDOWN_WAIT_MS;
+    this.deadline = until;
     const left = () => Math.max(0, until - Date.now());
     let ok = await this.quiet(left());
     if (!ok) this.audio.closed = true; // an upload still sending after the deadline is refused, not taken in behind the flush
     void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
     ok = (await this.quiet(left())) && ok;
     this.audio.closed = true;
-    this.late = true;
     this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open, before the brain stops listening
     this.brain.drain();
     void this.track(this.brain.idle());
@@ -292,6 +295,7 @@ export class Hub {
     await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);
     // The conversation is sealed (a late event is refused, not missed), then its last stretch goes into the wiki's sources, on its own (it never
     // waits behind a slow ingest); it is read in if the model answers in time, or at the next start.
+    this.canvas.flushActivity(); // a canvas call that finished after the first flush, still before the conversation is sealed
     this.store.seal("events");
     await Promise.race([Promise.resolve().then(() => this.wiki.captureFinal()).catch((e) => console.error("wiki:", e instanceof Error ? e.message : e)), Bun.sleep(5000)]);
     await Promise.race([this.wiki.flush().catch(() => null), Bun.sleep(15_000)]);

@@ -8,6 +8,7 @@
 //
 // Everything here takes the project folder as an argument and touches only that folder: page names are
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
+import { pastDeadline } from "../room-context";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -124,10 +125,11 @@ export function initWiki(dir: string): void {
 }
 
 /** The file writes the vault makes, in one place so tests can make them fail part way. */
-/** Vault folders that have taken their last write (the room stopped). Every write to the vault goes through `io`, so this is the one gate. */
+/** Vault folders that have taken their last write (the room stopped), and requests past the shutdown deadline. Every write to the vault goes through `io`, so this is the one gate. */
 const closedVaults = new Set<string>();
 export const closeVault = (dir: string) => void closedVaults.add(dir);
 const gate = (path: unknown) => {
+  if (pastDeadline()) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
   const p = String(path);
   for (const d of closedVaults) if (p === d || p.startsWith(`${d}/`)) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
 };
@@ -180,9 +182,30 @@ function git(dir: string, args: string[]) {
  */
 export function commitPaths(dir: string, message: string, paths: string[]): boolean {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return false;
-  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+)?$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && (existsSync(join(dir, p)) || git(dir, ["ls-files", "--error-unmatch", "--", p]))); // a file that is gone is committed only if git tracked it (a deletion)
+  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+){0,2}$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && (existsSync(join(dir, p)) || git(dir, ["ls-files", "--error-unmatch", "--", p]))); // a file that is gone is committed only if git tracked it (a deletion)
   if (!own.length) return false;
   return git(dir, ["add", "--", ...own]) && git(dir, ["commit", "-q", "--only", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200), "--", ...own]);
+}
+
+/**
+ * Every source file the wiki owns, for a commit to name: those in raw/ and raw/archive/ now, and those git still has that
+ * are gone (a source that moved to the archive is a deletion in one place and a new file in the other; both sides are named).
+ */
+export function rawPaths(dir: string): string[] {
+  const out = new Set<string>();
+  for (const [folder, name] of [["raw", "raw"], ["raw/archive", "raw/archive"]] as const) {
+    try {
+      const d = vaultDir(dir, folder);
+      if (d) for (const f of readdirSync(d)) if (f.endsWith(".md") && isSourceId(f.slice(0, -3))) out.add(`${name}/${f}`);
+    } catch {}
+  }
+  if (gitAvailable() && existsSync(join(dir, ".git"))) {
+    try {
+      const r = Bun.spawnSync(["git", "ls-files", "-z", "--", "raw"], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+      for (const f of r.stdout.toString().split("\0")) if (/^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3))) out.add(f);
+    } catch {}
+  }
+  return [...out];
 }
 
 // ---- pages ----
@@ -261,6 +284,7 @@ function titleOf(body: string, slug: string) {
 export function linksOf(body: string): string[] {
   const out: string[] = [];
   for (const m of body.matchAll(/\[\[([^\]|#\n]{1,120})(?:[#|][^\]\n]*)?\]\]/g)) {
+    if (/^raw\/[\w./-]+$/.test(m[1].trim())) continue; // a citation of a source, not a link to a page
     const s = slugifyTitle(m[1]);
     if (!out.includes(s)) out.push(s);
   }

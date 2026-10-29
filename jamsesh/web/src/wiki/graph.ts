@@ -69,6 +69,23 @@ export function shapeGraph(raw: Partial<RawGraph> | null | undefined, scale = 1)
   return { nodes, edges, near };
 }
 
+/**
+ * The small map beside a page, made from the page's own full link lists (the hub's page route sends them all), so a page
+ * with many neighbours shows every one even when the global map is thinned.
+ */
+export function localOf(page: { slug: string; title: string; category: string; links: { slug: string; exists: boolean }[]; backlinks: { slug: string; title: string }[] }, metas: { slug: string; title: string; category: string; backlinks: number }[], scale = 1): Graph {
+  const by = new Map(metas.map((m) => [m.slug, m]));
+  const ids = new Set<string>([page.slug]);
+  const edges: { from: string; to: string }[] = [];
+  for (const l of page.links) if (l.exists && by.has(l.slug)) (ids.add(l.slug), edges.push({ from: page.slug, to: l.slug }));
+  for (const b of page.backlinks) if (by.has(b.slug)) (ids.add(b.slug), edges.push({ from: b.slug, to: page.slug }));
+  const nodes = [...ids].map((id) => {
+    const m = by.get(id);
+    return { id, title: m?.title ?? (id === page.slug ? page.title : id), category: m?.category ?? page.category, backlinks: m?.backlinks ?? 0 };
+  });
+  return shapeGraph({ nodes, edges }, scale);
+}
+
 /** One page and the pages it links with, for the small map beside a page. */
 export function localGraph(g: Graph, slug: string): Graph {
   const around = g.near.get(slug);

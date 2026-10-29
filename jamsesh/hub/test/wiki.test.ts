@@ -8,8 +8,9 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
+import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
 import { encodeWav } from "../src/audio/wav";
 
@@ -2476,4 +2477,63 @@ test("the wiki's commits name its own files: a person's other files in wiki/ and
   expect(tracked).not.toContain("mine.txt");
   const staged = Bun.spawnSync(["git", "diff", "--cached", "--name-only"], { cwd: dir }).stdout.toString();
   expect(staged).toBe("");
+});
+
+test("work that began in a request is over at the deadline wherever it resumes: store and vault writes after an await are dropped or refused", async () => {
+  const { hub, s, w, dir } = room();
+  let over = false;
+  const ctx = { over: () => over };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await inRequest(ctx, async () => {
+      s.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: "before the deadline" });
+      await Bun.sleep(30);
+      over = true; // the deadline passes while this request is awaiting something
+      await Bun.sleep(5);
+      s.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: "after the deadline" });
+      s.store.setSetting("late", 1);
+      let vault = "";
+      try {
+        w.addSource("document", "Late", "From a request past the deadline.", "Chey");
+      } catch (e) {
+        vault = (e as NodeJS.ErrnoException).code ?? "";
+      }
+      return vault;
+    });
+    expect(result).toBe("ESEALED");
+    const texts = s.store.eventsAfter(0).map((e) => e.text);
+    expect(texts).toContain("before the deadline");
+    expect(texts).not.toContain("after the deadline");
+    expect(s.store.setting("late", "unset")).toBe("unset");
+    // The room's own work carries no request context and still writes.
+    s.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: "from the room itself" });
+    expect(s.store.eventsAfter(0).map((e) => e.text)).toContain("from the room itself");
+    w.addSource("document", "Own", "Written by the room.", "Chey");
+    expect(sourceIds(dir).length).toBeGreaterThan(0);
+  } finally {
+    console.warn = warn;
+    void hub;
+  }
+});
+
+test("a source archived to raw/archive is committed on both sides: the new file and the deletion", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const src = w.addSource("document", "Old", "Read in already.", "Chey");
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" }); // a commit that includes the source
+  expect(Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString()).toContain(`raw/${src.id}.md`);
+  archiveSources(dir, [src.id]);
+  w.editPage("two", "# Two\n\nAnother page.", { by: "Chey" });
+  const tracked = Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString();
+  expect(tracked).toContain(`raw/archive/${src.id}.md`);
+  expect(tracked).not.toContain(`raw/${src.id}.md\n`);
+  expect(Bun.spawnSync(["git", "status", "--porcelain"], { cwd: dir }).stdout.toString().trim()).toBe("");
+});
+
+test("a [[raw/source]] citation is not a link to a page", () => {
+  const { dir } = room();
+  expect(linksOf("See [[Pricing]] and [[raw/2026-10-29_note]] and [[raw/x#12:30|12:30]].")).toEqual(["pricing"]);
+  writePage(dir, "cites", "# Cites\n\nFrom [[raw/2026-10-29_note]].");
+  expect(listPages(dir).find((p) => p.slug === "cites")!.links).toEqual([]);
 });

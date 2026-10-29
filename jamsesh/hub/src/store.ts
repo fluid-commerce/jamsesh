@@ -1,5 +1,6 @@
 // Session storage: SQLite on disk, with small collections cached in memory.
 // Events (the context log) get full-text search through FTS5.
+import { pastDeadline } from "./room-context";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { bus } from "./bus";
@@ -95,9 +96,9 @@ export class Store {
     return this.sealed === "all";
   }
 
-  /** True when a write may go ahead. Sealed "all": false (the write is dropped, logged). Sealed "events" and an event write: throws. */
+  /** True when a write may go ahead. A write by work that began in a request and outlived the shutdown deadline (room-context.ts): false, like sealed "all". Sealed "all": false (the write is dropped, logged). Sealed "events" and an event write: throws. */
   private writable(event = false): boolean {
-    if (this.sealed === "all") {
+    if (this.sealed === "all" || pastDeadline()) {
       if (this.dropped++ % 50 === 0) console.warn(`store: the room is closed; a write was dropped (${this.dropped} so far)`);
       return false;
     }

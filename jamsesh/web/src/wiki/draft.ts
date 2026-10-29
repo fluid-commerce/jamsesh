@@ -21,6 +21,7 @@ const held = new Map<string, { text: string; base: string; n: number; first: num
 let armed = false;
 /** Edit numbers come from one counter that only goes up (never reset by Cancel, a save or a new draft), so a save's number can match no other draft. */
 let edits = 0;
+const listeners = new Map<string, Set<(outcome: "cleared" | "rebased") => void>>();
 
 export const drafts = {
   hold(slug: string, text: string, base: string) {
@@ -34,6 +35,13 @@ export const drafts = {
     }
   },
   get: (slug: string) => held.get(slug),
+  /** Every mounted editor of a page hears how a save settled its draft (a save made from another view of it, too). Returns the way to stop listening. */
+  listen(slug: string, f: (outcome: "cleared" | "rebased") => void) {
+    const set = listeners.get(slug) ?? new Set();
+    set.add(f);
+    listeners.set(slug, set);
+    return () => void set.delete(f);
+  },
   /** The edit number of the text held now (what a save sends along with the text). */
   edit: (slug: string) => held.get(slug)?.n ?? 0,
   /**
@@ -42,12 +50,13 @@ export const drafts = {
    */
   saved(slug: string, n: number, rev: string): "cleared" | "rebased" | "unrelated" {
     const d = held.get(slug);
+    const tell = (o: "cleared" | "rebased") => (listeners.get(slug)?.forEach((f) => f(o)), o);
     if (!d) return "cleared";
-    if (d.n === n) return held.delete(slug), "cleared";
+    if (d.n === n) return held.delete(slug), tell("cleared");
     // A draft begun after the sent edit (the old one was cancelled) is someone else's: the answer leaves it, and its revision, alone.
     if (d.first > n) return "unrelated";
     held.set(slug, { ...d, base: rev });
-    return "rebased";
+    return tell("rebased");
   },
 
   drop: (slug: string) => void held.delete(slug),
