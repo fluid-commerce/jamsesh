@@ -206,7 +206,10 @@ export class FontTries {
  */
 export async function loadLocalFonts(fc: Fc, invoke: Invoke | null, tries: FontTries): Promise<string[]> {
   const missing = await missingFamilies(fc);
-  const ask = missing.filter((f) => tries.due(f));
+  // A family the Mac sent only in part is asked for again even after its first face stops it being "missing":
+  // the canvas reports missing fonts per face, so it can't be trusted to say the rest of the faces are there.
+  const wanted = [...missing, ...[...tries.partial].filter((f) => !missing.includes(f))];
+  const ask = wanted.filter((f) => tries.due(f));
   const listed = (left: string[]) => [...left, ...[...tries.partial].filter((f) => !left.includes(f))];
   if (!invoke || !ask.length) return listed(missing);
   let fonts: { family: string; data: string }[];

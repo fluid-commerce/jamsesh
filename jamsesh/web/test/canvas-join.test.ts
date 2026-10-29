@@ -138,6 +138,31 @@ test("a family the Mac sent only in part is not settled and stays listed as subs
   expect(tried.due("Huge", Date.now() + 5_001)).toBe(true);
 });
 
+test("a partial family is asked for again after its first face stops it being reported missing, until all faces load", async () => {
+  const { fc, loaded } = fakeCanvas(["Acme"]); // reports Acme missing only until one face loads
+  const asked: string[][] = [];
+  let whole = false;
+  const invoke = async (_c: string, args: any) => {
+    asked.push(args.families);
+    return { fonts: [{ family: "Acme", data: btoa("Acme") }], deferred: [], incomplete: whole ? [] : ["Acme"] };
+  };
+  const tried = new FontTries();
+  expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["Acme"]); // loaded one face; still listed
+  expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["Acme"]); // backing off: not asked yet
+  expect(asked).toHaveLength(1);
+  whole = true;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 5_001;
+  try {
+    expect(await loadLocalFonts(fc, invoke, tried)).toEqual([]); // asked again though the canvas no longer reports it
+  } finally {
+    Date.now = realNow;
+  }
+  expect(asked).toEqual([["Acme"], ["Acme"]]);
+  expect(loaded).toHaveLength(2);
+  expect(tried.done.has("acme")).toBe(true);
+});
+
 test("in a browser there's no Mac to ask: the missing families are only listed", async () => {
   const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
   expect(await loadLocalFonts(fc, null, new FontTries())).toEqual(["Helvetica Neue"]);
