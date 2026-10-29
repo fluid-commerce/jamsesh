@@ -5,7 +5,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
-import { RELAY_LIMITS, queueRelayFrame, startHttp } from "../src/http";
+import { createServer } from "node:net";
+import { createHash } from "node:crypto";
+import { RELAY_LIMITS, queueRelayFrame, relayDown, relayUp, startHttp } from "../src/http";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-relay-"));
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
@@ -74,8 +76,103 @@ test("a client that leaves before the canvas server opens leaves no timer or que
     ws.close();
     await closed;
     await Bun.sleep(700); // the deadline passes with nobody to close; nothing throws
-    expect(true).toBe(true);
+    // The server is unharmed by the stale deadline: a new client still gets its own relay.
+    const again = client();
+    await again.opened;
+    expect(again.ws.readyState).toBe(WebSocket.OPEN);
+    again.ws.close();
+    await again.closed;
   } finally {
     RELAY_LIMITS.openMs = was;
   }
 });
+
+/** What a fake socket records, standing in for the Bun server socket and its upstream. */
+function fakeRelay(opts: { sendResult?: number; buffered?: number; refuse?: boolean; open?: boolean }) {
+  const log = { closed: [] as (number | undefined)[], upClosed: 0, sent: 0, upSent: 0 };
+  const up = { open: opts.open !== false, send() { log.upSent++; return !opts.refuse; }, close() { log.upClosed++; } };
+  const ws: any = { data: { upstream: up, collab: "/x" }, send() { log.sent++; return opts.sendResult ?? 1; }, getBufferedAmount: () => opts.buffered ?? 0, close(code?: number) { log.closed.push(code); } };
+  return { ws, log };
+}
+
+test("after the canvas server opens, a client frame ends the relay once the upstream says it is holding too much", () => {
+  const ok = fakeRelay({});
+  relayUp(ok.ws, "frame");
+  expect(ok.log).toMatchObject({ upSent: 1, closed: [], upClosed: 0 });
+  const stuck = fakeRelay({ refuse: true });
+  relayUp(stuck.ws, "frame");
+  expect(stuck.log).toMatchObject({ closed: [1013], upClosed: 1 });
+});
+
+test("a client that stopped draining ends the relay (a dropped send, or too much held)", () => {
+  const fine = fakeRelay({});
+  relayDown(fine.ws, "x");
+  expect(fine.log.closed).toEqual([]);
+  const dropped = fakeRelay({ sendResult: 0 });
+  relayDown(dropped.ws, new Uint8Array(4));
+  expect(dropped.log).toMatchObject({ closed: [1013], upClosed: 1 });
+  const held = fakeRelay({ buffered: RELAY_LIMITS.bytes + 1 });
+  relayDown(held.ws, "x");
+  expect(held.log).toMatchObject({ closed: [1013], upClosed: 1 });
+});
+
+test("frames and messages cross the relay both ways, large and binary ones intact", async () => {
+  const echo = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })), websocket: { message: (ws, m) => void ws.send(m) } });
+  const was = (hub.canvas as any).port;
+  (hub.canvas as any).port = echo.port;
+  try {
+    const { ws, opened } = client();
+    ws.binaryType = "arraybuffer";
+    const got: any[] = [];
+    ws.onmessage = (e) => got.push(e.data);
+    await opened;
+    const big = "y".repeat(300_000);
+    const bin = Uint8Array.from({ length: 70_000 }, (_, i) => i % 251);
+    ws.send("hello");
+    ws.send(big);
+    ws.send(bin);
+    for (let i = 0; i < 100 && got.length < 3; i++) await Bun.sleep(50);
+    expect(got[0]).toBe("hello");
+    expect(got[1]).toBe(big);
+    expect(new Uint8Array(got[2])).toEqual(bin);
+    ws.close();
+  } finally {
+    (hub.canvas as any).port = was;
+    echo.stop(true);
+  }
+});
+
+test("a canvas server that completes the handshake and then stops reading ends the relay with a retryable close", async () => {
+  // A raw upstream: answers the WebSocket upgrade, then stops reading its socket.
+  const sockets: import("node:net").Socket[] = [];
+  const upstream = createServer((sock) => {
+    sockets.push(sock);
+    sock.once("data", (buf) => {
+      const key = /Sec-WebSocket-Key: (.+)\r\n/i.exec(buf.toString())?.[1] ?? "";
+      const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      sock.pause();
+    });
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const port = (upstream.address() as any).port;
+  const was = { port: (hub.canvas as any).port, bytes: RELAY_LIMITS.bytes };
+  (hub.canvas as any).port = port;
+  RELAY_LIMITS.bytes = 256 * 1024;
+  try {
+    const { ws, closed, opened } = client();
+    await opened;
+    await Bun.sleep(300); // the handshake completes: the queue is out of the picture
+    const chunk = "x".repeat(512 * 1024);
+    for (let i = 0; i < 80 && ws.readyState === WebSocket.OPEN; i++) {
+      ws.send(chunk);
+      await Bun.sleep(10);
+    }
+    expect((await closed).code).toBe(1013);
+  } finally {
+    RELAY_LIMITS.bytes = was.bytes;
+    (hub.canvas as any).port = was.port;
+    for (const s of sockets) s.destroy();
+    upstream.close();
+  }
+}, 20_000);

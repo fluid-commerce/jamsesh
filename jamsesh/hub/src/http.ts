@@ -10,10 +10,11 @@ import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
+import { Upstream } from "./relay";
 import { skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; queueBytes?: number; openTimer?: ReturnType<typeof setTimeout> };
+type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: Upstream; queue?: (string | Buffer)[]; queueBytes?: number; openTimer?: ReturnType<typeof setTimeout> };
 
 /** What a relay holds for a canvas server that hasn't opened yet, and how long it waits: past either the client is told to try again. */
 export const RELAY_LIMITS = { bytes: 8 * 1024 * 1024, frames: 1000, openMs: 10_000 };
@@ -26,6 +27,30 @@ export function queueRelayFrame(data: WsData, raw: string | Buffer | ArrayBuffer
   q.push(raw as any);
   data.queueBytes = (data.queueBytes ?? 0) + size;
   return true;
+}
+
+/** Ends both legs of a relay with a retryable close: used when either side can't drain what it's been sent. */
+function endRelay(ws: ServerWebSocket<WsData>, reason: string) {
+  ws.close(1013, reason); // first: the upstream's own close below must not turn it into a plain one
+  ws.data.upstream?.close();
+}
+
+/**
+ * Every frame between the canvas client and the canvas server goes through here, so one rule holds
+ * for both directions and before and after the upstream opens: a leg that is already holding more
+ * than RELAY_LIMITS.bytes (a peer that stopped reading) ends the relay instead of growing.
+ */
+export function relayUp(ws: ServerWebSocket<WsData>, raw: string | Buffer | ArrayBuffer | Uint8Array) {
+  const up = ws.data.upstream;
+  if (up?.open) {
+    // The upstream counts what the canvas server hasn't read; over the cap it stopped reading.
+    if (!up.send(typeof raw === "string" ? raw : new Uint8Array(raw as ArrayBuffer))) endRelay(ws, "canvas can't keep up, try again");
+  } else if (!queueRelayFrame(ws.data, raw)) endRelay(ws, "canvas not ready, try again");
+}
+
+export function relayDown(ws: ServerWebSocket<WsData>, data: string | Uint8Array) {
+  const sent = ws.send(data);
+  if (sent === 0 || ws.getBufferedAmount() > RELAY_LIMITS.bytes) endRelay(ws, "can't keep up, try again");
 }
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
@@ -320,10 +345,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       },
       message(ws: ServerWebSocket<WsData>, raw) {
         if (ws.data.collab != null) {
-          const up = ws.data.upstream;
-          if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
-          else if (!queueRelayFrame(ws.data, raw as any)) ws.close(1013, "canvas not ready, try again");
-          return;
+          return relayUp(ws, raw as any);
         }
         try {
           const m = JSON.parse(String(raw));
@@ -364,23 +386,28 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 /** Relays a canvas WebSocket to the canvas server, which only listens on this machine. */
 function openCollab(ws: ServerWebSocket<WsData>, hub: Hub) {
   const port = (ws.data as any).devPort ?? hub.canvas.port;
-  const up = new WebSocket(`ws://127.0.0.1:${port}${ws.data.collab}`);
-  up.binaryType = "arraybuffer";
+  const up = new Upstream(
+    port,
+    ws.data.collab ?? "/",
+    {
+      open() {
+        clearTimeout(ws.data.openTimer);
+        const held = ws.data.queue ?? [];
+        ws.data.queue = [];
+        ws.data.queueBytes = 0;
+        for (const m of held) relayUp(ws, m as any);
+      },
+      message: (data) => relayDown(ws, data),
+      close: () => ws.close(),
+    },
+    () => RELAY_LIMITS.bytes,
+  );
   ws.data.upstream = up;
   // A canvas server that doesn't open in time (stalled, restarting) ends the relay with a retryable close.
   ws.data.openTimer = setTimeout(() => {
-    up.close();
     ws.close(1013, "canvas not ready, try again");
+    up.close();
   }, RELAY_LIMITS.openMs);
-  up.onopen = () => {
-    clearTimeout(ws.data.openTimer);
-    for (const m of ws.data.queue ?? []) up.send(m as any);
-    ws.data.queue = [];
-    ws.data.queueBytes = 0;
-  };
-  up.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer));
-  up.onclose = () => ws.close();
-  up.onerror = () => ws.close();
 }
 
 /** The dev server port for a dev-<port>.<domain> request, when <domain> is this host's. */
