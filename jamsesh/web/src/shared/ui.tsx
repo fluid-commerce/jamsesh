@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import qrcode from "qrcode-generator";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
-import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, JoinWatch, START_TIMEOUT_MS, friendlyReason, joinLabel, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -967,14 +967,15 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     let last = "loading";
     let gone = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    const watch = new JoinWatch();
     const tick = async () => {
       const fc = figcraftIn(frame.current);
       let j: JoinState;
       if (!fc) j = Date.now() - started > START_TIMEOUT_MS ? { state: "failed", reason: "The canvas didn't start." } : { state: "loading" };
       else {
-        const peers = await fc.execute("collab.peers", {}).catch(() => null);
-        if (!peers) return;
-        j = joinStateOf(peers);
+        const read = await watch.poll(fc);
+        if (!read) return;
+        j = read;
       }
       if (gone) return;
       if (j.state !== last) ((last = j.state), (since = Date.now()));
