@@ -206,7 +206,7 @@ refactors, fixes and tooling never coordinate. (That needs the brain online. If 
    what has to differ for the platform.
 2. Build only if you both confirm a gap; then post its screenshot. Otherwise `jam_ack` it done
    with what you found. It closes only that way, after the other agent has replied on it: pass the directive's id as
-   `directiveId` to `jam_message` or `jam_ask`, and in your replies to messages that name it (a `jam_update`
+   `directiveId` to `jam_message`, `jam_ask` and `jam_answer`, in your replies too (only a message that carries it counts) (a `jam_update`
    never closes it); if nobody answers, `jam_ack` it cancelled and say why.
 3. Compare both renders. Fix inconsistencies that aren't deliberate platform differences.
 4. `jam_show` with mode `parity` and columns for each platform, then `jam_update` with `shipped`

@@ -139,8 +139,8 @@ export class FigcraftMcp {
     }
   }
 
-  /** TERM, then KILL for one that ignores it; resolves once it is gone. */
-  close(): Promise<void> {
-    return this.closed ? Promise.resolve() : stopHelper(this.proc).catch(() => {});
+  /** TERM, then KILL for one that ignores it; true once its exit was seen. */
+  close(): Promise<boolean> {
+    return this.closed ? Promise.resolve(true) : stopHelper(this.proc).catch(() => false);
   }
 }

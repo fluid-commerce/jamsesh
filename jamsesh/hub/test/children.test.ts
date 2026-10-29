@@ -105,3 +105,17 @@ test("the wrapper itself kills a TERM-resistant helper after its own grace", asy
   await p.exited;
   expect(alive(hung)).toBe(false);
 });
+
+test("stopHelper reports true only for an exit it saw: a TERM-ignoring helper after KILL, and false for one that never exits", async () => {
+  const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 60_000), { stdio: ["ignore", "ignore", "ignore"] });
+  await Bun.sleep(500);
+  expect(await stopHelper(p, 500)).toBe(true);
+  expect(alive(p.pid)).toBe(false);
+  // A process whose exit never arrives (even after SIGKILL) is not reported as reaped.
+  const kills: (string | undefined)[] = [];
+  const stuck = { pid: 999999, exited: new Promise<number>(() => {}), kill: (sig?: any) => void kills.push(sig) };
+  const t0 = Date.now();
+  expect(await stopHelper(stuck, 200)).toBe(false);
+  expect(kills).toEqual([undefined, "SIGKILL"]);
+  expect(Date.now() - t0).toBeLessThan(2000);
+});

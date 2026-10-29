@@ -195,18 +195,25 @@ test("empty frames count against the cap too, after the canvas server has opened
   RELAY_LIMITS.bytes = 64 * 1024; // the kernel buffers more than this, so only the count of held frames can end it
   try {
     const { Upstream } = await import("../src/relay");
-    // Direct: the held count rises by the overhead for each empty frame until send() refuses.
-    const up = new Upstream((upstream.address() as any).port, "/", { open() {}, message() {}, close() {} }, () => RELAY_LIMITS.bytes);
+    let cap = 256 * 1024 * 1024;
+    const up = new Upstream((upstream.address() as any).port, "/", { open() {}, message() {}, close() {} }, () => cap);
     for (let i = 0; i < 200 && !up.open; i++) await Bun.sleep(10);
     expect(up.open).toBe(true);
-    // Fill the kernel's buffers first (a paused peer takes a few hundred KB), then empty frames must hit the cap.
-    const big = new Uint8Array(32 * 1024);
+    // Fill the kernel's buffers with big frames until the peer's refusal makes the relay hold some.
+    const big = new Uint8Array(64 * 1024);
+    for (let i = 0; i < 2000 && up.held === 0; i++) expect(up.send(big)).toBe(true);
+    expect(up.held).toBeGreaterThan(0);
+    // Now the cap sits just above what is held: only empty frames follow, and each must cost something.
+    cap = up.held + 1000;
+    let accepted = 0;
     let refused = false;
     for (let i = 0; i < 100_000 && !refused; i++) {
-      if (!up.send(i < 400 ? big : "")) refused = true;
+      if (up.send("")) accepted++;
+      else refused = true;
     }
+    expect(accepted).toBeGreaterThan(0); // empty frames really were sent before the limit
     expect(refused).toBe(true);
-    expect(up.held).toBeLessThanOrEqual(RELAY_LIMITS.bytes);
+    expect(up.held).toBeLessThanOrEqual(cap);
     up.close();
   } finally {
     RELAY_LIMITS.bytes = was.bytes;

@@ -142,7 +142,7 @@ const JAM_TOOLS = [
   {
     name: "jam_answer",
     description: "Answer a question another agent (or the room brain) asked you. Do this as soon as a QUESTION shows up in your inbox, before continuing your own work. Be concrete: file paths, values, names.",
-    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" } }, required: ["askId", "text"] },
+    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" }, directiveId: { type: "string", description: "The coordinate directive the question was about, if it names one" } }, required: ["askId", "text"] },
   },
   {
     name: "jam_repo_card",
@@ -481,7 +481,7 @@ export class McpEndpoint {
       }
       case "jam_answer": {
         const agent = this.requireAgent(ctx);
-        s.answer(agent.id, String(args.askId), String(args.text));
+        s.answer(agent.id, String(args.askId), String(args.text), args.directiveId ? { directiveId: String(args.directiveId) } : {});
         return text("Answered.");
       }
       case "jam_repo_card": {
@@ -746,7 +746,7 @@ export class McpEndpoint {
       );
     }
     for (const m of messages) {
-      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}), then continue.`);
+      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}${m.data.directiveId ? `, directiveId ${m.data.directiveId}` : ""}), then continue.`);
       else if (m.data.answerTo) out.push(`ANSWER from ${m.authorName} (to your question ${m.data.answerTo}): ${m.text}`);
       else out.push(`MESSAGE from ${m.authorName}${m.data.directiveId ? ` (about directive ${m.data.directiveId}: reply with directiveId ${m.data.directiveId})` : ""}: ${m.text}`);
     }

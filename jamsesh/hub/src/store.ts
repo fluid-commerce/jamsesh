@@ -276,18 +276,6 @@ export class Store {
     return row ? rowToEvent(row) : undefined;
   }
 
-  /** The latest message between two agents, either way: the thread's current end. */
-  lastBetween(a: string, b: string): JamEvent | undefined {
-    const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND ((author_id = ? AND json_extract(data, '$.to') = ?) OR (author_id = ? AND json_extract(data, '$.to') = ?)) ORDER BY id DESC LIMIT 1").get(a, b, b, a);
-    return row ? rowToEvent(row) : undefined;
-  }
-
-  /** The latest message one agent sent another that is tied to a directive, with no window. */
-  lastLinkedMessage(fromId: string, toId: string): JamEvent | undefined {
-    const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND author_id = ? AND json_extract(data, '$.to') = ? AND json_extract(data, '$.directiveId') IS NOT NULL ORDER BY id DESC LIMIT 1").get(fromId, toId);
-    return row ? rowToEvent(row) : undefined;
-  }
-
   /** How many events there are (before an id, of some kinds), for "N more" counts. */
   countEvents(opts: { beforeId?: number; kinds?: EventKind[] } = {}): number {
     const where: string[] = [];

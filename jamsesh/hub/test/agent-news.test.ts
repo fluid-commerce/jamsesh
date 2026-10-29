@@ -344,24 +344,17 @@ test("a coordinate directive stays open on jam_update and closes only after a re
   expect(s.store.get("directives", d.id)!.result).toBe(result);
 });
 
-test("an inline jam_ask answered on the directive counts as the exchange, and a reply that omits the id inherits it", async () => {
+test("an inline jam_ask answered with the directive id counts as the exchange", async () => {
   const { hub, s, desktop, mobile } = room();
   const ctx = (a: any) => ({ agentId: a.id, ip: "127.0.0.1", device: "host" });
   const d = s.createDirective({ text: "Parity check: compare.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
   const asking = hub.mcp.call(ctx(mobile), "jam_ask", { to: desktop.name, question: "Do you have the sidebar?", directiveId: d.id, waitSeconds: 5 });
   await wait(30);
   const q = s.store.recentEvents({ kinds: ["message"], limit: 5 }).find((e) => e.data.askId)!;
-  s.answer(desktop.id, q.data.askId, "Yes, same");
+  await hub.mcp.call(ctx(desktop), "jam_answer", { askId: q.data.askId, text: "Yes, same", directiveId: d.id });
   expect(JSON.stringify(await asking)).toContain("Yes, same");
   await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" });
   expect(s.store.get("directives", d.id)!.progress[mobile.id]).toBe("done");
-  // A plain reply to a message that was about the directive is about it too.
-  const d2 = s.createDirective({ text: "Parity check: compare tabs.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
-  s.sendMessage(desktop.id, mobile.id, "Tabs on yours?", { directiveId: d2.id });
-  s.sendMessage(mobile.id, desktop.id, "Yes");
-  s.sendMessage(desktop.id, mobile.id, "Good, matches");
-  await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d2.id, status: "done", result: "same" });
-  expect(s.store.get("directives", d2.id)!.progress[mobile.id]).toBe("done");
 });
 
 test("a coordinate directive can always be dropped, and other modes close on jam_update as before", async () => {
@@ -404,7 +397,7 @@ test("only the agent a question was asked of can answer it, and an old ask is st
   void hub;
 });
 
-test("the exchange must be with one named counterpart in both directions, and a reply inherits only from the thread's current end", async () => {
+test("the exchange must be with one named counterpart in both directions, and only an explicit directiveId links a message", async () => {
   const { hub, s, desktop, mobile } = room();
   const web = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
   const ctx = { agentId: mobile.id, ip: "127.0.0.1", device: "host" };
@@ -415,17 +408,29 @@ test("the exchange must be with one named counterpart in both directions, and a 
   s.sendMessage(mobile.id, desktop.id, "to desktop", { directiveId: d.id });
   s.sendMessage(web.id, mobile.id, "from web", { directiveId: d.id });
   expect(await done()).toContain("wait for their reply");
+  // A reply without the id is not part of it, however it follows: nothing is inherited.
+  s.sendMessage(desktop.id, mobile.id, "plain reply, no id");
+  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBeUndefined();
+  s.sendMessage(mobile.id, desktop.id, "and a plain answer");
+  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBeUndefined();
+  expect(await done()).toContain("wait for their reply");
   s.sendMessage(desktop.id, mobile.id, "from desktop", { directiveId: d.id });
   expect(await done()).toBe("accepted");
-  // A plain reply inherits only while the linked message is still the thread's end.
-  const d2 = s.createDirective({ text: "Another", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
-  s.sendMessage(desktop.id, mobile.id, "about d2", { directiveId: d2.id });
-  s.sendMessage(mobile.id, desktop.id, "plain answer"); // inherits: right after the linked one
-  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBe(d2.id);
-  s.sendMessage(mobile.id, desktop.id, "and a second plain message"); // not a reply to the other agent: the thread's end is its own
-  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBeUndefined();
-  // A third agent's plain message never inherits a pair's thread.
-  s.sendMessage(desktop.id, mobile.id, "again about d2", { directiveId: d2.id });
-  s.sendMessage(web.id, mobile.id, "hello");
-  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBeUndefined();
+});
+
+test("an answer counts only when jam_answer carries the directiveId, and the inbox tells the asked agent to pass it", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const d = s.createDirective({ text: "Parity check", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
+  const gap = () => s.exchangeGap(s.store.get("directives", d.id)!, mobile.id);
+  const q1 = s.ask(mobile.id, desktop.id, "Do you have it?", 5000);
+  const askId = s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.askId;
+  s.answer(desktop.id, askId, "yes"); // no id: not part of the exchange
+  await q1.answer;
+  expect(gap()).not.toBeNull();
+  const q2 = s.ask(mobile.id, desktop.id, "And the footer?", 5000, { directiveId: d.id });
+  const ask2 = s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.askId;
+  expect(hub.mcp.inboxText(desktop, false)).toContain(`directiveId ${d.id}`);
+  await hub.mcp.call({ agentId: desktop.id, ip: "127.0.0.1", device: "host" }, "jam_answer", { askId: ask2, text: "yes", directiveId: d.id });
+  await q2.answer;
+  expect(gap()).toBeNull();
 });

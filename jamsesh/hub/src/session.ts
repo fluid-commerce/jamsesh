@@ -786,14 +786,6 @@ export class Session {
       return ev;
     }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
-    // A reply to a message that was about a directive is about it too, so an agent that doesn't pass the id still answers on the record.
-    // Only the thread's current end counts: the other agent's latest message to this one, still the last between them.
-    if (target && !data.directiveId) {
-      const end = this.store.lastBetween(target.id, from.id);
-      const d = end && end.authorId === target.id && end.data.directiveId ? this.store.get("directives", end.data.directiveId) : undefined;
-      const party = (a: string, b: string) => !!d && d.targets.includes(a) && (d.counterparts?.length ? d.counterparts.includes(b) : true);
-      if (d && (party(from.id, target.id) || party(target.id, from.id))) data = { ...data, directiveId: d.id };
-    }
     const ev = this.store.addEvent({
       kind: "message",
       authorType: "agent",
@@ -839,7 +831,7 @@ export class Session {
     return this.store.messagesAnswering(askId).length > 0;
   }
 
-  answer(fromId: string, askId: string, text: string) {
+  answer(fromId: string, askId: string, text: string, data: Record<string, any> = {}) {
     const from = this.agent(fromId);
     const q = this.store.messageByAsk(askId);
     if (!q) throw new Error("No question with that id.");
@@ -854,7 +846,7 @@ export class Session {
       text,
       relevance: "work",
       // A waiting jam_ask returns the answer itself: the inbox doesn't repeat it.
-      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...(q.data.directiveId ? { directiveId: q.data.directiveId } : {}), ...(waiting ? { inline: true } : {}) },
+      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...data, ...(waiting ? { inline: true } : {}) },
     });
     if (waiting) waiting.resolve(text);
     else if (q.authorId) this.wake(q.authorId); // the asker stopped waiting; it gets the answer in its inbox

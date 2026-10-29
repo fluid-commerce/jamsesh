@@ -500,7 +500,7 @@ test("Stop reaps a canvas server that ignores SIGTERM, and a key helper still ru
     expect(await waitFor(() => existsSync(join(dir, "key.pid")) && existsSync(join(dir, "serve.pid")))).toBe(true);
     const pids = ["key", "serve"].map((m) => Number(readFileSync(join(dir, `${m}.pid`), "utf8").trim()));
     expect(pids.every(isAlive)).toBe(true);
-    await canvas.stop(); // resolves only once the TERM-resistant helpers are reaped
+    expect(await canvas.stop()).toBe(true); // resolves true only once the TERM-resistant helpers' exits were seen
     expect(pids.every((p) => !isAlive(p))).toBe(true);
     await key;
   } finally {

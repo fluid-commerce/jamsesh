@@ -164,10 +164,12 @@ export class Hub {
   async shutdown() {
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
-    await Promise.race([this.stop(), Bun.sleep(6000)]); // helpers get their TERM-then-KILL before the process exits
+    // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
+    if (!(await this.stop())) console.warn("a helper process was still running at shutdown");
   }
 
-  stop(): Promise<void> {
+  /** Stops everything; true when every helper process was seen to exit. */
+  stop(): Promise<boolean> {
     this.awake.stop();
     this.autosave.stop();
     this.brain.stop();

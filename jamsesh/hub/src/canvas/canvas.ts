@@ -130,18 +130,18 @@ export class Canvas {
     if (this.stopped) throw new Error("the canvas was stopped");
   }
 
-  /** Stops everything; the promise resolves once the helpers are reaped (a TERM-resistant one gets KILL). */
-  stop(): Promise<void> {
+  /** Stops everything. Resolves true when every helper's exit was seen (a TERM-resistant one gets KILL), false if one is still running. */
+  stop(): Promise<boolean> {
     this.stopped = true;
     if (this.startRetry) clearTimeout(this.startRetry);
     if (this.poller) clearInterval(this.poller);
     for (const t of this.timers.splice(0)) clearInterval(t);
-    const reaped: Promise<unknown>[] = [];
+    const reaped: Promise<boolean>[] = [];
     if (this.host) reaped.push(this.host.close());
     for (const a of this.agents.values()) reaped.push(a.mcp.close());
-    if (this.keyProc) reaped.push(stopHelper(this.keyProc).catch(() => {}));
-    if (this.serverProc) reaped.push(stopHelper(this.serverProc).catch(() => {})); // TERM, then KILL, and reaped
-    return Promise.all(reaped).then(() => {});
+    if (this.keyProc) reaped.push(stopHelper(this.keyProc).catch(() => false));
+    if (this.serverProc) reaped.push(stopHelper(this.serverProc).catch(() => false)); // TERM, then KILL, and reaped
+    return Promise.all(reaped).then((all) => all.every(Boolean));
   }
 
   private async startServer() {

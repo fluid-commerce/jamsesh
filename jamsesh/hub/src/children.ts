@@ -26,13 +26,13 @@ export function withParentWatch(cmd: string[], parentPid = process.pid, graceMs 
   return ["/bin/sh", "-c", script, "jamsesh-child", String(parentPid), ...cmd];
 }
 
-/** Stops a wrapped helper and waits for it. A helper still alive after the grace gets SIGKILL, so a hung one can't hold its port. */
-export async function stopHelper(proc: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void }, graceMs = 2_000) {
+/** Stops a wrapped helper and waits for it. A helper still alive after the grace gets SIGKILL, so a hung one can't hold its port. True only when its exit was observed; false if it is still running after the KILL. */
+export async function stopHelper(proc: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void }, graceMs = 2_000): Promise<boolean> {
+  const exited = (ms: number) => Promise.race([proc.exited.then(() => true, () => true), Bun.sleep(ms).then(() => false)]);
   proc.kill();
-  const done = await Promise.race([proc.exited.then(() => true), Bun.sleep(graceMs).then(() => false)]);
-  if (done) return;
+  if (await exited(graceMs)) return true;
   // The wrapper is waiting on its helper: kill the helper and the wrapper's wait ends.
   Bun.spawnSync(["pkill", "-KILL", "-P", String(proc.pid)]);
   proc.kill("SIGKILL");
-  await Promise.race([proc.exited, Bun.sleep(graceMs)]);
+  return exited(graceMs); // true only when the exit itself was seen
 }
