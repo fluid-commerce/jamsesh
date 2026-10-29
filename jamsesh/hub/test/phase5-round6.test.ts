@@ -239,7 +239,17 @@ test("a WAV with a missing, late, short or doubled fmt, a chunk past its end or 
     ["data past the end", riff(["fmt ", fmt16], ["data", pcm(3200)]).slice(0, 1000)],
     ["half a sample", riff(["fmt ", fmt16], ["data", pcm(3201)])],
     ["only a header", new Uint8Array([..."RIFF"].map((c) => c.charCodeAt(0)))],
+    // Office review 6: the declared RIFF size, and every chunk after data.
+    ["RIFF size zero", (() => { const w = good.slice(); new DataView(w.buffer).setUint32(4, 0, true); return w; })()],
+    ["RIFF size too big", (() => { const w = good.slice(); new DataView(w.buffer).setUint32(4, w.length + 100, true); return w; })()],
+    ["junk chunk after data", riff(["fmt ", fmt16], ["data", pcm(320)], ["\u0000\u0001\u0002\u0003", pcm(4)])],
+    ["chunk after data runs past the end", (() => { const w = riff(["fmt ", fmt16], ["data", pcm(320)], ["LIST", pcm(40)]).slice(0, -20); new DataView(w.buffer).setUint32(4, w.length - 8, true); return w; })()],
+    ["half a chunk header after data", (() => { const a = riff(["fmt ", fmt16], ["data", pcm(320)]); const w = new Uint8Array(a.length + 5); w.set(a); new DataView(w.buffer).setUint32(4, w.length - 8, true); return w; })()],
+    ["two data", riff(["fmt ", fmt16], ["data", pcm(320)], ["data", pcm(320)])],
   ];
+  // A chunk after data that is whole is fine (LIST metadata), and so is a last odd chunk without its pad byte.
+  expect(decodeWav(riff(["fmt ", fmt16], ["data", pcm(320)], ["LIST", pcm(6)])).samples.length).toBe(160);
+  expect(decodeWav(riff(["fmt ", fmt16], ["data", pcm(320)], ["LIST", pcm(5)]).slice(0, -1)).samples.length).toBe(160);
   for (const [what, w] of bad) {
     let thrown: unknown;
     try {
@@ -257,7 +267,10 @@ test("over HTTP a malformed WAV is a 400 for a segment and for a read, never a 5
   expect((await call(wes.token, "POST", "/devices", { deviceId: "d-wes", personId: p.id })).status).toBe(200);
   const post = (path: string, body: Uint8Array) => fetch(`${base}/api${path}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${wes.token}` }, body: body as unknown as BodyInit });
   const t0 = Date.now() - 5000;
-  for (const [i, w] of [riff(["fmt ", fmt16.slice(0, 4)], ["data", pcm(320)]), riff(["data", pcm(320)], ["fmt ", fmt16]), riff(["fmt ", fmt16]).slice(0, 26)].entries()) {
+  const zeroRiff = riff(["fmt ", fmt16], ["data", pcm(320)]);
+  new DataView(zeroRiff.buffer).setUint32(4, 0, true);
+  const junkAfter = riff(["fmt ", fmt16], ["data", pcm(320)], ["\u0000\u0001\u0002\u0003", pcm(4)]);
+  for (const [i, w] of [riff(["fmt ", fmt16.slice(0, 4)], ["data", pcm(320)]), riff(["data", pcm(320)], ["fmt ", fmt16]), riff(["fmt ", fmt16]).slice(0, 26), zeroRiff, junkAfter].entries()) {
     expect((await post(`/audio?deviceId=d-wes&t0=${t0 + i}&t1=${t0 + i + 1000}&epoch=0`, w)).status).toBe(400);
     expect((await post(`/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}`, w)).status).toBe(400);
   }
