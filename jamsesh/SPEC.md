@@ -1288,7 +1288,7 @@ and can be turned off on the host (**Settings > Voice and host > Let the brain d
 | `arrange` | Places apps side by side (`left-right`), in a grid, or full on a display (the big screen's by default, `main`, or by name), inside the display's usable area [A29c, B42]. |
 | `windows` | Lists visible windows with titles, sizes, positions, and displays. |
 | `simulator` | Boots an iOS Simulator (a booted match, the named device, or the first iPhone) and optionally opens a URL in it [B45a, A29b]. |
-| `shell` | Runs a command in `zsh -lc` (60 seconds, last 4000 characters of output), for example installing a tool it needs to show something [B41, B42]. |
+| `shell` | Runs a command in `zsh -lc` (60 seconds). The room is told how it ended and the last 600 characters of output, with anything that looks like a secret (tokens, keys, `password=` values, URL credentials) masked. A command that carries a password or token is refused when it is filed, for example installing a tool it needs to show something [B41, B42]. |
 | `focus_jamsesh` | Brings the big screen back to the front. |
 
 Every action is logged as a system event. Errors from missing Accessibility or Automation

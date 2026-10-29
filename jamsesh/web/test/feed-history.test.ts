@@ -72,3 +72,19 @@ test("an HTTP state answer that was in flight while the socket delivered newer s
   }
   expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([2, 3]); // not regressed to [2]
 });
+
+test("a reconnect while an HTTP state request is out also discards that answer", async () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: { events: [{ id: 2, kind: "speech", text: "a", data: {} }], utterances: [] } });
+  const realFetch = globalThis.fetch;
+  (globalThis as any).fetch = async () => {
+    h.set({ epoch: h.snap.epoch + 1 }); // the socket reconnected; state identity is untouched
+    return new Response(JSON.stringify({ events: [], utterances: [] }), { headers: { "content-type": "application/json" } });
+  };
+  try {
+    await hub.refreshState();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([2]);
+});

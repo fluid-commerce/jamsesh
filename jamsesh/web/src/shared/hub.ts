@@ -283,9 +283,10 @@ class HubClient {
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
     const before = this.snap.state;
+    const epoch = this.snap.epoch;
     const fetched = await api<HubState>("/state");
-    // Any socket message that arrived while this was in flight made newer state: don't overwrite it with an older answer.
-    if (this.snap.state === before) this.adopt(fetched);
+    // Any socket message that arrived while this was in flight made newer state, and a reconnect changes the epoch: either way an older answer must not overwrite it.
+    if (this.snap.state === before && this.snap.epoch === epoch) this.adopt(fetched);
   }
 
   /** The one way a whole state replaces the old (socket message or HTTP fallback): events newer than the old state's newest are announced, so lines that came in while this client was away from the wire still reach listeners (only those the snapshot still holds). */

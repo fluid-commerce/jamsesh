@@ -301,19 +301,38 @@ function urlValueProblem(url: string, o: { allowGitUser?: boolean }): boolean {
   if (authority.includes("@") && !(o.allowGitUser && u.username === "git" && u.protocol === "ssh:" && !u.password)) return true; // any userinfo, even an empty one
   if (u.password) return true;
   if (u.username && !(o.allowGitUser && u.username === "git" && u.protocol === "ssh:")) return true;
-  for (const params of [u.searchParams, new URLSearchParams(u.hash.slice(1))]) for (const key of params.keys()) if (SECRET_PARAM.test(key)) return true;
+  // Fields separated by & or ; (the URL class splits on & only), in the query and the fragment.
+  for (const part of [u.search.slice(1), u.hash.slice(1)]) for (const field of part.split(/[&;]/)) if (SECRET_PARAM.test(decodeURIComponent(field.split("=")[0]).replace(/\+/g, " ").trim())) return true;
   return false;
+}
+
+/** The text inside `$(...)` and `...` (backticks) in a command, which the shell runs as commands of their own. */
+function substitutions(text: string): string[] {
+  const found: string[] = [];
+  for (const m of text.matchAll(/`([^`]*)`/g)) found.push(m[1]);
+  for (let i = text.indexOf("$("); i >= 0; i = text.indexOf("$(", i + 2)) {
+    let depth = 0;
+    let j = i + 1;
+    for (; j < text.length; j++) {
+      if (text[j] === "(") depth++;
+      else if (text[j] === ")" && --depth === 0) break;
+    }
+    found.push(text.slice(i + 2, j));
+  }
+  return found;
 }
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 
 /** One simple command's words. A curl-style command anywhere in it (after env, sudo, time, nice, xargs...) makes its credential flags count; `sh -c "..."` is checked as a command of its own. */
-function wordsProblem(words: string[], o: { allowGitUser?: boolean }): boolean {
+function wordsProblem(words: string[], o: { allowGitUser?: boolean }, depth = 0): boolean {
   const base = (w: string) => (w ?? "").split("/").pop()!.toLowerCase();
   const curlish = words.some((w) => CURLISH.has(base(w)));
   for (let i = 0; i < words.length; i++) {
     const w = words[i];
     if (SHELLS.has(base(w)) && /^-[a-z]*c[a-z]*$/i.test(words[i + 1] ?? "") && words[i + 2] && credentialProblem(words[i + 2], o)) return true;
+    // Quoted payloads (a string handed to eval, `sh`, ssh, xargs...) are commands in disguise: any word with whitespace is checked as command text of its own.
+    if (depth < 3 && /\s/.test(w) && i > 0 && credentialProblem(w, { ...o, depth: depth + 1 })) return true;
     if (HEADER.test(w) || /^bearer\s+\S{8,}/i.test(w)) return true;
     if (curlish && i > 0 && CRED_FLAG.test(w)) return true;
     if (CRED_ASSIGN.test(w) || KEY_ASSIGN.test(w)) return true;
@@ -333,7 +352,7 @@ function wordsProblem(words: string[], o: { allowGitUser?: boolean }): boolean {
  * formats. A `single` value (a URL or path) must be one token with no whitespace or control
  * characters, and is parsed whole. `allowGitUser` lets an ssh remote keep the plain user `git`.
  */
-export function credentialProblem(text: string, o: { single?: boolean; allowGitUser?: boolean } = {}): string | null {
+export function credentialProblem(text: string, o: { single?: boolean; allowGitUser?: boolean; depth?: number } = {}): string | null {
   if (typeof text !== "string") return "That isn't valid.";
   if (text.length > 100_000) return "That is too long to check.";
   if (TOKEN_FORMATS.some((r) => r.test(text))) return CREDENTIALS_REFUSED;
@@ -343,9 +362,10 @@ export function credentialProblem(text: string, o: { single?: boolean; allowGitU
     return /^[a-z][a-z0-9+.-]*:\/\//i.test(text) && urlValueProblem(text, o) ? CREDENTIALS_REFUSED : null;
   }
   // Both readings: with comments stripped as a shell does, and with `#` as ordinary text (a comment can hide a credential from the room's view of the command, or be pasted into a script).
+  for (const sub of substitutions(text)) if ((o.depth ?? 0) < 3 && credentialProblem(sub, { ...o, depth: (o.depth ?? 0) + 1 })) return CREDENTIALS_REFUSED;
   for (const cmds of [shellCommands(text), shellCommands(text, { comments: false })]) {
     for (const words of cmds) {
-      if (wordsProblem(words, o)) return CREDENTIALS_REFUSED;
+      if (wordsProblem(words, o, o.depth ?? 0)) return CREDENTIALS_REFUSED;
     }
   }
   return null;
@@ -392,6 +412,21 @@ export function confine(dir: string, rel: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Anything a command printed that looks like a secret, masked, before it can reach the room: URL userinfo, known token formats, private keys, and `name=value` for secret-looking names. */
+export function redactSecrets(text: string): string {
+  let out = redactUrls(text).replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***private key***");
+  for (const r of TOKEN_FORMATS) out = out.replace(new RegExp(r.source, r.flags.includes("g") ? r.flags : `${r.flags}g`), "***");
+  return out.replace(/(\b[\w.-]*?(?:token|secret|password|passwd|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?(?![a-z])|cookie)[\w.-]*\s*[=:]\s*)(?:Bearer\s+)?\S+/gi, "$1***");
+}
+
+/** A branch name git may be given: plain characters only, no leading dash, nothing that looks like a token. */
+export function branchProblem(branch: string | undefined): string | null {
+  const b = branch?.trim() ?? "";
+  if (!b) return null;
+  if (b.length > 200 || !/^[\w./-]+$/.test(b) || b.startsWith("-")) return "That branch name has characters I won't pass to git.";
+  return credentialProblem(b, { single: true });
 }
 
 /** Any URL's credentials removed, for anything the room can see. */
@@ -724,7 +759,7 @@ export class HostControl {
     const bad = repoProblem(r.repo);
     if (bad) return bad.startsWith("That") ? bad : "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
     if (!r.command.trim()) return "Give the build command.";
-    const leaky = commandProblem(r.command) ?? openProblem(r.open);
+    const leaky = branchProblem(r.branch) ?? commandProblem(r.command) ?? openProblem(r.open);
     if (leaky) return leaky;
     return this.file(r);
   }
@@ -783,7 +818,7 @@ export class HostControl {
             return this.log(`Shell command is still running and couldn't be stopped: ${redactUrls(command)}`);
           case "ok":
           case "failed":
-            return this.log(`Shell command finished with exit ${r.code}: ${redactUrls(command)}${r.out.trim() ? `\n${redactUrls(r.out.slice(-600))}` : ""}`);
+            return this.log(`Shell command finished with exit ${r.code}: ${redactUrls(command)}${r.out.trim() ? `\n${redactSecrets(r.out.slice(-600))}` : ""}`);
           default:
             return assertNever(r);
         }
@@ -804,7 +839,8 @@ export class HostControl {
     if (bad) return bad;
     const name = o.repo.replace(/\.git$/, "").split(/[/:]/).pop() || "repo";
     const branch = o.branch?.trim() || "";
-    if (branch && (!/^[\w./-]+$/.test(branch) || branch.startsWith("-"))) return "That branch name has characters I won't pass to git.";
+    const badBranch = branchProblem(branch);
+    if (badBranch) return badBranch;
     // The checkout is keyed by the full remote, so org-a/app and org-b/app never share one.
     const slug = `${name}${branch ? `-${branch.replace(/[^\w-]+/g, "-")}` : ""}-${createHash("sha1").update(o.repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
     if (this.builds.has(slug)) return `${name}${branch ? `@${branch}` : ""} is already building on the host.`;
@@ -881,7 +917,7 @@ export class HostControl {
         if (!built) {
           result = ""; // stuck: set below
         } else if (built.code) {
-          result = `The ${label} build failed (exit ${built.code}): ${redactUrls(built.out.slice(-600))}`;
+          result = `The ${label} build failed (exit ${built.code}): ${redactSecrets(built.out.slice(-600))}`;
         } else {
           result = await launched();
         }
@@ -889,14 +925,14 @@ export class HostControl {
           const s2 = stuck.r;
           ok = false;
           release = () => void s2.gone.then(() => this.builds.delete(slug));
-          result = `The ${label} build is still running a command that couldn't be stopped (${redactUrls(s2.out.slice(-300))}). It stays locked until that exits.`;
+          result = `The ${label} build is still running a command that couldn't be stopped (${redactSecrets(s2.out.slice(-300))}). It stays locked until that exits.`;
         }
-        result = redactUrls(result);
+        result = redactSecrets(result);
         this.log(result);
         this.onBuilt(label, ok, result);
         bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
       } catch (e) {
-        const result = redactUrls(`The ${label} build couldn't run: ${e instanceof Error ? e.message : String(e)}`);
+        const result = redactSecrets(`The ${label} build couldn't run: ${e instanceof Error ? e.message : String(e)}`);
         try {
           this.log(result);
           this.onBuilt(label, false, result);
