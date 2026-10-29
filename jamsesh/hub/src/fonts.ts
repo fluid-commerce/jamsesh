@@ -16,6 +16,7 @@ export const MAX_FACES = 12;
 export const MAX_FAMILY_BYTES = 32 * 1024 * 1024;
 export const MAX_LENT_BYTES = 128 * 1024 * 1024;
 export const MAX_TICKETS_PER_CALLER = 8;
+export const MAX_TICKETS = 100;
 export const MAX_OPEN_BYTES = 96 * 1024 * 1024;
 export const MAX_FAMILIES = 48;
 const MAX_OPEN_PER_SCAN = 16;
@@ -352,13 +353,29 @@ export class FontService {
         await r.body?.cancel().catch(() => {});
         continue;
       }
-      // Read no more than this face may be: the face cap, and what's left of the family's and the session's.
-      // Other families downloading at the same time have already spoken for part of the room's allowance (`reserved`).
-      const data = await readUpTo(r, Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, this.maxOpen - this.openBytes() - this.reserved));
+      // Read no more than this face may be, and speak for that much of the room's allowance before the first byte is read: the
+      // face cap, what's left of the family's, and what the room has left after the fonts held and everything other downloads
+      // have already spoken for (`reserved`). The reservation shrinks to what was read; it is never taken after the await.
+      const room = Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, this.maxOpen - this.openBytes() - this.reserved);
+      // A server that says how long the file is is held to that: a short file speaks for no more than it is.
+      const said = Number(r.headers.get("content-length") ?? NaN);
+      if (room <= 0 || (Number.isFinite(said) && said > room)) {
+        await r.body?.cancel().catch(() => {});
+        break;
+      }
+      const reserve = Number.isFinite(said) && said >= 0 ? said : room;
+      this.reserved += reserve;
+      claim.n += reserve;
+      let data: Uint8Array | null = null;
+      try {
+        data = await readUpTo(r, reserve);
+      } finally {
+        const used = data?.length ?? 0;
+        this.reserved -= reserve - used;
+        claim.n -= reserve - used;
+      }
       if (!data) break;
       total += data.length;
-      claim.n += data.length;
-      this.reserved += data.length;
       if (fontFamilies(data)?.some((n) => normalizeFamily(n) === key)) faces.push({ data });
     }
     return faces;
@@ -511,13 +528,18 @@ export class FontService {
    */
   lendTicket(caller: string, personId: string, family: unknown, now = Date.now()): string | null {
     if (this.closed || typeof family !== "string" || !family.trim() || family.length > 200) return null;
+    // Only for a font the room is waiting for, or one just lent (a retry after a lost answer): a lend of any other is refused anyway,
+    // so the pool can't fill with tickets for nothing.
+    const key = normalizeFamily(family);
+    if (!this.wanted.has(key) && this.held.get(key)?.kind !== "borrowed") return null;
     for (const [t, v] of this.tickets) if (v.until < now) this.tickets.delete(t);
     // One window can't use up the pool: past its share, its oldest ticket is replaced.
     const mine = [...this.tickets].filter(([, v]) => v.caller === caller);
     if (mine.length >= MAX_TICKETS_PER_CALLER) this.tickets.delete(mine[0][0]);
-    if (this.tickets.size >= 100) return null;
+    // A full pool drops the oldest ticket of all, so a new request is never the one that waits.
+    while (this.tickets.size >= MAX_TICKETS) this.tickets.delete(this.tickets.keys().next().value!);
     const ticket = randomBytes(16).toString("hex");
-    this.tickets.set(ticket, { caller, personId, key: normalizeFamily(family), until: now + 2 * 60_000 });
+    this.tickets.set(ticket, { caller, personId, key, until: now + 2 * 60_000 });
     return ticket;
   }
 
