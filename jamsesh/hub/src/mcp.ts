@@ -614,6 +614,7 @@ export class McpEndpoint {
         const columns = (args.columns ?? []).map((c: any) => ({ label: String(c.label ?? ""), items: (c.artifactIds ?? []).filter((i: string) => known.has(i)) }));
         if (!items.length && !columns.some((c: any) => c.items.length)) throw new Error("No known artifact ids. Use jam_artifacts.");
         const screen = "main";
+        if (!["spotlight", "compare", "parity"].includes(args.mode)) return text("jam_show can put up a spotlight, a compare or a parity view. Other screens are the room's to choose.");
         // The exact stage, checked before it is queued or shown: an item that can never go up isn't promised to the agent.
         const wanted = { mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items: items.slice(0, 60), columns: columns.length ? columns : undefined };
         const checked = parseStage(wanted);

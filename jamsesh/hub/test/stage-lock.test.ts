@@ -1397,3 +1397,32 @@ test("the stage write itself refuses a view with nothing to draw (a brain tool's
   expect(s.showReady(queued.id, { override: true })).toMatchObject({ applied: true });
   void out;
 });
+
+test("malformed stage data is refused, never thrown on: raw writes, stored history and a queued item are parsed first", async () => {
+  const { s, chey, reg, call, out } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { override: true });
+  const err = console.error;
+  console.error = () => {};
+  try {
+    for (const bad of [{ mode: "spotlight", items: "x" }, { mode: "parity", columns: "no" }, { mode: "layout", layout: { tiles: "no" } }, { mode: "layout", layout: { tiles: [null] } }] as any[]) {
+      expect(s.setStage(bad, "Room brain", "main", { override: true })).toMatchObject({ applied: false });
+    }
+    // History entries and a queued item as an older build (or a hand edit) might have stored them.
+    s.store.setSetting("stageHistory", { main: [{ id: "his-bad", at: 1, by: "x", label: "x", stage: { mode: "layout", layout: { tiles: "no" } } }] });
+    expect(s.restoreHistory("his-bad", "main", { claim: s.stageClaim() })).toMatchObject({ applied: false });
+    const agent = reg("Felipe");
+    const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Bad", stage: { mode: "spotlight", items: "no" } as any });
+    expect(s.showReady(item.id, { override: true })).toMatchObject({ applied: false });
+    expect(s.readyToShow().some((r) => r.id === item.id)).toBe(true);
+  } finally {
+    console.error = err;
+  }
+  expect(s.stage().items).toEqual([a.id]);
+  // jam_show offers three views; a raw call for another mode is turned away, an unlocked screen untouched.
+  const agent2 = reg("Maya");
+  const said = out(await call(agent2, "jam_show", { mode: "board", artifactIds: [a.id] }));
+  expect(said).toContain("spotlight");
+  expect(s.stage().mode).toBe("spotlight");
+  void chey;
+});

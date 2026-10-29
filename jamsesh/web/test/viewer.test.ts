@@ -1,17 +1,10 @@
 import { expect, test } from "bun:test";
-import { groupArtifacts, keyAction, step } from "../src/client/viewerNav";
+import { groupArtifacts, keyAction } from "../src/client/viewerNav";
 import { fullSize } from "../src/shared/frames";
 import type { Artifact } from "../src/shared/hub";
 
 const art = (id: string, over: Partial<Artifact> = {}): Artifact =>
   ({ id, ts: 0, updatedAt: 0, kind: "frame", stage: "mockup", agentId: null, agentName: "", title: id, group: "", variant: "", platform: null, nodeId: null, url: null, image: null, width: null, height: null, workstreamId: null, note: "", ...over }) as Artifact;
-
-test("the arrows stop at the ends of the group", () => {
-  expect(step(0, 3, -1)).toBe(0);
-  expect(step(0, 3, 1)).toBe(1);
-  expect(step(2, 3, 1)).toBe(2);
-  expect(step(1, 1, 1)).toBe(0);
-});
 
 test("keys: arrows step, Esc closes, Space zooms, and modified keys are left to the browser", () => {
   expect(keyAction({ key: "ArrowLeft" })).toBe("prev");

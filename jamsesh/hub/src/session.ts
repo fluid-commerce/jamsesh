@@ -1643,6 +1643,10 @@ export class Session {
    */
   setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen: string, opts: StageOpts): StageResult {
     const refused = (reason: string): StageResult => ({ applied: false, reason });
+    // Parse once, at the very top: everything below reads and commits only the cleaned copy, never the raw input.
+    const parsed = parseStage(next);
+    if (!parsed.ok) return refused(parsed.error);
+    next = parsed.stage;
     if (!this.claimHolds(opts.claim, screen)) return refused("The screen changed since this was decided.");
     const held = this.lockOf(screen);
     // The lock's owner asked for this very write: it replaces their lock in the same step (nothing is released ahead of it).
@@ -1961,12 +1965,14 @@ export class Session {
     const item = this.readyToShow().find((r) => r.id === id);
     if (!item) throw new NotShown("That item isn't waiting any more.");
     if ("claim" in who && !this.claimHolds(who.claim, item.screen)) throw new NotShown("The screen changed since; look again.");
-    const gone = this.unrenderable(item.stage);
+    const wanted = parseStage(item.stage);
+    if (!wanted.ok) throw new NotShown(wanted.error);
+    const gone = this.unrenderable(wanted.stage);
     if (gone) throw new NotShown(gone);
     // A display that was unplugged since the item queued has no one looking at it.
     if (item.screen !== "main" && !this.screens().some((x) => x.id === item.screen)) throw new NotShown("That display isn't connected any more.");
     this.dismissReady(id);
-    const r = this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
+    const r = this.setStage(wanted.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
     if (!r.applied) throw new NotShown(r.reason);
     return r;
   }
@@ -2102,9 +2108,11 @@ export class Session {
     if (!entry) return { applied: false, reason: "That screen is no longer in the history." };
     // The screen changed since the caller decided: nothing is restored, and the caller is told so.
     if (who.claim && !this.claimHolds(who.claim, screen)) return { applied: false, reason: "The screen changed since; look again." };
-    const gone = this.unrenderable(entry.stage);
+    const old = parseStage(entry.stage);
+    if (!old.ok) return { applied: false, reason: old.error };
+    const gone = this.unrenderable(old.stage);
     if (gone) return { applied: false, reason: gone };
-    return this.setStage({ ...entry.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);
+    return this.setStage({ ...old.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);
   }
 }
 
