@@ -9,7 +9,8 @@ import "./annotate.css";
 import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, type QueuedResult } from "./hub";
 import { PointerRecorder, canvasHit, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { drive, useDriving } from "./drive";
-import { RecordTidy, sendSummary, type RecordNote, type SendReply } from "./record";
+import { RecordTidy } from "./record";
+import { sendSummary, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";

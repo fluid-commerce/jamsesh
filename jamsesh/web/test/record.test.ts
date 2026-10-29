@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/record";
+import { mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });

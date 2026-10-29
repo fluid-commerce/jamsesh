@@ -36,7 +36,7 @@ let drop = 0;
   return realFetch(`http://127.0.0.1:${server.port}${url}`, { ...init, headers: { ...init.headers, cookie } });
 };
 const { api, hub: client } = await import("../../web/src/shared/hub");
-const { mergeInto, sendSummary } = await import("../../web/src/shared/record");
+const { mergeInto, sendSummary } = await import("../../web/src/shared/notes");
 client.deviceId = "mayaLaptop";
 
 const s = hub.session;
