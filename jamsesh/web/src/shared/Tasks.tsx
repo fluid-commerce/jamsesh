@@ -214,7 +214,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     });
   const save = () => run(async () => (await api(`/triage/${card.id}`, edits(), "PATCH"), setEditing(false)));
   const primary = () => (task ? verb("send") : conflict ? verb("replace") : verb("add"));
-  const label = task ? "Send" : conflict ? "Replace" : "Add";
+  const label = task ? "Send" : card.retire ? "Retire" : conflict ? "Replace" : "Add";
   const sendReady = !task || (draft.agent || card.targets.length) ? true : false;
 
   const fieldKeys = (e: KeyboardEvent) => {
@@ -232,7 +232,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     >
       <div className="tk-top">
         <span className="tk-num mono" title={`Say “the ${["first", "second", "third", "fourth", "fifth"][index - 1] ?? `number ${index}`} one”`}>{index}</span>
-        <span className={`tk-tag kind ${task ? card.mode : card.kind}`}>{task ? MODE_WORDS[card.mode] : card.kind}</span>
+        <span className={`tk-tag kind ${task ? card.mode : card.kind}`}>{task ? MODE_WORDS[card.mode] : card.retire ? `Retire ${card.kind}` : card.kind}</span>
         <span className="grow" />
         <Waited ts={card.ts} now={now} />
       </div>
@@ -301,7 +301,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
             <p>{conflict.text}</p>
           </div>
           <div>
-            <span className="label">Heard</span>
+            <span className="label">{card.retire ? "Why" : "Heard"}</span>
             <p>{card.text}</p>
           </div>
         </div>
@@ -344,12 +344,12 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
               <button className="btn small" disabled={busy} onClick={() => setEditing(true)} title="Edit the wording, agent, mode or workstream (E)">
                 Edit
               </button>
-              {!task && (
+              {!task && !card.retire && (
                 <button className="btn small" disabled={busy} onClick={() => setMerging(true)} title="Fold this into a saved fact">
                   Merge into…
                 </button>
               )}
-              {!task && conflict && (
+              {!task && conflict && !card.retire && (
                 <button className="btn small" disabled={busy} onClick={() => verb("add")} title="Keep both">
                   Add anyway
                 </button>

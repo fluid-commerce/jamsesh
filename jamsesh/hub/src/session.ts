@@ -5,6 +5,7 @@ import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
 import { Board, type ContextProposal, type TaskProposal } from "./board";
+import { buildBrief, hasBrief } from "./brief";
 import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
@@ -105,7 +106,11 @@ export class Session {
       this.stageRevert.unref?.();
     }
     // A lock whose owner left lets go without anyone asking.
-    setInterval(() => this.sweepLocks(), 30_000).unref?.();
+    setInterval(() => {
+      try {
+        this.sweepLocks();
+      } catch {}
+    }, 30_000).unref?.();
     bus.resolver = (key) => this.resolve(key);
   }
 
@@ -205,7 +210,7 @@ export class Session {
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
       stageHistory: this.stageHistory(),
-      digest: this.store.digest("session")?.text ?? "",
+      digest: hasBrief(this) ? this.brief().full : "",
       totals: this.totals(),
       brain: this.brainStatus,
       voiceprints: this.voiceprints(),
@@ -272,7 +277,7 @@ export class Session {
       case "totals":
         return { key, value: this.totals() };
       case "digest":
-        return { key, value: this.store.digest("session")?.text ?? "" };
+        return { key, value: hasBrief(this) ? this.brief().full : "" };
       case "shares":
         return { key, value: this.shares() };
       case "annotations":
@@ -663,6 +668,9 @@ export class Session {
       ? { ...existing, ownerAgentId: agentId, status: "active", updatedAt: Date.now() }
       : { id: newId("w"), title: t, ownerAgentId: agentId, status: "active", brief: "", updatedAt: Date.now() };
     this.store.put("workstreams", ws);
+    // What this agent already posted without a workstream belongs to the one it just took.
+    const only = this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").length === 1;
+    for (const x of this.store.all("artifacts")) if (x.agentId === agentId && !x.workstreamId && (only || groupKey(x.group) === groupKey(ws.title))) this.store.put("artifacts", { ...x, workstreamId: ws.id });
     this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
       // Work nobody asked for (no open task, no prompt from its person lately) is announced as such.
@@ -1029,8 +1037,14 @@ export class Session {
 
   upsertArtifact(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, opts: { announce?: boolean } = {}): Artifact {
     const existing = a.id ? this.store.get("artifacts", a.id) : undefined;
-    const { group, variant } = splitTitle(a.title);
     const agent = this.agent(a.agentId ?? existing?.agentId);
+    // Titles are tidied and grouped as an item arrives (4.5); once an item has versions its title stays put,
+    // because later builds are matched to it by that title.
+    const title = existing && ((existing.version ?? 1) > 1 || (a.version ?? 1) > 1) ? existing.title : tidyTitle(a.title);
+    const split = splitTitle(title);
+    const group = this.canonGroup(a.group ?? split.group, existing?.group);
+    const variant = split.variant;
+    const workstreamId = a.workstreamId ?? existing?.workstreamId ?? this.workstreamFor(agent, a.page ?? existing?.page, group);
     const art: Artifact = {
       id: existing?.id ?? a.id ?? newId("art"),
       ts: existing?.ts ?? Date.now(),
@@ -1039,8 +1053,8 @@ export class Session {
       stage: a.stage ?? existing?.stage ?? (a.kind === "frame" ? "mockup" : "built"),
       agentId: a.agentId ?? existing?.agentId ?? null,
       agentName: agent?.name ?? a.agentName ?? existing?.agentName ?? "",
-      title: a.title,
-      group: a.group ?? group,
+      title,
+      group,
       variant: a.variant ?? variant,
       platform: a.platform ?? existing?.platform ?? agent?.platform ?? null,
       nodeId: a.nodeId ?? existing?.nodeId ?? null,
@@ -1048,7 +1062,7 @@ export class Session {
       image: a.image ?? existing?.image ?? null,
       width: a.width ?? existing?.width ?? null,
       height: a.height ?? existing?.height ?? null,
-      workstreamId: a.workstreamId ?? existing?.workstreamId ?? null,
+      workstreamId,
       note: a.note ?? existing?.note ?? "",
       page: a.page ?? existing?.page,
       ...(a.version ?? existing?.version ? { version: a.version ?? existing?.version } : {}),
@@ -1070,6 +1084,33 @@ export class Session {
     return art;
   }
 
+  /** Saves what someone said about an item right after it went up (4.2). Repeats of one line don't add up. */
+  addReaction(artifactId: string, ev: { id: number; ts: number; text: string; authorName: string }) {
+    const art = this.store.get("artifacts", artifactId);
+    if (!art || art.reactions?.some((r) => r.eventId === ev.id)) return;
+    this.store.put("artifacts", { ...art, reactions: [...(art.reactions ?? []), { by: ev.authorName, text: ev.text, at: ev.ts, eventId: ev.id }].slice(-30) });
+  }
+
+  /** The workstream an item belongs to: its agent's active one (the one named like the item's group when there are several), or the canvas page named after one. */
+  private workstreamFor(agent: Agent | undefined, page: string | undefined, group: string): string | null {
+    const streams = this.store.all("workstreams");
+    if (agent) {
+      const mine = streams.filter((w) => w.ownerAgentId === agent.id && w.status === "active").sort((x, y) => y.updatedAt - x.updatedAt);
+      return (mine.find((w) => groupKey(w.title) === groupKey(group)) ?? mine[0])?.id ?? null;
+    }
+    return page ? (streams.find((w) => groupKey(w.title) === groupKey(page))?.id ?? null) : null;
+  }
+
+  /** One spelling per group: "Mist Mobile rep mode" joins an existing "Mist Mobile rep"; a group named like a workstream takes its title. */
+  private canonGroup(group: string, current?: string): string {
+    const g = group.replace(/\s+/g, " ").trim();
+    if (current && groupKey(current) === groupKey(g)) return current;
+    const key = groupKey(g);
+    if (!key) return g;
+    const seen = this.artifacts().find((x) => x.group && groupKey(x.group) === key);
+    return seen?.group ?? this.store.all("workstreams").find((w) => groupKey(w.title) === key)?.title ?? g;
+  }
+
   /**
    * A new build of a screen that's already in the room becomes the next version of that item (3.5): the
    * newest image shows, the earlier ones stay in `versions`, and anything pointing at the id (the screen,
@@ -1084,8 +1125,8 @@ export class Session {
       if (!prior) throw new Error(`No artifact ${replaces} to replace. Use jam_artifacts for ids.`);
       if (prior.agentId !== (a.agentId ?? null)) throw new Error("That item belongs to someone else's agent; post yours as a new item.");
     } else if (a.kind === "screenshot" || a.kind === "html") {
-      const key = buildKey(a.title);
-      prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(x.title) === key);
+      const key = buildKey(tidyTitle(a.title));
+      prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(tidyTitle(x.title)) === key);
     }
     if (!prior) return this.upsertArtifact(a);
     const v = prior.version ?? 1;
@@ -1266,6 +1307,11 @@ export class Session {
   }
 
   // ---- curated context ----
+
+  /** The session brief: its sections in full, and the short excerpt a joining agent gets. */
+  brief() {
+    return buildBrief(this);
+  }
 
   /** Active facts first (newest first), then the latest resolved or superseded ones. */
   facts(): Fact[] {
@@ -1741,6 +1787,24 @@ export function buildKey(title: string): string {
     .replace(/\s+(built|rebuilt|v\d+|version \d+)\s*$/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Words that only restate what an item is, so "Mist Mobile rep" and "Mist Mobile rep mode" are one group. */
+const GROUP_FILLER = /\s+(mode|page|pages|screen|screens|flow|view|views)$/;
+
+/** A group compared without case, punctuation or filler words. */
+export function groupKey(group: string): string {
+  return group.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim().replace(GROUP_FILLER, "");
+}
+
+/**
+ * Titles follow "<Workstream> / <Letter>: <idea>". On arrival: spacing is normalised, the letter is
+ * capitalised, and a trailing "(built)" is dropped (the stage already says it). Anything else is left alone.
+ */
+export function tidyTitle(title: string): string {
+  const t = title.replace(/\s+/g, " ").trim().replace(/\s*[[(]\s*(built|rebuilt)\s*[\])]\s*$/i, "");
+  const m = t.match(/^(.*?\S)\s*\/\s*([A-Za-z0-9]{1,2})\s*[:\-–—]\s*(.+)$/);
+  return m && !/[/:]$/.test(m[1]) && !m[1].includes("://") ? `${m[1]} / ${m[2].toUpperCase()}: ${m[3]}` : t;
 }
 
 /** "Mobile nav / B: bottom tabs" → group "Mobile nav", variant "B". */

@@ -193,6 +193,20 @@ export class Board {
     return this.announce(this.s.store.put("triage", card));
   }
 
+  /** The curator would retire a saved fact with nothing worded to take its place: a person decides. */
+  proposeRetire(p: { fact: Fact; status: "superseded" | "resolved"; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
+    const open = this.all().find((c) => c.status === "open" && c.retire && c.conflictsWith === p.fact.id);
+    const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
+    if (open) return this.repeat(open, sources);
+    const text = clean(p.reason) || (p.status === "resolved" ? "Answered or done" : "Replaced by a newer decision");
+    const now = this.stamp();
+    const card: TriageCard = {
+      id: newId("tri"), ts: now, updatedAt: now, type: "context", status: "open", origin: "overheard", text, original: text, by: p.by,
+      mode: "note", targets: [], kind: p.fact.kind, workstream: p.fact.workstream, conflictsWith: p.fact.id, retire: p.status, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+    };
+    return this.announce(this.s.store.put("triage", card));
+  }
+
   /** A quiet notice that something is waiting: the count is on the Tasks tab, so no sound and no detail. */
   private announce(card: TriageCard) {
     this.s.onTriage?.(card);
@@ -299,6 +313,7 @@ export class Board {
     const c = this.openCard(id);
     if ("ok" in c) return c;
     if (c.type !== "context") return fail("That's a task card: send it instead.");
+    if (c.retire) return fail("That card retires a saved fact: use Retire, or dismiss it.");
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
     const fact = this.s.store.put("facts", this.newFact(r.card));
@@ -316,7 +331,7 @@ export class Board {
   merge(id: string, factId: string, by: string, text?: string): BoardResult<{ factId: string }> {
     const c = this.openCard(id);
     if ("ok" in c) return c;
-    if (c.type !== "context") return fail("Only context cards merge into a fact.");
+    if (c.type !== "context" || c.retire) return fail("Only context cards that add something merge into a fact.");
     const f = this.s.store.get("facts", factId);
     if (!f || f.status !== "active") return fail("That fact isn't saved any more.", 404);
     const joined = text !== undefined ? clean(text) : clean(`${f.text.replace(/[.\s]+$/, "")}. ${c.text}`);
@@ -332,7 +347,11 @@ export class Board {
     if ("ok" in c) return c;
     if (c.type !== "context") return fail("Only context cards replace a fact.");
     const old = this.s.store.get("facts", factId ?? c.conflictsWith ?? "");
-    if (!old || old.status !== "active") return fail("There's no saved fact left to replace. Add it instead.", 409);
+    if (!old || old.status !== "active") return fail(c.retire ? "That fact is already gone." : "There's no saved fact left to replace. Add it instead.", 409);
+    if (c.retire) {
+      this.s.store.put("facts", { ...old, status: c.retire, note: `${c.text} (${by}, from the Tasks board)`, updatedAt: Date.now() });
+      return { ok: true, card: this.done(c, "replaced", by, { factId: old.id }), factId: old.id };
+    }
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
     this.s.store.put("facts", { ...old, status: "superseded", note: `Replaced by ${by} from the Tasks board`, updatedAt: Date.now() });
@@ -380,7 +399,7 @@ export class Board {
     return this.open()
       .map((c, i) => {
         const w = Board.waitingMin(c, now);
-        const where = c.type === "task" ? `${c.mode} → ${c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ") || "no agent chosen"}` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
+        const where = c.type === "task" ? `${c.mode} → ${c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ") || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
         return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})`;
       })
       .join("\n");

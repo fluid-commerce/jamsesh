@@ -109,10 +109,12 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     async settle(timeoutMs = 90_000) {
       const t0 = Date.now();
       await sleep(50);
-      while (brain.timer || brain.shipTimer || brain.busy || brain.pending.length || inflight.n) {
+      // Idle means no debounce timer, nothing pending, and the pass queue (brain.exclusive) drained.
+      while (brain.timer || brain.shipTimer || brain.pending.length || inflight.n) {
         if (Date.now() - t0 > timeoutMs) throw new Error("brain never went idle");
         await sleep(150);
       }
+      await brain.queue;
     },
     directives: () => s.directives(),
     cards: () => s.board.open(),

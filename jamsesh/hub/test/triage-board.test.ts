@@ -354,3 +354,43 @@ test("the board's routes: people act through the host window, agents and strange
     server.stop(true);
   }
 });
+
+test("curation: new facts wait as cards, a restatement still merges, and retiring or replacing a saved fact is a card too", () => {
+  const r = room();
+  const a = r.said(r.chey, "the header is option A");
+  const old = r.s.board.rememberNow({ text: "Settings header uses option A, the big greeting", kind: "decision", by: "Chey" })!;
+  const q = r.s.board.rememberNow({ text: "Is there a dark accent color defined?", kind: "question", by: "Britain" })!;
+  const keep = r.s.board.rememberNow({ text: "Sidebar collapses to a 64 px icon rail under 1024 px", kind: "requirement", by: "Chey" })!;
+  const b = r.said(r.felipe, "go with option B, compact search");
+  const c = r.said(r.chey, "the dark accent is E85A3A, so that's answered");
+  const d = r.said(r.chey, "narrow windows get the 64 px icon rail under 1024 px");
+  const out = r.hub.brain.applyCuration(
+    {
+      add: [
+        { kind: "decision", text: "Settings header uses option B, the compact search", eventIds: [b.id] },
+        { kind: "requirement", text: "Sidebar collapses to a 64 px icon rail under 1024 px.", eventIds: [d.id] },
+      ],
+      update: [{ id: keep.id, text: "Sidebar collapses to a 64 px icon rail under 1024 px, remembered per window", reason: "more detail", eventIds: [d.id] }],
+      resolve: [{ id: q.id, reason: "The dark accent is E85A3A", eventIds: [c.id] }],
+      supersede: [{ id: old.id, reason: "Option B replaced it", eventIds: [b.id] }],
+    },
+    [a, b, c, d],
+  );
+  // Nothing was taken away or added silently; the accepted fact was updated in place; the restatement merged into it.
+  expect(out.added).toHaveLength(0);
+  expect(r.s.store.get("facts", old.id)!.status).toBe("active");
+  expect(r.s.store.get("facts", q.id)!.status).toBe("active");
+  expect(r.s.store.get("facts", keep.id)!.text).toContain("remembered per window");
+  const cards = r.s.board.open();
+  expect(cards).toHaveLength(2);
+  const replace = cards.find((x) => !x.retire)!;
+  const retire = cards.find((x) => x.retire)!;
+  expect(replace).toMatchObject({ text: "Settings header uses option B, the compact search", conflictsWith: old.id });
+  expect(retire).toMatchObject({ retire: "resolved", conflictsWith: q.id });
+  expect(r.s.board.add(retire.id, "Chey")).toMatchObject({ ok: false });
+  expect(r.s.board.replace(replace.id, "Chey").ok).toBe(true);
+  expect(r.s.board.replace(retire.id, "Chey").ok).toBe(true);
+  expect(r.s.store.get("facts", old.id)!.status).toBe("superseded");
+  expect(r.s.store.get("facts", q.id)!.status).toBe("resolved");
+  expect(r.s.facts().filter((f) => f.status === "active").map((f) => f.text).sort()).toEqual(["Settings header uses option B, the compact search", "Sidebar collapses to a 64 px icon rail under 1024 px, remembered per window"]);
+});

@@ -8,6 +8,7 @@ import { bus } from "./bus";
 import { config } from "./config";
 import { ownTarget } from "./devproxy";
 import type { Hub } from "./hub";
+import { confidentBanter } from "./brain/card";
 import { shortRepo, type UpdateKind } from "./session";
 import type { Agent, Directive, JamEvent } from "./types";
 import { skillMarkdown } from "./skill";
@@ -687,7 +688,7 @@ export class McpEndpoint {
     const ws = s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
     const settled = s.facts().filter((f) => f.status === "active").length;
     const mine = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled" && d.targets.includes(agent.id));
-    const brief = s.store.digest("session")?.text.trim();
+    const brief = s.brief().short;
     return [
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
@@ -696,7 +697,7 @@ export class McpEndpoint {
       "",
       this.roster(true),
       "",
-      `## Session brief\n${brief ? clip(brief, 600) : "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
+      `## Session brief\n${brief || "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
       ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
       `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
       this.unreadLine(agent),
@@ -755,14 +756,14 @@ export class McpEndpoint {
 
   context(agent: Agent, workstream?: string, minutes = 10) {
     const s = this.hub.session;
-    const brief = s.store.digest("session")?.text;
+    const brief = s.brief().full;
     const ws = workstream
       ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === workstream.toLowerCase())
       : s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
     const decisions = s.roomDecisions(agent.id, { limit: 12, workstreamId: ws?.id });
     const room = s.store
       .recentEvents({ kinds: ["speech", "prompt"], since: Date.now() - minutes * 60_000, limit: 80 })
-      .filter((e) => e.relevance !== "banter" && e.relevance !== "chatter");
+      .filter((e) => !confidentBanter(e) && e.relevance !== "chatter");
     const fromOthers = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 40 }).filter((e) => e.authorId !== agent.id);
     const isShip = (e: JamEvent) => e.kind === "update" && e.data.updateKind === "shipped";
     const updates = fromOthers.filter((e) => !isShip(e)).slice(-20);
@@ -785,7 +786,7 @@ export class McpEndpoint {
       `## Decisions as said in the room\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
       `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
       `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
-      `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
+      `## Room, last ${minutes} min (clear banter filtered; lines marked maybe off-topic are doubtful)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
       `## Recently shipped by other agents (information, nothing for you to do unless a directive says so)\n${shippedLines.join("\n") || "(nothing yet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
     ]
@@ -878,7 +879,7 @@ function pageOf<T>(all: T[], args: { limit?: unknown; offset?: unknown }, max = 
 export function fmtEvent(e: JamEvent) {
   const t = new Date(e.ts).toTimeString().slice(0, 5);
   const label = e.kind === "speech" ? "said" : e.kind === "prompt" ? "typed" : e.kind;
-  return `[${t}] ${e.authorName} ${label}: ${e.text}`;
+  return `[${t}] ${e.authorName} ${label}: ${e.text}${e.relevance === "banter" ? " (maybe off-topic)" : ""}`;
 }
 
 export function clip(s: string, n: number) {
