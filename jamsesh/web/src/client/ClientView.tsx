@@ -276,7 +276,7 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
         (phone ? (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "0 12px" }}>
             <div style={{ flex: "none", paddingTop: 8 }}>
-              <StageBar state={state} />
+              <StageBar state={state} asPerson />
             </div>
             <div style={{ position: "relative", flex: 1, minHeight: 0, margin: "0 -12px" }}>
               <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />

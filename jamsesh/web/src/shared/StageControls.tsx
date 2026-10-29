@@ -38,7 +38,7 @@ export async function stageAction(path: string, body: Record<string, unknown>): 
 }
 
 /** Above the stage: who holds the screen, and what's waiting to go up. Nothing when neither applies. */
-export function StageBar({ state, screen = state.stage.screenId ?? "main" }: { state: HubState; screen?: string }) {
+export function StageBar({ state, screen = state.stage.screenId ?? "main", asPerson = false }: { state: HubState; screen?: string; asPerson?: boolean }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
   const lock = state.stage.lock;
@@ -52,8 +52,8 @@ export function StageBar({ state, screen = state.stage.screenId ?? "main" }: { s
         {lock && (
           <span className="stage-lock">
             <Lock /> Locked by <b>{lock.by}</b>
-            {/* Only the owner unlocks (the hub checks); a lock held by no one in particular is the host's to let go. */}
-            {(!lock.personId || lock.personId === me) && (
+            {/* Only the owner unlocks (the hub checks); a lock held by no one in particular is the host window's to let go, so a person's own window doesn't offer it. */}
+            {(lock.personId ? lock.personId === me : !asPerson) && (
               <button className="btn small" onClick={() => act("/stage/unlock", { screen })} title="Let the room's agents and the brain change this screen again">
                 Unlock
               </button>

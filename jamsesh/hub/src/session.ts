@@ -1945,7 +1945,8 @@ export class Session {
       case "compare":
         return has(st.items) ? null : "None of the artifacts it shows exist any more.";
       case "parity":
-        return has(st.items) || (st.columns ?? []).some((c) => has(c.items)) ? null : "Neither side has an artifact that exists any more.";
+        // What the screen draws: the columns when there are any, else the items (as stageTileKeys has it).
+        return (st.columns?.length ? st.columns.some((c) => has(c.items)) : has(st.items)) ? null : "Neither side has an artifact that exists any more.";
       case "layout":
         return (st.layout?.tiles ?? []).some((t) => t.kind !== "artifact" || known.has(t.artifactId)) ? null : "Every artifact in that layout is gone.";
       default:
@@ -1960,6 +1961,8 @@ export class Session {
     if ("claim" in who && !this.claimHolds(who.claim, item.screen)) throw new NotShown("The screen changed since; look again.");
     const gone = this.unrenderable(item.stage);
     if (gone) throw new NotShown(gone);
+    // A display that was unplugged since the item queued has no one looking at it.
+    if (item.screen !== "main" && !this.screens().some((x) => x.id === item.screen)) throw new NotShown("That display isn't connected any more.");
     this.dismissReady(id);
     const r = this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
     if (!r.applied) throw new NotShown(r.reason);

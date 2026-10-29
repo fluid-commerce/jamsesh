@@ -1,6 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { parseStage } from "./stageSchema";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -613,6 +614,12 @@ export class McpEndpoint {
         const columns = (args.columns ?? []).map((c: any) => ({ label: String(c.label ?? ""), items: (c.artifactIds ?? []).filter((i: string) => known.has(i)) }));
         if (!items.length && !columns.some((c: any) => c.items.length)) throw new Error("No known artifact ids. Use jam_artifacts.");
         const screen = "main";
+        // The exact stage, checked before it is queued or shown: an item that can never go up isn't promised to the agent.
+        const wanted = { mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items: items.slice(0, 60), columns: columns.length ? columns : undefined };
+        const checked = parseStage(wanted);
+        if (!checked.ok) return text(`That can't go on the big screen: ${checked.error}`);
+        const empty = s.unrenderable(wanted);
+        if (empty) return text(`That can't go on the big screen: ${empty}`);
         const lock = s.lockOf(screen);
         if (lock) {
           // A person's cast stays up. The item waits as "ready to show"; an old enough lock makes JamSesh ask its owner.

@@ -1346,3 +1346,35 @@ test("every caller of a refused write says so: HTTP gives a 4xx with the reason,
     server.stop();
   }
 });
+
+test("what the screen would actually draw decides: parity with stale columns, an unplugged display, and a show that could never go up", async () => {
+  const { hub, s, chey, reg, call, out } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    const a = artifact(s, "Checkout");
+    // Columns win over items in the parity view: a real item with only dead column ids draws nothing.
+    expect((await post("/stage", { mode: "parity", items: [a.id], columns: [{ label: "L", items: ["gone"] }, { label: "R", items: ["gone2"] }] })).status).toBe(400);
+    expect(s.stage().lock).toBeUndefined();
+    expect((await post("/stage", { mode: "parity", columns: [{ label: "L", items: [a.id] }, { label: "R", items: [] }] })).status).toBe(200);
+  } finally {
+    server.stop();
+  }
+  // A queued item for an extra display that has since been unplugged: Show and an approval both leave the item queued.
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const b = artifact(s, "Pricing");
+  const agent = reg("Felipe");
+  s.setStage({ mode: "agents" }, "Chey", "screen-2", { person: { id: chey.id, name: "Chey" } });
+  const item = s.queueReady({ screen: "screen-2", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [b.id] } });
+  s.removeScreen("screen-2");
+  expect(s.showReady(item.id, { override: true })).toMatchObject({ applied: false, reason: expect.stringContaining("connected") });
+  expect(s.readyToShow().some((r) => r.id === item.id)).toBe(true);
+  // jam_show checks the exact stage before promising a queued item: five parity columns can never go up.
+  s.setStage({ mode: "spotlight", items: [b.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const cols = Array.from({ length: 5 }, (_, i) => ({ label: `c${i}`, artifactIds: [b.id] }));
+  const said = out(await call(agent, "jam_show", { mode: "parity", columns: cols, title: "x" }));
+  expect(said).toContain("can't go on the big screen");
+  expect(s.readyToShow().filter((r) => r.agentId === agent.id).length).toBe(1);
+});
