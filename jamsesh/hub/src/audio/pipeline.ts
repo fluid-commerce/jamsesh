@@ -94,6 +94,13 @@ const SPLIT_SPAN_MS = 1000;
 const TWIN_MS = 3000;
 /** Copies of one voice on two microphones compare at 0.7 to 0.9; two voices saying the same words, about 0.4 to 0.55. */
 const SAME_VOICE = 0.6;
+/** Two microphones hearing one sound give loudness contours that match this well (gain and room shift them, not reshape them). */
+const SAME_SOUND = 0.8;
+/** And their waveforms line up at one offset: the phase-only cross-correlation peaks this many deviations above the rest. */
+const COHERENT = 10;
+/** How long a line's sound is kept (8 kHz, 16-bit), so a copy flushed late can still be checked against it. */
+const KEEP_SOUND_MS = 5 * 60_000;
+const KEEP_SOUNDS = 300;
 /** An unnamed line is the corrected voice's when it sounds this much like it, among the last few dozen. */
 const RELABEL_SIM = 0.75;
 const RELABEL_LOOKBACK = 60;
@@ -106,6 +113,8 @@ export class AudioPipeline {
   private open: Group[] = [];
   private finalized: Group[] = [];
   private lag = new Map<string, { ms: number; at: number; location: "room" | "remote" }>();
+  /** Each recent line's sound (its best copy, 8 kHz), the acoustic evidence mergeTwin needs. */
+  private sounds = new Map<string, { pcm: Float32Array; at: number }>();
   /** Unconfirmed first voice samples per person (see autoEnroll). */
   private candidates = new Map<string, Heard[][]>();
   voiceprints: Voiceprints;
@@ -322,6 +331,7 @@ export class AudioPipeline {
     if (guess.method.startsWith("voice")) this.stats.voice++;
     if (!guess.personId) this.stats.someone++;
     this.autoEnroll(guess, best, g.segments);
+    this.keepSound(u.id, best);
     this.session.store.put("utterances", u);
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
@@ -367,9 +377,11 @@ export class AudioPipeline {
    * already shown, which is then labelled from every copy. The evidence has to be positive:
    * - only other devices' copies (a microphone that already gave the line, hearing the same words
    *   again, is someone saying them again), within a few seconds;
+   * - the sound is the same sound: the two recordings' loudness contours line up (sameSound). Words
+   *   and voice say who and what; only this says it was one moment of speech and not the same person
+   *   saying it again, or saying a little more. A line whose contour isn't kept is never merged;
    * - the voices agree (both copies embedded, alike); when either can't be embedded (voice matching
-   *   off, a line under 0.8 seconds such as "Looks good"), the words must be exactly the same;
-   * - a line too old to join is dropped only on exactly the same words; anything less is kept.
+   *   off, a line under 0.8 seconds such as "Looks good"), the words must be exactly the same.
    */
   private async mergeTwin(g: Group, text: string, best: Segment): Promise<boolean> {
     const mine = new Set(g.segments.map((s) => s.deviceId));
@@ -387,12 +399,15 @@ export class AudioPipeline {
       )
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
     if (!twin) return false;
+    const heard = this.sounds.get(twin.id);
+    if (!heard || !sameSound(narrow(best.pcm), heard.pcm)) return false;
     const theirs = this.voiceOf(twin).embedding;
     if (best.embedding && theirs) {
       if (cosine(best.embedding, theirs) < SAME_VOICE) return false;
     } else if (!same(twin.text)) return false;
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
-    if (!home) return same(twin.text);
+    // Its group is gone (a copy flushed late): the sound and the words said it's that line, so it isn't shown twice.
+    if (!home) return true;
     this.finalized = this.finalized.filter((x) => x !== g);
     home.segments.push(...g.segments);
     home.t0 = Math.min(home.t0, g.t0);
@@ -422,6 +437,12 @@ export class AudioPipeline {
       if (other.eventId) this.session.store.updateEvent(other.eventId, { relevance: "chatter", data: { echo: true } });
     }
     return "keep";
+  }
+
+  private keepSound(utteranceId: string, best: Segment) {
+    const now = Date.now();
+    for (const [id, x] of this.sounds) if (now - x.at > KEEP_SOUND_MS || this.sounds.size >= KEEP_SOUNDS) this.sounds.delete(id);
+    this.sounds.set(utteranceId, { pcm: narrow(best.pcm), at: now });
   }
 
   private keep(g: Group) {
@@ -693,6 +714,145 @@ function sameWords(a: string, b: string, aMs: number, bMs: number) {
   for (const w of long) if (w === short[at]) at++;
   return at === short.length;
 }
+/** 16 kHz to 8 kHz (pairs averaged): enough for the shape and the phase of speech, at half the memory. */
+export function narrow(pcm: Pcm): Float32Array {
+  const step = Math.max(1, Math.round(pcm.sampleRate / 8000));
+  const out = new Float32Array(Math.floor(pcm.samples.length / step));
+  for (let i = 0; i < out.length; i++) {
+    let x = 0;
+    for (let j = 0; j < step; j++) x += pcm.samples[i * step + j];
+    out[i] = x / step;
+  }
+  return out;
+}
+
+/** Loudness per 20 ms frame (8 kHz audio), in dB: the shape of what a microphone heard. */
+export function contour(x: Float32Array): Float32Array {
+  const frame = 160;
+  const out = new Float32Array(Math.floor(x.length / frame));
+  for (let i = 0; i < out.length; i++) {
+    let e = 0;
+    for (let j = i * frame; j < (i + 1) * frame; j++) e += x[j] * x[j];
+    out[i] = 10 * Math.log10(e / frame + 1e-10);
+  }
+  return out;
+}
+
+/** Best correlation of two loudness contours at an offset up to a second, over most of the shorter one. */
+export function contourMatch(a: Float32Array, b: Float32Array): number {
+  const need = Math.max(20, Math.floor(0.6 * Math.min(a.length, b.length)));
+  let best = -1;
+  for (let lag = -50; lag <= 50; lag++) {
+    const from = Math.max(0, -lag);
+    const to = Math.min(a.length, b.length - lag);
+    const n = to - from;
+    if (n < need) continue;
+    let sa = 0;
+    let sb = 0;
+    for (let i = from; i < to; i++) (sa += a[i]), (sb += b[i + lag]);
+    const ma = sa / n;
+    const mb = sb / n;
+    let xy = 0;
+    let xx = 0;
+    let yy = 0;
+    for (let i = from; i < to; i++) {
+      const x = a[i] - ma;
+      const y = b[i + lag] - mb;
+      (xy += x * y), (xx += x * x), (yy += y * y);
+    }
+    if (xx > 0 && yy > 0) best = Math.max(best, xy / Math.sqrt(xx * yy));
+  }
+  return best;
+}
+
+/**
+ * How sharply two recordings' waveforms line up at one offset (up to a second): the phase-only cross-correlation
+ * (GCC-PHAT) peak, in standard deviations of the rest. One sound on two microphones is one waveform, delayed and
+ * coloured by the room, so it peaks sharply; two sounds, however alike, have no offset where they agree.
+ */
+export function coherence(a: Float32Array, b: Float32Array): number {
+  const cap = 8000 * 4;
+  const x = a.subarray(0, cap);
+  const y = b.subarray(0, cap);
+  let n = 1;
+  while (n < x.length + y.length) n *= 2;
+  const ar = new Float64Array(n);
+  const ai = new Float64Array(n);
+  const br = new Float64Array(n);
+  const bi = new Float64Array(n);
+  ar.set(x);
+  br.set(y);
+  fft(ar, ai, false);
+  fft(br, bi, false);
+  for (let k = 0; k < n; k++) {
+    // A times the conjugate of B, keeping only the phase.
+    const re = ar[k] * br[k] + ai[k] * bi[k];
+    const im = ai[k] * br[k] - ar[k] * bi[k];
+    const m = Math.hypot(re, im) || 1;
+    ar[k] = re / m;
+    ai[k] = im / m;
+  }
+  fft(ar, ai, true);
+  const maxLag = Math.min(8000, n / 2 - 1);
+  let peak = 0;
+  let sq = 0;
+  let count = 0;
+  for (let lag = -maxLag; lag <= maxLag; lag++) {
+    const v = ar[(lag + n) % n];
+    peak = Math.max(peak, v);
+    sq += v * v;
+    count++;
+  }
+  const sd = Math.sqrt(sq / count);
+  return sd > 0 && Number.isFinite(peak / sd) ? peak / sd : 0;
+}
+
+/** In-place radix-2 FFT (n a power of two); `inverse` scales by 1/n. */
+function fft(re: Float64Array, im: Float64Array, inverse: boolean) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = ((inverse ? 2 : -2) * Math.PI) / len;
+    const wr = Math.cos(ang);
+    const wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1;
+      let ci = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const ur = re[i + j];
+        const ui = im[i + j];
+        const vr = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci;
+        const vi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+        re[i + j] = ur + vr;
+        im[i + j] = ui + vi;
+        re[i + j + len / 2] = ur - vr;
+        im[i + j + len / 2] = ui - vi;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = nr;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i++) (re[i] /= n), (im[i] /= n);
+}
+
+/**
+ * Whether two recordings (8 kHz) are one sound: their loudness rises and falls together, and their waveforms
+ * line up at one offset. Two microphones in a room hear one moment of speech with different gain, noise and
+ * echo; the same words said again, even by the same voice, are another waveform in another rhythm.
+ */
+export function sameSound(a: Float32Array, b: Float32Array): boolean {
+  return contourMatch(contour(a), contour(b)) >= SAME_SOUND && coherence(a, b) >= COHERENT;
+}
+
 const wordCount = (t: string) => t.split(/\s+/).filter(Boolean).length;
 /** Lowercase words only: "Looks good." and "looks good" are the same words. */
 const plainText = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}\s']+/gu, " ").replace(/\s+/g, " ").trim();
