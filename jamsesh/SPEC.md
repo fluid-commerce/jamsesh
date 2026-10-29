@@ -274,6 +274,13 @@ Developers can run the host from a checkout without the app:
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.
 
+> **Parked.** This section describes work on the branch `jamsesh/isolation-wip`, not in the release.
+> Review 4 (DISAGREE) left these open: `config.ts` reads `JAMSESH_HOME` before `isolateEnv` drops it;
+> the canvas adopts any `/healthz` responder on its chosen port (race); saved dev registrations skip
+> the target-port check on restore; a silent frame with a `target="_self"` link can leave its document;
+> macOS 13 has no per-window WebView store (`data_store_identifier` is macOS 14+); the finished-clip
+> `Set` leaked (fixed on `jamsesh/office-fixes`); `voices.test.ts:84` came from the branch base.
+
 **Run a test build beside the real app.** A build for trying changes shares nothing with the real
 app. Setting `JAMSESH_APP_DATA` is what turns this on: from then on the app and the hub it starts
 treat every resource below as the test build's own. The whole environment is built from that one
