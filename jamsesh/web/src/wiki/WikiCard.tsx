@@ -51,14 +51,9 @@ export function WikiCardView({ card, index, personId, now }: { card: TriageCard;
               </label>
               {c.stale && <span className="wk-card-stale">Someone edited this since. It will be skipped.</span>}
               {c.largeDeletion && !c.stale && <span className="wk-card-stale">Takes out {c.removed} lines of this page. Look at the changes before adding it.</span>}
-              <button className="btn ghost small" aria-expanded={open === c.slug} onClick={() => setOpen(open === c.slug ? null : c.slug)}>
-                {open === c.slug ? "Hide" : "Changes"}
+              <button className="btn ghost small" aria-expanded={open === c.slug} onClick={() => setOpen(open === c.slug ? null : c.slug)} title={c.op === "update" && c.removed !== undefined ? `${c.added ?? 0} lines added, ${c.removed} removed` : undefined}>
+                {open === c.slug ? "Hide changes" : c.op === "update" && c.removed !== undefined ? `Show changes (+${c.added ?? 0} −${c.removed})` : "Show changes"}
               </button>
-              {c.op === "update" && c.removed !== undefined && (
-                <span className="wk-card-op mono" title={`${c.added ?? 0} lines added, ${c.removed} removed`}>
-                  +{c.added ?? 0} −{c.removed}
-                </span>
-              )}
               {open === c.slug && <Diff c={c} />}
             </li>
           ))}
