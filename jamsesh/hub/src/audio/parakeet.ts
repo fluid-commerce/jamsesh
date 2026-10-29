@@ -6,8 +6,8 @@
 // and its memory (about 2 GB) goes back when the hub stops.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { stopHelper } from "../children";
 import { config } from "../config";
 import { downloadVerified, type ModelState, type ModelStatus } from "./models";
@@ -62,6 +62,14 @@ export async function installedIntact(dir: string, managed = true): Promise<bool
   return true;
 }
 
+function samePath(a: string, b: string) {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
+}
+
 /** How to start the child: this binary with a flag when compiled, otherwise bun on the script. */
 function serverArgv(dir: string): string[] {
   return import.meta.dir.includes("$bunfs") ? [process.execPath, "--stt-server", dir] : [process.execPath, join(import.meta.dir, "stt-server.ts"), dir];
@@ -95,7 +103,8 @@ export class Parakeet {
     this.stopped = false;
     let dir = findModel();
     const own = join(config.home, "models", PARAKEET.name);
-    if (dir === own && !(await installedIntact(dir).catch(() => false))) {
+    // Whatever spelling found it (models/./name, a symlink), the managed model is checked against its manifest.
+    if (dir && samePath(dir, own) && !(await installedIntact(own).catch(() => false))) {
       // A file changed after it was verified: it isn't loaded, and a fresh copy replaces it where downloads are allowed.
       rmSync(own, { recursive: true, force: true });
       dir = findModel();

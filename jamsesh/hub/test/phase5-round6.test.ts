@@ -1,9 +1,11 @@
 // Phase 5, sixth review: who may change a voice by correcting a line, and what a Reset makes stale. Synthetic embeddings only; nothing makes sound.
 import "./voices.env";
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { config } from "../src/config";
+import { Parakeet, PARAKEET, writeManifest } from "../src/audio/parakeet";
 import { voiceprintStatus } from "../src/audio/voiceprint";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
@@ -258,5 +260,32 @@ test("over HTTP a malformed WAV is a 400 for a segment and for a read, never a 5
   for (const [i, w] of [riff(["fmt ", fmt16.slice(0, 4)], ["data", pcm(320)]), riff(["data", pcm(320)], ["fmt ", fmt16]), riff(["fmt ", fmt16]).slice(0, 26)].entries()) {
     expect((await post(`/audio?deviceId=d-wes&t0=${t0 + i}&t1=${t0 + i + 1000}&epoch=0`, w)).status).toBe(400);
     expect((await post(`/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}`, w)).status).toBe(400);
+  }
+});
+
+// ---- the managed Parakeet model is checked however its path is spelled
+
+test("a changed managed Parakeet model is caught when it's chosen by another spelling of its path or through a link", async () => {
+  const own = join(config.home, "models", PARAKEET.name);
+  const link = join(dir, "pk-link");
+  const was = process.env.JAMSESH_PARAKEET_DIR;
+  try {
+    for (const alias of [join(config.home, "models", ".", PARAKEET.name), link]) {
+      mkdirSync(own, { recursive: true });
+      for (const f of PARAKEET.files) writeFileSync(join(own, f), `contents of ${f}`);
+      await writeManifest(own);
+      writeFileSync(join(own, PARAKEET.files[0]), "swapped");
+      rmSync(link, { force: true });
+      symlinkSync(own, link);
+      process.env.JAMSESH_PARAKEET_DIR = alias;
+      const p = new Parakeet();
+      expect(await p.start(false)).toBeNull();
+      expect([alias, p.status().state, existsSync(own)]).toEqual([alias, "missing", false]);
+    }
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_PARAKEET_DIR;
+    else process.env.JAMSESH_PARAKEET_DIR = was;
+    rmSync(own, { recursive: true, force: true });
+    rmSync(link, { force: true });
   }
 });
