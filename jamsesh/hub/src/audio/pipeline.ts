@@ -1,7 +1,9 @@
 // Room audio. Every device with its mic on sends speech segments stamped in host
 // time. Copies of the same utterance from different devices are grouped by capture
-// time, the clearest copy is transcribed once, and the speaker is identified from
-// which device heard it loudest plus a voiceprint match.
+// time, the clearest copy is transcribed, and the speaker is identified from which
+// device heard it loudest plus a voiceprint match. A copy that could be someone else
+// talking at the same moment is transcribed too, and is its own line when its words
+// are not the clearest copy's.
 //
 // Network lag: a group waits an adaptive window (each device's recent lag) before it
 // is finalized. A copy that arrives later still joins its utterance; if it is clearly
@@ -34,6 +36,8 @@ export interface Segment {
   /** When it was heard, on this host's clock: its synced start, or its arrival if that's earlier. */
   heardAt: number;
   embedding?: Float32Array | null;
+  /** Its transcription, once asked for: a copy is never sent to whisper twice. */
+  heard?: Promise<{ text: string; engine: string }>;
 }
 
 interface Group {
@@ -51,6 +55,8 @@ interface Group {
   location: "room" | "remote";
   /** Its speaker's voice was reset since: nothing is learned from it. */
   forgotten?: boolean;
+  /** Copies that said other words than the rest of their group: named by voice only, and never taught from. */
+  split?: boolean;
 }
 
 /** Who corrected a line: the host's own window, or a person's window (null: neither, e.g. the brain). */
@@ -93,6 +99,14 @@ const MAX_PRINT_SAMPLES = 40;
 const MAX_CLIPPED = 0.005;
 /** How far a copy's span may slide before it is another utterance. */
 const SPLIT_SPAN_MS = 1000;
+/**
+ * A copy within this of the best copy's voice level could be someone else talking at the same moment, so it is
+ * transcribed too. Further down it is the same voice across the room (4 laptops at a table spread over about 20 dB).
+ */
+const DIFFERENT_SPEECH_DB = 10;
+/** A quieter copy that was the loudest of all of them for this long had someone at its own laptop speaking then. */
+const LOUDEST_PART_MS = 400;
+const LOUDEST_FRAME_MS = 200;
 /** Copies of one line, as clocks and microphones see it, start within this of each other. */
 const TWIN_MS = 3000;
 /** Copies of one voice on two microphones compare at 0.7 to 0.9; two voices saying the same words, about 0.4 to 0.55. */
@@ -288,14 +302,59 @@ export class AudioPipeline {
     // a few knocks and clicks.
     // A noise floor near digital silence (a muted or paused mic) makes any room tone look like a
     // clear voice; then only a plainly loud segment counts.
-    // pickBest prefers copies that pass this gate, so a rejected best means every copy fails it.
-    if (!speechLike(best)) {
+    // pickBest prefers copies that pass this gate, so a rejected best means every copy fails it. Copies split
+    // out of a group already passed couldDiffer, whose loudest-for-a-moment rule covers replies too short for it.
+    if (!g.split && !speechLike(best)) {
       g.finalizedWith = best.id;
       return;
     }
-    const { text, engine } = await this.transcriber.transcribe(best.wav, dur, this.hint(), trustedSnr(best), this.names());
-    const guess = this.identify(g.segments, best);
+    const { text, engine } = await this.words(best, dur);
     g.finalizedWith = best.id;
+    // Copies that could be someone else talking at the same moment, with other words, leave the group first: the
+    // line is labelled from the copies that heard it, and each other set of words is its own line after it.
+    const apart = await this.differing(g, best, text);
+    this.without(g, apart.flat());
+    await this.show(g, best, text, engine);
+    for (const set of apart) await this.emitApart(g, set);
+  }
+
+  /** What a copy says. */
+  private words(s: Segment, dur = (s.t1 - s.t0) / 1000) {
+    return (s.heard ??= this.transcriber.transcribe(s.wav, dur, this.hint(), trustedSnr(s), this.names()));
+  }
+
+  /**
+   * The group's other copies that could be different speech (see couldDiffer) are transcribed; those whose words
+   * don't agree one by one with the best copy's come back in sets that say the same words.
+   */
+  private async differing(g: Group, best: Segment, text: string): Promise<Segment[][]> {
+    const words = plainText(text);
+    const sets = new Map<string, Segment[]>();
+    for (const s of g.segments) {
+      if (s === best || !couldDiffer(s, best, g.segments)) continue;
+      const theirs = plainText((await this.words(s)).text);
+      if (theirs && theirs !== words) sets.set(theirs, [...(sets.get(theirs) ?? []), s]);
+    }
+    return [...sets.values()];
+  }
+
+  private without(g: Group, gone: Segment[]) {
+    if (!gone.length) return;
+    g.segments = g.segments.filter((s) => !gone.includes(s));
+    g.t0 = Math.min(...g.segments.map((s) => s.t0));
+    g.t1 = Math.max(...g.segments.map((s) => s.t1));
+  }
+
+  /** Copies that said something else: their own line, from a group of their own. */
+  private async emitApart(g: Group, set: Segment[]) {
+    const part: Group = { ...this.regroup(g, set), split: true };
+    this.keep(part);
+    part.busy = this.emit(part).finally(() => (part.busy = null));
+    await part.busy;
+  }
+
+  private async show(g: Group, best: Segment, text: string, engine: string) {
+    const guess = this.identify(g.segments, best, !g.split);
     if (!text) return;
     // Someone reading the join sentence: every laptop hears it, and none of it belongs in the transcript.
     if (this.isCalibration(text, g)) return;
@@ -324,7 +383,7 @@ export class AudioPipeline {
     this.stats.lines++;
     if (guess.method.startsWith("voice")) this.stats.voice++;
     if (!guess.personId) this.stats.someone++;
-    this.autoEnroll(guess, best, g.segments);
+    if (!g.split) this.autoEnroll(guess, best, g.segments);
     this.session.store.put("utterances", u);
     this.onLine?.(u, true);
     bus.send({ type: "utterance", utterance: u });
@@ -431,11 +490,19 @@ export class AudioPipeline {
       }
       return;
     }
-    const guess = this.identify(g.segments, best);
+    // A late copy that could be someone else talking then is heard like the copies that came in time.
+    if (late !== best && current && couldDiffer(late, current, g.segments)) {
+      const theirs = plainText((await this.words(late)).text);
+      if (theirs && theirs !== plainText(u.text)) {
+        this.without(g, [late]);
+        return this.emitApart(g, [late]);
+      }
+    }
+    const guess = this.identify(g.segments, best, !g.split);
     let text = u.text;
     let engine = u.engine;
     if (best === late && current && late.snr > current.snr + 6) {
-      const r = await this.transcriber.transcribe(late.wav, (late.t1 - late.t0) / 1000, this.hint(), trustedSnr(late), this.names());
+      const r = await this.words(late);
       if (r.text) ((text = r.text), (engine = r.engine));
       g.finalizedWith = late.id;
     }
@@ -467,15 +534,15 @@ export class AudioPipeline {
    * - device: the loudest device's owner, weighted by how much louder it was than the next one;
    * - voice: similarity of the cleanest copy to each enrolled voiceprint.
    * A confident voice match outweighs the device, so someone who walks to another
-   * laptop is still recognized.
+   * laptop is still recognized. `byDevice` false: only a voice names the speaker.
    */
-  identify(segments: Segment[], best = pickBest(segments)): SpeakerGuess {
+  identify(segments: Segment[], best = pickBest(segments), byDevice = true): SpeakerGuess {
     const s = this.session;
     const byLevel = [...segments].sort((a, b) => speechDb(b) - speechDb(a));
     const loud = byLevel[0];
     const margin = byLevel.length > 1 ? speechDb(loud) - speechDb(byLevel[1]) : 6;
     const deviceScores = new Map<string, number>();
-    for (const seg of byLevel) {
+    for (const seg of byDevice ? byLevel : []) {
       const owner = s.store.get("devices", seg.deviceId)?.personId;
       if (!owner || deviceScores.has(owner)) continue;
       const rel = seg === loud ? 0.55 + Math.min(Math.max(margin, 0), 12) / 26 : Math.max(0, 0.35 - (speechDb(loud) - speechDb(seg)) / 30);
@@ -705,6 +772,35 @@ function shifted(a: { t0: number; t1: number }, b: { t0: number; t1: number }) {
 function speechDb(s: Segment) {
   const p = 10 ** (s.levelDb / 10) - 10 ** (s.noiseDb / 10);
   return Math.max(s.levelDb - 10, 10 * Math.log10(Math.max(p, 1e-12)));
+}
+
+/**
+ * Whether a copy that isn't the best could be different speech, so it is worth transcribing: it holds a voice nearly
+ * as loud as the best copy's, or its own laptop heard it the loudest of all for part of the span (a short reply over
+ * a long sentence, too brief to pass the speech gate on its own).
+ */
+function couldDiffer(s: Segment, best: Segment, all: Segment[]) {
+  return (speechLike(s) && speechDb(s) >= speechDb(best) - DIFFERENT_SPEECH_DB) || loudestMs(s, all) >= LOUDEST_PART_MS;
+}
+
+/** How long a copy was louder than every other copy while it held a voice, in frames on the host's clock. */
+function loudestMs(s: Segment, all: Segment[]) {
+  let won = 0;
+  for (let t = s.t0; t + LOUDEST_FRAME_MS <= s.t1; t += LOUDEST_FRAME_MS) {
+    const mine = frameDb(s, t);
+    if (mine >= s.noiseDb + MIN_SPEECH_SNR && all.every((o) => o === s || frameDb(o, t) < mine)) won += LOUDEST_FRAME_MS;
+  }
+  return won;
+}
+
+function frameDb(s: Segment, t: number) {
+  const rate = s.pcm.sampleRate;
+  const i0 = Math.round(((t - s.t0) / 1000) * rate);
+  const i1 = Math.min(s.pcm.samples.length, i0 + Math.round((LOUDEST_FRAME_MS / 1000) * rate));
+  if (i0 < 0 || i1 <= i0) return -Infinity;
+  let acc = 0;
+  for (let i = i0; i < i1; i++) acc += s.pcm.samples[i] ** 2;
+  return 10 * Math.log10(acc / (i1 - i0) + 1e-12);
 }
 
 /** Whether a copy holds a voice rather than silence, steady noise or a few knocks. */
