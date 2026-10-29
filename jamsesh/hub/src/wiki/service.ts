@@ -16,6 +16,7 @@ import { cutDiff, diffStats, lineDiff } from "./diff";
 import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
+  closeVault,
 } from "./files";
 
 const EVERY_MS = 15 * 60_000;
@@ -213,6 +214,14 @@ export class WikiService {
   start() {
     this.timer = setInterval(() => void this.tick().catch((e) => console.error("wiki:", e instanceof Error ? e.message : e)), EVERY_MS);
     this.timer.unref?.();
+  }
+
+  private vaultClosed = false;
+
+  /** The room has stopped: the vault takes no more writes (io's gate in files.ts), whatever is still running. */
+  close() {
+    this.vaultClosed = true;
+    closeVault(this.dir);
   }
 
   stop() {
@@ -568,7 +577,7 @@ export class WikiService {
    */
   /** The room has stopped: a vault write now would land after the final capture, outside the store's seal. Refused. */
   private open() {
-    if (this.s.store.closed) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
+    if (this.vaultClosed || this.s.store.closed) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
   }
 
   private write(slug: string, body: string, opts: Parameters<typeof writePage>[3] = {}): Page {
@@ -1091,7 +1100,7 @@ export class WikiService {
   /** A person's edit applies at once and is kept as a source, so the next ingest builds on it. `rev` guards against overwriting a newer page. */
   editPage(slug: string, body: string, opts: { rev?: string; by: string; title?: string; category?: Category }): { ok: true; page: Page } | { ok: false; error: string; status: number; current?: Page } {
     if (!isPageSlug(slug)) return { ok: false, error: "That isn't a page name.", status: 400 };
-    if (this.s.store.closed) return { ok: false, error: "The room is closed. Try again once it is open.", status: 503 };
+    if (this.vaultClosed || this.s.store.closed) return { ok: false, error: "The room is closed. Try again once it is open.", status: 503 };
     // A proposal write that landed and wasn't recorded is recorded now, while the page still carries its token: an edit can't hide it.
     try {
       this.syncVault(); // also reconciles; a hand edit made since is filed before this one

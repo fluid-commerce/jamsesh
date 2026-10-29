@@ -308,11 +308,11 @@ test("store level: typing while a save is out stays as the draft, on the saved r
   track("p", "first", "r1");
   const sent = drafts.edit("p");
   track("p", "first, and more typed while saving", "r1"); // a later edit
-  expect(drafts.saved("p", sent, "r2")).toBe(false);
+  expect(drafts.saved("p", sent, "r2")).toBe("rebased");
   expect(restore("p")).toEqual({ editing: "first, and more typed while saving", base: "r2" });
   // The next save answers for the newer edit and clears it.
   const next = drafts.edit("p");
-  expect(drafts.saved("p", next, "r3")).toBe(true);
+  expect(drafts.saved("p", next, "r3")).toBe("cleared");
   expect(restore("p").editing).toBeNull();
 });
 
@@ -320,12 +320,12 @@ test("store level: a save answered after the view unmounted applies the same rul
   track("q", "text", "r1");
   const sent = drafts.edit("q");
   // (the view unmounts; the save is still out) ... the answer arrives with nothing mounted:
-  expect(drafts.saved("q", sent, "r2")).toBe(true);
+  expect(drafts.saved("q", sent, "r2")).toBe("cleared");
   expect(restore("q").editing).toBeNull();
   track("q2", "text", "r1");
   const sent2 = drafts.edit("q2");
   track("q2", "typed after leaving? no: typed before leaving", "r1");
-  expect(drafts.saved("q2", sent2, "r5")).toBe(false);
+  expect(drafts.saved("q2", sent2, "r5")).toBe("rebased");
   expect(restore("q2")).toEqual({ editing: "typed after leaving? no: typed before leaving", base: "r5" });
   track("q2", null, "r5");
 });
@@ -336,7 +336,7 @@ test("store level: edit numbers never repeat, across Cancel, a save and a new dr
   track("r", null, "r1"); // Cancel
   track("r", "a fresh draft", "r1");
   expect(drafts.edit("r")).not.toBe(old);
-  expect(drafts.saved("r", old, "r2")).toBe(false); // the old save answers late: the fresh draft stays
+  expect(drafts.saved("r", old, "r2")).toBe("unrelated"); // the old save answers late: the fresh draft stays
   expect(restore("r")).toEqual({ editing: "a fresh draft", base: "r1" }); // and its revision is not moved by the old save
   track("r", null, "r1");
 });

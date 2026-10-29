@@ -345,8 +345,9 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
       setPage(r.page);
       setConflict(null);
       // Settled in the store, so it holds whether or not this view is still on screen.
-      if (drafts.saved(slug, sent, r.page.rev)) setEditing(null);
-      else setBase(r.page.rev);
+      const outcome = drafts.saved(slug, sent, r.page.rev);
+      if (outcome === "cleared") setEditing(null);
+      else if (outcome === "rebased") setBase(r.page.rev);
       wiki.reload();
     } catch (e) {
       setSaveErr(pretty(e, "Couldn't save. Your edit is still here."));

@@ -267,7 +267,6 @@ export class Hub {
     // and finishes; (4) the brain triages what it heard, takes nothing new, and its pass finishes. Only then does it stop, and the
     // local whisper after it. A step that overruns the deadline is given up on: what it adds afterwards is refused.
     this.closing = true;
-    this.canvas.flushActivity(); // canvas work batched for a timer is recorded while the conversation is still open
     this.session.timers.stop(); // no timer of the room fires from here on: none can write past the seal
     this.autosave.stop();
     this.keeper.stop();
@@ -279,6 +278,7 @@ export class Hub {
     void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
     ok = (await this.quiet(left())) && ok;
     this.audio.closed = true;
+    this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open, before the brain stops listening
     this.brain.drain();
     void this.track(this.brain.idle());
     ok = (await this.quiet(left())) && ok;
@@ -294,6 +294,7 @@ export class Hub {
     await Promise.race([this.wiki.flush().catch(() => null), Bun.sleep(15_000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
     this.stop();
+    this.wiki.close(); // the vault takes no more writes either
     this.store.seal("all");
   }
 

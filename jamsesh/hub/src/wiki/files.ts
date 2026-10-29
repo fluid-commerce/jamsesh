@@ -124,7 +124,19 @@ export function initWiki(dir: string): void {
 }
 
 /** The file writes the vault makes, in one place so tests can make them fail part way. */
-export const io = { write: writeFileSync, rename: renameSync, link: linkSync };
+/** Vault folders that have taken their last write (the room stopped). Every write to the vault goes through `io`, so this is the one gate. */
+const closedVaults = new Set<string>();
+export const closeVault = (dir: string) => void closedVaults.add(dir);
+const gate = (path: unknown) => {
+  const p = String(path);
+  for (const d of closedVaults) if (p === d || p.startsWith(`${d}/`)) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
+};
+
+export const io = {
+  write: ((path: any, ...a: any[]) => (gate(path), (writeFileSync as any)(path, ...a))) as typeof writeFileSync,
+  rename: ((from: any, to: any) => (gate(to), renameSync(from, to))) as typeof renameSync,
+  link: ((from: any, to: any) => (gate(to), linkSync(from, to))) as typeof linkSync,
+};
 
 /** Writes beside the file, then renames over it: a reader sees the old text or the new, never half of either. */
 function writeAtomic(file: string, text: string) {

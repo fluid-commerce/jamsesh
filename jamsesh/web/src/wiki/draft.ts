@@ -40,14 +40,16 @@ export const drafts = {
    * A save of edit `n` was answered with the page now at `rev`. The draft goes only if it is still that edit; typing done
    * while the save was out stays as the draft, built on the saved revision. Works the same whether or not the view is still mounted.
    */
-  saved(slug: string, n: number, rev: string): boolean {
+  saved(slug: string, n: number, rev: string): "cleared" | "rebased" | "unrelated" {
     const d = held.get(slug);
-    if (!d) return true;
-    if (d.n === n) return held.delete(slug), true;
+    if (!d) return "cleared";
+    if (d.n === n) return held.delete(slug), "cleared";
     // A draft begun after the sent edit (the old one was cancelled) is someone else's: the answer leaves it, and its revision, alone.
-    if (d.first <= n) held.set(slug, { ...d, base: rev });
-    return false;
+    if (d.first > n) return "unrelated";
+    held.set(slug, { ...d, base: rev });
+    return "rebased";
   },
+
   drop: (slug: string) => void held.delete(slug),
 };
 

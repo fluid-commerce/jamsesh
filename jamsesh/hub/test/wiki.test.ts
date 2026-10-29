@@ -2385,13 +2385,12 @@ test("once the room has stopped no vault file is written: an edit, a source and 
     console.warn = warn;
   }
   expect(readPage(dir, "pricing")!.markdown).toBe(cur.markdown);
-  expect(sourceIds(dir).length).toBe(sourceIds(dir).length); // (shutdown's own capture may add; the late one above must not)
   expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).not.toContain("Written after the stop.");
   void before;
   void s;
 }, 30_000);
 
-test("a shell job that ends while the conversation is sealed is let go: no unhandled rejection", async () => {
+test("a real shell job that ends while the conversation is sealed is let go: no unhandled rejection", async () => {
   const { hub } = room();
   const errors: unknown[] = [];
   const catcher = (e: unknown) => void errors.push(e);
@@ -2399,17 +2398,39 @@ test("a shell job that ends while the conversation is sealed is let go: no unhan
   process.on("unhandledRejection", catcher);
   try {
     hub.store.seal("events");
-    (hub.host as any).log("late note from a job");
-    (hub.host as any).onBuilt = () => {
-      throw Object.assign(new Error("closed"), { code: "ESEALED" });
-    };
-    await Bun.sleep(50);
+    (hub.host as any).runShell("true", "a test");
+    await Bun.sleep(1500);
     expect(errors).toEqual([]);
   } finally {
     process.off("uncaughtException", catcher);
     process.off("unhandledRejection", catcher);
   }
-});
+}, 20_000);
+
+test("after the room stops, the vault takes no write of any kind: a model pass that outlived the flush writes no page, and a state save fails closed", async () => {
+  const { hub, w, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  const files = () => readdirSync(join(dir, "raw")).concat(readdirSync(join(dir, "wiki"))).sort().join(",");
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  w.addSource("document", "Pricing", "We decided pricing: three tiers.", "Chey");
+  w.decide = (async () => {
+    await gate; // a slow model call
+    return { summary: "Late", pages: [page("late-page", "Late page", "topic", "Written after the stop.")] };
+  }) as Decider;
+  const pass = w.tick().catch(() => null);
+  await Bun.sleep(30);
+  await hub.shutdown();
+  const before = files();
+  const state = readFileSync(join(dir, ".wiki-state.json"), "utf8");
+  release();
+  await pass;
+  expect(files()).toBe(before);
+  expect(readFileSync(join(dir, ".wiki-state.json"), "utf8")).toBe(state);
+  expect(existsSync(join(dir, "wiki", "late-page.md"))).toBe(false);
+  expect(() => writeState(dir, { ...readState(dir) })).toThrow("closed");
+}, 30_000);
 
 test("closing records canvas work still waiting for its timer", async () => {
   const { hub, s } = room();

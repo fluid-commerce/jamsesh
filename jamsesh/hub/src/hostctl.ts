@@ -468,7 +468,8 @@ export class HostControl {
     this.log(`Running on the host (approved by ${by}): ${command}`);
     void run(["/bin/zsh", "-lc", command], 60_000)
       .then((r) => this.log(`Shell command finished with exit ${r.code}: ${command}${r.out.trim() ? `\n${r.out.slice(-600)}` : ""}`))
-      .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`));
+      .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`))
+      .catch((e) => console.error("[host] shell job:", e instanceof Error ? e.message : e)); // nothing here may end as an unhandled rejection
     return `Running on the host: ${command}`;
   }
 
@@ -525,12 +526,12 @@ export class HostControl {
       this.onBuilt(label, ok, result);
       bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
     })().catch((e) => {
-      // A background job never ends as an unhandled rejection: the room is told it failed, and a log that finds the room closed is dropped.
-      this.builds.delete(slug);
-      console.error("[host] preview build:", e instanceof Error ? e.message : e);
-      const result = `The ${label} build stopped: ${e instanceof Error ? e.message : e}`;
-      this.log(result);
+      // A background job never ends as an unhandled rejection, whatever its own error handling hits.
       try {
+        this.builds.delete(slug);
+        console.error("[host] preview build:", e instanceof Error ? e.message : e);
+        const result = `The ${label} build stopped: ${e instanceof Error ? e.message : e}`;
+        this.log(result);
         this.onBuilt(label, false, result); // the same way the room hears of any build that ends badly
       } catch (err) {
         if ((err as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", err);
