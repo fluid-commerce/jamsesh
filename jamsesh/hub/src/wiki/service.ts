@@ -23,6 +23,8 @@ import {
 const EVERY_MS = 15 * 60_000;
 const MAX_BATCH_SOURCES = 8;
 const MAX_BATCH_CHARS = 60_000;
+/** Most page paths kept as owed to a commit; past it the debt becomes the whole wiki folder. */
+const OWED_MAX = 200;
 const MAX_PAGES_PER_INGEST = 15;
 const AGENT_SOURCES_PER_HOUR = 30;
 const STALE_DAYS = 45;
@@ -254,6 +256,8 @@ export class WikiService {
     } catch {}
     // On disk and in memory both: a state file that can't be read or written doesn't lose what is owed.
     for (const p of [...(st?.owed ?? []), ...paths]) this.owedPaths.add(p);
+    // Past the cap the list collapses to the wiki folder as a whole (a full add of it): the debt stays small however long git is unwell.
+    if (this.owedPaths.size > OWED_MAX) this.owedPaths = new Set(["wiki"]);
     const raw = rawPaths(this.dir);
     const result = raw ? commitPaths(this.dir, message, [...this.owedPaths, "index.md", "log.md", ...raw]) : "failed";
     if (result !== "failed") this.owedPaths.clear();
@@ -261,7 +265,10 @@ export class WikiService {
     try {
       const now = readState(this.dir);
       if ((now.owed ?? []).join("\n") !== left.join("\n")) writeState(this.dir, { ...now, ...(left.length ? { owed: left } : { owed: undefined }) });
-    } catch {} // still in memory; written at the next commit
+    } catch (e) {
+      // Not silent: the commit debt is only in memory until a write succeeds.
+      console.error(`wiki: couldn't record ${left.length} page${left.length === 1 ? "" : "s"} waiting for a commit (${errText(e)}); they are kept in memory and tried again.`);
+    }
   }
 
   private owedPaths = new Set<string>();

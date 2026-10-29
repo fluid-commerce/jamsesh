@@ -1,11 +1,11 @@
 // Network: makes the host reachable at https://<name>.duckdns.org from anywhere.
 // DuckDNS name -> Let's Encrypt cert (DNS-01) -> router port forward -> self-check.
 import { assertLive } from "../room-context";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { CertStore, issueOne, needsRenewal, safeError, type CertKind } from "./acme";
-import { clearTxt, parseDomain, publicIp as lookupIp, startUpdater, updateIp, type Domain, type FetchFn } from "./duckdns";
+import { parseDomain, publicIp as lookupIp, startUpdater, updateIp, type Domain, type FetchFn } from "./duckdns";
 import { externalCheck, localCheck } from "./reach";
 import { PortMapper, type RouterStatus } from "./router";
 
@@ -40,7 +40,7 @@ export class Network {
   private cfgPath: string;
   private cfg: NetConfig | null = null;
   private store: CertStore;
-  private mapper: PortMapper;
+  private mapper = new PortMapper();
   private stopUpdater?: () => void;
   private renewTimer?: ReturnType<typeof setInterval>;
   private issuing?: Promise<void>;
@@ -61,9 +61,6 @@ export class Network {
     this.store = new CertStore(join(dir, "tls"));
     this.cfg = this.readConfig();
     this.refreshCertState();
-    this.mapper = new PortMapper(join(dir, "router-map.json"));
-    void this.settleTxt();
-    void this.mapper.settleOwed(); // a port an earlier run couldn't close is closed now, whether or not a new one is opened
   }
 
   // ---- config (token lives in a 0600 file; it is never returned by status()) ----
@@ -92,32 +89,6 @@ export class Network {
   /** The room is closing: nothing here starts, saves or maps from now on (stop() still takes the router mapping down). */
   private closed = false;
   private abort = new AbortController();
-  /** Every outgoing call the network makes: refused once the room is closing, and cut short if one is under way. */
-  private f: FetchFn = async (u, init) => {
-    this.abort.signal.throwIfAborted();
-    return this.fetchFn(u, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, this.abort.signal]) : this.abort.signal });
-  };
-
-  /** A TXT proof record this run wrote and has not seen cleared: remembered on disk so a later start clears it. */
-  private get txtFile() {
-    return join(this.dir, "acme-txt-owed");
-  }
-
-  private noteTxt(s: "set" | "cleared" | "failed") {
-    try {
-      if (s === "set") writeFileSync(this.txtFile, "1", { mode: 0o600 });
-      else if (s === "cleared") rmSync(this.txtFile, { force: true });
-    } catch {}
-  }
-
-  private async settleTxt() {
-    const d = this.domain();
-    if (!this.cfg || !d || !existsSync(this.txtFile)) return;
-    try {
-      const r = await clearTxt(d, this.cfg.token, (u, init) => this.fetchFn(u, { ...init, signal: AbortSignal.timeout(8000) }));
-      if (r.ok) this.noteTxt("cleared");
-    } catch {}
-  }
 
   close() {
     this.closed = true;
@@ -138,7 +109,7 @@ export class Network {
       this.st.dns = r.ok ? "ok" : "error";
       this.st.dnsError = r.ok ? undefined : r.error;
       if (r.ip) this.st.publicIp = r.ip;
-    }, 5 * 60_000, this.f);
+    }, 5 * 60_000, this.fetchFn);
     this.renewTimer ??= setInterval(() => void this.ensureCert(), 24 * 3600_000);
     (this.renewTimer as any).unref?.();
     void this.openRouter();
@@ -161,7 +132,6 @@ export class Network {
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
-    await this.issuing?.catch(() => {}); // an issuance in flight finishes its cleanup (the TXT record it set) first
     await this.mapper.unmap();
     this.st.router = { state: "idle" };
   }
@@ -211,7 +181,7 @@ export class Network {
       try {
         for (const kind of todo) {
           if (this.closed) break;
-          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.f, onTxt: (s) => this.noteTxt(s), cleanupF: (u, init) => this.fetchFn(u, { ...init, signal: AbortSignal.timeout(8000) }), signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.fetchFn, signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
           if (this.closed) break; // issued as the room closed: not kept
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };
@@ -234,7 +204,7 @@ export class Network {
     if (!c || this.closed) return;
     this.st.router = { state: "working", method: "none", externalPort: c.externalPort, message: "Asking your router to open the port…" };
     const lan = lanIpv4();
-    const ip = await lookupIp(this.f, this.st.publicIp);
+    const ip = await lookupIp(this.fetchFn, this.st.publicIp);
     if (this.closed) return;
     this.st.publicIp ??= ip;
     const r = await this.mapper.map(c.externalPort, c.internalPort, lan, ip);
@@ -246,13 +216,13 @@ export class Network {
   async check() {
     const d = this.domain();
     if (!d) return;
-    const local = await localCheck(d.fqdn, this.f);
+    const local = await localCheck(d.fqdn, this.fetchFn);
     if (local.ok) {
       this.st.reachable = "yes";
       this.st.reachDetail = local.detail;
       return;
     }
-    const outside = await externalCheck(d.fqdn, this.f);
+    const outside = await externalCheck(d.fqdn, this.fetchFn);
     if (outside) {
       this.st.reachable = outside.ok ? "yes" : "no";
       this.st.reachDetail = outside.detail;
@@ -299,7 +269,7 @@ export class Network {
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);
       if (!/^[0-9a-f-]{20,}$/i.test(token)) return json({ error: "The DuckDNS token is a long code of letters, numbers and dashes. Copy it from the top of the DuckDNS page." }, 400);
-      const r = await updateIp(d, token, this.f);
+      const r = await updateIp(d, token, this.fetchFn);
       assertLive();
       if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
       const externalPort = Number(body.externalPort ?? this.cfg?.externalPort ?? 443);

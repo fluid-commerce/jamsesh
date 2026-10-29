@@ -2659,3 +2659,47 @@ test("a page whose commit failed stays owed across a restart until a commit succ
   expect(Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString()).toContain("wiki/owed-page.md"); // committed
   expect(readState(dir).owed).toBeUndefined();
 });
+
+test("commit debt is bounded: past the cap it becomes the whole wiki folder, which one commit then takes", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("seed", "# Seed\n\nA page.", { by: "Chey" });
+  const index = readFileSync(join(dir, ".git", "index"));
+  writeFileSync(join(dir, ".git", "index"), "not an index");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    for (let i = 0; i < 205; i++) writePage(dir, `bulk-${i}`, `# Bulk ${i}\n\nPage ${i}.`);
+    (w as any).commitOwn("many pages", Array.from({ length: 205 }, (_, i) => `wiki/bulk-${i}.md`));
+  } finally {
+    console.error = err;
+  }
+  expect(readState(dir).owed).toEqual(["wiki"]); // collapsed, not 205 paths
+  writeFileSync(join(dir, ".git", "index"), index);
+  (w as any).commitOwn("recovered", []);
+  const history = Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString();
+  expect(history).toContain("wiki/bulk-204.md");
+  expect(readState(dir).owed).toBeUndefined();
+});
+
+test("a failed write of the commit debt is reported, not swallowed", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const index = readFileSync(join(dir, ".git", "index"));
+  writeFileSync(join(dir, ".git", "index"), "not an index");
+  const errors: string[] = [];
+  const err = console.error;
+  console.error = (...a: unknown[]) => void errors.push(a.join(" "));
+  const was = io.rename;
+  try {
+    (io as any).rename = () => {
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    };
+    (w as any).commitOwn("one page", ["wiki/one.md"]);
+  } finally {
+    (io as any).rename = was;
+    console.error = err;
+    writeFileSync(join(dir, ".git", "index"), index);
+  }
+  expect(errors.join("\n")).toContain("waiting for a commit");
+});

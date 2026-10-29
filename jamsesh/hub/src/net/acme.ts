@@ -34,10 +34,9 @@ export async function dnsHasTxt(fqdn: string, value: string, f: FetchFn = fetch)
   return false;
 }
 
-export async function waitForTxt(fqdn: string, value: string, opts: { f?: FetchFn; timeoutMs?: number; everyMs?: number; signal?: AbortSignal } = {}) {
+export async function waitForTxt(fqdn: string, value: string, opts: { f?: FetchFn; timeoutMs?: number; everyMs?: number } = {}) {
   const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
   while (Date.now() < deadline) {
-    opts.signal?.throwIfAborted();
     if (await dnsHasTxt(fqdn, value, opts.f)) return true;
     await new Promise((r) => setTimeout(r, opts.everyMs ?? 5000));
   }
@@ -55,9 +54,9 @@ export class CertStore {
     writeFileSync(this.p(name), data, { mode: 0o600 });
     chmodSync(this.p(name), 0o600);
   }
-  accountKey(signal?: AbortSignal): Promise<Buffer> | Buffer {
+  accountKey(): Promise<Buffer> | Buffer {
     if (existsSync(this.p("account.key"))) return readFileSync(this.p("account.key"));
-    return acme.crypto.createPrivateKey().then((k) => (signal?.throwIfAborted(), this.write("account.key", k), k));
+    return acme.crypto.createPrivateKey().then((k) => (this.write("account.key", k), k));
   }
   save(b: CertBundle, staging: boolean) {
     this.write(`${b.kind}.crt`, b.cert);
@@ -74,19 +73,16 @@ export class CertStore {
   }
 }
 
-export type IssueOpts = { domain: Domain; token: string; store: CertStore; staging?: boolean; email?: string; f?: FetchFn; onProgress?: (msg: string) => void; propagationMs?: number; /** Aborted when the room closes: nothing more is created (account key, DNS records) once it is. */ signal?: AbortSignal; /** The fetch for tidying up after a challenge: not cancelled by the signal, since it undoes a record this run set. */ cleanupF?: FetchFn; /** Told when this run writes a TXT record and when it is confirmed cleared, so a record left behind can be cleared later. */ onTxt?: (s: "set" | "cleared" | "failed") => void };
+export type IssueOpts = { domain: Domain; token: string; store: CertStore; staging?: boolean; email?: string; f?: FetchFn; onProgress?: (msg: string) => void; propagationMs?: number; /** Aborted when the room closes: nothing more is started (account key, DNS records) once it is. */ signal?: AbortSignal };
 
 /** Issues one cert (one order) for `names`, serialising on the single DuckDNS TXT slot. */
 export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle> {
   const names = kind === "apex" ? [o.domain.fqdn] : [`*.${o.domain.fqdn}`];
   o.signal?.throwIfAborted();
-  const accountKey = await o.store.accountKey(o.signal);
-  o.signal?.throwIfAborted();
   const client = new acme.Client({
     directoryUrl: o.staging ? acme.directory.letsencrypt.staging : acme.directory.letsencrypt.production,
-    accountKey,
+    accountKey: await o.store.accountKey(),
   });
-  let txtSet = false;
   const [key, csr] = await acme.crypto.createCsr({ commonName: names[0] });
   o.onProgress?.(`Requesting the ${kind === "apex" ? "main" : "wildcard"} certificate`);
   const cert = await client.auto({
@@ -97,19 +93,13 @@ export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle
     skipChallengeVerification: true, // we verify through public DoH below; the local resolver may be stale
     challengeCreateFn: async (_authz, _ch, txt) => {
       o.signal?.throwIfAborted();
-      txtSet = true;
-      o.onTxt?.("set"); // noted before the record is written: a crash in between still leaves a reminder
       const r = await setTxt(o.domain, o.token, txt, o.f);
       if (!r.ok) throw new Error(r.error ?? "DuckDNS refused the TXT record");
       o.onProgress?.("Waiting for DNS to publish the proof");
-      if (!(await waitForTxt(o.domain.fqdn, txt, { f: o.f, timeoutMs: o.propagationMs, signal: o.signal }))) throw new Error("DNS didn't show the challenge record in time. Try again in a minute.");
+      if (!(await waitForTxt(o.domain.fqdn, txt, { f: o.f, timeoutMs: o.propagationMs }))) throw new Error("DNS didn't show the challenge record in time. Try again in a minute.");
     },
     challengeRemoveFn: async () => {
-      if (!txtSet) return; // nothing was published: nothing to take down
-      // Even when the room is closing: this undoes the one record this run set, through a fetch the signal doesn't cut.
-      const r = await clearTxt(o.domain, o.token, o.cleanupF ?? o.f);
-      o.onTxt?.(r.ok ? "cleared" : "failed");
-      if (!r.ok) o.onProgress?.("Couldn't clear the proof record from DNS; it will be tried again at the next start");
+      await clearTxt(o.domain, o.token, o.f);
     },
   });
   const notAfter = new X509Certificate(cert).validToDate.getTime();
