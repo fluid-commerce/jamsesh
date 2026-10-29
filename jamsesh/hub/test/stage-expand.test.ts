@@ -16,7 +16,8 @@ test("expanding a tile marks it on the stage in place; collapsing and a new stag
   expect(open.expanded).toBe("b");
   expect(s.stage().expanded).toBe("b");
   // Same stage, not a new one: it keeps its age, who put it up and what's on it.
-  expect(open.since).toBe(first.since);
+  expect(first.applied).toBe(true);
+  expect(open.since).toBe((first as any).stage.since);
   expect(open.by).toBe("Chey");
   expect(open.items).toEqual(["a", "b"]);
   // Another tile replaces it; asking again changes nothing.
@@ -55,7 +56,8 @@ test("a locked screen can still be expanded: the lock, its owner and its history
   const open = s.expandTile("b", "screen-2");
   expect(open.expanded).toBe("b");
   expect(open.lock?.personId).toBe(chey.id);
-  expect(open.since).toBe(put.since);
+  expect(put.applied).toBe(true);
+  expect(open.since).toBe((put as any).stage.since);
   expect(s.lockOf("screen-2")?.personId).toBe(chey.id);
   expect(s.stageHistory("screen-2").length).toBe(history);
   // Another person can look closer at a locked screen, but still can't replace it.

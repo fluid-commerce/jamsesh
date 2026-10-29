@@ -54,7 +54,7 @@ test("a person's cast is locked; unlocking leaves it up and ends the lock", () =
   const { s, chey } = room();
   const a = artifact(s, "Checkout");
   const st = s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(st.lock?.by).toBe("Chey");
+  expect(st.applied && st.stage.lock?.by).toBe("Chey");
   expect(s.stage().lock?.personId).toBe(chey.id);
   // The board is nothing to hold on to.
   s.setStage({ mode: "board" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
@@ -69,7 +69,8 @@ test("a locked screen refuses the brain and automatic changes, but people and ho
   const { s, chey, felipe } = room();
   const a = artifact(s, "Checkout");
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() }).mode).toBe("spotlight");
+  expect(s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() })).toMatchObject({ applied: false, reason: expect.stringContaining("locked") });
+  expect(s.stage().mode).toBe("spotlight");
   expect(s.stage().mode).toBe("spotlight");
   // Another person's deliberate cast replaces it and takes the lock.
   s.setStage({ mode: "agents" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
@@ -402,13 +403,14 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   expect(s.historyBy("felipe")?.label).toBe("Checkout");
   const hit = s.historyBy("Felipe")!;
   (s as any).dropLock("main");
-  const back = s.restoreHistory(hit.id, "main", { claim: s.stageClaim() }, "Room brain") as Stage;
+  const back = (s.restoreHistory(hit.id, "main", { claim: s.stageClaim() }, "Room brain") as { applied: true; stage: Stage }).stage;
   expect(back.mode).toBe("spotlight");
   expect(back.by).toBe("Room brain");
   // A locked screen holds off a restore that isn't a person's.
   s.setStage({ mode: "agents" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect((s.restoreHistory(s.previousScreens()[0].id, "main", { claim: s.stageClaim() }, "Room brain") as Stage).mode).toBe("agents");
-  expect(s.restoreHistory("his-nope", "main", { claim: s.stageClaim() })).toBeNull();
+  expect(s.restoreHistory(s.previousScreens()[0].id, "main", { claim: s.stageClaim() }, "Room brain")).toMatchObject({ applied: false, reason: expect.stringContaining("locked") });
+  expect(s.stage().mode).toBe("agents");
+  expect(s.restoreHistory("his-nope", "main", { claim: s.stageClaim() })).toMatchObject({ applied: false });
 });
 
 test("the brain brings back what a person had up, and says so when nothing matches", async () => {
@@ -526,7 +528,8 @@ test("locks, the queue and history are per screen: a lock on main doesn't hold t
   expect(s.stage().lock?.by).toBe("Chey");
   // Locking the second display holds only it; its queue and history are its own.
   s.setStage({ mode: "spotlight", items: [a.id], title: "Right" }, "Felipe", "screen-2", { person: { id: felipe.id, name: "Felipe" } });
-  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2", { claim: s.stageClaim() }).title).toBe("Right");
+  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2", { claim: s.stageClaim() })).toMatchObject({ applied: false });
+  expect(s.stage("screen-2").title).toBe("Right");
   s.queueReady({ screen: "screen-2", agentId: "x", agentName: "Agent", label: "For the right", stage: { mode: "agents" } });
   expect(s.readyToShow().map((r) => r.screen)).toEqual(["screen-2"]);
   expect(s.stageHistory()["screen-2"].map((e) => e.by)).toEqual(["Felipe", "Room brain"]);
@@ -1252,7 +1255,7 @@ test("approving a show request is one write: when the item can't go up, the appr
   // And a plain show that can't land (the screen changed under its claim) keeps the item queued.
   const claim = s.stageClaim();
   s.setStage({ mode: "agents" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.showReady(item.id, { claim })).toBeNull();
+  expect(s.showReady(item.id, { claim })).toMatchObject({ applied: false });
   expect(s.readyToShow().some((r) => r.id === item.id)).toBe(true);
 });
 
@@ -1311,7 +1314,35 @@ test("a restore whose claim is stale says so, and restores nothing", async () =>
   const entry = s.previousScreens()[0];
   const claim = s.stageClaim();
   s.setStage({ mode: "agents" }, "Chey", "main", { override: true });
-  expect(s.restoreHistory(entry.id, "main", { claim }, "Room brain")).toBe("stale");
+  expect(s.restoreHistory(entry.id, "main", { claim }, "Room brain")).toMatchObject({ applied: false, reason: expect.stringContaining("changed") });
   expect(s.stage().mode).toBe("agents");
   void chey; void tools;
+});
+
+test("every caller of a refused write says so: HTTP gives a 4xx with the reason, the MCP tool says it didn't land, and an unrenderable cast is refused before it locks", async () => {
+  const { hub, s, chey, reg, call, out } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    const a = artifact(s, "Checkout");
+    // Empty parity, and content that names only artifacts that don't exist: nothing to draw, no lock taken.
+    for (const bad of [{ mode: "parity" }, { mode: "spotlight", items: ["nope"] }, { mode: "compare", items: ["nope", "none"] }]) {
+      const r = await post("/stage", bad);
+      expect(r.status).toBe(400);
+    }
+    expect(s.stage().lock).toBeUndefined();
+    // A write the stage refuses after the schema passed it (a layout of only an ended share) is not a 200.
+    const sh = s.startShare("chey-mac", "screen");
+    s.endShare(sh.id);
+    const ended = await post("/stage", { mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } });
+    expect(ended.status).toBe(409);
+    expect((await ended.json()).error ?? "").toContain("share");
+    // An agent's show while a person's lock holds the screen.
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    const agent = reg("Felipe");
+    const said = out(await call(agent, "jam_show", { mode: "spotlight", artifactIds: [a.id], title: "x" }));
+    expect(said).not.toBe("On the big screen.");
+  } finally {
+    server.stop();
+  }
 });

@@ -560,7 +560,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const who = actor();
     const screen = screenOf();
     if (!screen) return noScreen();
-    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
+    const gone = s.unrenderable(stage);
+    if (gone) return bad(gone, 400);
+    const put = s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who });
+    return put.applied ? json(put.stage) : bad(put.reason, 409);
   }
   // Only the lock's owner unlocks it: their window's credential, never a name in the body. The host's own windows carry no
   // person's credential; they may unlock a lock held by no one in particular or by the person at the host (Session.releaseLock).
@@ -579,13 +582,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const lock = s.lockOf(screen);
     if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
     const stage = s.restoreHistory(String(body?.id ?? ""), screen, { person: who });
-    return stage === "stale" ? bad("The screen changed; look again.", 409) : stage ? json(stage) : bad("That screen is no longer in the history.", 404);
+    return stage.applied ? json(stage.stage) : bad(stage.reason, stage.reason.includes("history") ? 404 : 409);
   }
   m = path.match(/^\/stage\/ready\/([\w-]+)$/);
   if (m && req.method === "POST") {
     if (body?.action === "dismiss") return (s.dismissReady(m[1]), json({ ok: true }));
     const stage = s.showReady(m[1], { person: actor() });
-    return stage ? json(stage) : bad("That item isn't waiting any more.", 404);
+    return stage.applied ? json(stage.stage) : bad(stage.reason, stage.reason.includes("waiting") ? 404 : 409);
   }
   m = path.match(/^\/show-requests\/([\w-]+)$/);
   if (m && req.method === "POST") {

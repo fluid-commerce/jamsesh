@@ -520,7 +520,7 @@ A26c].
 ### 5.2 Saved state and merge
 
 - **Outbox.** Every change the client makes (POST, PATCH, DELETE), except the live-only screen controls
-  (Expand and Collapse of a tile, which are never queued for later), goes into a durable outbox in
+  (every call under /stage: a cast, Unlock, Restore, a ready item's Show or Dismiss, and Expand and Collapse of a tile; and the answers to show requests, which are never queued for later because replaying one after reconnecting could undo a later decision), goes into a durable outbox in
   IndexedDB when the host can't take it. Calls replay in order, one at a time, with an idempotency
   key, so the host applies each exactly once even if it saw the first attempt. Caps: 500 changes
   and 7 days. Pairing, audio, hooks, share requests, and debug calls are never queued.

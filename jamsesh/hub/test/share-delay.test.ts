@@ -107,7 +107,7 @@ test("the presenter's own set_layout, answering late, lands only on the screen i
   const said = String(await act());
   await placing;
   expect(late.s.stage().mode).toBe("agents");
-  expect(said).toContain("The screen changed while you were deciding");
+  expect(said).toContain("didn't land");
 
   const ended = room();
   const sh2 = ended.s.startShare("felipe-laptop", "screen");

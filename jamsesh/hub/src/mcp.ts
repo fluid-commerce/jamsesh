@@ -628,7 +628,8 @@ export class McpEndpoint {
           bus.send({ type: "toast", tone: "info", text: `${agent.name} would like to show ${args.title || "their work"}`, detail: `${why}, so it wasn't swapped in.` });
           return text(`${why}, so I didn't replace it. The room got a note that you'd like to show this; try again in a minute or ask them.`);
         }
-        s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items: items.slice(0, 60), columns: columns.length ? columns : undefined }, agent.name, "main", { claim });
+        const shown = s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items: items.slice(0, 60), columns: columns.length ? columns : undefined }, agent.name, "main", { claim });
+        if (!shown.applied) return text(`It didn't go on the big screen: ${shown.reason}`);
         return text("On the big screen.");
       }
       case "jam_artifacts": {

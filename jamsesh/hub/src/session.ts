@@ -98,7 +98,7 @@ export class Session {
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
     if (this.revertsToBoard(st)) {
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
+      this.stageRevert = setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
       this.stageRevert.unref?.();
     }
     // A lock whose owner left lets go without anyone asking.
@@ -1310,7 +1310,9 @@ export class Session {
         // The pin comes back only with the lock that held it: an owner who unlocked during the share released the pin with it.
         // A pin that had no lock was never anyone's to release, and stays.
         const restored = back && back.lock && !st.lock ? { ...back, pinned: false, pinnedById: undefined } : back;
-        this.setStage(tiles.length ? { ...st, layout: { tiles } } : restored ? restored : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
+        const put = this.setStage(tiles.length ? { ...st, layout: { tiles } } : restored ? restored : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
+        // What it hid can't be shown again (its artifacts are gone): the board, rather than the ended share's tile.
+        if (!put.applied) void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true });
       }
     }
   }
@@ -1639,23 +1641,23 @@ export class Session {
    * for the hub's own housekeeping: a share ending, a request the owner approved): the stage comes back
    * unchanged, and callers that want to explain why ask `lockOf` first. A person's cast takes the lock.
    */
-  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen: string, opts: StageOpts) {
-    const cur = this.stage(screen);
-    if (!this.claimHolds(opts.claim, screen)) return cur;
+  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen: string, opts: StageOpts): StageResult {
+    const refused = (reason: string): StageResult => ({ applied: false, reason });
+    if (!this.claimHolds(opts.claim, screen)) return refused("The screen changed since this was decided.");
     const held = this.lockOf(screen);
     // The lock's owner asked for this very write: it replaces their lock in the same step (nothing is released ahead of it).
-    if (!opts.person && !opts.override && held && !(opts.mayReplaceLock && opts.mayReplaceLock === held.personId)) return cur;
+    if (!opts.person && !opts.override && held && !(opts.mayReplaceLock && opts.mayReplaceLock === held.personId)) return refused(`${held.by} has this screen locked.`);
     // Work bound to one share (the presenter's placement) lands only while that share is live and in the layout.
-    if (opts.onlyScreen && opts.onlyScreen !== screen) return cur;
+    if (opts.onlyScreen && opts.onlyScreen !== screen) return refused("This was decided for another screen.");
     if (opts.requireShare) {
       const need = opts.requireShare;
       const inLayout = next.mode === "layout" && !!next.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === need);
-      if (!inLayout || this.store.get("shares", need)?.status !== "live") return cur;
+      if (!inLayout || this.store.get("shares", need)?.status !== "live") return refused("The share it was for has ended or isn't in the layout.");
     }
     // A share is shown only while it's live: an ended one's tile is dropped, and a layout that was only ended shares isn't put up.
     if (next.mode === "layout" && next.layout?.tiles.length) {
       const tiles = next.layout.tiles.filter((t) => t.kind !== "screen" || this.store.get("shares", t.shareId)?.status === "live");
-      if (!tiles.length) return cur;
+      if (!tiles.length) return refused("Every share in that layout has ended.");
       if (tiles.length !== next.layout.tiles.length) next = { ...next, layout: { ...next.layout, tiles, grid: undefined } };
     }
     const now = Date.now();
@@ -1667,7 +1669,7 @@ export class Session {
     const checked = parseStage(stage);
     if (!checked.ok) {
       console.error(`refused a stage for ${screen}: ${checked.error}`);
-      return cur;
+      return refused(checked.error);
     }
     // Who pinned it, by identity (never by name): only a person with an id of their own is recorded.
     if (stage.pinned && opts.person) stage.pinnedById = opts.person.id ?? "";
@@ -1675,7 +1677,7 @@ export class Session {
     this.commitStage(stage, screen);
     opts.claim?.revs.set(screen, this.stageRev(screen));
     this.recordHistory(stage, screen);
-    return stage;
+    return { applied: true, stage };
   }
 
   /** Whether this person's direct request may replace the lock on a screen: they own it, and nothing changed it since the claim. Releases nothing. */
@@ -1751,7 +1753,7 @@ export class Session {
         this.scheduleShareSweep();
         clearTimeout(this.screenReverts.get(screen));
         if (this.revertsToBoard(stage))
-          this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
+          this.screenReverts.set(screen, setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
       });
       return;
     }
@@ -1764,7 +1766,7 @@ export class Session {
       if (this.stageRevert) clearTimeout(this.stageRevert);
       this.stageRevert = null;
       // Anything the brain brought up returns to the live board after a while.
-      if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
+      if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
     });
   }
 
@@ -1921,43 +1923,47 @@ export class Session {
   }
 
   /** Puts a queued item on its screen. A person showing it takes the screen's lock; with no person (the owner said yes) it goes up unlocked. */
-  showReady(id: string, who: ShowWho): Stage | null {
+  showReady(id: string, who: ShowWho): StageResult {
     try {
       return this.atomically(() => this.showReadyIn(id, who));
     } catch (e) {
-      if (e instanceof NotShown) return null;
+      if (e instanceof NotShown) return { applied: false, reason: e.message };
       throw e;
     }
   }
 
-  /** Whether a queued stage still has something to draw (its artifacts may have been deleted while it waited). */
-  private renderable(st: Partial<Stage> & { mode: Stage["mode"] }): boolean {
+  /**
+   * Why a stage would draw nothing, or null when it has something to draw: the one check for a cast, a queued item
+   * and an approval. Content modes need at least one artifact that still exists (it may have been deleted while the
+   * item waited); parity needs one in its columns or items.
+   */
+  unrenderable(st: Partial<Stage> & { mode: Stage["mode"] }): string | null {
     const known = new Set(this.artifacts().map((a) => a.id));
     const has = (ids: string[] | undefined) => (ids ?? []).some((i) => known.has(i));
     switch (st.mode) {
       case "spotlight":
       case "compare":
-        return has(st.items);
+        return has(st.items) ? null : "None of the artifacts it shows exist any more.";
       case "parity":
-        return has(st.items) || (st.columns ?? []).some((c) => has(c.items));
+        return has(st.items) || (st.columns ?? []).some((c) => has(c.items)) ? null : "Neither side has an artifact that exists any more.";
       case "layout":
-        return (st.layout?.tiles ?? []).some((t) => t.kind !== "artifact" || known.has(t.artifactId));
+        return (st.layout?.tiles ?? []).some((t) => t.kind !== "artifact" || known.has(t.artifactId)) ? null : "Every artifact in that layout is gone.";
       default:
-        return true;
+        return null;
     }
   }
 
   /** `showReady` inside a transaction: the item leaves the queue only if the stage really changed, else NotShown undoes it all. */
-  private showReadyIn(id: string, who: ShowWho): Stage {
+  private showReadyIn(id: string, who: ShowWho): StageResult & { applied: true } {
     const item = this.readyToShow().find((r) => r.id === id);
-    if (!item) throw new NotShown();
-    if ("claim" in who && !this.claimHolds(who.claim, item.screen)) throw new NotShown();
-    if (!this.renderable(item.stage)) throw new NotShown();
+    if (!item) throw new NotShown("That item isn't waiting any more.");
+    if ("claim" in who && !this.claimHolds(who.claim, item.screen)) throw new NotShown("The screen changed since; look again.");
+    const gone = this.unrenderable(item.stage);
+    if (gone) throw new NotShown(gone);
     this.dismissReady(id);
-    const before = this.stageRev(item.screen);
-    const stage = this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
-    if (this.stageRev(item.screen) === before) throw new NotShown();
-    return stage;
+    const r = this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
+    if (!r.applied) throw new NotShown(r.reason);
+    return r;
   }
 
   dismissReady(id: string) {
@@ -2086,11 +2092,13 @@ export class Session {
   }
 
   /** Brings an earlier screen back. A person's tap takes the lock; anyone else is held off by one. */
-  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): Stage | null | "stale" {
+  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): StageResult {
     const entry = (this.stageHistory(screen)[screen] ?? []).find((e) => e.id === id);
-    if (!entry) return null;
+    if (!entry) return { applied: false, reason: "That screen is no longer in the history." };
     // The screen changed since the caller decided: nothing is restored, and the caller is told so.
-    if (who.claim && !this.claimHolds(who.claim, screen)) return "stale";
+    if (who.claim && !this.claimHolds(who.claim, screen)) return { applied: false, reason: "The screen changed since; look again." };
+    const gone = this.unrenderable(entry.stage);
+    if (gone) return { applied: false, reason: gone };
     return this.setStage({ ...entry.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);
   }
 }
@@ -2101,10 +2109,17 @@ export class Session {
  * work's next write still lands. Anything that decides and writes later than the moment it acts on (the brain, whose
  * model takes seconds; an agent) carries one.
  */
+/** What a stage write came to. A refused write changed nothing; callers must say so (there is no stage to read off a refusal). */
+export type StageResult = { applied: true; stage: Stage } | { applied: false; reason: string };
+
 type ShowWho = { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { override: true } | { claim: StageClaim; mayReplaceLock?: string };
 
 /** Thrown inside a transaction when a queued item couldn't actually go up: everything the attempt wrote is undone. */
-class NotShown extends Error {}
+class NotShown extends Error {
+  constructor(reason: string) {
+    super(reason);
+  }
+}
 
 export interface StageClaim {
   revs: Map<string, number>;

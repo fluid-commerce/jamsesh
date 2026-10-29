@@ -4,7 +4,7 @@
 import { generateText, isStepCount, Output, tool } from "ai";
 import { z } from "zod";
 import { bus } from "../bus";
-import type { Session, StageClaim, UpdateKind } from "../session";
+import type { Session, StageClaim, StageResult, UpdateKind } from "../session";
 import { shortRepo } from "../session";
 import type { Agent, Artifact, JamEvent, Relevance, Share, Stage, Tile } from "../types";
 import { describeError, model } from "./llm";
@@ -364,7 +364,7 @@ export class Brain {
     const claim = s.stageClaim();
     const fallback = () => {
       if (this.stopped) return;
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", target, { override: true, keepLock: held ?? undefined, claim });
+      void s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", target, { override: true, keepLock: held ?? undefined, claim });
     };
     if (!m) return fallback();
     const pass = { effects: 0 };
@@ -528,12 +528,9 @@ export class Brain {
     // lands on a screen someone changed while the model thought.
     const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(bind ? { requireShare: bind.shareId, onlyScreen: bind.screen } : {}), ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
     // The pass's stage writes: whether it went up (a screen changed meanwhile, or a share that ended, refuses it).
-    const put = (next: Partial<Stage> & { mode: Stage["mode"] }, screen: string) => {
-      const before = s.stageRev(screen);
-      s.setStage(next, "Room brain", screen, castBy(screen));
-      return s.stageRev(screen) !== before;
-    };
-    const MOVED_ON = "The screen changed while you were deciding (someone put something else up, or the share ended), so nothing was replaced. Look at the screen again before showing anything.";
+    const put = (next: Partial<Stage> & { mode: Stage["mode"] }, screen: string): StageResult => s.setStage(next, "Room brain", screen, castBy(screen));
+    /** What the model is told when a write didn't land. */
+    const didntLand = (r: Extract<StageResult, { applied: false }>) => `That didn't land: ${r.reason} Nothing was replaced. Look at the screen again before showing anything.`;
     const all = {
       cancel_directive: tool({
         description:
@@ -645,7 +642,7 @@ export class Brain {
             },
             screen,
           );
-          if (!up) return refuse(MOVED_ON);
+          if (!up.applied) return refuse(didntLand(up));
           return "On screen.";
         },
       }),
@@ -693,7 +690,8 @@ export class Brain {
           if (!screen) return noScreen();
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
-          if (!put({ mode: "custom", title: i.title, html: i.html, pinned: false }, screen)) return refuse(MOVED_ON);
+          const view = put({ mode: "custom", title: i.title, html: i.html, pinned: false }, screen);
+          if (!view.applied) return refuse(didntLand(view));
           return "Showing the custom view.";
         },
       }),
@@ -816,7 +814,8 @@ export class Brain {
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!put({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, screen)) return refuse(MOVED_ON);
+          const laid = put({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, screen);
+          if (!laid.applied) return refuse(didntLand(laid));
           return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out (local URLs must be registered dev servers). If the room asked for something that isn't available, tell them briefly.` : ""}`;
         },
       }),
@@ -957,7 +956,8 @@ export class Brain {
           const held = this.lockBlock(item.screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!s.showReady(id, castBy(item.screen))) return refuse("The screen changed since; look again.");
+          const shown = s.showReady(id, castBy(item.screen));
+          if (!shown.applied) return refuse(didntLand(shown));
           return `On screen: ${item.label}.`;
         },
       }),
@@ -974,8 +974,7 @@ export class Brain {
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
           const back = s.restoreHistory(entry.id, id, castBy(id), "Room brain");
-          if (back === "stale") return refuse(MOVED_ON);
-          if (!back) return refuse("That screen is no longer in the history.");
+          if (!back.applied) return refuse(didntLand(back));
           return `Brought back ${entry.label}, which ${entry.by} had up.`;
         },
       }),
@@ -997,7 +996,8 @@ export class Brain {
           const held = this.lockBlock("main", batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!put({ ...all[key] }, "main")) return refuse(MOVED_ON);
+          const saved = put({ ...all[key] }, "main");
+          if (!saved.applied) return refuse(didntLand(saved));
           return `On screen: ${key}.`;
         },
       }),
@@ -1063,15 +1063,15 @@ export class Brain {
       }
       const wo = { claim, ...(isDirectRequest(ev) ? { person: { id: ev.authorId, name: ev.authorName } } : {}) };
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
-        s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", wo);
+        void s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", wo);
         continue;
       }
       if (line.intent === "present") {
         const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
         const hit = s.artifacts().find((a) => words.some((w) => a.title.toLowerCase().includes(w)));
-        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: (hit.group ? s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) : [hit.id]).slice(0, 60) }, "Room brain", "main", wo);
-        else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain", "main", wo);
-        else s.setStage({ mode: "board" }, "Room brain", "main", wo);
+        if (hit) void s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: (hit.group ? s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) : [hit.id]).slice(0, 60) }, "Room brain", "main", wo);
+        else if (/agent|everyone|split/.test(text.toLowerCase())) void s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain", "main", wo);
+        else void s.setStage({ mode: "board" }, "Room brain", "main", wo);
         continue;
       }
       if (line.intent === "decision") {
@@ -1215,7 +1215,7 @@ export class Brain {
     const liveShares = new Set(s.shares().filter((sh) => sh.status === "live").map((sh) => sh.id));
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && liveShares.has(t.shareId))) return;
     const claim = s.stageClaim();
-    if (stage.mode === "welcome" && !held) s.setStage({ mode: "board" }, "JamSesh", "main", { claim });
+    if (stage.mode === "welcome" && !held) void s.setStage({ mode: "board" }, "JamSesh", "main", { claim });
     const groups = new Map<string, Artifact[]>();
     for (const a of arts) if (a.group && a.variant) groups.set(a.group, s.artifacts().filter((x) => x.group === a.group && x.variant));
     for (const [group, items] of groups) {
@@ -1228,7 +1228,7 @@ export class Brain {
           const compare = { mode: "compare" as const, title: group, caption: compareCaption(items), items: items.map((i) => i.id) };
           // A person's cast stays up: the comparison waits in the queue.
           if (held) s.queueReady({ screen: "main", agentId: "", agentName: "JamSesh", label: `Compare ${group}`, stage: compare });
-          else s.setStage(compare, "JamSesh", "main", { claim });
+          else void s.setStage(compare, "JamSesh", "main", { claim });
           return;
         }
       }

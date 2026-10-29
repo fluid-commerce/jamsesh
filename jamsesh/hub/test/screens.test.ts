@@ -67,12 +67,13 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     const named = await (await post("/screens/config", { screens: [{ id: "main", name: "Left TV" }, { id: "screen-2", name: "Right TV" }] })).json();
     expect(named.screens.map((sc: any) => sc.name)).toEqual(["Left TV", "Right TV"]);
     const s = hub.session;
-    await post("/stage", { mode: "spotlight", items: ["x"], title: "to the right", by: "Maya", screen: "right tv" });
+    const art = s.upsertArtifact({ kind: "screenshot", stage: "built", title: "Pricing", image: "/renders/p.png" });
+    await post("/stage", { mode: "spotlight", items: [art.id], title: "to the right", by: "Maya", screen: "right tv" });
     expect(s.stage("screen-2").title).toBe("to the right");
     expect(s.stage().title).not.toBe("to the right");
     // No screen named: the main one. One that isn't there is refused, never put on the main screen instead.
-    await post("/stage", { mode: "spotlight", items: ["x"], title: "default", by: "Maya" });
-    expect((await post("/stage", { mode: "spotlight", items: ["x"], title: "nowhere", by: "Maya", screen: "kitchen" })).status).toBe(404);
+    await post("/stage", { mode: "spotlight", items: [art.id], title: "default", by: "Maya" });
+    expect((await post("/stage", { mode: "spotlight", items: [art.id], title: "nowhere", by: "Maya", screen: "kitchen" })).status).toBe(404);
     expect(s.stage().title).toBe("default");
     expect(s.stage("screen-2").title).toBe("to the right");
     // The brain: "put it on the left TV".
