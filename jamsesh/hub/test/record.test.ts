@@ -595,3 +595,51 @@ test("two sends of one recording at once (a double click, a retry racing the fir
   expect(((await (await r.post("/record/send", { recordingId: empty, personId: r.maya.id, notes: [pinOn(login, "n2")] })).json()) as any).ok).toBe(true);
   expect(r.s.directives().length).toBe(2);
 }, 30_000);
+
+test("the older prompt routes need the caller's own device too: another person can't replace or end a recording through them", async () => {
+  const r = room();
+  const t0 = Date.now() - 3000;
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
+  const lock = r.s.lockOf("main");
+  const bens = r.hub.auth.issue({ kind: "browser", label: "Ben's laptop", ip: "10.0.0.7", personId: r.ben.id });
+  const asBen = { "x-forwarded-for": "10.0.0.7", authorization: `Bearer ${bens.token}` };
+  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop", t0 }, asBen)).status).toBe(403);
+  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", t0, t1: t0 + 10 }, asBen)).status).toBe(403);
+  expect((await r.post("/prompt-window", { deviceId: "nobody-has-this", t0, t1: t0 + 10 }, asBen)).status).toBe(403);
+  // Maya's recording and her lock are untouched; her own window still works.
+  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
+  expect(r.s.lockOf("main")).toEqual(lock);
+  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop", t0 })).status).toBe(200);
+}, 30_000);
+
+test("a Stop still gathering words doesn't end the recording that started after it", async () => {
+  const r = room();
+  const t0 = Date.now() - 3000;
+  const first = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
+  expect(first.ok).toBe(true);
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", caller: "host", personId: r.maya.id, t0, t1: t0 + 10, pointer: [], typed: "first" });
+  const second = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 20);
+  expect(second.ok).toBe(true);
+  await stopping;
+  expect(r.s.recordings().map((x) => x.id)).toEqual([(second as any).id]);
+  // The same for the older prompt window.
+  const prompting = r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [], typed: "x" });
+  const third = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 30);
+  await prompting;
+  expect(r.s.recordings().map((x) => x.id)).toEqual([(third as any).id]);
+}, 30_000);
+
+test("a Start that is refused leaves the recording already running", async () => {
+  const r = room();
+  const t0 = Date.now();
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
+  const lock = r.s.lockOf("main");
+  // A screen that isn't there, and a screen someone else drives.
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 5, "no-such-screen")).toMatchObject({ ok: false, status: 404 });
+  expect(r.s.recordings().length).toBe(1);
+  expect(r.s.lockOf("main")).toEqual(lock);
+  r.s.unlockStage("main");
+  r.s.setStage({ mode: "spotlight", items: ["b"] }, "Ben", "main", { person: { id: r.ben.id, name: "Ben" } });
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 6, "main")).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
+}, 30_000);

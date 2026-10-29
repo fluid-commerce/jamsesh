@@ -367,8 +367,10 @@ export class Hub {
    */
   async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
     const s = this.session;
+    // The recording this call belongs to: one started while the words were being gathered is not ended by it.
+    const rec = this.recs.get(w.deviceId);
     const lines = await this.windowLines(w);
-    this.recordEnd(w.deviceId);
+    this.recordEnd(w.deviceId, rec);
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
@@ -423,23 +425,28 @@ export class Hub {
     const person = s.person(personId);
     const earlier = this.recs.get(deviceId);
     if (earlier?.personId && earlier.personId !== person?.id) return { ok: false, reason: "Someone else is recording in this window.", status: 409 };
-    // Ended before the lock is looked at, so giving back its lock can't release the one this recording relies on.
+    // Everything that can refuse is checked first: a rejected Start leaves the earlier recording running.
+    let sc: { id: string } | undefined;
+    if (screen) {
+      sc = screen === "main" ? { id: "main" } : s.findScreen(screen);
+      if (!sc) return { ok: false, reason: "That screen isn't connected.", status: 404 };
+      if (!person) return { ok: false, reason: "Pick who you are before recording the big screen.", status: 403 };
+      const lock = s.lockOf(sc.id);
+      // The earlier recording's own lock is this person's, so ending it can't turn this into a refusal.
+      if (lock && !s.driversOf(sc.id).includes(person.id) && lock.personId !== person.id) return { ok: false, reason: `${lock.by} is driving the big screen. Ask them to pass control or drive together first.`, status: 409 };
+    }
+    // Ended before the lock is taken, so giving back its lock can't release the one this recording relies on.
     this.recordEnd(deviceId);
     let screenId: string | null = null;
     let lockTaken: { personId?: string | null; since: number } | null = null;
-    if (screen) {
-      const sc = screen === "main" ? { id: "main" } : s.findScreen(screen);
-      if (!sc) return { ok: false, reason: "That screen isn't connected.", status: 404 };
-      if (!person) return { ok: false, reason: "Pick who you are before recording the big screen.", status: 403 };
+    if (sc && person) {
       screenId = sc.id;
-      const lock = s.lockOf(screenId);
-      if (!lock) {
+      if (!s.lockOf(screenId)) {
         s.holdScreen(screenId, person);
         const held = s.lockOf(screenId);
         lockTaken = held ? { personId: held.personId, since: held.since } : null;
       } else if (!s.driversOf(screenId).includes(person.id)) {
-        // Recording a screen is driving it: its owner starts driving again, anyone else must have been given control.
-        if (lock.personId !== person.id) return { ok: false, reason: `${lock.by} is driving the big screen. Ask them to pass control or drive together first.`, status: 409 };
+        // Recording a screen is driving it: its owner starts driving again.
         s.drive("start", screenId, person.id);
       }
     }
@@ -470,9 +477,9 @@ export class Hub {
   }
 
   /** Forgets a device's recording and, if it was the last on its screen and took the lock, gives the screen back. */
-  private recordEnd(deviceId: string) {
+  private recordEnd(deviceId: string, only?: unknown) {
     const rec = this.recs.get(deviceId);
-    if (!rec) return;
+    if (!rec || (only !== undefined && rec !== only)) return;
     clearInterval(rec.keep);
     clearTimeout(rec.cap);
     this.recs.delete(deviceId);
@@ -493,7 +500,8 @@ export class Hub {
     if (rec && rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
     const person = s.person(w.personId ?? rec?.personId);
     const lines = await this.windowLines({ ...w, personId: person?.id ?? w.personId });
-    this.recordEnd(w.deviceId);
+    // Only the recording this Stop belongs to: a Start that came in while the words were gathered stays.
+    this.recordEnd(w.deviceId, rec);
     const marks = (Array.isArray(w.pointer) ? w.pointer : []).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
     const notes = alignNotes(lines, marks, { screenId: rec?.screenId });
     const typed = w.typed?.trim();

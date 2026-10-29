@@ -891,13 +891,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // ---- prompts addressed to the brain ----
+  const ownDeviceOf = (id: unknown) => !!caller && typeof id === "string" && s.store.get("devices", id)?.pairedId === caller;
   if (path === "/prompt-window/start" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
+    if (!ownDeviceOf(body.deviceId)) return bad("Record from your own window.", 403);
     hub.promptStart(String(body.deviceId), Number(body.t0) || Date.now());
     return json({ ok: true });
   }
   if (path === "/prompt-window" && req.method === "POST") {
     if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+    if (!ownDeviceOf(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
     return json(await hub.promptWindow({ deviceId: body.deviceId, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
   }
 
