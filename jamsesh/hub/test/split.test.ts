@@ -290,3 +290,18 @@ test("a group still being transcribed is kept past the keep window, so a copy ar
   expect(r.lines()).toHaveLength(1);
   expect(copies(r)).toEqual(["lap-a", "lap-b"]);
 });
+
+test("the same words from two laptops whose clocks are too far apart to group, transcribed at the same time, are one line", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(48, [A(3), 1]), "Put the pricing page up.");
+  await r.hear("lap-b", t0 + 1500, mix(49, [A(3), 0.7]), "Put the pricing page up.");
+  expect((r.pipeline as any).open).toHaveLength(2);
+  const release = r.hold();
+  const flushed = r.pipeline.flush();
+  await Bun.sleep(10);
+  release();
+  await flushed;
+  expect(r.lines()).toHaveLength(1);
+  expect(copies(r)).toEqual(["lap-a", "lap-b"]);
+});

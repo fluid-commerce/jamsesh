@@ -345,7 +345,7 @@ export class AudioPipeline {
     // line is labelled from the copies that heard it, and each other set of words is its own line after it.
     const apart = await this.differing(g, best, text);
     this.without(g, apart.flat());
-    await this.show(g, best, text, engine);
+    this.show(g, best, text, engine);
     for (const set of apart) this.emitApart(g, set);
   }
 
@@ -387,12 +387,13 @@ export class AudioPipeline {
     this.keep(part);
   }
 
-  private async show(g: Group, best: Segment, text: string, engine: string) {
+  private show(g: Group, best: Segment, text: string, engine: string) {
     const guess = this.identify(g.segments, best, !g.split);
     if (!text) return;
     // Someone reading the join sentence: every laptop hears it, and none of it belongs in the transcript.
     if (this.isCalibration(text, g)) return;
-    if (await this.mergeTwin(g, text, best)) return;
+    // From here to the line being stored nothing awaits: two groups finishing together can't both miss each other.
+    if (this.mergeTwin(g, text, best)) return;
     const person = this.session.person(guess.personId);
     const u: Utterance = {
       id: newId("utt"),
@@ -466,7 +467,7 @@ export class AudioPipeline {
    * - the words agree one by one (same words, same order, nothing added or missing);
    * - and when both copies have a voice, the voices agree.
    */
-  private async mergeTwin(g: Group, text: string, best: Segment): Promise<boolean> {
+  private mergeTwin(g: Group, text: string, best: Segment): boolean {
     const mine = new Set(g.segments.map((s) => s.deviceId));
     const words = plainText(text);
     if (!words) return false;
