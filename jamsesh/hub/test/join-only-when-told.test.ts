@@ -86,7 +86,7 @@ describe("the install", () => {
       expect(readFileSync(join(home, ".codex/skills/jamsesh/SKILL.md"), "utf8")).toBe("LAUNCHER");
       const hooks = JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8")).hooks;
       expect(hooks.SessionStart.map((e: any) => e.hooks[0].command)).toEqual(["mine.sh"]);
-      expect(Object.keys(hooks).sort()).toEqual(["SessionStart", "Stop", "UserPromptSubmit"]);
+      expect(Object.keys(hooks).sort()).toEqual(["PostToolUse", "SessionStart", "Stop", "UserPromptSubmit"]);
     } finally {
       server.stop(true);
     }

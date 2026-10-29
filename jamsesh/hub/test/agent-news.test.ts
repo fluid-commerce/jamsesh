@@ -2,13 +2,20 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-news-"));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
+const hubs: Hub[] = [];
+afterAll(() => {
+  for (const h of hubs) h.stop();
+  bus.resolver = null; // a flush still pending would read the folder after it's gone
+  rmSync(dir, { recursive: true, force: true });
+});
 
 function room() {
   const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
+  hubs.push(hub);
   const s = hub.session;
   const reg = (ownerName: string, repo: string, platform: "desktop" | "mobile", cwd: string) => s.registerAgent({ ownerName, harness: "claude-code", repo, cwd, machine: "m1", platform, branch: "main" }).agent;
   const desktop = reg("Jonathan", "acme/desktop", "desktop", "/d");

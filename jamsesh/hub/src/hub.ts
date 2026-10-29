@@ -152,6 +152,7 @@ export class Hub {
     this.devproxy.restore();
     this.autosave.start();
     setInterval(() => this.devproxy.refresh(), 30_000);
+    setInterval(() => this.session.tick(), 60_000).unref?.();
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -463,7 +464,25 @@ export class Hub {
       });
       this.brain.hear(ev);
     }
-    this.session.touchAgent(agent.id, { status: "working" });
+    this.cancelListen(agent.id); // the person is talking to it: it hears the room through this turn's hooks
+    this.hookSeen.set(agent.id, Date.now());
+    const first = prompt.split("\n")[0].slice(0, 100);
+    this.session.touchAgent(agent.id, { status: "working", ...(first && !prompt.startsWith("/") ? { activity: `Working on: ${first}` } : {}) });
+    return this.pendingContext(agent, "UserPromptSubmit", "Handle these alongside your person's prompt; jam_ack directives when you take them.");
+  }
+
+  /**
+   * What the room has for an agent that it hasn't been handed yet, as hook context. Everything
+   * that reaches an agent (these hooks, jam_inbox, jam_wait, the idle listener) takes items out of
+   * the same inbox and marks them delivered, so nothing is handed over twice.
+   */
+  private pendingContext(agent: Agent, event: "UserPromptSubmit" | "PostToolUse", closing: string) {
+    const lines = this.pendingLines(agent);
+    if (!lines.length) return {};
+    return { hookSpecificOutput: { hookEventName: event, additionalContext: `JamSesh, new since your last turn:\n${lines.join("\n")}\n${closing}` } };
+  }
+
+  private pendingLines(agent: Agent) {
     const { directives, messages } = this.session.inbox(agent.id, true);
     const lastSeen = this.store.setting<number>(`decisionsSeen:${agent.id}`, 0);
     const decisions = this.session.roomDecisions(agent.id, { afterId: lastSeen, limit: 10 });
@@ -471,33 +490,102 @@ export class Hub {
     // than its mark was for other workstreams, so the mark moves to the newest decision in the log.
     const seen = decisions.length ? decisions[decisions.length - 1].id : this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0]?.id;
     if (seen && seen > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, seen);
-    const lines = [
+    return [
       ...directives.map((d) => `Room directive ${d.id} [${d.mode}] (${d.requestedBy}): ${d.text}`),
       ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),
       ...decisions.map((d) => `Room decision: ${d.text}`),
     ];
-    if (!lines.length) return {};
-    return {
-      hookSpecificOutput: {
-        hookEventName: "UserPromptSubmit",
-        additionalContext: `JamSesh, new since your last turn:\n${lines.join("\n")}\nHandle these alongside your person's prompt; jam_ack directives when you take them.`,
-      },
-    };
+  }
+
+  /** An agent whose machine has the newer hooks (PostToolUse, the listener) is woken by the listener; others still need the old "wait here" nudge at Stop. */
+  private newHooks(agentId: string) {
+    return this.store.setting<boolean>(`newHooks:${agentId}`, false);
+  }
+
+  private markNewHooks(agentId: string) {
+    if (!this.newHooks(agentId)) this.store.setSetting(`newHooks:${agentId}`, true);
+  }
+
+  /** The last time a hook of each agent's reached us: tells a hooked Claude Code from a Codex that has none. */
+  private hookSeen = new Map<string, number>();
+  private listening = new Map<string, number>();
+
+  /** Whether this agent's tool calls pass through our hooks (so a "you have mail" nudge in tool results would repeat them). */
+  hooked(agentId: string) {
+    return Date.now() - (this.hookSeen.get(agentId) ?? 0) < 5 * 60_000;
+  }
+
+  /**
+   * PostToolUse: between two steps of a busy agent, new room items come back as context so it folds
+   * them into the work it's doing. The agent's own inbox/wait calls already carry their items.
+   */
+  onTool(body: any, ip: string, device?: string | null) {
+    const agent = this.hookAgent(body, ip, device);
+    if (!agent) return {};
+    this.hookSeen.set(agent.id, Date.now());
+    this.markNewHooks(agent.id);
+    const done = typeof agent.activity === "string" && agent.activity.startsWith("Done:");
+    if (agent.status !== "working" || done) this.session.touchAgent(agent.id, { status: "working", ...(done ? { activity: "Working" } : {}) });
+    else this.session.touchAgent(agent.id);
+    if (/jam_(inbox|wait|ask)$/.test(String(body?.tool_name ?? ""))) return {};
+    return this.pendingContext(agent, "PostToolUse", "Fold these into your current work; jam_ack directives when you take them, and answer questions with jam_answer.");
+  }
+
+  /**
+   * An idle Claude Code agent has gone back to its person. Its Stop hook starts this call in the
+   * background (asyncRewake): it holds until the room has something for the agent, then returns the
+   * text that wakes it. A new prompt or a newer listen ends it empty; so does the time limit (the
+   * server drops idle connections after about four minutes, so the hook script calls again).
+   */
+  async onListen(body: any, ip: string, device?: string | null, maxMs = 200_000): Promise<string> {
+    const agent = this.hookAgent(body, ip, device);
+    if (!agent) return "";
+    this.hookSeen.set(agent.id, Date.now());
+    this.markNewHooks(agent.id);
+    const mine = (this.listening.get(agent.id) ?? 0) + 1;
+    this.listening.set(agent.id, mine);
+    this.session.wake(agent.id); // a listener this one replaces ends now
+    const until = Date.now() + maxMs;
+    while (Date.now() < until) {
+      await this.session.wait(agent.id, Math.min(30_000, until - Date.now()));
+      if (this.listening.get(agent.id) !== mine) return ""; // replaced, or its person started talking to it
+      // In jam_wait (or jam_ask) the agent is already listening itself: it gets the items there.
+      if (this.session.agent(agent.id)?.status === "waiting") {
+        await Bun.sleep(1000);
+        continue;
+      }
+      if (!this.session.hasInbox(agent.id)) continue;
+      const lines = this.pendingLines(agent);
+      if (!lines.length) continue;
+      this.session.touchAgent(agent.id, { status: "working", activity: "Picking up work from the room" });
+      return `JamSesh has something for you from the room:\n${lines.join("\n")}\njam_ack directives as you take them, follow the JamSesh skill, and post a jam_update when done.`;
+    }
+    if (this.listening.get(agent.id) === mine) this.listening.delete(agent.id);
+    return "";
+  }
+
+  private cancelListen(agentId: string) {
+    if (!this.listening.has(agentId)) return;
+    this.listening.set(agentId, (this.listening.get(agentId) ?? 0) + 1);
+    this.session.wake(agentId);
   }
 
   /** Stop: if the room has work for this agent, keep it going instead of stopping. */
   onStop(body: any, ip: string, device?: string | null) {
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
+    this.hookSeen.set(agent.id, Date.now());
     const last = typeof body.last_assistant_message === "string" ? body.last_assistant_message.trim() : "";
-    if (last) this.session.touchAgent(agent.id, { activity: last.split("\n")[0].slice(0, 140) });
+    // A finished turn reads as "Done: ..." until the next task starts.
+    if (last && !agent.activity.startsWith("Done:")) this.session.touchAgent(agent.id, { activity: `Done: ${last.split("\n")[0]}`.slice(0, 140) });
     const { directives, messages } = this.session.inbox(agent.id, true);
     if (!directives.length && !messages.length) {
+      // Idle: the agent goes back to its person. The listener hook (see onListen) wakes it when the room has something.
       this.session.touchAgent(agent.id, { status: "idle" });
-      // Once a turn ends the agent can't hear the room until its person types, so ask it to wait for
-      // directives instead. Only once per stop: if this stop already comes from a hook, let it end.
-      if (body.stop_hook_active || agent.harness !== "claude-code" || agent.status === "offline") return {};
-      return { decision: "block", reason: "You're in a JamSesh session: call jam_wait to wait for the room's next directive. If your person is typing to you, stop and help them instead." };
+      // An install from before the listener existed can't be woken: keep it waiting in jam_wait, once per stop.
+      if (!this.newHooks(agent.id) && !body.stop_hook_active && agent.harness === "claude-code" && agent.status !== "offline")
+        return { decision: "block", reason: "You're in a JamSesh session: call jam_wait to wait for the room's next directive. If your person is typing to you, stop and help them instead." };
+      return {};
     }
     const reason = [
       "JamSesh has new work for you:",

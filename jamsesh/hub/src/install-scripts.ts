@@ -5,7 +5,7 @@ import type { Hub } from "./hub";
 export function hookScript(hub: Hub) {
   void hub;
   return `#!/usr/bin/env bash
-# JamSesh hook for Claude Code: hook.sh prompt|stop, with the hook's JSON on stdin.
+# JamSesh hook for Claude Code: hook.sh prompt|tool|stop|listen, with the hook's JSON on stdin.
 # Does nothing for a chat that hasn't joined the room: only a chat whose person said "connect to
 # jamsesh" sends its prompts in, picks up directives, or is held at the end of a turn. Chats are told
 # apart by Claude Code's session id, so a second chat in the same folder is not the joined one.
@@ -39,6 +39,17 @@ if [ ! -f "$mark" ]; then
     fi
     exit 0
   fi
+fi
+
+# listen runs in the background after the agent stops (asyncRewake): it holds until the room has
+# something for the idle agent, prints it and exits 2, which wakes the agent. No news is exit 0.
+if [ "$1" = "listen" ]; then
+  end=$((now + \${JAMSESH_LISTEN_SECONDS:-3000}))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    out="$(printf '%s' "$body" | curl -fs --max-time 230 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" --data-binary @- "$JAMSESH_HUB/api/hooks/listen" 2>/dev/null)" || exit 0
+    if [ -n "$out" ]; then printf '%s\\n' "$out" >&2; exit 2; fi
+  done
+  exit 0
 fi
 
 # The host was unreachable a moment ago: don't make every prompt wait for it again.
@@ -229,7 +240,7 @@ Join the JamSesh room session and work as part of it.
 2. Find this repository's remote (git remote get-url origin), branch, and what it builds (desktop, mobile, web, backend, or design).
 3. Call jam_join (harness: claude-code, cwd: this directory; chat: the JamSesh chat id from the note at the start of this prompt, if there is one; add owner only if jam_join asks). Use this as the focus: $ARGUMENTS
 4. Post your repo card with jam_repo_card, jam_claim your workstream, and tell me in two lines who else is here and what's open.
-5. Then do the work. When you're idle, call jam_wait so the room can reach you.
+5. Then do the work. When you're idle, just stop: JamSesh wakes you when the room has something.
 CMD
   # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
   perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" <<'PL'
@@ -253,10 +264,12 @@ if (ref $hooks->{SessionStart} eq 'ARRAY') {
   my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } @{ $hooks->{SessionStart} };
   if (@kept) { $hooks->{SessionStart} = \\@kept } else { delete $hooks->{SessionStart} }
 }
-for my $pair (['UserPromptSubmit', 'prompt'], ['Stop', 'stop']) {
+for my $pair (['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 'stop']) {
   my ($event, $arg) = @$pair;
   my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
   push @kept, { hooks => [{ type => 'command', command => "$hook $arg", timeout => 5 }] };
+  # An idle agent is woken by a background listener that holds until the room has something for it.
+  push @kept, { hooks => [{ type => 'command', command => "$hook listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
   $hooks->{$event} = \\@kept;
 }
 my $tmp = "$path.jamsesh-tmp";
