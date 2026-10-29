@@ -103,3 +103,20 @@ test("a pulse fades by itself and is forgotten", () => {
   p.level("y", 1000 + PULSE_MS + 1);
   expect(p.active).toBe(false);
 });
+
+test("names go to the important pages first: backlinks, then people and workstreams before the rest; pages with 2+ backlinks are all named", async () => {
+  const { byImportance, labelledAtLeast } = await import("../src/wiki/graph");
+  const g = shapeGraph({
+    nodes: [
+      { id: "t", title: "Topic", category: "topics", backlinks: 2 },
+      { id: "p", title: "Person", category: "people", backlinks: 2 },
+      { id: "w", title: "Work", category: "workstreams", backlinks: 2 },
+      { id: "big", title: "Big", category: "repos", backlinks: 9 },
+      ...["a", "b", "c"].map((id) => ({ id, title: id, category: "topics", backlinks: 0 })),
+    ],
+    edges: [],
+  });
+  expect(byImportance(g).map((n) => n.id).slice(0, 4)).toEqual(["big", "p", "w", "t"]);
+  expect([...labelledAtLeast(g, 2, 1)].sort()).toEqual(["a", "big", "p", "t", "w"]);
+  expect(labelledAtLeast(g, 2, 0).size).toBe(4);
+});

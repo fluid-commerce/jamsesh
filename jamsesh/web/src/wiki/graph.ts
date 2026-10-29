@@ -1,5 +1,5 @@
 // The link graph as data: shaped from the hub's nodes and edges, with the lookups the canvas needs.
-import { asCategory, type Category, type RawGraph } from "./types";
+import { asCategory, CATEGORIES, type Category, type RawGraph } from "./types";
 
 export const MAX_NODES = 400;
 const arr = <T>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
@@ -80,9 +80,22 @@ export function localGraph(g: Graph, slug: string): Graph {
 /** The order the keyboard walks the map in: by category, then title. */
 export const walkOrder = (g: Graph) => [...g.nodes].sort((a, b) => a.category.localeCompare(b.category) || a.title.localeCompare(b.title)).map((n) => n.id);
 
-/** Which nodes get a name drawn beside them without hovering: the biggest few, scaled to how much room there is. */
+const CATEGORY_RANK = new Map(CATEGORIES.map((c, i) => [c as string, i]));
+
+/** Pages from most to least important: backlinks first, then category (people and workstreams lead), then title. */
+export const byImportance = (g: Graph) =>
+  [...g.nodes].sort((a, b) => b.backlinks - a.backlinks || (CATEGORY_RANK.get(a.category) ?? 9) - (CATEGORY_RANK.get(b.category) ?? 9) || b.degree - a.degree || a.title.localeCompare(b.title));
+
+/** Which nodes get a name drawn without hovering: the most important `max`. */
 export function labelled(g: Graph, max: number): Set<string> {
-  return new Set([...g.nodes].sort((a, b) => b.backlinks - a.backlinks || b.degree - a.degree || a.id.localeCompare(b.id)).slice(0, Math.max(0, max)).map((n) => n.id));
+  return new Set(byImportance(g).slice(0, Math.max(0, max)).map((n) => n.id));
+}
+
+/** Every page with `min` or more backlinks, plus up to `extra` of the rest; only the smallest leaves go unnamed. */
+export function labelledAtLeast(g: Graph, min: number, extra: number): Set<string> {
+  const all = byImportance(g);
+  const key = all.filter((n) => n.backlinks >= min);
+  return new Set([...key, ...all.slice(key.length, key.length + extra)].map((n) => n.id));
 }
 
 /** The nearest node under a point, if the point is within its radius plus a little slack. */

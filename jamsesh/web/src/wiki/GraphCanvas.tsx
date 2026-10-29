@@ -3,7 +3,7 @@
 // it settles once, off screen, and shows the result.
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type Simulation } from "d3-force";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { labelled, nodeAt, walkOrder, type GNode, type Graph } from "./graph";
+import { byImportance, labelled, labelledAtLeast, nodeAt, walkOrder, type GNode, type Graph } from "./graph";
 import { pulses, PULSE_MS } from "./pulse";
 import { CATEGORY_COLOR, CATEGORY_LABEL } from "./types";
 
@@ -27,6 +27,48 @@ const hex = (c: string, a: number) => {
   return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
 };
 const ease = (cur: number, to: number, dt: number, rate = 9) => cur + (to - cur) * Math.min(1, dt * rate);
+
+/** A force that keeps the names of the important pages clear of each other and of other pages: each such node is a box
+ * (the dot and its name below it), and boxes that overlap are pushed apart along the shorter way out. `k` is the screen
+ * scale, because a name is a fixed size on screen and so a different size on the map as the map is zoomed to fit. */
+function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
+  const FS = 22;
+  const force = (_alpha: number) => {
+    const kk = Math.max(0.2, k());
+    const box = (n: GNode) => {
+      const w = named.has(n.id) ? (Math.min(26, n.title.length) * FS * 0.54 + 26) / kk : 0;
+      const h = named.has(n.id) ? (FS + 16) / kk : 0;
+      const hw = Math.max(n.r + 4, w / 2);
+      return { x: n.x ?? 0, y: (n.y ?? 0) + h / 2 - 0, hw, hh: n.r + 4 + h / 2 };
+    };
+    // A few passes a tick, moving nodes directly: velocity nudges are too soft to clear a crowded middle.
+    for (let pass = 0; pass < 5; pass++) {
+      const boxes = nodes.map(box);
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          if (!named.has(nodes[i].id) && !named.has(nodes[j].id)) continue;
+          const a = boxes[i], b = boxes[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const ox = a.hw + b.hw - Math.abs(dx), oy = a.hh + b.hh - Math.abs(dy);
+          if (ox <= 0 || oy <= 0) continue;
+          const [p, q] = [nodes[i], nodes[j]];
+          // Names are wide and short, so most clashes are cleared by moving up or down.
+          if (ox * 0.55 < oy) {
+            const m = (dx < 0 ? -1 : 1) * ox * 0.35;
+            p.x = (p.x ?? 0) - m;
+            q.x = (q.x ?? 0) + m;
+          } else {
+            const m = (dy < 0 ? -1 : 1) * oy * 0.35;
+            p.y = (p.y ?? 0) - m;
+            q.y = (q.y ?? 0) + m;
+          }
+        }
+      }
+    }
+  };
+  force.initialize = () => {};
+  return force as any;
+}
 
 export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse = false, label = "Link map of the wiki" }: Props) {
   const wrap = useRef<HTMLDivElement>(null);
@@ -77,7 +119,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       const padX = stage ? 110 : mode === "local" ? 56 : 52;
       const padY = stage ? 40 : padX;
       const padT = stage ? 110 : 0;
-      const padB = stage ? 90 : mode === "full" ? 36 : 0;
+      const padB = stage ? 120 : mode === "full" ? 36 : 0;
       L.midY = padT + (size.h - padT - padB) / 2;
       const kMax = stage ? 2.6 : mode === "local" ? 1.9 : 2;
       const kFit = Math.max(0.25, Math.min(kMax, (size.w - padX * 2) / Math.max(1, x1 - x0), (size.h - padY * 2 - padT - padB) / Math.max(1, y1 - y0)));
@@ -143,15 +185,16 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       }
 
       // Names: the ones you're pointing at first, then the biggest, never on top of each other.
-      const fs = stage ? 25 : coarse ? 11.5 : 12;
+      const fs = stage ? 22 : coarse ? 11.5 : 12;
       g.font = `${stage ? 500 : 450} ${fs}px "Geist Variable", system-ui, sans-serif`;
       g.textAlign = "center";
       g.textBaseline = "top";
       const room = Math.floor((size.w * size.h) / (stage ? 52000 : coarse ? 30000 : mode === "local" ? 9000 : 15000));
-      const top = labelled(graph, Math.min(coarse ? 7 : stage ? 14 : 40, Math.max(mode === "local" ? 14 : 4, room)));
+      const top = stage ? labelledAtLeast(graph, 2, 8) : labelled(graph, Math.min(coarse ? 7 : 40, Math.max(mode === "local" ? 14 : 4, room)));
       const want: GNode[] = [];
       for (const n of list) if (n.id === hot || n.id === focus || (hot && near?.has(n.id)) || (!hot && top.has(n.id))) want.push(n);
-      want.sort((a, b) => (a.id === hot ? -2 : a.id === focus ? -1 : 0) - (b.id === hot ? -2 : b.id === focus ? -1 : 0) || b.backlinks - a.backlinks);
+      const rank = new Map(byImportance(graph).map((n, i) => [n.id, i]));
+      want.sort((a, b) => (a.id === hot ? -2 : a.id === focus ? -1 : 0) - (b.id === hot ? -2 : b.id === focus ? -1 : 0) || (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
       const placed: [number, number, number, number][] = [];
       // Every node as a circle on screen, so a name can be kept off other nodes as well as off other names.
       const discs = list.map((n) => ({ id: n.id, x: sx(n.x ?? 0), y: sy(n.y ?? 0), r: Math.max(stage ? 7 : coarse ? 5.5 : 3.5, n.r * Math.min(1.6, Math.max(0.7, k))) + 2 }));
@@ -163,6 +206,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
         const text = n.title.length > 26 ? `${n.title.slice(0, 25)}…` : n.title;
         const w = g.measureText(text).width, h = fs + 2;
         const must = n.id === hot || n.id === focus;
+        const key = must || (stage && n.backlinks >= 2);
         // Below the node first, then above, then to the right, then to the left.
         const tries: { box: [number, number, number, number]; align: CanvasTextAlign; x: number; y: number }[] = [
           { x: me.x, y: me.y + me.r + 3, align: "center" as CanvasTextAlign },
@@ -174,7 +218,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
           box: (t.align === "center" ? [t.x - w / 2 - 3, t.y - 1, t.x + w / 2 + 3, t.y + h] : t.align === "left" ? [t.x - 3, t.y - 1, t.x + w + 3, t.y + h] : [t.x - w - 3, t.y - 1, t.x + 3, t.y + h]) as [number, number, number, number],
         }));
         const clear = tries.find((t) => !hitsLabel(t.box) && !hitsDisc(t.box, n.id));
-        const pick = clear ?? (must ? tries[0] : null);
+        const pick = clear ?? (key ? tries[0] : null);
         if (!pick) continue;
         placed.push(pick.box);
         g.textAlign = pick.align;
@@ -230,22 +274,23 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
     const aspect = Math.max(0.5, Math.min(2, size.w / Math.max(1, size.h)));
     const links = graph.edges.map((e) => ({ source: e.source, target: e.target }));
     const s = forceSimulation<GNode>(fresh)
-      .force("link", forceLink<GNode, { source: string; target: string }>(links).id((n) => n.id).distance(mode === "local" ? 100 * S : 62 * S).strength(0.4))
+      .force("link", forceLink<GNode, { source: string; target: string }>(links).id((n) => n.id).distance(mode === "local" ? 100 * S : 62 * S).strength(stage ? 0.22 : 0.4))
       .force("charge", forceManyBody<GNode>().strength(mode === "local" ? -320 * S : -(160 + Math.min(120, fresh.length * 2)) * S).distanceMax(600 * S))
       .force("center", forceCenter(0, 0))
       // The map takes the shape of the room it has: wide on a screen, tall on a phone.
-      .force("x", forceX<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : 0.07 / aspect) : 0.3)))
+      .force("x", forceX<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : (stage ? 0.03 : 0.07) / aspect) : 0.3)))
       .force("y", forceY<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : 0.07 * aspect) : 0.3)))
       .force("collide", forceCollide<GNode>((n) => n.r + 5 * S))
+      .force("names", stage ? nameRoom(fresh, labelledAtLeast(graph, 2, 8), () => live.current.k) : null)
       // Nothing drifts out of the map: a loose page stays within reach of the rest.
       .force("fence", () => {
-        const R = (150 + 34 * Math.sqrt(fresh.length)) * S;
+        const R = (150 + 34 * Math.sqrt(fresh.length)) * S * (stage ? 1.6 : 1);
         for (const n of fresh) {
-          if (n.x !== undefined) n.x = Math.max(-R * 2, Math.min(R * 2, n.x));
+          if (n.x !== undefined) n.x = Math.max(-R * (stage ? 2.6 : 2), Math.min(R * (stage ? 2.6 : 2), n.x));
           if (n.y !== undefined) n.y = Math.max(-R * (aspect < 1 ? 2 : 1), Math.min(R * (aspect < 1 ? 2 : 1), n.y));
         }
       })
-      .alphaDecay(0.035)
+      .alphaDecay(stage ? 0.022 : 0.035)
       .velocityDecay(0.42);
     sim.current = s;
     s.stop();
