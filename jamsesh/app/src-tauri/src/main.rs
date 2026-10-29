@@ -963,9 +963,12 @@ fn main() {
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
-            // Earlier builds kept a copy of the person's voice here to take to other hosts. Voices now stay on the
-            // host that learned them, so a copy left behind is deleted rather than kept anywhere.
-            let _ = std::fs::remove_file(dir.join("voiceprint.json"));
+            let stuck = forget_voice_copies(&dir);
+            if !stuck.is_empty() {
+                let list = stuck.iter().map(|(p, e)| format!("{} ({e})", p.display())).collect::<Vec<_>>().join("\n");
+                let text = format!("Earlier versions kept a copy of your voice on this Mac. JamSesh couldn't delete it:\n{list}\nDelete it in Finder; JamSesh will try again next time it opens.");
+                app.dialog().message(text).title("An old copy of your voice is still here").kind(MessageDialogKind::Warning).show(|_| {});
+            }
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let state = Arc::new(App {
                 inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }),
@@ -1038,9 +1041,71 @@ fn main() {
     });
 }
 
+/// Earlier builds kept a copy of the person's voice in the app's folder, as voiceprint.json, written through
+/// voiceprint.json.<pid>.<n>.part (left behind if the app was killed mid-write). Voices now stay on the host
+/// that learned them, so every such copy is deleted. Returns the ones that are still there after two tries.
+fn forget_voice_copies(dir: &std::path::Path) -> Vec<(PathBuf, std::io::Error)> {
+    let names = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect::<Vec<_>>(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => return vec![(dir.to_path_buf(), e)],
+    };
+    let mut stuck = Vec::new();
+    for name in names {
+        let Some(n) = name.to_str() else { continue };
+        if !(n == "voiceprint.json" || (n.starts_with("voiceprint.json.") && n.ends_with(".part"))) {
+            continue;
+        }
+        let path = dir.join(n);
+        let gone = |r: std::io::Result<()>| match r {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        if let Err(e) = gone(std::fs::remove_file(&path)).or_else(|_| gone(std::fs::remove_file(&path))) {
+            stuck.push((path, e));
+        }
+    }
+    stuck
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folder(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("jamsesh-voice-copies-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_old_voice_copy_and_an_interrupted_write_of_one_are_deleted_and_nothing_else() {
+        let d = folder("ok");
+        for f in ["voiceprint.json", "voiceprint.json.4242.7.part", "voiceprint.json.1.0.part", "app.json", "voiceprint.json.bak", "notes.part"] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        assert!(forget_voice_copies(&d).is_empty());
+        let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["app.json", "notes.part", "voiceprint.json.bak"]);
+        // Nothing to delete, or no folder yet: nothing to report.
+        assert!(forget_voice_copies(&d).is_empty());
+        assert!(forget_voice_copies(&d.join("missing")).is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_cant_be_deleted_is_reported() {
+        let d = folder("stuck");
+        // A folder where the copy was: remove_file fails on it, as it would on a locked file.
+        std::fs::create_dir(d.join("voiceprint.json")).unwrap();
+        std::fs::write(d.join("voiceprint.json.9.1.part"), "x").unwrap();
+        let stuck = forget_voice_copies(&d);
+        assert_eq!(stuck.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), [d.join("voiceprint.json")]);
+        assert!(!d.join("voiceprint.json.9.1.part").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 
     #[test]
     fn only_a_join_or_invite_code_is_passed_to_the_connect_page() {
