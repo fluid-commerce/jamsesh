@@ -8,6 +8,7 @@ import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
   Agent,
+  ActiveRecording,
   Annotation,
   Artifact,
   ArtifactVersion,
@@ -192,6 +193,7 @@ export class Session {
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
+      recordings: this.recordings(),
       facts: this.facts(),
       buildRequests: this.buildRequests(),
       screens: this.screens(),
@@ -270,6 +272,8 @@ export class Session {
         return { key, value: this.shares() };
       case "annotations":
         return { key, value: this.annotations() };
+      case "recordings":
+        return { key, value: this.recordings() };
       case "facts":
         return { key, value: this.facts() };
       case "settings":
@@ -1243,6 +1247,23 @@ export class Session {
     if (recheck) this.scheduleShareSweep(recheck + 50);
   }
 
+  // ---- recordings in progress ----
+
+  private active = new Map<string, ActiveRecording>();
+  recordings(): ActiveRecording[] {
+    return [...this.active.values()];
+  }
+  setRecording(r: ActiveRecording | null, deviceId?: string) {
+    if (r) this.active.set(r.deviceId, r);
+    else if (deviceId) this.active.delete(deviceId);
+    bus.changed("recordings");
+  }
+  /** Who may point on a screen right now. Driving together (6.1) widens this; until then it is the lock's owner. */
+  screenDrivers: (screen: string) => string[] = (screen) => {
+    const l = this.lockOf(screen);
+    return l?.personId ? [l.personId] : [];
+  };
+
   // ---- annotations ----
 
   annotations(): Annotation[] {
@@ -1504,6 +1525,14 @@ export class Session {
     if (!cur.lock) return;
     const { lock: _drop, ...rest } = cur;
     this.commitStage(rest, screen);
+  }
+
+  /** A person takes a free screen's lock without changing what it shows (they start recording on it). */
+  holdScreen(screen: string, person: { id: string; name: string }) {
+    const cur = this.stage(screen);
+    if (cur.lock) return;
+    const now = Date.now();
+    this.commitStage({ ...cur, lock: { by: person.name, personId: person.id, since: now, lastActive: now } }, screen);
   }
 
   /** The owner did something with their screen: it counts as activity. */

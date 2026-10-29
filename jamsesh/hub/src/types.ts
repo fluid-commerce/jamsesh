@@ -257,7 +257,18 @@ export interface Annotation {
     nodeId?: string | null;
     canvasX?: number | null;
     canvasY?: number | null;
+    /** The page of the build or canvas it was on when pinned. */
+    page?: string | null;
   };
+  /** Scroll position of the page or viewer at the moment it was pinned. */
+  scroll?: { x: number; y: number } | null;
+  /** Set when pinned from a recording on a big screen: which one. */
+  screenId?: string | null;
+  /** The recording this pin came from, and its note, so a repeated send never doubles it. */
+  recordingId?: string;
+  noteId?: string;
+  /** A picture of the spot (a crop of the item), when one could be made. */
+  crop?: string | null;
   /** Position inside the target, 0..1. */
   x: number;
   y: number;
@@ -265,6 +276,55 @@ export interface Annotation {
   source: "pin" | "pointer";
   status: "open" | "sent" | "done";
   promptEventId: number | null;
+}
+
+/** One pointer moment in a recording (after CursorCap's dwell/click model), with where it happened. */
+export interface RecordMark {
+  t: number;
+  kind: "dwell" | "click" | "drag" | "move";
+  x: number;
+  y: number;
+  dur?: number;
+  target: Annotation["target"];
+  /** Who was pointing, when more than one person drives the same screen. */
+  driverId?: string | null;
+  scroll?: { x: number; y: number } | null;
+  word?: string;
+}
+
+/** What a note is pinned to. */
+export interface NotePin {
+  target: Annotation["target"];
+  x: number;
+  y: number;
+  kind: RecordMark["kind"];
+  scroll?: { x: number; y: number } | null;
+}
+
+/** A thing said while pointing, ready to tidy and send. */
+export interface RecordNote {
+  id: string;
+  text: string;
+  t0: number;
+  t1: number;
+  personId: string | null;
+  pin: NotePin | null;
+  /** The big screen it was said on, or none for the person's own screen. */
+  screenId?: string | null;
+  /** Who gets it: the agent that owns the item pinned, or null (the room brain decides). */
+  ownerId?: string | null;
+  ownerName?: string | null;
+}
+
+/** A recording in progress, so every window can show who is recording and where. */
+export interface ActiveRecording {
+  id: string;
+  deviceId: string;
+  personId: string | null;
+  personName: string;
+  /** The big screen being recorded, or null for the person's own screen. */
+  screenId: string | null;
+  since: number;
 }
 
 export interface Stage {
@@ -427,6 +487,8 @@ export interface HubState {
   stage: Stage;
   shares: Share[];
   annotations: Annotation[];
+  /** Recordings running now. */
+  recordings: ActiveRecording[];
   facts: Fact[];
   buildRequests: BuildRequest[];
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
