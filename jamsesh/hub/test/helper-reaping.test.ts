@@ -1,7 +1,7 @@
 // Every helper process the hub starts is in one registry that Hub.stop walks, local whisper included,
 // and none outlives a hub that is killed outright.
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
@@ -21,7 +21,9 @@ require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)
   const bin = join(dir, name);
   writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
   chmodSync(bin, 0o755);
+  // A model the size of a real one (sparse, so it takes no disk): smaller files are passed over as broken.
   writeFileSync(join(dir, "model.bin"), "");
+  truncateSync(join(dir, "model.bin"), 26_000_000);
   return { bin, pidFile };
 }
 const freePort = () => {

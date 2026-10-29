@@ -5,26 +5,45 @@ export interface Pcm {
   samples: Float32Array;
 }
 
-export function decodeWav(bytes: Uint8Array): Pcm {
+/** The rates JamSesh records at (browsers and the Mac's microphones); anything else isn't ours. */
+export const MIN_RATE = 8000;
+export const MAX_RATE = 48000;
+/** Longer than any segment (14 s) or join read (20 s) a device sends. */
+export const MAX_SECONDS = 120;
+
+/** Audio that isn't a WAV JamSesh would send: the sender's mistake (400), not the host's. */
+export class BadWav extends Error {}
+
+/**
+ * Decodes a WAV. Its structure is checked before any field is read: RIFF/WAVE, every chunk inside the file, a
+ * complete `fmt ` chunk before `data`, and whole sample frames. Then its header: a rate outside what JamSesh
+ * records, a format it doesn't make, or more than `maxSeconds` of audio is refused before anything is allocated,
+ * so a small upload can't claim a rate (1 Hz) that resampling turns into millions of samples. Every refusal is a BadWav.
+ */
+export function decodeWav(bytes: Uint8Array, maxSeconds = MAX_SECONDS): Pcm {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (String.fromCharCode(...bytes.subarray(0, 4)) !== "RIFF") throw new Error("not a WAV file");
+  const tag = (at: number) => String.fromCharCode(...bytes.subarray(at, at + 4));
+  if (bytes.length < 12 || tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new BadWav("not a WAV file");
+  let fmt: { format: number; channels: number; sampleRate: number; bits: number } | null = null;
   let off = 12;
-  let sampleRate = 16000;
-  let channels = 1;
-  let bits = 16;
-  let format = 1;
   while (off + 8 <= bytes.length) {
-    const id = String.fromCharCode(...bytes.subarray(off, off + 4));
+    const id = tag(off);
     const size = view.getUint32(off + 4, true);
     const body = off + 8;
+    if (body + size > bytes.length) throw new BadWav(`WAV ${id.trim() || "chunk"} chunk runs past the end of the file`);
     if (id === "fmt ") {
-      format = view.getUint16(body, true);
-      channels = view.getUint16(body + 2, true);
-      sampleRate = view.getUint32(body + 4, true);
-      bits = view.getUint16(body + 14, true);
+      if (fmt) throw new BadWav("WAV has two fmt chunks");
+      if (size < 16) throw new BadWav("WAV fmt chunk is incomplete");
+      fmt = { format: view.getUint16(body, true), channels: view.getUint16(body + 2, true), sampleRate: view.getUint32(body + 4, true), bits: view.getUint16(body + 14, true) };
     } else if (id === "data") {
-      const end = Math.min(body + size, bytes.length);
-      const frames = Math.floor((end - body) / (bits / 8) / channels);
+      if (!fmt) throw new BadWav("WAV data comes before its fmt chunk");
+      const { format, channels, sampleRate, bits } = fmt;
+      if (!Number.isInteger(sampleRate) || sampleRate < MIN_RATE || sampleRate > MAX_RATE) throw new BadWav(`WAV sample rate ${sampleRate} Hz is outside ${MIN_RATE} to ${MAX_RATE} Hz`);
+      if (channels < 1 || channels > 2 || ![8, 16, 32].includes(bits) || !(format === 1 || (format === 3 && bits === 32))) throw new BadWav("unsupported WAV format");
+      const frame = (bits / 8) * channels;
+      if (size % frame) throw new BadWav("WAV data ends partway through a sample");
+      const frames = size / frame;
+      if (frames > sampleRate * maxSeconds) throw new BadWav(`WAV is longer than ${maxSeconds} seconds`);
       const out = new Float32Array(frames);
       for (let i = 0; i < frames; i++) {
         let acc = 0;
@@ -38,7 +57,7 @@ export function decodeWav(bytes: Uint8Array): Pcm {
     }
     off = body + size + (size % 2);
   }
-  throw new Error("WAV file has no data");
+  throw new BadWav(fmt ? "WAV file has no data" : "WAV file has no fmt chunk");
 }
 
 export function encodeWav({ sampleRate, samples }: Pcm): Uint8Array {
@@ -67,6 +86,8 @@ export function encodeWav({ sampleRate, samples }: Pcm): Uint8Array {
 
 export function resample(pcm: Pcm, rate: number): Pcm {
   if (pcm.sampleRate === rate) return pcm;
+  // Never more than the output rate allows from the input's own length (a decoded WAV is already bounded).
+  if (!(pcm.sampleRate >= MIN_RATE && pcm.sampleRate <= MAX_RATE && rate >= MIN_RATE && rate <= MAX_RATE)) throw new BadWav("sample rate out of range");
   const ratio = pcm.sampleRate / rate;
   const n = Math.floor(pcm.samples.length / ratio);
   const out = new Float32Array(n);

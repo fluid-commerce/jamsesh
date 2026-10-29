@@ -76,7 +76,6 @@ export function ConnectView() {
   function scanned(s: Scanned) {
     setScanning(false);
     const where = scanGoes(s, location.origin);
-    if (where === "known") return void go(s);
     if (where === "ask") return void setElsewhere(s);
     if (!s.code) return void (setState("error"), setError("That QR code has no code in it. Type the code on the big screen."));
     if (s.code.length === 8) return void submit(s.code);

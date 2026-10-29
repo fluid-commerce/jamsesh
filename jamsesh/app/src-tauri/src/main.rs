@@ -10,7 +10,6 @@ mod perms;
 mod projects;
 mod proxy;
 mod screens;
-mod voiceprints;
 mod watchdog;
 
 use std::path::PathBuf;
@@ -1229,88 +1228,6 @@ fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
     }
 }
 
-/// The person this app's window is on the host it shows, as that host says (not as the page says), and
-/// only for the person's own window. `person_id` is who the page thinks it is: a page that's behind
-/// (someone else picked who they are) gets nothing.
-async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Result<(String, u16), String> {
-    if window.label() != "client" {
-        return Err("Only your own window keeps your voice.".into());
-    }
-    let port = {
-        let inner = state.inner.lock().await;
-        inner.hub.as_ref().map(|h| h.port).or(inner.relay.as_ref().map(|r| r.port))
-    };
-    let port = port.ok_or("Host or join a session first.")?;
-    let (status, me) = proxy::get_as_window(port, "/api/me").await?;
-    let (id, name) = voiceprints::person_of(&me).filter(|_| status.is_success()).ok_or("Pick who you are first.")?;
-    if id != person_id {
-        return Err("This window is someone else now.".into());
-    }
-    Ok((name, port))
-}
-
-/// The host the window shows: its id and its room's name (else its address), as the host says.
-async fn voice_host(state: &App, port: u16) -> Result<(String, String), String> {
-    let fallback = {
-        let inner = state.inner.lock().await;
-        inner.cfg.host_url.clone().unwrap_or_else(|| "this host".into()).replace("https://", "").replace("http://", "")
-    };
-    let (status, info) = proxy::get_as_window(port, "/api/pair/info").await?;
-    voiceprints::host_of(&info, &fallback).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())
-}
-
-/// The copy as this host's page may see it: without its samples until the person said Share to this host.
-#[tauri::command]
-async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
-    let (_, port) = voice_owner(&window, &state, &person_id).await?;
-    let (host_id, _) = voice_host(&state, port).await?;
-    Ok(voiceprints::for_page(voiceprints::load(&state.dir), &host_id))
-}
-
-/// The whole copy, to send to this host: asks the person the first time, in a native dialog.
-#[tauri::command]
-async fn voiceprint_share(
-    app: AppHandle,
-    window: tauri::Window,
-    state: State<'_, Arc<App>>,
-    person_id: String,
-) -> Result<Option<voiceprints::Copy>, String> {
-    let (name, port) = voice_owner(&window, &state, &person_id).await?;
-    let (host_id, room) = voice_host(&state, port).await?;
-    let question = voiceprints::question(&name, &room);
-    let ask = || async move {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        app.dialog()
-            .message(question)
-            .title("Share your voice")
-            .buttons(MessageDialogButtons::OkCancelCustom("Share".into(), "Not this room".into()))
-            .show(move |yes| {
-                let _ = tx.send(yes);
-            });
-        rx.await.unwrap_or(false)
-    };
-    voiceprints::share(&state.dir, &host_id, ask).await
-}
-
-#[tauri::command]
-async fn voiceprint_put(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, copy: voiceprints::Copy) -> Result<(), String> {
-    voice_owner(&window, &state, &person_id).await?;
-    voiceprints::put(&state.dir, copy)
-}
-
-#[tauri::command]
-async fn voiceprint_consent(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
-    voice_owner(&window, &state, &person_id).await?;
-    voiceprints::set_consent(&state.dir, on)
-}
-
-/// The person reset their voice on a host: the app's copy goes too, so it can't bring the old voice back.
-#[tauri::command]
-async fn voiceprint_forget(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<(), String> {
-    voice_owner(&window, &state, &person_id).await?;
-    voiceprints::forget(&state.dir)
-}
-
 /// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
 fn resume_launch(cfg: &Config) -> Launch {
     if cfg.lobby {
@@ -1404,11 +1321,6 @@ fn main() {
             has_fonts,
             lend_font,
             heartbeat,
-            voiceprint_get,
-            voiceprint_put,
-            voiceprint_share,
-            voiceprint_consent,
-            voiceprint_forget,
             screens::screens_state,
             screens::screens_preview,
             screens::screens_save,
@@ -1417,6 +1329,12 @@ fn main() {
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
+            let stuck = forget_voice_copies(&dir);
+            if !stuck.is_empty() {
+                let list = stuck.iter().map(|(p, e)| format!("{} ({e})", p.display())).collect::<Vec<_>>().join("\n");
+                let text = format!("Earlier versions kept a copy of your voice on this Mac. JamSesh couldn't delete it:\n{list}\nDelete it in Finder; JamSesh will try again next time it opens.");
+                app.dialog().message(text).title("An old copy of your voice is still here").kind(MessageDialogKind::Warning).show(|_| {});
+            }
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let state = Arc::new(App {
                 inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }),
@@ -1513,9 +1431,71 @@ fn main() {
     });
 }
 
+/// Earlier builds kept a copy of the person's voice in the app's folder, as voiceprint.json, written through
+/// voiceprint.json.<pid>.<n>.part (left behind if the app was killed mid-write). Voices now stay on the host
+/// that learned them, so every such copy is deleted. Returns the ones that are still there after two tries.
+fn forget_voice_copies(dir: &std::path::Path) -> Vec<(PathBuf, std::io::Error)> {
+    let names = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect::<Vec<_>>(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => return vec![(dir.to_path_buf(), e)],
+    };
+    let mut stuck = Vec::new();
+    for name in names {
+        let Some(n) = name.to_str() else { continue };
+        if !(n == "voiceprint.json" || (n.starts_with("voiceprint.json.") && n.ends_with(".part"))) {
+            continue;
+        }
+        let path = dir.join(n);
+        let gone = |r: std::io::Result<()>| match r {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        if let Err(e) = gone(std::fs::remove_file(&path)).or_else(|_| gone(std::fs::remove_file(&path))) {
+            stuck.push((path, e));
+        }
+    }
+    stuck
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folder(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("jamsesh-voice-copies-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_old_voice_copy_and_an_interrupted_write_of_one_are_deleted_and_nothing_else() {
+        let d = folder("ok");
+        for f in ["voiceprint.json", "voiceprint.json.4242.7.part", "voiceprint.json.1.0.part", "app.json", "voiceprint.json.bak", "notes.part"] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        assert!(forget_voice_copies(&d).is_empty());
+        let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["app.json", "notes.part", "voiceprint.json.bak"]);
+        // Nothing to delete, or no folder yet: nothing to report.
+        assert!(forget_voice_copies(&d).is_empty());
+        assert!(forget_voice_copies(&d.join("missing")).is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_cant_be_deleted_is_reported() {
+        let d = folder("stuck");
+        // A folder where the copy was: remove_file fails on it, as it would on a locked file.
+        std::fs::create_dir(d.join("voiceprint.json")).unwrap();
+        std::fs::write(d.join("voiceprint.json.9.1.part"), "x").unwrap();
+        let stuck = forget_voice_copies(&d);
+        assert_eq!(stuck.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), [d.join("voiceprint.json")]);
+        assert!(!d.join("voiceprint.json.9.1.part").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 
     #[test]
     fn only_a_join_or_invite_code_is_passed_to_the_connect_page() {

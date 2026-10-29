@@ -4,7 +4,7 @@ import { join, normalize, sep } from "node:path";
 import { HelperRegistry } from "./children";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
-import { learningNote, parseCarried, voiceprintStatus, type Learning } from "./audio/voiceprint";
+import { learningNote, voiceprintStatus, type Learning } from "./audio/voiceprint";
 import { decodeWav, resample } from "./audio/wav";
 import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
@@ -241,7 +241,8 @@ export class Hub {
       const ev = this.store.event(eventId);
       const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });
       if (!ev?.data.utteranceId) return "That line wasn't spoken, so there's no voice to learn.";
-      const { learning } = this.audio.assign(ev.data.utteranceId, person.id);
+      // Said out loud to the brain: whoever said it isn't known for sure, so it relabels and teaches nothing.
+      const { learning } = this.audio.assign(ev.data.utteranceId, person.id, { host: false, personId: null });
       this.confirmLearning(person.name, learning);
       return `Line ${eventId} is now ${person.name}'s. ${learningNote(person.name, learning)}`;
     };
@@ -378,7 +379,7 @@ export class Hub {
         authorName: u.speakerName,
         text: u.text,
         ts: u.t0,
-        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, embedding: this.audio.embeddingFor(u.id), source: "overheard" },
+        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, ...this.audio.voiceFor(u.id), source: "overheard" },
       });
       s.store.put("utterances", { ...u, eventId: ev.id });
       this.brain.hear(ev);
@@ -490,7 +491,7 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, ...this.audio.voiceFor(lines[0].id) } : {}) },
     });
     // One spoken line: it can be relabelled from the prompt, like any line in the feed.
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
@@ -760,7 +761,7 @@ export class Hub {
   }
 
   /** A deliberate voice sample: the join sentences, read aloud. */
-  enrollVoice(personId: string, bytes: Uint8Array) {
+  enrollVoice(personId: string, bytes: Uint8Array, epoch: number) {
     if (!this.session.person(personId)) throw new Error("No such person.");
     let pcm;
     try {
@@ -769,37 +770,19 @@ export class Hub {
       this.audio.endEnrolment(personId);
       throw e;
     }
-    return this.audio.enrol(personId, pcm);
-  }
-
-  /** What a person's own device keeps of their voice: embeddings only, never audio. */
-  voiceprintOf(personId: string) {
-    return this.audio.voiceprints.exportFor(personId);
-  }
-
-  /** A person's own device brings their voiceprint to this host. */
-  carryVoiceprint(personId: string, body: unknown) {
-    if (!this.session.person(personId)) throw new Error("No such person.");
-    // A copy made before the person reset their voice here would bring the old voice back.
-    const resetAt = this.session.store.setting<Record<string, number>>("voiceResetAt", {})[personId];
-    const madeAt = Number((body as { updatedAt?: unknown } | null)?.updatedAt);
-    if (resetAt && !(madeAt > resetAt)) return { ok: false as const, reason: "Your voice was reset on this host after that copy was made.", reset: true };
-    const r = parseCarried(body);
-    if (!r.ok) return r;
-    const kept = this.audio.voiceprints.importCarried(personId, r.samples);
-    this.session.store.put("people", this.session.person(personId)!);
-    return { ok: true as const, samples: kept };
+    return this.audio.enrol(personId, pcm, epoch);
   }
 
   /**
    * Forgets a person's voice on this host: their samples, the embeddings kept with their lines in this
-   * session (so a later correction can't rebuild it), and, from now on, any copy made before this.
+   * session, and what's held or in flight. A voice lives only on the host that learned it, so nothing else
+   * can bring it back, and nothing heard before now teaches it again (Store.addVoiceSample).
    */
   resetVoice(personId: string) {
+    this.session.store.markVoiceReset(personId);
     this.audio.voiceprints.clear(personId);
     const scrubbed = this.session.store.scrubEmbeddings(personId);
     this.audio.forgetVoice(personId);
-    this.session.store.setSetting("voiceResetAt", { ...this.session.store.setting<Record<string, number>>("voiceResetAt", {}), [personId]: Date.now() });
     const p = this.session.person(personId);
     if (p) this.session.store.put("people", p);
     return { ok: true as const, scrubbed };

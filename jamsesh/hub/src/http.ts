@@ -9,6 +9,7 @@ import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachm
 import { bus } from "./bus";
 import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
 import { learningNote } from "./audio/voiceprint";
+import { BadWav } from "./audio/wav";
 import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
@@ -411,7 +412,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const me = m.type === "level" || m.type === "rtc" ? speaker(hub, ws) : null;
           if (m.type === "level" && me) {
             bus.send({ type: "level", deviceId: me, level: m.level });
-          } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
+          } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now(), voiceEpoch: hub.session.store.voiceEpoch() }));
           else if (m.type === "drive") driveFrom(ws, hub, m);
           else if (m.type === "rtc" && me && typeof m.to === "string") {
             const msg = JSON.stringify({ type: "rtc", from: me, to: m.to, data: m.data });
@@ -686,12 +687,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       // So this is the browser's own device. The browser becomes the person it first says it is; after that a
       // request can't make it someone else (only a person who was removed frees it to pick again), and its
       // devices are that person's. Owner-only answers rest on this.
-      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) hub.auth.update(paired.id, { personId: String(body.personId) });
+      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) {
+        const refused = becomePerson(hub, paired, String(body.personId));
+        if (refused) return bad(refused, 403);
+      }
       if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
     }
     // The person using the host's own window: agents on the host Mac work for them.
     if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
+      setKeeper(hub, String(body.personId), "host");
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
     const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
@@ -722,52 +727,61 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
         t0: Number(q.get("t0")),
         t1: Number(q.get("t1")),
         wav: bytes,
-        levelDb: q.has("level") ? Number(q.get("level")) : undefined,
-        noiseDb: q.has("noise") ? Number(q.get("noise")) : undefined,
+        // A device that sent no epoch is an old one: its audio counts as captured before every reset.
+        epoch: q.has("epoch") ? Number(q.get("epoch")) : -1,
       });
       remember(recentSegments, segKey, 4000);
       return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    } catch (e) {
+      if (e instanceof BadWav) return bad(e.message);
+      throw e;
     } finally {
       segmentsInFlight.delete(segKey);
     }
   }
 
-  if (path === "/people" && req.method === "POST") {
-    if (!body?.name?.trim()) return bad("name is required");
-    return json(s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined }));
-  }
-  let m = path.match(/^\/people\/([\w-]+)$/);
-  if (m && req.method === "DELETE") return (s.removePerson(m[1]), hub.fonts.dropLender(m[1]), json({ ok: true }));
-  if (m && req.method === "PATCH") {
-    const p = s.person(m[1]);
-    if (!p) return bad("no such person", 404);
-    return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
-  }
-  // A voice belongs to its person: only their own window or device reads, reads aloud, brings or forgets it.
+  // A voice belongs to its person: only their own window reads aloud for it or resets it.
   const own = (id: string) => {
     if (paired?.kind === "agent") return "That's for people; agents use their jam_ tools.";
     if (isLocal(ip) && !hostWindow) return NOT_THE_HOST_WINDOW;
     const me = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
     return me && me === id ? null : "A voice is only for its own person to give.";
   };
+  if (path === "/people" && req.method === "POST") {
+    if (!body?.name?.trim()) return bad("name is required");
+    const known = new Set(s.people().map((p) => p.id));
+    const p = s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined });
+    // Someone new, made by this browser: it may become them without asking the host.
+    if (!known.has(p.id) && paired?.kind === "browser" && !paired.personId) setKeeper(hub, p.id, paired.id);
+    return json(p);
+  }
+  let m = path.match(/^\/people\/([\w-]+)$/);
+  // Removing a person erases their voiceprint: only the host or the person themselves.
+  if (m && req.method === "DELETE") {
+    const refused = hostWindow ? null : own(m[1]);
+    if (refused) return bad(refused === "A voice is only for its own person to give." ? "Only the host or that person can remove them." : refused, 403);
+    return (s.removePerson(m[1]), hub.fonts.dropLender(m[1]), setKeeper(hub, m[1], null), json({ ok: true }));
+  }
+  if (m && req.method === "PATCH") {
+    const p = s.person(m[1]);
+    if (!p) return bad("no such person", 404);
+    return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
+  }
+  // Reset: the voice lives only here, so this is the only place it is forgotten.
   m = path.match(/^\/people\/([\w-]+)\/voiceprint$/);
-  if (m) {
+  if (m && req.method === "DELETE") {
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
     if (!s.person(m[1])) return bad("no such person", 404);
-    if (req.method === "GET") return json(hub.voiceprintOf(m[1]));
-    if (req.method === "PUT") {
-      const r = hub.carryVoiceprint(m[1], body);
-      return r.ok ? json(r) : "reset" in r ? json({ error: r.reason, reset: true }, 409) : bad(r.reason);
-    }
-    if (req.method === "DELETE") return json(hub.resetVoice(m[1]));
+    return json(hub.resetVoice(m[1]));
   }
   if (path === "/voice/script" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people; agents use their jam_ tools.", 403) : json({ sentences: ENROL_SCRIPT, seconds: ENROL_SECONDS });
   m = path.match(/^\/people\/([\w-]+)\/voice\/start$/);
   if (m && req.method === "POST") {
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
-    return (hub.audio.beginEnrolment(m[1]), json({ ok: true }));
+    // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
+    return (hub.audio.beginEnrolment(m[1]), json({ ok: true, epoch: s.store.voiceEpoch() }));
   }
   // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
   // whether anything was said aloud, which earns the grace for copies still on their way.
@@ -785,7 +799,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     let personId = body?.personId;
     if (!personId && body?.name) personId = s.upsertPerson({ name: body.name, role: body.role }).id;
     if (!personId) return bad("personId or name is required");
-    const { utterance, learning } = hub.audio.assign(m[1], personId);
+    const by = { host: hostWindow, personId: paired?.kind === "browser" ? paired.personId : null };
+    const { utterance, learning } = hub.audio.assign(m[1], personId, by);
     const person = s.person(personId)!;
     s.store.put("people", person);
     hub.confirmLearning(person.name, learning);
@@ -1178,7 +1193,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
-    return json(hub.enrollVoice(m[1], bytes));
+    try {
+      return json(hub.enrollVoice(m[1], bytes, url.searchParams.has("epoch") ? Number(url.searchParams.get("epoch")) : -1));
+    } catch (e) {
+      if (e instanceof BadWav) return bad(e.message);
+      throw e;
+    }
   }
 
   // ---- profile photos ----
@@ -1286,6 +1306,20 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "DELETE") {
     if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can disconnect devices.", 403);
     return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
+  }
+  // The host lets a laptop be the person it asked to be: the person's other laptops are disconnected, and
+  // their voice and owner-only answers follow this one from now on.
+  m = path.match(/^\/paired\/([\w-]+)\/allow$/);
+  if (m && req.method === "POST") {
+    if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can let a laptop in as someone.", 403);
+    const d = hub.auth.get(m[1]);
+    const personId = d?.kind === "browser" ? d.wants : null;
+    if (!d || !personId || !s.person(personId)) return bad("That laptop isn't asking to be anyone.", 404);
+    if (s.store.setting<string>("hostPersonId", "") === personId) return bad("That's the person using the host's own window.", 409);
+    for (const other of hub.auth.list()) if (other.kind === "browser" && other.id !== d.id && other.personId === personId) hub.auth.revoke(other.id);
+    hub.auth.update(d.id, { personId, wants: null });
+    setKeeper(hub, personId, d.id);
+    return json({ ok: true });
   }
 
   // Live apps (6.3): a person starts a tile for a running Simulator or Mac app, takes or passes control, and drives it.
@@ -1548,3 +1582,32 @@ export function cookie(req: Request, name: string) {
   return req.headers.get("cookie")?.match(new RegExp(`(?:^|; )${name}=([^;]+)`))?.[1] ?? null;
 }
 
+
+/** Which credential a person belongs to ("host" for the host's own window), set the first time someone becomes them. */
+function setKeeper(hub: Hub, personId: string, keeper: string | null) {
+  const all = { ...hub.session.store.setting<Record<string, string>>("personKeepers", {}) };
+  if (keeper) all[personId] = keeper;
+  else delete all[personId];
+  hub.session.store.setSetting("personKeepers", all);
+}
+
+/**
+ * The one rule for a browser becoming a person, since their voiceprint and every owner-only answer follow
+ * it. A browser is someone it made itself, or someone nobody has been yet who has no voice here; anyone
+ * else (on another laptop now, before, or the host's own window) only once the host lets it in. Returns
+ * why not, and then the host is asked.
+ */
+function becomePerson(hub: Hub, paired: PairedDevice, personId: string): string | null {
+  const s = hub.session;
+  const keeper = s.store.setting<Record<string, string>>("personKeepers", {})[personId];
+  const fresh = !keeper && !hub.auth.everHeld(personId) && s.store.setting<string>("hostPersonId", "") !== personId && hub.audio.voiceprints.count(personId) === 0;
+  if (keeper === paired.id || fresh) {
+    hub.auth.update(paired.id, { personId, wants: null });
+    setKeeper(hub, personId, paired.id);
+    return null;
+  }
+  const name = s.person(personId)?.name ?? "them";
+  hub.auth.update(paired.id, { wants: personId });
+  bus.send({ type: "toast", tone: "info", text: `${paired.label} wants to be ${name}`, detail: "Let them in from Settings, Connected devices." });
+  return `${name} is already known to this host. Ask the host to let this laptop in as ${name} (Settings, Connected devices).`;
+}

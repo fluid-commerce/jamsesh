@@ -28,25 +28,44 @@ export interface ModelStatus {
 
 /**
  * Downloads `pin.url` to `file` (which must not be in use: callers pass a temporary name and move it
- * into place). Throws with a sentence for the room on HTTP errors, a size or checksum mismatch, or
- * when `cancelled()` turns true. `progress` gets 0 to 100.
+ * into place). Throws with a sentence for the room on HTTP errors, a size or checksum mismatch, when
+ * `cancelled()` turns true (the request is aborted at once, even mid-stall), or when nothing arrives
+ * for `idleMs`. `progress` gets 0 to 100.
  */
-export async function downloadVerified(pin: Pinned, file: string, progress: (pct: number) => void, cancelled: () => boolean = () => false) {
-  const r = await fetch(pin.url, { redirect: "follow" });
-  if (!r.ok || !r.body) throw new Error(`Couldn't download the speech model: HTTP ${r.status}.`);
+export async function downloadVerified(pin: Pinned, file: string, progress: (pct: number) => void, cancelled: () => boolean = () => false, idleMs = 60_000) {
+  const ctl = new AbortController();
+  let why = "";
+  const stop = (reason: string) => {
+    why ||= reason;
+    ctl.abort();
+  };
+  let idle = setTimeout(() => stop("The speech model download stalled."), idleMs);
+  const poll = setInterval(() => cancelled() && stop("Stopped while downloading."), 200);
+  const fail = (e: unknown) => (why ? new Error(why) : e);
   const out = Bun.file(file).writer();
   const hash = createHash("sha256");
   let got = 0;
   try {
-    for await (const chunk of r.body) {
-      if (cancelled()) throw new Error("Stopped while downloading.");
-      hash.update(chunk);
-      out.write(chunk);
-      got += chunk.byteLength;
-      if (got > pin.bytes) throw new Error("The speech model download is larger than expected.");
-      progress(Math.floor((100 * got) / pin.bytes));
+    const r = await fetch(pin.url, { redirect: "follow", signal: ctl.signal }).catch((e) => Promise.reject(fail(e)));
+    if (!r.ok || !r.body) throw new Error(`Couldn't download the speech model: HTTP ${r.status}.`);
+    try {
+      for await (const chunk of r.body) {
+        if (cancelled()) throw new Error("Stopped while downloading.");
+        clearTimeout(idle);
+        idle = setTimeout(() => stop("The speech model download stalled."), idleMs);
+        hash.update(chunk);
+        out.write(chunk);
+        got += chunk.byteLength;
+        if (got > pin.bytes) throw new Error("The speech model download is larger than expected.");
+        progress(Math.floor((100 * got) / pin.bytes));
+      }
+    } catch (e) {
+      throw fail(e);
     }
   } finally {
+    clearTimeout(idle);
+    clearInterval(poll);
+    ctl.abort();
     await out.end();
   }
   if (got !== pin.bytes || hash.digest("hex") !== pin.sha256) throw new Error("The speech model download didn't match its checksum.");

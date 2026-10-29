@@ -5,8 +5,9 @@
 // against a pinned hash. It runs in a child process (stt-server.ts): a decode never blocks the hub,
 // and its memory (about 2 GB) goes back when the hub stops.
 
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { type HelperRegistry, stopHelper } from "../children";
 import { config } from "../config";
 import { downloadVerified, type ModelState, type ModelStatus } from "./models";
@@ -30,6 +31,43 @@ export function findModel(): string | null {
   const own = join(config.home, "models", PARAKEET.name);
   const places = [process.env.JAMSESH_PARAKEET_DIR, process.env.JAMSESH_RESOURCES && join(process.env.JAMSESH_RESOURCES, "models", PARAKEET.name), own];
   return places.find((p): p is string => !!p && has(p)) ?? null;
+}
+
+const MANIFEST = ".files.sha256.json";
+
+const hashFile = async (path: string) => {
+  const h = createHash("sha256");
+  for await (const chunk of Bun.file(path).stream()) h.update(chunk);
+  return h.digest("hex");
+};
+
+/** The SHA-256 of every model file, recorded when the verified archive was unpacked. */
+export const writeManifest = async (dir: string) => writeFileSync(join(dir, MANIFEST), JSON.stringify(Object.fromEntries(await Promise.all(PARAKEET.files.map(async (f) => [f, await hashFile(join(dir, f))])))));
+
+/**
+ * Whether the unpacked files are still the ones that were verified. A managed folder without a
+ * readable manifest can't be verified, so it isn't intact (the caller reinstalls it from the pinned
+ * archive); a chosen folder or the app bundle is the person's own and isn't second-guessed.
+ */
+export async function installedIntact(dir: string, managed = true): Promise<boolean> {
+  if (!managed) return true;
+  let want: Record<string, unknown>;
+  try {
+    want = JSON.parse(readFileSync(join(dir, MANIFEST), "utf8"));
+    if (!want || typeof want !== "object") return false;
+  } catch {
+    return false;
+  }
+  for (const f of PARAKEET.files) if ((await hashFile(join(dir, f))) !== want[f]) return false;
+  return true;
+}
+
+function samePath(a: string, b: string) {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return resolve(a) === resolve(b);
+  }
 }
 
 /** How to start the child: this binary with a flag when compiled, otherwise bun on the script. */
@@ -67,6 +105,13 @@ export class Parakeet {
     if (process.env.JAMSESH_PARAKEET === "0") return this.set("off", "Turned off on this host (JAMSESH_PARAKEET=0)."), null;
     this.stopped = false;
     let dir = findModel();
+    const own = join(config.home, "models", PARAKEET.name);
+    // Whatever spelling found it (models/./name, a symlink), the managed model is checked against its manifest.
+    if (dir && samePath(dir, own) && !(await installedIntact(own).catch(() => false))) {
+      // A file changed after it was verified: it isn't loaded, and a fresh copy replaces it where downloads are allowed.
+      rmSync(own, { recursive: true, force: true });
+      dir = findModel();
+    }
     if (!dir && !download) return this.set("missing", `The speech model isn't on this host (${Math.round(PARAKEET.bytes / 1e6)} MB download).`), null;
     try {
       dir ??= await this.download();
@@ -97,6 +142,7 @@ export class Parakeet {
       if (!has(unpacked)) throw new Error("The speech model archive is missing files.");
       const dest = join(models, PARAKEET.name);
       rmSync(dest, { recursive: true, force: true });
+      await writeManifest(unpacked);
       renameSync(unpacked, dest);
       return dest;
     } finally {

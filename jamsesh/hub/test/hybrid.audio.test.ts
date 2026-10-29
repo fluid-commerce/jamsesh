@@ -77,3 +77,27 @@ test("two remote people never merge into one line", async () => {
   await p.flush();
   expect(out).toHaveLength(2);
 });
+
+test("an echo is only the very same words: a room reply that adds a word to the remote line stays", async () => {
+  const remote = speech(1.0, 0.3, 7);
+  const reply = speech(1.3, 0.3, 8);
+  const lines = new Map([[remote.length, "Yes."], [reply.length, "Yes please"]]);
+  const { p, out } = setup(lines);
+  const t = Date.now() - 4000;
+  await p.ingest({ deviceId: "felipe-laptop", t0: t, t1: t + 1000, wav: remote });
+  await p.ingest({ deviceId: "chey-laptop", t0: t + 100, t1: t + 1400, wav: reply });
+  await p.flush();
+  expect(out.map((o) => `${o.who}: ${o.text}`).sort()).toEqual(["Chey: Yes please", "Felipe: Yes."]);
+});
+
+test("a short remote line played into the room, word for word, is still one line", async () => {
+  const clean = speech(1.0, 0.3, 9);
+  const echo = speech(1.02, 0.05, 10);
+  const lines = new Map([[clean.length, "Yes."], [echo.length, "yes"]]);
+  const { p, out } = setup(lines);
+  const t = Date.now() - 4000;
+  await p.ingest({ deviceId: "felipe-laptop", t0: t, t1: t + 1000, wav: clean });
+  await p.ingest({ deviceId: "chey-laptop", t0: t + 250, t1: t + 1270, wav: echo });
+  await p.flush();
+  expect(out).toEqual([{ text: "Yes.", who: "Felipe", location: "remote" }]);
+});

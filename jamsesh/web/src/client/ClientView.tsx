@@ -9,7 +9,6 @@ import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, m
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
-import { useVoiceprintSync } from "../shared/voiceprint";
 import { Stage, expandTile, stageTiles } from "../host/Stage";
 import { cast, putOnScreen } from "./CastPicker";
 import { InviteButton } from "./Invite";
@@ -41,8 +40,11 @@ export function ClientView() {
   const [enrollAsked, setEnrollAsked] = useState(pref("enrollAsked") === "1");
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const me = state?.people.find((p) => p.id === personId);
-  // A voiceprint this device carries is offered to the host before the join read is asked for.
-  const voiceReady = useVoiceprintSync(me);
+  // Which person the host has bound this window to (its acknowledged registration), or why it won't yet.
+  const [registered, setRegistered] = useState<string | null>(null);
+  const [refused, setRefused] = useState("");
+  // The join read is asked for once the host knows this window is them (only their own window may read for them).
+  const voiceReady = !!me && registered === me.id;
   const layout = useLayout();
 
   // A link elsewhere in the app (the Work tab) asked for a wiki page.
@@ -91,8 +93,29 @@ export function ClientView() {
     if (!me) return;
     // Never leave it to the hub's guess on the host Mac itself (loopback is always in the room).
     const location = pref("location") || (/^(127\.0\.0\.1|localhost|\[::1\])$/.test(window.location.hostname) ? "room" : undefined);
-    api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on, location }).catch(() => {});
-  }, [me?.id, micStatus.on]);
+    let live = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Sent now, never queued: the voiceprint sync waits for the answer. Refused (the host hasn't let this
+    // laptop in as them yet) or not reached, it's asked again until it is.
+    const register = () =>
+      api<{ personId?: string | null }>("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on, location }, "POST", { queue: false }).then(
+        (d) => {
+          if (!live) return;
+          setRegistered(d?.personId ?? null);
+          setRefused("");
+        },
+        (e) => {
+          if (!live) return;
+          if ((e as { status?: number }).status === 403) setRefused((e as Error).message);
+          retry = setTimeout(register, 10_000);
+        },
+      );
+    void register();
+    return () => {
+      live = false;
+      clearTimeout(retry);
+    };
+  }, [me?.id, micStatus.on, connected]);
   useEffect(() => {
     setPref("tab", tab);
   }, [tab]);
@@ -151,6 +174,7 @@ export function ClientView() {
         overlays={
           <>
             <Toasts />
+            {refused && <Refused text={refused} onPickAgain={() => (setPref("personId", ""), setPersonId(""))} />}
             <ShareRequestPrompt />
             {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
             {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
@@ -193,6 +217,7 @@ export function ClientView() {
         </div>
       </header>
       <MicNotice status={micStatus} onRetry={toggleMic} />
+      {refused && <Refused text={refused} onPickAgain={() => (setPref("personId", ""), setPersonId(""))} />}
 
       <main className="client-main" style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>
@@ -208,6 +233,18 @@ export function ClientView() {
       {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
       {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
       {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
+    </div>
+  );
+}
+
+/** The host won't let this window be that person yet: say why, and let them pick someone else. */
+function Refused({ text, onPickAgain }: { text: string; onPickAgain: () => void }) {
+  return (
+    <div className="mic-notice info" role="status">
+      <span>{text}</span>
+      <button className="btn small" onClick={onPickAgain}>
+        Pick someone else
+      </button>
     </div>
   );
 }

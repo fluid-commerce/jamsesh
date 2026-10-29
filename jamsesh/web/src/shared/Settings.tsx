@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
-import { forgetCopy } from "./voiceprint";
 
 export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: boolean }) {
   const { state, levels } = useHub();
@@ -269,12 +268,8 @@ function PersonRow({ p, mine }: { p: Person; mine: boolean }) {
         {mine && p.voiceSamples > 0 && (
           <button
             className="btn ghost small"
-            title="Forget your voice on this host and on this device"
-            onClick={() =>
-              api(`/people/${p.id}/voiceprint`, undefined, "DELETE")
-                .then(() => forgetCopy(p.id))
-                .catch((e) => alert(e.message))
-            }
+            title="Forget your voice on this host (it isn't kept anywhere else)"
+            onClick={() => api(`/people/${p.id}/voiceprint`, undefined, "DELETE").catch((e) => alert(e.message))}
           >
             Reset
           </button>
@@ -311,7 +306,9 @@ function RemoteAccess() {
 }
 
 function Paired({ host }: { host: boolean }) {
-  const [list, setList] = useState<{ id: string; kind: string; label: string; lastSeen: number; ip: string }[]>([]);
+  const [list, setList] = useState<{ id: string; kind: string; label: string; lastSeen: number; ip: string; wants?: string | null }[]>([]);
+  const { state } = useHub();
+  const nameOf = (id: string) => state?.people.find((p) => p.id === id)?.name ?? "someone";
   const load = () => api("/paired").then(setList).catch(() => {});
   useEffect(() => {
     load();
@@ -324,6 +321,11 @@ function Paired({ host }: { host: boolean }) {
           <span className="badge neutral" style={{ width: 62, justifyContent: "center" }}>{d.kind === "agent" ? "Agent" : "App"}</span>
           <span className="grow ellipsis">{d.label}</span>
           <span className="chip mono" style={{ fontSize: 12 }}>{ago(d.lastSeen)}</span>
+          {host && d.wants && (
+            <button className="btn small" title="Their voice and their own answers go to this laptop; their other laptops are disconnected." onClick={() => confirm(`Let ${d.label} in as ${nameOf(d.wants!)}?`) && api(`/paired/${d.id}/allow`, {}, "POST").then(load, (e) => alert(e?.message ?? e))}>
+              Let in as {nameOf(d.wants)}
+            </button>
+          )}
           {host && (
             <button className="btn ghost small" onClick={() => confirm(`Disconnect ${d.label}?`) && api(`/paired/${d.id}`, undefined, "DELETE").then(load)}>
               Disconnect

@@ -5,8 +5,9 @@
 #        app/build-whisper.sh --check <output dir>  says whether the binary there is this pinned build
 # whisper.cpp is MIT (see NOTICE).
 #
-# The stamp (whisper-server.build) records the commit it was built from and the binary's SHA-256. A
-# binary without a stamp, from another commit, or changed since it was built is not this build.
+# The stamp (whisper-server.build) records the commit it was built from and the binary's SHA-256. --check
+# only tells a dev install (install.sh) whether to rebuild: it catches an unstamped, stale or damaged
+# binary, not a substituted one with a rewritten stamp. Packaging never relies on it; bundle-hub.sh builds.
 set -euo pipefail
 TAG=v1.8.4
 # The commit that tag named when it was pinned: a tag can be moved, a commit can't.

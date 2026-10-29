@@ -37,6 +37,8 @@ interface Snapshot {
   levels: Record<string, number>;
   speaking: string | null;
   clockOffset: number;
+  /** The host's reset epoch, from its clock pongs (-1 before the first): stamped on audio as it is captured. */
+  voiceEpoch: number;
 }
 
 type SpeakListener = (m: { audio: string | null; mime: string; text: string }) => void;
@@ -51,7 +53,7 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 }
 
 class HubClient {
-  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
+  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], thinking: null, levels: {}, speaking: null, clockOffset: 0, voiceEpoch: -1 };
   private listeners = new Set<() => void>();
   private ws: WebSocket | null = null;
   private started = false;
@@ -302,7 +304,7 @@ class HubClient {
     return Date.now() + this.snap.clockOffset;
   }
 
-  private handle(m: BusMessage | { type: "pong"; t: number; now: number }) {
+  private handle(m: BusMessage | { type: "pong"; t: number; now: number; voiceEpoch?: number }) {
     const s = this.snap.state;
     if (m.type === "state" || (m.type !== "pong" && s)) this.taken = ++this.seq;
     switch (m.type) {
@@ -311,7 +313,7 @@ class HubClient {
         const rtt = t1 - m.t;
         this.pings = [...this.pings, { rtt, offset: m.now - (m.t + rtt / 2) }].slice(-12);
         const best = [...this.pings].sort((a, b) => a.rtt - b.rtt)[0];
-        this.set({ clockOffset: best.offset, clockSynced: true });
+        this.set({ clockOffset: best.offset, clockSynced: true, voiceEpoch: m.voiceEpoch ?? -1 });
         return;
       }
       case "state":

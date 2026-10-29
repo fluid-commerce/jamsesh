@@ -88,3 +88,92 @@ test("after a line's group is gone, a copy at the same moment with other words i
   await r.pipeline.flush();
   expect(r.lines()).toEqual(["Put the pricing page on the big screen.", "I still think the header is too tall."]);
 });
+
+// With voices on, matching embeddings are positive evidence about the voice, not about the words: a related
+// sentence with extra words is still another line. The embeddings are stood in for here (same vector).
+function withVoice(r: ReturnType<typeof room>) {
+  const v = new Float32Array(256).fill(0.0625);
+  (r.pipeline as any).voiceOf = () => ({ embedding: v, reason: "" });
+  const hear = r.hear;
+  return async (...a: Parameters<typeof hear>) => {
+    await hear(...a);
+    for (const g of (r.pipeline as any).open) for (const s of g.segments) s.embedding = v;
+  };
+}
+
+test("the same voice on two laptops saying a longer version of a sentence keeps both lines", async () => {
+  const r = room();
+  const hear = withVoice(r);
+  const t = base();
+  await hear("lap-a", t, 1.5, "Make it blue now.", 11);
+  await r.pipeline.flush();
+  await hear("lap-b", t + 1500, 2.5, "Make it blue now after lunch.", 12);
+  await r.pipeline.flush();
+  expect(r.lines()).toEqual(["Make it blue now.", "Make it blue now after lunch."]);
+});
+
+test("one word heard differently is two lines: when unsure, both are kept, even from the same voice", async () => {
+  const r = room();
+  const hear = withVoice(r);
+  const t = base();
+  await hear("lap-a", t, 2.5, "Move the header up a bit please.", 13);
+  await r.pipeline.flush();
+  await hear("lap-b", t + 1500, 2.5, "Move the header up a bit police.", 14);
+  await r.pipeline.flush();
+  expect(r.lines()).toEqual(["Move the header up a bit please.", "Move the header up a bit police."]);
+});
+
+test("the same words from the same voice on another laptop are one line; voices that disagree are two", async () => {
+  const r = room();
+  const hear = withVoice(r);
+  const t = base();
+  await hear("lap-a", t, 2.5, "Move the header up a bit please.", 13);
+  await r.pipeline.flush();
+  await hear("lap-b", t + 1500, 2.5, "move the header up a bit, please", 14);
+  await r.pipeline.flush();
+  expect(r.lines()).toEqual(["Move the header up a bit please."]);
+  // Another voice saying the same words at another laptop then is someone else saying them.
+  const q = room();
+  const hearQ = withVoice(q);
+  await hearQ("lap-a", t, 2.5, "Move the header up a bit please.", 13);
+  await q.pipeline.flush();
+  const other = new Float32Array(256);
+  other[0] = 1;
+  (q.pipeline as any).voiceOf = () => ({ embedding: other, reason: "" });
+  await hearQ("lap-b", t + 1500, 2.5, "Move the header up a bit please.", 14);
+  await q.pipeline.flush();
+  expect(q.lines()).toHaveLength(2);
+});
+
+test("the same voice with an added word is another line, not a twin", async () => {
+  const r = room();
+  const hear = withVoice(r);
+  const t = base();
+  await hear("lap-a", t, 2.5, "Move the header up a bit please.", 13);
+  await r.pipeline.flush();
+  await hear("lap-b", t + 1500, 3.4, "Move the header up a bit please then.", 15);
+  await r.pipeline.flush();
+  expect(r.lines()).toEqual(["Move the header up a bit please.", "Move the header up a bit please then."]);
+});
+
+test("a nearer line with the same words in another voice doesn't stop the copy joining the line in its own voice", async () => {
+  const r = room();
+  const one = new Float32Array(256);
+  one[0] = 1;
+  const two = new Float32Array(256);
+  two[1] = 1;
+  const voices: Record<string, Float32Array> = { "lap-a": one, "lap-b": two, "lap-c": two };
+  (r.pipeline as any).voiceOf = (u: { deviceId: string }) => ({ embedding: voices[u.deviceId], reason: "" });
+  const hear = async (...a: Parameters<typeof r.hear>) => {
+    await r.hear(...a);
+    for (const g of (r.pipeline as any).open) for (const s of g.segments) s.embedding = voices[s.deviceId];
+    await r.pipeline.flush();
+  };
+  const t = base();
+  await hear("lap-a", t, 1, "Header up a bit.", 21);
+  await hear("lap-c", t + 2600, 1, "Header up a bit.", 22);
+  expect(r.lines()).toHaveLength(2);
+  // Nearest in time is lap-a's line, in the other voice; lap-c's, in this voice, is the twin.
+  await hear("lap-b", t + 1200, 1, "header up a bit", 23);
+  expect(r.lines()).toHaveLength(2);
+});

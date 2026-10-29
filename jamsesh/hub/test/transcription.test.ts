@@ -465,7 +465,7 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
 // ---- the host's whisper.cpp: bundled server, model downloaded once ----
 
 import { chmodSync, mkdirSync, truncateSync, writeFileSync } from "node:fs";
-import { findWhisperServer, findWhisperModel, isWhisperServer, LocalWhisper, WHISPER_MODEL } from "../src/audio/whisper";
+import { findWhisperServer, findWhisperModel, isWhisperServer, LocalWhisper, recordDownload, WHISPER_MODEL } from "../src/audio/whisper";
 
 const freePort = () => {
   const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
@@ -581,7 +581,8 @@ test("first host session: the gateway covers the room while the model downloads,
     for (let i = 0; i < 100 && !engines(hub).has("local"); i++) await Bun.sleep(50);
     expect(asked).toEqual([WHISPER_MODEL.url]);
     expect(hub.transcriber.whisper.status()).toMatchObject({ state: "ready", installed: true });
-    expect(readdirSync(join(config.home, "models"))).toEqual([WHISPER_MODEL.name]);
+    // The download is recorded as JamSesh's own: the only kind of model file it may ever delete.
+    expect(readdirSync(join(config.home, "models")).sort()).toEqual(["downloaded.json", WHISPER_MODEL.name]);
     expect(await hub.transcriber.transcribe(clip, 2)).toEqual({ text: `Chey used ${WHISPER_MODEL.name}`, engine: "host whisper.cpp" });
   } finally {
     hub.stop();
@@ -615,7 +616,7 @@ test("a model download that fails its checksum leaves nothing, and offline never
   }
 }));
 
-test("a model with the pinned name but the wrong checksum is never used: deleted from ~/.jamsesh/models, left alone in the cache", () => online(async () => {
+test("a model with the pinned name but the wrong checksum is never used: deleted if JamSesh downloaded it, else left alone", () => online(async () => {
   const home = join(dir, "tampered-home");
   const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "tampered-bin")) });
   const real = globalThis.fetch;
@@ -627,9 +628,14 @@ test("a model with the pinned name but the wrong checksum is never used: deleted
     mkdirSync(join(config.home, "models"), { recursive: true });
     const own = sized(join(config.home, "models", WHISPER_MODEL.name), WHISPER_MODEL.bytes);
     const cached = sized(join(cache, WHISPER_MODEL.name), WHISPER_MODEL.bytes);
+    // Put in ~/.jamsesh/models by someone else: passed over, not deleted.
+    const first = new LocalWhisper();
+    expect(await first.start(freePort(), false)).toBeNull();
+    expect(existsSync(own)).toBe(true);
+    recordDownload(true);
     const w = new LocalWhisper();
     const port = freePort();
-    // Offline: nothing usable and nothing downloaded.
+    // Offline: nothing usable and nothing downloaded; JamSesh's own bad download is gone.
     expect(await w.start(port, false)).toBeNull();
     expect(w.status()).toMatchObject({ state: "missing", installed: false });
     expect(existsSync(own)).toBe(false);
@@ -640,6 +646,35 @@ test("a model with the pinned name but the wrong checksum is never used: deleted
     globalThis.fetch = real;
     restore();
     rmSync(join(config.home, "models"), { recursive: true, force: true });
+  }
+}), 60_000);
+
+test("a corrupt model chosen with JAMSESH_WHISPER_MODEL is passed over after one check, wherever it lives", () => online(async () => {
+  const home = join(dir, "chosen-home");
+  mkdirSync(join(dir, "chosen-elsewhere"), { recursive: true });
+  mkdirSync(join(home, ".cache", "whisper-cpp"), { recursive: true });
+  const chosen = sized(join(dir, "chosen-elsewhere", WHISPER_MODEL.name), WHISPER_MODEL.bytes);
+  const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: chosen, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "chosen-bin")) });
+  const real = globalThis.fetch;
+  globalThis.fetch = (async (url: any, init?: any) => (String(url) === WHISPER_MODEL.url ? new Response("no") : real(url, init))) as typeof fetch;
+  try {
+    const cache = join(home, ".cache", "whisper-cpp");
+    const other = sized(join(cache, "ggml-base.en.bin"), 147_964_211);
+    // Falls back to another good candidate once the chosen file is in the bad set.
+    expect(findWhisperModel()).toBe(chosen);
+    expect(findWhisperModel(new Set([chosen]))).toBe(other);
+    rmSync(other);
+    const w = new LocalWhisper();
+    expect(await w.start(freePort(), false)).toBeNull();
+    // Checked once, then skipped: not reported installed, and left alone (it isn't in the managed folder).
+    expect(w.status()).toMatchObject({ state: "missing", installed: false });
+    expect(existsSync(chosen)).toBe(true);
+    // A chosen file that is cut short is passed over without any hashing.
+    sized(chosen, 1000);
+    expect(findWhisperModel()).toBeNull();
+  } finally {
+    globalThis.fetch = real;
+    restore();
   }
 }), 60_000);
 
@@ -675,12 +710,20 @@ test("only the pinned whisper-server build and speaker model are installed or bu
   expect(check()).toBe(1);
   writeFileSync(stamp, `tag=v1.8.4\ncommit=0000000000000000000000000000000000000000\nsha256=${sha()}\n`);
   expect(check()).toBe(1);
+  // A substituted binary with a matching rewritten stamp passes --check: that is why packaging doesn't use it.
+  writeFileSync(bin, "#!/bin/sh\necho substituted\n");
+  writeFileSync(stamp, `tag=v1.8.4\ncommit=${commit}\nsha256=${sha()}\n`);
+  expect(check()).toBe(0);
   // install.sh and bundle-hub.sh check the same speaker-model pin, and bundling refuses a file that isn't it.
   const install = readFileSync(join(import.meta.dir, "../../install.sh"), "utf8");
   const bundle = readFileSync(join(import.meta.dir, "../../app/bundle-hub.sh"), "utf8");
   const pin = install.match(/^WESPEAKER_SHA256=(\w+)$/m)![1];
   expect(bundle).toContain(`WESPEAKER_SHA256=${pin}`);
-  expect(bundle).toMatch(/build-whisper\.sh --check "\$JAM\/bin" \|\| \{ echo/);
+  // The shipped whisper-server is built from the pinned commit into the bundle; a stamped binary found on
+  // the machine (whose stamp anyone can rewrite) is never copied in.
+  expect(bundle).toMatch(/^app\/build-whisper\.sh "\$OUT\/bin"$/m);
+  expect(bundle).not.toMatch(/--check/);
+  expect(bundle).not.toMatch(/for b in [^\n]*whisper-server/);
   expect(bundle).toMatch(/!= "\$WESPEAKER_SHA256" \]; then[\s\S]*?exit 1/);
 });
 

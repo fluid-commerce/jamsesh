@@ -98,43 +98,8 @@ export function cosine(a: Float32Array, b: Float32Array): number {
 }
 
 /** How much one sample of each kind counts toward a voiceprint. A correction is a person saying who it was. */
-export const WEIGHT: Record<VoiceKind, number> = { auto: 1, enrol: 3, correction: 10, carried: 3 };
-/** The speaker model this host uses; carried voiceprints must come from the same one. */
-export const MODEL_ID = "wespeaker_en";
+export const WEIGHT: Record<VoiceKind, number> = { auto: 1, enrol: 3, correction: 10 };
 export const EMBED_DIM = 256;
-export const MAX_CARRIED = 32;
-
-export interface Carried {
-  model: string;
-  dim: number;
-  samples: { kind: VoiceKind; embedding: number[] }[];
-  /** A digest of every sample this host holds for the person: it changes whenever the voiceprint does. */
-  version?: string;
-  /** When this host last learned a sample for the person (ms), to tell which of two hosts' copies is newer. */
-  updatedAt?: number;
-}
-
-/** A voiceprint arriving from a person's device, checked before it goes anywhere near the store. */
-export function parseCarried(body: unknown): { ok: true; samples: Float32Array[] } | { ok: false; reason: string } {
-  const b = body as Partial<Carried> | null;
-  if (!b || typeof b !== "object") return { ok: false, reason: "That isn't a voiceprint." };
-  if (b.model !== MODEL_ID || b.dim !== EMBED_DIM) return { ok: false, reason: `This host uses the ${MODEL_ID} voice model; that voiceprint is from another.` };
-  if (!Array.isArray(b.samples) || !b.samples.length) return { ok: false, reason: "That voiceprint has no samples." };
-  if (b.samples.length > MAX_CARRIED) return { ok: false, reason: `A voiceprint carries at most ${MAX_CARRIED} samples.` };
-  const out: Float32Array[] = [];
-  for (const x of b.samples) {
-    const e = x?.embedding;
-    if (!Array.isArray(e) || e.length !== EMBED_DIM || e.some((n) => typeof n !== "number" || !Number.isFinite(n))) return { ok: false, reason: "A sample in that voiceprint is malformed." };
-    // Finite as JSON isn't finite as Float32 (1e100 becomes Infinity, and then NaN once normalized): check what is stored.
-    const v = Float32Array.from(e);
-    if (!v.every(Number.isFinite)) return { ok: false, reason: "A sample in that voiceprint is malformed." };
-    if (!v.some((n) => n !== 0)) return { ok: false, reason: "A sample in that voiceprint is empty." };
-    const unit = normalize(v);
-    if (!unit.every(Number.isFinite) || Math.abs(Math.hypot(...unit) - 1) > 1e-3) return { ok: false, reason: "A sample in that voiceprint is malformed." };
-    out.push(unit);
-  }
-  return { ok: true, samples: out };
-}
 
 export class Voiceprints {
   private centroids = new Map<string, Float32Array>();
@@ -157,15 +122,24 @@ export class Voiceprints {
       for (let i = 0; i < e.length; i++) s[i] += e[i] * w;
       sums.set(personId, s);
       this.weights.set(personId, (this.weights.get(personId) ?? 0) + w);
-      const k = this.kinds.get(personId) ?? { auto: 0, enrol: 0, correction: 0, carried: 0 };
+      const k = this.kinds.get(personId) ?? { auto: 0, enrol: 0, correction: 0 };
       k[kind] = (k[kind] ?? 0) + 1;
       this.kinds.set(personId, k);
     }
     this.centroids = new Map([...sums].map(([k, v]) => [k, normalize(v)]));
   }
 
-  add(personId: string, e: Float32Array, kind: VoiceKind = "auto") {
-    this.store.addVoiceSample(personId, e, kind);
+  /** Learns a sample heard at `heardAt` (this host's clock); the store refuses anything from before the person's reset. */
+  add(personId: string, e: Float32Array, kind: VoiceKind, heardAt: number) {
+    const kept = this.store.addVoiceSample(personId, e, kind, heardAt);
+    if (kept) this.reload();
+    return kept;
+  }
+
+  /** Replaces a person's join read with a new one, heard now. */
+  replaceEnrol(personId: string, samples: Float32Array[], heardAt: number) {
+    this.store.clearVoiceKind(personId, "enrol");
+    for (const e of samples) this.store.addVoiceSample(personId, e, "enrol", heardAt);
     this.reload();
   }
 
@@ -218,31 +192,7 @@ export class Voiceprints {
 
   /** Samples by kind, for "learned from 3 corrections". */
   learnedFrom(personId: string): Record<VoiceKind, number> {
-    return this.kinds.get(personId) ?? { auto: 0, enrol: 0, correction: 0, carried: 0 };
-  }
-
-  /** What a person's own device keeps: everything they read or were corrected on, and their latest automatic samples. */
-  exportFor(personId: string): Carried {
-    const mine = this.store.voiceSamples().filter((x) => x.personId === personId && x.embedding.length === EMBED_DIM);
-    const trusted = mine.filter((x) => x.kind !== "auto");
-    const autos = mine.filter((x) => x.kind === "auto").sort((a, b) => b.ts - a.ts);
-    const pick = [...trusted.sort((a, b) => b.ts - a.ts), ...autos].slice(0, MAX_CARRIED);
-    const version = mine.length ? Bun.hash(mine.map((x) => `${x.id}:${x.ts}:${x.kind}`).sort().join(",")).toString(36) : "";
-    const updatedAt = mine.reduce((t, x) => Math.max(t, x.ts), 0);
-    return { model: MODEL_ID, dim: EMBED_DIM, samples: pick.map((x) => ({ kind: x.kind, embedding: [...x.embedding].map((n) => Math.round(n * 1e5) / 1e5) })), version, updatedAt };
-  }
-
-  /**
-   * Brings a person's voiceprint from their own device, replacing the copy they brought before. Samples this
-   * host already has (its own copy coming back from another host) aren't added twice. Returns how many were kept.
-   */
-  importCarried(personId: string, samples: Float32Array[]): number {
-    this.store.clearVoiceKind(personId, "carried");
-    const own = this.store.voiceSamples().filter((x) => x.personId === personId && x.embedding.length === EMBED_DIM).map((x) => normalize(x.embedding));
-    const fresh = samples.filter((e) => !own.some((o) => cosine(o, e) > 0.9999));
-    for (const e of fresh) this.store.addVoiceSample(personId, e, "carried");
-    this.reload();
-    return fresh.length;
+    return this.kinds.get(personId) ?? { auto: 0, enrol: 0, correction: 0 };
   }
 
   /** Similarity of an embedding to every enrolled person, best first. */
@@ -259,3 +209,4 @@ export class Voiceprints {
 
 /** Two samples this alike (cosine) are the same voice for the purpose of undoing a mislabel. */
 const NEAR = 0.5;
+
