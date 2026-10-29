@@ -84,6 +84,20 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Localhost mention gets the "share it" step | Simulated | Via `jam_update` and `jam_message` results. Needs a real agent to see if it acts on it. |
 | A stopped build's tile says why, tells its agent, clears after 5 minutes | Simulated | Throwaway local server started and stopped; tile screenshot checked in headless Chromium. |
 
+## Project wiki (phase 7.1, store and API)
+
+| Capability | Status | Notes |
+|---|---|---|
+| The project folder as a vault (WIKI.md, index, log, raw, wiki; git history when `git` is there) | Simulated | Files and git checked in a temp folder; with git missing it still works. Not opened in Obsidian itself. |
+| Ingest from transcript, documents, agent reports and edits into one board card with diffs | Tested live | Scripted decider in tests; one run with the real router model on a short synthetic transcript produced 8 cited pages, and an injected instruction in a document stayed data. Not run on a real room's hour of talk. |
+| Accepting a card page by page; people's edits win over a stale proposal | Simulated | |
+| People's page edits (direct, logged as sources) and Add to wiki (text, link, text file) | Simulated | Through the real routes. |
+| Add to wiki from a PDF | Not tested | Read by the router model; needs a real PDF and the key. |
+| Query, filing an answer, lint (orphans, broken links, stale, unread sources, contradictions) | Tested live | Query and lint ran once with the live model; the contradiction check has only seen a clean wiki. |
+| `jam_wiki_read` / `search` / `query` / `jam_source_add`; join briefing carries index and workstream pages under 1,500 tokens | Simulated | Scripted agent over the tool path. A real Claude Code chat hasn't used them. |
+| Fact list folded into pages on first use | Simulated | From a context.json and session facts; not from a real project's history. |
+| Wiki tab, graph and the Work tab links | Not tested | Built by the UI worker against the API. |
+
 ## Big screen: locks, versions, history
 
 | Capability | Status | Notes |

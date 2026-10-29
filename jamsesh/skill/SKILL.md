@@ -68,6 +68,11 @@ between steps, and use `jam_wait` whenever you're idle. Claude Code doesn't need
   `jam_context` (with your workstream) so you work from the latest decisions, not stale ones.
   `jam_search` finds anything said or posted earlier, and `jam_directives` lists what the room
   asked agents to do, older ones included.
+- **The project wiki is the project's memory across sessions.** The join briefing lists its pages and
+  gives you your workstream's. `jam_wiki_read` opens a page, `jam_wiki_search` finds one, and
+  `jam_wiki_query` answers a question from the pages. You can't edit pages. To file a document (meeting
+  notes, a spec, research), call `jam_source_add` once instead of messaging everyone; a person approves the
+  page changes on the Tasks board.
 - **People's roles matter.** When instructions conflict, the higher-weight role wins (the
   directive's rationale says whose call it was). If you can't tell, `jam_ask_room`.
 
