@@ -576,9 +576,13 @@ export function modeLabel(mode: string) {
 
 function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: JamEvent; x: number; y: number; onClose: () => void }) {
   const [name, setName] = useState("");
+  const [result, setResult] = useState<{ message: string; learned: boolean } | null>(null);
   const assign = async (body: { personId?: string; name?: string }) => {
-    await api(`/utterances/${ev.data.utteranceId}/assign`, body);
-    onClose();
+    const r = await api<{ ok?: boolean; queued?: boolean; learning?: { learned: boolean; message: string } }>(`/utterances/${ev.data.utteranceId}/assign`, body);
+    // Say what the correction did for the voiceprint, then get out of the way.
+    if (!r?.learning) return onClose();
+    setResult({ message: r.learning.message, learned: r.learning.learned });
+    setTimeout(onClose, r.learning.learned ? 1600 : 3200);
   };
   useEffect(() => {
     const close = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -589,7 +593,18 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 59 }} onClick={onClose} />
       <div className="popover" style={{ left: Math.min(x, innerWidth - 260), top: Math.min(y + 8, innerHeight - 340) }}>
-        <div className="hint">Who said this? JamSesh learns their voice.</div>
+        {result ? (
+          <div className="hint" role="status" style={{ padding: "10px 10px 8px", maxWidth: 240, fontSize: 13, color: result.learned ? "var(--built)" : "var(--warn)" }}>{result.message}</div>
+        ) : (
+          <>
+        {state.voiceprints && !state.voiceprints.available ? (
+          <div className="hint" style={{ color: "var(--warn)", maxWidth: 240 }} title={state.voiceprints.reason}>
+            Voice matching is off on this host, so this renames the line but can't teach a voice.
+            {state.voiceprints.reason && <div style={{ color: "var(--dim)", marginTop: 4 }}>{state.voiceprints.reason}</div>}
+          </div>
+        ) : (
+          <div className="hint">Who said this? JamSesh learns their voice.</div>
+        )}
         {state.people.map((p) => (
           <button key={p.id} className="item" onClick={() => assign({ personId: p.id })}>
             <Avatar name={p.name} color={p.color} size={22} photo={p.photo} />
@@ -607,6 +622,8 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
         >
           <input className="grow" placeholder="Someone new…" value={name} onChange={(e) => setName(e.target.value)} autoFocus={!state.people.length} />
         </form>
+          </>
+        )}
       </div>
     </>
   );

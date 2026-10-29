@@ -6,7 +6,15 @@ const d = (o: Partial<Parameters<typeof speechDecision>[0]>) => speechDecision({
 
 test("spoken questions get spoken answers", () => expect(d({})).toBe("speak"));
 test("problems are spoken when asked by voice", () => expect(d({ kind: "problem" })).toBe("speak"));
-test("confirmations are never spoken; the visible change is the confirmation", () => expect(d({ kind: "confirm" })).toBe("text"));
+test("a spoken request is confirmed out loud in a few words", () => {
+  expect(d({ kind: "confirm" })).toBe("speak");
+  expect(d({ kind: "confirm", source: "recorded" })).toBe("speak");
+});
+test("typed and overheard confirmations stay text", () => {
+  expect(d({ kind: "confirm", source: "typed" })).toBe("text");
+  expect(d({ kind: "confirm", source: "ambient" })).toBe("text");
+});
+test("a quiet room doesn't get confirmations out loud", () => expect(d({ kind: "confirm", quietRoom: true })).toBe("text"));
 test("typed requests get text", () => expect(d({ source: "typed" })).toBe("text"));
 test("overheard work never makes the brain talk", () => expect(d({ source: "ambient", kind: "problem" })).toBe("text"));
 test("a quiet room still gets answers, but not problems", () => {

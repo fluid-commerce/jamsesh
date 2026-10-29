@@ -4,6 +4,9 @@ import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { PairedDevice } from "./auth";
 import { bus } from "./bus";
+import { voiceprintStatus, learningNote } from "./audio/voiceprint";
+import { describeError } from "./brain/llm";
+import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
@@ -19,7 +22,7 @@ const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -466,9 +469,19 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     let personId = body?.personId;
     if (!personId && body?.name) personId = s.upsertPerson({ name: body.name, role: body.role }).id;
     if (!personId) return bad("personId or name is required");
-    const u = hub.audio.assign(m[1], personId);
-    s.store.put("people", s.person(personId)!);
-    return json(u);
+    const { utterance, learning } = hub.audio.assign(m[1], personId);
+    const person = s.person(personId)!;
+    s.store.put("people", person);
+    return json({ ...utterance, learning: { ...learning, message: learningNote(person.name, learning) } });
+  }
+
+  if (path === "/voice-preview" && req.method === "POST") {
+    // A fixed sentence in the chosen voice, so the picker can be tried without a real reply.
+    try {
+      return json(await synthesize(s, "Hi, I'm the room brain. This is how I sound.", typeof body?.voice === "string" ? body.voice : undefined));
+    } catch (e) {
+      return bad(`Couldn't make a sample: ${describeError(e)}`, 502);
+    }
   }
 
   if (path === "/say" && req.method === "POST") {
@@ -533,7 +546,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: hub.audio.voiceprints.enrolled, problem: hub.transcriber.problem() });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";

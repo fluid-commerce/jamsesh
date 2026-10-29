@@ -32,9 +32,14 @@ export const DEFAULT_MODELS: Settings["models"] = {
   router: "anthropic/claude-sonnet-5.5",
   presenter: "anthropic/claude-sonnet-5.5",
   digest: "google/gemini-3.5-flash",
-  speech: "openai/tts-1",
+  speech: "openai/tts-1-hd",
   transcribe: "openai/gpt-transcribe",
 };
+
+/** The old default speech model is the one rooms were never asked about; they move to the current default with it. */
+function withCurrentSpeech(models: Settings["models"]): Settings["models"] {
+  return models.speech === "openai/tts-1" ? { ...models, speech: DEFAULT_MODELS.speech } : models;
+}
 
 export type UpdateKind = "progress" | "done" | "question" | "blocked" | "handoff" | "decision" | "shipped";
 
@@ -106,11 +111,12 @@ export class Session {
     return {
       sessionName: s.setting("sessionName", "Jam session"),
       brainName: s.setting("brainName", "JamSesh"),
+      brainAliases: s.setting<string[]>("brainAliases", []),
       brainNotes: s.setting<string[]>("brainNotes", []),
       brainEnabled: s.setting("brainEnabled", true),
       voiceReplies: s.setting("voiceReplies", true),
       voice: s.setting("voice", "nova"),
-      models: { ...DEFAULT_MODELS, ...s.setting<Partial<Settings["models"]>>("models", {}) },
+      models: withCurrentSpeech({ ...DEFAULT_MODELS, ...s.setting<Partial<Settings["models"]>>("models", {}) }),
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),
@@ -123,8 +129,18 @@ export class Session {
     return this.store.setting<string>("gatewayKey", "") || config.envGatewayKey || undefined;
   }
 
+  /** Adds a name the brain answers to (or makes it the display name, keeping the old one as an alias). */
+  addBrainName(name: string, makeDisplay = false) {
+    const { brainName, brainAliases } = this.settings();
+    const same = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const names = [brainName, ...brainAliases];
+    if (names.some((n) => same(n, name)) && !(makeDisplay && !same(brainName, name))) return;
+    if (makeDisplay) this.updateSettings({ brainName: name, brainAliases: [brainName, ...brainAliases].filter((n) => !same(n, name)).slice(0, 8) });
+    else this.updateSettings({ brainAliases: [...brainAliases, name].slice(-8) });
+  }
+
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainName", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
+    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
     for (const k of allowed) if (patch[k] !== undefined) this.store.setSetting(k, patch[k]);
     if (patch.models) this.store.setSetting("models", { ...this.store.setting("models", {}), ...patch.models });
     if (patch.gatewayKey !== undefined) this.store.setSetting("gatewayKey", patch.gatewayKey.trim());
@@ -136,6 +152,8 @@ export class Session {
 
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
+  /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
+  voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
 
   state(): HubState {
     return {
@@ -159,6 +177,7 @@ export class Session {
       digest: this.store.digest("session")?.text ?? "",
       totals: this.totals(),
       brain: this.brainStatus,
+      voiceprints: this.voiceprints(),
     };
   }
 

@@ -7,7 +7,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
   const { state, levels } = useHub();
   const [key, setKey] = useState("");
   const [saved, setSaved] = useState<string | null>(null);
-  const [engines, setEngines] = useState<{ transcription: { label: string; inflight: number; healthy: boolean }[]; voiceprints: number } | null>(null);
+  const [engines, setEngines] = useState<{ transcription: { label: string; inflight: number; healthy: boolean }[]; voiceprints: { available: boolean; reason: string; enrolled: number } } | null>(null);
   useEffect(() => {
     api("/engines").then(setEngines).catch(() => {});
     const close = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -60,6 +60,21 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
               <span>Name</span>
               <input defaultValue={s.brainName} onBlur={(e) => e.target.value.trim() && e.target.value.trim() !== s.brainName && update({ brainName: e.target.value.trim() })} />
             </label>
+            <div className="field">
+              <span>Also answers to</span>
+              <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+                {s.brainAliases.length === 0 && <span className="empty-note" style={{ padding: 0 }}>Nothing else. Add the other words your room uses, like "Computer".</span>}
+                {s.brainAliases.map((a) => (
+                  <span key={a} className="badge neutral" style={{ textTransform: "none", letterSpacing: 0, fontSize: 13, gap: 6 }}>
+                    {a}
+                    <button className="btn ghost small" style={{ padding: "0 4px", minHeight: 0 }} onClick={() => update({ brainAliases: s.brainAliases.filter((x) => x !== a) })} title={`Stop answering to ${a}`} aria-label={`Stop answering to ${a}`}>
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <NoteInput placeholder="Another name, for example Computer" onAdd={(n) => !s.brainAliases.some((a) => a.toLowerCase() === n.toLowerCase()) && update({ brainAliases: [...s.brainAliases, n].slice(-8) })} />
+            </div>
             <div className="field">
               <span>What it has learned about how to behave</span>
               {s.brainNotes.length === 0 && <div className="empty-note" style={{ padding: "4px 0" }}>Nothing yet. Tell it, for example, "{s.brainName}, keep your answers to one sentence."</div>}
@@ -114,14 +129,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
                 <span>Speak replies on the room speaker</span>
                 <Toggle on={s.voiceReplies} onChange={(v) => update({ voiceReplies: v })} />
               </div>
-              <label className="field">
-                <span>Voice</span>
-                <select defaultValue={s.voice} onChange={(e) => update({ voice: e.target.value })}>
-                  {["nova", "alloy", "echo", "fable", "onyx", "shimmer"].map((v) => (
-                    <option key={v}>{v}</option>
-                  ))}
-                </select>
-              </label>
+              <VoicePicker voice={s.voice} model={s.models.speech} onChange={(v) => update({ voice: v })} />
               <div className="row between">
                 <span>Let the brain drive this Mac (apps, windows, Simulator, shell)</span>
                 <Toggle on={s.hostControl} onChange={(v) => update({ hostControl: v })} />
@@ -145,6 +153,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
           </Section>
 
           <Section title="People" help="Each person's title weighs in when instructions conflict. Voice samples come from lines you label, and from people talking at their own laptops.">
+            {!state.voiceprints.available && <VoiceMatchingOff reason={state.voiceprints.reason} />}
             {state.people.map((p) => (
               <PersonRow key={p.id} p={p} />
             ))}
@@ -312,7 +321,57 @@ function Saved() {
   );
 }
 
-function NoteInput({ onAdd }: { onAdd: (n: string) => void }) {
+/** Voices the OpenAI speech models offer; any other provider gets a free-text field. */
+const OPENAI_VOICES = ["nova", "alloy", "echo", "fable", "onyx", "shimmer", "coral", "sage", "ash"];
+
+function VoicePicker({ voice, model, onChange }: { voice: string; model: string; onChange: (v: string) => void }) {
+  const [chosen, setChosen] = useState(voice);
+  const [phase, setPhase] = useState<"idle" | "busy" | "error">("idle");
+  const [err, setErr] = useState("");
+  const listed = model.startsWith("openai/");
+  const preview = async () => {
+    setPhase("busy");
+    try {
+      const r = await api<{ audio: string; mime: string }>("/voice-preview", { voice: chosen }, undefined, { queue: false, timeoutMs: 30000 });
+      await new Audio(`data:${r.mime};base64,${r.audio}`).play();
+      setPhase("idle");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't play the sample");
+      setPhase("error");
+    }
+  };
+  return (
+    <div className="field">
+      <span>Voice</span>
+      <div className="row">
+        {listed ? (
+          <select className="grow" value={chosen} onChange={(e) => (setChosen(e.target.value), onChange(e.target.value))}>
+            {(OPENAI_VOICES.includes(chosen) ? OPENAI_VOICES : [chosen, ...OPENAI_VOICES]).map((v) => (
+              <option key={v}>{v}</option>
+            ))}
+          </select>
+        ) : (
+          <input className="grow" value={chosen} onChange={(e) => setChosen(e.target.value)} onBlur={() => chosen.trim() && chosen !== voice && onChange(chosen.trim())} />
+        )}
+        <button className="btn" onClick={preview} disabled={phase === "busy"}>
+          {phase === "busy" ? "Playing…" : "Preview"}
+        </button>
+      </div>
+      {phase === "error" && <p className="help" style={{ color: "var(--warn)", margin: "6px 0 0" }}>{err}</p>}
+    </div>
+  );
+}
+
+/** The host's speaker model didn't load, so lines are labelled by device alone. */
+function VoiceMatchingOff({ reason }: { reason: string }) {
+  return (
+    <p className="help" style={{ color: "var(--warn)", margin: "0 0 12px" }}>
+      Voice matching is off on this host{reason ? `: ${reason}` : ""}. Lines are labelled by which laptop heard them, and corrections can't teach anyone's voice.
+    </p>
+  );
+}
+
+function NoteInput({ onAdd, placeholder = "Add a note, for example: ask before building anything big" }: { onAdd: (n: string) => void; placeholder?: string }) {
   const [v, setV] = useState("");
   return (
     <form
@@ -322,7 +381,7 @@ function NoteInput({ onAdd }: { onAdd: (n: string) => void }) {
         if (v.trim()) (onAdd(v.trim()), setV(""));
       }}
     >
-      <input className="grow" placeholder="Add a note, for example: ask before building anything big" value={v} onChange={(e) => setV(e.target.value)} />
+      <input className="grow" placeholder={placeholder} value={v} onChange={(e) => setV(e.target.value)} />
       <button className="btn" type="submit">
         Add
       </button>
