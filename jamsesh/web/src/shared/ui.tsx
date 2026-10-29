@@ -392,16 +392,21 @@ const NEAR_TOP = 160;
 const FEED_KEEP = 1500;
 
 /**
- * Keeps at most `keep` lines, always. Following the bottom drops the oldest (they load again from
- * the hub on scroll); a reader who scrolled away keeps the lines they are reading, so the newest
- * are dropped instead and come back from the live state when they return to the bottom.
- * True when anything was dropped.
+ * Keeps at most `keep` lines, always, and the list stays contiguous. Following the bottom drops the
+ * oldest (they load again from the hub on scroll). A reader who scrolled away keeps the lines they
+ * are reading, so the newest are dropped instead: what remains is still an unbroken run, and
+ * returning to the bottom resets to the latest window. Says which end was cut, or null.
  */
-export function capFeed(seen: Map<number, unknown>, following: boolean, keep = FEED_KEEP): boolean {
-  if (seen.size <= keep) return false;
+export function capFeed(seen: Map<number, unknown>, following: boolean, keep = FEED_KEEP): "oldest" | "newest" | null {
+  if (seen.size <= keep) return null;
   const ids = [...seen.keys()].sort((a, b) => a - b);
   for (const id of following ? ids.slice(0, ids.length - keep) : ids.slice(keep)) seen.delete(id);
-  return true;
+  return following ? "oldest" : "newest";
+}
+
+/** Whether a live event joins the list: always while following; while the reader is away only ones at or before the line they left (so the list has no gap). */
+export function feedAdmits(following: boolean, frozenAt: number, id: number): boolean {
+  return following || id <= frozenAt;
 }
 
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
@@ -412,25 +417,34 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const seen = useRef(new Map<number, JamEvent>());
   const following = useRef(true);
   const [away, setAway] = useState(false);
-  // The newest line the reader had reached when they scrolled away: what's after it is "new".
-  const readTo = useRef(0);
+  // The newest line in the list when the reader scrolled away. While they are away nothing newer is added (the list never has a gap); it is counted for the pill, and returning resets to the latest window.
+  const frozenAt = useRef(0);
   // Where the box was before older lines went in above, to hold the reader's place.
   const holdPlace = useRef<{ height: number; top: number } | null>(null);
   const busy = useRef(false);
   const trimmed = useRef(false);
   const [older, setOlder] = useState<{ loading: boolean; failed: boolean; done: boolean; more: number | null }>({ loading: false, failed: false, done: false, more: null });
 
-  for (const e of state?.events ?? []) seen.current.set(e.id, e);
+  for (const e of state?.events ?? []) if (feedAdmits(following.current, frozenAt.current, e.id)) seen.current.set(e.id, e);
   const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
   // A long session keeps a bounded tail while the reader follows the bottom; older lines load again from the hub on scroll.
-  if (capFeed(seen.current, following.current)) trimmed.current = true;
+  // Only cutting the oldest end reopens older paging; the newest end is always the live state's.
+  if (capFeed(seen.current, following.current) === "oldest") trimmed.current = true;
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
   const last = events[events.length - 1]?.id ?? 0;
   const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || ((older.done || everything) && !trimmed.current);
-  const fresh = following.current ? 0 : events.filter((e) => e.id > readTo.current).length;
+  const fresh = following.current ? 0 : (state?.events ?? []).filter((e) => e.id > frozenAt.current && wanted(e)).length;
+
+  /** Back at the bottom: drop everything and start again from the live state, a contiguous latest window that pages backward. */
+  const resetToLatest = () => {
+    seen.current.clear();
+    trimmed.current = false;
+    holdPlace.current = null;
+    setOlder({ loading: false, failed: false, done: false, more: null });
+  };
 
   const toBottom = (smooth = false) => {
     const el = box.current;
@@ -442,10 +456,11 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM;
     if (atBottom !== following.current) {
+      if (atBottom) resetToLatest();
+      else frozenAt.current = Math.max(0, ...seen.current.keys());
       following.current = atBottom;
       setAway(!atBottom);
     }
-    if (atBottom) readTo.current = last;
     if (!big && el.scrollTop < NEAR_TOP) void loadOlder();
   };
 
@@ -480,7 +495,6 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   // New lines: follow them while the reader is at the bottom, otherwise leave the box alone.
   useLayoutEffect(() => {
     if (following.current) {
-      readTo.current = last;
       toBottom();
     }
   }, [last]);
@@ -502,8 +516,8 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
 
   if (!state) return null;
   const jump = () => {
+    if (!following.current) resetToLatest();
     following.current = true;
-    readTo.current = last;
     setAway(false);
     toBottom(true);
   };
@@ -526,7 +540,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="m6 9 6 6 6-6" />
           </svg>
-          {fresh ? `Latest · ${fresh} new` : "Latest"}
+          {fresh ? `${fresh} new ${fresh === 1 ? "line" : "lines"}` : "Latest"}
         </button>
       )}
     </div>

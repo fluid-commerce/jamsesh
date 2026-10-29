@@ -120,6 +120,12 @@ jobs:
 
           **First open:** macOS says it can't check the app for malicious software, because the app isn't signed with an Apple Developer ID yet. Click Done, then open **System Settings > Privacy & Security** and click **Open Anyway** next to JamSesh. After each update, macOS may ask again for the microphone and to use JamSesh's saved sign-in (choose **Always Allow**).
           EOF
-          gh release delete jamsesh-latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create jamsesh-latest "$RUNNER_TEMP/JamSesh.dmg" \
+          # The download link is never missing: the new release goes up first (and becomes "latest"),
+          # only then are the older JamSesh releases removed.
+          TAG="jamsesh-$VERSION"
+          gh release create "$TAG" "$RUNNER_TEMP/JamSesh.dmg" \
             --target "$GITHUB_SHA" --title "JamSesh $VERSION (latest)" --notes-file "$RUNNER_TEMP/notes.md" --latest
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qx 'JamSesh.dmg'
+          for old in $(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^jamsesh-' | grep -vx "$TAG"); do
+            gh release delete "$old" --yes --cleanup-tag || true
+          done

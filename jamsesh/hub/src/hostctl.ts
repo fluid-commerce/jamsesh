@@ -5,7 +5,6 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bus } from "./bus";
-import { stopHelper } from "./children";
 import { config } from "./config";
 import type { Session } from "./session";
 import type { BuildRequest } from "./types";
@@ -93,53 +92,92 @@ JSON.stringify(out);`;
 /** How much of a command's output is kept: the tail (what ends up in a note), however much it prints. */
 const OUTPUT_TAIL = 16_384;
 
-async function tail(stream: ReadableStream<Uint8Array>, max = OUTPUT_TAIL): Promise<string> {
+/** Reads a stream into a rolling tail; `done` settles when the stream ends (or fails). */
+function collect(stream: ReadableStream<Uint8Array>, max = OUTPUT_TAIL) {
   const dec = new TextDecoder();
-  let kept = "";
-  for await (const chunk of stream) {
-    kept += dec.decode(chunk, { stream: true });
-    if (kept.length > max * 2) kept = kept.slice(-max);
-  }
-  return kept.slice(-max);
+  const acc = { text: "", done: Promise.resolve() };
+  acc.done = (async () => {
+    for await (const chunk of stream) {
+      acc.text += dec.decode(chunk, { stream: true });
+      if (acc.text.length > max * 2) acc.text = acc.text.slice(-max);
+    }
+  })().catch(() => {});
+  return acc;
 }
 
 export type RunResult = {
   code: number;
   out: string;
-  /** The command timed out (or its pipes failed) and stopHelper could not see it exit: it may still be running. */
+  /** The command timed out (or its pipes failed) and its process group could not be emptied: it may still be running. */
   stuck?: boolean;
-  /** Resolves only when the process's exit was observed. Never rejects. */
+  /** Resolves only when the whole process group was seen empty. Never rejects. */
   gone?: Promise<void>;
 };
 
-/** Runs argv (no shell) with a deadline. Every wait is bounded; a process that can't be stopped is reported as stuck, never as a finished failure. */
+/**
+ * Process-group checks, replaceable in tests. A command runs as the leader of its own group
+ * (setsid), so a stop reaches everything it started, background children included.
+ */
+export const groups = {
+  alive(pgid: number): boolean {
+    try {
+      process.kill(-pgid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "EPERM";
+    }
+  },
+  signal(pgid: number, sig: NodeJS.Signals) {
+    try {
+      process.kill(-pgid, sig);
+    } catch {}
+  },
+};
+
+async function groupEmpty(pgid: number, ms: number): Promise<boolean> {
+  for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(50)) if (!groups.alive(pgid)) return true;
+  return !groups.alive(pgid);
+}
+
+/** TERM to the whole group, then KILL after the grace. True only when the group was seen empty. */
+async function stopGroup(pgid: number, graceMs = 1_000): Promise<boolean> {
+  groups.signal(pgid, "SIGTERM");
+  if (await groupEmpty(pgid, graceMs)) return true;
+  groups.signal(pgid, "SIGKILL");
+  return groupEmpty(pgid, graceMs);
+}
+
+/** Runs argv (no shell) as its own process group with a deadline. Every wait is bounded; a group that can't be emptied is reported as stuck, never as a finished failure. */
 export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<RunResult> {
-  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", ...(cwd ? { cwd } : {}) });
-  const gone = p.exited.then(() => undefined, () => new Promise<void>(() => {}));
+  const p = Bun.spawn(["/usr/bin/perl", "-e", "use POSIX qw(setsid); setsid(); exec @ARGV or exit 127", ...cmd], { stdout: "pipe", stderr: "pipe", ...(cwd ? { cwd } : {}) });
+  const out = collect(p.stdout);
+  const err = collect(p.stderr);
   const finished = (async () => {
-    const [out, err] = await Promise.all([tail(p.stdout), tail(p.stderr)]);
     const code = await p.exited;
-    return { code, out: (out + (err ? `\n${err}` : "")).trim().slice(-OUTPUT_TAIL) };
+    // A background child that inherited the pipes keeps them open: after the command itself is done, give the output a moment, then stop reading.
+    await Promise.race([Promise.all([out.done, err.done]), Bun.sleep(500)]);
+    return { code, out: (out.text.slice(-OUTPUT_TAIL) + (err.text ? `\n${err.text.slice(-OUTPUT_TAIL)}` : "")).trim().slice(-OUTPUT_TAIL) };
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)));
+  let why = "timed out";
   try {
     const r = await Promise.race([finished, late]);
     if (r) return r;
   } catch (e) {
-    // A pipe or exit wait failed: fall through to stop the process.
-    finished.catch(() => {});
-    return stopAfter(p, gone, `failed: ${e instanceof Error ? e.message : String(e)}`);
+    why = `failed: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
     clearTimeout(timer);
   }
   finished.catch(() => {});
-  return stopAfter(p, gone, "timed out");
-}
-
-async function stopAfter(p: Parameters<typeof stopHelper>[0], gone: Promise<void>, why: string): Promise<RunResult> {
-  const stopped = await stopHelper(p, 1_000).catch(() => false);
-  return stopped ? { code: -1, out: why } : { code: -1, out: `${why}; still running, couldn't stop it`, stuck: true, gone };
+  if (await stopGroup(p.pid)) {
+    p.kill();
+    return { code: -1, out: why };
+  }
+  const gone = (async () => {
+    while (groups.alive(p.pid)) await Bun.sleep(500);
+  })();
+  return { code: -1, out: `${why}; still running, couldn't stop it`, stuck: true, gone };
 }
 
 /** A remote a build may clone: https, ssh:// or git@, with no credentials in it (a token or user:password belongs in the host's git credential helper, not in room data or a process list). */
@@ -150,6 +188,11 @@ export function repoProblem(repo: string): string | null {
   const user = at >= 0 ? authority.slice(0, at) : "";
   if (user && !(user === "git" && !repo.startsWith("https://"))) return "That repository URL has a username or token in it. Use the plain URL; the host's own git login does the authenticating.";
   return null;
+}
+
+/** Command text that carries a URL with a username, token or password in it: refused, because command text is shown to the room, logged, and visible in the process list. */
+export function commandProblem(command: string): string | null {
+  return /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]+@/i.test(command) ? "That command has a URL with a username or token in it. Leave the credentials out; the host's own git login does the authenticating." : null;
 }
 
 /** Any URL's credentials removed, for anything the room can see. */
@@ -476,6 +519,8 @@ export class HostControl {
     const bad = repoProblem(r.repo);
     if (bad) return bad.startsWith("That") ? bad : "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
     if (!r.command.trim()) return "Give the build command.";
+    const leaky = commandProblem(r.command);
+    if (leaky) return leaky;
     return this.file(r);
   }
 
@@ -485,6 +530,8 @@ export class HostControl {
    */
   requestShell(command: string, by: string): BuildRequest | string {
     if (!command.trim()) return "Give a command.";
+    const leaky = commandProblem(command);
+    if (leaky) return leaky;
     return this.file({ agentId: "brain", agentName: by, ownerName: "the room", repo: "a shell command", branch: "", command: command.trim(), kind: "shell" });
   }
 
@@ -523,7 +570,7 @@ export class HostControl {
 
   /** An approved shell command, in the background (60 seconds at most); the room sees how it ended. */
   private runShell(command: string, by: string): string {
-    this.log(`Running on the host (approved by ${by}): ${command}`);
+    this.log(`Running on the host (approved by ${by}): ${redactUrls(command)}`);
     void run(["/bin/zsh", "-lc", command], 60_000)
       .then((r) => this.log(r.stuck ? `Shell command is still running and couldn't be stopped: ${command}` : `Shell command finished with exit ${r.code}: ${command}${r.out.trim() ? `\n${r.out.slice(-600)}` : ""}`))
       .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`));
@@ -538,7 +585,7 @@ export class HostControl {
    */
   preview(o: { repo: string; branch?: string; command: string; open?: string; by: string }): string {
     if (!this.session.settings().hostControl) return "Host control is turned off in Settings.";
-    const bad = repoProblem(o.repo);
+    const bad = repoProblem(o.repo) ?? commandProblem(o.command);
     if (bad) return bad;
     const name = o.repo.replace(/\.git$/, "").split(/[/:]/).pop() || "repo";
     const branch = o.branch?.trim() || "";
@@ -548,14 +595,15 @@ export class HostControl {
     if (this.builds.has(slug)) return `${name}${branch ? `@${branch}` : ""} is already building on the host.`;
     const dir = join(config.home, "previews", slug);
     const label = `${name}${branch ? `@${branch}` : ""}`;
+    // The lock is taken here and released in the one finally below; nothing that can throw sits between them.
     this.builds.set(slug, { started: Date.now(), label });
-    mkdirSync(join(config.home, "previews"), { recursive: true });
-    this.log(`${o.by} started a preview build of ${label} on the host: ${redactUrls(o.command)}`);
-    bus.send({ type: "toast", tone: "info", text: `Building ${label} on the host`, detail: redactUrls(o.command).slice(0, 80) });
     void (async () => {
-      // One place releases the build lock. If a command couldn't be stopped, the lock stays until its exit is seen.
+      // If a command couldn't be stopped, the lock stays until its whole process group is seen empty.
       let release = () => void this.builds.delete(slug);
       try {
+        mkdirSync(join(config.home, "previews"), { recursive: true });
+        this.log(`${o.by} started a preview build of ${label} on the host: ${redactUrls(o.command)}`);
+        bus.send({ type: "toast", tone: "info", text: `Building ${label} on the host`, detail: redactUrls(o.command).slice(0, 80) });
         // Fetching the code is argv only (no shell, the URL is never in a command string); the approved build command is the only shell text.
         const git = (args: string[], cwd?: string) => run(["git", ...args], HostControl.GIT_MS, cwd);
         const fetched = existsSync(join(dir, ".git"))
@@ -598,8 +646,10 @@ export class HostControl {
         bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
       } catch (e) {
         const result = redactUrls(`The ${label} build couldn't run: ${e instanceof Error ? e.message : String(e)}`);
-        this.log(result);
-        this.onBuilt(label, false, result);
+        try {
+          this.log(result);
+          this.onBuilt(label, false, result);
+        } catch {} // reporting must not stop the lock from being released
       } finally {
         release();
       }
