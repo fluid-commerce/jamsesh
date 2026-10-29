@@ -521,3 +521,96 @@ test("locks, the queue and history are per screen: a lock on main doesn't hold t
   expect(s.stageHistory()["screen-2"].map((e) => e.by)).toEqual(["Felipe", "Room brain"]);
   expect(s.stageHistory().main.map((e) => e.by)).toEqual(["Chey"]);
 });
+
+test("a paired window is the person it's bound to: another device naming the owner can't answer or take the lock", async () => {
+  const { hub, s, chey, felipe, reg } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const a = artifact(s, "Checkout");
+    // Three browsers paired from other machines: Chey's, Felipe's, and one that hasn't said who it is.
+    const browser = (label: string, personId: string | null) => hub.auth.issue({ kind: "browser", label, personId, ip: "10.0.0.9" }).token;
+    const [cheys, felipes, nobody] = [browser("Chey's Mac", chey.id), browser("Felipe's laptop", felipe.id), browser("Phone", null)];
+    const as = (token: string) => (path: string, body: any) =>
+      fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.9", authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const me = async (token: string) => (await (await fetch(`http://127.0.0.1:${server.port}/api/me`, { headers: { "x-forwarded-for": "10.0.0.9", authorization: `Bearer ${token}` } })).json()).person?.id ?? null;
+
+    // Felipe's browser says it's Chey when it casts: the lock is still Felipe's.
+    expect((await as(felipes)("/stage", { mode: "spotlight", items: [a.id], personId: chey.id })).status).toBe(200);
+    expect(s.stage().lock?.personId).toBe(felipe.id);
+    // A browser that hasn't picked anyone is nobody in particular, not the person it names.
+    await as(nobody)("/stage", { mode: "spotlight", items: [a.id], personId: chey.id, by: "Phone" });
+    expect(s.stage().lock?.personId).toBeNull();
+    expect((await as(cheys)("/stage", { mode: "spotlight", items: [a.id] })).status).toBe(200);
+    expect(s.stage().lock?.personId).toBe(chey.id);
+
+    const agent = reg("Felipe");
+    const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [a.id] } });
+    s.onShowRequest = () => {};
+    age(s, 6 * 60_000);
+    const req = s.askOwner(item)!;
+    expect(req.ownerId).toBe(chey.id);
+    // Felipe's browser claims Chey's id in the answer, then tries to become Chey: neither works, and it stays Felipe's.
+    expect((await as(felipes)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
+    expect((await as(felipes)("/devices", { deviceId: "felipe-laptop", personId: chey.id })).status).toBe(200);
+    expect(await me(felipes)).toBe(felipe.id);
+    // One model: the device belongs to Felipe's window, and that window's devices are Felipe's.
+    expect(s.store.get("devices", "felipe-laptop")?.personId).toBe(felipe.id);
+    // Chey's browser can't take over the device Felipe's window registered (Phase 1's window-owned devices).
+    expect((await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: chey.id })).status).toBe(403);
+    expect((await as(felipes)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
+    // The unbound browser naming Chey can't answer either.
+    expect((await as(nobody)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
+    expect(s.showRequests()[0].status).toBe("pending");
+    expect(s.stage().lock?.personId).toBe(chey.id);
+    // Chey's own browser answers; the repeat is a clean refusal.
+    expect((await as(cheys)(`/show-requests/${req.id}`, { approve: false })).status).toBe(200);
+    expect((await as(cheys)(`/show-requests/${req.id}`, { approve: true })).status).toBe(404);
+
+    // The unbound browser picks who it is once; picking again doesn't move it. A removed person frees it to pick again.
+    const maya = s.upsertPerson({ name: "Maya" });
+    await as(nobody)("/devices", { deviceId: "phone", personId: maya.id });
+    expect(await me(nobody)).toBe(maya.id);
+    await as(nobody)("/devices", { deviceId: "phone", personId: chey.id });
+    expect(await me(nobody)).toBe(maya.id);
+    // Assigning another device in Settings never moves the caller's own credential.
+    await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: felipe.id });
+    expect(await me(cheys)).toBe(chey.id);
+    s.removePerson(maya.id);
+    await as(nobody)("/devices", { deviceId: "phone", personId: felipe.id });
+    expect(await me(nobody)).toBe(felipe.id);
+    // Someone who doesn't exist is never bound.
+    const fresh = browser("Tablet", null);
+    await as(fresh)("/devices", { deviceId: "tablet", personId: "per_nope" });
+    expect(await me(fresh)).toBeNull();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a named lock with no window of its owner's on record lets go after the grace period", () => {
+  const { s, chey } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  s.store.remove("devices", "chey-mac");
+  // Recently active: it stays.
+  s.store.setSetting("stage", { ...s.stage(), lock: { ...s.stage().lock!, lastActive: Date.now() - 60_000 } });
+  expect(s.lockOf()?.by).toBe("Chey");
+  s.store.setSetting("stage", { ...s.stage(), lock: { ...s.stage().lock!, lastActive: Date.now() - Session.LOCK_GONE_MS - 1000 } });
+  s.sweepLocks();
+  expect(s.stage().lock).toBeUndefined();
+  expect(s.stage().mode).toBe("spotlight");
+});
+
+test("a stopped hub's screen timers stop too: none of them touches its store after it closes", () => {
+  const { hub, s, chey } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const timers = () => [(s as any).lockSweep, (s as any).stageRevert, (s as any).shareSweep, ...(s as any).screenReverts.values()].filter(Boolean);
+  expect(timers().length).toBeGreaterThan(0);
+  hub.stop();
+  expect(timers()).toEqual([]);
+});

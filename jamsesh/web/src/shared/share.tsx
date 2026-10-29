@@ -217,6 +217,26 @@ interface Request {
   kind: Share["kind"];
   reason: string;
   by: string;
+  /** When the prompt arrived, and whether the room's state has listed it yet (it trails the prompt by a moment). */
+  at: number;
+  listed?: boolean;
+}
+
+/** How long a prompt waits for the room's state to list its request before it counts as gone. */
+const UNLISTED_MS = 10_000;
+
+/**
+ * The prompts still worth asking: a request the state lists as waiting. One it no longer lists was
+ * answered, declined or timed out (here, in another window, or by the host), unless it is so new the
+ * state hasn't caught up.
+ */
+export function waitingRequests(queue: Request[], shares: Share[], now = Date.now()): Request[] {
+  const next = queue.flatMap((r) => {
+    const sh = shares.find((s) => s.id === r.shareId);
+    if (sh) return sh.status === "requested" ? [r.listed ? r : { ...r, listed: true }] : [];
+    return !r.listed && now - r.at < UNLISTED_MS ? [r] : [];
+  });
+  return next.length === queue.length && next.every((r, i) => r === queue[i]) ? queue : next;
 }
 
 export function ShareRequestPrompt() {
@@ -231,22 +251,20 @@ export function ShareRequestPrompt() {
       if (m?.type !== "share-request" || !m.deviceIds?.includes(hub.deviceId)) return;
       // They already said yes to this: answer with the share that is running instead of asking again.
       if (activePublication(m.kind)) return void startShare(m.kind, m.shareId).catch(() => {});
-      setQueue((q) => (q.some((r) => r.shareId === m.shareId) ? q : [...q, { shareId: m.shareId, kind: m.kind, reason: m.reason, by: m.by }]));
+      setQueue((q) => (q.some((r) => r.shareId === m.shareId) ? q : [...q, { shareId: m.shareId, kind: m.kind, reason: m.reason, by: m.by, at: Date.now() }]));
     });
     return () => void off();
   }, []);
 
-  // A request answered elsewhere (another window of mine, the host, a timeout) goes away.
+  // A request answered elsewhere (another window of mine, the host, a timeout) goes away; so does
+  // one the state never listed, once it has had time to.
   useEffect(() => {
     if (!state) return;
-    setQueue((q) => {
-      const next = q.filter((r) => {
-        const sh = state.shares.find((s) => s.id === r.shareId);
-        return !sh || sh.status === "requested";
-      });
-      return next.length === q.length ? q : next;
-    });
-  }, [state]);
+    setQueue((q) => waitingRequests(q, state.shares));
+    if (!queue.some((r) => !r.listed)) return;
+    const t = setTimeout(() => setQueue((q) => waitingRequests(q, state.shares)), UNLISTED_MS);
+    return () => clearTimeout(t);
+  }, [state, queue]);
 
   const req = queue[0];
   const pop = useCallback(() => {

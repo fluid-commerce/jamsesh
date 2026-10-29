@@ -2,16 +2,19 @@
 // AGENTS.md, hooks do nothing for a chat that never called jam_join, and chats are told apart even in
 // one folder. A wrongly joined agent can be removed, with what it caused.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
-import { STRIP_BLOCK_PL, hookScript, joinScript } from "../src/install-scripts";
+import { OLD_BLOCKS, STRIP_BLOCK_PL, hookScript, joinScript } from "../src/install-scripts";
 import { Session } from "../src/session";
 import { Store } from "../src/store";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "jam-join-"));
-const BLOCK = `<!-- jamsesh:start -->\n## JamSesh\n\nWhen your person says "connect to jamsesh", read it.\n<!-- jamsesh:end -->\n`;
+// The blocks earlier installs wrote, exactly: the longer one, then the first.
+const [LONG, SHORT] = OLD_BLOCKS;
+const block = (b: string) => `${b}\n`;
+const BLOCK = block(LONG);
 
 async function strip(content: string | null) {
   const file = join(tmp(), "AGENTS.md");
@@ -49,7 +52,34 @@ describe("removing the block an earlier install wrote", () => {
     expect(await strip(text)).toBe(text);
   });
   test("two blocks both go", async () => {
-    expect(await strip(`a\n${BLOCK}b\n${BLOCK}`)).toBe("a\nb\n");
+    expect(await strip(`a\n${BLOCK}b\n${block(SHORT)}`)).toBe("a\nb\n");
+  });
+  test("only the exact block goes: an edited one, an indented one, or the markers alone stay", async () => {
+    const edited = BLOCK.replace("host or join a session.", "host or join a session. Also: my own rule.");
+    for (const text of [`# Mine\n\n${edited}`, `# Mine\n\n${BLOCK.replace(/^/gm, "  ")}`, "a\n<!-- jamsesh:start -->\nmy notes\n<!-- jamsesh:end -->\nb\n", `x ${BLOCK}`])
+      expect(await strip(text)).toBe(text);
+  });
+  test("blank lines and indentation around the block stay byte for byte", async () => {
+    expect(await strip(`# Mine\n\n\n${BLOCK}\n\n  indented rule\n\t\n`)).toBe("# Mine\n\n\n\n\n  indented rule\n\t\n");
+    expect(await strip(`  - item\n${BLOCK}    - next\n`)).toBe("  - item\n    - next\n");
+  });
+  test("a symlinked file is edited at its target and stays a symlink", async () => {
+    const d = tmp();
+    const target = join(d, "shared-instructions.md");
+    writeFileSync(target, `# Shared\n\n${BLOCK}`, { mode: 0o640 });
+    const link = join(d, "CLAUDE.md");
+    symlinkSync(target, link);
+    const proc = Bun.spawn(["perl", "-", link], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe" });
+    expect(await proc.exited).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(target);
+    expect(readFileSync(target, "utf8")).toBe("# Shared\n");
+    expect(statSync(target).mode & 0o777).toBe(0o640);
+    // A link whose target was only the block keeps the link, now to an empty file.
+    writeFileSync(target, BLOCK);
+    expect(await Bun.spawn(["perl", "-", link], { stdin: new Blob([STRIP_BLOCK_PL]) }).exited).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(link, "utf8")).toBe("");
   });
 });
 
@@ -169,11 +199,16 @@ describe("chats are separate agents", () => {
     const hub = { session: fresh() } as unknown as Hub;
     const a = join_(hub.session, "chat-a").agent;
     join_(hub.session, "chat-b", "codex");
-    expect(Hub.prototype.hookAgent.call(hub, { session_id: "chat-a", cwd: "/Users/j/fluid" }, "127.0.0.1")?.id).toBe(a.id);
-    expect(Hub.prototype.hookAgent.call(hub, { session_id: "chat-other", cwd: "/Users/j/fluid" }, "127.0.0.1")).toBeUndefined();
-    expect(Hub.prototype.hookAgent.call(hub, { cwd: "/Users/j/fluid" }, "127.0.0.1")).toBeUndefined();
+    const find = (body: object, machine: string | null = "host") => Hub.prototype.hookAgent.call(hub, body, "127.0.0.1", machine);
+    expect(find({ session_id: "chat-a", cwd: "/Users/j/fluid" })?.id).toBe(a.id);
+    expect(find({ session_id: "chat-other", cwd: "/Users/j/fluid" })).toBeUndefined();
+    expect(find({ cwd: "/Users/j/fluid" })).toBeUndefined();
     // A Codex connection has no hook; its id never answers one.
-    expect(Hub.prototype.hookAgent.call(hub, { session_id: "chat-b" }, "127.0.0.1")).toBeUndefined();
+    expect(find({ session_id: "chat-b" })).toBeUndefined();
+    // Nor does the chat answer a hook from another machine's credential, or one with no machine at all.
+    expect(find({ session_id: "chat-a" }, "dev_other")).toBeUndefined();
+    expect(find({ session_id: "chat-a" }, null)).toBeUndefined();
+    expect(find({ agentId: a.id }, "host")).toBeUndefined();
   });
 });
 
@@ -192,16 +227,34 @@ describe("joining is announced, and an accidental join can be removed", () => {
     const { agent } = s.registerAgent({ ownerName: "Jonathan", harness: "codex", repo: "fluid", cwd: "/Users/j/fluid", machine: "host", platform: "web", chatId: "mcp:1" });
     const keep = s.store.addEvent({ kind: "speech", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "let's build it" });
     s.postUpdate(agent.id, "progress", "refactoring the cart", { workstream: "Cart" });
-    s.store.addEvent({ kind: "prompt", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "unrelated prompt", data: { agentId: agent.id } });
+    const prompt = s.store.addEvent({ kind: "prompt", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "unrelated prompt", data: { agentId: agent.id } });
     const gone = s.removeAgent(agent.id, { purge: true });
     expect(gone.removed).toBe(true);
-    expect(gone.events).toBeGreaterThanOrEqual(3);
+    expect(gone.events).toBeGreaterThanOrEqual(2);
     expect(s.agent(agent.id)).toBeUndefined();
-    expect(s.store.recentEvents().filter((e) => e.authorType !== "system").map((e) => e.id)).toEqual([keep.id]);
+    expect(s.store.recentEvents().filter((e) => e.authorType !== "system").map((e) => e.id)).toEqual([keep.id, prompt.id]); // the person's own prompt stays
     expect(s.store.recentEvents().some((e) => e.kind === "join")).toBe(false);
     expect(s.store.all("workstreams").every((w) => w.ownerAgentId !== agent.id)).toBe(true);
     expect(s.store.searchEvents("cart")).toEqual([]);
     expect(s.removeAgent(agent.id).removed).toBe(false);
+  });
+
+  test("purge deletes only what the agent authored: its events and long documents, not messages to it or its person's prompts", () => {
+    const s = new Session(new Store(tmp()));
+    const person = s.upsertPerson({ name: "Jonathan" });
+    const { agent } = s.registerAgent({ ownerName: "Jonathan", harness: "codex", repo: "fluid", cwd: "/Users/j/fluid", machine: "host", platform: "web", chatId: "mcp:1" });
+    const other = s.registerAgent({ ownerName: "Chey", harness: "codex", repo: "api", cwd: "/Users/c/api", machine: "host", platform: "web", chatId: "mcp:2" }).agent;
+    s.postUpdate(agent.id, "progress", "long ".repeat(400));
+    expect(s.store.all("documents").filter((d) => d.authorId === agent.id)).toHaveLength(1);
+    s.postUpdate(other.id, "progress", "other agent's long ".repeat(200));
+    s.sendMessage(other.id, agent.id, "heads up from the other agent");
+    s.store.addEvent({ kind: "prompt", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "a prompt Jonathan wrote", data: { agentId: agent.id } });
+    s.removeAgent(agent.id, { purge: true });
+    const texts = s.store.recentEvents().map((e) => e.text);
+    expect(texts).toContain("heads up from the other agent");
+    expect(texts).toContain("a prompt Jonathan wrote");
+    expect(texts.some((t) => t.startsWith("long long"))).toBe(false);
+    expect(s.store.all("documents").map((d) => d.authorId)).toEqual([other.id]);
   });
 
   test("without purge the agent goes and its history stays", () => {

@@ -26,6 +26,8 @@ export interface Device {
   micOn: boolean;
   level: number;
   lastSeen: number;
+  /** The window that registered it: its pairing id, or "host" for the host's own windows. Only that window starts or ends its shares. */
+  pairedId?: string;
 }
 
 export type Harness = "claude-code" | "codex" | "other";
@@ -57,6 +59,17 @@ export interface Agent {
   role?: "worker" | "observer";
   /** An observer can opt out of room-wide messages (to "all"); absent means it gets them. */
   broadcasts?: boolean;
+}
+
+/** A chat the room removed (Session.removedChats): kept out until a person lets it back in. */
+export interface RemovedChat {
+  id: string;
+  agentId: string;
+  chatId: string | null;
+  machine: string;
+  name: string;
+  ownerName: string;
+  at: number;
 }
 
 export interface RepoCard {
@@ -129,8 +142,10 @@ export interface Directive {
   updatedAt: number;
   /** When JamSesh asked each target how it's going (an open task with no progress for a while). */
   nudgedAt?: Record<string, number>;
-  /** When the room was offered a reassignment; the tile shows a Reassign button until the task moves. */
-  reassignOfferedAt?: number;
+  /** Per target: when it last showed progress on this task (delivery, ack, a linked update, a status change). */
+  signs?: Record<string, number>;
+  /** Per target: when the room was offered a reassignment; that target's tile shows a Reassign button until it resumes or the task moves. */
+  reassignOfferedAt?: Record<string, number>;
 }
 
 export type ArtifactKind = "frame" | "screenshot" | "devserver" | "html" | "note";

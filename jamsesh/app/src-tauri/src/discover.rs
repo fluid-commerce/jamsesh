@@ -176,9 +176,10 @@ impl Hosts {
 }
 
 fn answers(f: &Found) -> bool {
-    f.url.trim_start_matches("http://").parse::<std::net::SocketAddr>().is_ok_and(|addr| {
-        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)).is_ok()
-    })
+    f.url
+        .trim_start_matches("http://")
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|addr| std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)).is_ok())
 }
 
 /// Browses in the background for as long as the app runs.

@@ -107,13 +107,27 @@ impl Setup {
         std::fs::read(dir.join("screens.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
-    pub fn save(&self, dir: &std::path::Path) {
-        let _ = std::fs::create_dir_all(dir);
-        let Ok(json) = serde_json::to_vec_pretty(self) else { return };
+    pub fn save(&self, dir: &std::path::Path) -> Result<(), String> {
+        let failed = |e: std::io::Error| format!("Couldn't save the screen setup: {e}");
+        std::fs::create_dir_all(dir).map_err(failed)?;
+        let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         let tmp = dir.join("screens.json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, dir.join("screens.json"));
+        std::fs::write(&tmp, json).map_err(failed)?;
+        std::fs::rename(&tmp, dir.join("screens.json")).map_err(failed)
+    }
+
+    /// The choices for these displays, and whether the person saved this very set. A set not saved
+    /// yet (a TV unplugged, or a new one plugged in) takes each known display's choice from the saved
+    /// set that shares the most displays with it, so the screens still there keep their numbers,
+    /// names, stages and history; only the new ones get defaults.
+    pub fn choices(&self, ds: &[Display]) -> (Option<Saved>, bool) {
+        if let Some(saved) = self.sets.get(&set_key(ds)) {
+            return (Some(saved.clone()), true);
         }
+        let mut ranked: Vec<&Saved> = self.sets.values().collect();
+        ranked.sort_by_key(|s| std::cmp::Reverse(ds.iter().filter(|d| s.contains_key(&d.key)).count()));
+        let inherited: Saved = ds.iter().filter_map(|d| ranked.iter().find_map(|s| s.get(&d.key)).map(|c| (d.key.clone(), c.clone()))).collect();
+        (if inherited.is_empty() { None } else { Some(inherited) }, false)
     }
 }
 
@@ -212,7 +226,12 @@ pub fn resolve(ds: &[Display], saved: Option<&Saved>, userless: bool) -> Vec<Scr
         v.sort_by_key(|&i| !ds[i].raw.primary);
         v
     };
-    let main = by_pref.iter().copied().find(|&i| roles[i] == Role::Main).or_else(|| by_pref.iter().copied().find(|&i| roles[i] == Role::Extra)).unwrap_or(by_pref[0]);
+    let main = by_pref
+        .iter()
+        .copied()
+        .find(|&i| roles[i] == Role::Main)
+        .or_else(|| by_pref.iter().copied().find(|&i| roles[i] == Role::Extra))
+        .unwrap_or(by_pref[0]);
     for (i, r) in roles.iter_mut().enumerate() {
         if i == main {
             *r = Role::Main;
@@ -328,10 +347,11 @@ pub struct SetupView {
     confirmed: bool,
 }
 
-pub fn view(ds: &[Display], saved: Option<&Saved>, userless: bool) -> SetupView {
+/// `confirmed`: the person saved a setup for exactly these displays.
+pub fn view(ds: &[Display], saved: Option<&Saved>, confirmed: bool, userless: bool) -> SetupView {
     let screens = resolve(ds, saved, userless);
     SetupView {
-        confirmed: saved.is_some(),
+        confirmed,
         displays: ds
             .iter()
             .enumerate()
@@ -401,7 +421,12 @@ fn read_displays(app: &AppHandle) -> Vec<Display> {
             let s = if m.scale_factor() > 0.0 { m.scale_factor() } else { 1.0 };
             Raw {
                 name: m.name().cloned().unwrap_or_else(|| "Display".into()),
-                rect: Rect { x: m.position().x as f64 / s, y: m.position().y as f64 / s, w: m.size().width as f64 / s, h: m.size().height as f64 / s },
+                rect: Rect {
+                    x: m.position().x as f64 / s,
+                    y: m.position().y as f64 / s,
+                    w: m.size().width as f64 / s,
+                    h: m.size().height as f64 / s,
+                },
                 scale: s,
                 primary: Some((m.position().x, m.position().y)) == primary,
             }
@@ -454,7 +479,7 @@ pub async fn arrange(app: &AppHandle, origin: &str) -> Result<Vec<Screen>, Strin
         let inner = state.inner.lock().await;
         (inner.cfg.userless, Setup::load(&state.dir))
     };
-    let screens = resolve(&ds, setup.sets.get(&set_key(&ds)), userless);
+    let screens = resolve(&ds, setup.choices(&ds).0.as_ref(), userless);
     if screens.is_empty() {
         return Ok(screens);
     }
@@ -490,7 +515,8 @@ pub async fn arrange(app: &AppHandle, origin: &str) -> Result<Vec<Screen>, Strin
 async fn tell_hub(origin: &str, screens: &[Screen]) {
     let list: Vec<serde_json::Value> = screens.iter().map(|s| serde_json::json!({ "id": s.id, "name": s.name, "role": s.role })).collect();
     let body = serde_json::json!({ "screens": list }).to_string();
-    let _ = proxy::send("POST", origin, "/api/screens/config", None, &body).await;
+    // As this app's window: only the host's own windows name the room's screens.
+    let _ = proxy::send_as_window("POST", origin, "/api/screens/config", &body).await;
 }
 
 /// First time this Mac sees these displays while hosting: show the setup (the defaults are already
@@ -595,8 +621,8 @@ pub fn open_setup(app: &AppHandle) {
 pub async fn screens_state(app: AppHandle, state: State<'_, Arc<App>>) -> Result<SetupView, String> {
     let ds = read_displays(&app);
     let userless = state.inner.lock().await.cfg.userless;
-    let setup = Setup::load(&state.dir);
-    Ok(view(&ds, setup.sets.get(&set_key(&ds)), userless))
+    let (saved, confirmed) = Setup::load(&state.dir).choices(&ds);
+    Ok(view(&ds, saved.as_ref(), confirmed, userless))
 }
 
 /// What the setup would look like with these picks (names by position follow the roles), unsaved.
@@ -604,9 +630,8 @@ pub async fn screens_state(app: AppHandle, state: State<'_, Arc<App>>) -> Result
 pub async fn screens_preview(app: AppHandle, state: State<'_, Arc<App>>, picks: Vec<Pick>) -> Result<SetupView, String> {
     let ds = read_displays(&app);
     let userless = state.inner.lock().await.cfg.userless;
-    let setup = Setup::load(&state.dir);
-    let old = setup.sets.get(&set_key(&ds));
-    Ok(view(&ds, Some(&merge(&ds, &picks, old, userless)), userless))
+    let (old, _) = Setup::load(&state.dir).choices(&ds);
+    Ok(view(&ds, Some(&merge(&ds, &picks, old.as_ref(), userless)), true, userless))
 }
 
 /// Saves the picks for the displays there are now, and puts the windows where they say.
@@ -619,13 +644,14 @@ pub async fn screens_save(app: AppHandle, state: State<'_, Arc<App>>, picks: Vec
     };
     let mut setup = Setup::load(&state.dir);
     let key = set_key(&ds);
-    let saved = merge(&ds, &picks, setup.sets.get(&key), userless);
+    // Numbers come from what these displays had (in this set or the one they were part of).
+    let saved = merge(&ds, &picks, setup.choices(&ds).0.as_ref(), userless);
     setup.sets.insert(key.clone(), saved);
-    setup.save(&state.dir);
+    setup.save(&state.dir)?;
     if let Some(origin) = origin {
         arrange(&app, &origin).await?;
     }
-    Ok(view(&ds, setup.sets.get(&key), userless))
+    Ok(view(&ds, setup.sets.get(&key), true, userless))
 }
 
 /// Flashes each display's number, big, on that display, for a few seconds.
@@ -800,30 +826,42 @@ mod tests {
     }
 
     #[test]
-    fn a_tv_unplugged_leaves_the_others_ids_alone() {
-        let ds = displays(vec![tv(0.0, 0.0), raw("Sony", 1920.0, 0.0, 1920.0, 1080.0, 1.0, false), raw("LG", 3840.0, 0.0, 1920.0, 1080.0, 1.0, false)]);
-        let picks: Vec<Pick> = ds
+    fn a_tv_unplugged_and_plugged_back_in_leaves_the_others_ids_and_names_alone() {
+        // The setup lookup `arrange` and the setup page use, through the unplug and replug sequence.
+        let sony = || raw("Sony", 1920.0, 0.0, 1920.0, 1080.0, 1.0, false);
+        let lg = |x: f64| raw("LG", x, 0.0, 1920.0, 1080.0, 1.0, false);
+        let all = displays(vec![tv(0.0, 0.0), sony(), lg(3840.0)]);
+        let picks: Vec<Pick> = all
             .iter()
             .enumerate()
-            .map(|(i, d)| Pick { key: d.key.clone(), role: if i == 0 { Role::Main } else { Role::Extra }, name: None })
+            .map(|(i, d)| Pick { key: d.key.clone(), role: if i == 0 { Role::Main } else { Role::Extra }, name: (i == 2).then(|| "Kitchen".into()) })
             .collect();
-        let saved = merge(&ds, &picks, None, false);
-        assert_eq!(saved[&ds[1].key].slot, Some(2));
-        assert_eq!(saved[&ds[2].key].slot, Some(3));
-        // The Sony goes away: the LG is still screen-3 (its stage and history stay with it).
-        let after = displays(vec![tv(0.0, 0.0), raw("LG", 1920.0, 0.0, 1920.0, 1080.0, 1.0, false)]);
-        let mut remembered = Saved::new();
-        for d in &after {
-            if let Some(c) = saved.get(&d.key) {
-                remembered.insert(d.key.clone(), c.clone());
-            }
-        }
-        let s = resolve(&after, Some(&remembered), false);
-        assert_eq!(s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["main", "screen-3"]);
-        // And a newly plugged one takes the free number.
-        let again = displays(vec![tv(0.0, 0.0), raw("LG", 1920.0, 0.0, 1920.0, 1080.0, 1.0, false), raw("Vizio", 3840.0, 0.0, 1920.0, 1080.0, 1.0, false)]);
-        let s = resolve(&again, Some(&remembered), false);
-        assert_eq!(s.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["main", "screen-3", "screen-2"]);
+        let mut setup = Setup::default();
+        setup.sets.insert(set_key(&all), merge(&all, &picks, setup.choices(&all).0.as_ref(), false));
+        let screens = |setup: &Setup, ds: &[Display]| ids(&resolve(ds, setup.choices(ds).0.as_ref(), false));
+        assert_eq!(screens(&setup, &all), ["main:Left TV", "screen-2:Middle TV", "screen-3:Kitchen"]);
+        // The Sony goes away: the LG is still screen-3 and still the Kitchen (its stage and history stay with it).
+        let without = displays(vec![tv(0.0, 0.0), lg(1920.0)]);
+        let (inherited, confirmed) = setup.choices(&without);
+        assert!(!confirmed);
+        assert!(inherited.is_some());
+        assert_eq!(screens(&setup, &without), ["main:Left TV", "screen-3:Kitchen"]);
+        // A new TV in the Sony's place takes the free number; nobody else moves.
+        let vizio = displays(vec![tv(0.0, 0.0), lg(1920.0), raw("Vizio", 3840.0, 0.0, 1920.0, 1080.0, 1.0, false)]);
+        assert_eq!(screens(&setup, &vizio)[1..], ["screen-3:Kitchen".to_string(), "screen-2:Right TV".to_string()]);
+        // Saving the smaller set keeps the LG's number; plugging the Sony back in finds the first setup again.
+        let picks: Vec<Pick> = without
+            .iter()
+            .map(|d| Pick { key: d.key.clone(), role: if d.raw.name == "LG" { Role::Extra } else { Role::Main }, name: None })
+            .collect();
+        let saved = merge(&without, &picks, setup.choices(&without).0.as_ref(), false);
+        setup.sets.insert(set_key(&without), saved);
+        assert_eq!(screens(&setup, &without), ["main:Left TV", "screen-3:Right TV"]);
+        assert_eq!(screens(&setup, &all), ["main:Left TV", "screen-2:Middle TV", "screen-3:Kitchen"]);
+        assert!(setup.choices(&all).1);
+        // Displays never seen before: no choices, the defaults.
+        assert_eq!(Setup::default().choices(&all), (None, false));
+        assert_eq!(setup.choices(&displays(vec![raw("Projector", 0.0, 0.0, 1280.0, 720.0, 1.0, true)])), (None, false));
     }
 
     #[test]
@@ -875,13 +913,17 @@ mod tests {
     #[test]
     fn the_setup_view_lists_every_display_and_remembers_nothing_until_saved() {
         let ds = displays(vec![laptop(), tv(1512.0, 0.0)]);
-        let v = view(&ds, None, false);
+        let v = view(&ds, None, false, false);
         assert!(!v.confirmed);
         assert_eq!(v.displays.len(), 2);
         assert_eq!(v.displays[0].role, Role::Unused);
         assert_eq!(v.displays[1].role, Role::Main);
         assert_eq!(v.displays[1].id, "main");
-        let picks = vec![Pick { key: ds[0].key.clone(), role: Role::Extra, name: Some("  Desk  ".into()) }, Pick { key: ds[1].key.clone(), role: Role::Main, name: Some("".into()) }, Pick { key: "gone".into(), role: Role::Main, name: None }];
+        let picks = vec![
+            Pick { key: ds[0].key.clone(), role: Role::Extra, name: Some("  Desk  ".into()) },
+            Pick { key: ds[1].key.clone(), role: Role::Main, name: Some("".into()) },
+            Pick { key: "gone".into(), role: Role::Main, name: None },
+        ];
         let saved = merge(&ds, &picks, None, false);
         assert_eq!(saved.len(), 2);
         assert_eq!(saved[&ds[0].key].name.as_deref(), Some("Desk"));
@@ -895,11 +937,16 @@ mod tests {
         let ds = displays(vec![laptop(), tv(1512.0, 0.0)]);
         let mut setup = Setup::default();
         setup.sets.insert(set_key(&ds), merge(&ds, &[Pick { key: ds[1].key.clone(), role: Role::Main, name: Some("Left TV".into()) }], None, false));
-        setup.save(&dir);
+        setup.save(&dir).unwrap();
         let back = Setup::load(&dir);
         assert_eq!(back.sets.len(), 1);
         assert_eq!(back.sets[&set_key(&ds)][&ds[1].key].name.as_deref(), Some("Left TV"));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(Setup::load(&dir).sets.is_empty());
+        // A folder that can't be written says so instead of reporting the setup as saved.
+        let blocked = std::env::temp_dir().join(format!("jamsesh-screens-blocked-{}", std::process::id()));
+        std::fs::write(&blocked, "a file, not a folder").unwrap();
+        assert!(setup.save(&blocked.join("app")).unwrap_err().starts_with("Couldn't save the screen setup"));
+        let _ = std::fs::remove_file(&blocked);
     }
 }

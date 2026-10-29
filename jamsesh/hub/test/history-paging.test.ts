@@ -86,3 +86,18 @@ test("jam_artifacts and jam_directives page and say how many more there are", as
   const search = (await hub.mcp.call(ctx, "jam_search", { query: "line", limit: 20 })).content[0] as any;
   expect(search.text).toContain("offset 20");
 });
+
+test("a state window with nothing the feed shows still pages back to older speech", async () => {
+  // The newest 250 events are canvas noise; the speech is all older.
+  for (let i = 0; i < 260; i++) s.store.addEvent({ kind: "canvas", authorType: "system", authorName: "Canvas", text: `edit ${i}` });
+  const st = s.state();
+  const feed = new Set(["speech", "prompt", "directive", "decision", "brain", "update", "message", "artifact"]);
+  expect(st.events.some((e) => feed.has(e.kind))).toBe(false);
+  // The window's own oldest event is the cursor (what the web feed now uses).
+  const cursor = Math.min(...st.events.map((e) => e.id));
+  const page = await get(`/history/events?before=${cursor}&limit=60&kinds=${[...feed].join(",")}`);
+  expect(page.items.length).toBe(60);
+  expect(page.items.every((e: any) => feed.has(e.kind))).toBe(true);
+  expect(page.items.at(-1).text).toBe("line 299");
+  expect(page.more).toBeGreaterThan(0);
+});
