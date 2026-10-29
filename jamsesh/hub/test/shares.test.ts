@@ -424,6 +424,36 @@ describe("share calls act only for the window that made them", () => {
     await closed(raeWs.ws);
   });
 
+  test("a socket opened for a device before another window registers it loses that device", async () => {
+    const open = (token: string, device: string) =>
+      new Promise<{ ws: WebSocket; got: any[] }>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=${device}`, { headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${token}` } } as any);
+        const got: any[] = [];
+        ws.onmessage = (e) => got.push(JSON.parse(String(e.data)));
+        ws.onopen = () => resolve({ ws, got });
+        ws.onerror = reject;
+      });
+    const closed = (ws: WebSocket) => new Promise((r) => ((ws.onclose = r), ws.close()));
+    // Rae's window grabs an id nobody has registered yet; then Felipe's new window registers it.
+    const early = await open(raeLaptop.token, "dev-felipe-tablet");
+    await register(felipeLaptop.token, "dev-felipe-tablet", felipe.id);
+    const real = await open(felipeLaptop.token, "dev-felipe-tablet");
+    const listener = await open(raeLaptop.token, "dev-rae");
+    const sh = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe-tablet", kind: "screen" })).json();
+    early.ws.send(JSON.stringify({ type: "rtc", to: "dev-rae", data: { op: "offer", shareId: sh.id, pc: "x", sdp: "fake" } }));
+    // Signaling addressed to the device reaches only its owner's socket.
+    listener.ws.send(JSON.stringify({ type: "rtc", to: "dev-felipe-tablet", data: { op: "want", shareId: sh.id } }));
+    await Bun.sleep(100);
+    expect(listener.got.filter((m) => m.type === "rtc")).toEqual([]);
+    expect(early.got.filter((m) => m.type === "rtc")).toEqual([]);
+    expect(real.got.filter((m) => m.type === "rtc")).toHaveLength(1);
+    await closed(early.ws);
+    await Bun.sleep(50);
+    expect(s.store.get("shares", sh.id)?.status).toBe("live");
+    await closed(real.ws);
+    await closed(listener.ws);
+  });
+
   test("the same person sharing from their second window replaces the first, over HTTP", async () => {
     const one = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen" })).json();
     const two = await (await call(felipePhone.token, "POST", "/shares", { deviceId: "dev-felipe-phone", kind: "screen" })).json();
