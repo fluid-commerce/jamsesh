@@ -291,8 +291,9 @@ export function mayReplace(path: string) {
   if (chosen && real(chosen) === real(path)) return false;
   try {
     lstatSync(path);
-  } catch {
-    return true;
+  } catch (e) {
+    // Only "nothing there" frees the path; a folder it can't read (EACCES, ENOTDIR, ...) may hide someone's file.
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT";
   }
   return ownDownload(path);
 }

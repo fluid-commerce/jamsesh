@@ -112,6 +112,15 @@ test("a rejected Whisper model is deleted only when it is the very file JamSesh 
     // Nothing there: free to write. Chosen by the person, even before it exists: never.
     rmSync(own);
     expect(mayReplace(own)).toBe(true);
+    // Any other reason it can't be looked at isn't "nothing there": a path through a file (ENOTDIR), a loop.
+    const notDir = join(models, "plain-file");
+    writeFileSync(notDir, "x");
+    expect(mayReplace(join(notDir, WHISPER_MODEL.name))).toBe(false);
+    rmSync(notDir);
+    const loop = join(models, "loop");
+    symlinkSync(loop, loop);
+    expect(mayReplace(join(loop, WHISPER_MODEL.name))).toBe(false);
+    rmSync(loop);
     process.env.JAMSESH_WHISPER_MODEL = own;
     expect(mayReplace(own)).toBe(false);
     delete process.env.JAMSESH_WHISPER_MODEL;
