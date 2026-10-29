@@ -219,12 +219,13 @@ export class Canvas {
   }
 
   private async startHost() {
-    const participant = this.spawnParticipant(join(this.filesDir, "host"));
-    const host = await participant.init().catch((e) => {
-      participant.close(); // a process whose start failed doesn't linger
+    const host = this.spawnParticipant(join(this.filesDir, "host"));
+    this.host = host; // tracked from the moment it exists: a Stop during init closes it
+    this.checkRunning();
+    await host.init().catch((e) => {
+      host.close(); // a process whose start failed doesn't linger
       throw e;
     });
-    this.host = host; // from here on, stop() or the failed-start cleanup closes it
     this.checkRunning();
     await host.command("pref.userName", { name: "JamSesh" });
     this.checkRunning();

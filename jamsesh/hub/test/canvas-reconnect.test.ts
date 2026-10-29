@@ -385,3 +385,78 @@ test("a key helper that hangs is killed and reaped, and the start fails instead 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** A figcraft-cli stand-in: records its pid, then either answers the MCP handshake or never does. */
+async function fakeCli(answers: boolean) {
+  const { mkdtempSync, writeFileSync, chmodSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "jam-mcp-"));
+  const script = join(dir, "cli.ts");
+  writeFileSync(script, `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(join(dir, "pid"))}, String(process.pid));
+const answers = ${answers};
+let buf = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buf += new TextDecoder().decode(chunk);
+  let nl;
+  while ((nl = buf.indexOf("\\n")) >= 0) {
+    const m = JSON.parse(buf.slice(0, nl)); buf = buf.slice(nl + 1);
+    if (answers && m.id != null) console.log(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: m.method === "tools/list" ? { tools: [{ name: "t" }] } : {} }));
+  }
+}
+`);
+  const bin = join(dir, "figcraft-cli");
+  writeFileSync(bin, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+  chmodSync(bin, 0o755);
+  mkdirSync(join(dir, "files"));
+  return { dir, bin, pidFile: join(dir, "pid") };
+}
+const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function waitFor(fn: () => boolean, ms = 8000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end && !fn()) await Bun.sleep(50);
+  return fn();
+}
+
+test("the canvas participant works through the parent-watch wrapper (it still gets stdin)", async () => {
+  const { rmSync, readFileSync } = await import("node:fs");
+  const { FigcraftMcp } = await import("../src/canvas/figcraft-mcp");
+  const cli = await fakeCli(true);
+  const mcp = new FigcraftMcp(cli.bin, ["mcp"]);
+  try {
+    await mcp.init();
+    expect(mcp.tools.map((t) => t.name)).toEqual(["t"]);
+  } finally {
+    mcp.close();
+    const pid = Number(readFileSync(cli.pidFile, "utf8"));
+    expect(await waitFor(() => !isAlive(pid))).toBe(true);
+    rmSync(cli.dir, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("Stop while the host participant's MCP handshake is pending closes and reaps that process", async () => {
+  const { rmSync, readFileSync, existsSync } = await import("node:fs");
+  const { config } = await import("../src/config");
+  const cli = await fakeCli(false); // never answers initialize
+  const was = config.figcraftBin;
+  (config as any).figcraftBin = cli.bin;
+  const session: any = { canvas: { status: "off" }, setCanvas(i: any) { this.canvas = { ...this.canvas, ...i }; }, store: { setting: (_k: string, d: unknown) => d, setSetting() {} } };
+  const canvas: any = new Canvas(session);
+  canvas.filesDir = cli.dir + "/files";
+  canvas.stopped = false;
+  try {
+    const started = canvas.startHost().catch((e: Error) => e);
+    expect(await waitFor(() => existsSync(cli.pidFile))).toBe(true);
+    const pid = Number(readFileSync(cli.pidFile, "utf8"));
+    expect(isAlive(pid)).toBe(true);
+    canvas.stop();
+    const err = await started;
+    expect(err).toBeInstanceOf(Error);
+    expect(await waitFor(() => !isAlive(pid))).toBe(true);
+  } finally {
+    canvas.stop();
+    (config as any).figcraftBin = was;
+    rmSync(cli.dir, { recursive: true, force: true });
+  }
+}, 20_000);

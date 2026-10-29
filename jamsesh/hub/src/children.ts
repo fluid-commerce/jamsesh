@@ -11,7 +11,7 @@
 export function withParentWatch(cmd: string[], parentPid = process.pid): string[] {
   const script = [
     'parent=$1; shift',
-    '"$@" &',
+    '"$@" <&0 &', // a backgrounded command would otherwise lose stdin (the MCP child reads it)
     "child=$!",
     "trap 'kill $child 2>/dev/null; wait $child 2>/dev/null; exit 0' TERM INT HUP",
     'while kill -0 $child 2>/dev/null && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d \' \')" = "$parent" ]; do',

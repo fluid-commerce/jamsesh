@@ -1,6 +1,7 @@
 // A client for one headless `figcraft-cli mcp` process: newline-delimited
 // JSON-RPC 2.0 over stdio.
 import type { Subprocess } from "bun";
+import { withParentWatch } from "../children";
 
 export type McpContent =
   | { type: "text"; text: string }
@@ -21,7 +22,7 @@ export class FigcraftMcp {
   tools: { name: string; description?: string; inputSchema?: any }[] = [];
 
   constructor(bin: string, args: string[] = ["mcp"], env: Record<string, string> = {}) {
-    this.proc = Bun.spawn([bin, ...args], {
+    this.proc = Bun.spawn(withParentWatch([bin, ...args]), {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
