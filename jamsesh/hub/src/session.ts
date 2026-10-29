@@ -1389,6 +1389,8 @@ export class Session {
   static LOCK_IDLE_MS = 20 * 60_000;
   /** Gone from the room: no window of theirs has checked in for this long. */
   static LOCK_GONE_MS = 10 * 60_000;
+  /** Whether a window has a live connection (the HTTP layer supplies it). */
+  deviceOnline: (deviceId: string) => boolean = () => false;
 
   /** The lock on a screen, or null. A lock whose owner left or went quiet is let go on the way. */
   lockOf(screen = "main"): StageLock | null {
@@ -1406,8 +1408,11 @@ export class Session {
     if (now - lock.lastActive >= Session.LOCK_IDLE_MS) return true;
     if (!lock.personId) return false;
     if (!this.person(lock.personId)) return true;
-    const windows = this.store.all("devices").filter((d) => d.personId === lock.personId);
-    return windows.length > 0 && windows.every((d) => now - d.lastSeen > Session.LOCK_GONE_MS);
+    // The person at the host also has the host's own window, which carries no person of its own.
+    const atHost = lock.personId === this.store.setting<string>("hostPersonId", "");
+    const windows = this.store.all("devices").filter((d) => d.personId === lock.personId || (atHost && d.kind === "host"));
+    // A window with a live connection is here, however long since it last reported itself.
+    return windows.length > 0 && windows.every((d) => !this.deviceOnline(d.id) && now - d.lastSeen > Session.LOCK_GONE_MS);
   }
 
   /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. */

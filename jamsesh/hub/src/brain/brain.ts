@@ -462,6 +462,9 @@ export class Brain {
     const agentIds = () => new Set(s.agents().map((a) => a.id));
     const artifactIds = () => new Set(s.artifacts().map((a) => a.id));
     const host = this.host;
+    // A person who asked JamSesh directly (typed, or spoken to it by name) is putting this up on purpose: it's their cast and takes the lock.
+    const asker = batch.find((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct && e.authorId);
+    const castBy = asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {};
     const all = {
       cancel_directive: tool({
         description:
@@ -571,6 +574,7 @@ export class Brain {
             },
             "Room brain",
             screenId(i.screen),
+            castBy,
           );
           return "On screen.";
         },
@@ -600,7 +604,7 @@ export class Brain {
         execute: async (i) => {
           const held = this.lockBlock(screenId(i.screen), batch);
           if (held) return refuse(held);
-          s.setStage({ mode: "custom", title: i.title, html: i.html, pinned: false }, "Room brain", screenId(i.screen));
+          s.setStage({ mode: "custom", title: i.title, html: i.html, pinned: false }, "Room brain", screenId(i.screen), castBy);
           return "Showing the custom view.";
         },
       }),
@@ -719,7 +723,7 @@ export class Brain {
           const held = this.lockBlock(screenId(i.screen), batch);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain", screenId(i.screen));
+          s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain", screenId(i.screen), castBy);
           return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out (local URLs must be registered dev servers). If the room asked for something that isn't available, tell them briefly.` : ""}`;
         },
       }),
@@ -868,7 +872,7 @@ export class Brain {
           const held = this.lockBlock("main", batch);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.setStage({ ...all[key], pinned: false }, "Room brain");
+          s.setStage({ ...all[key] }, "Room brain", "main", castBy);
           return `On screen: ${key}.`;
         },
       }),

@@ -72,6 +72,7 @@ function isLocal(ip: string) {
 
 export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; key: string; serverName: string }[]): Server<WsData> {
   const s = hub.session;
+  s.deviceOnline = (id) => (sockets.get(id)?.size ?? 0) > 0;
 
   const tokenOf = (req: Request, url: URL) =>
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token") ?? url.searchParams.get("token");

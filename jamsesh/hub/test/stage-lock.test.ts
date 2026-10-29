@@ -416,3 +416,46 @@ test("history keeps at most 20 screens per screen", () => {
   expect(s.stageHistory().main).toHaveLength(Session.HISTORY_MAX);
   expect(s.stageHistory().main[0].label).toBe("Screen 29");
 });
+
+test("a direct request to JamSesh is a person's cast and locks to them; overheard talk and the brain's own moves don't", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  const direct = (who: { id: string; name: string }, text: string) => ({ ...said(who, text), data: { direct: true } }) as JamEvent;
+  expect(await tools([direct(chey, "JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
+  expect(s.stage().lock).toMatchObject({ by: "Chey", personId: chey.id });
+  expect(s.stage().by).toBe("Room brain");
+  s.unlockStage();
+  await tools([direct(felipe, "put up a custom view")]).build_custom_view.execute({ title: "x", html: "<p>x</p>" });
+  expect(s.stage().lock?.by).toBe("Felipe");
+  s.unlockStage();
+  s.saveLayout("review");
+  s.setStage({ mode: "agents" }, "Room brain");
+  await tools([direct(chey, "bring back the review layout")]).show_saved_layout.execute({ name: "review" });
+  expect(s.stage().mode).toBe("custom");
+  expect(s.stage().lock?.by).toBe("Chey");
+  s.unlockStage();
+  // Overheard, or the brain acting alone: no lock.
+  await tools([said(felipe, "show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] });
+  expect(s.stage().items).toEqual([a.id]);
+  expect(s.stage().lock).toBeUndefined();
+  await tools().show_on_screen.execute({ mode: "agents" });
+  expect(s.stage().lock).toBeUndefined();
+  // An agent's typed prompt to its own agent is not a request to the brain.
+  const prompt = { ...direct(chey, "show it"), kind: "prompt" } as JamEvent;
+  await tools([prompt]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] });
+  expect(s.stage().lock).toBeUndefined();
+});
+
+test("the person at the host keeps their lock while the host's window is connected, and loses it when every window is gone", () => {
+  const { s, chey } = room();
+  s.store.setSetting("hostPersonId", chey.id);
+  s.touchDevice("host", { label: "Room mic (host)", kind: "host" });
+  s.store.put("devices", { ...s.store.get("devices", "chey-mac")!, lastSeen: Date.now() - 30 * 60_000 });
+  s.store.put("devices", { ...s.store.get("devices", "host")!, lastSeen: Date.now() - 30 * 60_000 });
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  s.deviceOnline = (id) => id === "host";
+  expect(s.lockOf()?.by).toBe("Chey");
+  s.deviceOnline = () => false;
+  expect(s.lockOf()).toBeNull();
+});
