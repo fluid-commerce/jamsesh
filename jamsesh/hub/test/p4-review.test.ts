@@ -63,7 +63,12 @@ function room(dataDir = join(dir, String(Math.random()))) {
   const mobile = reg("Chey", "acme/mobile", "mobile");
   const said = (who: { id: string; name: string }, text: string, data: Record<string, any> = {}) => s.store.addEvent({ kind: "speech", authorType: "person", authorId: who.id, authorName: who.name, text, relevance: "work", data });
   let n = 0;
-  const tools = (batch: any[], route: "direct" | "overheard" = "direct", files: boolean | "read" = false) => (hub.brain as any).tools(batch, { effects: 0 }, "person", route, files);
+  // `files`: the pass's lines carry a file (with no words for "read"), which is what the brain checks.
+  const tools = (batch: any[], route: "direct" | "overheard" = "direct", files: boolean | "read" = false) => {
+    const lines = files && !batch.length ? [said(chey, "")] : batch;
+    const withFile = files ? lines.map((e: any) => ({ ...e, data: { ...e.data, attachments: [{ id: "att_x", name: "x.md" }], ...(files === "read" ? { noWords: true } : {}) } })) : lines;
+    return (hub.brain as any).tools(withFile, { effects: 0 }, "person", route);
+  };
   const exec = (t: any, input: any) => t.execute(input, { toolCallId: String(n++), messages: [] });
   const messagesTo = (agentId: string) => s.store.recentEvents({ kinds: ["message"], limit: 100 }).filter((e) => e.data.to === agentId);
   return { hub, s, chey, felipe, desktop, mobile, said, tools, exec, messagesTo };
@@ -306,12 +311,15 @@ test("a context file with one malformed nested value seeds nothing; two sessions
   expect(writeProjectContext(home, p.slug, "newer", newer.s)).toBe(true);
   expect(writeProjectContext(home, p.slug, "older", older.s)).toBe(true);
   expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text).sort()).toEqual(["Left nav", "Newer session's call", "Older session's call"]);
-  // A database that isn't one is kept aside, not silently lost, and a new one started.
-  for (const ext of ["-wal", "-shm"]) rmSync(contextFile(home, p.slug) + ext, { force: true });
-  writeFileSync(contextFile(home, p.slug), "{ not json");
+  // A database that isn't one is left where it is, and the next generation starts from the export: nothing is lost.
+  const first = contextFile(home, p.slug);
+  for (const ext of ["-wal", "-shm"]) rmSync(first + ext, { force: true });
+  writeFileSync(first, "{ not json");
+  older.s.board.rememberNow({ text: "After the damage", kind: "decision", by: "Chey" });
   expect(writeProjectContext(home, p.slug, "older", older.s)).toBe(true);
-  expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).toContain("Older session's call");
-  expect(require("node:fs").readdirSync(join(home, "projects", p.slug)).some((f: string) => f.startsWith("context.db.unreadable-"))).toBe(true);
+  expect(contextFile(home, p.slug)).toEndWith("context-1.db");
+  expect(require("node:fs").readFileSync(first, "utf8")).toBe("{ not json");
+  expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text).sort()).toEqual(["After the damage", "Left nav", "Newer session's call", "Older session's call"]);
 });
 
 // ---------- 7. a PDF on its own: its words on the card, or a card a person has to word ----------
@@ -536,7 +544,6 @@ test("retiring the last carried fact empties the project's file, so the next ses
   expect(writeProjectContext(home, p.slug, "a", a.s)).toBe(true);
   const ctx = readProjectContext(home, p.slug)!;
   expect(ctx.facts).toEqual([]);
-  expect(ctx.activeAt).toBeGreaterThan(1);
   const b = room();
   seedFromProject(home, p.slug, "b", b.s);
   expect(b.s.facts().map((f) => f.text)).not.toContain("Use the top tabs");
@@ -687,7 +694,7 @@ test("an accepted fact is never cut to fit; the brain's brief is; a change past 
   expect(ctx.facts[0].text.length).toBe(9000);
   expect(ctx.facts[0].by.length).toBe(900);
   // Past the limits: nothing of it is written, and the save says it failed.
-  const huge = { session: "s2", facts: [{ id: "f_ok", changedAt: 5, status: "active" as const, kind: "fact" as const, text: "Fine", workstream: "", by: "", note: "", ts: 5 }, { id: "f_huge", changedAt: 5, status: "active" as const, kind: "fact" as const, text: "Y".repeat(30_000), workstream: "", by: "", note: "", ts: 5 }], workstreams: [], brief: null, people: [] };
+  const huge = { session: "s2", facts: [{ id: "f_ok", base: null, changedAt: 5, status: "active" as const, kind: "fact" as const, text: "Fine", workstream: "", by: "", note: "", ts: 5 }, { id: "f_huge", base: null, changedAt: 5, status: "active" as const, kind: "fact" as const, text: "Y".repeat(30_000), workstream: "", by: "", note: "", ts: 5 }], workstreams: [], brief: null, people: [] };
   expect(commitChanges(home, p.slug, huge)).toBe("failed");
   expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).not.toContain("Fine");
 });

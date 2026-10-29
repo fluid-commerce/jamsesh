@@ -138,7 +138,7 @@ test("with files, a failed or empty model pass never falls back to the keyword r
 
 // ---------- 2. overlapping sessions both keep what they settled ----------
 
-const fact = (id: string, text: string, at: number, status: "active" | "superseded" = "active") => ({ id, changedAt: at, status, kind: "decision" as const, text, workstream: "", by: "Chey", note: "", ts: at });
+const fact = (id: string, text: string, at: number, status: "active" | "superseded" = "active", base: number | null = null) => ({ id, base, changedAt: at, status, kind: "decision" as const, text, workstream: "", by: "Chey", note: "", ts: at });
 const changes = (session: string, facts: ReturnType<typeof fact>[] = [], extra: object = {}) => ({ session, facts, workstreams: [], brief: null, people: [], ...extra });
 
 test("an older session saving after unrelated activity never removes what a newer session accepted", () => {
@@ -154,35 +154,43 @@ test("an older session saving after unrelated activity never removes what a newe
   expect(saveProjectContext(home, p.slug, "B", b.s)).toBe("written");
   // A merely hears something later and saves again: B's fact stays.
   a.said(a.chey, "lunch at noon?");
-  expect(saveProjectContext(home, p.slug, "A", a.s)).toBe("written");
+  expect(saveProjectContext(home, p.slug, "A", a.s)).toBe("skipped");
   expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text).sort()).toEqual(["Footer is dark", "Header uses option A"]);
   // B retires the fact it carried from A; A, which never touched it, saves later: it stays retired.
   const carried = b.s.facts().find((f) => f.text === "Header uses option A")!;
   b.s.store.put("facts", { ...carried, status: "superseded", updatedAt: Date.now() + 1 });
   expect(saveProjectContext(home, p.slug, "B", b.s)).toBe("written");
   a.said(a.chey, "one more thing");
-  expect(saveProjectContext(home, p.slug, "A", a.s)).toBe("written");
+  expect(saveProjectContext(home, p.slug, "A", a.s)).not.toBe("failed");
   expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).toEqual(["Footer is dark"]);
   const c = room();
   seedFromProject(home, p.slug, "C", c.s);
   expect(c.s.facts().map((f) => f.text)).toEqual(["Footer is dark"]);
 });
 
-test("when two sessions changed the same item, the later change wins whichever saves last", () => {
+test("per fact: a retirement is final, an edit on the current version applies, and of two blind edits the later wins", () => {
   const home = mkdtempSync(join(dir, "home-"));
   const p = createProject(home, "Same item");
   expect(commitChanges(home, p.slug, changes("A", [fact("f1", "Nav on the left", 100)]))).toBe("written");
-  // B retired it at 300; A rewrote it at 200 but saves after B.
-  expect(commitChanges(home, p.slug, changes("B", [fact("f1", "Nav on the left", 300, "superseded")]))).toBe("written");
-  expect(commitChanges(home, p.slug, changes("A", [fact("f1", "Nav on the left, collapsible", 200)]))).toBe("written");
+  // B (saw version 1) retires it; A edits version 1 later and saves after B: still retired, and stays so.
+  expect(commitChanges(home, p.slug, changes("B", [fact("f1", "Nav on the left", 300, "superseded", 1)]))).toBe("written");
+  expect(commitChanges(home, p.slug, changes("A", [fact("f1", "Nav on the left, collapsible", 400, "active", 1)]))).toBe("written");
+  expect(commitChanges(home, p.slug, changes("A", [fact("f1", "Nav on the left", 900, "active", 2)]))).toBe("written");
   expect(readProjectContext(home, p.slug)!.facts).toEqual([]);
-  // A later rewrite does win.
-  expect(commitChanges(home, p.slug, changes("A", [fact("f1", "Nav on the left, collapsible", 400)]))).toBe("written");
-  expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).toEqual(["Nav on the left, collapsible"]);
-  // The same words saved under two ids: retiring one retires both.
+  // Two edits that didn't see each other: the later one wins, whichever saves last; one millisecond apart or none.
+  expect(commitChanges(home, p.slug, changes("A", [fact("g1", "Grid is 8px", 100)]))).toBe("written");
+  expect(commitChanges(home, p.slug, changes("A", [fact("g1", "Grid is 8px, 4px inside cards", 500, "active", 1)]))).toBe("written");
+  expect(commitChanges(home, p.slug, changes("B", [fact("g1", "Grid is 10px", 450, "active", 1)]))).toBe("written");
+  expect(readProjectContext(home, p.slug)!.facts.find((f) => f.id === "g1")!.text).toBe("Grid is 8px, 4px inside cards");
+  expect(commitChanges(home, p.slug, changes("C", [fact("g1", "Grid is 12px", 500, "active", 1)]))).toBe("written");
+  expect(readProjectContext(home, p.slug)!.facts.find((f) => f.id === "g1")!.text).toBe("Grid is 12px");
+  // An edit on the version it saw applies, however old its clock.
+  expect(commitChanges(home, p.slug, changes("D", [fact("g1", "Grid is 16px", 1, "active", 3)]))).toBe("written");
+  expect(readProjectContext(home, p.slug)!.facts.find((f) => f.id === "g1")).toMatchObject({ text: "Grid is 16px", version: 4 });
+  // The same fact saved under two ids: retiring one retires both.
   expect(commitChanges(home, p.slug, changes("C", [fact("f2", "Use 8px grid", 500)]))).toBe("written");
   expect(commitChanges(home, p.slug, changes("D", [fact("f3", "Use 8px grid", 600, "superseded")]))).toBe("written");
-  expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).toEqual(["Nav on the left, collapsible"]);
+  expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).toEqual(["Grid is 16px"]);
 });
 
 test("every accepted fact and unfinished workstream is kept, however many there are", () => {
@@ -248,7 +256,7 @@ test("three processes saving at once, while a fourth holds the lock for a while,
     `const { commitChanges } = await import(${JSON.stringify(join(import.meta.dir, "../src/carryover.ts"))});
 const [home, slug, who] = process.argv.slice(2);
 let failed = 0;
-for (let i = 0; i < 60; i++) if (commitChanges(home, slug, { session: who, facts: [{ id: who + i, changedAt: Date.now(), status: "active", kind: "fact", text: who + " fact " + i, workstream: "", by: "", note: "", ts: i }], workstreams: [], brief: null, people: [] }, { waitMs: 10000 }) !== "written") failed++;
+for (let i = 0; i < 60; i++) if (commitChanges(home, slug, { session: who, facts: [{ id: who + i, base: null, changedAt: Date.now(), status: "active", kind: "fact", text: who + " fact " + i, workstream: "", by: "", note: "", ts: i }], workstreams: [], brief: null, people: [] }, { waitMs: 10000 }) !== "written") failed++;
 process.exit(failed);
 `,
   );
@@ -297,7 +305,10 @@ test("on loopback, a valid agent or device token reads an attachment; no token, 
     expect(get.status).toBe(200);
     expect(await get.text()).toBe("hello");
     expect((await fetch(url, { method: "HEAD", headers: { authorization: `Bearer ${agent.token}` } })).status).toBe(200);
-    expect((await fetch(`${url}?token=${agent.token}`)).status).toBe(200);
+    // Never in the address, and never kept by the browser.
+    expect((await fetch(`${url}?token=${agent.token}`)).status).toBe(401);
+    expect((await fetch(`${url}?token=${agent.token}`, { headers: { authorization: `Bearer ${agent.token}` } })).status).toBe(400);
+    expect(get.headers.get("cache-control")).toBe("no-store");
     const browser = r.hub.auth.issue({ kind: "browser", label: "Chey's laptop", ip: "127.0.0.1", personId: r.chey.id });
     expect((await fetch(url, { headers: { cookie: `jam_token=${browser.token}` } })).status).toBe(200);
     expect((await fetch(url)).status).toBe(401);

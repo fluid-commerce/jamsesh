@@ -1257,7 +1257,7 @@ other update becomes a Replace card for that fact; a resolve or supersede with n
 (a Retire card always shows a room line behind it); new facts become context cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
 curator would resolve or supersede with nothing to take its place becomes a **Retire** card (`retire` on the card;
 accepting it only changes the fact's status). Overheard, the brain's `cancel_directive` marks a waiting task card
-`overruled` for a person to dismiss, and keeps the veto (`vetoes`: why, who, when, the lines) on that card for good;
+`overruled` for a person to dismiss, and keeps every veto (`vetoes`: why, who, when, the lines; the whole history) on that card for good;
 the same ask said again doesn't clear it but makes a new card with `renews` naming the overruled one ("Asked again").
 Asked directly, it dismisses it. A document sent with no request is a context card
 with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
@@ -1732,8 +1732,9 @@ try again to send.") until it is removed or retried; it is never dropped from a 
   uploaded twice is one blob); `<id>.json` holds each upload's record (name, who, time). The stored
   name is made by the hub from the hash and sniffed type; only ids of the form `att_<16 hex>` reach
   a path, and a shown name keeps only its last path part.
-- **Fetching.** `GET /api/attachments/<id>` for any paired device or agent credential of the session
-  (unpaired: 401). Served with the sniffed type, `nosniff`, a sandboxing CSP, inline for images and
+- **Fetching.** `GET /api/attachments/<id>` for any paired device or agent credential of the session,
+  in the Authorization header or the `jam_token` cookie, also on loopback (unpaired: 401; a credential in
+  the address: 400). Responses are `no-store`, so a revoked device keeps no readable copy. Served with the sniffed type, `nosniff`, a sandboxing CSP, inline for images and
   text (as `text/plain`) and as a download for PDFs. Uploading is for people only (agents: 403).
 - **Brain.** A direct message's files go to the router model in a message of their own before the
   request: images and PDFs as parts, text files fenced in random `<attached-…>` markers and labelled as
@@ -1744,7 +1745,10 @@ try again to send.") until it is removed or retried; it is never dropped from a 
   becomes a card on the Tasks board (origin `document`) that a person sends or adds, and nothing
   reaches an agent or the saved context before that. A file can't mark a waiting card overruled. The
   Tasks board, the screen, host control, asking an agent, naming and behaviour notes are never
-  offered with a file, and each call is checked again when it runs. So a file's text, or an
+  offered with a file, and each call is checked again when it runs. This holds on every route into the
+  brain, decided by one check of the pass's lines (`withFiles`): a direct message, a room message it
+  overhears, a line said to it by name, an agent's message; the keyword rules (no key, or a failing
+  gateway) and spoken answers to host requests ignore lines that carry files. So a file's text, or an
   explanatory request the model misreads, can at most propose. A message with files and no words is not a request to the brain (answering tools only).
 - **Tasks.** A directive created from an event carries that event's attachments
   (`Directive.attachments`). `jam_inbox`, the briefing, `jam_context` and `jam_directives` list each
@@ -1756,22 +1760,28 @@ try again to send.") until it is removed or retried; it is never dropped from a 
 ### 12.7 Context carries over
 
 A project keeps its settled context in `projects/<slug>/context.db` (SQLite): one row per accepted fact
-(decisions, requirements and the rest) and workstream, active or retired, the session brief with its goal and
-glossary, and people's titles. `ProjectKeeper` saves every five minutes and when the session ends. A session writes
-only what it changed: facts and workstreams it settled, rewrote or retired, each under its project id (a carried item
-keeps the id it came in with), and its own brief once it has one. Items it only carried in are never written, so two
-sessions of a project open at once both keep their changes, and an item both changed keeps the later change (by when
-it changed, not when it was saved). Nothing is cut or left out for size: a change that doesn't fit the reader's limits
-fails the whole save, which the keeper reports. Each save is one SQLite `BEGIN IMMEDIATE` transaction: the write lock
-belongs to the connection, is released when its process exits, and is never taken over, so a paused writer keeps it
-and others wait (two seconds) and report a failed save. A new session of the project is seeded from it once
-(`seedFromProject`): active facts and unfinished workstreams come in with `carriedFrom {sessionId, at, id}`, the brief
-shows in the agents' briefing and `jam_context` until the session writes its own, and people without a title get
-theirs back. A resumed session, or one that already has facts or workstreams of its own, is not seeded. Every row is
-checked when read (types, fact kinds, workstream statuses, sizes): one malformed value and nothing is seeded. A file
-that isn't a database is moved aside (`context.db.unreadable-<time>`) and a new one started. After each save the
-whole context is exported, under the same lock, as plain JSON in `projects/<slug>/context.json` (version 1, every
-active item) for Phase 7's wiki; a `context.json` from before the database is read into it once.
+(decisions, requirements and the rest) and workstream, each with a version, the session brief with its goal and
+glossary, and people's titles. A retired fact stays as a tombstone row. `ProjectKeeper` saves every five minutes and
+when the session ends. A session writes only items whose meaning (wording, kind, workstream, status; not the lines a
+fact cites) differs from the version it last saw (carried in, or saved), each with that version (`carryBase` in the
+session's settings); items it only carried in, or whose sources alone changed, are never written. Each row is merged
+on its own inside one SQLite `BEGIN IMMEDIATE` transaction: a change made on the row's current version applies, a
+retirement always applies, a tombstone is never made active again, and of two edits made without seeing each other
+the later (by time, then session id) wins. So two sessions of a project open at once both keep their changes, and an
+older session can't bring back what another retired. Nothing is cut or left out for size: a change that doesn't fit
+the reader's limits fails the whole save, which the keeper reports. The write lock belongs to the connection, is
+released when its process exits, and is never taken over: a paused writer keeps it and others wait (two seconds) and
+report a failed save. A new session of the project is seeded from it once (`seedFromProject`): every active fact
+(the same kind, workstream and wording only once) and unfinished workstream comes in with `carriedFrom {sessionId,
+at, id}`, the brief shows in the agents' briefing and `jam_context` until the session writes its own, and people
+without a title get theirs back. A resumed session, or one that already has facts or workstreams of its own, is not
+seeded. Every row is checked when read (types, statuses, sizes): one malformed value and nothing is seeded. After a
+save commits, the committed state is exported as plain JSON in `projects/<slug>/context.json` for Phase 7's wiki:
+read and written while holding the write lock, to a temporary file renamed into place, and never over an export of
+a later `generation`. A database that isn't one is left where it is and the next generation (`context-1.db`, ...) is
+started, taking in the export; every process that finds the damage opens the same next file, so recovery happens
+once. A new database takes in `context.json` (the export, or the file builds before the database wrote) once, only if
+the whole file is valid.
 
 ## 13. Host control and permissions
 
