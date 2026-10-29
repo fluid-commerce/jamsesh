@@ -309,8 +309,9 @@ export function readProjectContext(home: string, slug: string, waitMs = 2000): P
     if (busy(e)) throw new ContextUnavailable(`the project's context is busy: ${e instanceof Error ? e.message : e}`);
     if (e instanceof ExportRejected) throw new ContextUnavailable(`the project's saved context can't be read: ${e.message}`);
     if (!damaged(e)) {
+      // The database exists but a row can't be read: a session started without its facts would be wrong, so the start fails.
       console.error("project context:", e instanceof Error ? e.message : e);
-      return null;
+      throw new ContextUnavailable(`the project's context can't be read: ${e instanceof Error ? e.message : e}`);
     }
     // The newest database is damaged: recover first (the next generation, from the export, under its write lock), then read that.
     try {

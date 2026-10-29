@@ -1263,7 +1263,7 @@ the same ask said again doesn't clear it but makes a new card with `renews` nami
 Asked directly, it dismisses it. A document sent with no request is a context card
 with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
 poppler's `pdftotext` when installed, else JamSesh's own reader in a worker with a 5 s limit, which takes only the
-strings shown by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`, in the content streams pages name, skipping text shown while the render mode is invisible or clip-only (`3 Tr`, `7 Tr`, until another mode is set; text hidden any other way, such as white on white or off the page, is still read, and so is anything `pdftotext` returns); `pdfText`; the compiled
+strings shown by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`, in the content streams pages name, skipping text shown while the render mode is invisible or clip-only (`3 Tr`, `7 Tr`, until another mode is set, across a page's content streams in order; text hidden any other way, such as white on white or off the page, is still read, and so is anything `pdftotext` returns); `pdfText`; the compiled
 hub carries the worker as a second entrypoint, and `jamsesh-hub --pdf-text <file>` checks it); with nothing readable it gets `needsWording`. Agents'
 credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.db`) holds only
 accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
@@ -1780,7 +1780,7 @@ report a failed save. A new session of the project is seeded from it once (`seed
 (the same kind, workstream and wording only once) and unfinished workstream comes in with `carriedFrom {sessionId,
 at, id}`, the brief shows in the agents' briefing and `jam_context` until the session writes its own, and people
 without a title get theirs back. A resumed session, or one that already has facts or workstreams of its own, is not
-seeded. Every row is checked when read (types, statuses, sizes): one malformed value and nothing is seeded. After a
+seeded. Every row is checked when read (types, statuses, sizes): one malformed value and nothing is seeded: the session's start fails with a visible error (never a quietly smaller or empty session). After a
 save commits, the committed state is exported as plain JSON in `projects/<slug>/context.json` for Phase 7's wiki:
 read and written while holding the write lock, to a temporary file renamed into place, and never over an export of
 a later `generation`. It holds every row as stored (`rows`: tombstones and versions included) besides the readable
@@ -1788,8 +1788,8 @@ lists, so recovery restores it exactly. An export that can't be written fails th
 is written by the next save, even one with nothing new. Reading a damaged database (seeding a new session included)
 recovers first, so a valid export is never read as no context. A database that isn't one is left where it is and the next generation (`context-1.db`, ...) is
 started, taking in the export; every process that finds the damage opens the same next file, so recovery happens
-once. A new database takes in `context.json` (the export, or the file builds before the database wrote) once, only if
-the whole file is valid.
+once. A new database takes in `context.json` (the export, or the file builds before the database wrote) once; a file that
+exists but isn't a complete, valid export fails the start instead of being skipped.
 
 ## 13. Host control and permissions
 

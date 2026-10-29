@@ -13,6 +13,7 @@ const { acceptedEvent } = await import("../src/brain/brain");
 const { ContextUnavailable, contextExport, readProjectContext, saveProjectContext, seedFromProject } = await import("../src/carryover");
 const { createProject } = await import("../src/projects");
 const { Attachments } = await import("../src/attachments");
+const { drawnText } = await import("../src/pdfworker");
 
 const dir = mkdtempSync(join(tmpdir(), "jam-r9-"));
 const hubs: InstanceType<typeof Hub>[] = [];
@@ -330,4 +331,61 @@ test("the final snapshot is taken even when only a card or fact changed (no even
   await first;
   const ctx = JSON.parse(readFileSync(join(final!.dir, "context.json"), "utf8"));
   expect(JSON.stringify(ctx.facts)).toContain("A requirement accepted");
+});
+
+// ---------- round 14 ----------
+
+test("shutdown goes through shipped news waiting on its timer and a decision's delayed digest, before saving", async () => {
+  const r = room();
+  const brain = r.hub.brain as any;
+  const seen: string[] = [];
+  brain.shippedBatch = (b: any[]) => void seen.push(`shipped ${b.length}`);
+  brain.digestRun = async () => void seen.push("digest");
+  brain.shipped.push({ agent: { id: "a" }, text: "Tabs shipped" });
+  brain.shipTimer = setTimeout(() => {}, 60_000);
+  brain.decisionDigest = setTimeout(() => {}, 60_000);
+  expect(brain.busy()).toEqual(["news waiting to be passed on"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(seen.sort()).toEqual(["digest", "shipped 1"]);
+  expect(brain.busy()).toEqual([]);
+});
+
+test("a context database with a row the reader can't use fails the start visibly", () => {
+  const p = saved("Bad row");
+  const db = new Database(join(folderOf(p.slug), "context.db"));
+  db.exec("UPDATE items SET status = 'archived'");
+  db.close();
+  expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
+});
+
+test("a request body past the cap is refused with 413 before any route sees it, whoever sent it", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    r.hub.auth.windows.adopt("cd".repeat(32));
+    const base = `http://127.0.0.1:${server.port}`;
+    const huge = new Uint8Array(3 * 1024 * 1024).fill(32);
+    const json = await fetch(`${base}/api/triage/tri_nope/dismiss`, { method: "POST", headers: { "content-type": "application/json" }, body: huge });
+    expect(json.status).toBe(413);
+    let sent = 0;
+    const chunked = new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (sent++ < 4) c.enqueue(new Uint8Array(1024 * 1024).fill(32));
+        else c.close();
+      },
+    });
+    const streamed = await fetch(`${base}/api/say`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${"cd".repeat(32)}` }, body: chunked, duplex: "half" } as any).catch(() => null);
+    expect([streamed?.status ?? 413, await streamed?.text()]).toEqual([413, expect.any(String)]);
+    // A normal body still works.
+    expect((await fetch(`${base}/api/triage/tri_nope/dismiss`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${"cd".repeat(32)}` }, body: "{}" })).status).not.toBe(413);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a PDF's invisible text mode carries across its content streams", () => {
+  const body = (s: string) => s;
+  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>\nendobj\n4 0 obj\n<< /Length 13 >>\nstream\nBT 3 Tr ET\nendstream\nendobj\n5 0 obj\n<< /Length 29 >>\nstream\nBT (SECRET HIDDEN TEXT) Tj ET\nendstream\nendobj\n%%EOF`;
+  expect(drawnText(new TextEncoder().encode(body(doc)))).toBe("");
 });

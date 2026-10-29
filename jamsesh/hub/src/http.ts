@@ -430,6 +430,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
   const upload = path === "/attachments" && req.method === "POST";
   const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  // Past the cap before anything is parsed or any route looked at: no caller can make the hub hold a body it would refuse.
+  if (body?.__capped) return bad("That request is too large.", 413);
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
@@ -1064,12 +1066,42 @@ export async function readCapped(req: Request, max: number): Promise<{ __form: F
   }
 }
 
+/** The most a request body may be: JSON is small; audio, pictures and forms carry media. */
+export const BODY_LIMITS = { json: 2 * 1024 * 1024, media: 32 * 1024 * 1024 };
+
+/** The body's bytes; null when it passes `max` (nothing past the cap is kept). */
+async function readBytes(req: Request, max: number): Promise<Uint8Array | null> {
+  if (!req.body) return new Uint8Array();
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    // Past the cap nothing more is kept; what is left is read and dropped (the server's own limit bounds it), so the sender gets its answer.
+    if (size <= max) chunks.push(value);
+    else chunks.length = 0;
+  }
+  return size > max ? null : new Uint8Array(await new Blob(chunks as BlobPart[]).arrayBuffer());
+}
+
 async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) return req.json().catch(() => ({}));
-  if (type.includes("multipart/form-data")) return { __form: await req.formData() };
-  if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
-  return null;
+  const json = type.includes("application/json");
+  const media = type.includes("multipart/form-data") || type.includes("audio/") || type.includes("image/") || type.includes("octet-stream");
+  if (!json && !media) return null;
+  const bytes = await readBytes(req, json ? BODY_LIMITS.json : BODY_LIMITS.media);
+  if (!bytes) return { __capped: true };
+  if (json) {
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return {};
+    }
+  }
+  if (type.includes("multipart/form-data")) return { __form: await new Response(new Blob([bytes as BlobPart]), { headers: { "content-type": type } }).formData().catch(() => new FormData()) };
+  return { __raw: bytes };
 }
 
 function file(p: string, root: string, cache = false): Response {

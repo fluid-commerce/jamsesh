@@ -181,7 +181,7 @@ test("a fact with a status the reader doesn't know makes the whole file unreadab
   const db = new Database(contextFile(p.home, p.slug));
   db.exec("UPDATE items SET status = 'archived' WHERE id = 'f1'");
   db.close();
-  expect(readProjectContext(p.home, p.slug)).toBeNull();
+  expect(() => readProjectContext(p.home, p.slug)).toThrow(); // visible failure, never a smaller session
 });
 
 // ---------- 3. the export shows only committed state, in order ----------

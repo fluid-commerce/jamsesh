@@ -49,6 +49,8 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
   }
   const out: string[] = [];
   let size = 0;
+  // The text render mode belongs to the page's graphics state, which its content streams share, in order.
+  let hidden = false;
   for (const n of contents) {
     const o = objs.get(n);
     const m = o && /^\s*<<([\s\S]{0,400}?)>>\s*stream\r?\n/.exec(o.body);
@@ -65,7 +67,6 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
       }
     } else if (/\/Filter/.test(m[1])) continue;
     const ops = latin(body);
-    let hidden = false;
     for (const block of ops.match(/\bBT\b[\s\S]*?\bET\b/g) ?? []) {
       let line = "";
       for (const t of block.matchAll(SHOW_OR_MODE)) {

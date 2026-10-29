@@ -111,6 +111,8 @@ export class Brain {
     clearInterval(this.nagTimer);
     if (this.timer) clearTimeout(this.timer);
     if (this.shipTimer) clearTimeout(this.shipTimer);
+    if (this.decisionDigest) clearTimeout(this.decisionDigest);
+    this.decisionDigest = null;
     this.timer = null;
     this.shipTimer = null;
   }
@@ -315,11 +317,35 @@ export class Brain {
     return work;
   }
 
+  private decisionDigest: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Shutdown: stops the periodic producers, and hands everything that was only waiting on a timer (shipped news, the digest
+   * after a decision, overheard lines) to the counted path now, so the drain sees it.
+   */
+  quiesce() {
+    if (this.stopped) return;
+    clearInterval(this.digestTimer);
+    clearInterval(this.nagTimer);
+    if (this.shipTimer) {
+      clearTimeout(this.shipTimer);
+      this.shipTimer = null;
+      this.shippedBatch(this.shipped.splice(0));
+    }
+    if (this.decisionDigest) {
+      clearTimeout(this.decisionDigest);
+      this.decisionDigest = null;
+      this.digest(true).catch(() => {});
+    }
+    this.settle();
+  }
+
   /** What the brain still owes: passes queued or running, direct requests, and overheard lines waiting for their pass. */
   busy(): string[] {
     const out: string[] = [];
     if (this.active > 0) out.push("the brain's requests");
     if (this.pending.length || this.timer) out.push("overheard speech waiting to be read");
+    if (this.shipTimer || this.decisionDigest) out.push("news waiting to be passed on");
     return out;
   }
 
@@ -710,7 +736,11 @@ export class Brain {
           });
           bus.send({ type: "toast", tone: "decision", text: "Decision", detail: i.text });
           // Decisions reach the curated knowledge (and every agent's context) right away.
-          setTimeout(() => this.digest(true).catch(() => {}), 3000);
+          if (this.decisionDigest) clearTimeout(this.decisionDigest);
+          this.decisionDigest = setTimeout(() => {
+            this.decisionDigest = null;
+            this.digest(true).catch(() => {});
+          }, 3000);
           return "Recorded.";
         },
       }),

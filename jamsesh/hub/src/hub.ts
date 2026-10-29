@@ -188,6 +188,7 @@ export class Hub {
     this.closing = true;
     // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
     for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
+    this.brain.quiesce();
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
     const docs = !unfinished.length && !this.documentLost;
