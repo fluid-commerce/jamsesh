@@ -269,6 +269,8 @@ export class Hub {
     // The recorder's own words belong to the prompt (promptWindow reads them from the store);
     // a feed line as well would show them twice.
     if (isNew && this.inPrompt(u)) return;
+    // A line transcribed after the final save began would miss it.
+    if (this.closing) return;
     if (isNew) {
       const ev = s.store.addEvent({
         kind: "speech",
@@ -299,6 +301,7 @@ export class Hub {
    * request: it becomes proposed context instead of reaching the brain.
    */
   typed(personId: string | null, text: string, direct = false, attached: AttachmentRef[] = []) {
+    if (this.closing) throw new Error("The session is saving and closing.");
     const p = this.session.person(personId);
     const words = text.trim();
     const names = attached.map((a) => a.name).join(", ");
@@ -381,6 +384,7 @@ export class Hub {
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
     if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
+    if (this.closing) return { ok: false, reason: "The session is closing." };
     const pointed = w.pointer
       .filter((m) => m.kind !== "move")
       .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));

@@ -92,3 +92,56 @@ test("a document card says which attachment couldn't be read", async () => {
   expect(card.text).toContain("Couldn't read: scan.pdf");
   expect(card.needsWording).toBeFalsy();
 });
+
+// ---------- round 10 ----------
+
+test("only a sealed export (checksum and completion marker, written last) counts: a plausible partial file is rewritten and never imported", () => {
+  const p = saved("Sealed");
+  const file = contextExport(dir, p.slug);
+  const ex = JSON.parse(readFileSync(file, "utf8"));
+  expect(Object.keys(ex).slice(-2)).toEqual(["checksum", "complete"]);
+  // Partial: the right generation, no seal.
+  writeFileSync(file, JSON.stringify({ generation: ex.generation }));
+  const r = room();
+  r.s.board.rememberNow({ text: "Another call", kind: "decision", by: "Chey" });
+  expect(saveProjectContext(dir, p.slug, "s2", r.s)).toBe("written");
+  const fixed = JSON.parse(readFileSync(file, "utf8"));
+  expect(fixed.complete).toBe(true);
+  expect(fixed.facts.length).toBeGreaterThan(0);
+  // A body edited after sealing fails the checksum, so a damaged database doesn't recover from it.
+  fixed.facts[0].text = "Edited by hand";
+  writeFileSync(file, JSON.stringify(fixed));
+  wipeDbs(p.slug);
+  expect(readProjectContext(dir, p.slug)?.facts ?? []).toEqual([]);
+});
+
+test("an edited card doesn't absorb a later request for what it used to say", () => {
+  const r = room();
+  const a = r.s.proposeContext({ text: "Use option A", kind: "decision", by: "Chey" })!;
+  expect(r.s.board.edit(a.id, { text: "Use option B" }, "Chey").ok).toBe(true);
+  const again = r.s.proposeContext({ text: "Use option A", kind: "decision", by: "Felipe" })!;
+  expect(again.id).not.toBe(a.id);
+});
+
+test("once shutdown begins nothing is taken in: typed messages, room lines and prompt windows are turned away", async () => {
+  const r = room();
+  const shutting = r.hub.shutdown();
+  expect(r.hub.closing).toBe(true);
+  expect(() => r.hub.typed(r.chey.id, "hello", false)).toThrow();
+  const before = r.s.store.recentEvents({ limit: 50 }).length;
+  expect(await r.hub.promptWindow({ deviceId: "d", personId: r.chey.id, t0: Date.now() - 1000, t1: Date.now(), pointer: [], typed: "late words" })).toMatchObject({ ok: false });
+  (r.hub as any).roomLine({ id: "u1", eventId: 0, t0: 0, t1: 1, text: "late line", personId: r.chey.id, speakerName: "Chey" }, true);
+  expect(r.s.store.recentEvents({ limit: 50 }).length).toBe(before);
+  // And over HTTP: every write route is turned away at the router, reads still work.
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const dev = r.hub.auth.issue({ kind: "browser", label: "A laptop", ip: "10.0.0.5", personId: r.chey.id });
+    const call = (method: string, path: string, body?: object) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method, headers: { "x-forwarded-for": "9.9.9.9", "content-type": "application/json", authorization: `Bearer ${dev.token}` }, body: body ? JSON.stringify(body) : undefined });
+    for (const [path, body] of [["/say", { text: "late" }], ["/audio?deviceId=d&t0=1&t1=2", {}], ["/prompt-window", { deviceId: "d", t0: 1, t1: 2 }], ["/prompt-window/start", { deviceId: "d" }]] as const) expect((await call("POST", path, body)).status).toBe(503);
+    expect((await call("GET", "/state")).status).toBe(200);
+  } finally {
+    server.stop(true);
+  }
+  await shutting;
+});

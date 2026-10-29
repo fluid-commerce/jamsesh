@@ -1216,15 +1216,16 @@ author, text and time; at most 12), a `count`, and `edits` (who changed which fi
 target agents and a workstream; a context card has a kind, a workstream and `conflictsWith`, a saved fact it
 disagrees with. Cards never expire. One that has waited 30 minutes reads "Waiting 40 min" on the board.
 
-**Repeats.** The same thing proposed again (stemmed-term overlap above 0.7, the same counts, the same variant letters
-and numbers) joins the open card: `count` goes up and the new source line is added. The same line twice (two
-microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context proposal a saved fact
-already states is dropped; one that is close to a fact but differs in its specifics (option A versus B, 16 versus 24
-px) or negates it ("must not use option A"), or names a fact with `replaces`, is flagged `conflictsWith`, but only a
-fact of the same kind, workstream and platforms; each option's side counts ("A, not B" is not "B, not A"); a named
-replacement is never dropped as already known. Repeats must also agree on polarity and on the platforms named
-(`hub/src/similarity.ts`, shared with curation), and a task repeat on mode, target agents and workstream; a context
-repeat, and "already known", on kind and workstream.
+**Repeats.** The same thing proposed again joins the open card: `count` goes up and the new source line is added. "The same"
+means identical text once case, spacing and punctuation are set aside, compared with the card's current wording only
+(never its `original`, so an edited card doesn't absorb a later, different request); any other wording is another card.
+The same line twice (two microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context
+proposal that repeats a saved fact word for word is dropped; one that is close to a fact (`similar`, a hint only) but not
+identical, or that names a fact with `replaces`, is flagged `conflictsWith`, but only a fact of the same kind, workstream
+and platforms (`sameScope`). A named replacement is never dropped as already known. A task repeat must also agree on mode,
+target agents and workstream; a context repeat, and "already known", on kind and workstream. Curation and the brain's
+duplicate-directive checks use the same rule (`hub/src/similarity.ts`): no judging of meaning, polarity or paraphrase, since
+a missed merge costs one card and a wrong one loses what was said.
 
 **Actions** (`POST /api/triage/<id>/<action>`, `PATCH /api/triage/<id>`; people only, like the other human routes: an
 agent's credential and a process on the host without the window key get 403, and a window must know its person):

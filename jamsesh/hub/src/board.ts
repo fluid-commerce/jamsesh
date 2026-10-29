@@ -128,7 +128,7 @@ export class Board {
   /** An open card (or one dismissed a moment ago) that says the same thing for the same purpose: `extra` checks the purpose. */
   private match(type: TriageCard["type"], text: string, extra: (c: TriageCard) => boolean): TriageCard | undefined {
     const now = Date.now();
-    return this.all().find((c) => c.type === type && (c.status === "open" || (c.status === "dismissed" && now - (c.resolvedAt ?? 0) < DISMISS_QUIET_MS)) && extra(c) && (restates(c.text, text) || restates(c.original, text)));
+    return this.all().find((c) => c.type === type && (c.status === "open" || (c.status === "dismissed" && now - (c.resolvedAt ?? 0) < DISMISS_QUIET_MS)) && extra(c) && restates(c.text, text));
   }
 
   /** The agents' names when the card was made or edited, so a card can still say who an agent that left was. */

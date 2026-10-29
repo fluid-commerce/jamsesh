@@ -11,6 +11,7 @@
 // derived view, never written ahead of what committed. A database that turns out not to be one is left
 // where it is and the next generation (context-1.db, context-2.db, ...) is started from the export, which
 // every process that finds the damage does the same way.
+import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -150,6 +151,14 @@ function openForWrite(home: string, slug: string, waitMs: number): Database {
   }
 }
 
+/** An export's last two fields: the checksum of everything before them, then the marker that the file was written whole. */
+const seal = (body: object) => ({ ...body, checksum: createHash("sha256").update(JSON.stringify(body)).digest("hex"), complete: true });
+function sealedOk(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const { checksum, complete, ...body } = raw as Record<string, unknown>;
+  return complete === true && typeof checksum === "string" && checksum === createHash("sha256").update(JSON.stringify(body)).digest("hex");
+}
+
 /** context.json as written by the export or by builds before the database: checked whole before any of it is taken in. */
 const rowsSchema = z.object({
   items: z.array(z.object({ id: text(200).min(1), type: z.enum(["fact", "workstream"]), status: z.string(), data: z.string(), version, changed_at: when, session: text(200) })),
@@ -173,7 +182,13 @@ function importJson(db: Database, file: string) {
   if (db.query("SELECT 1 FROM items LIMIT 1").get()) return;
   let parsed: z.infer<typeof jsonSchema>;
   try {
-    const r = jsonSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+    // An export (it has the rows) counts only when sealed; the plain file older builds wrote has no rows and no seal.
+    if (raw?.rows && !sealedOk(raw)) {
+      console.error("project context: context.json isn't a complete export; not taken in");
+      return;
+    }
+    const r = jsonSchema.safeParse(raw);
     if (!r.success) {
       console.error("project context: context.json is malformed; not taken in");
       return;
@@ -482,7 +497,10 @@ function exportJson(db: Database, file: string) {
     const ctx = readAll(db);
     let shown = -1;
     try {
-      shown = JSON.parse(readFileSync(file, "utf8"))?.generation ?? -1;
+      const raw = JSON.parse(readFileSync(file, "utf8"));
+      // Complete only with the marker and the checksum of the body, both written last: a partial or edited file isn't an export.
+      if (sealedOk(raw)) shown = raw.generation ?? -1;
+      else console.error("project context: context.json isn't a complete export; writing it again");
     } catch {}
     // Exports are written from committed state under this lock, so a valid export is never ahead of the database. One that
     // claims to be (or isn't a count at all) is ignored and written over from the database.
@@ -495,7 +513,7 @@ function exportJson(db: Database, file: string) {
     try {
       const fd = openSync(tmp, "wx");
       try {
-        writeSync(fd, JSON.stringify(ctx, null, 2));
+        writeSync(fd, JSON.stringify(seal(ctx), null, 2));
       } finally {
         closeSync(fd);
       }

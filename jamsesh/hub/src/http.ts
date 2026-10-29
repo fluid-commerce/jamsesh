@@ -126,6 +126,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
       if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
+      // Once the final save has begun nothing is written: every route that changes something (audio, prompts, messages, MCP) is turned away here.
+      if (hub.closing && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad("The session is saving and closing.", 503);
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
         if (path.endsWith("/healthz")) return new Response("ok");
@@ -556,7 +558,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/say" && req.method === "POST") {
     // Only people speak as people: agents post through MCP, and a window speaks as its own person.
     if (paired?.kind === "agent") return bad("Agents post with jam_update and jam_message, not as a person.", 403);
-    if (hub.closing) return bad("The session is saving and closing. Try again in the next one.", 503);
     if (paired?.personId && body?.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
     let attached: AttachmentRef[] = [];
     try {

@@ -169,14 +169,16 @@ describe("4.3 curation updates instead of restating", () => {
     r.hub.stop();
   });
 
-  test("a restatement merges into the fact it repeats, and its event joins the sources", () => {
+  test("only identical text merges into the fact it repeats (its event joins the sources); reordered wording is a card", () => {
     const r = room();
     const evs = events(r);
     fact(r.s, "The sidebar collapses to an icon rail under 1024 pixels.", { kind: "requirement", sourceEventIds: [1] });
     const h = hold();
     const res = applyCuration(r.s, { add: [{ kind: "requirement", text: "Under 1024 pixels the sidebar collapses to an icon rail.", eventIds: [evs[1].id] }], ...noChange }, evs, h);
-    expect(h.added).toHaveLength(0);
-    expect(res.merged).toHaveLength(1);
+    expect(h.added).toHaveLength(1);
+    expect(res.merged).toHaveLength(0);
+    const same = applyCuration(r.s, { add: [{ kind: "requirement", text: "the sidebar collapses to an icon rail under 1024 pixels", eventIds: [evs[1].id] }], ...noChange }, evs, hold());
+    expect(same.merged).toHaveLength(1);
     const active = r.s.facts().filter((f) => f.status === "active");
     expect(active).toHaveLength(1);
     expect(active[0].sourceEventIds).toEqual([1, evs[1].id]);

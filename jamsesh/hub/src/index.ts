@@ -106,10 +106,10 @@ function openBigScreen(url: string) {
   else Bun.spawn(["open", url]);
 }
 
-let stopping = false;
-const shutdown = async () => {
-  if (stopping) return process.exit(0);
-  stopping = true;
+/** One shutdown, however many times it is asked for: a second trigger (the parent watcher fires every 2 s) gets the first one's promise and never exits early. */
+let stopping: Promise<void> | null = null;
+const shutdown = () => (stopping ??= stopSession());
+const stopSession = async () => {
   console.log("Saving the session…");
   stopAdvertising();
   const complete = await hub.shutdown();
