@@ -518,8 +518,10 @@ if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/prompts"
   # The token comes from the header file, not this process's arguments or environment.
   perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" <<'PL'
-use strict; use warnings; use File::Temp (); use File::Basename ();
+use strict; use warnings; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($hub, $header, $path) = @ARGV;
+# A symlinked config is edited at its target, so the link stays a link.
+$path = abs_path($path) // $path if -l $path;
 my $token = '';
 if (open(my $h, '<', $header)) { ($token) = (<$h> // '') =~ /Bearer\\s+(\\S+)/; close $h; }
 $token //= '';

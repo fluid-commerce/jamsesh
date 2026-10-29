@@ -1,7 +1,7 @@
 // Runs the real /agent/setup.sh against a throwaway home folder: finding agent CLIs that aren't on
 // PATH, never wiping a settings file it can't parse, and failing when no agent was set up.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hub } from "../src/hub";
@@ -243,6 +243,36 @@ describe("agent setup script", () => {
     expect(toml).toContain('authorization = "Bearer tok"');
     // Nothing of ours is left in the person's own instructions, and nothing of theirs is lost.
     expect(readFileSync(agents, "utf8")).toBe("# Mine\n");
+  });
+
+  test("Codex: a symlinked config.toml stays a link and its target is what changes", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    mkdirSync(join(box.home, "dotfiles"), { recursive: true });
+    const target = join(box.home, "dotfiles/codex.toml");
+    const link = join(box.home, ".codex/config.toml");
+    writeFileSync(target, 'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n');
+    symlinkSync(target, link);
+    for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(target);
+    const toml = readFileSync(target, "utf8");
+    expect(toml).toContain('model = "gpt"');
+    expect(toml).not.toContain("http://old/mcp");
+    expect(toml).toContain(`url = "${origin}/mcp"`);
+    expect(readdirSync(join(box.home, "dotfiles"))).toEqual(["codex.toml"]);
+  });
+
+  test("Codex: a symlink to a config that doesn't exist yet is filled in, not replaced", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    mkdirSync(join(box.home, "dotfiles"), { recursive: true });
+    const target = join(box.home, "dotfiles/codex.toml");
+    const link = join(box.home, ".codex/config.toml");
+    symlinkSync(target, link);
+    expect((await run(box)).code).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, "utf8")).toContain(`url = "${origin}/mcp"`);
   });
 
   test("reinstalling never widens a file's mode, and tightens JamSesh's own credential files", async () => {
