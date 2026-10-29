@@ -202,13 +202,8 @@ describe("agent setup script", () => {
     expect(auths.length).toBeGreaterThan(2);
     expect(new Set(auths)).toEqual(new Set(["Bearer tok"]));
     expect(readFileSync(join(box.home, ".jamsesh/auth.header"), "utf8")).toBe("authorization: Bearer tok\n");
-    // Neither script puts a token on a command line.
-    const setup = joinScript({} as Hub, origin, "tok");
-    expect(setup).not.toMatch(/-H "authorization|--header|Bearer \$TOKEN"? "\$/);
-    expect(setup).not.toMatch(/perl [^\n]*"\$TOKEN"/);
+    // The CLI argument log and the request checks above are what prove it, not the script's text.
     expect(hookScript({} as Hub)).not.toContain("Bearer");
-    // Nor in a child's environment (Codex's config is written from the header file).
-    expect(setup).not.toMatch(/[A-Z_]+="\$TOKEN" /);
   });
 
   test("the pairing guide never puts the token in a command: the agent writes it to a private file first", () => {
@@ -218,6 +213,42 @@ describe("agent setup script", () => {
     for (const c of commands) expect(c).not.toContain("jst_secret123");
     expect(guide).toContain("authorization: Bearer jst_secret123");
     expect(guide).toContain('-H @"$HOME/.jamsesh/auth.header"');
+  });
+
+  test("a recent hub failure holds back automatic prompts, but an explicit connect prompt still asks the host and hands over the chat id", async () => {
+    const box = sandbox();
+    const asked: string[] = [];
+    const hub = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const path = new URL(req.url).pathname;
+        asked.push(path);
+        if (path.endsWith("/hooks/joined")) return Response.json({ joined: false });
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const env = join(box.home, "client.env");
+      writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${hub.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+      // The host failed a moment ago.
+      writeFileSync(join(box.home, "hub-down"), String(Math.floor(Date.now() / 1000)));
+      const hook = async (prompt: string) => {
+        const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "prompt"], {
+          env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: box.home },
+          stdin: new Blob([JSON.stringify({ prompt, session_id: "chat-9" })]),
+          stdout: "pipe",
+        });
+        await proc.exited;
+        return await new Response(proc.stdout).text();
+      };
+      expect(await hook("put the mobile build next to the mockup")).toBe("");
+      expect(asked).toEqual([]);
+      const out = await hook("connect to jamsesh");
+      expect(asked).toEqual(["/api/hooks/joined"]);
+      expect(out).toContain("JamSesh chat id for jam_join (pass it as chat): chat-9");
+    } finally {
+      hub.stop(true);
+    }
   });
 
   test("the hook keeps Claude Code's own notices out of the room", async () => {
@@ -257,7 +288,7 @@ describe("agent setup script", () => {
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
     const agents = join(box.home, ".codex/AGENTS.md");
-    writeFileSync(config, 'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n\n[mcp_servers.jamsesh.http_headers]\nauthorization = "Bearer old"\n\n[mcp_servers.other]\nurl = "http://x"\n');
+    writeFileSync(config, 'model = "gpt"\n\n# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n\n[mcp_servers.jamsesh.http_headers]\nauthorization = "Bearer old"\n# <<< jamsesh\n\n[mcp_servers.other]\nurl = "http://x"\n');
     writeFileSync(agents, `# Mine\n\n${OLD_BLOCKS[0]}\n`);
     for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
     const toml = readFileSync(config, "utf8");
@@ -277,7 +308,7 @@ describe("agent setup script", () => {
     mkdirSync(join(box.home, "dotfiles"), { recursive: true });
     const target = join(box.home, "dotfiles/codex.toml");
     const link = join(box.home, ".codex/config.toml");
-    writeFileSync(target, 'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n');
+    writeFileSync(target, 'model = "gpt"\n\n# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n# <<< jamsesh\n');
     symlinkSync(target, link);
     for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
@@ -334,44 +365,52 @@ describe("agent setup script", () => {
     expect(out.stdout.toString().trim()).toBe("ran stop");
   });
 
-  test("Codex: JamSesh's tables go by their header lines, whatever brackets the values hold", async () => {
+  test("Codex: only the text between JamSesh's markers is replaced, however the rest of the file looks", async () => {
     const box = sandbox();
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
-    writeFileSync(
-      config,
-      [
-        'model = "gpt"',
-        "",
-        "[mcp_servers.jamsesh]",
-        'url = "http://[::1]:4747/mcp" # the old [v1] address',
-        'note = """',
-        "[not.a.header]",
-        '"""',
-        "",
-        "[mcp_servers.jamsesh.http_headers]",
-        'authorization = "Bearer old"',
-        "",
-        "[mcp_servers.other]",
-        'url = "http://[fe80::1]:9000/mcp" # keep [me]',
-        "",
-        '[ mcp_servers . "jamsesh" . env ]',
-        'X = "y"',
-        "",
-        "[profiles.a]",
-        "k = 1",
-        "",
-      ].join("\n"),
-    );
+    const before = ['model = "gpt" # a comment with """ in it', 'long = """', '\\"""', "[not.a.header]", '"""', ""].join("\n");
+    const after = ["[mcp_servers.other]", 'url = "http://[fe80::1]:9000/mcp" # keep [me]', "", "[profiles.a]", "k = 1", ""].join("\n");
+    writeFileSync(config, `${before}\n# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "http://[::1]:4747/mcp"\n# <<< jamsesh\n${after}`);
     for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
     const toml = readFileSync(config, "utf8");
+    expect(toml.startsWith(`${before}\n# >>> jamsesh\n`)).toBe(true);
+    expect(toml.endsWith(`# <<< jamsesh\n${after}`)).toBe(true);
     expect(toml).not.toContain("[::1]");
-    expect(toml).not.toContain("not.a.header");
-    expect(toml).not.toContain('X = "y"');
-    expect(toml).toContain('[mcp_servers.other]\nurl = "http://[fe80::1]:9000/mcp" # keep [me]');
-    expect(toml).toContain("[profiles.a]\nk = 1");
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`url = "${origin}/mcp"`);
+  });
+
+  test("Codex: a first install appends the marked block and leaves the rest alone", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    writeFileSync(config, 'model = "gpt"\n');
+    expect((await run(box)).code).toBe(0);
+    const toml = readFileSync(config, "utf8");
+    expect(toml.startsWith('model = "gpt"\n\n# >>> jamsesh\n[mcp_servers.jamsesh]')).toBe(true);
+    expect(toml.endsWith("# <<< jamsesh\n")).toBe(true);
+  });
+
+  test("Codex: a [mcp_servers.jamsesh] table outside the markers, or a broken marker pair, leaves the file untouched and says what to remove", async () => {
+    for (const body of [
+      'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n',
+      'model = "gpt"\n\n[ mcp_servers . "jamsesh" . env ]\nX = "y"\n',
+      'model = "gpt"\n# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "x"\n',
+      'model = "gpt"\n# <<< jamsesh\n# >>> jamsesh\n',
+    ]) {
+      const box = sandbox();
+      const { dir, files } = earlierInstall(box);
+      mkdirSync(join(box.home, ".codex"), { recursive: true });
+      const config = join(box.home, ".codex/config.toml");
+      writeFileSync(config, body);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toMatch(/left it as it is|left as it is/);
+      expect(r.stderr).toMatch(/Delete/);
+      expect(readFileSync(config, "utf8")).toBe(body);
+      connectionIntact(dir, files);
+    }
   });
 
   test("reinstalling takes out only JamSesh's own hook commands, keeping a person's hooks even in the same group", async () => {
@@ -402,18 +441,6 @@ describe("agent setup script", () => {
     // Reinstalling again changes nothing more.
     expect((await run(box)).code).toBe(0);
     expect(JSON.parse(readFileSync(settings, "utf8")).hooks).toEqual(hooks);
-  });
-
-  test("Codex: triple quotes in a comment don't hide JamSesh's table", async () => {
-    const box = sandbox();
-    mkdirSync(join(box.home, ".codex"), { recursive: true });
-    const config = join(box.home, ".codex/config.toml");
-    writeFileSync(config, ['model = "gpt" # a comment with """ in it', "", "[mcp_servers.jamsesh]", 'url = "http://old/mcp"', "", "[keep]", 'a = "b\\" # [c]"', ""].join("\n"));
-    expect((await run(box)).code).toBe(0);
-    const toml = readFileSync(config, "utf8");
-    expect(toml).not.toContain("http://old/mcp");
-    expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
-    expect(toml).toContain('[keep]\na = "b\\" # [c]"');
   });
 
   test("a hook download that fails or comes back broken leaves the installed hook as it was", async () => {
@@ -806,6 +833,26 @@ describe("agent setup script", () => {
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain("outside your home folder");
     expect(existsSync(join(dirname(box.home), "escaped"))).toBe(false);
+  });
+
+  test("a ~/.claude.json that is invalid or unreadable aborts setup before any change", async () => {
+    for (const kind of ["invalid", "unreadable"]) {
+      const box = sandbox();
+      stubCli(join(box.bin, "claude"), box.log);
+      const cfg = join(box.home, ".claude.json");
+      writeFileSync(cfg, kind === "invalid" ? "{ not json" : '{"mcpServers":{}}');
+      if (kind === "unreadable") chmodSync(cfg, 0o000);
+      const { dir, files } = earlierInstall(box);
+      const r = await run(box);
+      chmodSync(cfg, 0o600);
+      // Running as root, a mode 0 file is still readable: only the invalid case is certain.
+      if (kind === "unreadable" && r.code === 0) continue;
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("nothing was changed");
+      expect(readFileSync(cfg, "utf8")).toBe(kind === "invalid" ? "{ not json" : '{"mcpServers":{}}');
+      expect(existsSync(box.log) ? readFileSync(box.log, "utf8") : "").not.toMatch(/mcp (remove|add-json)/);
+      connectionIntact(dir, files);
+    }
   });
 
   test("a CLI that exits 0 without registering the entry fails the setup and puts the earlier entry back", async () => {

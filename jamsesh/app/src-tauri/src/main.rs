@@ -576,8 +576,25 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
         Ok(msg)
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
-        Err(format!("Setup didn't finish: {}", err.lines().last().unwrap_or("unknown error")))
+        Err(format!("Setup didn't finish:\n{}", failure_lines(&err)))
     }
+}
+
+/// Every line setup printed to stderr (they name the failed paths and where the saved copies are), capped
+/// so a runaway script can't fill the dialog.
+fn failure_lines(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.is_empty() {
+        return "unknown error".to_string();
+    }
+    let mut text = lines.iter().take(12).copied().collect::<Vec<_>>().join("\n");
+    if lines.len() > 12 {
+        text.push_str("\n…");
+    }
+    if text.chars().count() > 1500 {
+        text = text.chars().take(1500).collect::<String>() + "…";
+    }
+    text
 }
 
 /// Held while the agent setup runs; taking it fails if another run holds it.
@@ -602,7 +619,16 @@ fn old_block_notices(stderr: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::old_block_notices;
+    use super::{failure_lines, old_block_notices};
+
+    #[test]
+    fn the_whole_failure_is_shown_but_capped() {
+        assert_eq!(failure_lines(""), "unknown error");
+        assert_eq!(failure_lines("a\n\nb\n"), "a\nb");
+        let many = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let shown = failure_lines(&many);
+        assert!(shown.contains("line 11") && !shown.contains("line 12") && shown.ends_with('…'));
+    }
 
     #[test]
     fn only_one_setup_at_a_time() {

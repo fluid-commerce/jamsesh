@@ -68,12 +68,13 @@ queue() {
   echo "JamSesh couldn't keep this prompt for the room while the host is unreachable (writing to $outbox failed)." >&2
   exit 1
 }
-if hub_down; then queue "$1"; exit 0; fi
-
 # Has this chat joined? Asked every time, so a chat the room removed (or a host this Mac switched
 # away from) gets nothing more. The question carries only the session id.
 connect=false
 if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eiq '"prompt"[[:space:]]*:[[:space:]]*"([[:space:]]|\\\\n)*((please|ok|okay|hey|now)[[:space:],]+)*(connect to jamsesh|join jamsesh|join the (jam)?session|/jamsesh)'; then connect=true; fi
+# The cooldown after a failed call only holds back automatic notifications: a person asking to connect
+# always tries the host, which may have come back.
+if hub_down && [ "$connect" != true ]; then queue "$1"; exit 0; fi
 if ! ans="$(joined "$sid" "$connect")"; then
   printf '%s' "$now" > "$down"
   queue "$1"
@@ -381,7 +382,7 @@ sub slurp { open(my $f, '<:raw', $_[0]) or return undef; local $/; my $t = <$f>;
 my $js = JSON::PP->new->canonical;
 if ($op eq 'get') {
   my $t = slurp($cfg);
-  exit 0 unless defined $t;
+  exit(-e $cfg ? 2 : 0) unless defined $t;
   my $d = eval { decode_json($t) };
   exit 2 unless ref $d eq 'HASH';
   my $o = ref $d->{mcpServers} eq 'HASH' ? $d->{mcpServers}{jamsesh} : undef;
@@ -541,7 +542,8 @@ if [ -n "$CLAUDE" ]; then
   # write, before the CLI runs: a link at ~/.claude.json to an instruction file is refused up front.
   guard "$(resolve "$CLAUDEJSON")" || exit 1
   cred="$DIR/mcp-headers.json"
-  mcp_before="$(mcp_key get "$CLAUDEJSON" 2>/dev/null || true)"
+  # A config that can't be read or parsed is not an absent entry: nothing is changed until it can be.
+  mcp_before="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)" || { echo "JamSesh can't read $CLAUDEJSON (it isn't valid JSON, or can't be opened), so nothing was changed. Fix or move it, then connect again." >&2; exit 1; }
   printf '%s' "$mcp_before" > "$SAVED/mcp_before.json"
   # Claude Code asks a helper for the credential header each time it connects, so the token is in
   # neither its arguments nor its config. Without a token the app's relay adds it.
@@ -662,49 +664,35 @@ if (-e $path) {
   $text = do { local $/; <$in> };
   close $in;
 }
-# Where a line leaves us: inside a multi-line string (its opening quotes) or not (''). Comments and
-# one-line strings are skipped, so quotes in a comment or a value never start a multi-line string.
-sub scan {
-  my ($line, $long) = @_;
-  my ($i, $n) = (0, length $line);
-  while ($i < $n) {
-    if ($long) {
-      my $j = index($line, $long, $i);
-      return $long if $j < 0;
-      ($i, $long) = ($j + 3, '');
-      next;
-    }
-    my $c = substr($line, $i, 1);
-    return '' if $c eq '#';
-    my $three = substr($line, $i, 3);
-    if ($three eq '"' x 3 || $three eq "'" x 3) { ($long, $i) = ($three, $i + 3); next; }
-    if ($c eq '"') {
-      for ($i++; $i < $n; $i++) { my $d = substr($line, $i, 1); if ($d eq '\\\\') { $i++; next } if ($d eq '"') { $i++; last } }
-      next;
-    }
-    if ($c eq "'") { my $j = index($line, "'", $i + 1); $i = $j < 0 ? $n : $j + 1; next; }
-    $i++;
-  }
-  return $long;
+# JamSesh's part of the file sits between two marker comments, and setup only ever replaces the text
+# between its own markers. The rest is never parsed. A table of the same name outside the markers
+# (written by hand, or by an earlier JamSesh) is not ours to edit: the file is left as it is.
+my ($open, $close) = ('# >>> jamsesh', '# <<< jamsesh');
+my @lines = split /(?<=\\n)/, $text;
+my (@from, @to);
+for my $i (0 .. $#lines) {
+  (my $l = $lines[$i]) =~ s/\\s+\\z//;
+  push @from, $i if $l eq $open;
+  push @to, $i if $l eq $close;
 }
-# Takes out JamSesh's own tables ([mcp_servers.jamsesh] and its subtables) by their header lines, so
-# a "[" inside a value (an IPv6 address, a comment) or a multi-line string never ends a table early.
-my ($kept, $ours, $long) = ('', 0, '');
-for my $line (split /(?<=\\n)/, $text) {
-  if (!$long && $line =~ /^\\s*\\[\\[?\\s*([^\\]\\[#]+?)\\s*\\]\\]?\\s*(?:#.*)?\\r?\\n?\\z/) {
-    (my $name = $1) =~ s/\\s*\\.\\s*/./g;
-    $name =~ s/"([^"]*)"/$1/g;
-    $ours = $name =~ /^mcp_servers\\.jamsesh(\\.|\\z)/ ? 1 : 0;
+die "JamSesh: $path has a broken pair of '$open' / '$close' lines, so it was left as it is. Delete them and the JamSesh lines between them, then connect again.\\n"
+  unless (@from == 0 && @to == 0) || (@from == 1 && @to == 1 && $from[0] < $to[0]);
+my $has = @from ? 1 : 0;
+for my $i (0 .. $#lines) {
+  next if $has && $i >= $from[0] && $i <= $to[0];
+  if ($lines[$i] =~ /^\\s*\\[\\[?\\s*mcp_servers\\s*\\.\\s*["']?jamsesh\\b/ || $lines[$i] =~ /^\\s*mcp_servers\\s*\\.\\s*["']?jamsesh\\b/) {
+    die "JamSesh: $path already has its own [mcp_servers.jamsesh] outside JamSesh's markers (line " . ($i + 1) . "), so it was left as it is. Delete that table (and its [mcp_servers.jamsesh.http_headers]), then connect again.\\n";
   }
-  $kept .= $line unless $ours;
-  # Inside a multi-line string nothing is a header.
-  $long = scan($line, $long);
 }
-$text = $kept;
-$text =~ s/\\s+\\z//;
 (my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
 (my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
-$text .= ($text eq '' ? '' : "\\n\\n") . "[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n";
+my $block = "$open\\n[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n$close\\n";
+if ($has) {
+  $text = join('', @lines[0 .. $from[0] - 1]) . $block . join('', @lines[$to[0] + 1 .. $#lines]);
+} else {
+  $text =~ s/\\s+\\z//;
+  $text .= ($text eq '' ? '' : "\\n\\n") . $block;
+}
 print $text;
 PL
   safe_write "$HOME/.codex/config.toml" 600 < "$SAVED/config.new"

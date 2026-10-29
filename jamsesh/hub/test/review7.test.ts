@@ -107,3 +107,21 @@ test("hook.sh: a host switch between the room check and the replay leaves the pr
     fake.stop(true);
   }
 });
+
+test("a removed Codex chat is keyed by machine and folder on the hub: a supplied chat, a missing cwd or a trailing slash don't give it a new identity", async () => {
+  const fresh = () => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID() });
+  const first: any = await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone" });
+  expect(first.isError).toBeFalsy();
+  const mine = s.store.all("agents").find((a: any) => a.harness === "codex" && a.cwd === "/w/codex-gone")!;
+  s.removeAgent(mine.id);
+  const gone = /removed this chat/;
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone" })).rejects.toThrow(gone);
+  // Naming another chat, or another repo, or the folder with a slash, changes nothing.
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone", chat: "made-up" })).rejects.toThrow(gone);
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "other", cwd: "/w/codex-gone/" })).rejects.toThrow(gone);
+  // No folder: refused, not given an identity from the repo.
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app" })).rejects.toThrow("cwd");
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "  " })).rejects.toThrow("cwd");
+  // Another folder is another chat.
+  expect((await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-other" })).isError).toBeFalsy();
+});

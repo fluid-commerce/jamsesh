@@ -406,24 +406,16 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
-        // Which chat this is. Claude Code's hooks hand it its session id (passed as chat). A harness without
-        // hooks (Codex) has no chat id of its own, and its MCP session changes on every reconnect or hub
-        // restart, so its chat is its folder on its machine: a reconnect resumes it and a removal sticks.
-        // (Two Codex chats open in one folder at once are one agent.) Without even a folder, the session.
-        const where = String(args.cwd ?? "").trim() || String(args.repo ?? "").trim();
+        // Claude Code's hooks hand it its chat id. Every other harness is keyed here, by machine and folder, and a
+        // chat or repo it supplies is ignored: neither can give a removed chat a fresh identity. No folder, no join.
         const harness = String(args.harness ?? "other");
-        const chatId =
-          typeof args.chat === "string" && args.chat.trim()
-            ? args.chat.trim().slice(0, 80)
-            : harness !== "claude-code" && where
-              ? `${harness}:${machine}:${where}`.slice(0, 300)
-              : ctx.sessionId
-                ? `mcp:${ctx.sessionId}`
-                : undefined;
-        // A chat the room removed stays out until a person lets it back in.
-        // A join that doesn't name its chat can't show it isn't the removed one: a removal in this folder counts.
-        const named = typeof args.chat === "string" && !!args.chat.trim();
-        if (s.rejoinBlocked(chatId, ctx.agentId, named ? undefined : { machine, cwd: String(args.cwd ?? "").trim(), harness }))
+        const cwd = String(args.cwd ?? "").trim().replace(/(.)\/+$/, "$1");
+        const claudeChat = harness === "claude-code" && typeof args.chat === "string" ? args.chat.trim().slice(0, 80) : "";
+        if (harness !== "claude-code" && !cwd) throw new Error("Pass cwd (this chat's working directory) to jam_join: without it the room can't tell which chat this is.");
+        const chatId = claudeChat || (harness !== "claude-code" ? `${harness}:${machine}:${cwd}`.slice(0, 300) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
+        // A chat the room removed stays out until a person lets it back in. A Claude Code join without its chat
+        // id can't show it isn't the removed one: a removal in this folder counts.
+        if (s.rejoinBlocked(chatId, ctx.agentId, claudeChat ? undefined : { machine, cwd, harness }))
           throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
         // Rejoining keeps the stored role unless the caller names one (the session settles it).
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
@@ -434,7 +426,7 @@ export class McpEndpoint {
           role,
           broadcasts: typeof args.broadcasts === "boolean" ? args.broadcasts : undefined,
           branch: args.branch,
-          cwd: args.cwd,
+          cwd: cwd || args.cwd,
           machine,
           chatId, // see above
           platform: args.platform,
