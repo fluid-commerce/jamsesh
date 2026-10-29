@@ -493,6 +493,7 @@ export class McpEndpoint {
           : null;
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
+        this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
         const out = this.inboxText(agent, true);
         const idle = out.startsWith("Nothing new.");
         s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });

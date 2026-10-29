@@ -254,9 +254,11 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   its SHA-256 hash. Browsers keep it in an HttpOnly, SameSite=Lax cookie (Secure over HTTPS, and
   scoped to the DuckDNS domain so dev-server subdomains open signed in). The Mac app keeps it in
   the Keychain. Agents keep it in files under `~/.jamsesh` (mode 600) or rely on the app's relay. A
-  token is never a command-line argument (any process can list those): `curl` reads it as a header
-  file (`-H @~/.jamsesh/auth.header`, or `-K -` from a pipe), and Claude Code gets it from a
-  `headersHelper` script that reads `~/.jamsesh/mcp-headers.json`.
+  token is never in a command's text, arguments or environment (shell history and process lists show
+  those): the pairing guide has the agent write it to `~/.jamsesh/auth.header` with its file tool,
+  `curl` reads that file (`-H @~/.jamsesh/auth.header`), the setup script reaches `bash` through a pipe,
+  Codex's config is written from the file, and Claude Code gets it from a `headersHelper` script that
+  reads `~/.jamsesh/mcp-headers.json`.
 - Each paired device has a kind: **browser** (a person's window, browser, or Mac app) or
   **agent**. Kinds decide what a device may approve (see [14](#14-security)).
 - The big screen shows a toast when a device pairs ("A laptop connected", "An agent connected").
@@ -340,12 +342,33 @@ kind of credential, is answered "Session not found", and a chat id in `jam_join`
 from the same machine. Transport ids (`chatId`: a Claude Code session id, `mcp:<session>`) never
 appear in `/api/state` or its live patches.
 
+**The trust boundary is the machine, not the chat.** Every chat on one computer runs as the same
+person, shares that computer's agents credential (or the app's relay), and can read `~/.jamsesh`, so
+a per-chat secret would sit in a file every other chat can read. JamSesh therefore separates
+machines, not chats on one machine: a process on Chey's Mac can name another of Chey's chats' session
+ids and read or acknowledge that chat's room items, post a prompt as Chey for it, or claim
+"connect to jamsesh" for a chat Chey's Mac had removed. It cannot do any of that for a chat on another
+Mac, and it cannot act as a person (person-only routes need a person's window). Chats on one machine
+are told apart for routing (each its own agent and inbox), not as a security boundary. A removed
+chat is let back in by its person's words only through its own machine's joined check (the hook
+sends `connect: true` only when the prompt starts by asking to connect, so "don't connect to jamsesh"
+doesn't count), or by a person choosing Allow again.
+
+**Removing an agent ends everything waiting on it.** Its listener and any `jam_wait` end at once
+with nothing (a wait that ends checks the agent is still in the room), handovers it hadn't
+acknowledged are dropped, and its share of each open task is cancelled, with one feed line naming the
+tasks so the room can hand them to someone else; other targets of a shared task carry on.
+
 `hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
 asks the host whether the chat has joined, every time (the question carries the session id only),
 so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
-have a 4-second limit (the joined question 3). When the host is unreachable, prompts of a chat this
-Mac saw joined go to `~/.jamsesh/outbox.jsonl` and are replayed (each after a fresh joined check) on
-the next successful call, if under ten minutes old.
+have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the hub
+records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once. When
+the host is unreachable, prompts of a chat this Mac saw joined go to `~/.jamsesh/outbox.jsonl` with
+their id. Later hook calls replay them, two per call, each after a fresh joined check; an entry is
+removed only once the host has taken it, it is over ten minutes old, or its chat is no longer in the
+room. Every change to the outbox happens under a lock (`outbox.jsonl.lock`, a folder; one left by a
+killed hook is cleared after a minute), so hooks running at once don't lose each other's prompts.
 
 ### 4.6 Remote access
 

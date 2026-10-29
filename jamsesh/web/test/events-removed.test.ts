@@ -15,3 +15,11 @@ test("lines the room deleted leave the state and are listed for the feed to forg
   expect(snap.state!.events.map((e) => e.id)).toEqual([1]);
   expect(snap.removed).toEqual([2, 3]);
 });
+
+test("a purge of any size is listed in full, so an open feed forgets every line of it", () => {
+  const ids = Array.from({ length: 1200 }, (_, i) => 1000 + i);
+  (hub as any).snap = { ...(hub as any).snap, removed: [], state: { events: [] } };
+  (hub as any).handle({ type: "events-removed", ids: ids.slice(0, 700) });
+  (hub as any).handle({ type: "events-removed", ids: ids.slice(700) });
+  expect(hub.get().removed).toEqual(ids);
+});

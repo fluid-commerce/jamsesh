@@ -31,7 +31,8 @@ mark="$dir/chats/$sid"
 acks="$dir/acks/$sid"
 hdr="$dir/.headers.$$"
 now="$(date +%s)"
-trap 'rm -f "$hdr"' EXIT
+locked=""
+trap 'rm -f "$hdr"; [ -z "$locked" ] || rmdir "$outbox.lock" 2>/dev/null' EXIT
 hub_down() { [ -f "$down" ] && [ $((now - $(cat "$down" 2>/dev/null || echo 0))) -lt 45 ]; }
 # The credential is in a file (mode 600) that curl reads, so it never shows in a process list. With
 # none, the JamSesh app's relay on this Mac adds it.
@@ -47,20 +48,34 @@ handed_over() { local id; id="$(header x-jam-delivery)"; [ -n "$id" ] && mkdir -
 gone() { [ "$(header x-jam-joined)" = "0" ]; }
 joined() { printf '{"session_id":"%s","connect":%s}' "$1" "\${2:-false}" | post --max-time 3 --data-binary @- "$hub/api/hooks/joined" 2>/dev/null; }
 
+# Each prompt has an id that goes with it, and stays with it in the outbox, so the host records it once
+# however often it arrives (a send whose answer was lost, then the same prompt replayed).
+pid="p$now-$$-$RANDOM$RANDOM"
+# Every chat's hooks share the outbox: one at a time changes it. A lock left by a hook that was
+# killed holding it is cleared after a minute.
+lock() {
+  local i=0
+  find "$outbox.lock" -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null
+  until mkdir "$outbox.lock" 2>/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && return 1; sleep 0.1; done
+  locked=1
+}
+unlock() { rmdir "$outbox.lock" 2>/dev/null; locked=""; }
 # The host was unreachable a moment ago: don't make every prompt wait for it again. A chat this Mac
 # saw joined keeps its prompts until the host is back.
 queue() {
   [ "$1" = "prompt" ] && [ -f "$mark" ] || return 0
-  printf '%s\\t%s\\n' "$now" "$(printf '%s' "$body" | tr -d '\\n')" >> "$outbox"
+  lock || return 0
+  printf '%s\\t%s\\t%s\\n' "$now" "$pid" "$(printf '%s' "$body" | tr -d '\\n')" >> "$outbox"
   # Keep the newest 50 only.
   if [ "$(wc -l < "$outbox")" -gt 50 ]; then tail -n 50 "$outbox" > "$outbox.tmp" && mv -f "$outbox.tmp" "$outbox"; fi
+  unlock
 }
 if hub_down; then queue "$1"; exit 0; fi
 
 # Has this chat joined? Asked every time, so a chat the room removed (or a host this Mac switched
 # away from) gets nothing more. The question carries only the session id.
 connect=false
-if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eiq '"prompt"[[:space:]]*:[[:space:]]*"[^"]{0,40}(connect to jamsesh|join jamsesh|join the (jam)?session|/jamsesh)'; then connect=true; fi
+if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eiq '"prompt"[[:space:]]*:[[:space:]]*"([[:space:]]|\\\\n)*((please|ok|okay|hey|now)[[:space:],]+)*(connect to jamsesh|join jamsesh|join the (jam)?session|/jamsesh)'; then connect=true; fi
 if ! ans="$(joined "$sid" "$connect")"; then
   printf '%s' "$now" > "$down"
   queue "$1"
@@ -96,7 +111,7 @@ if [ "$1" = "listen" ]; then
   exit 0
 fi
 
-if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then
+if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-prompt-id: $pid" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then
   # The host is unreachable: keep prompts so they reach the room when it's back.
   printf '%s' "$now" > "$down"
   queue "$1"
@@ -106,17 +121,28 @@ confirmed
 printf '%s' "$out"
 handed_over
 gone && rm -f "$mark"
-# Back in touch: send what was queued while the host was away, if it's still fresh and its chat is
-# still in the room. A prompt from hours ago would only confuse the room, so anything older than ten
-# minutes is dropped.
-if [ -s "$outbox" ]; then
-  while IFS=$'\\t' read -r ts line; do
+# Back in touch: send what was queued while the host was away, two at a time (each call stays
+# short). An entry leaves the outbox only once the host has it, it's too old to matter (ten minutes:
+# a prompt from hours ago would only confuse the room), or its chat isn't in the room any more.
+if [ -s "$outbox" ] && lock; then
+  : > "$outbox.keep"
+  n=0
+  while IFS=$'\\t' read -r ts qid line; do
     case "$ts" in ''|*[!0-9]*) continue ;; esac
+    # Queued by an older hook.sh, without an id: one made from the line stays the same on every try.
+    [ -n "$line" ] || { line="$qid"; qid="q$ts-$(printf '%s' "$line" | cksum | cut -d ' ' -f 1)"; }
     [ $((now - ts)) -le 600 ] && [ -n "$line" ] || continue
+    keep() { printf '%s\\t%s\\t%s\\n' "$ts" "$qid" "$line" >> "$outbox.keep"; }
+    [ "$n" -lt 2 ] || { keep; continue; }
+    n=$((n + 1))
     qsid="$(printf '%s' "$line" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -n 1)"
-    [ -n "$qsid" ] && joined "$qsid" | grep -q '"joined":true' && printf '%s' "$line" | post --max-time 4 --data-binary @- "$hub/api/hooks/prompt" >/dev/null 2>&1
+    [ -n "$qsid" ] || continue
+    ans="$(joined "$qsid")" || { keep; continue; }
+    printf '%s' "$ans" | grep -q '"joined":true' || continue
+    printf '%s' "$line" | post --max-time 4 -H "x-jam-prompt-id: $qid" --data-binary @- "$hub/api/hooks/prompt" >/dev/null 2>&1 || keep
   done < "$outbox"
-  : > "$outbox"
+  mv -f "$outbox.keep" "$outbox"
+  unlock
 fi
 `;
 }
@@ -215,14 +241,24 @@ files outside your home folder.
 
 ## Set yourself up (one time per computer)
 
-Run this one command. It configures Claude Code and Codex on this computer: the \`jamsesh\` MCP
-server, a small JamSesh skill, a \`/jamsesh\` command, and Claude Code hooks. Nothing joins the room by
-itself: a chat joins only when its person tells it to ("connect to jamsesh"), and the hooks do nothing for
-any other chat. Replace <NAME> with your person's first name; ask them if you don't know it.
+The token never goes in a command: commands land in shell history and process lists.
 
-\`\`\`bash
-printf 'header = "authorization: Bearer %s"\\n' '${token}' | curl -fsSL -K - "${origin}/agent/setup.sh" | JAMSESH_NAME="<NAME>" bash
-\`\`\`
+1. Make JamSesh's private folder: \`mkdir -p ~/.jamsesh && chmod 700 ~/.jamsesh\`
+2. With your file-writing tool (not a shell command), create \`~/.jamsesh/auth.header\` holding exactly
+   this one line:
+
+   \`\`\`
+   authorization: Bearer ${token}
+   \`\`\`
+
+3. Run this one command. It configures Claude Code and Codex on this computer: the \`jamsesh\` MCP
+   server, a small JamSesh skill, a \`/jamsesh\` command, and Claude Code hooks. Nothing joins the room by
+   itself: a chat joins only when its person tells it to ("connect to jamsesh"), and the hooks do nothing
+   for any other chat. Replace <NAME> with your person's first name; ask them if you don't know it.
+
+   \`\`\`bash
+   chmod 600 ~/.jamsesh/auth.header && curl -fsSL -H @"$HOME/.jamsesh/auth.header" "${origin}/agent/setup.sh" | JAMSESH_NAME="<NAME>" bash
+   \`\`\`
 
 ## Then
 
@@ -382,10 +418,13 @@ fi
 
 if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/prompts"
-  JAMSESH_T="$TOKEN" perl - "$HUB" "$HOME/.codex/config.toml" <<'PL'
+  # The token comes from the header file, not this process's arguments or environment.
+  perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" <<'PL'
 use strict; use warnings;
-my ($hub, $path) = @ARGV;
-my $token = $ENV{JAMSESH_T} // '';
+my ($hub, $header, $path) = @ARGV;
+my $token = '';
+if (open(my $h, '<', $header)) { ($token) = (<$h> // '') =~ /Bearer\\s+(\\S+)/; close $h; }
+$token //= '';
 my $text = '';
 if (-e $path) {
   open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";

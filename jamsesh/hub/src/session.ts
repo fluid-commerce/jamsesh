@@ -529,6 +529,14 @@ export class Session {
     this.store.remove("agents", id);
     this.removedAgents.add(id);
     this.blockRejoin(agent);
+    // Nothing waits on it any more: its share of each open task is cancelled (and the room told which),
+    // what was being handed to it is dropped, and a listener or jam_wait of its ends now.
+    const open = this.directives().filter((d) => d.targets.includes(id) && !["done", "cancelled"].includes(d.progress?.[id] ?? d.status));
+    for (const d of open) this.setDirectiveFor(d.id, id, "cancelled", `${agent.name} was removed from the session`);
+    if (open.length)
+      this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed with ${open.length === 1 ? "an open task" : `${open.length} open tasks`}, now cancelled: ${open.map((d) => `"${d.text.slice(0, 80)}"`).join("; ")}. Ask the room to give ${open.length === 1 ? "it" : "them"} to another agent.`, data: { directiveIds: open.map((d) => d.id) } });
+    this.store.setSetting(`deliveries:${id}`, []);
+    this.wake(id);
     const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
     if (opts.purge) for (const d of this.store.all("documents")) if (d.authorId === id) this.store.remove("documents", d.id);
     if (ids.length) bus.send({ type: "events-removed", ids });

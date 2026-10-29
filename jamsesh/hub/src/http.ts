@@ -570,6 +570,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
     if (hook === "joined") return json({ joined: hub.chatJoined(b, machine) });
     // What the hook script passed on to the agent since its last call (see Hub.offer).
+    const promptId = req.headers.get("x-jam-prompt-id") ?? "";
+    if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;
     b.jamAcks = (req.headers.get("x-jam-ack") ?? "").split(",").map((x) => x.trim()).filter((x) => /^[\w-]{1,40}$/.test(x)).slice(0, 50);
     // A chat that isn't (or is no longer) in the room: the script stops sending for it.
     const joined = !!hub.hookAgent(b, ip, machine);

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hub } from "../src/hub";
-import { OLD_BLOCKS, hookScript, joinScript } from "../src/install-scripts";
+import { OLD_BLOCKS, agentGuide, hookScript, joinScript } from "../src/install-scripts";
 
 let server: ReturnType<typeof Bun.serve>;
 let origin = "";
@@ -178,6 +178,17 @@ describe("agent setup script", () => {
     expect(setup).not.toMatch(/-H "authorization|--header|Bearer \$TOKEN"? "\$/);
     expect(setup).not.toMatch(/perl [^\n]*"\$TOKEN"/);
     expect(hookScript({} as Hub)).not.toContain("Bearer");
+    // Nor in a child's environment (Codex's config is written from the header file).
+    expect(setup).not.toMatch(/[A-Z_]+="\$TOKEN" /);
+  });
+
+  test("the pairing guide never puts the token in a command: the agent writes it to a private file first", () => {
+    const guide = agentGuide("http://host:4790", "jst_secret123");
+    const commands = [...guide.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]!).concat([...guide.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!));
+    expect(commands.some((c) => c.includes("curl"))).toBe(true);
+    for (const c of commands) expect(c).not.toContain("jst_secret123");
+    expect(guide).toContain("authorization: Bearer jst_secret123");
+    expect(guide).toContain('-H @"$HOME/.jamsesh/auth.header"');
   });
 
   test("the hook keeps Claude Code's own notices out of the room", async () => {

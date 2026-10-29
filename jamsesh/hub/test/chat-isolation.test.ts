@@ -3,7 +3,7 @@
 // offered again, an acknowledged one never), and a chat the room removed stays out until a person
 // lets it back in. Real HTTP and the real hook script against throwaway hubs.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
@@ -340,4 +340,121 @@ test("hook.sh listen against a real hub wakes the agent, and the wake is acknowl
   expect(s.store.get("directives", d.id)!.progress[a.id]).toBe("pending");
   await run("tool", { session_id: "chat-wake", tool_name: "Edit" });
   expect(s.store.get("directives", d.id)!.progress[a.id]).toBe("delivered");
+});
+
+// ---- re-review: removal, the outbox, the connect phrase ----
+
+test("removing an agent ends its waiting listener and jam_wait, drops its handovers, and releases its tasks", async () => {
+  const a = joinChat("chat-rm-wait");
+  const other = joinChat("chat-rm-other", "dev_macB", "/work/other");
+  const shared = directive("Build the settings page", [a.id, other.id]);
+  const solo = directive("Fix the footer", [a.id]);
+  // Taken already: open work, nothing new in its inbox, so both wait.
+  for (const d of [shared, solo]) s.setDirectiveFor(d.id, a.id, "acked");
+  const listening = hooksOf(hub).listen(a, {}, 5000);
+  const ctx = { agentId: a.id, ip: "relayed", device: macA.device.id, origin: base };
+  const waiting = hub.mcp.call(ctx, "jam_wait", { seconds: 30 });
+  await Bun.sleep(30);
+  const t0 = Date.now();
+  s.removeAgent(a.id);
+  // Both end at once with nothing: the removed chat isn't woken or handed anything.
+  expect(await listening).toBe("");
+  await expect(waiting).rejects.toThrow("removed you");
+  expect(Date.now() - t0).toBeLessThan(1500);
+  expect(s.store.setting(`deliveries:${a.id}`, [1])).toEqual([]);
+  // Its share of each task is cancelled, so nothing waits on a tile that's gone; the other target carries on.
+  expect(s.store.get("directives", solo.id)!.status).toBe("cancelled");
+  expect(s.store.get("directives", shared.id)!.progress[a.id]).toBe("cancelled");
+  expect(s.store.get("directives", shared.id)!.progress[other.id]).toBe("pending");
+  expect(s.store.get("directives", shared.id)!.status).not.toBe("cancelled");
+  expect(s.store.recentEvents({ kinds: ["system"] }).some((e) => e.text.includes("Fix the footer") && e.text.includes("now cancelled"))).toBe(true);
+}, 10_000);
+
+test("a prompt that arrives twice under one id is recorded once", async () => {
+  joinChat("chat-dup");
+  const post = () => fetch(`${base}/api/hooks/prompt`, { method: "POST", headers: { ...bearer(macA.token), "x-jam-prompt-id": "p123-dup" }, body: JSON.stringify({ session_id: "chat-dup", prompt: "make the header sticky" }) });
+  await (await post()).body?.cancel();
+  await (await post()).body?.cancel();
+  expect(s.store.recentEvents({ kinds: ["prompt"] }).filter((e) => e.text === "make the header sticky")).toHaveLength(1);
+});
+
+test("hook.sh outbox: a lost answer is replayed under the same id, a failed replay stays queued, concurrent writes all land", async () => {
+  // A fake host: the first prompt is accepted but answered too late (the hook gives up after 4 seconds);
+  // then its replay fails once; after that everything goes through.
+  let mode: "slow" | "fail" | "ok" = "slow";
+  let failId = "";
+  const prompts: { id: string | null; body: string }[] = [];
+  const fake = Bun.serve({
+    port: 0,
+    idleTimeout: 30,
+    fetch: async (req) => {
+      const path = new URL(req.url).pathname;
+      const body = await req.text();
+      if (path.endsWith("/hooks/joined")) return Response.json({ joined: true });
+      if (!path.endsWith("/hooks/prompt")) return Response.json({});
+      prompts.push({ id: req.headers.get("x-jam-prompt-id"), body });
+      if (mode === "slow") {
+        await Bun.sleep(5000);
+        return Response.json({});
+      }
+      if (mode === "fail" && req.headers.get("x-jam-prompt-id") === failId) return new Response("busy", { status: 503 });
+      return Response.json({});
+    },
+  });
+  try {
+    const { home, run } = box(`http://127.0.0.1:${fake.port}`, "tok");
+    mkdirSync(join(home, "chats"), { recursive: true });
+    writeFileSync(join(home, "chats/chat-q"), "");
+    await run("prompt", { session_id: "chat-q", prompt: "first prompt" });
+    const outbox = join(home, "outbox.jsonl");
+    const lines = () => (existsSync(outbox) ? readFileSync(outbox, "utf8").split("\n").filter(Boolean) : []);
+    expect(lines()).toHaveLength(1);
+    const id = prompts[0]!.id!;
+    expect(id).toMatch(/^p\d+-/);
+    expect(lines()[0]!.split("\t")[1]).toBe(id);
+    // The host looks down for 45 seconds after that: let it be reachable again.
+    rmSync(join(home, "hub-down"), { force: true });
+    mode = "fail";
+    failId = id;
+    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
+    // The tool call went through but the replay didn't: the prompt is still queued.
+    expect(prompts.filter((p) => p.id === id)).toHaveLength(2);
+    expect(lines().map((l) => l.split("\t")[1])).toEqual([id]);
+    mode = "ok";
+    prompts.length = 0;
+    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
+    // Replayed under the same id it was first sent with, so the host can tell it's the same prompt.
+    expect(prompts.some((p) => p.id === id && p.body.includes("first prompt"))).toBe(true);
+    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
+    expect(lines()).toHaveLength(0);
+    // Many hooks queueing at once (the host is down): every prompt lands, each with its own id.
+    writeFileSync(join(home, "hub-down"), String(Math.floor(Date.now() / 1000)));
+    await Promise.all(Array.from({ length: 12 }, (_, i) => run("prompt", { session_id: "chat-q", prompt: `burst ${i}` })));
+    const burst = lines();
+    expect(burst).toHaveLength(12);
+    expect(new Set(burst.map((l) => l.split("\t")[1])).size).toBe(12);
+    expect(existsSync(`${outbox}.lock`)).toBe(false);
+  } finally {
+    fake.stop(true);
+  }
+}, 30_000);
+
+test("only a prompt that asks to connect counts as asking: \"don't connect to jamsesh\" doesn't", async () => {
+  const asks: boolean[] = [];
+  const fake = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      const body = await req.json().catch(() => ({}));
+      if (new URL(req.url).pathname.endsWith("/hooks/joined")) asks.push(body.connect === true);
+      return Response.json({ joined: false });
+    },
+  });
+  try {
+    const { run } = box(`http://127.0.0.1:${fake.port}`, "tok");
+    for (const prompt of ["connect to jamsesh", "Please connect to jamsesh", "  /jamsesh mobile nav", "don't connect to jamsesh", "why did you join the session?", "we should not join jamsesh yet"])
+      await run("prompt", { session_id: "chat-c", prompt });
+    expect(asks).toEqual([true, true, true, false, false, false]);
+  } finally {
+    fake.stop(true);
+  }
 });

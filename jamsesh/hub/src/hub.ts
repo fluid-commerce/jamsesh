@@ -458,7 +458,9 @@ export class Hub {
     if (!agent) return {};
     this.ackDeliveries(agent.id, body.jamAcks);
     const prompt = String(body.prompt ?? "").trim();
-    if (prompt && !prompt.startsWith("/")) {
+    // The same prompt again (its answer was lost and the outbox replayed it) is recorded once.
+    const again = this.promptSeen(body.jamPromptId);
+    if (prompt && !prompt.startsWith("/") && !again) {
       const owner = this.session.person(agent.ownerId);
       const ev = this.session.store.addEvent({
         kind: "prompt",
@@ -476,6 +478,15 @@ export class Hub {
     const first = prompt.split("\n")[0].slice(0, 100);
     this.session.touchAgent(agent.id, { status: "working", ...(first && !prompt.startsWith("/") ? { activity: `Working on: ${first}` } : {}) });
     return this.pendingContext(agent, "UserPromptSubmit", "Handle these alongside your person's prompt; jam_ack directives when you take them.");
+  }
+
+  /** Whether a prompt with this id (from hook.sh) has reached the room already; remembers it if not. */
+  private promptSeen(id: unknown) {
+    if (typeof id !== "string" || !id) return false;
+    const seen = this.store.setting<string[]>("promptIds", []);
+    if (seen.includes(id)) return true;
+    this.store.setSetting("promptIds", [...seen, id].slice(-500));
+    return false;
   }
 
   /**
@@ -505,6 +516,7 @@ export class Hub {
    * answer the agent directly and mark what they return. Acknowledged items are never offered again.
    */
   private offer(agent: Agent, { via = "hook", retry = false, withDecisions = true }: { via?: Delivery["via"]; retry?: boolean; withDecisions?: boolean } = {}): { id: string; lines: string[] } | null {
+    if (!this.session.agent(agent.id)) return null; // removed from the room
     const now = Date.now();
     const list = this.deliveries(agent.id).filter((d) => now - d.at < 30 * 60_000);
     const open = list[list.length - 1];
@@ -618,6 +630,11 @@ export class Hub {
     const until = Date.now() + maxMs;
     while (Date.now() < until) {
       await this.session.wait(agent.id, Math.min(30_000, until - Date.now()));
+      // Removed from the room while it waited: it never hears from the room again.
+      if (!this.session.agent(agent.id)) {
+        if (this.listening.get(agent.id) === mine) this.listening.delete(agent.id);
+        return none;
+      }
       if (this.listening.get(agent.id) !== mine) return none; // replaced, or its person started talking to it
       // In jam_wait (or jam_ask) the agent is already listening itself: it gets the items there.
       if (this.session.agent(agent.id)?.status === "waiting") {
