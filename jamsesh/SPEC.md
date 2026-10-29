@@ -1315,6 +1315,13 @@ and click and type in apps it opened, to walk the room through a build [B44, B45
 - The room gets a toast when the build starts and when it opens or fails (with the exit code and
   the end of the output).
 
+**Credentials and output.** A command, `open` value, branch or repository that carries a password or
+token is refused when it is filed ("Commands can't contain passwords or tokens. Use a public URL, or set
+it up on the host."). That detection in arbitrary shell text is a best-effort safety net: shell can
+hide text in many ways, so the person's approval on the card, which shows the exact command and what
+will open, is the real guard. The room is shown the last lines of an approved command's output with
+anything that looks like a secret masked; that masking is best-effort for the same reason.
+
 A build an agent asks for goes through approval first (see [8.11](#811-build-approvals)). A build
 the brain starts, and any `shell` command, also needs a person: the brain files it as a request,
 says it out loud ("JamSesh wants to run … on the host. Approve or deny?"), and a person approves

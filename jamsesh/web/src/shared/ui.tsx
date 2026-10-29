@@ -432,7 +432,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   // The newest line in the list when the reader scrolled away. While they are away nothing newer is added (the list never has a gap); it is counted for the pill, and returning resets to the latest window.
   const frozenAt = useRef(0);
   // How many feed lines came in while the reader was away: a plain counter bumped by each new event as it arrives, with the highest id counted so far (the live state holds only a recent window).
-  const awayNew = useRef({ count: 0, upTo: 0 });
+  const awayNew = useRef({ count: 0, upTo: 0, gap: false });
   // Bumped by every reset to the latest window (and on unmount): a history response from an older generation is dropped, so it can't put stale rows back or restore an old scroll position.
   const generation = useRef(new Generation());
   useEffect(() => () => void generation.current.bump(), []);
@@ -454,11 +454,12 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || ((older.done || everything) && !trimmed.current);
   const fresh = following.current ? 0 : awayNew.current.count;
+  const gap = !following.current && awayNew.current.gap;
 
   /** Back at the bottom: drop everything and start again from the live state, a contiguous latest window that pages backward. */
   const resetToLatest = () => {
     seen.current.clear();
-    awayNew.current = { count: 0, upTo: 0 };
+    awayNew.current = { count: 0, upTo: 0, gap: false };
     generation.current.bump();
     busy.current = false;
     trimmed.current = false;
@@ -479,7 +480,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
       if (atBottom) resetToLatest();
       else {
         frozenAt.current = Math.max(0, ...seen.current.keys());
-        awayNew.current = { count: 0, upTo: Math.max(frozenAt.current, ...(state?.events ?? []).map((e) => e.id)) }; // everything in the state so far was already shown
+        awayNew.current = { gap: false, count: 0, upTo: Math.max(frozenAt.current, ...(state?.events ?? []).map((e) => e.id)) }; // everything in the state so far was already shown
       }
       following.current = atBottom;
       setAway(!atBottom);
@@ -527,6 +528,12 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   // The away count is bumped at the wire, one event at a time, so a burst can't push lines out of the state window uncounted.
   const wantedRef = useRef<(e: JamEvent) => boolean>(() => false);
   wantedRef.current = wanted;
+  useEffect(() => hub.onGap(() => {
+    if (!following.current) {
+      awayNew.current.gap = true;
+      tick((n) => n + 1);
+    }
+  }), []);
   useEffect(
     () =>
       hub.onEvent((e) => {
@@ -578,11 +585,11 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
         {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
       </div>
       {away && !big && (
-        <button className="feed-latest" onClick={jump} aria-label={fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
+        <button className="feed-latest" onClick={jump} aria-label={gap ? "Jump to the latest, new lines" : fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="m6 9 6 6 6-6" />
           </svg>
-          {fresh ? `${fresh} new ${fresh === 1 ? "line" : "lines"}` : "Latest"}
+          {gap ? "New lines" : fresh ? `${fresh} new ${fresh === 1 ? "line" : "lines"}` : "Latest"}
         </button>
       )}
     </div>

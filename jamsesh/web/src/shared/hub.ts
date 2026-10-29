@@ -51,6 +51,13 @@ class HubClient {
   snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
   private listeners = new Set<() => void>();
   private eventListeners = new Set<(e: JamEvent) => void>();
+  private gapListeners = new Set<() => void>();
+
+  /** Called when a replacement state shows lines were missed that it no longer holds (a gap longer than the snapshot), so a count would be wrong. */
+  onGap = (fn: () => void) => {
+    this.gapListeners.add(fn);
+    return () => void this.gapListeners.delete(fn);
+  };
 
   /** Called for every new event as it arrives off the wire, before the 400-event window can displace it. */
   onEvent = (fn: (e: JamEvent) => void) => {
@@ -294,6 +301,8 @@ class HubClient {
     const old = this.snap.state;
     if (old) {
       const known = Math.max(0, ...old.events.map((e) => e.id));
+      const oldest = Math.min(Infinity, ...state.events.map((e) => e.id));
+      if (known > 0 && oldest > known + 1) for (const fn of this.gapListeners) fn();
       for (const e of [...state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
     }
     this.set({ state });

@@ -88,3 +88,19 @@ test("a reconnect while an HTTP state request is out also discards that answer",
   }
   expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([2]);
 });
+
+test("a reconnect snapshot that no longer holds everything missed says there is a gap instead of a wrong count", () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: { events: [{ id: 10, kind: "speech", text: "a", data: {} }], utterances: [] } });
+  let gaps = 0;
+  const seen: number[] = [];
+  const offG = hub.onGap(() => void gaps++);
+  const offE = hub.onEvent((e) => void seen.push(e.id));
+  const ev = (id: number) => ({ id, kind: "speech", text: "x", data: {} });
+  h.handle({ type: "state", state: { events: [11, 12, 13].map(ev), utterances: [] } }); // contiguous: counted, no gap
+  expect([gaps, seen]).toEqual([0, [11, 12, 13]]);
+  h.handle({ type: "state", state: { events: [400, 401].map(ev), utterances: [] } }); // 14..399 are gone from the snapshot
+  expect(gaps).toBe(1);
+  offG();
+  offE();
+});
