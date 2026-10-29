@@ -6,6 +6,7 @@ import type { HostWindows, PairedDevice } from "./auth";
 import { bus } from "./bus";
 import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
 import { learningNote } from "./audio/voiceprint";
+import { BadWav } from "./audio/wav";
 import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
@@ -488,6 +489,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       });
       remember(recentSegments, segKey, 4000);
       return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    } catch (e) {
+      if (e instanceof BadWav) return bad(e.message);
+      throw e;
     } finally {
       segmentsInFlight.delete(segKey);
     }
@@ -808,7 +812,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
-    return json(hub.enrollVoice(m[1], bytes));
+    try {
+      return json(hub.enrollVoice(m[1], bytes));
+    } catch (e) {
+      if (e instanceof BadWav) return bad(e.message);
+      throw e;
+    }
   }
 
   // ---- profile photos ----
