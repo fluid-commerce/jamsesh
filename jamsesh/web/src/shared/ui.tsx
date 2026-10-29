@@ -604,8 +604,8 @@ function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState
             <button className="btn small" disabled={busy} onClick={() => void remove(false)}>
               Remove
             </button>
-            <button className="btn small" disabled={busy} onClick={() => void remove(true)} title="Also deletes what it posted and what was sent to it">
-              Remove and delete its messages
+            <button className="btn small" disabled={busy} onClick={() => void remove(true)} title="Also deletes what it posted: its updates, messages and long documents. Messages sent to it and its artifacts stay.">
+              Remove and delete its posts
             </button>
             <button className="btn small ghost" disabled={busy} onClick={() => setAsking(false)}>
               Cancel
@@ -701,6 +701,35 @@ export function openTasksFor(state: HubState, agentId: string) {
     .sort((x, y) => x.ts - y.ts);
 }
 
+/** Moves this agent's stalled task to someone else; the other targets of the same task keep it. */
+export function reassignTask(directiveId: string, agentId: string) {
+  return api(`/directives/${directiveId}/reassign`, { personId: readPref("personId"), agentId });
+}
+
+function ReassignButton({ directiveId, agentId }: { directiveId: string; agentId: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <>
+      {error && <span style={{ color: "var(--warn)" }}>{error}</span>}
+      <button
+        className="btn small"
+        style={{ flex: "none" }}
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError("");
+          reassignTask(directiveId, agentId)
+            .catch((e) => setError(e?.message || "Couldn't reassign it"))
+            .finally(() => setBusy(false));
+        }}
+      >
+        Reassign
+      </button>
+    </>
+  );
+}
+
 export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubState; compact?: boolean }) {
   const now = useNow(5000);
   const color = colorFor(state, { agentId: agent.id });
@@ -731,14 +760,10 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
         {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
         {paused.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--warn)", marginTop: 2 }}>Paused while offline: {paused.map((w) => w.title).join(", ")}</div>}
         {tasks.slice(0, compact ? 1 : 3).map((d) => (
-          <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
+          <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt?.[agent.id] ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
             <span className="chip mono" style={{ flex: "none" }}>{ago(d.ts, now)}</span>
             <span className="ellipsis grow">{d.progress?.[agent.id] === "acked" ? "On it" : "Not picked up"}: {stripMd(d.text)}</span>
-            {d.reassignOfferedAt && (
-              <button className="btn small" style={{ flex: "none" }} onClick={() => api(`/api/directives/${d.id}/reassign`, { personId: readPref("personId") }).catch(() => {})}>
-                Reassign
-              </button>
-            )}
+            {d.reassignOfferedAt?.[agent.id] && <ReassignButton directiveId={d.id} agentId={agent.id} />}
           </div>
         ))}
         {tasks.length > (compact ? 1 : 3) && <div style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>and {tasks.length - (compact ? 1 : 3)} more open</div>}

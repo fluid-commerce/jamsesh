@@ -481,7 +481,7 @@ export class Session {
       ownerId: owner?.id ?? null,
       ownerName: owner?.name ?? info.ownerName,
       harness: info.harness,
-      repo: info.repo,
+      repo: (info.role ?? existing?.role) === "observer" ? "" : info.repo,
       branch: info.branch ?? existing?.branch ?? "",
       cwd: info.cwd ?? existing?.cwd ?? "",
       machine: info.machine,
@@ -515,8 +515,9 @@ export class Session {
 
   /**
    * Takes an agent out of the room: it no longer exists to the hub (its tools and hooks stop working
-   * until it joins again), its workstreams are free, and with `purge` everything it caused goes too:
-   * its updates, the prompts forwarded for it, messages to it and its join notices.
+   * until it joins again), its workstreams are free, and with `purge` what it authored goes too: its
+   * events (updates, messages, join notices) and its long documents. Messages others sent it, prompts
+   * its person wrote and its artifacts stay.
    */
   /** Agents the room took out, so a tool call from one says so instead of asking it to join again. */
   readonly removedAgents = new Set<string>();
@@ -529,6 +530,7 @@ export class Session {
     this.removedAgents.add(id);
     this.blockRejoin(agent);
     const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
+    if (opts.purge) for (const d of this.store.all("documents")) if (d.authorId === id) this.store.remove("documents", d.id);
     if (ids.length) bus.send({ type: "events-removed", ids });
     if (!opts.purge) this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed from the session.` });
     return { removed: true, events: ids.length };
@@ -652,6 +654,8 @@ export class Session {
     const status = kind === "blocked" || kind === "question" ? "blocked" : kind === "done" || kind === "shipped" ? "idle" : "working";
     this.touchAgent(agentId, { status, activity: (kind === "done" || kind === "shipped" ? `Done: ${text}` : text).slice(0, 140) });
     if (kind === "question" || kind === "blocked") bus.send({ type: "toast", tone: "warn", text: `${agent.name} needs the room`, detail: text });
+    const linked = typeof extra.data?.directiveId === "string" ? extra.data.directiveId : "";
+    if (linked) this.noteProgress(linked, agentId);
     this.onUpdate?.(this.agent(agentId)!, kind, text, ev);
     return ev;
   }
@@ -670,6 +674,8 @@ export class Session {
         return { workstream: existing, conflict: owner };
       }
     }
+    // The first claim right after joining is what the join prompt asked for (the chat's prompt was ignored before it joined).
+    const firstAfterJoin = !!agent && Date.now() - agent.joinedAt < ASKED_WINDOW_MS && !this.store.all("workstreams").some((w) => w.ownerAgentId === agentId);
     const ws: Workstream = existing
       ? { ...existing, ownerAgentId: agentId, status: "active", updatedAt: Date.now() }
       : { id: newId("w"), title: t, ownerAgentId: agentId, status: "active", brief: "", updatedAt: Date.now() };
@@ -677,7 +683,7 @@ export class Session {
     this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
       // Work nobody asked for (no open task, no prompt from its person lately) is announced as such.
-      const onItsOwn = !!existing && existing.ownerAgentId === agentId && existing.status === "active" ? false : this.startedOnItsOwn(agent);
+      const onItsOwn = !!existing && existing.ownerAgentId === agentId && existing.status === "active" ? false : !firstAfterJoin && this.startedOnItsOwn(agent);
       this.store.addEvent({
         kind: "system",
         authorType: "agent",
@@ -734,7 +740,7 @@ export class Session {
         const nudged = nudgeAt && nudgeAt > this.lastSign(d, t) ? nudgeAt : undefined; // an answer to the nudge starts the clock again
         // An agent that's gone can't answer a nudge: the room is offered the reassignment right away.
         if (agent.status === "offline" || (nudged && now - nudged >= TASK_OFFER_MS)) {
-          if (!d.reassignOfferedAt) this.offerReassign(d, agent, now);
+          if (!d.reassignOfferedAt?.[t]) this.offerReassign(d, agent, now);
         } else if (!nudged) {
           this.store.patch("directives", d.id, { nudgedAt: { ...(d.nudgedAt ?? {}), [t]: now } });
           this.store.addEvent({
@@ -756,25 +762,37 @@ export class Session {
     return this.directives().filter((d) => d.status !== "done" && d.status !== "cancelled");
   }
 
-  /** The last time anything moved on this task for this agent: when it reached the agent, was acked, or the agent reported since. */
+  /** The last time anything moved on this task for this agent: when it reached the agent, was acked, or the agent reported on it. */
   private lastSign(d: Directive, agentId: string) {
-    const acked = (d.progress?.[agentId] ?? d.status) === "acked";
-    const last = this.store.recentEvents({ kinds: ["update"], limit: 200 }).filter((e) => e.authorId === agentId).pop();
-    return Math.max(d.ts, d.deliveredAt ?? 0, acked ? d.updatedAt : 0, last && last.ts > d.ts ? last.ts : 0);
+    return Math.max(d.ts, d.signs?.[agentId] ?? 0);
+  }
+
+  /** This agent showed progress on this task: the clock starts again and a standing reassignment offer goes. */
+  noteProgress(directiveId: string, agentId: string, at = Date.now()) {
+    const d = this.store.get("directives", directiveId);
+    if (!d || !d.targets.includes(agentId)) return;
+    const { [agentId]: _offer, ...offers } = d.reassignOfferedAt ?? {};
+    this.store.patch("directives", directiveId, { signs: { ...(d.signs ?? {}), [agentId]: at }, reassignOfferedAt: offers });
   }
 
   private offerReassign(d: Directive, agent: Agent, now: number) {
-    const mins = Math.round((now - d.ts) / 60_000);
-    this.store.patch("directives", d.id, { reassignOfferedAt: now });
-    this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${agent.name} hasn't reported on "${d.text.slice(0, 100)}" in ${mins} minutes. Reassign it from the agent's tile.`, data: { directiveId: d.id, reassignOffer: true } });
+    const mins = Math.round((now - this.lastSign(d, agent.id)) / 60_000);
+    this.store.patch("directives", d.id, { reassignOfferedAt: { ...(d.reassignOfferedAt ?? {}), [agent.id]: now } });
+    this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${agent.name} hasn't reported on "${d.text.slice(0, 100)}" in ${mins} minutes. Reassign it from the agent's tile.`, data: { directiveId: d.id, agentId: agent.id, reassignOffer: true } });
     bus.send({ type: "toast", tone: "warn", text: `${agent.name} is quiet on a task`, detail: `${mins} minutes on "${d.text.slice(0, 80)}". Reassign it from its tile.` });
   }
 
-  /** Moves a stalled task to another worker (the best match for it, or `to`); the old target is released. */
-  reassignDirective(id: string, by: string, to?: string): Directive | undefined {
+  /**
+   * Moves a stalled task to another worker (the best match for it, or `to`). Only `target` is released
+   * (default: the targets the room was offered a reassignment for, else every unfinished one); the other targets keep working.
+   */
+  reassignDirective(id: string, by: string, to?: string, target?: string): Directive | undefined {
     const d = this.store.get("directives", id);
     if (!d || d.status === "done" || d.status === "cancelled") return undefined;
-    const from = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
+    const open = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
+    const offered = open.filter((t) => d.reassignOfferedAt?.[t]);
+    const from = target ? open.filter((t) => t === target) : offered.length ? offered : open;
+    if (!from.length) return undefined;
     const taken = new Set(d.targets);
     const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
     const pick = (to ? live.find((a) => a.id === to) : undefined) ?? (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
@@ -786,7 +804,8 @@ export class Session {
       this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
       this.wake(t);
     }
-    this.store.patch("directives", id, { reassignOfferedAt: undefined });
+    const left = this.store.get("directives", id);
+    if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
     return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
   }
 
@@ -863,7 +882,10 @@ export class Session {
   }
 
   setDirective(id: string, fields: Partial<Directive>) {
-    return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
+    const d = this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
+    // A status set on the directive itself (not through one target's progress) is news for every target.
+    if (d && fields.status && !fields.progress) for (const t of d.targets) this.noteProgress(id, t);
+    return d;
   }
 
   /** One agent's progress on a directive; the directive's status follows the slowest target. */
@@ -878,7 +900,9 @@ export class Session {
     const finished = states.every((x) => x === "done" || x === "cancelled");
     const overall = finished ? (states.includes("done") ? "done" : "cancelled") : states.map((x) => order.indexOf(x)).reduce((a, b) => Math.min(a, b)) >= 2 ? "acked" : states.some((x) => x !== "pending") ? "delivered" : "pending";
     const res = result ? [d.result, `${this.agent(agentId)?.name ?? agentId}: ${result}`].filter(Boolean).join("\n") : d.result;
-    return this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+    const out = this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+    this.noteProgress(id, agentId);
+    return out;
   }
 
   /** Directives this agent took but hasn't finished. */

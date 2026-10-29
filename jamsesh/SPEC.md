@@ -542,7 +542,7 @@ steps, and an idle agent goes back to its person and is woken when the room has 
    It calls `/api/hooks/listen`, which the hub holds open (up to about 200 seconds, which the
    server's idle limit allows) until the room has something for that agent; the script calls again
    until about 50 minutes (3000 seconds) pass; the hook's own `timeout` is 3300 seconds, since Claude Code enforces it on async hooks too (its default is 600). With news it prints it and exits with code 2, which wakes the agent
-   with that text as its next turn (the script prints the items to stderr, which is what Claude sees on a rewake). Async hooks are killed when a non-interactive `claude -p` run ends, so the wake-up works in interactive chats only. A newer listener for the same agent, or the person's next
+   with that text as its next turn (the script prints the items to stderr, which is what Claude sees on a rewake). Async hooks are killed when a non-interactive `claude -p` run ends, so the wake-up works in interactive chats only. Verified on 2026-10-29 in a real interactive Claude Code 2.1.308 chat: an idle chat woke when a background `Stop` hook exited 2. The full JamSesh path (installed hooks, a hub, a real room) still needs a real room. A newer listener for the same agent, or the person's next
    prompt, ends the old one empty; an agent that is itself in `jam_wait` or `jam_ask` is left to
    get its items there.
 

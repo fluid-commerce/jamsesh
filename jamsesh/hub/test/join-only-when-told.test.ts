@@ -227,16 +227,34 @@ describe("joining is announced, and an accidental join can be removed", () => {
     const { agent } = s.registerAgent({ ownerName: "Jonathan", harness: "codex", repo: "fluid", cwd: "/Users/j/fluid", machine: "host", platform: "web", chatId: "mcp:1" });
     const keep = s.store.addEvent({ kind: "speech", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "let's build it" });
     s.postUpdate(agent.id, "progress", "refactoring the cart", { workstream: "Cart" });
-    s.store.addEvent({ kind: "prompt", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "unrelated prompt", data: { agentId: agent.id } });
+    const prompt = s.store.addEvent({ kind: "prompt", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "unrelated prompt", data: { agentId: agent.id } });
     const gone = s.removeAgent(agent.id, { purge: true });
     expect(gone.removed).toBe(true);
-    expect(gone.events).toBeGreaterThanOrEqual(3);
+    expect(gone.events).toBeGreaterThanOrEqual(2);
     expect(s.agent(agent.id)).toBeUndefined();
-    expect(s.store.recentEvents().filter((e) => e.authorType !== "system").map((e) => e.id)).toEqual([keep.id]);
+    expect(s.store.recentEvents().filter((e) => e.authorType !== "system").map((e) => e.id)).toEqual([keep.id, prompt.id]); // the person's own prompt stays
     expect(s.store.recentEvents().some((e) => e.kind === "join")).toBe(false);
     expect(s.store.all("workstreams").every((w) => w.ownerAgentId !== agent.id)).toBe(true);
     expect(s.store.searchEvents("cart")).toEqual([]);
     expect(s.removeAgent(agent.id).removed).toBe(false);
+  });
+
+  test("purge deletes only what the agent authored: its events and long documents, not messages to it or its person's prompts", () => {
+    const s = new Session(new Store(tmp()));
+    const person = s.upsertPerson({ name: "Jonathan" });
+    const { agent } = s.registerAgent({ ownerName: "Jonathan", harness: "codex", repo: "fluid", cwd: "/Users/j/fluid", machine: "host", platform: "web", chatId: "mcp:1" });
+    const other = s.registerAgent({ ownerName: "Chey", harness: "codex", repo: "api", cwd: "/Users/c/api", machine: "host", platform: "web", chatId: "mcp:2" }).agent;
+    s.postUpdate(agent.id, "progress", "long ".repeat(400));
+    expect(s.store.all("documents").filter((d) => d.authorId === agent.id)).toHaveLength(1);
+    s.postUpdate(other.id, "progress", "other agent's long ".repeat(200));
+    s.sendMessage(other.id, agent.id, "heads up from the other agent");
+    s.store.addEvent({ kind: "prompt", authorType: "person", authorId: person.id, authorName: "Jonathan", text: "a prompt Jonathan wrote", data: { agentId: agent.id } });
+    s.removeAgent(agent.id, { purge: true });
+    const texts = s.store.recentEvents().map((e) => e.text);
+    expect(texts).toContain("heads up from the other agent");
+    expect(texts).toContain("a prompt Jonathan wrote");
+    expect(texts.some((t) => t.startsWith("long long"))).toBe(false);
+    expect(s.store.all("documents").map((d) => d.authorId)).toEqual([other.id]);
   });
 
   test("without purge the agent goes and its history stays", () => {
