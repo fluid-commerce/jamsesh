@@ -1665,7 +1665,9 @@ export class Session {
     const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
-    // The one check every stage passes before it is stored, whoever wrote it: what the read path would reject isn't written.
+    // The checks every stage passes before it is stored, whoever wrote it: what the read path would reject, or what would draw nothing, isn't written.
+    const gone = this.unrenderable(stage);
+    if (gone) return refused(gone);
     const checked = parseStage(stage);
     if (!checked.ok) {
       console.error(`refused a stage for ${screen}: ${checked.error}`);

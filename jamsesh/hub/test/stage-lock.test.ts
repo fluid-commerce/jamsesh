@@ -429,7 +429,8 @@ test("the brain brings back what a person had up, and says so when nothing match
 
 test("history keeps at most 20 screens per screen", () => {
   const { s } = room();
-  for (let i = 0; i < 30; i++) s.setStage({ mode: "spotlight", items: ["x"], title: `Screen ${i}` }, "Room brain", "main", { override: true });
+  const x = artifact(s, "X");
+  for (let i = 0; i < 30; i++) s.setStage({ mode: "spotlight", items: [x.id], title: `Screen ${i}` }, "Room brain", "main", { override: true });
   expect(s.stageHistory().main).toHaveLength(Session.HISTORY_MAX);
   expect(s.stageHistory().main[0].label).toBe("Screen 29");
 });
@@ -1377,4 +1378,22 @@ test("what the screen would actually draw decides: parity with stale columns, an
   const said = out(await call(agent, "jam_show", { mode: "parity", columns: cols, title: "x" }));
   expect(said).toContain("can't go on the big screen");
   expect(s.readyToShow().filter((r) => r.agentId === agent.id).length).toBe(1);
+});
+
+test("the stage write itself refuses a view with nothing to draw (a brain tool's parity of stale columns), and a long jam_show queues the stage that can be approved", async () => {
+  const { s, chey, tools, said, reg, call, out } = room();
+  const a = artifact(s, "Checkout");
+  const direct = { ...said(chey, "JamSesh, compare them side by side"), data: { direct: true } } as JamEvent;
+  const r = String(await tools([direct]).show_on_screen.execute({ mode: "parity", columns: [{ label: "L", artifactIds: ["gone"] }, { label: "R", artifactIds: [] }], artifactIds: [a.id] }));
+  expect(r).not.toBe("On screen.");
+  expect(s.stage().lock).toBeUndefined();
+  // 61 known artifacts to show while a person's lock holds the screen: what is queued is what approval can show.
+  const many = Array.from({ length: 61 }, (_, i) => artifact(s, `M${i}`).id);
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const agent = reg("Felipe");
+  await call(agent, "jam_show", { mode: "compare", artifactIds: many, title: "many" });
+  const queued = s.readyToShow().find((x) => x.agentId === agent.id)!;
+  expect(queued.stage.items!.length).toBe(60);
+  expect(s.showReady(queued.id, { override: true })).toMatchObject({ applied: true });
+  void out;
 });

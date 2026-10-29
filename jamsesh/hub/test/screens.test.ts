@@ -37,7 +37,8 @@ test("screens carry the names the host app gave them, and are found by name", ()
   expect(s.findScreen("kitchen")).toBeUndefined();
   expect(s.findScreen("")).toBeUndefined();
   // Each screen has its own stage, stamped with its id.
-  s.setStage({ mode: "spotlight", items: ["x"], title: "A" }, "Maya", "screen-2", { claim: s.stageClaim() });
+  const art = s.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", image: "/renders/a.png" });
+  s.setStage({ mode: "spotlight", items: [art.id], title: "A" }, "Maya", "screen-2", { claim: s.stageClaim() });
   expect(s.stage("screen-2").screenId).toBe("screen-2");
   expect(s.stage().screenId).toBeUndefined();
   s.setStage({ mode: "board" }, "Maya", "main", { claim: s.stageClaim() });

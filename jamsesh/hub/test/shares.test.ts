@@ -82,7 +82,8 @@ test("a new share fills the screen alone and the screen comes back when it ends"
   const { s } = room();
   const brain = new Brain(s, {} as any);
   clearInterval((brain as any).digestTimer);
-  s.setStage({ mode: "layout", title: "Review", layout: { tiles: [{ kind: "artifact", artifactId: "a1" }, { kind: "artifact", artifactId: "a2" }] } }, "Room brain", "main", { claim: s.stageClaim() });
+  const [a1, a2] = ["a1", "a2"].map((title) => s.upsertArtifact({ kind: "screenshot", stage: "built", title, image: `/renders/${title}.png` }));
+  s.setStage({ mode: "layout", title: "Review", layout: { tiles: [{ kind: "artifact", artifactId: a1.id }, { kind: "artifact", artifactId: a2.id }] } }, "Room brain", "main", { claim: s.stageClaim() });
   const sh = s.startShare("felipe-laptop", "screen");
   await brain.placeShare(sh);
   expect(s.stage().layout?.tiles).toEqual([{ kind: "screen", shareId: sh.id, label: sh.label }]);

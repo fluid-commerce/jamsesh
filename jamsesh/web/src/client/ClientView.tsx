@@ -287,7 +287,7 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
         ) : (
           <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
             <div style={{ flex: 1, minHeight: 0 }}>
-              <Stage state={state} interactive />
+              <Stage state={state} interactive asPerson />
             </div>
             <HistoryStrip state={state} />
           </div>
@@ -519,7 +519,7 @@ function MirrorStage({ state, personId, scale }: { state: HubState; personId: st
       ) : (
         // Laid out larger and scaled down, in percentages, so it follows a resize in the same frame.
         <div className="m-mirror-inner" style={{ width: `${100 / scale}%`, height: `${100 / scale}%`, transform: `scale(${scale})` }}>
-          <Stage state={state} interactive tilePins={false} />
+          <Stage state={state} interactive tilePins={false} asPerson />
         </div>
       )}
       {pinAll && <PinLayer target={target} personId={personId} enabled={mode.on} />}

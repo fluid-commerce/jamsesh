@@ -17,7 +17,8 @@ import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
-export function Stage({ state, interactive, tilePins = true, bar }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string }) {
+/** `asPerson`: this is a person's own window (not the host's), which matters for who may unlock a lock held by no one in particular. */
+export function Stage({ state, interactive, tilePins = true, bar, asPerson }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string; asPerson: boolean }) {
   const stage = state.stage;
   // Which screen this stage is: an extra display passes its id (`bar`), a mirror shows the main one.
   const screen = bar ?? stage.screenId ?? "main";
@@ -69,7 +70,7 @@ export function Stage({ state, interactive, tilePins = true, bar }: { state: Hub
   }
   return (
     <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
-      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} />}
+      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} asPerson={asPerson} />}
       <TilePins.Provider value={tilePins}>
         <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
       </TilePins.Provider>

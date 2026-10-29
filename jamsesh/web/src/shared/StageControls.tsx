@@ -38,7 +38,7 @@ export async function stageAction(path: string, body: Record<string, unknown>): 
 }
 
 /** Above the stage: who holds the screen, and what's waiting to go up. Nothing when neither applies. */
-export function StageBar({ state, screen = state.stage.screenId ?? "main", asPerson = false }: { state: HubState; screen?: string; asPerson?: boolean }) {
+export function StageBar({ state, screen = state.stage.screenId ?? "main", asPerson }: { state: HubState; screen?: string; asPerson: boolean }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
   const lock = state.stage.lock;

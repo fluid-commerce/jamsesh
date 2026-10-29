@@ -623,7 +623,7 @@ export class McpEndpoint {
         const lock = s.lockOf(screen);
         if (lock) {
           // A person's cast stays up. The item waits as "ready to show"; an old enough lock makes JamSesh ask its owner.
-          const item = s.queueReady({ screen, agentId: agent.id, agentName: agent.name, label: args.title || s.store.get("artifacts", items[0] ?? "")?.title || "their work", stage: { mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items, columns: columns.length ? columns : undefined } });
+          const item = s.queueReady({ screen, agentId: agent.id, agentName: agent.name, label: args.title || s.store.get("artifacts", items[0] ?? "")?.title || "their work", stage: wanted });
           const asked = s.askOwner(item);
           bus.send({ type: "toast", tone: "info", text: `${agent.name} has ${item.label} ready to show`, detail: `${lock.by} has the screen locked.` });
           return text(`${lock.by} has the big screen locked, so I didn't replace it. Yours is waiting as "ready to show"${asked ? `, and I've asked ${lock.by} out loud and on screen whether it can go up` : ""}. You don't need to ask again.`);

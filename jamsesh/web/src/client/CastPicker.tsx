@@ -47,7 +47,7 @@ export function ScreenThumb({ state, screen }: { state: HubState; screen: Screen
     <div ref={box} className="cast-thumb" style={{ aspectRatio: `${w} / ${h}` }} aria-hidden>
       <div className="cast-thumb-inner" style={{ width: w, height: h, transform: `scale(${k})` }} inert>
         <div className="in-thumb">
-          <Stage state={{ ...state, stage: screen.stage }} tilePins={false} />
+          <Stage state={{ ...state, stage: screen.stage }} tilePins={false} asPerson />
         </div>
       </div>
     </div>

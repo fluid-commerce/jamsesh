@@ -8,8 +8,18 @@ import { Store } from "../src/store";
 const dir = mkdtempSync(join(tmpdir(), "jam-expand-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
+/** Artifacts with these ids, so a stage showing them has something to draw. */
+function withArtifacts(s: Session, ...ids: string[]) {
+  for (const id of ids) {
+    const art = s.upsertArtifact({ kind: "screenshot", stage: "built", title: id, image: `/renders/${id}.png` });
+    s.store.remove("artifacts", art.id);
+    s.store.put("artifacts", { ...art, id });
+  }
+}
+
 test("expanding a tile marks it on the stage in place; collapsing and a new stage clear it", async () => {
   const s = new Session(new Store(dir));
+  withArtifacts(s, "a", "b");
   const first = s.setStage({ mode: "compare", items: ["a", "b"], title: "Login" }, "Chey", "main", { claim: s.stageClaim() });
   await Bun.sleep(5);
   const open = s.expandTile("b");
@@ -47,6 +57,7 @@ test("the join screen has nothing to expand; an extra screen keeps its own expan
 test("a locked screen can still be expanded: the lock, its owner and its history stay, and each screen keeps its own", () => {
   const s = new Session(new Store(mkdtempSync(join(tmpdir(), "jam-expand3-"))));
   const chey = s.upsertPerson({ name: "Chey" });
+  withArtifacts(s, "a", "b");
   const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
   s.reportScreen("main", info);
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
