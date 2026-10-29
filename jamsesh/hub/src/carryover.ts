@@ -38,7 +38,12 @@ export interface ProjectContext {
   facts: { id: string; version: number; kind: Fact["kind"]; text: string; workstream: string; by: string; note: string; ts: number; session: string }[];
   workstreams: { id: string; version: number; title: string; brief: string; status: Workstream["status"]; session: string }[];
   people: { name: string; role: string }[];
+  /** Every row as stored, tombstones and versions included: the export is a full copy, and recovery restores it exactly. */
+  rows: { items: ItemRow[]; meta: MetaRow[] };
 }
+
+type ItemRow = { id: string; type: "fact" | "workstream"; status: string; data: string; version: number; changed_at: number; session: string };
+type MetaRow = { key: string; value: string; changed_at: number; session: string };
 
 type FactChange = { id: string; base: number | null; changedAt: number; status: Fact["status"]; kind: Fact["kind"]; text: string; workstream: string; by: string; note: string; ts: number };
 type WsChange = { id: string; base: number | null; changedAt: number; title: string; brief: string; status: Workstream["status"] };
@@ -54,6 +59,16 @@ export interface ContextChanges {
 }
 
 export type CommitOutcome = "written" | "skipped" | "failed";
+
+/** What a save did, row by row: the versions it wrote, the changes another session's newer ones won over, and why it failed. */
+export interface CommitResult {
+  applied: Map<string, number>;
+  /** A change not applied, with the row that stands: a tombstone, or a later edit made without seeing this one. */
+  superseded: Map<string, ItemRow>;
+  /** The save committed but the export didn't (it is written again by the next save), or why nothing was written. */
+  reason?: string;
+  committed?: boolean;
+}
 
 const text = (max: number) => z.string().max(max);
 const when = z.number().finite().nonnegative();
@@ -136,8 +151,13 @@ function openForWrite(home: string, slug: string, waitMs: number): Database {
 }
 
 /** context.json as written by the export or by builds before the database: checked whole before any of it is taken in. */
+const rowsSchema = z.object({
+  items: z.array(z.object({ id: text(200).min(1), type: z.enum(["fact", "workstream"]), status: z.string(), data: z.string(), version, changed_at: when, session: text(200) })),
+  meta: z.array(z.object({ key: text(400).min(1), value: z.string(), changed_at: when, session: text(200) })),
+});
 const jsonSchema = z.object({
   generation: z.number().int().nonnegative().optional(),
+  rows: rowsSchema.optional(),
   updatedAt: when.optional(),
   fromSession: text(200).optional(),
   brief: text(40_000).optional(),
@@ -162,10 +182,28 @@ function importJson(db: Database, file: string) {
   } catch {
     return;
   }
-  const at = parsed.updatedAt ?? 0;
-  const session = parsed.fromSession || "earlier";
   const put = db.query("INSERT OR IGNORE INTO items (id, type, status, data, version, changed_at, session) VALUES (?, ?, ?, ?, ?, ?, ?)");
   const meta = db.query("INSERT OR REPLACE INTO meta (key, value, changed_at, session) VALUES (?, ?, ?, ?)");
+  // An export: every row back exactly as it was (tombstones and versions too), after checking each would read back.
+  if (parsed.rows) {
+    const check = new Database(":memory:");
+    try {
+      check.exec(SCHEMA);
+      for (const r of parsed.rows.items) check.query("INSERT INTO items (id, type, status, data, version, changed_at, session) VALUES (?, ?, ?, ?, ?, ?, ?)").run(r.id, r.type, r.status, r.data, r.version, r.changed_at, r.session);
+      for (const m of parsed.rows.meta) check.query("INSERT OR REPLACE INTO meta (key, value, changed_at, session) VALUES (?, ?, ?, ?)").run(m.key, m.value, m.changed_at, m.session);
+      readAll(check);
+    } catch {
+      console.error("project context: context.json's rows are malformed; not taken in");
+      return;
+    } finally {
+      check.close();
+    }
+    for (const r of parsed.rows.items) put.run(r.id, r.type, r.status, r.data, r.version, r.changed_at, r.session);
+    for (const m of parsed.rows.meta) if (m.key !== "imported") meta.run(m.key, m.value, m.changed_at, m.session);
+    return;
+  }
+  const at = parsed.updatedAt ?? 0;
+  const session = parsed.fromSession || "earlier";
   parsed.facts.forEach(({ id, version: v, session: from, ...f }, i) => put.run(id ?? `legacy-f${i}`, "fact", "active", JSON.stringify(f), v ?? 1, at, from || session));
   parsed.workstreams.forEach(({ id, version: v, session: from, status, ...w }, i) => put.run(id ?? `legacy-w${i}`, "workstream", status, JSON.stringify(w), v ?? 1, at, from || session));
   const brief = { brief: parsed.brief ?? "", goal: parsed.goal ?? "", glossary: parsed.glossary ?? [] };
@@ -177,7 +215,7 @@ function importJson(db: Database, file: string) {
 
 /** Every row, checked: one value the reader can't use and none of it is used (nothing half-read seeds a session). */
 function readAll(db: Database): ProjectContext {
-  const items = db.query("SELECT id, type, status, data, version, changed_at, session FROM items ORDER BY rowid").all() as { id: string; type: string; status: string; data: string; version: number; changed_at: number; session: string }[];
+  const items = db.query("SELECT id, type, status, data, version, changed_at, session FROM items ORDER BY rowid").all() as ItemRow[];
   const facts: ProjectContext["facts"] = [];
   const workstreams: ProjectContext["workstreams"] = [];
   let updatedAt = 0;
@@ -193,14 +231,14 @@ function readAll(db: Database): ProjectContext {
       if (status !== "done") workstreams.push({ id: row.id, version: v, ...wsRow.parse(data), status, session: row.session });
     } else throw new Error(`a row of unknown type ${row.type}`);
   }
-  const meta = db.query("SELECT key, value, changed_at, session FROM meta").all() as { key: string; value: string; changed_at: number; session: string }[];
+  const meta = db.query("SELECT key, value, changed_at, session FROM meta ORDER BY key").all() as MetaRow[];
   const b = meta.find((m) => m.key === "brief");
   const brief = b ? briefRow.parse(JSON.parse(b.value)) : { brief: "", goal: "", glossary: [] };
   const people = meta.filter((m) => m.key.startsWith("person:")).map((m) => ({ name: m.key.slice(7), role: text(200).parse(m.value) }));
   for (const m of meta) updatedAt = Math.max(updatedAt, m.changed_at);
   const generation = Number(meta.find((m) => m.key === "generation")?.value ?? 0);
   facts.sort((x, y) => x.ts - y.ts);
-  return { version: 1, generation, updatedAt, fromSession: b?.session ?? "", ...brief, facts, workstreams, people };
+  return { version: 1, generation, updatedAt, fromSession: b?.session ?? "", ...brief, facts, workstreams, people, rows: { items, meta } };
 }
 
 /** The project's settled context, or null when there is none or any part of it is malformed. */
@@ -226,8 +264,20 @@ export function readProjectContext(home: string, slug: string): ProjectContext |
     db.exec("PRAGMA busy_timeout = 2000;");
     return readAll(db);
   } catch (e) {
-    console.error("project context:", e instanceof Error ? e.message : e);
-    return null;
+    db?.close();
+    db = null;
+    if (!damaged(e)) {
+      console.error("project context:", e instanceof Error ? e.message : e);
+      return null;
+    }
+    // The newest database is damaged: recover first (the next generation, from the export, under its write lock), then read that.
+    try {
+      db = openForWrite(home, slug, 2000);
+      return readAll(db);
+    } catch (e2) {
+      console.error("project context: recovery failed:", e2 instanceof Error ? e2.message : e2);
+      return null;
+    }
   } finally {
     db?.close();
   }
@@ -267,17 +317,41 @@ export function snapshotContext(s: Session, sessionId: string): ContextChanges {
   };
 }
 
-/** Saves what this session changed into the project's context, then remembers the versions it saw. "failed" (the keeper reports it) when it should have saved and didn't. */
+/**
+ * Saves what this session changed into the project's context. Only a change the merge applied counts as saved; one a
+ * newer change in another session won over (a retirement, or a later edit) is brought in here as that row stands, and
+ * the wording that lost goes on the Tasks board for a person to accept again or dismiss. "failed" (the keeper reports
+ * it) when it should have saved and didn't, including a save that committed but whose export wasn't written.
+ */
 export function saveProjectContext(home: string, slug: string, sessionId: string, s: Session, waitMs?: number): CommitOutcome {
   const ch = snapshotContext(s, sessionId);
-  const seen = new Map<string, number>();
-  const out = commitChanges(home, slug, ch, { waitMs, seen });
-  if (out === "written") {
-    const bases = { ...basesOf(s) };
-    for (const f of ch.facts) bases[f.id] = { v: seen.get(f.id) ?? 1, sig: factSig(f) };
-    for (const w of ch.workstreams) bases[w.id] = { v: seen.get(w.id) ?? 1, sig: wsSig(w) };
-    s.store.setSetting("carryBase", bases);
+  const result: CommitResult = { applied: new Map(), superseded: new Map() };
+  const out = commitChanges(home, slug, ch, { waitMs, result });
+  if (!result.committed) return out;
+  const bases = { ...basesOf(s) };
+  for (const f of ch.facts) if (result.applied.has(f.id)) bases[f.id] = { v: result.applied.get(f.id)!, sig: factSig(f) };
+  for (const w of ch.workstreams) if (result.applied.has(w.id)) bases[w.id] = { v: result.applied.get(w.id)!, sig: wsSig(w) };
+  const now = Date.now();
+  for (const [id, row] of result.superseded) {
+    const data = JSON.parse(row.data);
+    const local = s.store.all("facts").find((f) => projectId(f) === id);
+    if (local) {
+      const lost = { text: local.text, kind: local.kind, workstream: local.workstream };
+      const status = FACT_STATUS.parse(row.status);
+      const next: Fact = { ...local, status, kind: data.kind, text: data.text, workstream: data.workstream, note: status === "active" ? "Changed in another session" : "Retired in another session", updatedAt: now };
+      s.store.put("facts", next);
+      bases[id] = { v: row.version, sig: factSig(next) };
+      s.board.proposeContext({ text: lost.text, kind: lost.kind, workstream: lost.workstream, by: "Carry-over", note: `Not saved for the project: another session ${status === "active" ? "changed" : "retired"} this fact first. Add it again to keep this wording.` });
+      continue;
+    }
+    const ws = s.store.all("workstreams").find((w) => projectId(w) === id);
+    if (ws) {
+      const next: Workstream = { ...ws, title: data.title, brief: data.brief, status: WS_STATUS.parse(row.status), updatedAt: now };
+      s.store.put("workstreams", next);
+      bases[id] = { v: row.version, sig: wsSig(next) };
+    }
   }
+  s.store.setSetting("carryBase", bases);
   return out;
 }
 
@@ -286,37 +360,49 @@ const later = (a: { changedAt: number; session: string }, b: { changed_at: numbe
 
 /**
  * Writes the changes in one IMMEDIATE transaction, merging each row on its own (see the top of this file), then
- * exports the committed state. `seen` gets each changed row's version afterwards. A lock held past `waitMs`, or
- * anything that doesn't fit, is a failed save with nothing written.
+ * exports the committed state. `result` says row by row what happened. A lock held past `waitMs`, anything that
+ * doesn't fit, or an export that couldn't be written is a failed save; with nothing to write, an export left behind
+ * by an earlier save is written now.
  */
-export function commitChanges(home: string, slug: string, ch: ContextChanges, opts: { waitMs?: number; seen?: Map<string, number> } = {}): CommitOutcome {
+export function commitChanges(home: string, slug: string, ch: ContextChanges, opts: { waitMs?: number; result?: CommitResult } = {}): CommitOutcome {
+  const result: CommitResult = opts.result ?? { applied: new Map(), superseded: new Map() };
+  const fail = (reason: string) => {
+    result.reason = reason;
+    console.error("project context:", reason);
+    return "failed" as const;
+  };
   const valid = changesSchema.safeParse(ch);
-  if (!valid.success) {
-    console.error("project context: a change doesn't fit the file's limits; nothing written:", valid.error.issues[0]?.path.join("."));
-    return "failed";
-  }
-  if (!ch.facts.length && !ch.workstreams.length && !ch.brief && !ch.people.length) return "skipped";
+  if (!valid.success) return fail(`a change doesn't fit the file's limits; nothing written (${valid.error.issues[0]?.path.join(".")})`);
+  const nothing = !ch.facts.length && !ch.workstreams.length && !ch.brief && !ch.people.length;
+  if (nothing && !generations(home, slug).length) return "skipped";
   let db: Database | null = null;
   try {
     db = openForWrite(home, slug, opts.waitMs ?? 2000);
     const d = db;
-    d.transaction(() => apply(d, ch, opts.seen)).immediate();
-    exportJson(d, contextExport(home, slug));
-    return "written";
+    if (!nothing) {
+      d.transaction(() => apply(d, ch, result)).immediate();
+      result.committed = true;
+    }
   } catch (e) {
-    console.error("project context:", e instanceof Error ? e.message : e);
-    return "failed";
-  } finally {
     db?.close();
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+  try {
+    exportJson(db, contextExport(home, slug));
+    return nothing ? "skipped" : "written";
+  } catch (e) {
+    return fail(`${result.committed ? "saved, but " : ""}the JSON export wasn't written: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    db.close();
   }
 }
 
 const norm = (t: string) => t.trim().toLowerCase().replace(/\s+/g, " ");
 
-function apply(db: Database, ch: ContextChanges, seen?: Map<string, number>) {
-  const get = db.query("SELECT status, version, changed_at, session FROM items WHERE id = ?");
+function apply(db: Database, ch: ContextChanges, result: CommitResult) {
+  const get = db.query("SELECT id, type, status, data, version, changed_at, session FROM items WHERE id = ?");
   const put = db.query("INSERT OR REPLACE INTO items (id, type, status, data, version, changed_at, session) VALUES (?, ?, ?, ?, ?, ?, ?)");
-  type Row = { status: string; version: number; changed_at: number; session: string };
+  type Row = ItemRow;
   for (const f of ch.facts) {
     const row = get.get(f.id) as Row | null;
     const retiring = f.status !== "active";
@@ -325,7 +411,8 @@ function apply(db: Database, ch: ContextChanges, seen?: Map<string, number>) {
     const ok = !row || (row.status === "active" && (f.base === row.version || retiring || later({ ...f, session: ch.session }, row)));
     const v = ok ? (row?.version ?? 0) + 1 : row!.version;
     if (ok) put.run(f.id, "fact", f.status, JSON.stringify({ kind: f.kind, text: f.text, workstream: f.workstream, by: f.by, note: f.note, ts: f.ts }), v, f.changedAt, ch.session);
-    seen?.set(f.id, v);
+    if (ok) result.applied.set(f.id, v);
+    else result.superseded.set(f.id, row!);
     // Retiring a fact the file also holds under another id (the same fact accepted twice, or carried in before items had
     // ids) retires those too: the same kind, workstream and wording.
     if (ok && retiring) {
@@ -341,7 +428,8 @@ function apply(db: Database, ch: ContextChanges, seen?: Map<string, number>) {
     const ok = !row || w.base === row.version || later({ ...w, session: ch.session }, row);
     const v = ok ? (row?.version ?? 0) + 1 : row!.version;
     if (ok) put.run(w.id, "workstream", w.status, JSON.stringify({ title: w.title, brief: w.brief }), v, w.changedAt, ch.session);
-    seen?.set(w.id, v);
+    if (ok) result.applied.set(w.id, v);
+    else result.superseded.set(w.id, row!);
   }
   const meta = db.query("INSERT OR REPLACE INTO meta (key, value, changed_at, session) VALUES (?, ?, ?, ?)");
   if (ch.brief) {
@@ -356,35 +444,31 @@ function apply(db: Database, ch: ContextChanges, seen?: Map<string, number>) {
 
 /**
  * The export: read and written while this connection holds the write lock, after the save committed, so exports are
- * written one at a time, each from committed state, and one never replaces a newer one. Temporary file, then rename.
- * A failed export is logged (the database has the save; the next save writes the export again).
+ * written one at a time, each from committed state, and one never replaces a newer one. It holds every row (tombstones
+ * and versions too) besides the readable lists. Temporary file, then rename; a failure is thrown to the save.
  */
 function exportJson(db: Database, file: string) {
-  try {
-    db.transaction(() => {
-      const ctx = readAll(db);
-      let shown = -1;
-      try {
-        shown = Number(JSON.parse(readFileSync(file, "utf8"))?.generation ?? -1);
-      } catch {}
-      if (shown >= ctx.generation) return;
-      const tmp = `${file}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+  db.transaction(() => {
+    const ctx = readAll(db);
+    let shown = -1;
+    try {
+      shown = Number(JSON.parse(readFileSync(file, "utf8"))?.generation ?? -1);
+    } catch {}
+    if (shown >= ctx.generation) return;
+    const tmp = `${file}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+    try {
       const fd = openSync(tmp, "wx");
       try {
         writeSync(fd, JSON.stringify(ctx, null, 2));
       } finally {
         closeSync(fd);
       }
-      try {
-        renameSync(tmp, file);
-      } catch (e) {
-        rmSync(tmp, { force: true });
-        throw e;
-      }
-    }).immediate();
-  } catch (e) {
-    console.error("project context: the JSON export wasn't written:", e instanceof Error ? e.message : e);
-  }
+      renameSync(tmp, file);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
+  }).immediate();
 }
 
 /**
