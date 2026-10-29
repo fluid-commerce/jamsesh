@@ -432,6 +432,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PUT" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  // A request admitted before the room closed, still sending its body when shutdown gave up waiting: refused here, after the body and before any handler can write.
+  if (body !== null && hub.late) return bad(CLOSING, 503);
 
   if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
   if (path === "/clock") return json({ now: Date.now() });

@@ -180,7 +180,7 @@ function git(dir: string, args: string[]) {
  */
 export function commitPaths(dir: string, message: string, paths: string[]): boolean {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return false;
-  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+)?$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && existsSync(join(dir, p)));
+  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+)?$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && (existsSync(join(dir, p)) || git(dir, ["ls-files", "--error-unmatch", "--", p]))); // a file that is gone is committed only if git tracked it (a deletion)
   if (!own.length) return false;
   return git(dir, ["add", "--", ...own]) && git(dir, ["commit", "-q", "--only", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200), "--", ...own]);
 }

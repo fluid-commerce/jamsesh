@@ -96,6 +96,8 @@ export class Hub {
   peopleOnline = 0;
   /** The hub is saving its last state: nothing new is taken in (http.ts answers 503), so nothing arrives after the wiki's final capture. */
   closing = false;
+  /** Shutdown has finished waiting for requests: one that is still in is refused as soon as it reaches a handler. */
+  late = false;
   /** Work under way that may still add to the room: requests being answered, speech being transcribed, the brain's pass. Shutdown waits for it. */
   private inflight = new Set<Promise<void>>();
   /** How long shutdown waits for work in flight before sealing the store; anything later is refused. */
@@ -278,6 +280,7 @@ export class Hub {
     void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
     ok = (await this.quiet(left())) && ok;
     this.audio.closed = true;
+    this.late = true;
     this.canvas.flushActivity(); // canvas work still batched for a timer is recorded while the conversation is open, before the brain stops listening
     this.brain.drain();
     void this.track(this.brain.idle());

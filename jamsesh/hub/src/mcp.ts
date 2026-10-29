@@ -390,7 +390,7 @@ export class McpEndpoint {
 
     if (name.startsWith("canvas_") && name !== "canvas_frames" && name !== "canvas_render") {
       const agent = this.requireAgent(ctx);
-      const r = await this.hub.canvas.call(agent, name.slice("canvas_".length), args);
+      const r = await this.hub.track(this.hub.canvas.call(agent, name.slice("canvas_".length), args)); // in flight until it is answered: shutdown waits, then records its activity
       if (!r.isError && /^canvas_(create_node|set_properties|batch|run_command|delete_nodes?|import_svg)$/.test(name)) this.canvasNote(agent.id).edit = Date.now();
       return r as ToolOut;
     }

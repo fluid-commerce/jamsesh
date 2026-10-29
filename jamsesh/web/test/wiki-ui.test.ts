@@ -341,6 +341,17 @@ test("store level: edit numbers never repeat, across Cancel, a save and a new dr
   track("r", null, "r1");
 });
 
+test("store level: starting an edit (begin) sets the held revision, and a save answered meanwhile moves it for every mounted copy", () => {
+  drafts.hold("m", "from their version", "theirs-rev"); // what begin() does
+  expect(restore("m").base).toBe("theirs-rev");
+  const sent = drafts.edit("m");
+  track("m", "typed on", drafts.get("m")?.base ?? "stale"); // a newly mounted editor tracks with the held base, not its own stale one
+  expect(drafts.saved("m", sent, "r9")).toBe("rebased");
+  track("m", "typed on, more", drafts.get("m")?.base ?? "stale");
+  expect(restore("m").base).toBe("r9");
+  track("m", null, "r9");
+});
+
 test("store level: the same text tracked again is not a new edit", () => {
   track("same", "abc", "r1");
   const n = drafts.edit("same");

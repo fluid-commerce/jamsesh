@@ -288,11 +288,11 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   const [base, setBase] = useState(() => restore(slug).base);
   const meta = wiki.pages.find((p) => p.slug === slug);
   const draft = useRef({ editing, base });
-  draft.current = { editing, base };
-  const begin = (text: string, rev: string) => (setEditing(text), setBase(rev), setConflict(null));
+  draft.current = { editing, base: drafts.get(slug)?.base ?? base };
+  const begin = (text: string, rev: string) => (drafts.hold(slug, text, rev), setEditing(text), setBase(rev), setConflict(null));
   // The edit is kept outside this view (draft.ts): leaving the page any way at all leaves it there.
   useEffect(() => {
-    track(slug, editing, base);
+    track(slug, editing, drafts.get(slug)?.base ?? base); // the held revision is the truth: a save answered meanwhile moved it
   }, [slug, editing, base]);
 
   useEffect(() => {
@@ -340,7 +340,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
     setSaving(true);
     setSaveErr(null);
     try {
-      const r = await wikiApi.save(slug, { markdown: editing, rev: saveRev(base, conflict, keepMine) });
+      const r = await wikiApi.save(slug, { markdown: editing, rev: saveRev(drafts.get(slug)?.base ?? base, conflict, keepMine) });
       if ("conflict" in r) return void (setConflict(r.conflict), (inFlight.current = false), setSaving(false));
       setPage(r.page);
       setConflict(null);

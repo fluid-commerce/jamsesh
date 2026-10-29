@@ -246,7 +246,7 @@ export class WikiService {
     this.catchUpLog();
     appendLog(this.dir, message, pages, Date.now(), key);
     rebuildIndex(this.dir);
-    commitPaths(this.dir, message, [...pages.map((p) => `wiki/${p}.md`), "index.md", "log.md", ...(sourceIds(this.dir).length ? ["raw"] : [])]);
+    commitPaths(this.dir, message, [...pages.map((p) => `wiki/${p}.md`), "index.md", "log.md", ...sourceIds(this.dir).map((id) => `raw/${id}.md`)]);
   }
 
   // ---- sources ----
@@ -686,7 +686,8 @@ export class WikiService {
       if (touched.length || gone.length) {
         this.catchUpLog();
         rebuildIndex(this.dir);
-        commitPaths(this.dir, "Changes made by hand in the vault", ["wiki", "index.md", "log.md", "raw"]);
+        // Named files only: a directory pathspec would stage whatever else a person keeps beside the wiki's own files.
+        commitPaths(this.dir, "Changes made by hand in the vault", [...[...new Set([...touched, ...gone])].map((s) => `wiki/${s}.md`), "index.md", "log.md", ...sourceIds(this.dir).map((id) => `raw/${id}.md`)]);
         this.notify("edit", [...new Set([...touched, ...gone])], "Someone in the vault");
       }
     }

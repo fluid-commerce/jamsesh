@@ -531,8 +531,12 @@ export class HostControl {
         this.builds.delete(slug);
         console.error("[host] preview build:", e instanceof Error ? e.message : e);
         const result = `The ${label} build stopped: ${e instanceof Error ? e.message : e}`;
-        this.log(result);
-        this.onBuilt(label, false, result); // the same way the room hears of any build that ends badly
+        try {
+          this.log(result);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", err);
+        }
+        this.onBuilt(label, false, result); // the same way the room hears of any build that ends badly, whether or not the note could be written
       } catch (err) {
         if ((err as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", err);
       }

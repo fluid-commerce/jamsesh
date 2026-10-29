@@ -2440,3 +2440,40 @@ test("closing records canvas work still waiting for its timer", async () => {
   await hub.shutdown();
   expect(s.store.eventsAfter(0).some((e) => e.kind === "canvas" && e.text.includes("1 new layer"))).toBe(true);
 }, 30_000);
+
+test("a wiki edit still sending its body when shutdown gave up waiting is refused with 503 and the vault is untouched", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  const wait = Hub.SHUTDOWN_WAIT_MS;
+  Hub.SHUTDOWN_WAIT_MS = 200;
+  try {
+    writePage(r.dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+    adopt(r.dir);
+    const cur = readPage(r.dir, "pricing")!;
+    const cookie = `jam_window=${r.hub.auth.windows.take(r.hub.auth.windows.mint())}`;
+    const held = await heldPost(server.port!, "/api/wiki/page/pricing", cookie, JSON.stringify({ markdown: "# Pricing\n\nThree tiers.", rev: cur.rev, personId: r.chey.id }).replace(/^\{/, "{"));
+    await r.hub.shutdown();
+    expect(await held.finish()).toBe(503);
+    expect(readPage(r.dir, "pricing")!.markdown).toBe(cur.markdown);
+  } finally {
+    Hub.SHUTDOWN_WAIT_MS = wait;
+    server.stop(true);
+  }
+}, 30_000);
+
+test("the wiki's commits name its own files: a person's other files in wiki/ and raw/ are neither staged nor committed", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  writeFileSync(join(dir, "wiki", "notes.txt"), "mine");
+  writeFileSync(join(dir, "raw", "mine.txt"), "mine too");
+  w.addSource("document", "A note", "Something worth keeping.", "Chey");
+  w.editPage("fresh", "# Fresh\n\nA page.", { by: "Chey" });
+  writePage(dir, "by-hand", "# By hand\n\nTyped in the vault.");
+  w.syncVault();
+  const tracked = Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString();
+  expect(tracked).toContain("wiki/fresh.md");
+  expect(tracked).not.toContain("notes.txt");
+  expect(tracked).not.toContain("mine.txt");
+  const staged = Bun.spawnSync(["git", "diff", "--cached", "--name-only"], { cwd: dir }).stdout.toString();
+  expect(staged).toBe("");
+});
