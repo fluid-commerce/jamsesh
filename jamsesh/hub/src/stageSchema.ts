@@ -42,6 +42,8 @@ const stageSchema = z.object(stageShape).superRefine((s, ctx) => {
   // A screen that locks should show what was asked for.
   const need = (ok: boolean, path: string, message: string) => ok || ctx.addIssue({ code: "custom", path: [path], message });
   if (s.mode === "spotlight" || s.mode === "compare") need((s.items?.length ?? 0) > 0, "items", "needs at least one item");
+  // Each place on a spotlight or compare is its own artifact: a repeated one couldn't be told apart when expanded.
+  if (s.mode === "spotlight" || s.mode === "compare") need(new Set(s.items).size === (s.items?.length ?? 0), "items", "lists the same artifact twice");
   if (s.mode === "layout") need((s.layout?.tiles.length ?? 0) > 0, "layout", "needs at least one tile");
   if (s.mode === "custom") need(!!s.html, "html", "needs content");
 });

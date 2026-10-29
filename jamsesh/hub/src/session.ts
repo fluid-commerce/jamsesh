@@ -106,6 +106,11 @@ export class Session {
     this.lockSweep = setInterval(() => this.sweepLocks(), 30_000);
     this.lockSweep.unref?.();
     bus.resolver = (key) => this.resolve(key);
+    // A stage saved before the last stop may point at a tile whose artifact is gone; and when artifacts change later, the same check.
+    this.dropDeadExpanded();
+    this.offArtifacts = bus.on((m: any) => {
+      if (m.type === "patch" && m.key === "artifacts") this.dropDeadExpanded();
+    });
   }
 
   /** Every address people can join from: the room's LAN, Tailscale, and a public URL if one is set. */
@@ -312,7 +317,6 @@ export class Session {
       case "stageHistory":
         return { key, value: this.stageHistory() };
       case "stageTiles":
-        this.dropDeadExpanded();
         return { key, value: this.stageTiles() };
       default:
         return null;
@@ -1501,7 +1505,10 @@ export class Session {
   private screenReverts = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** The hub is stopping: no timer of this session touches its store again (it may be closed or deleted next). */
+  private offArtifacts: (() => void) | null = null;
   stop() {
+    this.offArtifacts?.();
+    this.offArtifacts = null;
     for (const t of [this.lockSweep, this.stageRevert, this.shareSweep, ...this.screenReverts.values(), ...this.screenExpiry.values()]) if (t) clearTimeout(t);
     this.screenExpiry.clear();
     this.screenReverts.clear();
@@ -1660,7 +1667,8 @@ export class Session {
         return (st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c, ci) => c.items.flatMap((id, place) => (known.has(id) ? [{ key: `p${ci}.${place}.${id}`, artifactId: id, parity: { column: ci, place } }] : [])));
       case "layout":
         // The place plus a short fingerprint of what is there: a click on the old first tile can't expand a different new one.
-        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}.${fingerprint(t)}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
+        // (A tile for an artifact that no longer exists has nothing to expand.)
+        return (st.layout?.tiles ?? []).flatMap((t, i) => (t.kind === "artifact" && !known.has(t.artifactId) ? [] : [{ key: `t${i}.${fingerprint(t)}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }]));
       default:
         return [];
     }

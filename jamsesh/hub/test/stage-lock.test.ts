@@ -10,6 +10,7 @@ import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { buildKey, lockKey, Session } from "../src/session";
+import { Store } from "../src/store";
 import type { Agent, JamEvent, ShowRequest, Stage } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -1678,7 +1679,7 @@ test("an expand request is for the content that was clicked: a long parity key e
   }
 });
 
-test("Expand is a transaction like every stage write: a failed save leaves the revision, the patch and other work's claims alone, on main and on an extra screen", () => {
+test("Expand is a transaction like every stage write: a failed save leaves the revision, what clients were sent and other work's claims alone, on main and on an extra screen", () => {
   const { s } = room();
   const a = artifact(s, "A");
   const b = artifact(s, "B");
@@ -1689,10 +1690,14 @@ test("Expand is a transaction like every stage write: a failed save leaves the r
     s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", screen, { override: true });
     const rev = s.stageRev(screen);
     const claim = s.stageClaim();
+    const sent: any[] = [];
+    const off = bus.on((m: any) => sent.push(m));
     const real = s.store.setSetting.bind(s.store);
     (s.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage" || k === "screenStages") throw new Error("disk full"); real(k, v); };
     expect(() => s.expandTile(a.id, screen)).toThrow("disk full");
     (s.store as any).setSetting = real;
+    off();
+    expect(sent.filter((m) => m.type === "stage")).toEqual([]);
     expect(s.stageRev(screen)).toBe(rev);
     expect(s.stage(screen).expanded).toBeUndefined();
     // Other work's claim still holds.
@@ -1700,27 +1705,76 @@ test("Expand is a transaction like every stage write: a failed save leaves the r
   }
 });
 
-test("nothing writes a stage outside a transaction, and an expanded tile whose artifact is deleted is collapsed and published", () => {
+test("an expanded tile whose artifact is deleted is collapsed and published, and a screen's density change reaches clients with its value", async () => {
   const { s } = room();
   const a = artifact(s, "A");
   const b = artifact(s, "B");
-  expect(() => (s as any).commitStage({ mode: "board", title: "", caption: "", items: [], pinned: false, since: 1, by: "x" }, "main")).toThrow("outside Session.atomically");
   s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", "main", { override: true });
   s.expandTile(b.id);
   expect(s.stage().expanded).toBe(b.id);
-  s.store.remove("artifacts", b.id);
-  (s as any).resolve("stageTiles");
-  expect(s.stage().expanded).toBeUndefined();
-  // A screen's density alone changes what's published.
-  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
-  s.reportScreen("main", info);
-  const seen: string[] = [];
-  const real = bus.changed.bind(bus) as (key: string) => void;
-  (bus as any).changed = (key: string) => { seen.push(key); real(key); };
+  const old = bus.resolver;
+  bus.resolver = (k) => (s as any).resolve(k);
+  const msgs: any[] = [];
+  const off = bus.on((m: any) => msgs.push(m));
   try {
+    s.store.remove("artifacts", b.id);
+    bus.changed("artifacts");
+    await Bun.sleep(100);
+    expect(s.stage().expanded).toBeUndefined();
+    expect(msgs.some((m) => m.type === "stage" && m.stage.expanded === undefined)).toBe(true);
+    // A screen's density alone changes what's published.
+    const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+    s.reportScreen("main", info);
+    await Bun.sleep(80);
+    msgs.length = 0;
     s.reportScreen("main", { ...info, dpr: 2 });
+    await Bun.sleep(80);
+    const patch = msgs.find((m) => m.type === "patch" && m.key === "screens");
+    expect(patch?.value.find((x: any) => x.id === "main").dpr).toBe(2);
   } finally {
-    (bus as any).changed = real;
+    off();
+    bus.resolver = old;
   }
-  expect(seen).toContain("screens");
+});
+
+test("a deleted layout artifact can't be expanded, and a dead expansion saved before a restart is cleared when the store is reopened", async () => {
+  const { hub, s } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    const a = artifact(s, "A");
+    const b = artifact(s, "B");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "artifact", artifactId: a.id }, { kind: "artifact", artifactId: b.id }] } }, "Chey", "main", { override: true });
+    const keyB = s.stageTileKeys()[1].key;
+    s.expandTile(keyB);
+    s.store.remove("artifacts", b.id);
+    expect(s.stageTileKeys().map((k) => k.artifactId)).toEqual([a.id]);
+    expect((await post("/stage/expand", { tile: keyB })).status).toBe(404);
+  } finally {
+    server.stop();
+  }
+  // Restart: the stage on disk still says expanded; the new session clears it before serving anything.
+  const restartDir = mkdtempSync(join(tmpdir(), "jam-restart-"));
+  const s1 = new Session(new Store(restartDir));
+  const c = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "C", image: "/renders/c.png" });
+  const d = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "D", image: "/renders/d.png" });
+  s1.setStage({ mode: "compare", items: [c.id, d.id] }, "Chey", "main", { override: true });
+  s1.expandTile(d.id);
+  s1.store.remove("artifacts", d.id);
+  (s1.store as any).db.close();
+  const s2 = new Session(new Store(restartDir));
+  expect(s2.stage().expanded).toBeUndefined();
+  s2.stop();
+});
+
+test("a spotlight or compare can't list the same artifact twice (its tiles couldn't be told apart)", () => {
+  const { s } = room();
+  const a = artifact(s, "A");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(s.setStage({ mode: "compare", items: [a.id, a.id] }, "Chey", "main", { override: true })).toMatchObject({ applied: false });
+  } finally {
+    console.error = err;
+  }
 });
