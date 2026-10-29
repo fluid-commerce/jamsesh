@@ -3,6 +3,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
+import { config } from "../config";
 import { CertStore, issueOne, needsRenewal, safeError, type CertKind } from "./acme";
 import { parseDomain, publicIp as lookupIp, startUpdater, updateIp, type Domain, type FetchFn } from "./duckdns";
 import { externalCheck, localCheck } from "./reach";
@@ -243,6 +244,8 @@ export class Network {
     if (req.method !== "POST") return json({ error: "not found" }, 404);
     const body: any = await req.json().catch(() => ({}));
     if (p === "config") {
+      // Remote access forwards a router port to this Mac and keeps a DuckDNS name: the real host's job, not a test build's.
+      if (config.isolated) return json({ error: "Remote access is off in a test build." }, 409);
       const d = parseDomain(body.domain);
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);

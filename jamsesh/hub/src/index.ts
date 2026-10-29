@@ -102,9 +102,8 @@ function writeLinkSecret() {
 /** The big screen: Chrome in app mode, full screen, with its own profile, or the default browser. */
 function openBigScreen(url: string) {
   const chrome = "/Applications/Google Chrome.app";
-  const home = process.env.HOME ?? "";
   if (existsSync(chrome))
-    Bun.spawn(["open", "-na", chrome, "--args", `--app=${url}`, "--start-fullscreen", `--user-data-dir=${home}/.jamsesh/chrome-host`, "--autoplay-policy=no-user-gesture-required", "--no-first-run"], { stdout: "ignore", stderr: "ignore" });
+    Bun.spawn(["open", "-na", chrome, "--args", `--app=${url}`, "--start-fullscreen", `--user-data-dir=${join(config.home, "chrome-host")}`, "--autoplay-policy=no-user-gesture-required", "--no-first-run"], { stdout: "ignore", stderr: "ignore" });
   else Bun.spawn(["open", url]);
 }
 

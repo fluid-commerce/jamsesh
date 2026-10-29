@@ -1,4 +1,5 @@
 // A soft two-note chime, synthesized (no audio files): "heard you".
+import { useSyncExternalStore } from "react";
 import { hub } from "./hub";
 
 let ctx: AudioContext | null = null;
@@ -11,6 +12,43 @@ export function roomSilent(state: { session?: { silent?: boolean } } | null | un
 /** True when this page may play sound right now. */
 export function soundAllowed() {
   return !roomSilent(hub.snap.state);
+}
+
+/** The same, as a hook: a component re-renders when the room goes silent or not. */
+export function useSilent() {
+  return roomSilent(useSyncExternalStore(hub.subscribe, hub.get, hub.get).state);
+}
+
+/**
+ * A spoken clip (the brain's reply, a voice sample). In a silent room there is none: the element is
+ * never made, so nothing can play, and the caller treats null as "didn't play".
+ */
+export function clip(mime: string, audio: string, make: (src: string) => HTMLAudioElement = (src) => new Audio(src)) {
+  if (!soundAllowed()) return null;
+  return make(`data:${mime};base64,${audio}`);
+}
+
+/**
+ * Pages inside the app (a scripted HTML tile, a custom stage) can make sound on their own. In a silent room
+ * they get no scripts, no media and no plugins: the document is still drawn, but it can't play anything.
+ */
+export const QUIET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob: http: https:; font-src data:; media-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'";
+
+export function htmlFrame(silent: boolean, doc: string): { srcDoc: string; sandbox: string } {
+  if (!silent) return { srcDoc: doc, sandbox: "allow-scripts" };
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${QUIET_CSP}">`;
+  const at = doc.search(/<!doctype html>/i);
+  const srcDoc = at === 0 ? doc.replace(/^<!doctype html>/i, (m) => m + meta) : meta + doc;
+  return { srcDoc, sandbox: "" };
+}
+
+/** A shared screen or camera carries no audio (it is captured without any), and a silent room drops any that arrives. */
+export function dropAudio(stream: { getAudioTracks(): { enabled: boolean; stop(): void }[] }, silent = !soundAllowed()) {
+  if (!silent) return;
+  for (const t of stream.getAudioTracks()) {
+    t.enabled = false;
+    t.stop();
+  }
 }
 
 export function playChime() {

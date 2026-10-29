@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
+import { htmlFrame, useSilent } from "../shared/sound";
 import { ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
 import { LiveAppView } from "../shared/liveapp";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, ExpandButton, ExpandCtx, RecordCatch, RoomFeed, ScaledFrame, Slot, TileKeyCtx, artifactTarget, colorFor, stripMd, tileSlots, useIsExpanded, useNow, type SlotTarget } from "../shared/ui";
@@ -416,7 +417,7 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
     case "html":
       return (
         <TileFrame label={tile.label ?? ""} kind="html">
-          <iframe srcDoc={`<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#0c0d0f;color:#f3f2ef;font-family:system-ui}</style>${tile.html}`} sandbox="allow-scripts" title={tile.label ?? "View"} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }} />
+          <HtmlTile html={tile.html} title={tile.label ?? "View"} />
         </TileFrame>
       );
   }
@@ -497,6 +498,12 @@ function AgentCard({ agent: a, state }: { agent: HubState["agents"][number]; sta
   );
 }
 
+/** A scripted HTML tile; in a silent room it gets no scripts or media (see htmlFrame). */
+export function HtmlTile({ html, title }: { html: string; title: string }) {
+  const frame = htmlFrame(useSilent(), `<!doctype html><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#0c0d0f;color:#f3f2ef;font-family:system-ui}</style>${html}`);
+  return <iframe srcDoc={frame.srcDoc} sandbox={frame.sandbox} title={title} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }} />;
+}
+
 function Custom({ state }: { state: HubState }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const pins = useContext(TilePins);
@@ -509,6 +516,7 @@ function Custom({ state }: { state: HubState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [html],
   );
+  const frame = htmlFrame(useSilent(), doc);
   useEffect(() => {
     ref.current?.contentWindow?.postMessage({ jam: slim(state) }, "*");
   }, [state]);
@@ -516,7 +524,7 @@ function Custom({ state }: { state: HubState }) {
     <>
       <Header title={state.stage.title} />
       <div data-jam-target={pins ? JSON.stringify(target) : undefined} style={{ flex: 1, minHeight: 0, position: "relative", display: "flex", borderRadius: 22 }}>
-        <iframe ref={ref} srcDoc={doc} sandbox="allow-scripts" title={state.stage.title} style={{ flex: 1, border: 0, borderRadius: 22, background: "var(--panel)" }} />
+        <iframe ref={ref} srcDoc={frame.srcDoc} sandbox={frame.sandbox} title={state.stage.title} style={{ flex: 1, border: 0, borderRadius: 22, background: "var(--panel)" }} />
         <RecordCatch frame={ref} />
         {pins && <Slot target={target} />}
       </div>

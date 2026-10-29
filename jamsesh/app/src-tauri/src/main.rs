@@ -249,7 +249,7 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
 
 /// A build with its own app data folder keeps its own cookies and storage too (macOS 14 and later;
 /// earlier systems have one store per bundle id, which is why a test build also gets its own id).
-fn own_store<'a, R: tauri::Runtime, M: Manager<R>>(b: WebviewWindowBuilder<'a, R, M>) -> WebviewWindowBuilder<'a, R, M> {
+pub(crate) fn own_store<'a, R: tauri::Runtime, M: Manager<R>>(b: WebviewWindowBuilder<'a, R, M>) -> WebviewWindowBuilder<'a, R, M> {
     match isolation::get().web_store_id() {
         Some(id) => b.data_store_identifier(id),
         None => b,
@@ -452,6 +452,9 @@ async fn fetch_agents_token(app: &AppHandle, origin: &str, person_token: &str) {
 /// Once per Mac: offer to connect Claude Code and Codex. After that, saying "connect to jamsesh"
 /// to either one is enough, whichever host this Mac is on.
 fn offer_agents(app: AppHandle) {
+    if agent_setup_off().is_some() {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         let state = app.state::<Arc<App>>().inner().clone();
         {
@@ -615,8 +618,15 @@ async fn leave_now(app: &AppHandle, state: &App) {
     refresh_tray(app).await;
 }
 
+fn agent_setup_off() -> Option<&'static str> {
+    isolation::get().agent_setup_off()
+}
+
 /// Installs the jamsesh MCP server, skill, command and hooks for Claude Code and Codex on this Mac.
 async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
+    if let Some(why) = agent_setup_off() {
+        return Err(why.into());
+    }
     let port = state.inner.lock().await.relay.as_ref().map(|r| r.port).ok_or("Host or join a session first.")?;
     let (_, me) = proxy::get(port, "/api/me").await?;
     let me: serde_json::Value = serde_json::from_str(&me).unwrap_or_default();
@@ -818,7 +828,7 @@ async fn refresh_tray(app: &AppHandle) {
                 menu.append(&MenuItem::with_id(app, "bigscreen", "Show the big screen", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "screens", "Screens…", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
-                menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", agent_setup_off().is_none(), None::<&str>)?)?;
                 menu.append(&tauri::menu::CheckMenuItem::with_id(
                     app,
                     "userless",
@@ -840,7 +850,7 @@ async fn refresh_tray(app: &AppHandle) {
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "open", "Open my window", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
-                menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", agent_setup_off().is_none(), None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "leave", "Leave the session", true, None::<&str>)?)?;
             }

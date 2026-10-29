@@ -37,6 +37,11 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// A port nothing is listening on right now (the OS picks; ports from 49152 up never meet the real app's).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(0)
+}
+
 /// "4747, 4848 and 4949".
 fn list_ports(ports: &[u16]) -> String {
     match ports {
@@ -169,6 +174,13 @@ impl Hub {
         }
         if let Some(home) = &crate::isolation::get().hub_home {
             cmd.env("JAMSESH_HOME", home);
+        }
+        // A test build's hub gets its own FigCraft, live-build and speech helper ports, and runs flagged isolated.
+        for (k, v) in crate::isolation::get().hub_env(&mut free_port) {
+            cmd.env(k, v);
+        }
+        if crate::isolation::get().whisper_port.is_none() && crate::isolation::get().isolated() {
+            cmd.env_remove("JAMSESH_WHISPER_PORT");
         }
         let child = cmd
             .env("PATH", path_env())

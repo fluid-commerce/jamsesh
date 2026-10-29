@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
+import { useSilent } from "./sound";
 import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
 import { FeedAttachments } from "./attach";
@@ -132,7 +133,7 @@ export function artifactTarget(a: Artifact): SlotTarget {
 }
 
 function useRecording() {
-  return useSyncExternalStore(pointerRecording.sub, pointerRecording.get);
+  return useSyncExternalStore(pointerRecording.sub, pointerRecording.get, pointerRecording.get);
 }
 
 /**
@@ -243,7 +244,27 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
 }
 
 /** `fill`: draw the page at the box's own size instead of scaling a fixed-size page to it (an expanded desktop build gets the real viewport). */
-export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked, fill, bare }: { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean }) {
+type ScaledFrameProps = { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean };
+
+/** A live page in a frame. A silent room doesn't load one: a page can play sound on its own, and nothing in a frame can be muted from here. */
+export function ScaledFrame(p: ScaledFrameProps) {
+  return useSilent() ? <QuietFrame url={p.src} title={p.title} bare={p.bare} /> : <LiveFrame {...p} />;
+}
+
+/** What stands in for a live page while the room is silent. */
+export function QuietFrame({ url, title, bare }: { url: string; title: string; bare?: boolean }) {
+  return (
+    <div className="empty-note" role="status" data-quiet-frame style={{ position: "absolute", inset: bare ? 0 : "50px 18px 18px", display: "grid", placeItems: "center", textAlign: "center", padding: 24 }}>
+      <div>
+        <div style={{ color: "var(--text)", marginBottom: 6 }}>{title}</div>
+        <div className="ellipsis" style={{ maxWidth: 520 }}>{url}</div>
+        <div style={{ marginTop: 10 }}>This room is silent, so live pages stay off. They come back when sound is on.</div>
+      </div>
+    </div>
+  );
+}
+
+function LiveFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked, fill, bare }: ScaledFrameProps) {
   const src = localize(raw);
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);

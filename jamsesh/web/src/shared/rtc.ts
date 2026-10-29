@@ -6,6 +6,7 @@
 
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { api, hub, type Share } from "./hub";
+import { dropAudio } from "./sound";
 
 type Kind = Share["kind"];
 
@@ -332,6 +333,7 @@ async function onOffer(publisher: string, d: Extract<Signal, { op: "offer" }>) {
   pc.onicecandidate = (e) => send(publisher, { op: "ice", shareId: s.shareId, pc: d.pc, candidate: e.candidate ? e.candidate.toJSON() : null });
   pc.ontrack = (e) => {
     const stream = e.streams[0] ?? new MediaStream([e.track]);
+    dropAudio(stream);
     setSnap(s, { stream, status: "live" });
   };
   pc.onconnectionstatechange = () => {

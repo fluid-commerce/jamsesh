@@ -84,6 +84,28 @@ describe("silent mode reaches the page", () => {
     expect(r.status).toBe(409);
   });
 
+  test("a silent hub never falls back to the Mac's own voice, even outside tests and with no good voice", async () => {
+    process.env.JAMSESH_SILENT = "1";
+    resetSpeechState();
+    hub.session.updateSettings({ voiceReplies: true });
+    const spawned: unknown[] = [];
+    const realSpawn = Bun.spawn;
+    const wasEnv = process.env.NODE_ENV;
+    // `say` is guarded by NODE_ENV=test in other runs; here that guard is off, so only the silent flag stands in the way.
+    (Bun as any).spawn = (cmd: unknown) => (spawned.push(cmd), { exited: Promise.resolve(0), kill() {} });
+    process.env.NODE_ENV = "production";
+    sent.length = 0;
+    try {
+      expect(await speak(hub.session, "Nothing should be said.", { source: "voice", kind: "answer" })).toBe("spoken");
+    } finally {
+      (Bun as any).spawn = realSpawn;
+      if (wasEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = wasEnv;
+    }
+    expect(spawned).toEqual([]);
+    expect(sent.filter((m) => m.type === "speak")).toEqual([{ type: "speak", audio: null, mime: "", text: "Nothing should be said." }]);
+  });
+
   test("without the flag chime still goes out and the state says not silent", () => {
     delete process.env.JAMSESH_SILENT;
     sent.length = 0;

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "../host/HostView";
 import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState, type Stage as StageState } from "../shared/hub";
-import { fadeOut, playChime, soundAllowed } from "../shared/sound";
+import { clip, fadeOut, playChime } from "../shared/sound";
 import { HistoryStrip, StageBar } from "../shared/StageControls";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
@@ -73,9 +73,10 @@ function ClientViewBody() {
     if (!remote) return;
     let audio: HTMLAudioElement | null = null;
     const onSpeak = (m: { audio: string | null; mime: string }) => {
-      if (!m.audio || !soundAllowed() || pref("hearBrain") === "off") return;
+      const next = m.audio && pref("hearBrain") !== "off" ? clip(m.mime, m.audio) : null;
+      if (!next) return;
       if (audio) (audio.onpause = null), audio.pause();
-      const a = (audio = new Audio(`data:${m.mime};base64,${m.audio}`));
+      const a = (audio = next);
       a.onended = () => mic.playbackEnded();
       a.onpause = () => mic.playbackEnded();
       a.play().catch(() => mic.playbackEnded());
