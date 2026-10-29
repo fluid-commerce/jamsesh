@@ -924,6 +924,8 @@ export class Session {
   // ---- shares that left the big screen ----
 
   private shareSweep: ReturnType<typeof setTimeout> | null = null;
+  /** Shares a host screen has shown at some point, so the sharer hears why theirs stopped. */
+  private sharesShown = new Set<string>();
   /** Long enough for the brain to place a brand-new share before it counts as "not on screen". */
   static SHARE_PLACE_MS = 60_000;
   static SHARE_GRACE_MS = 5_000;
@@ -948,6 +950,7 @@ export class Session {
   sweepShares() {
     this.shareSweep = null;
     const shown = this.shownShareIds();
+    for (const id of shown) this.sharesShown.add(id);
     let recheck = 0;
     for (const sh of this.shares()) {
       if (sh.status !== "live" || shown.has(sh.id)) continue;
@@ -957,7 +960,9 @@ export class Session {
         continue;
       }
       this.endShare(sh.id);
-      bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text: `Your ${sh.kind} left the big screen, so sharing stopped.` });
+      const text = this.sharesShown.has(sh.id) ? `Your ${sh.kind} left the big screen, so sharing stopped.` : `Your ${sh.kind} wasn't put on the big screen, so sharing stopped.`;
+      this.sharesShown.delete(sh.id);
+      bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text });
     }
     if (recheck) this.scheduleShareSweep(recheck + 50);
   }
