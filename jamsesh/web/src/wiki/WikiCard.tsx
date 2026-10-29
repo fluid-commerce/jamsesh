@@ -112,6 +112,7 @@ function Diff({ c, cardId }: { c: WikiChange; cardId: string }) {
     setState("loading");
     try {
       setFull((await wikiApi.fullChange(cardId, c.slug)).diff);
+      setAll(true);
       setState("");
     } catch {
       setState("failed");
@@ -129,14 +130,14 @@ function Diff({ c, cardId }: { c: WikiChange; cardId: string }) {
       </pre>
       {c.cut && full === null && (
         <p className="wk-diff-more">
-          This is part of the change.{" "}
+          This shows part of the change.{" "}
           <button className="btn ghost small" disabled={state === "loading"} onClick={() => void load()}>
             {state === "loading" ? "Loading…" : "Show the whole change"}
           </button>
           {state === "failed" && <span role="alert"> Couldn't load it. Try again.</span>}
         </p>
       )}
-      {v.hidden > 0 && (
+      {v.hidden > 0 && !(c.cut && full === null) && (
         <p className="wk-diff-more">
           {v.notes.map((n) => (
             <span key={n}>{n} </span>

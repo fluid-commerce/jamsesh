@@ -89,6 +89,16 @@ export function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
   return force as any;
 }
 
+/**
+ * The pages whose names are tried this frame, best first: the one pointed at, the one in focus, then by importance. Never more
+ * than NAME_BUDGET, whatever is hovered: a page with hundreds of links doesn't get hundreds of names.
+ */
+export function nameCandidates(list: GNode[], o: { hot: string | null; focus: string | null; near?: Set<string>; top: Set<string>; rank: Map<string, number> }): GNode[] {
+  const want = list.filter((n) => n.id === o.hot || n.id === o.focus || (o.hot && o.near?.has(n.id)) || (!o.hot && o.top.has(n.id)));
+  const lead = (n: GNode) => (n.id === o.hot ? -2 : n.id === o.focus ? -1 : 0);
+  return want.sort((a, b) => lead(a) - lead(b) || (o.rank.get(a.id) ?? 0) - (o.rank.get(b.id) ?? 0)).slice(0, NAME_BUDGET);
+}
+
 /** The first ticks of a layout, run before the first frame: as many as asked for, but stopping at `ms` so a full vault never freezes the page. */
 export function settleFor(s: { tick: (n?: number) => unknown }, ticks: number, ms = 250, now: () => number = () => performance.now()) {
   const t0 = now();
@@ -227,9 +237,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       g.textBaseline = "top";
       const room = Math.floor((size.w * size.h) / (stage ? 52000 : coarse ? 30000 : mode === "local" ? 9000 : 15000));
       const top = stage ? stageNames : labelled(graph, Math.min(coarse ? 7 : 40, Math.max(mode === "local" ? 14 : 4, room)));
-      const want: GNode[] = [];
-      for (const n of list) if (n.id === hot || n.id === focus || (hot && near?.has(n.id)) || (!hot && top.has(n.id))) want.push(n);
-      want.sort((a, b) => (a.id === hot ? -2 : a.id === focus ? -1 : 0) - (b.id === hot ? -2 : b.id === focus ? -1 : 0) || (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+      const want = nameCandidates(list, { hot, focus, near, top, rank });
       const placed: [number, number, number, number][] = [];
       // Every node as a circle on screen, so a name can be kept off other nodes as well as off other names.
       const discs = list.map((n) => ({ id: n.id, x: sx(n.x ?? 0), y: sy(n.y ?? 0), r: Math.max(stage ? 7 : coarse ? 5.5 : 3.5, n.r * Math.min(1.6, Math.max(0.7, k))) + 2 }));

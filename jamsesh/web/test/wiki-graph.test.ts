@@ -1,6 +1,6 @@
 // The graph's data: shaped safely from whatever the hub sends, and the lookups the canvas relies on.
 import { expect, test } from "bun:test";
-import { labelled, localGraph, MAX_NODES, nodeAt, radiusFor, shapeGraph, walkOrder } from "../src/wiki/graph";
+import { byImportance, labelled, localGraph, MAX_NODES, nodeAt, radiusFor, shapeGraph, walkOrder } from "../src/wiki/graph";
 import { PULSE_MS, PulseStore } from "../src/wiki/pulse";
 import { keepDrawing } from "../src/wiki/GraphCanvas";
 
@@ -189,4 +189,17 @@ test("the first ticks of a layout stop at their time budget, however many were a
   ticks = 0;
   settleFor({ tick: () => void ticks++ }, 30, 0, () => 1e9);
   expect(ticks).toBe(1);
+});
+
+test("pointing at a page with hundreds of links still names no more than the budget, the page itself first", async () => {
+  const { nameCandidates } = await import("../src/wiki/GraphCanvas");
+  const g = vault(1500);
+  const rank = new Map(byImportance(g).map((n, i) => [n.id, i]));
+  const hub = g.nodes[700];
+  const near = new Set(g.nodes.slice(0, 900).map((n) => n.id));
+  const want = nameCandidates(g.nodes, { hot: hub.id, focus: null, near, top: new Set(), rank });
+  expect(want).toHaveLength(NAME_BUDGET);
+  expect(want[0].id).toBe(hub.id);
+  // Idle: the stage's own set, which is already within the budget.
+  expect(nameCandidates(g.nodes, { hot: null, focus: null, top: labelledAtLeast(g, 2, 8, NAME_BUDGET), rank })).toHaveLength(NAME_BUDGET);
 });

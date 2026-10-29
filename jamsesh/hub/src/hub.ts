@@ -162,6 +162,7 @@ export class Hub {
     };
     this.session.wikiAccept = (c, pages, by) => this.wiki.accept(c, pages, by);
     this.session.wikiClosed = (c) => this.wiki.closed(c);
+    this.session.wikiDismiss = (c, by) => this.wiki.dismissing(c, by);
     this.session.onFactSaved = (f) => void this.wiki.factSaved(f);
     try {
       // Raises the project's open proposals on this session's board, and closes any whose accept finished.

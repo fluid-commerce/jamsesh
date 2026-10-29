@@ -469,6 +469,8 @@ export function addSource(dir: string, s: { kind: SourceKind; title: string; tex
     io.write(tmp, header + text, { flag: "wx" });
     for (let n = 1; n < (s.id ? 2 : 200); n++) {
       const id = n === 1 ? stem : `${stem}-${n}`;
+      // An id is never reused: one a source moved to raw/archive/ still holds it.
+      if (!s.id && archived(dir, id)) continue;
       try {
         io.link(tmp, join(raw, `${id}.md`));
         return { id, title, kind: s.kind, ts: now, by: s.by, text };
@@ -500,13 +502,23 @@ function sourceFile(dir: string, id: string): string | null {
   return null;
 }
 
+const archived = (dir: string, id: string): boolean => {
+  try {
+    const d = vaultDir(dir, "raw/archive");
+    return !!d && existsSync(join(d, `${id}.md`));
+  } catch {
+    return false;
+  }
+};
+
 /** Moves read-in sources out of raw/ into raw/archive/, where they can still be read and cited but no longer count toward the cap. */
 export function archiveSources(dir: string, ids: string[]): number {
   const raw = rawDir(dir);
   const to = raw && ids.length ? vaultDir(dir, "raw/archive", true) : null;
   let n = 0;
   for (const id of ids) {
-    if (!raw || !to || !isSourceId(id) || !plainFile(join(raw, `${id}.md`))) continue;
+    // Never over a source already archived under that name.
+    if (!raw || !to || !isSourceId(id) || !plainFile(join(raw, `${id}.md`)) || existsSync(join(to, `${id}.md`))) continue;
     io.rename(join(raw, `${id}.md`), join(to, `${id}.md`));
     n++;
   }

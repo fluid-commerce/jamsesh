@@ -1254,7 +1254,7 @@ test("pages a failed accept already wrote stay part of its record whatever is ch
   expect(w.pendingSources()).toEqual([]);
 });
 
-test("dismissing after a partial accept still logs and indexes the pages that were written, now or after a restart", async () => {
+test("dismissing after a partial accept still logs and indexes the pages that were written", async () => {
   for (const crash of [false, true]) {
     const { w, s, dir } = room();
     w.addSource("document", "Two pages", "a b", "Chey");
@@ -1267,17 +1267,12 @@ test("dismissing after a partial accept still logs and indexes the pages that we
       renameSync(join(dir, "index.md"), join(dir, "index.bak"));
       mkdirSync(join(dir, "index.md"));
       writeFileSync(join(dir, "index.md", "x"), "x");
-      const err = console.error;
-      console.error = () => {};
-      try {
-        expect(s.board.dismiss(id, "Chey").ok).toBe(true);
-      } finally {
-        console.error = err;
-      }
-      expect(readdirSync(join(dir, ".proposals"))).toContain(`${id}.json`); // kept for the clean-up
+      // Dismissing is refused while the written pages can't be recorded; the card stays open.
+      expect(s.board.dismiss(id, "Chey").ok).toBe(false);
+      expect(s.board.get(id)!.status).toBe("open");
       rmSync(join(dir, "index.md"), { recursive: true });
       renameSync(join(dir, "index.bak"), join(dir, "index.md"));
-      w.restore();
+      expect(s.board.dismiss(id, "Chey").ok).toBe(true);
     } else expect(s.board.dismiss(id, "Chey").ok).toBe(true);
     expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("[[d-one]]");
     expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[d-one|One]]");
@@ -1431,4 +1426,116 @@ test("a proposal left by the older pending-… format is let go on restart and i
   expect(existsSync(join(dir, ".proposals", "pending-abc123.json"))).toBe(false);
   expect(s.board.open().filter((c) => c.type === "wiki")).toEqual([]);
   expect(w.pendingSources()).toEqual([src.id]);
+});
+
+// ---------- round 6 ----------
+
+test("a source id is never reused: an archived source keeps its id, and an archive never overwrites", () => {
+  const { w, dir } = room();
+  const old = w.addSource("document", "Weekly notes", "the old text", "Chey");
+  const st = readState(dir);
+  st.ingested[old.id] = { at: 1 };
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify(st));
+  expect(w.archiveOld(0, 0)).toBe(1);
+  const fresh = w.addSource("document", "Weekly notes", "the new text", "Chey");
+  expect(fresh.id).not.toBe(old.id);
+  expect(readSource(dir, old.id)!.text).toBe("the old text");
+  expect(readSource(dir, fresh.id)!.text).toBe("the new text");
+  // The new one is waiting, not mistaken for the ingested one.
+  expect(w.pendingSources()).toEqual([fresh.id]);
+  // Archiving something that has an archived namesake leaves both alone.
+  writeFileSync(join(dir, "raw", `${old.id}.md`), "intruder");
+  expect(archiveSources(dir, [old.id])).toBe(0);
+  expect(readSource(dir, old.id)!.text).toBe("intruder"); // raw/ is looked in first; the archived file is untouched
+  expect(readFileSync(join(dir, "raw", "archive", `${old.id}.md`), "utf8")).toContain("the old text");
+});
+
+/** Runs `fn` with the first proposal save after a page lands made to fail: the crash window between the rename and the record. */
+function failRecordAfterPage<T>(fn: () => T): T {
+  const rename = io.rename;
+  let armed = false;
+  io.rename = ((a: any, b: any) => {
+    if (armed && String(b).includes("/.proposals/")) {
+      armed = false;
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    }
+    rename(a, b);
+    if (String(b).includes("/wiki/")) armed = true;
+  }) as typeof io.rename;
+  try {
+    return fn();
+  } finally {
+    io.rename = rename;
+  }
+}
+
+test("a page that lands as the record fails to save is still recorded: a retry that unchecks it, a restart, and a dismissal all finish it", async () => {
+  for (const how of ["retry", "restart", "dismiss"] as const) {
+    const { w, s, dir } = room();
+    w.addSource("document", "Two pages", "a b", "Chey");
+    w.decide = (async () => ({ summary: "Two", pages: [page("r-one", "One", "topic", "1"), page("r-two", "Two", "topic", "2")] })) as Decider;
+    const id = (await w.tick())!.card!.id;
+    const first = failRecordAfterPage(() => s.board.add(id, "Chey"));
+    expect(first).toMatchObject({ ok: false, status: 500 });
+    expect(readPage(dir, "r-one")).not.toBeNull();
+    expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).writing).toBe("r-one");
+    if (how === "retry") {
+      expect(s.board.add(id, "Chey", { pages: ["r-two"] } as any)).toMatchObject({ ok: true });
+      expect(s.board.get(id)!.wiki!.applied).toEqual(["r-one", "r-two"]);
+    } else if (how === "restart") {
+      new WikiService(s, dir, s.sessionId).restore();
+      expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8"))).toMatchObject({ applied: ["r-one"] });
+      expect(s.board.add(id, "Chey", { pages: [] } as any).ok).toBe(true);
+    } else expect(s.board.dismiss(id, "Chey").ok).toBe(true);
+    expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("[[r-one]]");
+    expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[r-one|One]]");
+  }
+});
+
+test("a write that never landed is rolled back from its record: nothing claims it was applied", async () => {
+  const { w, s, dir } = room();
+  w.addSource("document", "One page", "a", "Chey");
+  w.decide = (async () => ({ summary: "One", pages: [page("rb-one", "One", "topic", "1")] })) as Decider;
+  const id = (await w.tick())!.card!.id;
+  mkdirSync(join(dir, "wiki", "rb-one.md")); // the write fails
+  expect(s.board.add(id, "Chey")).toMatchObject({ ok: false });
+  expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).writing).toBe("rb-one");
+  new WikiService(s, dir, s.sessionId).restore();
+  const rec = JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8"));
+  expect(rec.writing).toBeUndefined();
+  expect(rec.applied ?? []).toEqual([]);
+});
+
+test("dismissing fails, and the card stays open, when the pages already written can't be recorded", async () => {
+  const { w, s, dir } = room();
+  w.addSource("document", "Two pages", "a b", "Chey");
+  w.decide = (async () => ({ summary: "Two", pages: [page("f-one", "One", "topic", "1"), page("f-two", "Two", "topic", "2")] })) as Decider;
+  const id = (await w.tick())!.card!.id;
+  mkdirSync(join(dir, "wiki", "f-two.md"));
+  expect(s.board.add(id, "Chey")).toMatchObject({ ok: false });
+  renameSync(join(dir, "index.md"), join(dir, "index.bak"));
+  mkdirSync(join(dir, "index.md"));
+  writeFileSync(join(dir, "index.md", "x"), "x");
+  const refused = s.board.dismiss(id, "Chey");
+  expect(refused).toMatchObject({ ok: false, status: 500 });
+  expect((refused as any).error).toContain("earlier try");
+  expect(s.board.get(id)!.status).toBe("open");
+  expect(w.pendingSources()).toEqual([]); // still held by the card
+  rmSync(join(dir, "index.md"), { recursive: true });
+  renameSync(join(dir, "index.bak"), join(dir, "index.md"));
+  expect(s.board.dismiss(id, "Chey").ok).toBe(true);
+  expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("[[f-one]]");
+});
+
+test("a person's edit keeps the whole change in its source, even one long line", () => {
+  const { w, dir } = room();
+  const before = `# Long\n\n${"a".repeat(30_000)}`;
+  const after = `# Long\n\n${"b".repeat(30_000)}`;
+  w.editPage("long", before, { by: "Chey" });
+  const r = w.editPage("long", after, { by: "Chey", rev: readPage(dir, "long")!.rev });
+  expect(r.ok).toBe(true);
+  const edit = sourceIds(dir).map((id) => readSource(dir, id)!).filter((x) => x.kind === "edit").pop()!;
+  expect(edit.text).toContain("a".repeat(30_000));
+  expect(edit.text).toContain("b".repeat(30_000));
+  expect(edit.text).not.toContain("cut here");
 });

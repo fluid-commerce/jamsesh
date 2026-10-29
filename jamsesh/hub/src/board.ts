@@ -393,6 +393,9 @@ export class Board {
   dismiss(id: string, by: string): BoardResult {
     const c = this.openCard(id);
     if ("ok" in c) return c;
+    // Pages an accept wrote before it failed are recorded first: if that can't be done the card stays open and says so.
+    const refused = c.type === "wiki" ? this.s.wikiDismiss?.(c, by) : null;
+    if (refused) return fail(refused, 500);
     const card = this.done(c, "dismissed", by);
     // A wiki card's sources are read once a person has said no to it.
     if (c.type === "wiki") this.s.wikiClosed?.(card);

@@ -122,6 +122,8 @@ interface Proposal {
   sources: string[];
   /** The card as it was raised, to raise it again on a later session's board. */
   card?: WikiCardPayload;
+  /** The page an accept is writing right now: recorded before the write, so a crash in it is finished or rolled back from this. */
+  writing?: string;
   /** Pages an accept that didn't finish already wrote: a retry counts them and doesn't write them again. */
   applied?: string[];
   /** How far into each source this proposal read (a long source is read in parts). */
@@ -715,13 +717,28 @@ export class WikiService {
    * Closes a card for good. Pages an accept wrote before it failed are on disk, so whichever way the card ends (a retry
    * that finished, or a dismissal) they get the log line, index and commit an accept gives, before the proposal goes.
    */
-  private settle(cardId: string, prop: Proposal, by: string) {
+  private settle(cardId: string, prop: Proposal, by: string, close = true) {
+    prop = this.reconcile(cardId, prop);
     const written = (prop.applied ?? []).filter((slug) => prop.changes.some((c) => c.slug === slug));
     if (written.length && !prop.done) {
       this.finish(`${prop.card?.kind === "answer" ? "Filed an answer" : "Ingest"}: ${(prop.card?.summary ?? "").replace(/^Wiki: /, "")} (partly accepted, then closed by ${by})`, written, `accept:${prop.key ?? cardId}:${hashOf(written.join(","))}`);
       this.notify("apply", written, by);
     }
-    this.resolve(cardId, prop);
+    if (close) this.resolve(cardId, prop);
+  }
+
+  /**
+   * Finishes or rolls back the write an accept was in the middle of: the page it named is on disk as proposed (the write
+   * landed, so it counts as applied) or it isn't (nothing happened). Either way the record is true again.
+   */
+  private reconcile(cardId: string, prop: Proposal): Proposal {
+    if (!prop.writing) return prop;
+    const c = prop.changes.find((x) => x.slug === prop.writing);
+    const landed = !!c && readPage(this.dir, c.slug)?.markdown.trim() === c.body.trim();
+    const next: Proposal = { ...prop, applied: landed ? [...new Set([...(prop.applied ?? []), c!.slug])] : prop.applied };
+    delete next.writing;
+    this.saveProposal(cardId, next);
+    return next;
   }
 
   /**
@@ -730,7 +747,9 @@ export class WikiService {
    * are read again.
    */
   restore() {
-    for (const { id, prop } of this.proposals()) {
+    for (const found of this.proposals()) {
+      const { id } = found;
+      const prop = this.reconcile(id, found.prop); // a write the last run died in the middle of
       const here = this.s.board.get(id);
       // The accept finished but the card wasn't closed (a crash in between): close it with what was recorded.
       if (prop.done) {
@@ -764,11 +783,19 @@ export class WikiService {
     const prop = this.loadProposal(card.id);
     if (!prop) return;
     if (card.status !== "dismissed") return void this.dropProposal(card.id);
+    // dismissing() recorded the written pages before the card closed; this only reads the sources.
+    this.resolve(card.id, prop);
+  }
+
+  /** Before a wiki card is dismissed: records the pages an earlier accept wrote. An error keeps the card open. */
+  dismissing(card: TriageCard, by: string): string | null {
+    const prop = this.loadProposal(card.id);
+    if (!prop) return null;
     try {
-      this.settle(card.id, prop, card.resolvedBy || "a person");
+      this.settle(card.id, prop, by, false);
+      return null;
     } catch (e) {
-      // The proposal stays: restore() finishes the clean-up at the next start.
-      console.error("wiki:", errText(e));
+      return `Some pages from an earlier try are already written, and their record couldn't be made: ${errText(e)}. Try again.`;
     }
   }
 
@@ -804,7 +831,8 @@ export class WikiService {
   accept(card: TriageCard, pages: string[] | undefined, by: string): { applied: string[]; skipped: string[] } | { error: string; status: number } {
     if (!card.wiki) return { error: "That isn't a wiki card.", status: 400 };
     if (!card.wiki.changes.length) return { applied: [], skipped: [] };
-    const prop = this.loadProposal(card.id);
+    const loaded = this.loadProposal(card.id);
+    const prop = loaded && this.reconcile(card.id, loaded);
     if (!prop) return { error: "That proposal has expired. Dismiss it; the next ingest raises a new one.", status: 410 };
     if (prop.done) return prop.done; // finished before; only the card was left open
     const want = pages ? new Set(pages.map(String)) : null;
@@ -826,6 +854,8 @@ export class WikiService {
         continue;
       }
       try {
+        // The intent is recorded before the write and the page after it: a crash between leaves a record that says which page to look at.
+        this.saveProposal(card.id, { ...prop, applied: [...done], writing: c.slug });
         writePage(this.dir, c.slug, c.body, { category: c.category, workstreams: c.workstreams, sources: c.sources });
         applied.push(c.slug);
         done.add(c.slug);
@@ -870,7 +900,7 @@ export class WikiService {
     let src: Source | null = null;
     let page: Page;
     try {
-      src = addSource(this.dir, { kind: "edit", title: `Edit to ${cur?.title ?? opts.title ?? slug} (${slug})`, by: opts.by, text: `${opts.by} ${cur ? "changed" : "wrote"} the page "${slug}".\n\n${lineDiff(cur?.markdown.trim() ?? "", text, 20_000)}` });
+      src = addSource(this.dir, { kind: "edit", title: `Edit to ${cur?.title ?? opts.title ?? slug} (${slug})`, by: opts.by, text: `${opts.by} ${cur ? "changed" : "wrote"} the page "${slug}".\n\n${lineDiff(cur?.markdown.trim() ?? "", text)}` });
       page = writePage(this.dir, slug, text, { category: opts.category, sources: [src.id] });
     } catch (e) {
       // The write can fail after the page landed (reading it back): then the edit happened, and its source stays.
