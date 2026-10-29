@@ -313,6 +313,8 @@ export interface StageTileKey {
   key: string;
   artifactId?: string;
   layoutIndex?: number;
+  /** A parity tile's source: its column and its place in that column's stored list (before missing artifacts are skipped). */
+  parity?: { column: number; place: number };
 }
 
 export interface StageLock {

@@ -1509,7 +1509,10 @@ export class Session {
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
     const known = this.bigScreens.has(id);
     this.bigScreens.set(id, { id, ...info });
-    if (!known) bus.changed("screens");
+    if (!known) {
+      bus.changed("screens");
+      bus.changed("stageTiles");
+    }
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,
@@ -1520,6 +1523,7 @@ export class Session {
     this.screenReverts.delete(id);
     this.defaultStages.delete(id);
     bus.changed("screens");
+    bus.changed("stageTiles");
   }
 
   screens(): ScreenInfo[] {
@@ -1595,7 +1599,8 @@ export class Session {
 
   /** Every screen's tile keys (`stageTileKeys`), as windows get them: they draw tiles from these and never work keys out themselves. */
   stageTiles(): Record<string, StageTileKey[]> {
-    const ids = new Set(["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]);
+    // Every connected screen has tiles, even one nothing was put on yet (its default board).
+    const ids = new Set(["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {})), ...this.screens().map((x) => x.id)]);
     return Object.fromEntries([...ids].map((id) => [id, this.stageTileKeys(id)]));
   }
 
@@ -1617,8 +1622,9 @@ export class Session {
           return (p.variant || p.title).localeCompare(q.variant || q.title);
         });
       case "parity":
-        // Keyed by column and place, so the same artifact in two columns is two tiles.
-        return (st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c, ci) => c.items.filter((id) => known.has(id)).map((id, ii) => ({ key: `p${ci}.${ii}`, artifactId: id })));
+        // Keyed by where each came from (column, place in the stored list) and which artifact it was: when an earlier artifact
+        // goes, the others keep their keys and the gone one's key names nothing, so a key never points at different content.
+        return (st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c, ci) => c.items.flatMap((id, place) => (known.has(id) ? [{ key: `p${ci}.${place}.${id}`, artifactId: id, parity: { column: ci, place } }] : [])));
       case "layout":
         return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
       default:

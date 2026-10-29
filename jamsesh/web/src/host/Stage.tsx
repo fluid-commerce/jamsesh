@@ -91,14 +91,13 @@ interface StageTile {
 const hubTiles = (state: HubState) => state.stageTiles?.[state.stage.screenId ?? "main"] ?? [];
 
 /** The hub's key for a tile this stage draws (an artifact, or a layout's nth tile); null when the hub lists none, so no Expand. */
-/** The key of the tile at this place in a parity column (the hub keys them by column and place). */
-function parityKey(state: HubState, column: number, place: number): string | null {
-  const key = `p${column}.${place}`;
-  return hubTiles(state).some((k) => k.key === key) ? key : null;
+/** The hub's key for the parity tile that came from this column and place (never made here). */
+function parityKey(state: HubState, column: number, place: number, artifactId: string): string | null {
+  return hubTiles(state).find((k) => k.parity?.column === column && k.parity.place === place && k.artifactId === artifactId)?.key ?? null;
 }
 
 function tileKey(state: HubState, t: { artifactId: string } | { layoutIndex: number }): string | null {
-  return hubTiles(state).find((k) => ("layoutIndex" in t ? k.layoutIndex === t.layoutIndex : k.layoutIndex === undefined && k.artifactId === t.artifactId))?.key ?? null;
+  return hubTiles(state).find((k) => ("layoutIndex" in t ? k.layoutIndex === t.layoutIndex : k.layoutIndex === undefined && !k.parity && k.artifactId === t.artifactId))?.key ?? null;
 }
 
 /** The tiles of the stage, in the hub's order, with what draws each. Single-view modes (agents, custom, join) have none. */
@@ -238,8 +237,8 @@ function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Art
               {c.label}
             </div>
             <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 14, gridTemplateColumns: `repeat(${Math.max(1, c.items.length)}, minmax(0, 1fr))` }}>
-              {pick(c.items).map((a, ii) => (
-                <TileKeyCtx.Provider key={`${a.id}:${ii}`} value={parityKey(state, ci, ii)}>
+              {c.items.flatMap((id, place) => pick([id]).map((a) => ({ a, place }))).map(({ a, place }) => (
+                <TileKeyCtx.Provider key={`${a.id}:${place}`} value={parityKey(state, ci, place, a.id)}>
                   <PinnedTile art={a} state={state} />
                 </TileKeyCtx.Provider>
               ))}

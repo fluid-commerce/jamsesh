@@ -63,16 +63,17 @@ test("expanding restarts the wait before a brought-up stage returns to the board
   Session.STAGE_REVERT_MS = 120;
   try {
     const s2 = new Session(new Store(mkdtempSync(join(tmpdir(), "jam-expand-timer-"))));
-    s2.setStage({ mode: "spotlight", items: ["a"] }, "Room brain", "main", { claim: s2.stageClaim() });
+    const art = s2.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", image: "/renders/a.png" });
+    s2.setStage({ mode: "spotlight", items: [art.id] }, "Room brain", "main", { claim: s2.stageClaim() });
     await Bun.sleep(80);
-    s2.expandTile("a");
+    s2.expandTile(art.id);
     await Bun.sleep(80);
     expect(s2.stage().mode).toBe("spotlight");
     await Bun.sleep(100);
     expect(s2.stage().mode).toBe("board");
     // A pinned stage never reverts, expanded or not.
-    s2.setStage({ mode: "spotlight", items: ["a"], pinned: true }, "Chey", "main", { claim: s2.stageClaim() });
-    s2.expandTile("a");
+    s2.setStage({ mode: "spotlight", items: [art.id], pinned: true }, "Chey", "main", { claim: s2.stageClaim() });
+    s2.expandTile(art.id);
     await Bun.sleep(200);
     expect(s2.stage().mode).toBe("spotlight");
   } finally {

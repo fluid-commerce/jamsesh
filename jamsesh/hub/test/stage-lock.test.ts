@@ -1520,5 +1520,75 @@ test("the same artifact in two parity columns is two tiles, keyed by column and 
   const { s } = room();
   const a = artifact(s, "Checkout");
   s.setStage({ mode: "parity", columns: [{ label: "L", items: [a.id] }, { label: "R", items: [a.id] }] }, "Chey", "main", { override: true });
-  expect(s.stageTileKeys().map((k) => k.key)).toEqual(["p0.0", "p1.0"]);
+  expect(s.stageTileKeys().map((k) => k.key)).toEqual([`p0.0.${a.id}`, `p1.0.${a.id}`]);
+});
+
+test("a parity key never names different content: when an earlier artifact goes, the others keep their keys, and a request for the gone one's key is turned away", async () => {
+  const { hub, s } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    const a = artifact(s, "A");
+    const b = artifact(s, "B");
+    s.setStage({ mode: "parity", columns: [{ label: "L", items: [a.id, b.id] }, { label: "R", items: [a.id] }] }, "Chey", "main", { override: true });
+    const keys = s.stageTileKeys();
+    const keyA = keys[0].key;
+    const keyB = keys[1].key;
+    expect(new Set(keys.map((k) => k.key)).size).toBe(3);
+    expect(keys[1].parity).toEqual({ column: 0, place: 1 });
+    expect((await post("/stage/expand", { tile: keyB })).status).toBe(200);
+    expect(s.stage().expanded).toBe(keyB);
+    // A is deleted while B is expanded: B is still B, and an Expand for A's key (in flight when it went) finds nothing.
+    s.store.remove("artifacts", a.id);
+    const after = s.stageTileKeys();
+    expect(after.map((k) => k.key)).toEqual([keyB]);
+    expect(after[0].artifactId).toBe(b.id);
+    expect(s.stage().expanded).toBe(keyB);
+    expect((await post("/stage/expand", { tile: keyA })).status).toBe(404);
+    expect(s.stage().expanded).toBe(keyB);
+  } finally {
+    server.stop();
+  }
+});
+
+test("a screen that just connected has tile keys for its board before anything is put on it, and the keys are published", () => {
+  const { s } = room();
+  artifact(s, "A");
+  const seen: string[] = [];
+  const prev = bus.resolver;
+  const real = bus.changed.bind(bus) as (key: string) => void;
+  (bus as any).changed = (key: string) => { seen.push(key); real(key); };
+  try {
+    s.reportScreen("screen-2", { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0, at: Date.now() });
+  } finally {
+    (bus as any).changed = real;
+    bus.resolver = prev;
+  }
+  expect(s.stageTiles()["screen-2"]?.length).toBeGreaterThan(0);
+  expect(seen).toContain("stageTiles");
+});
+
+test("same-millisecond recast: a pending show request about the first lock expires and its approval does nothing", () => {
+  const { s, chey, felipe, reg } = room();
+  const a = artifact(s, "Checkout");
+  const b = artifact(s, "Pricing");
+  const agent = reg("Felipe");
+  const realNow = Date.now;
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [b.id] } });
+  s.onShowRequest = () => {};
+  age(s, 6 * 60_000);
+  const req = s.askOwner(item)!;
+  const since = s.stage().lock!.since;
+  Date.now = () => since;
+  try {
+    // Chey casts again in the very millisecond the old lock began: a new lock with the same start time.
+    s.setStage({ mode: "spotlight", items: [a.id], title: "again" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    expect(s.stage().lock!.since).toBe(since);
+  } finally {
+    Date.now = realNow;
+  }
+  expect(s.showRequests().find((r) => r.id === req.id)?.status).toBe("expired");
+  expect(s.stage().items).toEqual([a.id]);
+  void felipe;
 });
