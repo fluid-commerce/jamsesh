@@ -15,6 +15,7 @@ import type {
   DevServer,
   Directive,
   DirectiveMode,
+  Document,
   HubState,
   JamEvent,
   Person,
@@ -24,6 +25,9 @@ import type {
   Stage,
   Workstream,
  BuildRequest, ScreenInfo } from "./types";
+
+/** A message or update longer than this is stored once and others get a pointer. */
+export const LONG_TEXT = 1200;
 
 /** An agent quiet this long shows as offline (and its record can be taken over by a rejoin). */
 export const AGENT_OFFLINE_MS = 20 * 60_000;
@@ -501,22 +505,35 @@ export class Session {
     return byName.length === 1 ? byName[0] : undefined;
   }
 
+  /**
+   * A long text is stored once as a document. Returns what the feed and other agents' inboxes carry
+   * instead: its opening and where to fetch the rest.
+   */
+  shelve(from: { id: string; name: string }, text: string): { text: string; documentId?: string } {
+    if (text.length <= LONG_TEXT) return { text };
+    const doc: Document = { id: newId("doc"), ts: Date.now(), authorId: from.id, authorName: from.name, title: text.split("\n", 1)[0].slice(0, 80), text };
+    this.store.put("documents", doc, false);
+    const cut = text.slice(0, 240).replace(/\s+\S*$/, "");
+    return { text: `${cut}… [long: ${text.length} chars, stored once. Read it all with jam_artifacts id ${doc.id}]`, documentId: doc.id };
+  }
+
   postUpdate(agentId: string, kind: UpdateKind, text: string, extra: { workstream?: string; data?: Record<string, any> } = {}) {
     const agent = this.agent(agentId);
     if (!agent) throw new Error("Unknown agent; call jam_join first.");
     // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its brief.
     const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
     const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
+    const short = this.shelve(agent, text);
     const ev = this.store.addEvent({
       // An agent's decision is an update the brain can promote; only the brain makes room decisions.
       kind: "update",
       authorType: "agent",
       authorId: agentId,
       authorName: agent.name,
-      text,
+      text: short.text,
       workstreamId: ws?.id ?? null,
       relevance: "work",
-      data: { updateKind: kind, ...(extra.data ?? {}) },
+      data: { updateKind: kind, ...(extra.data ?? {}), ...(short.documentId ? { documentId: short.documentId } : {}) },
     });
     const status = kind === "blocked" || kind === "question" ? "blocked" : kind === "done" || kind === "shipped" ? "idle" : "working";
     this.touchAgent(agentId, { status, activity: text.slice(0, 140) });
@@ -727,14 +744,16 @@ export class Session {
       return ev;
     }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
+    // A long note to everyone is stored once; each agent's inbox gets the pointer.
+    const short = target ? { text } : this.shelve(from, text);
     const ev = this.store.addEvent({
       kind: "message",
       authorType: "agent",
       authorId: from.id,
       authorName: from.name,
-      text,
+      text: short.text,
       relevance: "work",
-      data: { to: target?.id ?? "all", toName: target?.name ?? "everyone", ...data },
+      data: { to: target?.id ?? "all", toName: target?.name ?? "everyone", ...data, ...(short.documentId ? { documentId: short.documentId } : {}) },
     });
     if (target) this.wake(target.id);
     else for (const a of this.store.all("agents")) if (a.id !== from.id) this.wake(a.id);

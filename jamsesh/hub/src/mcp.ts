@@ -227,8 +227,8 @@ const JAM_TOOLS = [
   },
   {
     name: "jam_artifacts",
-    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words. Long sessions have more than one page: it says how many more there are; pass offset to page on.",
-    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many (from the newest) to see older ones" } } },
+    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words. Long sessions have more than one page: it says how many more there are; pass offset to page on. Pass id (for example doc_… from a pointer in your inbox) to read a long document someone shared, in full.",
+    inputSchema: { type: "object", properties: { id: { type: "string", description: "A document id from a pointer, to read it in full" }, query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many (from the newest) to see older ones" } } },
   },
   {
     name: "jam_directives",
@@ -563,6 +563,11 @@ export class McpEndpoint {
       }
       case "jam_artifacts": {
         this.requireAgent(ctx);
+        if (args.id) {
+          const doc = s.store.get("documents", String(args.id));
+          if (!doc) throw new Error("No document with that id.");
+          return text(`${doc.authorName}, ${new Date(doc.ts).toTimeString().slice(0, 5)}:\n\n${doc.text}`);
+        }
         const q = String(args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
         const all = s.artifacts().filter((a) => !q.length || q.every((w) => `${a.title} ${a.note} ${a.agentName} ${a.platform}`.toLowerCase().includes(w)));
         const { shown, more } = pageOf(all, args);
@@ -628,25 +633,48 @@ export class McpEndpoint {
     return "";
   }
 
+  /**
+   * What `jam_join` returns: who is here, your workstream, what is asked of you, a short session brief and the
+   * tools that fetch more. A busy session's full context is thousands of tokens; `jam_context` has it on demand.
+   */
   briefing(agent: Agent, resumed: boolean, fullSkill = true, origin = this.hub.session.hubUrl) {
     const s = this.hub.session;
-    const inbox = this.inboxText(agent, false);
+    const role = s.person(agent.ownerId)?.role;
+    const ws = s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
+    const settled = s.facts().filter((f) => f.status === "active").length;
+    const mine = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled" && d.targets.includes(agent.id));
+    const brief = s.store.digest("session")?.text.trim();
     return [
-      `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${s.person(agent.ownerId)?.role ? ` (${s.person(agent.ownerId)!.role})` : ""}. The room brain is called "${s.settings().brainName}".`,
-      s.person(agent.ownerId)?.role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
+      `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
+      role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
       `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload" (JAMSESH_TOKEN is in ~/.jamsesh/client.env)`,
       "",
-      this.roster(),
+      this.roster(true),
       "",
-      this.context(agent, undefined, 10),
+      `## Session brief\n${brief ? clip(brief, 600) : "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
+      ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
+      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
+      this.unreadLine(agent),
       "",
-      inbox,
-      "",
+      "## Fetch more when you need it",
+      "- jam_context: the full picture (settled points, decisions, room conversation, other agents' updates). Call it at the start of each new leg of work.",
+      "- jam_search: full text of everything said, typed and decided.",
+      "- jam_artifacts: frames, screenshots and dev servers; also opens a long document someone shared (give its id).",
+      "- jam_directives: everything the room has asked, including older ones.",
       fullSkill
-        ? `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub, origin).replace(/^---[\s\S]*?---\s*/, "")}`
+        ? `\n## How to work here\n${WORKING_RULES}\nThe full JamSesh skill: the MCP prompt 'jamsesh', or GET ${origin}/skill.md.`
         : "You already have the JamSesh skill from this conversation. Next: jam_inbox, then carry on. When you go idle, keep calling jam_wait.",
-    ].join("\n");
+    ]
+      .filter((x) => x !== "")
+      .join("\n");
+  }
+
+  /** One line on what is waiting in the inbox (the items themselves are read with jam_inbox, which marks them delivered). */
+  private unreadLine(agent: Agent) {
+    const { directives, messages } = this.hub.session.inbox(agent.id, false);
+    const n = directives.length + messages.length;
+    return n ? `Waiting in your inbox: ${n} item${n === 1 ? "" : "s"}. Call jam_inbox next.` : "Your inbox is empty.";
   }
 
   /** A reconnect: who you are, where uploads go now, and what's new; the rest is already known. */
@@ -662,7 +690,7 @@ export class McpEndpoint {
     ].join("\n");
   }
 
-  roster() {
+  roster(compact = false) {
     const s = this.hub.session;
     const ws = s.store.all("workstreams").filter((w) => w.status === "active");
     const agents = s.agents().filter((a) => a.status !== "offline");
@@ -672,10 +700,12 @@ export class McpEndpoint {
       "Room brain (jam_message it by name; it routes work and answers):",
       `- ${s.settings().brainName}`,
       "Agents:",
-      ...agents.map(
+      ...agents.slice(0, compact ? 12 : agents.length).map(
         (a) =>
-          `- ${a.name} (${a.id}): ${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, ${a.status}${a.card ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${a.focus}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
+          `- ${a.name} (${a.id}): ${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, ${a.status}${a.card && !compact ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${clip(a.focus, 100)}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
       ),
+      ...(compact && agents.length > 12 ? [`(${agents.length - 12} more: jam_agents)`] : []),
+      ...(compact ? ["(jam_agents has each agent's stack and design system.)"] : []),
     ].join("\n");
   }
 
@@ -759,6 +789,15 @@ function modeHint(mode: Directive["mode"]) {
   }
 }
 
+/** The few rules of working here that can't wait for the full skill. */
+const WORKING_RULES = [
+  "- Claim your workstream (jam_claim) before you start; report with jam_update; check jam_inbox between steps.",
+  "- When idle, call jam_wait (it returns after a few minutes with nothing: call it again) and don't end your turn while the session is live.",
+  "- Share any dev server you start with jam_devserver, bound to 0.0.0.0, so the room can open it; jam_devserver_remove when you stop it.",
+  "- Check mockups against the design system and builds against mockups before you call work done.",
+  "- Long write-ups: send the gist, the rest is stored once and others fetch it by id.",
+].join("\n");
+
 /** The curated knowledge an agent should work from, its own workstream first. */
 function knowledge(s: Hub["session"], workstream?: string) {
   const active = s.facts().filter((f) => f.status === "active");
@@ -790,6 +829,10 @@ export function fmtEvent(e: JamEvent) {
   const t = new Date(e.ts).toTimeString().slice(0, 5);
   const label = e.kind === "speech" ? "said" : e.kind === "prompt" ? "typed" : e.kind;
   return `[${t}] ${e.authorName} ${label}: ${e.text}`;
+}
+
+export function clip(s: string, n: number) {
+  return s.length <= n ? s : `${s.slice(0, n - 1).trimEnd()}…`;
 }
 
 function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined) {

@@ -146,6 +146,16 @@ export interface Artifact {
   page?: string;
 }
 
+/** A long message or update, stored once; the feed and other agents' inboxes carry a short pointer to it. */
+export interface Document {
+  id: string;
+  ts: number;
+  authorId: string | null;
+  authorName: string;
+  title: string;
+  text: string;
+}
+
 export interface DevServer {
   id: string;
   agentId: string;

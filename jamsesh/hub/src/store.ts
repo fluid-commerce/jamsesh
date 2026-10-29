@@ -11,6 +11,7 @@ import type {
   Device,
   DevServer,
   Directive,
+  Document,
   EventKind,
   JamEvent,
   Person,
@@ -32,6 +33,7 @@ type Collections = {
   shares: Share;
   annotations: Annotation;
   facts: Fact;
+  documents: Document;
 };
 export type CollectionName = keyof Collections;
 
