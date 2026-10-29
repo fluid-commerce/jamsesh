@@ -233,7 +233,17 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
-        if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+        if (path === "/mcp") {
+          // The body is read up to the JSON cap before the transport sees it, and the request counts as work in flight until it is answered.
+          let forward = req;
+          if (req.method === "POST") {
+            const raw = await readBytes(req, BODY_LIMITS.json);
+            if (!raw) return bad("That request is too large.", 413);
+            forward = new Request(req.url, { method: req.method, headers: req.headers, body: new Blob([raw as BlobPart]) });
+          }
+          if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
+          return await hub.track("an agent's request", Promise.resolve(hub.mcp.handle(forward, ip, device?.id ?? (local ? "host" : null), originOf(req, url))));
+        }
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
@@ -394,7 +404,12 @@ function wantsHtml(req: Request) {
 
 /** POST /api/pair {code, kind, label}: browsers get an HttpOnly cookie, agents get the token. */
 async function pairRoute(hub: Hub, req: Request, url: URL, ip: string): Promise<Response> {
-  const body = (await req.json().catch(() => ({}))) as any;
+  const raw = await readBytes(req, BODY_LIMITS.json);
+  if (!raw) return bad("That request is too large.", 413);
+  let body: any = {};
+  try {
+    body = JSON.parse(new TextDecoder().decode(raw)) ?? {};
+  } catch {}
   const kind = body.kind === "agent" ? "agent" : "browser";
   const r = hub.auth.pair({ code: String(body.code ?? ""), kind, label: String(body.label ?? ""), ip });
   if (!r.ok) return bad(r.error, 403);
@@ -432,6 +447,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
   // Past the cap before anything is parsed or any route looked at: no caller can make the hub hold a body it would refuse.
   if (body?.__capped) return bad("That request is too large.", 413);
+  // A request that was let in before the final save began and stalled while sending its body is turned away here, after the body.
+  if (hub.closing && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad("The session is saving and closing.", 503);
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
@@ -498,7 +515,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
     segmentsInFlight.add(segKey);
     try {
-      const bytes: Uint8Array = body?.__raw ?? new Uint8Array(await req.arrayBuffer());
+      const bytes: Uint8Array | null = body?.__raw ?? (await readBytes(req, BODY_LIMITS.media));
+      if (!bytes) return bad("That recording is too large.", 413);
       const seg = await hub.audio.ingest({
         deviceId,
         t0: Number(q.get("t0")),
@@ -1053,12 +1071,11 @@ export async function readCapped(req: Request, max: number): Promise<{ __form: F
     const { done, value } = await reader.read();
     if (done) break;
     size += value.length;
-    if (size > max) {
-      await reader.cancel().catch(() => {});
-      return { __tooBig: true };
-    }
-    chunks.push(value as Uint8Array<ArrayBuffer>);
+    // Past the cap nothing more is kept; the rest is read and dropped so the sender gets its answer on a clean connection.
+    if (size <= max) chunks.push(value as Uint8Array<ArrayBuffer>);
+    else chunks.length = 0;
   }
+  if (size > max) return { __tooBig: true };
   try {
     return { __form: await new Response(new Blob(chunks), { headers: { "content-type": type } }).formData() };
   } catch {

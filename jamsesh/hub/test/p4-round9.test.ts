@@ -389,3 +389,71 @@ test("a PDF's invisible text mode carries across its content streams", () => {
   const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>\nendobj\n4 0 obj\n<< /Length 13 >>\nstream\nBT 3 Tr ET\nendstream\nendobj\n5 0 obj\n<< /Length 29 >>\nstream\nBT (SECRET HIDDEN TEXT) Tj ET\nendstream\nendobj\n%%EOF`;
   expect(drawnText(new TextEncoder().encode(body(doc)))).toBe("");
 });
+
+// ---------- round 15 ----------
+
+test("PDF render mode resets at each page: an invisible first page doesn't hide the next one", () => {
+  const obj = (n: number, body: string) => `${n} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}\nendstream\nendobj\n`;
+  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n${obj(4, "BT 3 Tr (PAGE ONE HIDDEN) Tj ET")}6 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>\nendobj\n${obj(7, "BT (PAGE TWO VISIBLE) Tj ET")}%%EOF`;
+  expect(drawnText(new TextEncoder().encode(doc))).toBe("PAGE TWO VISIBLE");
+});
+
+test("a failed recovery of the project's context fails the start, like a malformed row", () => {
+  const p = saved("Recovery fails");
+  wipeDbs(p.slug);
+  writeFileSync(join(folderOf(p.slug), "context.db"), "this is not a database at all, and neither is the next one");
+  mkdirSync(join(folderOf(p.slug), "context-1.db"));
+  expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
+});
+
+test("every body-bearing route is capped: pairing, audio of an odd type, and MCP get 413 before any work", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const big = new Uint8Array(3 * 1024 * 1024).fill(32);
+    expect((await fetch(`${base}/api/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: big })).status).toBe(413);
+    const dev = r.hub.auth.issue({ kind: "browser", label: "L", ip: "127.0.0.1", personId: r.chey.id });
+    const mcp = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${dev.token}` }, body: big });
+    expect(mcp.status).toBe(413);
+    const bigMedia = new Uint8Array(33 * 1024 * 1024);
+    const audio = await fetch(`${base}/api/audio?deviceId=d&t0=1&t1=2`, { method: "POST", headers: { "content-type": "audio/wav", authorization: `Bearer ${dev.token}` }, body: bigMedia });
+    expect(audio.status).toBe(413);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a request let in before shutdown and still sending its body is turned away after it", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    r.hub.auth.windows.adopt("ef".repeat(32));
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    let step = 0;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(c) {
+        if (step++ === 0) c.enqueue(new TextEncoder().encode('{"text":"late ca'));
+        else {
+          await gate;
+          c.enqueue(new TextEncoder().encode('rd"}'));
+          c.close();
+        }
+      },
+    });
+    const sending = fetch(`http://127.0.0.1:${server.port}/api/say`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${"ef".repeat(32)}` }, body, duplex: "half" } as any);
+    await Bun.sleep(100);
+    const before = r.s.store.recentEvents({ limit: 20 }).length;
+    const shutting = r.hub.shutdown();
+    await Bun.sleep(100);
+    release();
+    expect((await sending).status).toBe(503);
+    await shutting;
+    expect(r.s.store.recentEvents({ limit: 20 }).length).toBe(before);
+  } finally {
+    server.stop(true);
+  }
+});

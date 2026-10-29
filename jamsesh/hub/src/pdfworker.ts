@@ -40,19 +40,20 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
   const src = latin(bytes.subarray(0, 25 * 1024 * 1024));
   const objs = objects(src);
   // Only the content streams pages point at (/Contents, one or an array): a stream no page draws isn't wording.
-  const contents: number[] = [];
+  const pages: number[][] = [];
   for (const o of objs.values()) {
     if (!/\/Type\s*\/Page(?![s\w])/.test(o.body)) continue;
     const c = /\/Contents\s*(?:(\d+)\s+\d+\s+R|\[([^\]]*)\])/.exec(o.body);
-    if (c?.[1]) contents.push(Number(c[1]));
-    else if (c?.[2]) for (const r of c[2].matchAll(/(\d+)\s+\d+\s+R/g)) contents.push(Number(r[1]));
+    if (c?.[1]) pages.push([Number(c[1])]);
+    else if (c?.[2]) pages.push([...c[2].matchAll(/(\d+)\s+\d+\s+R/g)].map((r) => Number(r[1])));
   }
   const out: string[] = [];
   let size = 0;
-  // The text render mode belongs to the page's graphics state, which its content streams share, in order.
+  // The text render mode belongs to a page's graphics state: its content streams share it in order, and the next page starts fresh.
   let hidden = false;
-  for (const n of contents) {
-    const o = objs.get(n);
+  for (const n of pages.flatMap((ids) => ids.map((id, i) => ({ id, first: i === 0 })))) {
+    if (n.first) hidden = false;
+    const o = objs.get(n.id);
     const m = o && /^\s*<<([\s\S]{0,400}?)>>\s*stream\r?\n/.exec(o.body);
     if (!o || !m || size > limit) continue;
     const start = o.at + m[0].length;

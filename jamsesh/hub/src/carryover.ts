@@ -321,7 +321,7 @@ export function readProjectContext(home: string, slug: string, waitMs = 2000): P
       if (busy(e2)) throw new ContextUnavailable(`the project's context is busy: ${e2 instanceof Error ? e2.message : e2}`);
       if (e2 instanceof ExportRejected) throw new ContextUnavailable(`the project's saved context can't be read: ${e2.message}`);
       console.error("project context: recovery failed:", e2 instanceof Error ? e2.message : e2);
-      return null;
+      throw new ContextUnavailable(`the project's context couldn't be recovered: ${e2 instanceof Error ? e2.message : e2}`);
     }
   } finally {
     db?.close();
