@@ -4,7 +4,7 @@
 // the name or the type the browser claims, and the stored file's name is made here, so nothing a
 // caller sends reaches a path.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AttachmentKind, AttachmentRef } from "./types";
 
@@ -75,6 +75,27 @@ export class Attachments {
     mkdirSync(join(dir, "blobs"), { recursive: true });
   }
 
+  /**
+   * The blob for these bytes, written whole or not at all: to a temporary file in the same folder, then renamed in. A blob
+   * already there is reused only if it still has these bytes (an interrupted write by an older build, or a damaged file).
+   */
+  private keepBlob(path: string, bytes: Uint8Array, sha: string) {
+    try {
+      const have = readFileSync(path);
+      if (have.length === bytes.length && createHash("sha256").update(have).digest("hex") === sha) return;
+    } catch {}
+    const tmp = `${path}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+    try {
+      writeFileSync(tmp, bytes);
+      renameSync(tmp, path);
+    } catch (e) {
+      try {
+        unlinkSync(tmp);
+      } catch {}
+      throw e;
+    }
+  }
+
   /** Checks and keeps one upload. */
   save(bytes: Uint8Array, rawName: unknown, by: string): AttachmentRecord {
     const name = cleanFileName(rawName);
@@ -85,7 +106,7 @@ export class Attachments {
     const sha = createHash("sha256").update(bytes).digest("hex");
     const blob = `${sha.slice(0, 40)}.${EXT[found.type]}`;
     const blobPath = join(this.dir, "blobs", blob);
-    if (!existsSync(blobPath)) writeFileSync(blobPath, bytes);
+    this.keepBlob(blobPath, bytes, sha);
     const rec: AttachmentRecord = { id: `att_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`, name, type: found.type, kind: found.kind, size: bytes.length, blob, by, ts: Date.now() };
     writeFileSync(join(this.dir, `${rec.id}.json`), JSON.stringify(rec));
     return rec;

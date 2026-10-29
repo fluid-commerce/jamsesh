@@ -176,7 +176,7 @@ export class Hub {
   }
 
   /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000 };
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000, documents: 7000 };
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
@@ -184,11 +184,13 @@ export class Hub {
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
+    // Document cards still being read (a PDF takes up to 5 s) land before anything is saved.
+    const docs = this.pendingDocs.size ? await step(Promise.all([...this.pendingDocs]), Hub.SHUTDOWN_MS.documents) : true;
     const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     this.stop();
-    return saved && kept && closed;
+    return docs && saved && kept && closed;
   }
 
   stop() {
@@ -205,6 +207,7 @@ export class Hub {
   }
 
   private intervals: ReturnType<typeof setInterval>[] = [];
+  private pendingDocs = new Set<Promise<unknown>>();
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
@@ -304,7 +307,11 @@ export class Hub {
       relevance: direct ? "work" : null,
       data: { typed: true, direct, ...(attached.length ? { attachments: attached, ...(words ? {} : { noWords: true }) } : {}), ...(document ? { proposedContext: true } : {}) },
     });
-    if (document) void this.proposeDocument(ev, attached).catch((e) => console.error("document card:", e instanceof Error ? e.message : e));
+    if (document) {
+      // Tracked, so a shutdown waits for the card before the final save.
+      const pending = this.proposeDocument(ev, attached).catch((e) => console.error("document card:", e instanceof Error ? e.message : e)).finally(() => this.pendingDocs.delete(pending));
+      this.pendingDocs.add(pending);
+    }
     else if (direct) this.brain.direct(ev);
     // Pictures with no words have nothing to triage; the feed shows them.
     else if (words) this.brain.hear(ev);

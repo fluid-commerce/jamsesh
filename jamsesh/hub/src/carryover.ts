@@ -260,9 +260,21 @@ export function readProjectContext(home: string, slug: string): ProjectContext |
   }
   let db: Database | null = null;
   try {
-    db = new Database(contextFile(home, slug), { readonly: true });
-    db.exec("PRAGMA busy_timeout = 2000;");
-    return readAll(db);
+    try {
+      db = new Database(contextFile(home, slug), { readonly: true });
+    } catch (e) {
+      // A file mid-setup (no tables or WAL files yet) can't be opened read-only either: it's finished below, like an unimported one.
+      if (!/unable to open/.test(e instanceof Error ? e.message : "")) throw e;
+    }
+    if (db) db.exec("PRAGMA busy_timeout = 2000;");
+    const ctx = db ? readImported(db) : null;
+    if (ctx) return ctx;
+    // A database whose setup hasn't finished (a new generation still importing, or one whose creator died first): finish it
+    // under the write lock, then read that. Reading it as it stands would seed a session with nothing.
+    db?.close();
+    db = null;
+    db = openForWrite(home, slug, 2000);
+    return readImported(db);
   } catch (e) {
     db?.close();
     db = null;
@@ -273,13 +285,23 @@ export function readProjectContext(home: string, slug: string): ProjectContext |
     // The newest database is damaged: recover first (the next generation, from the export, under its write lock), then read that.
     try {
       db = openForWrite(home, slug, 2000);
-      return readAll(db);
+      return readImported(db);
     } catch (e2) {
       console.error("project context: recovery failed:", e2 instanceof Error ? e2.message : e2);
       return null;
     }
   } finally {
     db?.close();
+  }
+}
+
+/** Every row in one read transaction (one snapshot), and only once the database has taken in its export; null before that. */
+function readImported(db: Database): ProjectContext | null {
+  try {
+    return db.transaction(() => (db.query("SELECT 1 FROM meta WHERE key = 'imported'").get() ? readAll(db) : null)).deferred();
+  } catch (e) {
+    if (/no such table|unable to open/.test(e instanceof Error ? e.message : "")) return null;
+    throw e;
   }
 }
 

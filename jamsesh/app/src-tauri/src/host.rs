@@ -218,8 +218,8 @@ impl Drop for Hub {
 }
 
 /// How long the hub may take to save and exit: longer than its own shutdown steps add up to
-/// (8 + 4 + 3 seconds, hub.ts `Hub.SHUTDOWN_MS`), so a slow save is never cut short.
-const SHUTDOWN_WAIT: Duration = Duration::from_secs(20);
+/// (7 + 8 + 4 + 3 seconds, hub.ts `Hub.SHUTDOWN_MS`), so a slow save is never cut short.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 
 /// Stops a hub process: SIGTERM, then wait for it. Ok only when it exits 0, which is the hub saying
 /// its final save finished (hub/src/index.ts). An unfinished save (exit 3), or a hub still running
@@ -263,7 +263,7 @@ mod tests {
         let t0 = std::time::Instant::now();
         assert!(stop_child(sh("trap '' TERM; while :; do sleep 0.05; done"), Duration::from_millis(500)).unwrap_err().contains("too long"));
         assert!(t0.elapsed() < Duration::from_secs(3));
-        // The app's wait outlasts the hub's own shutdown steps (8 + 4 + 3 seconds).
-        assert!(SHUTDOWN_WAIT > Duration::from_secs(15));
+        // The app's wait outlasts the hub's own shutdown steps (7 + 8 + 4 + 3 seconds).
+        assert!(SHUTDOWN_WAIT > Duration::from_secs(22));
     }
 }

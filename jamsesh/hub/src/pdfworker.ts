@@ -64,6 +64,8 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
     } else if (/\/Filter/.test(m[1])) continue;
     const ops = latin(body);
     for (const block of ops.match(/\bBT\b[\s\S]*?\bET\b/g) ?? []) {
+      // Render mode 3 (invisible) and 7 (clip only) draw nothing a reader sees.
+      if (/(?:^|\s)[37]\s+Tr\b/.test(block)) continue;
       let line = "";
       for (const t of block.matchAll(SHOW)) {
         if (t[4]) line += " ";

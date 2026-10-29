@@ -195,7 +195,7 @@ export class Board {
 
   /** The curator would retire a saved fact with nothing worded to take its place: a person decides. */
   proposeRetire(p: { fact: Fact; status: "superseded" | "resolved"; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
-    const open = this.all().find((c) => c.status === "open" && c.retire && c.conflictsWith === p.fact.id);
+    const open = this.all().find((c) => c.status === "open" && c.retire === p.status && c.conflictsWith === p.fact.id);
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
     // Only with a line from the room behind it: a person sees what supports retiring the fact.
     if (sources.every((x) => x.eventId == null)) return null;
@@ -387,6 +387,8 @@ export class Board {
     if (f.kind !== c.kind || !sameName(f.workstream, c.workstream) || !sameScope(f.text, c.text)) return fail("That fact is another kind, workstream or platform than this card. Add the card instead, or edit it to match.");
     const joined = text !== undefined ? clean(text) : clean(`${f.text.replace(/[.\s]+$/, "")}. ${c.text}`);
     if (!joined) return fail("The wording can't be empty.");
+    // The wording that will be saved, supplied or joined, names the platforms the fact is about, no others.
+    if (!sameScope(f.text, joined)) return fail("The merged wording is about another platform than that fact. Edit it to match, or add the card instead.");
     // The card only has the file's name: the merged wording has to say something of its own, not the name or the fact alone.
     if (c.needsWording && (text === undefined || joined.includes(c.original) || joined.replace(/[.\s]+$/, "") === clean(f.text).replace(/[.\s]+$/, ""))) return fail("Write what to keep from the file into the merged wording first.");
     const ids = [...new Set([...f.sourceEventIds, ...c.sources.map((x) => x.eventId).filter((x): x is number => x != null)])];

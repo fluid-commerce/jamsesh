@@ -42,10 +42,27 @@ export function sameCounts(a: string, b: string) {
 
 const NEGATION = /\b(?:not|no|never|none|nothing|without|instead|rather|neither|nor|cannot|stop|drop|remove|avoid)\b|n't\b|n’t\b/gi;
 
-/** "must use option A" and "must not use option A" share every word but one, and mean the opposite. */
+/**
+ * Each content word with the polarity of every clause it appears in. "No banner and no modal" and "Banner and modal"
+ * negate different claims; counting negations (or their parity) can't tell, so each word's own clause decides.
+ */
+function polarities(t: string) {
+  const out = new Map<string, Set<boolean>>();
+  for (const clause of t.split(/[.;,!?:]+|\s+(?:and|or|but|then|so|while)\s+/i)) {
+    const negated = new RegExp(NEGATION.source, "i").test(clause);
+    for (const w of terms(clause)) out.set(w, (out.get(w) ?? new Set()).add(negated));
+  }
+  return out;
+}
+
+/** "must use option A" and "must not use option A" share every word but one, and mean the opposite: a shared word may not be negated in one and asserted in the other. */
 export function samePolarity(a: string, b: string) {
-  const n = (t: string) => (t.match(NEGATION) ?? []).length % 2;
-  return n(a) === n(b);
+  const y = polarities(b);
+  for (const [w, pa] of polarities(a)) {
+    const pb = y.get(w);
+    if (pb && (pa.size !== pb.size || [...pa].some((v) => !pb.has(v)))) return false;
+  }
+  return true;
 }
 
 const PLATFORMS = /\b(desktop|mobile|web|ios|iphone|ipad|android|tablet|phone|mac|macos|windows|linux|watch|tv)\b/gi;
