@@ -17,8 +17,8 @@ import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, BuildRequest, Platform, Utterance } from "./types";
-import { speak } from "./brain/speech";
+import type { Agent, Annotation, Artifact, BuildRequest, Platform, ShowRequest, Utterance } from "./types";
+import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
 
 /** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
@@ -99,6 +99,7 @@ export class Hub {
     this.host = new HostControl(this.session);
     this.session.buildRequests = () => this.host.buildRequests();
     this.host.onRequest = (r) => this.onBuildRequest(r);
+    this.session.onShowRequest = (r) => this.onShowRequest(r);
     // Simulator and host screenshots become artifacts the room and the brain can see.
     this.host.onImage = (path, title) => {
       void Bun.file(path)
@@ -380,7 +381,7 @@ export class Hub {
     return this.session.setPhoto(personId, `/renders/uploads/${file}`);
   }
 
-  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform }): Promise<Artifact> {
+  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string }): Promise<Artifact> {
     const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
     const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
     if (!isJpeg && !isPng) throw new Error("Upload a PNG or JPEG.");
@@ -388,19 +389,32 @@ export class Hub {
     const file = `${newId("up")}.${isJpeg ? "jpg" : "png"}`;
     await Bun.write(join(this.uploadsDir, file), bytes);
     const size = imageSize(bytes);
-    const art = this.session.upsertArtifact({
-      kind: "screenshot",
-      stage: meta.stage,
-      title: meta.title,
-      note: meta.note ?? "",
-      image: `/renders/uploads/${file}`,
-      agentId: agent?.id ?? null,
-      platform: meta.platform,
-      width: size?.width ?? null,
-      height: size?.height ?? null,
-    });
+    const art = this.session.upsertVersion(
+      {
+        kind: "screenshot",
+        stage: meta.stage,
+        title: meta.title,
+        note: meta.note ?? "",
+        image: `/renders/uploads/${file}`,
+        agentId: agent?.id ?? null,
+        platform: meta.platform,
+        width: size?.width ?? null,
+        height: size?.height ?? null,
+      },
+      meta.replaces,
+    );
     this.brain.artifactsLanded([art]);
     return art;
+  }
+
+  // ---------- an agent wants a screen someone locked (answered by the owner, by voice or a button) ----------
+
+  private onShowRequest(r: ShowRequest) {
+    const first = (n: string) => n.split(/\s+/)[0];
+    const ask = showRequestSpeech(r);
+    void speak(this.session, ask, { source: "voice", kind: "request" });
+    // Once more after a minute if the owner hasn't answered.
+    setTimeout(() => this.session.showRequests().find((x) => x.id === r.id)?.status === "pending" && void speak(this.session, `Still waiting, ${first(r.ownerName)}: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
   }
 
   // ---------- host build requests (approved by people, by voice or a button) ----------

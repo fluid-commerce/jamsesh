@@ -155,6 +155,22 @@ export interface Artifact {
   note: string;
   /** Canvas page the frame is on. */
   page?: string;
+  /** Which build of this screen this is; later builds of the same screen replace the image in place (3.5). */
+  version?: number;
+  /** The earlier builds, oldest first. They stay retrievable; only the newest shows. */
+  versions?: ArtifactVersion[];
+}
+
+/** One earlier build of an artifact. */
+export interface ArtifactVersion {
+  version: number;
+  at: number;
+  title: string;
+  image: string | null;
+  url: string | null;
+  width: number | null;
+  height: number | null;
+  note: string;
 }
 
 /** A long message or update, stored once; the feed and other agents' inboxes carry a short pointer to it. */
@@ -266,6 +282,55 @@ export interface Stage {
   pinned: boolean;
   since: number;
   by: string;
+  /** Set when a person put this up: agents and the brain don't replace it until it's unlocked (3.1). */
+  lock?: StageLock;
+}
+
+/** A person's hold on a screen. It ends when they unlock, leave, or 20 minutes pass without them touching it. */
+export interface StageLock {
+  by: string;
+  personId: string | null;
+  since: number;
+  lastActive: number;
+}
+
+/** What an agent wanted to show while a screen was locked; it waits here until someone shows or dismisses it. */
+export interface ReadyItem {
+  id: string;
+  at: number;
+  screen: string;
+  agentId: string;
+  agentName: string;
+  /** What it is, in words for the queue ("Checkout build"). */
+  label: string;
+  stage: Partial<Stage> & { mode: StageMode };
+}
+
+/** JamSesh asking a lock's owner whether an agent's item may replace their screen. */
+export interface ShowRequest {
+  id: string;
+  at: number;
+  screen: string;
+  ownerId: string | null;
+  ownerName: string;
+  agentName: string;
+  /** Whose agent it is ("Felipe"), for the question: "Felipe's agent has the checkout build ready". */
+  agentOwner: string;
+  label: string;
+  readyId: string;
+  status: "pending" | "approved" | "denied" | "expired";
+  decidedBy?: string;
+}
+
+/** One thing a screen showed, and who put it up. */
+export interface StageHistoryEntry {
+  id: string;
+  screen: string;
+  at: number;
+  by: string;
+  /** Short words for the strip ("Checkout build", "3 screens"). */
+  label: string;
+  stage: Partial<Stage> & { mode: StageMode };
 }
 
 export interface Utterance {
@@ -359,6 +424,12 @@ export interface HubState {
   buildRequests: BuildRequest[];
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];
+  /** Agents' items waiting because a screen was locked (3.1). */
+  readyToShow: ReadyItem[];
+  /** Questions to a lock's owner that are still open. */
+  showRequests: ShowRequest[];
+  /** What each screen showed recently, newest first (3.6). */
+  stageHistory: Record<string, StageHistoryEntry[]>;
   digest: string;
   /** How much the session holds in all; the lists above carry only the newest, /api/history/<what> pages the rest. */
   totals: { events: number; utterances: number; directives: number; artifacts: number };

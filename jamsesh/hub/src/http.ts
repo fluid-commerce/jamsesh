@@ -26,7 +26,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -511,10 +511,46 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.settings());
   }
 
+  // What a person puts on a screen is theirs until they unlock it (3.1). `by` is only a fallback name for a window that hasn't picked who it is.
+  const actor = () => {
+    const id = String(paired?.personId || body?.personId || s.store.setting<string>("hostPersonId", "") || "");
+    const p = id ? s.person(id) : undefined;
+    return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
+  };
+  const screenOf = () => (typeof body?.screen === "string" && body.screen ? body.screen : "main");
+
   if (path === "/stage" && req.method === "POST") {
     const stage = body as Partial<Stage> & { mode: Stage["mode"] };
     if (!stage?.mode) return bad("mode is required");
-    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
+    const who = actor();
+    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screenOf(), { person: who }));
+  }
+  if (path === "/stage/unlock" && req.method === "POST") {
+    s.unlockStage(screenOf());
+    return json(s.stage(screenOf()));
+  }
+  if (path === "/stage/restore" && req.method === "POST") {
+    const who = actor();
+    const screen = screenOf();
+    const lock = s.lockOf(screen);
+    if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
+    const stage = s.restoreHistory(String(body?.id ?? ""), screen, who);
+    return stage ? json(stage) : bad("That screen is no longer in the history.", 404);
+  }
+  m = path.match(/^\/stage\/ready\/([\w-]+)$/);
+  if (m && req.method === "POST") {
+    if (body?.action === "dismiss") return (s.dismissReady(m[1]), json({ ok: true }));
+    const stage = s.showReady(m[1], actor());
+    return stage ? json(stage) : bad("That item isn't waiting any more.", 404);
+  }
+  m = path.match(/^\/show-requests\/([\w-]+)$/);
+  if (m && req.method === "POST") {
+    const asked = s.showRequests().find((r) => r.id === m![1]);
+    const who = actor();
+    // The lock's owner answers; so does the host's own window, where the room is looking at the question.
+    if (asked && !hostWindow && asked.ownerId !== who.id) return bad(`Only ${asked.ownerName} can answer that.`, 403);
+    const done = s.answerShowRequest(m[1], !!body?.approve, who.name);
+    return done ? json(done) : bad("That question has already been answered.", 404);
   }
 
   // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
@@ -549,6 +585,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       stage: form!.get("stage") === "mockup" ? "mockup" : "built",
       note: String(form!.get("note") ?? ""),
       platform: (form!.get("platform") as any) ?? undefined,
+      replaces: String(form!.get("replaces") ?? "") || undefined,
     });
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }

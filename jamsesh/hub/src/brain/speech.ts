@@ -136,3 +136,10 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   }
   return "spoken";
 }
+
+/** What the owner of a locked screen hears when an agent wants it: "Chey, Felipe's agent has the checkout build ready. Can I put it up?" */
+export function showRequestSpeech(r: { ownerName: string; agentName: string; agentOwner: string; label: string }) {
+  const first = (n: string) => n.split(/\s+/)[0];
+  const whose = r.agentOwner ? `${first(r.agentOwner)}'s agent` : r.agentName;
+  return `${first(r.ownerName)}, ${whose} has ${r.label} ready. Can I put it up?`;
+}

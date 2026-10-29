@@ -10,6 +10,7 @@ import type {
   Agent,
   Annotation,
   Artifact,
+  ArtifactVersion,
   Fact,
   CanvasInfo,
   Device,
@@ -25,7 +26,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest, ScreenInfo } from "./types";
+ BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -94,9 +95,11 @@ export class Session {
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
     if (this.revertsToBoard(st)) {
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
+      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
       this.stageRevert.unref?.();
     }
+    // A lock whose owner left lets go without anyone asking.
+    setInterval(() => this.sweepLocks(), 30_000).unref?.();
     bus.resolver = (key) => this.resolve(key);
   }
 
@@ -192,6 +195,9 @@ export class Session {
       facts: this.facts(),
       buildRequests: this.buildRequests(),
       screens: this.screens(),
+      readyToShow: this.readyToShow(),
+      showRequests: this.showRequests().filter((r) => r.status === "pending"),
+      stageHistory: this.stageHistory(),
       digest: this.store.digest("session")?.text ?? "",
       totals: this.totals(),
       brain: this.brainStatus,
@@ -277,6 +283,12 @@ export class Session {
         return { key, value: this.screens() };
       case "buildRequests":
         return { key, value: this.buildRequests() };
+      case "readyToShow":
+        return { key, value: this.readyToShow() };
+      case "showRequests":
+        return { key, value: this.showRequests().filter((r) => r.status === "pending") };
+      case "stageHistory":
+        return { key, value: this.stageHistory() };
       default:
         return null;
     }
@@ -1030,6 +1042,8 @@ export class Session {
       workstreamId: a.workstreamId ?? existing?.workstreamId ?? null,
       note: a.note ?? existing?.note ?? "",
       page: a.page ?? existing?.page,
+      ...(a.version ?? existing?.version ? { version: a.version ?? existing?.version } : {}),
+      ...(a.versions ?? existing?.versions ? { versions: a.versions ?? existing?.versions } : {}),
     };
     this.store.put("artifacts", art);
     if (!existing && opts.announce !== false) {
@@ -1044,6 +1058,40 @@ export class Session {
         data: { artifactId: art.id, kind: art.kind, stage: art.stage },
       });
     }
+    return art;
+  }
+
+  /**
+   * A new build of a screen that's already in the room becomes the next version of that item (3.5): the
+   * newest image shows, the earlier ones stay in `versions`, and anything pointing at the id (the screen,
+   * a pin) now shows the new build. The earlier build is the one `replaces` names, or the same agent's
+   * item of the same stage with the same title once "(built)" and version marks are dropped.
+   * `replaces` that names nothing usable throws, so the agent hears it.
+   */
+  upsertVersion(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, replaces?: string): Artifact {
+    let prior: Artifact | undefined;
+    if (replaces) {
+      prior = this.store.get("artifacts", replaces);
+      if (!prior) throw new Error(`No artifact ${replaces} to replace. Use jam_artifacts for ids.`);
+      if (prior.agentId !== (a.agentId ?? null)) throw new Error("That item belongs to someone else's agent; post yours as a new item.");
+    } else if (a.kind === "screenshot" || a.kind === "html") {
+      const key = buildKey(a.title);
+      prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(x.title) === key);
+    }
+    if (!prior) return this.upsertArtifact(a);
+    const v = prior.version ?? 1;
+    const earlier: ArtifactVersion = { version: v, at: prior.updatedAt, title: prior.title, image: prior.image, url: prior.url, width: prior.width, height: prior.height, note: prior.note };
+    const art = this.upsertArtifact({ ...a, id: prior.id, title: prior.title, version: v + 1, versions: [...(prior.versions ?? []), earlier].slice(-20) });
+    this.store.addEvent({
+      kind: "artifact",
+      authorType: art.agentId ? "agent" : "system",
+      authorId: art.agentId,
+      authorName: art.agentName || "Canvas",
+      text: `New version (v${v + 1}): ${art.title}${art.note ? `. ${art.note}` : ""}`,
+      relevance: "work",
+      workstreamId: art.workstreamId,
+      data: { artifactId: art.id, kind: art.kind, stage: art.stage, version: v + 1 },
+    });
     return art;
   }
 
@@ -1138,7 +1186,7 @@ export class Session {
         const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
         // When the share was all the screen showed, the screen goes back to what it showed before.
         const back = !tiles.length && screen === "main" && before && !(before.mode === "layout" && before.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? before : null;
-        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen);
+        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true });
       }
     }
   }
@@ -1288,23 +1336,40 @@ export class Session {
   /** How long a brought-up screen stays before the board comes back (tests shorten it). */
   static STAGE_REVERT_MS = 6 * 60_000;
 
-  /** Whether a stage goes back to the board by itself. Not while it shows a live share: the share's end gives the screen back what it hid, and a timer would cut the share first. */
+  /** Whether a stage goes back to the board by itself. Not while it shows a live share (the share's end gives the screen back what it hid, and a timer would cut the share first), nor while a person holds it. */
   private revertsToBoard(stage: Stage) {
-    if (stage.pinned || stage.mode === "board" || stage.mode === "welcome") return false;
+    if (stage.pinned || stage.lock || stage.mode === "board" || stage.mode === "welcome") return false;
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && this.store.get("shares", t.shareId)?.status === "live")) return false;
     return true;
   }
 
-  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main") {
-    const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...next, since: Date.now(), by };
+  /**
+   * Put something on a screen. A screen a person locked refuses everything except people (and `override`,
+   * for the hub's own housekeeping: a share ending, a request the owner approved): the stage comes back
+   * unchanged, and callers that want to explain why ask `lockOf` first. A person's cast takes the lock.
+   */
+  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main", opts: StageOpts = {}) {
+    const cur = this.stage(screen);
+    if (!opts.person && !opts.override && this.lockOf(screen)) return cur;
+    const now = Date.now();
+    const quiet = next.mode === "board" || next.mode === "welcome";
+    const lock: StageLock | undefined = opts.person && !opts.noLock && !quiet ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined;
+    const { lock: _drop, ...rest } = next;
+    const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, ...(lock ? { lock } : {}) };
+    this.commitStage(stage, screen);
+    this.recordHistory(stage, screen);
+    return stage;
+  }
+
+  private commitStage(stage: Stage, screen: string) {
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
       this.scheduleShareSweep();
       clearTimeout(this.screenReverts.get(screen));
       if (this.revertsToBoard(stage))
-        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), Session.STAGE_REVERT_MS));
-      return stage;
+        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
+      return;
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
@@ -1313,9 +1378,202 @@ export class Session {
     if (this.stageRevert) clearTimeout(this.stageRevert);
     this.stageRevert = null;
     // Anything the brain brought up returns to the live board after a while.
-    if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Session.STAGE_REVERT_MS);
-    return stage;
+    if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
   }
+
+  // ---- locks: what a person puts up stays up (3.1) ----
+
+  /** A lock this old makes an agent's request ask its owner instead of just waiting. */
+  static LOCK_ASK_MS = 5 * 60_000;
+  /** A lock nobody has touched for this long lets go by itself. */
+  static LOCK_IDLE_MS = 20 * 60_000;
+  /** Gone from the room: no window of theirs has checked in for this long. */
+  static LOCK_GONE_MS = 10 * 60_000;
+
+  /** The lock on a screen, or null. A lock whose owner left or went quiet is let go on the way. */
+  lockOf(screen = "main"): StageLock | null {
+    const lock = this.stage(screen).lock;
+    if (!lock) return null;
+    if (this.lockLapsed(lock)) {
+      this.unlockStage(screen);
+      return null;
+    }
+    return lock;
+  }
+
+  private lockLapsed(lock: StageLock) {
+    const now = Date.now();
+    if (now - lock.lastActive >= Session.LOCK_IDLE_MS) return true;
+    if (!lock.personId) return false;
+    if (!this.person(lock.personId)) return true;
+    const windows = this.store.all("devices").filter((d) => d.personId === lock.personId);
+    return windows.length > 0 && windows.every((d) => now - d.lastSeen > Session.LOCK_GONE_MS);
+  }
+
+  /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. */
+  unlockStage(screen = "main") {
+    const cur = this.stage(screen);
+    if (!cur.lock) return;
+    const { lock: _drop, ...rest } = cur;
+    this.commitStage(rest, screen);
+  }
+
+  /** The owner did something with their screen: it counts as activity. */
+  touchLock(screen = "main") {
+    const cur = this.stage(screen);
+    if (!cur.lock) return;
+    this.commitStage({ ...cur, lock: { ...cur.lock, lastActive: Date.now() } }, screen);
+  }
+
+  /** Locks whose owners left or went quiet let go even when nobody asks (a timer runs this). */
+  sweepLocks() {
+    for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) this.lockOf(screen);
+  }
+
+  // ---- ready to show: agents' items wait while a screen is locked ----
+
+  readyToShow(): ReadyItem[] {
+    const cutoff = Date.now() - 60 * 60_000;
+    return this.store.setting<ReadyItem[]>("readyToShow", []).filter((r) => r.at > cutoff);
+  }
+
+  /** An agent's item waits for the screen. Asking again for the same thing replaces the earlier entry. */
+  queueReady(item: Omit<ReadyItem, "id" | "at">): ReadyItem {
+    const ready: ReadyItem = { ...item, id: newId("rdy"), at: Date.now() };
+    const kept = this.readyToShow().filter((r) => !(r.agentId === item.agentId && r.screen === item.screen && r.label === item.label));
+    this.store.setSetting("readyToShow", [...kept, ready].slice(-12));
+    bus.changed("readyToShow");
+    return ready;
+  }
+
+  /** Puts a queued item on its screen. A person showing it takes the screen's lock; with no person (the owner said yes) it goes up unlocked. */
+  showReady(id: string, person?: { id: string | null; name: string }): Stage | null {
+    const item = this.readyToShow().find((r) => r.id === id);
+    if (!item) return null;
+    this.dismissReady(id);
+    return person ? this.setStage(item.stage, person.name, item.screen, { person }) : this.setStage(item.stage, item.agentName, item.screen, { override: true });
+  }
+
+  dismissReady(id: string) {
+    this.store.setSetting("readyToShow", this.readyToShow().filter((r) => r.id !== id));
+    bus.changed("readyToShow");
+  }
+
+  // ---- asking the lock's owner ----
+
+  /** An unanswered question goes stale after this long; the item stays queued. */
+  static ASK_TTL_MS = 5 * 60_000;
+  /** After a no, an agent's request doesn't ask again for this long. */
+  static ASK_COOLDOWN_MS = 10 * 60_000;
+  onShowRequest: ((r: ShowRequest) => void) | null = null;
+
+  showRequests(): ShowRequest[] {
+    const now = Date.now();
+    return this.store.setting<ShowRequest[]>("showRequests", []).map((r) => (r.status === "pending" && now - r.at >= Session.ASK_TTL_MS ? { ...r, status: "expired" as const } : r));
+  }
+
+  /**
+   * An agent wants a locked screen. Once the lock is old enough the owner is asked, on screen and out
+   * loud; one question at a time per screen, and none right after a no.
+   */
+  askOwner(item: ReadyItem): ShowRequest | null {
+    const lock = this.lockOf(item.screen);
+    if (!lock || Date.now() - lock.since < Session.LOCK_ASK_MS) return null;
+    const all = this.showRequests();
+    if (all.some((r) => r.screen === item.screen && r.status === "pending")) return null;
+    if (all.some((r) => r.screen === item.screen && r.status === "denied" && Date.now() - r.at < Session.ASK_COOLDOWN_MS)) return null;
+    const agent = this.agent(item.agentId);
+    const req: ShowRequest = {
+      id: newId("ask"),
+      at: Date.now(),
+      screen: item.screen,
+      ownerId: lock.personId,
+      ownerName: lock.by,
+      agentName: item.agentName,
+      agentOwner: agent?.ownerName ?? "",
+      label: item.label,
+      readyId: item.id,
+      status: "pending",
+    };
+    this.store.setSetting("showRequests", [...all.filter((r) => Date.now() - r.at < 60 * 60_000), req].slice(-20));
+    this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${lock.by} has the big screen locked. Asked whether ${item.agentName}'s ${item.label} can go up. Say "yes, show it" or "keep mine up".`, relevance: "work", data: { showRequest: req.id } });
+    bus.changed("showRequests");
+    this.onShowRequest?.(req);
+    return req;
+  }
+
+  /** The lock's owner answered. Yes puts the item up (unlocked); no keeps their screen, and the item stays in the queue. */
+  answerShowRequest(id: string, approve: boolean, by: string): ShowRequest | null {
+    const req = this.showRequests().find((r) => r.id === id);
+    if (!req || req.status !== "pending") return null;
+    const done: ShowRequest = { ...req, status: approve ? "approved" : "denied", decidedBy: by, at: approve ? req.at : Date.now() };
+    this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === id ? done : r)));
+    if (approve) this.showReady(req.readyId);
+    else this.touchLock(req.screen);
+    this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: approve ? `${by} said yes: ${req.agentName}'s ${req.label} is on the big screen.` : `${by} is keeping their screen up. ${req.agentName}'s ${req.label} waits in the queue.`, relevance: "work", data: { showRequest: id } });
+    bus.changed("showRequests");
+    return done;
+  }
+
+  // ---- history: what each screen showed (3.6) ----
+
+  static HISTORY_MAX = 20;
+
+  /** What a screen showed recently, newest first, with who put it up. */
+  stageHistory(screen?: string): Record<string, StageHistoryEntry[]> {
+    const all = this.store.setting<Record<string, StageHistoryEntry[]>>("stageHistory", {});
+    return screen ? { [screen]: all[screen] ?? [] } : all;
+  }
+
+  private recordHistory(stage: Stage, screen: string) {
+    if (stage.mode === "board" || stage.mode === "welcome" || stage.mode === "join") return;
+    // A share ends on its own, so a screen showing one can't be brought back.
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen")) return;
+    const { lock: _l, since: _s, by: _b, ...snap } = stage;
+    const sig = JSON.stringify(snap);
+    const all = this.stageHistory();
+    const mine = (all[screen] ?? []).filter((e) => JSON.stringify(e.stage) !== sig);
+    const entry: StageHistoryEntry = { id: newId("his"), screen, at: stage.since, by: stage.by, label: stageLabel(stage, (id) => this.store.get("artifacts", id)?.title), stage: snap };
+    this.store.setSetting("stageHistory", { ...all, [screen]: [entry, ...mine].slice(0, Session.HISTORY_MAX) });
+    bus.changed("stageHistory");
+  }
+
+  /** What a screen showed before what it shows now, newest first. */
+  previousScreens(screen = "main"): StageHistoryEntry[] {
+    const all = this.stageHistory(screen)[screen] ?? [];
+    return all[0]?.at === this.stage(screen).since ? all.slice(1) : all;
+  }
+
+  /** The newest earlier screen a person put up, for "bring back what Jonathan had up". */
+  historyBy(name: string, screen = "main"): StageHistoryEntry | undefined {
+    const want = name.trim().toLowerCase();
+    return this.previousScreens(screen).find((e) => e.by.toLowerCase().includes(want));
+  }
+
+  /** Brings an earlier screen back. A person's tap takes the lock; anyone else is held off by one. */
+  restoreHistory(id: string, screen: string, person?: { id: string | null; name: string }, by = "JamSesh"): Stage | null {
+    const entry = (this.stageHistory(screen)[screen] ?? []).find((e) => e.id === id);
+    if (!entry) return null;
+    return this.setStage({ ...entry.stage, pinned: false }, person?.name ?? by, screen, person ? { person } : {});
+  }
+}
+
+/** How a setStage call says who is acting: a person (who may replace a lock and takes one) or the hub's own upkeep. */
+export interface StageOpts {
+  person?: { id: string | null; name: string };
+  /** Housekeeping that must happen whatever is locked: a share ending, an approved request, a timer. */
+  override?: boolean;
+  /** A person's action that shouldn't hold the screen (a share they started has its own hold). */
+  noLock?: boolean;
+}
+
+/** A few words for a stage, for the history strip and the ready queue. */
+export function stageLabel(stage: Partial<Stage> & { mode: string }, titleOf: (id: string) => string | undefined = () => undefined): string {
+  if (stage.title) return stage.title;
+  const first = stage.items?.map(titleOf).find(Boolean);
+  if (first) return stage.items!.length > 1 ? `${first} and ${stage.items!.length - 1} more` : first;
+  if (stage.mode === "layout") return `${stage.layout?.tiles.length ?? 0} tiles`;
+  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
 }
 
 export function publicEvent(e: JamEvent): JamEvent {
@@ -1356,6 +1614,17 @@ export function shortRepo(repo: string) {
 
 function normalize(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+/** A title with the marks of a rebuild dropped, so "Checkout (built)" and "Checkout v2" are the same screen as "Checkout". */
+export function buildKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[\[(]\s*(built|rebuilt|final|new|latest|updated|v\d+|version \d+|rev(ision)? ?\d+|\d+)\s*[\])]/g, " ")
+    .replace(/\s*[-–—:·]\s*(built|rebuilt|final|new|latest|updated|v\d+|version \d+|rev(ision)? ?\d+)\s*$/g, " ")
+    .replace(/\s+(built|rebuilt|v\d+|version \d+)\s*$/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** "Mobile nav / B: bottom tabs" → group "Mobile nav", variant "B". */

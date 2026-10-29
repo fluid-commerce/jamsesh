@@ -174,7 +174,11 @@ Ask a person to open, save or share files.
      -F agent=<your agent id> -H "authorization: Bearer $JAMSESH_TOKEN" "{{HUB}}/api/upload"
    ```
 
-   Title it like the mockup it matches, with "(built)", so the screen can pair them.
+   Title it like the mockup it matches, with "(built)", so the screen can pair them. Posting your
+   next build of the same screen under the same title (marks like "(built)" or "v2" don't count),
+   or with `-F replaces=<id>` (`replaces` on `jam_post_image`), makes it the next version of that
+   item: the room sees only the newest, and the earlier ones stay one click away. Don't give a
+   rebuild a new title.
 6. `jam_update` with `shipped`: what changed, the files, the dev server URL.
 
 ## Show a native build on the host
