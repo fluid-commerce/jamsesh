@@ -369,6 +369,13 @@ function toneStyle(tone: string) {
 
 const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "update", "message", "artifact"]);
 
+/** Where the next page of history starts: the oldest event this window has at all, shown or not (the state's window may hold none the feed shows). */
+export function historyCursor(ids: Iterable<number>): number | undefined {
+  let oldest: number | undefined;
+  for (const id of ids) if (oldest === undefined || id < oldest) oldest = id;
+  return oldest;
+}
+
 /** How close to the bottom still counts as "at the bottom" (px). */
 const AT_BOTTOM = 40;
 /** Start loading older lines when the reader is this close to the top (px). */
@@ -401,7 +408,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
   const last = events[events.length - 1]?.id ?? 0;
-  const first = events[0]?.id;
+  const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || older.done || everything;
   const fresh = following.current ? 0 : events.filter((e) => e.id > readTo.current).length;
@@ -484,7 +491,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
     <div className="feed-wrap">
       <div ref={box} className="feed" onScroll={onScroll} style={{ fontSize: big ? 17 : 14 }}>
         {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
-        {!exhausted && events.length > 0 && (
+        {!exhausted && first != null && (
           <button className="feed-older" disabled={older.loading} onClick={() => void loadOlder()}>
             {older.loading ? "Loading earlier lines" : older.failed ? "Couldn't load earlier lines. Try again" : older.more ? `${older.more} earlier ${older.more === 1 ? "line" : "lines"}` : "Earlier lines"}
           </button>
