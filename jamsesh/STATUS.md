@@ -54,6 +54,16 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Localhost mention gets the "share it" step | Simulated | Via `jam_update` and `jam_message` results. Needs a real agent to see if it acts on it. |
 | A stopped build's tile says why, tells its agent, clears after 5 minutes | Simulated | Throwaway local server started and stopped; tile screenshot checked in headless Chromium. |
 
+## Big screen: locks, versions, history
+
+| Capability | Status | Notes |
+|---|---|---|
+| A person's cast is locked; agents, the brain, the automatic compare and new shares don't replace it; agents' items wait as "ready to show" | Simulated | Fake people and agents against a test hub (`stage-lock.test.ts`); lock badge, queue and Unlock checked in headless Chromium. |
+| A 5-minute-old lock makes an agent's request ask its owner on screen and out loud; button or voice answers it | Simulated | The spoken line is built and passed to the speech policy but never played in tests. The card was checked on the host and in the owner's window. Not heard in a real room. |
+| Lock lets go when its owner leaves or after 20 minutes | Simulated | Time-travelled in tests. |
+| A rebuilt screen is one item with versions; "v3 · 2 min ago" badge opens the earlier builds; the screen swaps in place | Simulated | Uploads through the same path as `jam_post_image`; badge and version viewer checked in a screenshot. |
+| What each screen showed is kept; tapping the strip or "bring back what Jonathan had up" restores it | Simulated | Strip checked in the client window. The brain's tool is tested without a model; not tried with the live gateway. |
+
 ## Phones and browsers
 
 | Capability | Status | Notes |

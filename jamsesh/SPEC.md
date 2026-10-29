@@ -470,8 +470,8 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_agents` | The roster: people (name, title, weight) and agents (platform, repo, status, card, focus, workstreams). |
 | `jam_devserver` | Put a dev server on the host (see [6.6](#66-dev-servers-on-the-host)) [B18]. |
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
-| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact. |
-| `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen. |
+| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact; the same screen again (same title, or `replaces`) is its next version ([10.5](#105-locks-queue-history-and-versions)). |
+| `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen; a screen a person locked queues it as "ready to show" instead. |
 | `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first; pages with `offset` and says how many more there are. |
 | `jam_directives` | List the session's directives (the context leaves the older ones out), newest first, by words or status; pages with `offset`. |
 | `jam_ask_room` | Post a question to the people in the room. |
@@ -916,6 +916,7 @@ The brain has complete control of the big screen through tools [A6, B40]:
 | `remember_feedback` / `forget_feedback` | See [8.9](#89-feedback-about-its-behavior). |
 | `create_directive`, `record_decision`, `pair_agents`, `ask_agent` | See [8.4](#84-routing-and-intent)–[8.6](#86-decisions). |
 | `host_action`, `build_preview`, `decide_host_build` | See [13](#13-host-control-and-permissions). |
+| `unlock_screen`, `show_ready`, `restore_screen` | Let go of a person's lock after the room agrees, show an agent's waiting item, and bring back an earlier screen ("bring back what Jonathan had up"). See [10.5](#105-locks-queue-history-and-versions). |
 | `no_action` | Explicitly do nothing. |
 
 Screen rules:
@@ -927,6 +928,9 @@ Screen rules:
   without a model, the share goes first with up to three existing tiles [A5b].
 - **Pinning.** A person who picks a view pins it; the brain and agents don't override a pinned
   screen (agents' requests become a toast).
+- **Locks.** What a person puts up is locked, which is stronger than a pin: the brain's show tools,
+  the automatic compare and agents' `jam_show` all leave it alone (see
+  [10.5](#105-locks-queue-history-and-versions)).
 - **Back to the board.** Any unpinned view other than the board returns to the board after 6
   minutes.
 - **Displays.** The brain knows the big screen window's size, aspect ratio, and pixel density,
@@ -1162,6 +1166,52 @@ tile, in every view, takes pins (see [11.5](#115-annotations)) [A7c].
 | `M` | Mute or unmute the room mic |
 | `A` | Annotate |
 | `,` | Settings |
+
+### 10.5 Locks, queue, history, and versions
+
+**Locks (3.1).** A screen a person puts something on is locked to them: the stage shows
+"Locked by Chey" with **Unlock**. While it is locked:
+
+- the brain's `show_on_screen`, `set_layout`, `build_custom_view`, `show_saved_layout` and
+  `restore_screen` refuse and tell the model to ask the room; `unlock_screen` works only when a
+  person in the lines agrees (or the lock's owner is the one asking, which lets go of it first);
+- the automatic compare doesn't replace it, a new share doesn't take it unless the sharer holds it
+  (the share is shown only on its own), and an agent's `jam_show` waits in the queue;
+- the 6-minute return to the board doesn't run; it starts when the lock lets go.
+
+People replace people's locks: another person's deliberate cast takes the lock over, and the
+history strip brings the earlier one back. A restore from the strip is the exception: it is held
+off (409) while someone else holds the screen. Housekeeping (a share ending, a timer) is never held
+back. Brain stages are not locked.
+
+A lock lets go when its owner unlocks, is removed, has no window checking in for 10 minutes, or
+nobody has touched the screen for 20 minutes (a 30-second sweep applies it).
+
+**Ready to show.** An agent's held-back item waits as "ready to show" (at most 12, an hour), in a
+small queue on the stage that the host and people open to **Show** or **Dismiss** an item. A person
+who shows one takes the lock. The automatic compare queues itself the same way.
+
+**Asking the owner.** Once a lock is 5 minutes old, an agent's `jam_show` also makes JamSesh ask its
+owner, on the big screen and in the owner's window (a card with **Show it** and **Keep mine up**) and
+out loud through the speech policy's `request` kind: "Chey, Felipe's agent has the checkout build
+ready. Can I put it up?" (once more after a minute). One question is open per screen, and none comes
+within 10 minutes of a no. The owner can answer by button (the owner, or the host's own window) or
+by voice: "yes, show it" or "keep mine up", plus a bare "yes" or "no" for 90 seconds after the
+question; only the owner's words count and the brain's voice handling applies them with or without
+a model. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
+unanswered question goes stale after 5 minutes.
+
+**One item per built screen (3.5).** A new `jam_post_image` or `/api/upload` of the same agent and
+stage, with the same title once "(built)", "v2" and similar marks are dropped, or an explicit
+`replaces` id, becomes the next version of the existing item rather than a new one. Variants
+("Nav / A", "Nav / B") stay separate, and one agent can't replace another's item. The item keeps its
+id, so a screen showing it, a pin and the feed all follow the newest build; earlier builds are kept in
+the item's `versions` (up to 20). The tile's badge reads "v3 · 2 min ago" and opens the versions.
+
+**History (3.6).** Every screen keeps the last 20 things it showed with who put them up (the board
+and the join view are not kept; neither are shares). Showing the same thing again moves it to the
+top. People's apps show the earlier ones as a strip of chips that bring one back (`POST
+/api/stage/restore`), and the brain's `restore_screen` does the same by name.
 
 ## 11. Client
 
