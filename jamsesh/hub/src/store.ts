@@ -43,6 +43,7 @@ export const PALETTE = ["#FF6B4A", "#3E8BFF", "#22C08B", "#B36BFF", "#FFB020", "
 const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
 const TEAM_SETTINGS = new Set<string>([
   "hostId",
+  "voiceResetAt",
   "gatewayKey",
   "brainName",
   "brainAliases",
@@ -238,6 +239,15 @@ export class Store {
       .run(next.text, next.relevance, next.workstreamId, next.authorId, next.authorName, JSON.stringify(next.data), id);
     bus.send({ type: "event", event: next });
     return next;
+  }
+
+  /** Drops the voice embedding kept with a person's speech lines (their voice was reset). Returns how many. */
+  scrubEmbeddings(personId: string): number {
+    const where = "author_id = ? AND json_extract(data, '$.embedding') IS NOT NULL";
+    // Counted first: the search index's triggers count toward the update's changes.
+    const n = (this.db.query(`SELECT COUNT(*) AS n FROM events WHERE ${where}`).get(personId) as { n: number }).n;
+    this.db.query(`UPDATE events SET data = json_remove(data, '$.embedding') WHERE ${where}`).run(personId);
+    return n;
   }
 
   /** Deletes everything one agent put in the room, or that was addressed to it. Returns the ids. */

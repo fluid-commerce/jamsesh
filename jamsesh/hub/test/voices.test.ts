@@ -350,6 +350,52 @@ const normalizeArr = (e: number[]) => {
   return e.map((x) => x / n);
 };
 
+test("resetting a voice forgets it everywhere it could come back from: samples, the lines' embeddings, older copies", () => {
+  const s = hubB.session;
+  const p = s.upsertPerson({ name: "Resetter" });
+  const v = Array.from({ length: 256 }, (_, i) => Math.cos(i));
+  hubB.audio.voiceprints.add(p.id, Float32Array.from(v), "enrol");
+  const ev = s.store.addEvent({ kind: "speech", authorType: "person", authorId: p.id, authorName: p.name, text: "A line of theirs", data: { embedding: v } });
+  const other = s.upsertPerson({ name: "Bystander" });
+  const theirs = s.store.addEvent({ kind: "speech", authorType: "person", authorId: other.id, authorName: other.name, text: "Not theirs", data: { embedding: v } });
+  const now = Date.now();
+  s.store.put("utterances", { id: "utt_reset1", t0: now - 5000, t1: now - 3000, text: "A line of theirs", personId: p.id, speakerName: p.name, confidence: 0.5, method: "voice", deviceId: "d", devices: [], location: "room", eventId: ev.id, engine: "stub" } as any);
+  const before = hubB.voiceprintOf(p.id);
+  expect(hubB.resetVoice(p.id)).toMatchObject({ ok: true, scrubbed: 1 });
+  expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
+  expect(s.store.event(ev.id)?.data.embedding).toBeUndefined();
+  expect(s.store.event(theirs.id)?.data.embedding).toEqual(v);
+  // Correcting their old line to them teaches nothing now.
+  expect(hubB.audio.assign("utt_reset1", p.id).learning.learned).toBe(false);
+  expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
+  // A copy made before the reset can't bring it back; one made after (they read again elsewhere) can.
+  expect(hubB.carryVoiceprint(p.id, before)).toMatchObject({ ok: false, reset: true });
+  expect(hubB.carryVoiceprint(p.id, { ...before, samples: [{ kind: "enrol", embedding: v }], updatedAt: undefined })).toMatchObject({ ok: false, reset: true });
+  expect(hubB.carryVoiceprint(p.id, { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: v }], updatedAt: Date.now() + 1000 })).toMatchObject({ ok: true });
+});
+
+test("the join read's window closes when the read fails: a refused recording, bad audio, or no microphone", async () => {
+  const p = hubB.session.upsertPerson({ name: "Reader" });
+  const open = () => (hubB.audio as any).enrolling.get(p.id) as { until: number } | undefined;
+  hubB.audio.beginEnrolment(p.id);
+  expect(open()!.until).toBeGreaterThan(Date.now() + 60_000);
+  // Too quiet: refused, and the window is down to the grace for copies on their way.
+  expect(hubB.enrollVoice(p.id, encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }))).toMatchObject({ ok: false });
+  expect(open()!.until).toBeLessThanOrEqual(Date.now() + 25_000);
+  hubB.audio.beginEnrolment(p.id);
+  expect(() => hubB.enrollVoice(p.id, new Uint8Array([1, 2, 3]))).toThrow();
+  expect(open()!.until).toBeLessThanOrEqual(Date.now() + 25_000);
+  // Over HTTP: no microphone, so nothing was read: closed at once. Only the person's own window may.
+  hubB.audio.beginEnrolment(p.id);
+  const mine = hubB.auth.issue({ kind: "browser", label: "Reader's laptop", ip: "10.0.0.9", personId: p.id });
+  const someone = hubB.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.10" });
+  const end = (token: string) => fetch(`${url}/api/people/${p.id}/voice/end`, { method: "POST", headers: { ...remote, authorization: `Bearer ${token}` }, body: JSON.stringify({ read: false }) });
+  expect((await end(someone.token)).status).toBe(403);
+  expect(open()).toBeDefined();
+  expect((await end(mine.token)).status).toBe(200);
+  expect(open()).toBeUndefined();
+});
+
 sim("only a person gives their own voiceprint: not another person, not an agent, not a window with no person", async () => {
   const ana = hubB.session.people().find((p) => p.name === "Ana")!;
   const ben = hubB.session.people().find((p) => p.name === "Ben")!;

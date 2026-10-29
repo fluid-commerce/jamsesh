@@ -26,6 +26,8 @@ interface CopyStore {
   put(copy: Carried): Promise<void>;
   /** The whole copy, to send to this host (the Mac app asks the person first, once per host), or null. */
   share(): Promise<Carried | null>;
+  /** Deletes the copy, keeping the choice (their voice was reset on a host). */
+  forget(): Promise<void>;
 }
 
 interface Bridge {
@@ -34,9 +36,9 @@ interface Bridge {
 const bridge = () => (globalThis as { __TAURI_INTERNALS__?: Bridge }).__TAURI_INTERNALS__;
 
 /**
- * The Mac app keeps one copy per person under the Mac user's app data. It asks the host which person
- * this window is and refuses a different one, so a shared app never hands one person's copy to another.
- * The page sees the copy's samples only once the person said Share to this host in the app's dialog.
+ * The Mac app keeps one copy, for the app's own person, under the Mac user's app data. It asks the host
+ * which person this window is and refuses a page that says it's someone else. The page sees the copy's
+ * samples only once the person said Share to this host in the app's dialog.
  */
 function appStore(b: Bridge, personId: string): CopyStore {
   const get = () => b.invoke("voiceprint_get", { personId }) as Promise<{ consent: boolean | null; copy: Carried | null }>;
@@ -46,6 +48,7 @@ function appStore(b: Bridge, personId: string): CopyStore {
     get: async () => (await get()).copy,
     put: async (copy) => void (await b.invoke("voiceprint_put", { personId, copy })),
     share: () => b.invoke("voiceprint_share", { personId }) as Promise<Carried | null>,
+    forget: async () => void (await b.invoke("voiceprint_forget", { personId })),
   };
 }
 
@@ -83,6 +86,7 @@ function browserStore(personId: string): CopyStore {
     put: async (copy) => write(copyKey, copy),
     // Already this host's: a browser's copy never leaves the host's own address.
     share: async () => read<Carried>(copyKey),
+    forget: async () => write(copyKey, null),
   };
 }
 
@@ -106,8 +110,10 @@ const quiet = async <T,>(p: () => Promise<T>, fallback: T): Promise<T> => {
 export const carryChoice = (personId: string) => quiet(() => storeFor(personId).consent(), null);
 /** Off until they say so. */
 export const carryAllowed = async (personId: string) => (await carryChoice(personId)) === true;
-/** Saying no forgets the copy. */
-export const setCarryAllowed = (personId: string, on: boolean) => quiet(() => storeFor(personId).setConsent(on), undefined);
+/** Saying no forgets the copy. Throws when the choice couldn't be saved, so the checkbox can say so. */
+export const setCarryAllowed = (personId: string, on: boolean) => storeFor(personId).setConsent(on);
+/** Their voice was reset: this device's copy goes too, so it can't bring the old voice back. */
+export const forgetCopy = (personId: string) => quiet(() => storeFor(personId).forget(), undefined);
 export const localCopy = (personId: string) => quiet(() => storeFor(personId).get(), null);
 
 const tagged = (c: Carried, here: string): Carried => ({ ...c, host: here || c.host });
@@ -129,11 +135,13 @@ export async function pushCopy(personId: string, here = currentHostKey()): Promi
   const c = await quiet(() => storeFor(personId).share(), null);
   if (!c?.samples?.length) return false;
   try {
-    const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples }, "PUT");
+    const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples, updatedAt: c.updatedAt }, "PUT");
     if (!r?.ok) return false;
     await pullCopy(personId, here);
     return true;
-  } catch {
+  } catch (e) {
+    // Made before they reset their voice on this host: it must not come back, here or anywhere.
+    if ((e as { status?: number }).status === 409) await forgetCopy(personId);
     return false;
   }
 }
@@ -167,6 +175,12 @@ export async function syncVoiceprint(me: Pick<Person, "id">, here = currentHostK
  * Never queued for later: it throws when the host didn't take it, and then the read mustn't start.
  */
 export const beginRead = (personId: string) => api(`/people/${personId}/voice/start`, {}, "POST", { queue: false });
+
+/**
+ * The read stopped without the host getting it (no microphone, a failed upload): the host stops keeping
+ * the room's script-like lines out. `read`: something was said aloud, so copies on their way still are, briefly.
+ */
+export const endRead = (personId: string, read: boolean) => api(`/people/${personId}/voice/end`, { read }, "POST", { queue: false }).catch(() => {});
 
 /** Runs the sync once per person on this host; `ready` is false until it has settled (so the join read isn't asked first). */
 export function useVoiceprintSync(me: Pick<Person, "id"> | undefined) {

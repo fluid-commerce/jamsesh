@@ -375,7 +375,14 @@ export class Hub {
   /** A deliberate voice sample: the join sentences, read aloud. */
   enrollVoice(personId: string, bytes: Uint8Array) {
     if (!this.session.person(personId)) throw new Error("No such person.");
-    return this.audio.enrol(personId, resample(decodeWav(bytes), 16000));
+    let pcm;
+    try {
+      pcm = resample(decodeWav(bytes), 16000);
+    } catch (e) {
+      this.audio.endEnrolment(personId);
+      throw e;
+    }
+    return this.audio.enrol(personId, pcm);
   }
 
   /** What a person's own device keeps of their voice: embeddings only, never audio. */
@@ -386,11 +393,29 @@ export class Hub {
   /** A person's own device brings their voiceprint to this host. */
   carryVoiceprint(personId: string, body: unknown) {
     if (!this.session.person(personId)) throw new Error("No such person.");
+    // A copy made before the person reset their voice here would bring the old voice back.
+    const resetAt = this.session.store.setting<Record<string, number>>("voiceResetAt", {})[personId];
+    const madeAt = Number((body as { updatedAt?: unknown } | null)?.updatedAt);
+    if (resetAt && !(madeAt > resetAt)) return { ok: false as const, reason: "Your voice was reset on this host after that copy was made.", reset: true };
     const r = parseCarried(body);
     if (!r.ok) return r;
     const kept = this.audio.voiceprints.importCarried(personId, r.samples);
     this.session.store.put("people", this.session.person(personId)!);
     return { ok: true as const, samples: kept };
+  }
+
+  /**
+   * Forgets a person's voice on this host: their samples, the embeddings kept with their lines in this
+   * session (so a later correction can't rebuild it), and, from now on, any copy made before this.
+   */
+  resetVoice(personId: string) {
+    this.audio.voiceprints.clear(personId);
+    const scrubbed = this.session.store.scrubEmbeddings(personId);
+    this.audio.forgetVoice(personId);
+    this.session.store.setSetting("voiceResetAt", { ...this.session.store.setting<Record<string, number>>("voiceResetAt", {}), [personId]: Date.now() });
+    const p = this.session.person(personId);
+    if (p) this.session.store.put("people", p);
+    return { ok: true as const, scrubbed };
   }
 
   /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */

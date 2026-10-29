@@ -944,9 +944,9 @@ async fn voice_host(state: &App, port: u16) -> Result<(String, String), String> 
 /// The copy as this host's page may see it: without its samples until the person said Share to this host.
 #[tauri::command]
 async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
-    let (name, port) = voice_owner(&window, &state, &person_id).await?;
+    let (_, port) = voice_owner(&window, &state, &person_id).await?;
     let (host_id, _) = voice_host(&state, port).await?;
-    Ok(voiceprints::for_page(voiceprints::load(&state.dir, &name), &host_id))
+    Ok(voiceprints::for_page(voiceprints::load(&state.dir), &host_id))
 }
 
 /// The whole copy, to send to this host: asks the person the first time, in a native dialog.
@@ -971,19 +971,26 @@ async fn voiceprint_share(
             });
         rx.await.unwrap_or(false)
     };
-    voiceprints::share(&state.dir, &name, &host_id, ask).await
+    voiceprints::share(&state.dir, &host_id, ask).await
 }
 
 #[tauri::command]
 async fn voiceprint_put(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, copy: voiceprints::Copy) -> Result<(), String> {
-    let (name, _) = voice_owner(&window, &state, &person_id).await?;
-    voiceprints::put(&state.dir, &name, copy)
+    voice_owner(&window, &state, &person_id).await?;
+    voiceprints::put(&state.dir, copy)
 }
 
 #[tauri::command]
 async fn voiceprint_consent(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
-    let (name, _) = voice_owner(&window, &state, &person_id).await?;
-    voiceprints::set_consent(&state.dir, &name, on)
+    voice_owner(&window, &state, &person_id).await?;
+    voiceprints::set_consent(&state.dir, on)
+}
+
+/// The person reset their voice on a host: the app's copy goes too, so it can't bring the old voice back.
+#[tauri::command]
+async fn voiceprint_forget(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<(), String> {
+    voice_owner(&window, &state, &person_id).await?;
+    voiceprints::forget(&state.dir)
 }
 
 /// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
@@ -1035,6 +1042,7 @@ fn main() {
             voiceprint_put,
             voiceprint_share,
             voiceprint_consent,
+            voiceprint_forget,
             screens::screens_state,
             screens::screens_preview,
             screens::screens_save,

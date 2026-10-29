@@ -4,7 +4,7 @@ import { beforeEach, expect, test } from "bun:test";
 const store = new Map<string, string>();
 (globalThis as any).localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) };
 
-const { beginRead, carryAllowed, carriesToOtherHosts, localCopy, pushCopy, pullCopy, setCarryAllowed, syncVoiceprint } = await import("../src/shared/voiceprint");
+const { beginRead, endRead, forgetCopy, carryAllowed, carriesToOtherHosts, localCopy, pushCopy, pullCopy, setCarryAllowed, syncVoiceprint } = await import("../src/shared/voiceprint");
 // This page is on host "hostB" (passed in, so the identity module's own state is left alone).
 const H = "hostB";
 
@@ -55,7 +55,7 @@ test("a host that doesn't know the voice gets the device's copy, embeddings only
   reply = (m) => (m === "PUT" ? ((pushed = true), { status: 200, body: { ok: true } }) : { status: 200, body: pushed ? copy({ version: "b1", updatedAt: 20 }) : copy({ samples: [], version: "", updatedAt: 0 }) });
   await syncVoiceprint({ id: "p1" }, H);
   expect(calls.map((c) => c.method)).toEqual(["GET", "PUT", "GET"]);
-  expect(Object.keys(calls[1].body).sort()).toEqual(["dim", "model", "samples"]);
+  expect(Object.keys(calls[1].body).sort()).toEqual(["dim", "model", "samples", "updatedAt"]);
   expect(JSON.stringify(calls[1].body)).not.toMatch(/audio|wav|blob/i);
   expect(await localCopy("p1")).toMatchObject({ host: "hostB", version: "b1" });
 });
@@ -163,4 +163,25 @@ test("starting the join read fails out loud when the host didn't take it, and is
   (globalThis as any).fetch = async (url: string, init: RequestInit = {}) => (calls.push({ method: init.method ?? "GET", path: String(url), body: null }), new Response('{"ok":true}', { status: 200 }));
   await expect(beginRead("p1")).resolves.toMatchObject({ ok: true });
   expect(calls.at(-1)).toMatchObject({ method: "POST", path: "/api/people/p1/voice/start" });
+});
+
+test("a copy made before the person reset their voice on this host is deleted here when the host refuses it", async () => {
+  await setCarryAllowed("p1", true);
+  store.set(key("p1"), JSON.stringify(copy({ host: "hostA", version: "a1", updatedAt: 10 })));
+  reply = (m) => (m === "PUT" ? { status: 409, body: { error: "Your voice was reset on this host after that copy was made.", reset: true } } : { status: 200, body: copy({ samples: [], version: "", updatedAt: 0 }) });
+  await syncVoiceprint({ id: "p1" }, H);
+  expect(calls.map((c) => c.method)).toEqual(["GET", "PUT"]);
+  expect(calls[1].body.updatedAt).toBe(10);
+  expect(await localCopy("p1")).toBeNull();
+  expect(await carryAllowed("p1")).toBe(true);
+});
+
+test("Reset and a failed read reach the host, never queued; saving the choice can fail out loud", async () => {
+  store.set(key("p1"), JSON.stringify(copy()));
+  await forgetCopy("p1");
+  expect(await localCopy("p1")).toBeNull();
+  await endRead("p1", false);
+  expect(calls.at(-1)).toMatchObject({ method: "POST", path: "/people/p1/voice/end", body: { read: false } });
+  (globalThis as any).__TAURI_INTERNALS__ = { invoke: async () => Promise.reject("Couldn't save your voice in the app: disk full") };
+  await expect(setCarryAllowed("p1", true)).rejects.toBe("Couldn't save your voice in the app: disk full");
 });

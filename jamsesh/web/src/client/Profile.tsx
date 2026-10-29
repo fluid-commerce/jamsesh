@@ -4,7 +4,7 @@ import { encodeWav } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
 import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
-import { beginRead, carriesToOtherHosts, carryChoice, pullCopy, setCarryAllowed } from "../shared/voiceprint";
+import { beginRead, carriesToOtherHosts, endRead, carryChoice, pullCopy, setCarryAllowed } from "../shared/voiceprint";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
 export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person; brainName: string; onClose: () => void; micError?: string | null }) {
@@ -119,14 +119,18 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
         setState("saving");
         try {
           const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
-          const r = await fetch(`/api/people/${me.id}/voice`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav }).then((x) => x.json());
+          const res = await fetch(`/api/people/${me.id}/voice`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav });
+          // The host ends the read itself once it has the recording (taken or refused); anything else, we end it.
+          if (!res.ok) void endRead(me.id, true);
+          const r = await res.json();
           if (r.ok) {
-            await setCarryAllowed(me.id, carry);
+            await setCarryAllowed(me.id, carry).catch(() => setCarry(false));
             if (carry) await pullCopy(me.id);
             setState("done");
             setMsg(`${brainName} knows your voice.`);
           } else (setState("error"), setMsg(r.reason ?? r.error ?? "That didn't work. Try again."));
         } catch (e) {
+          void endRead(me.id, true);
           setState("error");
           setMsg(String(e));
         }
@@ -136,6 +140,8 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       setSecs(0);
       setState("recording");
     } catch (e) {
+      // No microphone, so nothing was read: the room is heard again at once.
+      void endRead(me.id, false);
       setState("error");
       setMsg(e instanceof Error ? e.message : String(e));
     }
@@ -165,7 +171,9 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
             // Already known on this host: the copy for your next room is taken now, or dropped now.
             if (state !== "recording") {
               const on = e.target.checked;
-              void setCarryAllowed(me.id, on).then(() => on && me.voiceSamples > 0 && pullCopy(me.id));
+              setCarryAllowed(me.id, on)
+                .then(() => on && me.voiceSamples > 0 && pullCopy(me.id))
+                .catch((err) => (setCarry(!on), setState("error"), setMsg(`Couldn't save that: ${err instanceof Error ? err.message : String(err)}`)));
             }
           }}
           style={{ marginTop: 2 }}

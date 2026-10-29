@@ -28,7 +28,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -459,6 +459,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const q = url.searchParams;
     const deviceId = q.get("deviceId");
     if (!deviceId) return bad("deviceId is required");
+    // Only the window that owns a device sends its audio: a device's owner names the speaker and teaches
+    // their voiceprint, so another window's microphone can't be spoken through.
+    const dev = s.store.get("devices", deviceId);
+    if (!dev) return bad("Register this device first (POST /api/devices).", 404);
+    if (!caller || dev.pairedId !== caller) return bad("That device belongs to another window.", 403);
     // A timed-out upload is retried; the same segment from the same device only counts once.
     const segKey = `${deviceId}:${q.get("t0")}`;
     if (recentSegments.has(segKey) || segmentsInFlight.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
@@ -507,9 +512,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (req.method === "GET") return json(hub.voiceprintOf(m[1]));
     if (req.method === "PUT") {
       const r = hub.carryVoiceprint(m[1], body);
-      return r.ok ? json(r) : bad(r.reason);
+      return r.ok ? json(r) : "reset" in r ? json({ error: r.reason, reset: true }, 409) : bad(r.reason);
     }
-    if (req.method === "DELETE") return (hub.audio.voiceprints.clear(m[1]), s.store.put("people", s.person(m[1])!), json({ ok: true }));
+    if (req.method === "DELETE") return json(hub.resetVoice(m[1]));
   }
   if (path === "/voice/script" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people; agents use their jam_ tools.", 403) : json({ sentences: ENROL_SCRIPT, seconds: ENROL_SECONDS });
   m = path.match(/^\/people\/([\w-]+)\/voice\/start$/);
@@ -517,6 +522,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
     return (hub.audio.beginEnrolment(m[1]), json({ ok: true }));
+  }
+  // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
+  // whether anything was said aloud, which earns the grace for copies still on their way.
+  m = path.match(/^\/people\/([\w-]+)\/voice\/end$/);
+  if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    if (body?.read) hub.audio.endEnrolment(m[1]);
+    else hub.audio.cancelEnrolment(m[1]);
+    return json({ ok: true });
   }
 
   m = path.match(/^\/utterances\/([\w-]+)\/assign$/);

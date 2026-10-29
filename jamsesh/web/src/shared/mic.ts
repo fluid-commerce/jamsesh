@@ -203,7 +203,8 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
       hub.markUnauthorized();
       return "unauthorized";
     }
-    return res.status >= 500 || res.status === 408 || res.status === 429 ? "retry" : "drop";
+    // 404: this window's device isn't registered with the host yet (it is a moment after joining).
+    return res.status >= 500 || res.status === 404 || res.status === 408 || res.status === 429 ? "retry" : "drop";
   } catch {
     return "retry";
   } finally {

@@ -2,12 +2,20 @@ import { useEffect, useState } from "react";
 import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
+import { forgetCopy } from "./voiceprint";
 
 export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: boolean }) {
   const { state, levels } = useHub();
   const [key, setKey] = useState("");
   const [saved, setSaved] = useState<string | null>(null);
   const [engines, setEngines] = useState<Engines | null>(null);
+  // Who this window is: only a person resets their own voice (the host refuses anyone else).
+  const [meId, setMeId] = useState<string | null>(null);
+  useEffect(() => {
+    api<{ person: { id: string } | null }>("/me")
+      .then((m) => setMeId(m.person?.id ?? null))
+      .catch(() => {});
+  }, []);
   useEffect(() => {
     const load = () => api("/engines").then(setEngines).catch(() => {});
     void load();
@@ -191,7 +199,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
           <Section title="People" help="Each person's title weighs in when instructions conflict. Voice samples come from lines you label, and from people talking at their own laptops.">
             {!state.voiceprints.available && <VoiceMatchingOff reason={state.voiceprints.reason} />}
             {state.people.map((p) => (
-              <PersonRow key={p.id} p={p} />
+              <PersonRow key={p.id} p={p} mine={p.id === meId} />
             ))}
             <AddPerson />
           </Section>
@@ -241,7 +249,7 @@ const MODEL_LABELS: Record<string, string> = {
   transcribe: "Transcription fallback",
 };
 
-function PersonRow({ p }: { p: Person }) {
+function PersonRow({ p, mine }: { p: Person; mine: boolean }) {
   return (
     <div className="person-row">
       <Avatar name={p.name} color={p.color} size={26} photo={p.photo} />
@@ -259,8 +267,16 @@ function PersonRow({ p }: { p: Person }) {
         <button className="icon-btn small" title={`Ask ${p.name} to share their screen`} aria-label={`Ask ${p.name} to share their screen`} onClick={() => api("/shares/request", { personId: p.id, kind: "screen", reason: "The room wants to see your screen", by: "Host" }).catch((e) => alert(e.message))}>
           <ScreenIcon size={15} />
         </button>
-        {p.voiceSamples > 0 && (
-          <button className="btn ghost small" title="Forget their voice" onClick={() => api(`/people/${p.id}/voiceprint`, undefined, "DELETE")}>
+        {mine && p.voiceSamples > 0 && (
+          <button
+            className="btn ghost small"
+            title="Forget your voice on this host and on this device"
+            onClick={() =>
+              api(`/people/${p.id}/voiceprint`, undefined, "DELETE")
+                .then(() => forgetCopy(p.id))
+                .catch((e) => alert(e.message))
+            }
+          >
             Reset
           </button>
         )}

@@ -47,6 +47,8 @@ interface Group {
   busy: Promise<void> | null;
   /** Copies from the room and from remote laptops never group: they are different rooms. */
   location: "room" | "remote";
+  /** Its speaker's voice was reset since: nothing is learned from it. */
+  forgotten?: boolean;
 }
 
 export interface SpeakerGuess {
@@ -324,6 +326,11 @@ export class AudioPipeline {
     this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS });
   }
 
+  /** The read never happened (the microphone didn't start): nothing is held out. */
+  cancelEnrolment(personId: string) {
+    this.enrolling.delete(personId);
+  }
+
   /** The read is over; copies still on their way from slow laptops are held out for a little longer. */
   endEnrolment(personId: string) {
     const w = this.enrolling.get(personId);
@@ -584,8 +591,14 @@ export class AudioPipeline {
   }
 
   /** The voice sample of a line, from its copies while they are kept and from its event after that. */
+  /** A person's voice was reset: the lines of theirs still held here no longer teach anyone. */
+  forgetVoice(personId: string) {
+    for (const g of this.finalized) if (g.utteranceId && this.session.store.get("utterances", g.utteranceId)?.personId === personId) g.forgotten = true;
+  }
+
   private voiceOf(u: Utterance): { embedding: Float32Array | null; reason: string } {
     const g = this.finalized.find((x) => x.utteranceId === u.id);
+    if (g?.forgotten) return { embedding: null, reason: "that voice was reset after the line" };
     if (g) {
       const usable = g.segments.filter((s) => s.clipped <= MAX_CLIPPED);
       if (!usable.length) return { embedding: null, reason: "every copy of it was clipped" };
@@ -620,6 +633,8 @@ export class AudioPipeline {
    * chunks so the voiceprint starts with variety.
    */
   enrol(personId: string, pcm: Pcm): { ok: true; samples: number } | { ok: false; reason: string } {
+    // Taken or refused, the read is over: copies on their way get the grace, then the room is heard again.
+    this.endEnrolment(personId);
     const { levelDb, noiseDb } = speechLevelDb(pcm);
     if (levelDb - noiseDb < 8 || levelDb < -50) return { ok: false, reason: "That was too quiet. Hold the laptop closer and try again." };
     const chunk = 16000 * 3;
@@ -632,7 +647,6 @@ export class AudioPipeline {
     this.session.store.clearVoiceKind(personId, "enrol");
     for (const e of fresh) this.session.store.addVoiceSample(personId, e, "enrol");
     this.voiceprints.reload();
-    this.endEnrolment(personId);
     return { ok: true, samples: this.voiceprints.learnedFrom(personId).enrol };
   }
 

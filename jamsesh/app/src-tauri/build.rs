@@ -21,6 +21,7 @@ const COMMANDS: &[&str] = &[
     "voiceprint_put",
     "voiceprint_share",
     "voiceprint_consent",
+    "voiceprint_forget",
     "screens_state",
     "screens_preview",
     "screens_save",
