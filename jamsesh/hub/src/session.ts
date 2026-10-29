@@ -312,6 +312,7 @@ export class Session {
       case "stageHistory":
         return { key, value: this.stageHistory() };
       case "stageTiles":
+        this.dropDeadExpanded();
         return { key, value: this.stageTiles() };
       default:
         return null;
@@ -1525,7 +1526,7 @@ export class Session {
   sweepScreens() {
     const live = this.screens();
     const ids = live.map((x) => x.id).sort().join("|");
-    const shape = live.map((x) => `${x.id}:${x.width}x${x.height}@${x.screenX},${x.screenY}`).sort().join("|");
+    const shape = live.map((x) => `${x.id}:${x.width}x${x.height}@${x.screenX},${x.screenY}x${x.dpr}`).sort().join("|");
     if (ids === this.liveScreens.ids && shape === this.liveScreens.shape) return;
     const idsChanged = ids !== this.liveScreens.ids;
     this.liveScreens = { ids, shape };
@@ -1613,9 +1614,19 @@ export class Session {
     if (tile && !this.stageTileKeys(screen).some((k) => k.key === tile)) return cur;
     const { expanded: _drop, ...rest } = cur;
     const stage: Stage = tile ? { ...rest, expanded: tile } : rest;
-    this.commitStage(stage, screen);
+    this.atomically(() => this.commitStage(stage, screen));
     claim?.revs.set(screen, this.stageRev(screen));
     return stage;
+  }
+
+  /** An expanded tile whose content is gone (its artifact was deleted) is collapsed, and the screens are told. */
+  private dropDeadExpanded() {
+    for (const screen of ["main", ...this.screens().map((x) => x.id)]) {
+      const st = this.stage(screen);
+      if (!st.expanded || this.stageTileKeys(screen).some((k) => k.key === st.expanded)) continue;
+      const { expanded: _gone, ...rest } = st;
+      this.atomically(() => this.commitStage(rest, screen));
+    }
   }
 
   /** Every screen's tile keys (`stageTileKeys`), as windows get them: they draw tiles from these and never work keys out themselves. */
@@ -1784,6 +1795,8 @@ export class Session {
   }
 
   private commitStage(stage: Stage, screen: string) {
+    // Every stage write is part of a transaction: the revision, the questions it expires and the store move together or not at all.
+    if (!this.effects) throw new Error("commitStage outside Session.atomically");
     this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
     this.after(() => bus.changed("stageTiles"));
@@ -1941,8 +1954,9 @@ export class Session {
   /** The owner did something with their screen: it counts as activity. */
   touchLock(screen = "main") {
     const cur = this.stage(screen);
-    if (!cur.lock) return;
-    this.commitStage({ ...cur, lock: { ...cur.lock, lastActive: Date.now() } }, screen);
+    const lock = cur.lock;
+    if (!lock) return;
+    this.atomically(() => this.commitStage({ ...cur, lock: { ...lock, lastActive: Date.now() } }, screen));
   }
 
   /** Locks whose owners left or went quiet let go even when nobody asks (a timer runs this). */
