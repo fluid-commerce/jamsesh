@@ -453,16 +453,33 @@ test("an image with no picture in it (a PNG without image data, a JPEG without a
   const noData = new Uint8Array([...whole.subarray(0, 33), ...whole.subarray(whole.length - 12)]);
   // Right chunks and CRCs, but image data with too few pixels for its size.
   const fewPixels = png(2, 2, new Uint8Array(3));
+  // A row filter that doesn't exist (7).
+  const badFilter = png(2, 2, new Uint8Array([7, 128, 128, 0, 128, 128]));
+  // A small file claiming 20000 x 20000 RGBA (1.6 GB of pixels): refused before anything is inflated.
+  const bomb = (() => {
+    const w = png(2, 2).slice();
+    const v = new DataView(w.buffer);
+    v.setUint32(16, 20000);
+    v.setUint32(20, 20000);
+    w[25] = 6;
+    v.setUint32(29, Bun.hash.crc32(w.subarray(12, 29)) >>> 0);
+    return w;
+  })();
   const jpegNoScan = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0, 0xff, 0xd9]);
   const jpegEmptyScan = new Uint8Array([0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0, 0xff, 0xda, 0, 8, 1, 1, 0, 0, 0x3f, 0, 0xff, 0xd9]);
   const before = uploads();
-  for (const broken of [noData, fewPixels, jpegNoScan, jpegEmptyScan]) {
+  for (const broken of [noData, fewPixels, badFilter, bomb, jpegNoScan, jpegEmptyScan]) {
     expect((await post(lap.token, `/people/${p.id}/photo`, broken, { "content-type": "image/png" })).status).toBe(400);
   }
   const agentCred = hub.auth.issue({ kind: "agent", label: "Nel's agents", ip: "10.0.0.33" });
   const ag = hub.session.registerAgent({ ownerName: "Nel", harness: "claude-code", repo: "r", cwd: "/n", machine: hub.auth.machineOf(agentCred.device.id)!, platform: "desktop" }).agent;
-  for (const broken of [noData, fewPixels, jpegNoScan, jpegEmptyScan]) expect((await post(agentCred.token, "/upload", formOf(broken, { agent: ag.id }))).status).toBe(400);
+  for (const broken of [noData, fewPixels, badFilter, bomb, jpegNoScan, jpegEmptyScan]) expect((await post(agentCred.token, "/upload", formOf(broken, { agent: ag.id }))).status).toBe(400);
   expect(uploads()).toBe(before);
+  // A real JPEG (made by the platform's encoder) is taken: the JPEG check doesn't refuse every JPEG.
+  // (test/fixtures/tiny.jpg: a synthetic 8x8 gradient, written by macOS sips from a PNG made in code.)
+  const jpeg = new Uint8Array(await Bun.file(new URL("./fixtures/tiny.jpg", import.meta.url)).arrayBuffer());
+  expect((await post(lap.token, `/people/${p.id}/photo`, jpeg, { "content-type": "image/jpeg" })).status).toBe(200);
+  expect((await post(agentCred.token, "/upload", formOf(jpeg, { agent: ag.id }))).status).toBe(200);
 });
 
 test("a form that arrived whole but is broken is a 400 (the sender's error), not a 408 to retry", async () => {

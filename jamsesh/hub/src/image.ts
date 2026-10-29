@@ -8,6 +8,8 @@ export type CheckedImage = { kind: "png" | "jpeg"; width: number; height: number
 
 /** Bigger than any screen a room shows; a header claiming more is broken or hostile. */
 const MAX_SIDE = 20_000;
+/** The most a PNG's pixel data may decompress to (an 8K RGBA screenshot is about 130 MB; this is a 4K one twice over). */
+const MAX_DECODED_BYTES = 80 * 1024 * 1024;
 
 /** The image's kind and size, or why it isn't a whole PNG or JPEG. */
 export function checkImage(b: Uint8Array): CheckedImage | string {
@@ -52,13 +54,19 @@ function checkPng(b: Uint8Array): CheckedImage | string {
       if (typeof fit === "string") return fit;
       const row = rowBytes(size.width, size.colorType, size.depth);
       if (!row || !data.length) return "That PNG has no image data.";
+      // Refused before inflating: a small file can claim gigabytes of pixels.
+      const expected = (row + 1) * size.height;
+      if (expected > MAX_DECODED_BYTES) return "That image is too large.";
       let pixels: Uint8Array;
       try {
-        pixels = inflateSync(Buffer.concat(data), { maxOutputLength: (row + 1) * size.height + 1 });
+        pixels = inflateSync(Buffer.concat(data), { maxOutputLength: expected + 1 });
       } catch {
         return "That PNG's image data is damaged.";
       }
-      if (size.interlaced ? !pixels.length : pixels.length !== (row + 1) * size.height) return "That PNG's image data is damaged.";
+      if (size.interlaced) return pixels.length ? fit : "That PNG's image data is damaged.";
+      if (pixels.length !== expected) return "That PNG's image data is damaged.";
+      // Every row starts with one of the five filter types.
+      for (let y = 0; y < size.height; y++) if (pixels[y * (row + 1)] > 4) return "That PNG's image data is damaged.";
       return fit;
     }
     off = end;

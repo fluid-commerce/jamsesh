@@ -1576,9 +1576,14 @@ question; only the owner's words count and the brain's voice handling applies th
 a model. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
 unanswered question goes stale after 5 minutes.
 
-**One item per built screen (3.5).** A new `jam_post_image` or `/api/upload` of the same agent and
-stage, with the same title once "(built)", "v2" and similar marks are dropped, or an explicit
-`replaces` id, becomes the next version of the existing item rather than a new one. Variants
+**One item per built screen (3.5).** A new `jam_post_image` of the same agent and stage, with the
+same title once "(built)", "v2" and similar marks are dropped, or an explicit `replaces` id, becomes
+the next version of the existing item rather than a new one. An `/api/upload` is always a new item:
+a machine's agents share its credential, so an upload can't prove which agent sent it. It must name
+one of the caller's machine's agents; only the host's own window uploads for the room or makes
+versions over HTTP. An uploaded image must be a whole PNG or JPEG (PNG chunks, CRCs, pixel data that
+inflates to its declared size with valid row filters, at most 80 MB decoded; JPEG segments, a frame,
+a scan and its end marker), checked before anything is written. Variants
 ("Nav / A", "Nav / B") stay separate, and one agent can't replace another's item. The item keeps its
 id, so a screen showing it, a pin and the feed all follow the newest build; earlier builds are kept in
 the item's `versions` (up to 20). The tile's badge reads "v3 · 2 min ago" and opens the versions.
