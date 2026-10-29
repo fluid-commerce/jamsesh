@@ -2767,3 +2767,26 @@ test("a real filing failure (an unwritable raw/) stops the pass before it ingest
   }
   expect(decided).toBe(0);
 });
+
+test("a commit is not made while the person's git holds the index; it is made on the next pass and leaves no lock behind", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const headBefore = gitOutOf(dir, "rev-parse", "HEAD");
+  writePage(dir, "two", "# Two\n\nAnother.");
+  const lock = join(dir, ".git", "index.lock");
+  writeFileSync(lock, ""); // their git is mid-operation
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(commitPaths(dir, "Add two", ["wiki/two.md"])).toBe("failed");
+  } finally {
+    console.error = err;
+  }
+  expect(gitOutOf(dir, "rev-parse", "HEAD")).toBe(headBefore); // the branch did not move
+  expect(existsSync(lock)).toBe(true); // and their lock is theirs, untouched
+  rmSync(lock);
+  expect(commitPaths(dir, "Add two", ["wiki/two.md"])).toBe("done");
+  expect(existsSync(lock)).toBe(false);
+  expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki/two.md").trim()).toBe("");
+}, 20_000);

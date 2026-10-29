@@ -226,10 +226,22 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history
       const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : []), "-m", msg])?.trim();
       if (!commit) return "failed";
-      // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
-      if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) continue; // someone committed meanwhile: again from the new HEAD
-      followHead(dir, head, commit, names);
-      return "done";
+      // The person's index is held (git's own lock) while the branch moves and the index follows: a commit is not made at all if it can't be held.
+      const lock = lockIndex(gitDir);
+      if (!lock) {
+        console.error("wiki: the git index was busy; the commit waits for the next pass");
+        return "failed";
+      }
+      let moved = false;
+      try {
+        // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
+        if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) continue; // someone committed meanwhile: again from the new HEAD
+        moved = true;
+        followHead(dir, head, commit, names, lock);
+      } finally {
+        lock.release();
+      }
+      if (moved) return "done";
     }
     return "failed";
   } finally {
@@ -237,32 +249,52 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
   }
 }
 
-/**
- * After the wiki's commit: the person's index entry for each file it changed follows HEAD, unless the person had staged
- * something different there. It is done under git's own index lock, so nothing they stage meanwhile can be overwritten; if
- * the lock stays taken the index is left as it was and that is said loudly (their view then shows the wiki's files as changes
- * until their next `git add` or `git reset`).
- */
-function followHead(dir: string, oldHead: string | null, newHead: string, names: string[]) {
-  const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
-  if (!gitDir) return;
+type IndexLock = { path: string; real: string; release(): void; taken(): void };
+
+/** Takes git's own lock on the index (index.lock, created exclusively), waiting up to a second. Null if someone else holds it. */
+function lockIndex(gitDir: string): IndexLock | null {
   const real = join(gitDir, "index");
-  const lock = `${real}.lock`;
-  let fd: number | null = null;
-  for (let i = 0; i < 20 && fd === null; i++) {
+  const path = `${real}.lock`;
+  for (let i = 0; i < 20; i++) {
     try {
-      fd = openSync(lock, "wx");
+      const fd = openSync(path, "wx");
+      closeSync(fd);
+      let held = true;
+      return {
+        path,
+        real,
+        release() {
+          if (held) rmSync(path, { force: true });
+          held = false;
+        },
+        taken() {
+          held = false; // renamed over the index: nothing left to remove
+        },
+      };
     } catch {
-      Bun.sleepSync(50); // someone else (their git) holds the index right now
+      Bun.sleepSync(50);
     }
   }
-  if (fd === null) return void console.error("wiki: the git index was busy; it was left as it was and will show the wiki's files as changes until the next add or reset");
-  const mine = `${lock}.jamsesh-${process.pid}`;
+  return null;
+}
+
+/**
+ * After the wiki's commit: the person's index entry for each file it changed follows HEAD, unless the person had staged
+ * something different there. The caller holds git's index lock, so nothing they stage meanwhile can be overwritten. If
+ * anything can't be read the index is left exactly as it was (and that is logged): their view then shows the wiki's files
+ * as changes until their next `git add` or `git reset`.
+ */
+function followHead(dir: string, oldHead: string | null, newHead: string, names: string[], lock: IndexLock) {
+  const mine = `${lock.path}.jamsesh-${process.pid}`;
   try {
+    const must = (out: string | null) => {
+      if (out === null) throw new Error("git could not be read");
+      return out;
+    };
     // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
-    const entries = (text: string | null, kind: "index" | "tree") => {
+    const entries = (text: string, kind: "index" | "tree") => {
       const m = new Map<string, string>();
-      for (const rec of (text ?? "").split("\0").filter(Boolean)) {
+      for (const rec of text.split("\0").filter(Boolean)) {
         const tab = rec.indexOf("\t");
         const f = rec.slice(0, tab).split(" ");
         m.set(rec.slice(tab + 1), kind === "index" ? `${f[0]} ${f[1]}` : `${f[0]} ${f[2]}`);
@@ -271,32 +303,26 @@ function followHead(dir: string, oldHead: string | null, newHead: string, names:
     };
     const wanted = new Set(names);
     const only = (m: Map<string, string>) => new Map([...m].filter(([p]) => wanted.has(p)));
-    const index = only(entries(gitOut(dir, ["ls-files", "-s", "-z"]), "index"));
-    const before = only(entries(oldHead ? gitOut(dir, ["ls-tree", "-r", "-z", oldHead]) : "", "tree"));
-    const after = only(entries(gitOut(dir, ["ls-tree", "-r", "-z", newHead]), "tree"));
+    const index = only(entries(existsSync(lock.real) ? must(gitOut(dir, ["ls-files", "-s", "-z"])) : "", "index"));
+    const before = only(entries(oldHead ? must(gitOut(dir, ["ls-tree", "-r", "-z", oldHead])) : "", "tree"));
+    const after = only(entries(must(gitOut(dir, ["ls-tree", "-r", "-z", newHead])), "tree"));
     let info = "";
     for (const p of names) {
       if ((index.get(p) ?? "") !== (before.get(p) ?? "")) continue; // the person staged something different here: theirs stays
       info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
     }
     if (!info) return;
-    // Work on a copy of their index (or HEAD's tree if they have none), then put it in place the way git does: write the lock file, rename it over the index.
-    if (existsSync(real)) copyFileSync(real, mine);
-    const env = { GIT_INDEX_FILE: mine };
-    if (!existsSync(real) && oldHead && gitOut(dir, ["read-tree", oldHead], env) === null) throw new Error("read-tree failed");
-    if (gitOut(dir, ["update-index", "-z", "--index-info"], env, info) === null) throw new Error("update-index failed");
-    copyFileSync(mine, lock);
-    closeSync(fd);
-    fd = null;
-    renameSync(lock, real);
+    // Work on a copy of their index (or HEAD's tree if they have none), then put it in place the way git does: rename the lock file over the index.
+    if (existsSync(lock.real)) copyFileSync(lock.real, mine);
+    else if (oldHead) must(gitOut(dir, ["read-tree", oldHead], { GIT_INDEX_FILE: mine }));
+    must(gitOut(dir, ["update-index", "-z", "--index-info"], { GIT_INDEX_FILE: mine }, info));
+    copyFileSync(mine, lock.path);
+    renameSync(lock.path, lock.real);
+    lock.taken();
   } catch (e) {
-    console.error("wiki: couldn't bring the git index up to date with the wiki's commit:", e instanceof Error ? e.message : e);
+    console.error("wiki: couldn't bring the git index up to date with the wiki's commit; it was left as it was:", e instanceof Error ? e.message : e);
   } finally {
     rmSync(mine, { force: true });
-    if (fd !== null) {
-      closeSync(fd);
-      rmSync(lock, { force: true });
-    }
   }
 }
 
