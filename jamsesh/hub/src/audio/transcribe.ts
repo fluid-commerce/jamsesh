@@ -56,7 +56,6 @@ const CLEAN_VOICE_SNR = 15;
 
 export class Transcriber {
   private engines = new Map<string, Engine>();
-  private localProc: ReturnType<typeof Bun.spawn> | null = null;
 
   /** Why nothing is being heard, when that is the case (shown on the big screen and in Settings). */
   private trouble: string | null = null;
@@ -99,7 +98,8 @@ export class Transcriber {
     if (!config.whisperServerBin || !config.whisperModel) return false;
     const url = `http://127.0.0.1:${port}`;
     if (!(await ping(url))) {
-      this.localProc = this.helpers.track(
+      if (this.helpers.isClosed) return false; // the hub is stopping: no new helper (checked right before the spawn, after the awaited ping)
+      this.helpers.track(
         Bun.spawn(withParentWatch([config.whisperServerBin, "-m", config.whisperModel, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "auto"]), { stdout: "ignore", stderr: "ignore" }),
       );
       for (let i = 0; i < 60 && !(await ping(url)); i++) await Bun.sleep(250);

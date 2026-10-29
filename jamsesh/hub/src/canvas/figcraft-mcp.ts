@@ -22,6 +22,7 @@ export class FigcraftMcp {
   tools: { name: string; description?: string; inputSchema?: any }[] = [];
 
   constructor(bin: string, args: string[] = ["mcp"], env: Record<string, string> = {}, helpers?: HelperRegistry) {
+    helpers?.assertOpen();
     this.proc = Bun.spawn(withParentWatch([bin, ...args]), {
       stdin: "pipe",
       stdout: "pipe",

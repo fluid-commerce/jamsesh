@@ -54,12 +54,19 @@ export class HelperRegistry {
   /** Registers a spawned helper (started with withParentWatch) until it exits. One started after stopAll is stopped at once. */
   track<P extends Helper>(proc: P): P {
     this.procs.add(proc);
-    proc.exited.then(
-      () => this.procs.delete(proc),
-      () => this.procs.delete(proc),
-    );
+    // Only an observed exit removes a helper. If the exit promise rejects, the helper's fate is unknown, so it stays tracked and stopAll still tries to stop it and reports false.
+    proc.exited.then(() => this.procs.delete(proc), () => {});
     if (this.closed) void stopHelper(proc).catch(() => false);
     return proc;
+  }
+
+  /** Throws once stopAll has begun. Every spawn site calls this immediately before Bun.spawn (no await between), so after stopAll starts no new helper can appear that its result doesn't cover. */
+  assertOpen() {
+    if (this.closed) throw new Error("the hub is stopping");
+  }
+
+  get isClosed() {
+    return this.closed;
   }
 
   get size() {

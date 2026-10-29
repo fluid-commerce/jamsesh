@@ -634,8 +634,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     }
   }
 
-  m = path.match(/^\/directives\/([\w-]+)$/);
-  if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
+  // A directive's status is never set from a browser: agents finish it through setDirectiveFor (which checks the exchange) and the brain cancels it.
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;

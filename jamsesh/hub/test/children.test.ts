@@ -165,3 +165,23 @@ test("a helper tracked while stopAll runs is part of the same stop and its resul
   expect(late).not.toBeNull();
   expect(alive(late!.pid)).toBe(false);
 });
+
+test("the registry keeps a helper whose exit promise rejects: stopAll tries to stop it and says false", async () => {
+  const reg = new HelperRegistry();
+  const kills: (string | undefined)[] = [];
+  const failing = { pid: 999999, exited: Promise.reject(new Error("wait failed")) as Promise<number>, kill: (sig?: any) => void kills.push(sig) };
+  reg.track(failing);
+  await Bun.sleep(10);
+  expect(reg.size).toBe(1); // not forgotten
+  expect(await reg.stopAll(100)).toBe(false);
+  expect(kills).toEqual([undefined, "SIGKILL"]);
+});
+
+test("once stopAll has begun, nothing new may be spawned (assertOpen), so its result covers every helper", async () => {
+  const reg = new HelperRegistry();
+  reg.assertOpen(); // open: fine
+  const p = reg.stopAll(100); // closes synchronously, before it first awaits
+  expect(() => reg.assertOpen()).toThrow(/stopping/);
+  expect(await p).toBe(true);
+  expect(() => reg.assertOpen()).toThrow(/stopping/); // and after it returned
+});

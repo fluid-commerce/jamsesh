@@ -131,8 +131,9 @@ the client.
   (canvas server, canvas participants, the key helper, `whisper-server`) runs under a watcher that
   stops it if the hub dies outright, and is tracked in one list that stopping the hub walks:
   `SIGTERM`, then `SIGKILL` for one that ignores it. Shutdown reports the helpers reaped only when
-  each one's exit was seen, and warns otherwise; a helper that starts after shutdown began is
-  stopped at once. (A `whisper-server` already running on its port when the hub starts isn't the
+  each one's exit was seen, and warns otherwise. Once shutdown begins no helper is spawned (every
+  spawn site checks the registry right before spawning), so the result covers every helper there
+  will be; a helper whose exit promise fails stays tracked and counts as not seen. (A `whisper-server` already running on its port when the hub starts isn't the
   hub's, and is left alone.)
 - Opens the **big screen** window at `/host`. With two or more displays it moves to the first
   display that isn't the main one; with one it stays there. It uses same-Space full screen, so

@@ -198,7 +198,7 @@ function startable(steps: { server?: () => Promise<void>; host?: () => Promise<v
   const log: string[] = [];
   const session = { canvas: { status: "off" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; } };
   const canvas: any = { session, stopped: false, startFailures: 0, startRetry: null, timers: [], poller: null, agents: new Map(), host: null, serverProc: null, helpers: new HelperRegistry() };
-  for (const k of ["start", "stop", "halt", "checkRunning"]) canvas[k] = (Canvas.prototype as any)[k];
+  for (const k of ["start", "stop", "halt", "checkRunning", "reapLeftovers"]) canvas[k] = (Canvas.prototype as any)[k];
   canvas.poll = () => {};
   canvas.reapIdleAgents = () => {};
   canvas.watchdog = async () => {};
@@ -529,6 +529,20 @@ test("a failed start whose helper didn't exit says so in the canvas status, and 
     expect(session.canvas.status).toBe("failed");
     expect(session.canvas.reason).toBe("figcraft-cli exited (a helper from that start is still running)");
     expect(canvas.startRetry).not.toBeNull();
+    // The retry doesn't start a second helper while the first is unconfirmed: it tries to stop it again, and stays failed.
+    log.length = 0;
+    canvas.startHost = async () => (log.push("host"), void (canvas.host = { alive: true, close: async () => true }));
+    const stuckHost = canvas.host;
+    stuckHost.close = async () => (log.push("host closed"), false);
+    await canvas.start();
+    expect(log).toEqual(["host closed", "host closed"]); // tried (and tried again in the cleanup); no new server, no new host
+    expect(canvas.host).toBe(stuckHost);
+    expect(session.canvas.status).toBe("failed");
+    // Once the old one is confirmed gone, the start goes ahead.
+    stuckHost.close = async () => (log.push("host closed"), true);
+    await canvas.start();
+    expect(log).toEqual(["host closed", "host closed", "host closed", "server", "host"]);
+    expect(session.canvas.status).not.toBe("failed");
     canvas.halt();
   } finally {
     Canvas.START_RETRY_MS = was;

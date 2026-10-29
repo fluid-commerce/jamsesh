@@ -87,6 +87,7 @@ export class Hub {
 
   /** Every helper process the hub starts; stop() walks it. */
   readonly helpers = new HelperRegistry();
+  private proxyTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private opts: HubOptions = {}) {
     const dir = opts.dataDir ?? config.dataDir;
@@ -155,7 +156,7 @@ export class Hub {
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
     this.autosave.start();
-    setInterval(() => this.devproxy.refresh(), 30_000);
+    this.proxyTimer = setInterval(() => this.devproxy.refresh(), 30_000);
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -179,6 +180,8 @@ export class Hub {
     this.brain.stop();
     this.canvas.halt();
     this.devproxy.stop();
+    if (this.proxyTimer) clearInterval(this.proxyTimer);
+    this.proxyTimer = null;
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
     return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
   }

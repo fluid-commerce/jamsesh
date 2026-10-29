@@ -105,6 +105,9 @@ export class Canvas {
     this.startRetry = null;
     this.session.setCanvas({ status: "starting", reason: null });
     try {
+      // A helper left over from a failed start must be confirmed gone before another is started.
+      await this.reapLeftovers();
+      this.checkRunning();
       await this.startServer();
       this.checkRunning();
       await this.startHost();
@@ -117,20 +120,34 @@ export class Canvas {
       if (!this.stopped) console.error("canvas:", reason);
       // Nothing half-started stays behind: the host participant and the server this start spawned stop.
       // (Each is awaited to its observed exit before its reference is dropped; the registry still holds any that didn't.)
-      const host = this.host;
-      const hostGone = host ? await Promise.resolve(host.close()).catch(() => false) : true;
-      this.host = null;
-      const serverGone = this.serverProc ? await stopHelper(this.serverProc).catch(() => false) : true;
-      this.serverProc = null;
+      const leftover = await this.reapLeftovers().then(() => false, () => true);
       if (this.stopped) return; // stopped mid-start: cleaned up, nothing to report or retry
-      const stuck = hostGone === false || !serverGone;
-      if (stuck) console.warn("canvas: a helper from the failed start is still running; the retry picks a free port");
+      const stuck = leftover;
+      if (stuck) console.warn("canvas: a helper from the failed start is still running; the retry first tries to stop it again");
       this.session.setCanvas({ status: "failed", reason: stuck ? `${reason} (a helper from that start is still running)` : reason });
       if (this.stopped || ++this.startFailures > Canvas.START_RETRIES) return;
       const wait = Math.min(5 * 60_000, Canvas.START_RETRY_MS * 2 ** (this.startFailures - 1));
       this.startRetry = setTimeout(() => void this.start(), wait);
       this.startRetry.unref?.();
     }
+  }
+
+  /**
+   * Stops the host participant and the server a failed start left behind. A helper whose exit wasn't
+   * observed stays referenced (and tracked), so the next start stops it again before spawning another.
+   */
+  private async reapLeftovers() {
+    let stuck = "";
+    if (this.host) {
+      const gone = await Promise.resolve(this.host.close()).catch(() => false);
+      if (gone !== false) this.host = null;
+      else stuck = "host";
+    }
+    if (this.serverProc) {
+      if (await stopHelper(this.serverProc).catch(() => false)) this.serverProc = null;
+      else stuck ||= "server";
+    }
+    if (stuck) throw new Error(`the previous canvas ${stuck} process is still running`);
   }
 
   /** Stop can come while a start is waiting on something: after each wait, a stopped canvas goes no further. */
@@ -169,6 +186,7 @@ export class Canvas {
     if (!existsSync(config.figcraftServerBin) && config.figcraftServerBin.includes("/")) {
       throw new Error(`figcraft-server not found at ${config.figcraftServerBin}. Run jamsesh/install.sh.`);
     }
+    this.helpers.assertOpen();
     this.serverProc = this.helpers.track(
       Bun.spawn(withParentWatch([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir]), {
         stdout: "ignore",
@@ -185,10 +203,9 @@ export class Canvas {
     }
     // Stop it, and report the latest of what it said.
     const proc = this.serverProc;
-    this.serverProc = null;
     await Bun.sleep(100);
     const err = this.serverLog.slice(-300);
-    await stopHelper(proc);
+    if (await stopHelper(proc).catch(() => false)) this.serverProc = null; // else kept: the next start stops it again
     throw new Error(`figcraft-server didn't start${err.trim() ? `: ${err.trim().slice(0, 300)}` : ""}`);
   }
 
@@ -212,6 +229,7 @@ export class Canvas {
 
   private async serverKey(): Promise<string> {
     this.checkRunning();
+    this.helpers.assertOpen();
     const p = this.helpers.track(Bun.spawn(withParentWatch([config.figcraftServerBin, "--data", this.serverDir, "key"]), { stdout: "pipe", stderr: "ignore" }));
     this.keyProc = p;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -422,6 +440,7 @@ export class Canvas {
   // ---------- agents on the canvas ----------
 
   async forAgent(agent: Agent): Promise<FigcraftMcp> {
+    if (this.stopped) throw new Error("The canvas was stopped.");
     const link = this.session.canvas.editLink;
     if (!link) throw new Error(`The canvas isn't live yet (${this.session.canvas.status}${this.session.canvas.reason ? `: ${this.session.canvas.reason}` : ""}).`);
     let a = this.agents.get(agent.id);
@@ -635,8 +654,10 @@ export class Canvas {
     return this.recover(async () => {
       console.warn("canvas: the canvas server stopped; starting it again");
       // Wait for the old server to let go of its port, so the new one comes up on the same links.
-      if (this.serverProc) await stopHelper(this.serverProc);
-      this.serverProc = null;
+      if (this.serverProc) {
+        if (!(await stopHelper(this.serverProc).catch(() => false))) throw new Error("The old canvas server is still running; not starting a second one.");
+        this.serverProc = null;
+      }
       await this.startServer();
       const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
       if (!this.host || !saved) throw new Error("The canvas server restarted but there is no session file to rejoin; restart JamSesh.");

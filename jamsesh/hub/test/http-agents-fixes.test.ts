@@ -133,3 +133,26 @@ test("POST /directives: a coordinate directive needs another agent to compare wi
   // Other modes are unaffected.
   expect((await fetch(`${base}/api/directives`, { method: "POST", headers: h, body: JSON.stringify({ text: "Add the footer", mode: "implement", targets: [mobile.id] }) })).status).toBe(200);
 });
+
+test("a paired browser can't set a directive's status: coordinate directives finish only through the agents' exchange", async () => {
+  const reg = (repo: string) => hub.session.registerAgent({ ownerName: "Jo", harness: "claude-code", repo, cwd: `/${repo}`, machine: "m1", platform: "desktop", branch: "main" }).agent;
+  const a = reg("acme/one");
+  const b = reg("acme/two");
+  const d = hub.session.createDirective({ text: "Compare", mode: "coordinate", targets: [a.id, b.id], counterparts: [a.id, b.id], requestedBy: "Jo", rationale: "x" });
+  const h = { "content-type": "application/json", authorization: `Bearer ${browser.token}`, ...hostWindow };
+  for (const method of ["POST", "PATCH", "PUT"]) {
+    const r = await fetch(`${base}/api/directives/${d.id}`, { method, headers: h, body: JSON.stringify({ status: "done" }) });
+    expect(r.status).toBeGreaterThanOrEqual(400);
+  }
+  expect(hub.session.store.get("directives", d.id)!.status).not.toBe("done");
+});
+
+test("a stopped canvas gives no agent a new participant", async () => {
+  const c = Object.create(Canvas.prototype) as any;
+  c.stopped = true;
+  let spawned = 0;
+  c.spawnParticipant = () => void spawned++;
+  c.session = { canvas: { editLink: "ws://x/?token=t", status: "live" } };
+  await expect(c.forAgent({ id: "a1", name: "A" })).rejects.toThrow(/stopped/);
+  expect(spawned).toBe(0);
+});

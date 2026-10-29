@@ -62,7 +62,7 @@ test("Hub.stop stops a local whisper the hub started (one that ignores SIGTERM t
     expect(alive(pid)).toBe(true);
     expect(hub.helpers.size).toBe(1);
     expect(await hub.stop()).toBe(true);
-    expect(alive(pid)).toBe(false);
+    expect(await until(() => !alive(pid), 2_000)).toBe(true); // SIGKILL lands a few ms after the wrapper's exit is seen
     expect(hub.helpers.size).toBe(0);
   }), 30_000);
 
@@ -99,3 +99,15 @@ test("a local whisper dies within seconds of its hub being killed outright", asy
     hub.kill("SIGKILL");
   }
 }, 30_000);
+
+test("whisper can't start during or after Hub.stop, and no process is left", () =>
+  withWhisper(fakeWhisper("whisper-d").bin, async () => {
+    const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
+    const during = hub.transcriber.startLocal(freePort()); // blocked on its ping
+    const stopping = hub.stop(); // closes the registry before the start gets to spawn
+    expect(await during).toBe(false);
+    expect(await stopping).toBe(true);
+    expect(await hub.transcriber.startLocal(freePort())).toBe(false); // after stop
+    expect(hub.helpers.size).toBe(0);
+    expect(existsSync(join(dir, "whisper-d.pid"))).toBe(false); // never ran
+  }), 30_000);
