@@ -1507,7 +1507,7 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   that is no longer the device's current recording closes nothing. The older `POST /api/prompt-window/start` is refused (409, nothing changes)
   while a recording runs on that device. A line belongs to the recording it began in: it began at or after Start and before Stop, with
   300 ms more for the recording being stopped (a last word still in transcription), never past the Start of the next recording on the
-  same device, so no line is in two recordings. A line that began before Start is ordinary speech. A Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
+  same device (the hub keeps the device's recent Start times, so the bound stands even if that next recording is replaced or ends while the first is still waiting), so no line is in two recordings. A line that began before Start is ordinary speech. A Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
   returns **notes**, one per thing said, each pinned to the spot being pointed at while it was said.
   Nothing is sent yet. A note keeps the item, the position in it, the page of a build, the scroll
   position, the canvas frame or node id and canvas point, the big screen it was on, and who said it.

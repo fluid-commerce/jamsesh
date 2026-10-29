@@ -35,3 +35,8 @@ export function pinWords(n: RecordNote) {
   const t = n.pin.target;
   return `${t.label}, ${spot(n.pin.x, n.pin.y)}${t.page ? ` · ${t.page}` : ""}${n.screenId ? " · big screen" : ""}`;
 }
+
+/** A recording that began after its page went away has nobody to stop it: closes it, sending the words alone. */
+export function closeUnattended(post: (path: string, body: object) => Promise<unknown>, deviceId: string, personId: string | null, recordingId: string) {
+  return post("/prompt-window", { deviceId, personId, recordingId, pointer: [] }).catch(() => {});
+}

@@ -242,6 +242,26 @@ test("no more than four live apps at once", async () => {
   hub.live.stopAll();
 });
 
+test("a Mac helper that stays open but never reports a window ends its tile and is stopped, not shown as a live blank", async () => {
+  const quiet = join(dir, "quiet-live");
+  writeFileSync(
+    quiet,
+    `#!/bin/bash
+[ "$1" = "--apps" ] && { echo '[{"pid":51,"bundle":"com.example.quiet","name":"Quiet App"}]'; exit 0; }
+echo $$ > "${dir}/quiet-pid"
+exec sleep 60
+`,
+  );
+  chmodSync(quiet, 0o755);
+  const r = await hub.live.startMac({ name: "Quiet App" }, "Maya", [quiet]);
+  expect(typeof r).toBe("string");
+  expect(String(r)).toContain("window");
+  expect(hub.live.list().filter((a) => a.name === "Quiet App")).toHaveLength(0);
+  const pid = Number(readFileSync(join(dir, "quiet-pid"), "utf8").trim());
+  await new Promise((res) => setTimeout(res, 300));
+  expect(() => process.kill(pid, 0)).toThrow();
+}, 30_000);
+
 test("a Mac app's helper: frames come out, input goes in, and its errors become words", async () => {
   // A stand-in for jamsesh-live: says its window size, sends one framed JPEG, echoes input to a file, then exits on stdin EOF.
   const fake = join(dir, "fake-live");

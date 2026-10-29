@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { closeUnattended, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -34,4 +34,11 @@ test("a spot reads in words", () => {
 test("a send is told in words: who got how many, and what went to the brain", () => {
   expect(sendSummary({ ok: true, sent: [{ agentName: "Atlas", notes: 2 }, { agentName: "Juno", notes: 1 }], brain: 1 }, "Computah").text).toBe("2 notes to Atlas, 1 note to Juno, 1 note to Computah");
   expect(sendSummary({ ok: true, sent: [], brain: 3 }, "Computah").text).toBe("3 notes to Computah");
+});
+
+test("a recording that began after its page was gone is closed by id, with the words alone; a failed close is swallowed", async () => {
+  const calls: [string, object][] = [];
+  await closeUnattended(async (path, body) => void calls.push([path, body]), "dev1", "p1", "rec9");
+  expect(calls).toEqual([["/prompt-window", { deviceId: "dev1", personId: "p1", recordingId: "rec9", pointer: [] }]]);
+  await closeUnattended(async () => { throw new Error("offline"); }, "dev1", null, "rec9");
 });

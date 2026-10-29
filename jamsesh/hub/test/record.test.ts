@@ -790,6 +790,53 @@ test("speech belongs to one recording: the stopping one's 300 ms never reaches i
   expect(gotC.ok && gotC.notes.map((n) => n.text)).toEqual(["inside C"]);
 }, 60_000);
 
+test("a recording's speech stops at the next start even after that next recording is replaced or ended during the wait", async () => {
+  const r = room();
+  const base = Date.now() - 60_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "said in A", r.maya.id, "mayaLaptop", base + 1000);
+  r.at(base + 5000);
+  const stoppingA = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  // B starts inside A's slack, a line of B's lands, then B is replaced by C and C is stopped before A's wait is over.
+  r.at(base + 5100);
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!b.ok) throw new Error("start");
+  line(r.hub, "said in B", r.maya.id, "mayaLaptop", base + 5200);
+  r.at(base + 5400);
+  const c = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!c.ok) throw new Error("start");
+  r.at(base + 5600);
+  await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: c.id, caller: "host", personId: r.maya.id, pointer: [], typed: "c" });
+  const gotA = await stoppingA;
+  expect(gotA.ok && gotA.notes.map((n) => n.text)).toEqual(["said in A"]);
+}, 60_000);
+
+test("a send that fails after a directive went out repeats nothing when it is tried again", async () => {
+  const r = room();
+  const atlas = r.reg("Ben", "acme/web");
+  const juno = r.reg("Ana", "acme/api");
+  const a = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", agentId: atlas.id, image: "/renders/a.png" });
+  const b = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "B", agentId: juno.id, image: "/renders/b.png" });
+  const recordingId = await r.stopped();
+  const notes = [a, b].map((x, i) => ({ id: `n${i}`, text: `fix ${x.title}`, t0: 1, t1: 2, pin: { target: { kind: "artifact", ref: x.id, label: x.title }, x: 0.5, y: 0.5, kind: "click" } }));
+  // The second directive's write fails once.
+  const real = r.s.createDirective.bind(r.s);
+  let calls = 0;
+  (r.s as any).createDirective = (...args: any[]) => {
+    if (++calls === 2) throw new Error("database is locked");
+    return (real as any)(...args);
+  };
+  expect((await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).status).toBeGreaterThanOrEqual(500);
+  expect(r.s.directives().length).toBe(1);
+  const retry = await r.post("/record/send", { recordingId, personId: r.maya.id, notes });
+  expect(retry.status).toBe(200);
+  expect(((await retry.json()) as any).sent.length).toBe(2);
+  expect(r.s.directives().length).toBe(2);
+  expect(r.s.annotations().length).toBe(2);
+}, 60_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

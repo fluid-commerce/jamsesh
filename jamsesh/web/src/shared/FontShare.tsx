@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { pref, useHub } from "./hub";
 import { macInvoke } from "./canvasJoin";
-import { familyKey, openQuestions } from "./roomFonts";
+import { familyKey, lookUpFonts, openQuestions } from "./roomFonts";
 import { declineFont, withdrawFont } from "./roomFontsApi";
 
 const MAX_OFFERS = 3;
@@ -15,6 +15,8 @@ export function FontShare() {
   const me = pref("personId") || null;
   const [has, setHas] = useState<string[]>([]);
   const [answered, setAnswered] = useState<Set<string>>(new Set());
+  const [retry, setRetry] = useState(0);
+  const tries = useRef(0);
   const checked = useRef(new Set<string>());
   const wanted = state?.fonts?.wanted ?? [];
   const available = state?.fonts?.available ?? [];
@@ -23,11 +25,12 @@ export function FontShare() {
   const unchecked = open.filter((w) => !checked.current.has(w.key)).map((w) => w.family);
   useEffect(() => {
     if (!invoke || !unchecked.length) return;
-    for (const f of unchecked) checked.current.add(familyKey(f));
-    invoke("has_fonts", { families: unchecked })
-      .then((names: string[]) => Array.isArray(names) && setHas((h) => [...new Set([...h, ...names.map(familyKey)])]))
-      .catch(() => {});
-  }, [unchecked.join("|")]);
+    lookUpFonts(invoke, unchecked, checked.current).then((names) => {
+      if (names) setHas((h) => [...new Set([...h, ...names.map(familyKey)])]);
+      // A lookup that failed is tried again a few times, not forgotten until the page reloads.
+      else if (++tries.current <= 3) setTimeout(() => setRetry((n) => n + 1), 5000);
+    });
+  }, [unchecked.join("|"), retry]);
   const mine = available.filter((f) => f.kind === "borrowed" && me && f.lenderId === me);
   const offers = invoke ? open.filter((w) => has.includes(w.key)).slice(0, MAX_OFFERS) : [];
   if (!offers.length && !mine.length) return null;

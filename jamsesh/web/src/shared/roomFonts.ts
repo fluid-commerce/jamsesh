@@ -80,3 +80,15 @@ export function openQuestions(wanted: FontWant[], available: FontInfo[], me: str
   const have = new Set(available.map((f) => f.key));
   return wanted.filter((w) => !have.has(w.key) && !w.declinedBy.includes(me) && !answered.has(w.key));
 }
+
+/** Asks the Mac which of these families it has. Families are marked checked while asking; a failed lookup unmarks them so it can be asked again. */
+export async function lookUpFonts(invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>, families: string[], checked: Set<string>): Promise<string[] | null> {
+  for (const f of families) checked.add(familyKey(f));
+  try {
+    const names = await invoke("has_fonts", { families });
+    return Array.isArray(names) ? names.map(String) : [];
+  } catch {
+    for (const f of families) checked.delete(familyKey(f));
+    return null;
+  }
+}

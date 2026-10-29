@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { sendSummary, type RecordNote, type SendReply } from "./notes";
+import { closeUnattended, sendSummary, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -799,6 +799,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   const fail = (reason: string, title = "Nothing recorded") => setResult({ ok: false, title, text: reason, pills: [] });
 
   const starting = useRef(false);
+  const alive = useRef(true);
   const unmuted = useRef(false);
   const start = async () => {
     if (recRef.current.phase !== "idle" || starting.current || review) return;
@@ -821,6 +822,12 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       } catch (e) {
         if (unmuted.current) (unmuted.current = false, mic?.stop());
         return fail(e instanceof Error ? e.message : screen ? "Couldn't record the big screen." : "Couldn't start recording.");
+      }
+      // The page went away while the hub was answering: nothing is left to stop this recording, so it is closed here.
+      if (!alive.current) {
+        if (unmuted.current) (unmuted.current = false, mic?.stop());
+        void closeUnattended((path, body) => api(path, body, undefined, { queue: false, timeoutMs: 15_000 }), hub.deviceId, who.current, id);
+        return;
       }
       const r = (recorder.current = new PointerRecorder());
       if (screen) {
@@ -945,8 +952,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       return true;
     };
     const onHide = () => release(true);
+    alive.current = true;
     window.addEventListener("pagehide", onHide);
     return () => {
+      alive.current = false;
       window.removeEventListener("pagehide", onHide);
       if (!release(false)) void recorder.current?.stop();
     };

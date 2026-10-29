@@ -83,6 +83,8 @@ interface PromptWindow {
   rec?: string;
 }
 
+type SendProgress = { directives: Map<string, string>; brain?: boolean };
+
 export class Hub {
   store: Store;
   session: Session;
@@ -365,10 +367,10 @@ export class Hub {
     const max = open?.max ?? Hub.PROMPT_MAX_MS;
     // A line belongs to this recording if it began after the recording did and before it stopped. Only the stopping recording gets the
     // 300 ms for a last word still being transcribed, and never past the start of the next recording on this device: no line is in two.
+    // The bound is the earliest start after this one, from the device's log of starts: it holds even if that successor is replaced or ends first.
     const upto = () => {
-      const cur = this.recs.get(w.deviceId);
-      const next = cur && cur.id !== ownId && cur.t0 >= w.t0 ? cur.t0 : Infinity;
-      return Math.min(w.t1 + 300, next);
+      const next = (this.starts.get(w.deviceId) ?? []).find((x) => x.id !== ownId && x.t0 >= w.t0);
+      return Math.min(w.t1 + 300, next ? next.t0 : Infinity);
     };
     const heard = () => s.store.all("utterances").filter((u) => u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
@@ -441,6 +443,8 @@ export class Hub {
    * that lock is given back: never one someone took after it.
    */
   private recs = new Map<string, { id: string; t0: number; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number; stopping?: boolean }>();
+  /** Each device's recent recording starts, oldest first: a recording's speech never runs past the next start, whatever became of that one. */
+  private starts = new Map<string, { id: string; t0: number }[]>();
   private recSweep = (() => {
     const t = setInterval(() => this.sweepRecordings(), 15_000);
     t.unref?.();
@@ -451,7 +455,7 @@ export class Hub {
    * the right to send and the receipt of the send are kept and dropped together (the oldest 200 go): a record that is gone is a 404,
    * never a send that happens a second time. A repeated send (a lost reply, a double click) gets the same answer and does nothing twice.
    */
-  private noteRecs = new Map<string, { caller: string; personId: string | null; sending?: Promise<RecordSendResult> }>();
+  private noteRecs = new Map<string, { caller: string; personId: string | null; sending?: Promise<RecordSendResult>; done: SendProgress }>();
 
   /**
    * Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last
@@ -497,6 +501,8 @@ export class Hub {
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
     if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
     this.recs.set(deviceId, rec);
+    const log = [...(this.starts.get(deviceId) ?? []), { id, t0 }].sort((a, b) => a.t0 - b.t0);
+    this.starts.set(deviceId, log.slice(-20));
     s.setRecording({ id, deviceId, personId: rec.personId, personName: person?.name ?? "Someone", screenId, since: Date.now() });
     return { ok: true, id };
   }
@@ -565,7 +571,7 @@ export class Hub {
       n.ownerName = owner ? s.agent(owner)?.name ?? null : null;
     }
     const recordingId = rec.id;
-    this.noteRecs.set(recordingId, { caller: w.caller, personId: person?.id ?? null });
+    this.noteRecs.set(recordingId, { caller: w.caller, personId: person?.id ?? null, done: { directives: new Map() } });
     if (this.noteRecs.size > NOTE_RECS_MAX) this.noteRecs.delete(this.noteRecs.keys().next().value!);
     return { ok: true, recordingId, notes };
   }
@@ -613,7 +619,7 @@ export class Hub {
     // Reserved before anything waits, so two sends at once share one.
     if (owner.sending) return owner.sending;
     // Nothing went out (no notes, or it failed): the reservation goes, so a corrected send may follow.
-    const sending: Promise<RecordSendResult> = this.sendNotes(person, w.recordingId, w.notes).then(
+    const sending: Promise<RecordSendResult> = this.sendNotes(person, w.recordingId, w.notes, owner.done).then(
       (r) => (r.ok || owner.sending !== sending || (owner.sending = undefined), r),
       (e) => {
         if (owner.sending === sending) owner.sending = undefined;
@@ -624,7 +630,8 @@ export class Hub {
     return sending;
   }
 
-  private async sendNotes(person: { id: string; name: string }, recordingId: string, raw: RecordNote[]): Promise<RecordSendResult> {
+  /** `done` is what this recording has already delivered: a send that failed part-way and is tried again repeats none of it. */
+  private async sendNotes(person: { id: string; name: string }, recordingId: string, raw: RecordNote[], done: SendProgress): Promise<RecordSendResult> {
     const s = this.session;
     const w = { recordingId, notes: raw };
     const clamp = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
@@ -653,7 +660,7 @@ export class Hub {
         const have = s.store.all("annotations").find((a) => a.recordingId === w.recordingId && a.noteId === n.id);
         const ann = have ?? s.addAnnotation({ personId: person.id, target: n.pin.target, x: n.pin.x, y: n.pin.y, text: n.text, source: "pin", scroll: n.pin.scroll ?? null, screenId: n.screenId ?? null, recordingId: w.recordingId, noteId: n.id, crop });
         pins.push(ann);
-        if (ann.target.kind === "canvas" && ann.target.canvasX != null) this.canvas.comment(ann).catch(() => {});
+        if (!have && ann.target.kind === "canvas" && ann.target.canvasX != null) this.canvas.comment(ann).catch(() => {});
       }
       const item = { n, crop };
       if (owner) byAgent.set(owner, [...(byAgent.get(owner) ?? []), item]);
@@ -662,6 +669,11 @@ export class Hub {
 
     const sent: { agentId: string; agentName: string; notes: number; directiveId: string }[] = [];
     for (const [agentId, items] of byAgent) {
+      const had = done.directives.get(agentId);
+      if (had) {
+        sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: had });
+        continue;
+      }
       const lines = items.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
       const d = s.createDirective({
         text: `Notes from ${person.name}'s recording (${items.length}). Each is what they said while pointing at the spot described:\n${lines.join("\n")}`,
@@ -670,9 +682,10 @@ export class Hub {
         targets: [agentId],
         requestedBy: person.name,
       });
+      done.directives.set(agentId, d.id);
       sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: d.id });
     }
-    if (loose.length) {
+    if (loose.length && !done.brain) {
       const lines = loose.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
       const ev = s.store.addEvent({
         kind: "speech",
@@ -684,6 +697,7 @@ export class Hub {
         data: { direct: true, typed: true, recorded: true, recordingId: w.recordingId },
       });
       this.brain.direct(ev, "These notes were pinned to things no agent owns (or to nothing). Decide who should handle each, send one directive per agent quoting the note and where it was pinned, and say so if there is no one.");
+      done.brain = true;
     }
     for (const a of pins) s.store.patch("annotations", a.id, { status: "sent" });
     return { ok: true, sent, brain: loose.length, pins: pins.map((p) => p.id) };

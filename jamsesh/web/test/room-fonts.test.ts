@@ -2,7 +2,7 @@
 // the person with a font is asked once; and a font file never goes into the offline outbox.
 import "fake-indexeddb/auto";
 import { expect, test } from "bun:test";
-import { bytesToBase64, FACE_TRIES, familyKey, loadFonts, newFontMemory, openQuestions, type RoomFonts } from "../src/shared/roomFonts";
+import { bytesToBase64, FACE_TRIES, familyKey, loadFonts, lookUpFonts, newFontMemory, openQuestions, type RoomFonts } from "../src/shared/roomFonts";
 import { api } from "../src/shared/hub";
 import { idbTable, outbox } from "../src/shared/offline";
 
@@ -173,4 +173,12 @@ test("a font file is never saved on this laptop for later: with the network down
     globalThis.fetch = realFetch;
     await idbTable("outbox").clear();
   }
+});
+
+test("a failed lookup of which fonts this Mac has can be asked again; a good one stays checked", async () => {
+  const checked = new Set<string>();
+  expect(await lookUpFonts(async () => { throw new Error("native call failed"); }, ["Inter"], checked)).toBeNull();
+  expect(checked.size).toBe(0);
+  expect(await lookUpFonts(async () => ["Inter"], ["Inter"], checked)).toEqual(["Inter"]);
+  expect(checked.size).toBe(1);
 });

@@ -220,6 +220,8 @@ export class LiveApps {
     void this.readHelper(live, proc);
     // The first word from the helper says whether it's capturing; an error ends the tile at once.
     for (let i = 0; i < 60 && live.info.width === 0 && live.info.status === "live"; i++) await sleep(100);
+    // A helper that stays open but never says anything isn't capturing: the tile ends and the helper is stopped.
+    if (live.info.status === "live" && live.info.width === 0) this.end(live, "The app's window didn't start. Is the app open with a window?");
     if (live.info.status !== "live") {
       const why = live.info.note ?? "The app's window couldn't be captured.";
       this.apps.delete(live.info.id);
