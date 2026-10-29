@@ -205,6 +205,11 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
     for (let i = 0; i < parts.length; i++) {
       const e = parts[i];
       if (e.length < 4) continue;
+      // A change that is only staged (index column set, work tree column blank) is a person's own staging: left alone, never re-added.
+      if (e[1] === " " && e[0] !== "?") {
+        if (e[0] === "R" || e[0] === "C") i++;
+        continue;
+      }
       if (own(e.slice(3))) out.add(e.slice(3));
       if (e[0] === "R" || e[0] === "C") {
         i++; // a rename lists the old name next

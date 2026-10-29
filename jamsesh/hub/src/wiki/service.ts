@@ -24,8 +24,6 @@ import {
 const EVERY_MS = 15 * 60_000;
 const MAX_BATCH_SOURCES = 8;
 const MAX_BATCH_CHARS = 60_000;
-/** Most page paths kept as owed to a commit; past it the debt becomes the whole wiki folder. */
-const OWED_MAX = 200;
 const MAX_PAGES_PER_INGEST = 15;
 const AGENT_SOURCES_PER_HOUR = 30;
 const STALE_DAYS = 45;
@@ -246,38 +244,16 @@ export class WikiService {
   }
 
   /**
-   * One commit of the files named, the sources that changed, the index and the log, plus any page paths an earlier commit
-   * did not make (git was unwell, or couldn't list raw/). Those are kept in the state file until a commit succeeds or has
-   * nothing to add, so no page version is left out of history for good, even across a restart.
+   * One commit of the files named, the page and source files git reports as changed (the commit debt: whatever an earlier
+   * commit did not make is still changed, so git itself is the record and no state has to survive), the index and the log.
+   * If git can't say what changed, nothing is committed this time and those changes wait for the next commit.
    */
   private commitOwn(message: string, paths: string[]) {
-    let st: WikiState | null = null;
-    try {
-      st = readState(this.dir);
-    } catch {}
-    // On disk and in memory both: a state file that can't be read or written doesn't lose what is owed.
-    for (const p of [...(st?.owed ?? []), ...paths]) this.owedPaths.add(p);
-    // Past the cap the list collapses to the wiki folder as a whole (a full add of it): the debt stays small however long git is unwell.
-    if (this.owedPaths.size > OWED_MAX) this.owedPaths = new Set(); // git's own list of changed pages (below) takes over
-    // "wiki" stands for every page file in the folder, named one by one: a person's other files there are never swept in.
-    // What git says is changed among the pages is owed too, whatever any state file remembers (deletions included).
-    const changed = pagePaths(this.dir);
-    const named = changed ? [...new Set([...this.owedPaths, ...changed])] : [...this.owedPaths];
     const raw = rawPaths(this.dir);
-    const result = raw && changed ? commitPaths(this.dir, message, [...named, "index.md", "log.md", ...raw]) : "failed";
-    if (result !== "failed") this.owedPaths.clear();
-    const left = [...this.owedPaths];
-    try {
-      const now = readState(this.dir);
-      if ((now.owed ?? []).join("\n") !== left.join("\n")) writeState(this.dir, { ...now, ...(left.length ? { owed: left } : { owed: undefined }) });
-    } catch (e) {
-      // Not silent: the commit debt is only in memory until a write succeeds.
-      bus.send({ type: "toast", tone: "warn", text: "The wiki couldn't note a change it still owes its history", detail: errText(e).slice(0, 100) });
-      console.error(`wiki: couldn't record ${left.length} page${left.length === 1 ? "" : "s"} waiting for a commit (${errText(e)}); they are kept in memory and tried again.`);
-    }
+    const changed = pagePaths(this.dir);
+    if (!raw || !changed) return;
+    commitPaths(this.dir, message, [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]));
   }
-
-  private owedPaths = new Set<string>();
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
   private finish(message: string, pages: string[], key?: string) {
@@ -600,15 +576,18 @@ export class WikiService {
       this.checkState(); // before anything is written
       this.drainQueue();
       this.agentUpdate();
+      let filed = true;
       try {
         this.syncVault();
         this.catchUpLog();
         this.archiveOld(); // only once every source has its log line
       } catch (e) {
+        filed = false;
         console.error("wiki:", errText(e));
       }
       this.captureTranscript(final);
-      return this.ingestNow();
+      // A hand edit that couldn't be filed is not built on (or written over) by an ingest this pass: it is found again at the next.
+      return filed ? this.ingestNow() : null;
     });
   }
 

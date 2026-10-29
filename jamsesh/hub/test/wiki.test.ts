@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -2639,74 +2639,10 @@ test("a page whose commit was skipped because git couldn't list raw/ is named by
   expect(history).toContain("wiki/skipped.md"); // in a commit, not only in the index
 });
 
-test("a page whose commit failed stays owed across a restart until a commit succeeds", () => {
-  if (!gitAvailable()) return;
-  const { w, dir, s } = room();
-  w.editPage("first", "# First\n\nA page.", { by: "Chey" });
-  const index = readFileSync(join(dir, ".git", "index"));
-  writeFileSync(join(dir, ".git", "index"), "not an index");
-  const err = console.error;
-  console.error = () => {};
-  try {
-    w.editPage("owed-page", "# Owed\n\nMade while git was unwell.", { by: "Chey" });
-  } finally {
-    console.error = err;
-  }
-  expect(readState(dir).owed).toContain("wiki/owed-page.md"); // on disk, not only in memory
-  writeFileSync(join(dir, ".git", "index"), index);
-  const again = new WikiService(s, dir, s.sessionId); // a restart
-  again.editPage("after", "# After\n\nLater.", { by: "Chey" });
-  expect(Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString()).toContain("wiki/owed-page.md"); // committed
-  expect(readState(dir).owed).toBeUndefined();
-});
 
-test("commit debt is bounded and needs no state: git's list of changed pages is taken, a person's other files stay out", () => {
-  if (!gitAvailable()) return;
-  const { w, dir } = room();
-  w.editPage("seed", "# Seed\n\nA page.", { by: "Chey" });
-  const index = readFileSync(join(dir, ".git", "index"));
-  writeFileSync(join(dir, ".git", "index"), "not an index");
-  writeFileSync(join(dir, "wiki", "notes.txt"), "a person's own file");
-  const err = console.error;
-  console.error = () => {};
-  try {
-    for (let i = 0; i < 205; i++) writePage(dir, `bulk-${i}`, `# Bulk ${i}\n\nPage ${i}.`);
-    (w as any).commitOwn("many pages", Array.from({ length: 205 }, (_, i) => `wiki/bulk-${i}.md`));
-  } finally {
-    console.error = err;
-  }
-  expect(readState(dir).owed ?? []).toEqual([]); // not 205 paths in the state: git itself knows what changed
-  writeFileSync(join(dir, ".git", "index"), index);
-  (w as any).commitOwn("recovered", []);
-  const history = Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString();
-  expect(history).toContain("wiki/bulk-204.md");
-  expect(history).not.toContain("notes.txt");
-  expect(readState(dir).owed).toBeUndefined();
-});
 
-test("a failed write of the commit debt is reported, not swallowed", () => {
-  if (!gitAvailable()) return;
-  const { w, dir } = room();
-  const index = readFileSync(join(dir, ".git", "index"));
-  writeFileSync(join(dir, ".git", "index"), "not an index");
-  const errors: string[] = [];
-  const err = console.error;
-  console.error = (...a: unknown[]) => void errors.push(a.join(" "));
-  const was = io.rename;
-  try {
-    (io as any).rename = () => {
-      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
-    };
-    (w as any).commitOwn("one page", ["wiki/one.md"]);
-  } finally {
-    (io as any).rename = was;
-    console.error = err;
-    writeFileSync(join(dir, ".git", "index"), index);
-  }
-  expect(errors.join("\n")).toContain("waiting for a commit");
-});
 
-test("commit debt survives losing the state file: a deleted page and a changed one are recovered from git itself", () => {
+test("a changed and a deleted page are committed by the next commit even though nothing recorded them", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
   w.editPage("keep", "# Keep\n\nA page.", { by: "Chey" });
@@ -2714,9 +2650,41 @@ test("commit debt survives losing the state file: a deleted page and a changed o
   // Changes made while nothing recorded them as owed: no state, git otherwise unable to commit.
   rmSync(join(dir, "wiki", "gone.md"));
   writePage(dir, "keep", "# Keep\n\nChanged behind the wiki's back.");
-  (w as any).owedPaths = new Set();
   (w as any).commitOwn("recover", []);
   const history = Bun.spawnSync(["git", "log", "--name-status", "--pretty=format:%s"], { cwd: dir }).stdout.toString();
   expect(history).toMatch(/D\s+wiki\/gone\.md/);
   expect(Bun.spawnSync(["git", "status", "--porcelain", "--", "wiki"], { cwd: dir }).stdout.toString().trim()).toBe("");
+});
+
+test("pagePaths names unstaged page changes and leaves a person's staged-only change alone", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("mine", "# Mine\n\nCommitted.", { by: "Chey" });
+  w.editPage("theirs", "# Theirs\n\nCommitted.", { by: "Chey" });
+  const edit = (slug: string) => writeFileSync(join(dir, "wiki", `${slug}.md`), readFileSync(join(dir, "wiki", `${slug}.md`), "utf8") + "\nMore.\n");
+  edit("mine");
+  Bun.spawnSync(["git", "add", "wiki/mine.md"], { cwd: dir }); // staged only
+  edit("theirs"); // changed, not staged
+  expect(pagePaths(dir)).toEqual(["wiki/theirs.md"]);
+});
+
+test("a pass whose hand edits could not be filed does not ingest over them", async () => {
+  const { w, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  writeFileSync(join(dir, "wiki", "pricing.md"), readFileSync(join(dir, "wiki", "pricing.md"), "utf8").replace("Two", "Three"));
+  let decided = 0;
+  w.decide = (async () => (decided++, { summary: "x", pages: [] })) as Decider;
+  w.addSource("document", "A note", "Something to ingest.", "Chey");
+  (w as any).syncVault = () => {
+    throw new Error("filing failed");
+  };
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(await w.tick()).toBeNull();
+  } finally {
+    console.error = err;
+  }
+  expect(decided).toBe(0);
 });
