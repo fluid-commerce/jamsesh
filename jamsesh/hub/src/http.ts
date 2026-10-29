@@ -291,7 +291,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
             s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
-            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id);
+            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id, "ended", { lost: true });
           }
         }
       },
@@ -587,6 +587,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/shares" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
     if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
+    // A share someone ended stays ended: its window re-registering it (after missing the end) is told so and stops.
+    const was = typeof body.shareId === "string" ? s.store.get("shares", body.shareId) : undefined;
+    if (was && was.deviceId === String(body.deviceId) && (was.status === "ended" || was.status === "declined") && !was.lost) return bad("That share was ended.", 409);
     const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
     s.placeShare(share);
     return json(share);
@@ -605,7 +608,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
     const asked = decline && !!paired?.personId && sh.personId === paired.personId;
     if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
-    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended");
+    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended", { note: !own && sh.status === "live" ? `The host stopped your ${sh.kind} share.` : "" });
     return json({ ok: true });
   }
 
