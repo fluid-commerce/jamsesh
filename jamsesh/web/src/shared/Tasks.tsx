@@ -152,14 +152,15 @@ function useAct() {
 }
 
 const workers = (state: HubState) => state.agents.filter((a) => a.role !== "observer" && a.status !== "offline");
-const agentNames = (state: HubState, ids: string[]) => ids.map((id) => state.agents.find((a) => a.id === id)?.name ?? "an agent");
+/** `known`: names a card kept for its agents, so one that left is still named. */
+const agentNames = (state: HubState, ids: string[], known?: Record<string, string>) => ids.map((id) => state.agents.find((a) => a.id === id)?.name ?? known?.[id] ?? "an agent");
 
-function AgentTag({ state, ids }: { state: HubState; ids: string[] }) {
+function AgentTag({ state, ids, known }: { state: HubState; ids: string[]; known?: Record<string, string> }) {
   if (!ids.length) return <span className="tk-tag warn">No agent chosen</span>;
   return (
-    <span className="tk-tag agent" title={agentNames(state, ids).join(", ")}>
+    <span className="tk-tag agent" title={agentNames(state, ids, known).join(", ")}>
       <span className="tk-agent-dot" style={{ background: colorFor(state, { agentId: ids[0] }) }} />
-      <span className="ellipsis">{agentNames(state, ids).join(", ")}</span>
+      <span className="ellipsis">{agentNames(state, ids, known).join(", ")}</span>
     </span>
   );
 }
@@ -322,6 +323,18 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
         </p>
       )}
 
+      {card.unavailable?.length ? (
+        <p className="tk-overruled" role="note">
+          <span className="label">Not sent</span> {card.unavailable.join(", ")} {card.unavailable.length === 1 ? "isn't" : "aren't"} available. Change the agents with Edit.
+        </p>
+      ) : null}
+
+      {card.renews && !card.overruled && (
+        <p className="tk-overruled" role="note">
+          <span className="label">Asked again</span> after the room overruled it
+        </p>
+      )}
+
       {conflict && !editing && (
         <div className="tk-versus" aria-label="This disagrees with a saved fact">
           <div>
@@ -337,7 +350,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
 
       {(task || (card.workstream && !editing) || card.count > 1 || card.edits.length > 0) && (
         <div className="tk-chips">
-          {task && <AgentTag state={state} ids={card.targets} />}
+          {task && <AgentTag state={state} ids={card.targets} known={card.targetNames} />}
           {card.workstream && !editing && <span className="tk-tag ws">{card.workstream}</span>}
           {card.count > 1 && <span className="tk-times" title="Said more than once; the repeats are on this card">Heard {card.count} times</span>}
           {card.edits.length > 0 && <span className="tk-times">Edited</span>}
@@ -400,7 +413,10 @@ function MergePanel({ card, facts, personId, onDone }: { card: TriageCard; facts
   const [text, setText] = useState("");
   const ranked = useMemo(() => {
     const ql = q.toLowerCase();
+    // Only facts of the card's own kind and workstream: a merge never moves wording into another (the hub checks too).
+    const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
     return facts
+      .filter((f) => f.kind === card.kind && same(f.workstream, card.workstream))
       .filter((f) => !ql || f.text.toLowerCase().includes(ql))
       .map((f) => ({ f, s: overlap(f.text, card.text) }))
       .sort((a, b) => b.s - a.s)

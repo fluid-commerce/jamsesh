@@ -2,7 +2,7 @@
 // small picture of the canvas for the Projects picker. Every few minutes and when the session ends.
 import { config } from "./config";
 import type { Hub } from "./hub";
-import { writeProjectContext } from "./carryover";
+import { saveProjectContext } from "./carryover";
 import { saveThumbnail, touchSession } from "./projects";
 
 const EVERY_MS = 5 * 60_000;
@@ -18,8 +18,9 @@ export class ProjectKeeper {
 
   start() {
     if (!this.project) return;
-    this.save().catch(() => {});
-    this.timer = setInterval(() => this.save().catch((e) => console.error("project:", e instanceof Error ? e.message : e)), EVERY_MS);
+    const report = (e: unknown) => console.error("project:", e instanceof Error ? e.message : e);
+    this.save().catch(report);
+    this.timer = setInterval(() => this.save().catch(report), EVERY_MS);
     this.timer.unref?.();
   }
 
@@ -35,12 +36,16 @@ export class ProjectKeeper {
     const people = this.hub.store.speakers().map((name) => ({ name, color: s.personByName(name)?.color }));
     touchSession(this.home, p.slug, p.sessionId, people);
     // The context file is a copy of what the session's own store holds: failing to write it doesn't stop the rest.
+    let saved = true;
     try {
-      writeProjectContext(this.home, p.slug, p.sessionId, s);
+      saved = saveProjectContext(this.home, p.slug, p.sessionId, s) !== "failed";
     } catch (e) {
       console.error("project context:", e instanceof Error ? e.message : e);
+      saved = false;
     }
     const png = await this.hub.canvas.thumbnail().catch(() => null);
     if (png?.length) saveThumbnail(this.home, p.slug, png);
+    // The thumbnail is a nicety; the context is what the next session reads. A failed save is the caller's to know.
+    if (!saved) throw new Error("The project's context wasn't saved.");
   }
 }

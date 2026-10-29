@@ -142,14 +142,15 @@ test("the keeper records who came and the thumbnail, and does nothing without a 
     session: { personByName: (n: string) => (n === "Britt" ? { color: "#ff6b4a" } : undefined) },
     canvas: { thumbnail: async () => new Uint8Array([137, 80, 78, 71]) },
   };
-  await new ProjectKeeper(hub, home, { slug: meta.slug, sessionId: opened.sessionId }).save();
+  // This stand-in session can't be snapshotted: the context isn't saved (reported), but who came and the thumbnail still are.
+  await expect(new ProjectKeeper(hub, home, { slug: meta.slug, sessionId: opened.sessionId }).save()).rejects.toThrow("wasn't saved");
   expect(readProject(home, meta.slug)?.people).toEqual([{ name: "Britt", color: "#ff6b4a" }, { name: "Chey" }]);
   expect(readFileSync(join(home, "projects", meta.slug, "thumbnail.png")).length).toBe(4);
 
   hub.canvas.thumbnail = async () => {
     throw new Error("canvas is down");
   };
-  await new ProjectKeeper(hub, home, { slug: meta.slug, sessionId: opened.sessionId }).save();
+  await expect(new ProjectKeeper(hub, home, { slug: meta.slug, sessionId: opened.sessionId }).save()).rejects.toThrow("wasn't saved");
   expect(existsSync(join(home, "projects", meta.slug, "thumbnail.png"))).toBe(true);
   await new ProjectKeeper(hub, home, null).save();
 });

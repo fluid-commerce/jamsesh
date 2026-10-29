@@ -85,7 +85,6 @@ export class Session {
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
   private lockSweep: ReturnType<typeof setInterval> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
-  onDirective: ((d: Directive) => void) | null = null;
   /** A card landed on the Tasks board (4.1). */
   onTriage: ((c: TriageCard) => void) | null = null;
   /** Set by the hub: writes a wiki card's checked pages when a person accepts it (12.8). */
@@ -1020,7 +1019,6 @@ export class Session {
         const idle = d.targets.filter((t) => now.progress[t] === "pending" && !asleep(t) && this.agent(t)?.status !== "waiting").map((t) => this.agent(t)!);
         for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
       }, 45_000).unref?.();
-    this.onDirective?.(directive);
     return directive;
   }
 

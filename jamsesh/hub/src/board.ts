@@ -135,6 +135,11 @@ export class Board {
     return this.all().find((c) => c.type === type && (c.status === "open" || (c.status === "dismissed" && now - (c.resolvedAt ?? 0) < DISMISS_QUIET_MS)) && extra(c) && (restates(c.text, text, 0.7) || restates(c.original, text, 0.7)));
   }
 
+  /** The agents' names when the card was made or edited, so a card can still say who an agent that left was. */
+  private namesOf(ids: string[]) {
+    return Object.fromEntries(ids.map((id) => [id, this.s.agent(id)?.name ?? id]));
+  }
+
   private validTargets(targets: unknown, mode: DirectiveMode): string[] {
     const list = Array.isArray(targets) ? targets.map(String) : [];
     return [...new Set(list)].filter((id) => {
@@ -153,12 +158,15 @@ export class Board {
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const workstream = clean(p.workstream);
     // The same words for other agents, or another workstream, are another task.
-    const same = this.match("task", text, (c) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream));
+    const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream);
+    const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
     if (same) return this.repeat(same, sources);
+    // Asked again after the room overruled it: a new card, so the veto stays on the old one for people to see and decide.
+    const vetoed = this.match("task", text, (c) => purpose(c) && !!c.overruled && c.status === "open");
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, ...(mode === "coordinate" && p.counterparts?.length ? { counterparts: [...new Set(p.counterparts)] } : {}), kind: "fact", workstream, conflictsWith: null, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, targetNames: this.namesOf(targets), ...(mode === "coordinate" && p.counterparts?.length ? { counterparts: [...new Set(p.counterparts)] } : {}), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -170,7 +178,9 @@ export class Board {
     const workstream = clean(p.workstream);
     const active = this.s.store.all("facts").filter((f) => f.status === "active");
     // A named replacement changes that fact however close the wording is, so it is never "already known".
-    const named = p.replaces ? active.find((f) => f.id === p.replaces) : undefined;
+    // Only when it is the same kind, workstream and platform: a "replace" across those is another fact, not a change to this one.
+    const named0 = p.replaces ? active.find((f) => f.id === p.replaces) : undefined;
+    const named = named0 && named0.kind === kind && sameName(named0.workstream, workstream) && sameScope(named0.text, text) ? named0 : undefined;
     // Already known, in other words: nothing for a person to decide. "Not option A" is not "option A" again.
     if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text, 0.55))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
@@ -275,7 +285,7 @@ export class Board {
       if (!Array.isArray(e.targets)) return { error: "targets is a list of agent ids." };
       const targets = this.validTargets(e.targets, next.mode);
       if (targets.length !== e.targets.length) return { error: "One of those agents isn't in the session, or only watches." };
-      if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), fields.push("targets");
+      if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), (next.targetNames = this.namesOf(targets)), fields.push("targets");
     }
     if (e.workstream !== undefined) {
       const w = clean(e.workstream);
@@ -337,9 +347,14 @@ export class Board {
       });
     }
     if (!card.targets.length) return fail("Pick an agent to send it to first.");
-    // The card may have waited while an agent left or became an observer: only agents that can still take it get it.
+    // The card may have waited while an agent left or became an observer: then nothing is sent (not to the rest either),
+    // and the card names the ones that can't take it, for a person to change with Edit.
     const targets = this.validTargets(card.targets, card.mode);
-    if (!targets.length) return fail("The agent it was for isn't in the session any more, or only watches. Pick another with Edit.", 409);
+    if (targets.length !== card.targets.length) {
+      const gone = card.targets.filter((t) => !targets.includes(t)).map((t) => this.s.agent(t)?.name ?? card.targetNames?.[t] ?? "An agent that left");
+      this.s.store.put("triage", { ...c, unavailable: gone, updatedAt: this.stamp() });
+      return fail(`Not sent: ${gone.join(", ")} ${gone.length === 1 ? "isn't" : "aren't"} in the session any more, or only ${gone.length === 1 ? "watches" : "watch"}. Change the agents with Edit.`, 409);
+    }
     // A comparison needs someone to compare with: the card's counterparts and the other targets, while they're in the room.
     const counterparts = card.mode === "coordinate" ? [...new Set([...targets, ...(card.counterparts ?? [])])].filter((c) => this.s.agent(c)) : undefined;
     if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return fail("A comparison needs another agent to compare with. Add one with Edit.", 409);
@@ -355,7 +370,8 @@ export class Board {
         workstreamId: ws?.id ?? null,
         rationale: `${card.origin === "agent" ? `${card.by} reported this` : card.origin === "document" ? "From a document" : `Heard from ${card.by}`}; ${by} sent it from the Tasks board${card.edits.length ? " after editing it" : ""}.`,
       });
-      return { ok: true as const, card: this.done({ ...card, targets }, "sent", by, { directiveId: d.id }), directiveId: d.id };
+      const { unavailable: _cleared, ...sent } = card;
+      return { ok: true as const, card: this.done({ ...sent, targets }, "sent", by, { directiveId: d.id }), directiveId: d.id };
     });
   }
 
@@ -410,6 +426,8 @@ export class Board {
     if (c.type !== "context" || c.retire) return fail("Only context cards that add something merge into a fact.");
     const f = this.s.store.get("facts", factId);
     if (!f || f.status !== "active") return fail("That fact isn't saved any more.", 404);
+    // The same check as Replace: the merged wording stays a fact of its own kind, workstream and platform.
+    if (f.kind !== c.kind || !sameName(f.workstream, c.workstream) || !sameScope(f.text, c.text)) return fail("That fact is another kind, workstream or platform than this card. Add the card instead, or edit it to match.");
     const joined = text !== undefined ? clean(text) : clean(`${f.text.replace(/[.\s]+$/, "")}. ${c.text}`);
     if (!joined) return fail("The wording can't be empty.");
     // The card only has the file's name: the merged wording has to say something of its own, not the name or the fact alone.
@@ -442,6 +460,9 @@ export class Board {
     }
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
+    // Checked against the card as it will be saved (a matched card, a named fact, or a card edited just before): the
+    // new wording replaces a fact of its own kind, workstream and platform only.
+    if (old.kind !== r.card.kind || !sameName(old.workstream, r.card.workstream) || !sameScope(old.text, r.card.text)) return fail("That fact is another kind, workstream or platform than this card says. Add the card instead, or edit it to match.");
     if (!this.worded(c, r.card)) return fail("Write what the file says to keep first: Edit, then Replace.");
     // The old fact is retired only together with its replacement being saved.
     return this.filed(this.commit(() => {
@@ -466,26 +487,32 @@ export class Board {
    * Overheard: the room wants a task stopped. The cancellation waits as a card (sending it cancels the task and
    * tells its agents); nothing an agent is doing changes until a person sends it.
    */
-  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
+  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"] }): TriageCard | null {
     const d = p.directive;
     if (d.status === "done" || d.status === "cancelled") return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
-    const open = this.open().find((c) => c.cancels === d.id);
+    const open = this.open().find((c) => c.cancels === d.id && !c.overruled);
     if (open) return this.repeat(open, sources);
     const text = clean(p.reason) || "The room changed its mind";
     const now = this.stamp();
     const card: TriageCard = {
-      id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: "overheard", text, original: text, by: p.by,
+      id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
       mode: d.mode, targets: d.targets, kind: "fact", workstream: "", conflictsWith: null, cancels: d.id, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
 
-  /** Overheard: a later line overrules a proposal still waiting. It stays for a person to dismiss, marked with why. */
-  overrule(id: string, reason: string): TriageCard | null {
+  /**
+   * Overheard: a later line overrules a proposal still waiting. It stays for a person to dismiss, marked with why, and
+   * the veto (who, when, which lines) is kept on the card for good: the same ask said again makes a new card instead.
+   */
+  overrule(id: string, reason: string, by = "", eventIds: number[] = []): TriageCard | null {
     const c = this.get(id);
     if (!c || c.status !== "open") return null;
-    return this.s.store.put("triage", { ...c, overruled: clean(reason).slice(0, 200) || "Overruled in the room", updatedAt: this.stamp() });
+    const why = clean(reason).slice(0, 200) || "Overruled in the room";
+    // The whole history is kept; anything that shows it limits only what it shows.
+    const vetoes = [...(c.vetoes ?? []), { reason: why, by, at: Date.now(), eventIds: [...eventIds] }];
+    return this.s.store.put("triage", { ...c, overruled: why, vetoes, updatedAt: this.stamp() });
   }
 
   /** Minutes a card has waited, once it has waited long enough to label. */
@@ -521,7 +548,7 @@ export class Board {
         const w = Board.waitingMin(c, now);
         const who = c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ");
         const where = c.type === "wiki" ? `wiki ${c.wiki?.kind ?? ""}: ${c.wiki?.changes.map((x) => x.slug).join(", ") || "findings only"}` : c.cancels ? `cancel ${c.cancels} for ${who}` : c.type === "task" ? `${c.mode} → ${who || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
-        return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})${c.overruled ? ` [overruled: ${c.overruled}]` : ""}`;
+        return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})${c.overruled ? ` [overruled: ${c.overruled}]` : ""}${c.renews ? ` [asks again for overruled card ${c.renews}]` : ""}`;
       })
       .join("\n");
   }

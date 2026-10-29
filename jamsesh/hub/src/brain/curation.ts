@@ -1,12 +1,12 @@
 // Curation (4.3): turns what the room said into durable knowledge, not a changelog. It is split in two so a
 // caller can sit between them: `decideCuration` asks the model what should change (no side effects), and
-// `applyCuration` makes those changes (and is the one place that writes facts).
+// `applyCuration` hands them to a hold (the Tasks board): only a cited restatement joins a saved fact at once.
 import { generateText, Output } from "ai";
 import { z } from "zod";
 import type { Session } from "../session";
 import { newId } from "../store";
 import type { Fact, JamEvent } from "../types";
-import { restates, similar } from "../similarity";
+import { restates, sameScope, similar } from "../similarity";
 import { model } from "./llm";
 
 const kinds = ["decision", "requirement", "constraint", "preference", "question", "fact"] as const;
@@ -95,8 +95,8 @@ export async function decideCuration(s: Session, events: JamEvent[]): Promise<Cu
   return output ?? null;
 }
 
-/** Makes the changes. Every fact keeps the events it came from; an item with none is not saved. */
-export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold?: CurationHold): CurationResult {
+/** Passes the changes on. Every fact keeps the events it came from; an item with none is not saved. */
+export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold: CurationHold): CurationResult {
   const result: CurationResult = { added: [], merged: [], dropped: [] };
   const now = Date.now();
   const inBatch = new Set(events.map((e) => e.id));
@@ -109,10 +109,6 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold?
     const f = s.store.get("facts", u.id);
     if (!f || f.status !== "active") continue;
     const sources = cite(u.eventIds);
-    if (!hold) {
-      s.store.put("facts", { ...f, text: u.text, note: u.reason, updatedAt: now, sourceEventIds: union(f.sourceEventIds, sources) });
-      continue;
-    }
     // A rewrite of something a person accepted is theirs to approve, and has to say which new events it comes from.
     if (!sources.length) {
       result.dropped.push({ text: u.text, why: "no source event" });
@@ -131,16 +127,14 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold?
   for (const r of c.resolve) {
     const f = s.store.get("facts", r.id);
     // Retiring something a person accepted has to show what in the room supports it.
-    if (f && f.status === "active" && hold && !cite(r.eventIds).length) result.dropped.push({ text: r.reason, why: "no source event" });
-    else if (f && f.status === "active" && hold) retiring.push({ f, status: "resolved", reason: r.reason, sources: cite(r.eventIds) });
-    else if (f && f.status === "active") s.store.put("facts", { ...f, status: "resolved", note: r.reason, updatedAt: now, sourceEventIds: union(f.sourceEventIds, cite(r.eventIds)) });
+    if (f && f.status === "active" && !cite(r.eventIds).length) result.dropped.push({ text: r.reason, why: "no source event" });
+    else if (f && f.status === "active") retiring.push({ f, status: "resolved", reason: r.reason, sources: cite(r.eventIds) });
   }
   for (const r of c.supersede) {
     const f = s.store.get("facts", r.id);
     // Retiring something a person accepted has to show what in the room supports it.
-    if (f && f.status === "active" && hold && !cite(r.eventIds).length) result.dropped.push({ text: r.reason, why: "no source event" });
-    else if (f && f.status === "active" && hold) retiring.push({ f, status: "superseded", reason: r.reason, sources: cite(r.eventIds) });
-    else if (f && f.status === "active") s.store.put("facts", { ...f, status: "superseded", note: r.reason, updatedAt: now, sourceEventIds: union(f.sourceEventIds, cite(r.eventIds)) });
+    if (f && f.status === "active" && !cite(r.eventIds).length) result.dropped.push({ text: r.reason, why: "no source event" });
+    else if (f && f.status === "active") retiring.push({ f, status: "superseded", reason: r.reason, sources: cite(r.eventIds) });
   }
   for (const a of c.add) {
     if (SHIP_NOTE.test(a.text)) {
@@ -167,17 +161,12 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold?
       continue;
     }
     const fact: Fact = { id: newId("fact"), ts: now, updatedAt: now, kind: a.kind, text: a.text, workstream: streamOf(a.workstream), by: a.by ?? "", status: "active", note: "", sourceEventIds: sources };
-    if (hold) {
-      // The addition that most resembles a fact this answer retires is what replaces it.
-      const old = retiring.filter((r) => r.status === "superseded").map((r) => ({ r, score: similar(r.f.text, a.text) })).sort((x, y) => y.score - x.score)[0];
-      const pair = old && old.score >= 0.3 ? old.r : undefined;
-      if (pair) retiring.splice(retiring.indexOf(pair), 1);
-      hold.add(fact, pair?.f.id);
-      continue;
-    }
-    s.store.put("facts", fact);
-    result.added.push(fact);
+    // The addition that most resembles a fact this answer retires (of its own kind, workstream and platform) is what replaces it.
+    const old = retiring.filter((r) => r.status === "superseded" && r.f.kind === a.kind && r.f.workstream.toLowerCase() === fact.workstream.toLowerCase() && sameScope(r.f.text, a.text)).map((r) => ({ r, score: similar(r.f.text, a.text) })).sort((x, y) => y.score - x.score)[0];
+    const pair = old && old.score >= 0.3 ? old.r : undefined;
+    if (pair) retiring.splice(retiring.indexOf(pair), 1);
+    hold.add(fact, pair?.f.id);
   }
-  for (const r of retiring) hold?.retire(r.f, r.status, r.reason, r.sources);
+  for (const r of retiring) hold.retire(r.f, r.status, r.reason, r.sources);
   return result;
 }
