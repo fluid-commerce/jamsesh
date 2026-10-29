@@ -465,7 +465,7 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
 // ---- the host's whisper.cpp: bundled server, model downloaded once ----
 
 import { chmodSync, mkdirSync, truncateSync, writeFileSync } from "node:fs";
-import { findWhisperServer, findWhisperModel, isWhisperServer, LocalWhisper, WHISPER_MODEL } from "../src/audio/whisper";
+import { findWhisperServer, findWhisperModel, isWhisperServer, LocalWhisper, recordDownload, WHISPER_MODEL } from "../src/audio/whisper";
 
 const freePort = () => {
   const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
@@ -581,7 +581,8 @@ test("first host session: the gateway covers the room while the model downloads,
     for (let i = 0; i < 100 && !engines(hub).has("local"); i++) await Bun.sleep(50);
     expect(asked).toEqual([WHISPER_MODEL.url]);
     expect(hub.transcriber.whisper.status()).toMatchObject({ state: "ready", installed: true });
-    expect(readdirSync(join(config.home, "models"))).toEqual([WHISPER_MODEL.name]);
+    // The download is recorded as JamSesh's own: the only kind of model file it may ever delete.
+    expect(readdirSync(join(config.home, "models")).sort()).toEqual(["downloaded.json", WHISPER_MODEL.name]);
     expect(await hub.transcriber.transcribe(clip, 2)).toEqual({ text: `Chey used ${WHISPER_MODEL.name}`, engine: "host whisper.cpp" });
   } finally {
     hub.stop();
@@ -615,7 +616,7 @@ test("a model download that fails its checksum leaves nothing, and offline never
   }
 }));
 
-test("a model with the pinned name but the wrong checksum is never used: deleted from ~/.jamsesh/models, left alone in the cache", () => online(async () => {
+test("a model with the pinned name but the wrong checksum is never used: deleted if JamSesh downloaded it, else left alone", () => online(async () => {
   const home = join(dir, "tampered-home");
   const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "tampered-bin")) });
   const real = globalThis.fetch;
@@ -627,9 +628,14 @@ test("a model with the pinned name but the wrong checksum is never used: deleted
     mkdirSync(join(config.home, "models"), { recursive: true });
     const own = sized(join(config.home, "models", WHISPER_MODEL.name), WHISPER_MODEL.bytes);
     const cached = sized(join(cache, WHISPER_MODEL.name), WHISPER_MODEL.bytes);
+    // Put in ~/.jamsesh/models by someone else: passed over, not deleted.
+    const first = new LocalWhisper();
+    expect(await first.start(freePort(), false)).toBeNull();
+    expect(existsSync(own)).toBe(true);
+    recordDownload(true);
     const w = new LocalWhisper();
     const port = freePort();
-    // Offline: nothing usable and nothing downloaded.
+    // Offline: nothing usable and nothing downloaded; JamSesh's own bad download is gone.
     expect(await w.start(port, false)).toBeNull();
     expect(w.status()).toMatchObject({ state: "missing", installed: false });
     expect(existsSync(own)).toBe(false);

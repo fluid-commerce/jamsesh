@@ -1,4 +1,4 @@
-// No speaker model: voice matching is off for dedupe.test.ts. Imported first, before config is read.
+// A throwaway home with no speaker model (voice matching off), for tests that need neither. Imported first, before config is read.
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

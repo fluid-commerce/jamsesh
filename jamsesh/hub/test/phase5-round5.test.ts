@@ -1,13 +1,14 @@
 // Phase 5, fifth review: a WAV header can't make the host allocate more than JamSesh would record, and a corrupt
 // model next to the managed folder is never deleted. Synthetic audio only; nothing makes sound.
+import "./dedupe.env";
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../src/config";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
-import { inManagedFolder } from "../src/audio/whisper";
+import { ownDownload, recordDownload, WHISPER_MODEL } from "../src/audio/whisper";
 import { BadWav, decodeWav, encodeWav, resample } from "../src/audio/wav";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r5-"));
@@ -63,14 +64,42 @@ test("over HTTP a hostile header is the sender's error (400), for a segment and 
   expect([read.status, (await read.json()).error]).toEqual([400, expect.stringContaining("sample rate")]);
 });
 
-test("only files inside the managed models folder are deleted, not a sibling that shares its name's start", () => {
+test("a rejected Whisper model is deleted only when it is the very file JamSesh downloaded, never a chosen one", () => {
   const models = join(config.home, "models");
-  expect(inManagedFolder(join(models, "ggml-base.en.bin"))).toBe(true);
-  expect(inManagedFolder(join(models, "sub", "x.bin"))).toBe(true);
-  expect(inManagedFolder(`${models}-backup/ggml-base.en.bin`)).toBe(false);
-  expect(inManagedFolder(`${models}backup.bin`)).toBe(false);
-  expect(inManagedFolder(models)).toBe(false);
-  expect(inManagedFolder(join(models, "..", "elsewhere.bin"))).toBe(false);
+  mkdirSync(models, { recursive: true });
+  const own = join(models, WHISPER_MODEL.name);
+  // Never a real install's model: this test writes and deletes the managed file.
+  if (!config.home.startsWith(tmpdir()) || existsSync(own)) throw new Error(`run with JAMSESH_HOME set to a throwaway folder (${config.home})`);
+  const was = process.env.JAMSESH_WHISPER_MODEL;
+  try {
+    writeFileSync(own, "model");
+    // Put there by someone else (no record of a download): left alone.
+    expect(ownDownload(own)).toBe(false);
+    recordDownload(true);
+    expect(ownDownload(own)).toBe(true);
+    expect(ownDownload(join(models, ".", WHISPER_MODEL.name))).toBe(true);
+    for (const other of [join(models, "ggml-base.en.bin"), join(models, "sub", WHISPER_MODEL.name), `${models}-backup/${WHISPER_MODEL.name}`, models, join(models, "..", WHISPER_MODEL.name)]) expect([other, ownDownload(other)]).toEqual([other, false]);
+    // Chosen by the person, even by another spelling of the same path: never deleted.
+    process.env.JAMSESH_WHISPER_MODEL = join(models, "..", "models", WHISPER_MODEL.name);
+    expect(ownDownload(own)).toBe(false);
+    delete process.env.JAMSESH_WHISPER_MODEL;
+    // The managed name pointing at someone's file elsewhere: not JamSesh's to delete.
+    const theirs = join(dir, "theirs.bin");
+    writeFileSync(theirs, "model");
+    rmSync(own);
+    symlinkSync(theirs, own);
+    expect(ownDownload(own)).toBe(false);
+    expect(ownDownload(theirs)).toBe(false);
+    recordDownload(false);
+    rmSync(own);
+    writeFileSync(own, "model");
+    expect(ownDownload(own)).toBe(false);
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_WHISPER_MODEL;
+    else process.env.JAMSESH_WHISPER_MODEL = was;
+    // Only what this test made: the folder may hold real models.
+    for (const f of [own, join(models, "downloaded.json")]) rmSync(f, { force: true });
+  }
 });
 
 test("a voice brought from another host by an earlier build is gone when the host opens its store", async () => {

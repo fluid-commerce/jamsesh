@@ -5,9 +5,9 @@
 // is used only once its size and SHA-256 match, wherever it was found; a server already on the port is
 // used only when it answers a transcription like whisper-server.
 
-import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { stopHelper, withStdinWatch } from "../children";
 import { config } from "../config";
 import { downloadVerified, fileMatches, type ModelState, type ModelStatus } from "./models";
@@ -128,13 +128,13 @@ export class LocalWhisper {
     return !!findWhisperServer() && !!findWhisperModel();
   }
 
-  /** A model that passed its checksum, passing over (and, in ~/.jamsesh/models, deleting) any that don't. */
+  /** A model that passed its checksum, passing over any that don't (and deleting one only if JamSesh downloaded it). */
   private async goodModel(): Promise<string | null> {
     for (let model = findWhisperModel(this.bad); model; model = findWhisperModel(this.bad)) {
       this.set("starting", "Checking the speech model.");
       if (await verified(model)) return model;
       this.bad.add(model);
-      if (inManagedFolder(model)) rmSync(model, { force: true });
+      if (ownDownload(model)) (rmSync(model, { force: true }), recordDownload(false));
     }
     return null;
   }
@@ -201,6 +201,7 @@ export class LocalWhisper {
     try {
       await downloadVerified(WHISPER_MODEL, part, (pct) => (this.progress = pct), () => this.stopped);
       renameSync(part, dest);
+      recordDownload(true);
       const st = statSync(dest);
       checked.set(dest, `${st.size}:${st.mtimeMs}:${WHISPER_MODEL.sha256}`);
       return dest;
@@ -217,7 +218,48 @@ export class LocalWhisper {
   }
 }
 
-/** Inside JamSesh's own models folder (not a sibling such as models-backup, which only shares its name's start). */
-export function inManagedFolder(path: string) {
-  return resolve(path).startsWith(resolve(config.home, "models") + sep);
+/** The models JamSesh downloaded itself, by file name in ~/.jamsesh/models: the only files it ever deletes. */
+const manifest = () => join(config.home, "models", "downloaded.json");
+
+function downloaded(): string[] {
+  try {
+    const names: unknown = JSON.parse(readFileSync(manifest(), "utf8"));
+    return Array.isArray(names) ? names.filter((n): n is string => typeof n === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Records (or, once it's deleted, forgets) that JamSesh downloaded the pinned model itself. */
+export function recordDownload(on: boolean) {
+  const names = new Set(downloaded());
+  if (on) names.add(WHISPER_MODEL.name);
+  else names.delete(WHISPER_MODEL.name);
+  const tmp = `${manifest()}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify([...names]));
+  renameSync(tmp, manifest());
+}
+
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+};
+
+/**
+ * Whether JamSesh may delete a rejected model: only the exact file it downloaded (a plain file at its managed
+ * path, recorded in the manifest), compared by real path, and never a file chosen with JAMSESH_WHISPER_MODEL.
+ */
+export function ownDownload(path: string) {
+  const own = join(config.home, "models", WHISPER_MODEL.name);
+  const chosen = process.env.JAMSESH_WHISPER_MODEL;
+  if (chosen && real(chosen) === real(path)) return false;
+  try {
+    if (!lstatSync(own).isFile()) return false;
+  } catch {
+    return false;
+  }
+  return real(path) === real(own) && downloaded().includes(WHISPER_MODEL.name);
 }
