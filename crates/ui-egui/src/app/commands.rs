@@ -13,6 +13,7 @@ impl FigApp {
         let layers_generation = self.session.clipboard.layers_generation;
         let r = self.session.execute(id, &params);
         self.clear_comment_draft_after_tool_set(id, r.is_ok());
+        self.quiet_session_note(id);
         self.handle_ui_requests();
         self.invalidate_synthetic_copy(layers_generation);
         // A command may change the file the window shows (`doc.switch`, `doc.nextTab`,
@@ -20,6 +21,15 @@ impl FigApp {
         // screenshot admitted on the old file cannot accept pixels from the new one.
         self.observe_presentation();
         r.map_err(|e| self.failed(id, &e)).ok()
+    }
+
+    /// In canvas-only mode the page around the canvas (JamSesh) shows the session's state and
+    /// rejoins it, so a session command's note ("You left the session…") isn't toasted over the
+    /// canvas as well. The full app keeps it.
+    pub(crate) fn quiet_session_note(&mut self, id: &str) {
+        if self.ui.canvas_only && id.starts_with("collab.") {
+            self.session.message = None;
+        }
     }
 
     /// A programmatic command that changed the engine clipboard never wrote the system clipboard:
@@ -266,7 +276,8 @@ impl FigApp {
         crate::control::background(self, ctx);
         // What happened in a live session (the network woke us for it).
         if self.session.live_poll() {
-            if let Some(m) = self.session.message.take() {
+            // Canvas-only: the page around the canvas says how the session is doing.
+            if let Some(m) = self.session.message.take().filter(|_| !self.ui.canvas_only) {
                 self.toast(live::failure_text(&m));
             }
             self.background_done(ctx);

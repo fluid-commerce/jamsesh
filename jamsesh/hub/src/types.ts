@@ -349,6 +349,9 @@ export interface CanvasInfo {
   wsEdit: string | null;
   wsView: string | null;
   reason: string | null;
+  /** Goes up each time the canvas is announced (a new file published, or the server restarted):
+   * people's canvases fetch their join link again when it changes. */
+  generation: number;
 }
 
 export type BusMessage =

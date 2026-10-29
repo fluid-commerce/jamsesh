@@ -192,7 +192,7 @@ export class Canvas {
   }
 
   private announce(edit: string, view: string) {
-    this.session.setCanvas({ status: "live", editLink: edit, viewLink: view, wsEdit: toWs(edit), wsView: toWs(view), reason: null });
+    this.session.setCanvas({ status: "live", editLink: edit, viewLink: view, wsEdit: toWs(edit), wsView: toWs(view), reason: null, generation: this.session.canvas.generation + 1 });
   }
 
   /** The link the host's own pages use (localhost works without the LAN). */
@@ -503,9 +503,25 @@ export class Canvas {
     if (!(await waitLive(this.host, 20_000))) this.session.setCanvas({ reason: "The host lost the canvas session; restart JamSesh." });
   }
 
+  /** The canvas server stopped (it crashed, or something killed it): start it again on the same
+   * data, rejoin the session file, and announce it again so people's canvases rejoin too. */
+  private async revive() {
+    console.warn("canvas: the canvas server stopped; starting it again");
+    this.serverProc?.kill();
+    this.serverProc = null;
+    await this.startServer();
+    const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
+    if (!this.host || !saved) return;
+    await this.host.command("collab.leave", {}).catch(() => {});
+    await this.host.command("collab.join", { link: this.loopLink(saved.edit) });
+    if (await waitLive(this.host, 15_000)) this.announce(this.lanLink(this.loopLink(saved.edit)), this.lanLink(this.loopLink(saved.view)));
+    else this.session.setCanvas({ reason: "The canvas server restarted but the session file didn't come back; restart JamSesh." });
+  }
+
   /** The host should see every agent participant the hub runs; if it doesn't, it lost the session. */
   private async watchdog() {
     if (!this.host?.alive || this.polling) return;
+    if (this.session.canvas.status === "live" && !(await healthy(this.serverUrl)) && !(await healthy(this.serverUrl))) return this.revive();
     const ready = [...this.agents.values()].filter((a) => a.mcp.alive);
     const peers = await this.host.command("collab.peers").catch(() => null);
     if (!peers) return;

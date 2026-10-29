@@ -56,10 +56,26 @@ jobs:
       - name: Install trunk
         run: brew install trunk
 
+      # The browser has no system fonts: without craft-fonts people's canvases have no face to
+      # draw text in (Inter, Noto Sans). Same pin as FigCraft's own release (release.yml).
+      - name: Check out craft-fonts
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: 37827adc41fd165f9a9234ac40f94dbad353aa69
+          path: craft-fonts
+          persist-credentials: false
+
       - name: Build FigCraft server and CLI
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
         run: cargo build --release --locked -p figcraft-server -p figcraft-cli
 
       - name: Build the browser canvas
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
         run: cd apps/figcraft-web && trunk build --release
 
       - name: Stage the parts the app carries
