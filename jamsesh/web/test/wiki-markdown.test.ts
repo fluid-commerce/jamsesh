@@ -109,3 +109,12 @@ test("huge or odd input is cut and never throws", () => {
   expect(() => md("x".repeat(2_000_000))).not.toThrow();
   expect(md("")).toBe("");
 });
+
+test("mail and web links are followed by the browser; other links stay in the app", async () => {
+  const { followsNatively } = await import("../src/wiki/nav");
+  expect(followsNatively("mailto:a@b.co")).toBe(true);
+  expect(followsNatively("https://example.com")).toBe(true);
+  expect(followsNatively("javascript:alert(1)")).toBe(false);
+  expect(followsNatively("#top")).toBe(false);
+  expect(followsNatively(null)).toBe(false);
+});

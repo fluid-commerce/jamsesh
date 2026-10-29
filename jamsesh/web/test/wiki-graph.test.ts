@@ -49,6 +49,12 @@ test("size grows with backlinks but flattens, and scales for the big screen", ()
   expect(radiusFor(NaN)).toBe(radiusFor(0));
 });
 
+test("every page of a full vault is on the map", () => {
+  const nodes = Array.from({ length: 1500 }, (_, i) => ({ id: `p${i}`, title: `P${i}`, category: "topics", backlinks: 0 }));
+  expect(shapeGraph({ nodes, edges: [] }).nodes).toHaveLength(1500);
+  expect(MAX_NODES).toBeGreaterThanOrEqual(1500);
+});
+
 test("a huge wiki is cut to the best-connected pages, with no edges left dangling", () => {
   const nodes = Array.from({ length: MAX_NODES + 80 }, (_, i) => ({ id: `p${i}`, title: `P${i}`, category: "topics", backlinks: 0 }));
   const edges = nodes.slice(1).map((n) => ({ from: "p0", to: n.id }));

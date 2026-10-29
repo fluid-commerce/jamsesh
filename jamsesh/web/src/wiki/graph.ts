@@ -1,7 +1,8 @@
 // The link graph as data: shaped from the hub's nodes and edges, with the lookups the canvas needs.
 import { asCategory, CATEGORIES, type Category, type RawGraph } from "./types";
 
-export const MAX_NODES = 400;
+/** As many pages as a vault holds (hub MAX_PAGES): the map shows every page; the cap only guards a malformed reply. */
+export const MAX_NODES = 1500;
 const arr = <T>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
 
 export interface GNode {
