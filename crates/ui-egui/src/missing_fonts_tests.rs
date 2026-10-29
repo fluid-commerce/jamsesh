@@ -147,3 +147,21 @@ fn placing_images_or_clearing_recents_does_not_bring_it_back() {
     assert!(u.app.ui.font_checks.is_empty());
     assert_eq!(listed(&u), Value::Null);
 }
+
+/// Text in a family nothing provides still draws: with no other face (a web build without
+/// craft-fonts) it falls back to egui's own font, and the family stays listed as missing.
+#[test]
+fn text_in_a_missing_family_is_drawn_in_a_substitute_not_left_blank() {
+    crate::theme::install_fonts(&egui::Context::default(), false, 0);
+    let mut t = figcraft_doc::TextData::new("Hamburgefonstiv");
+    t.style.font_family = "FigCraft Missing Substitute".into();
+    t.style.font_size = 24.0;
+    let l = figcraft_text::layout(&t, None, None);
+    assert!(l.glyphs.len() >= 10, "glyphs: {}", l.glyphs.len());
+    assert!(l.width > 50.0, "width: {}", l.width);
+    assert!(!figcraft_text::has_family("FigCraft Missing Substitute"));
+    let mut s = Session::new();
+    s.execute("text.create", &json!({"text": "Hamburgefonstiv", "x": 0, "y": 0, "props": {"fontFamily": "FigCraft Missing Substitute"}})).unwrap();
+    let missing = s.execute("text.missingFonts", &json!({})).unwrap();
+    assert!(missing["families"].as_array().is_some_and(|f| f.iter().any(|m| m["family"] == "FigCraft Missing Substitute")), "{missing}");
+}

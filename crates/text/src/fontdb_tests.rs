@@ -491,3 +491,50 @@ fn core_text_lists_the_installed_font_files() {
     assert!(files.iter().any(|f| f.starts_with("/System/Library/Fonts")), "{} files", files.len());
     assert!(files.iter().all(|f| f.is_absolute()));
 }
+
+/// Any font file this machine can lend a test: an embedded face, else a common system one.
+fn some_font_bytes() -> Option<Vec<u8>> {
+    if let Some(f) = CRAFT_FONTS.first() {
+        return Some(f.bytes.to_vec());
+    }
+    [
+        "/System/Library/Fonts/Geneva.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ]
+    .iter()
+    .find_map(|p| std::fs::read(p).ok())
+}
+
+#[test]
+fn an_empty_database_draws_in_its_last_resort_face_without_listing_it() {
+    // A web build without craft-fonts has no face at all, and its text drew as nothing.
+    let mut db = FontDb::default();
+    assert!(db.default_face().is_none());
+    let Some(bytes) = some_font_bytes() else {
+        eprintln!("skipping: no font file to stand in");
+        return;
+    };
+    let Some(face) = Face::from_bytes(FontBytes::Shared(Arc::new(bytes)), 0, None, None) else { panic!("not a font") };
+    let family = face.family.clone();
+    db.set_last_resort(face);
+    assert_eq!(db.default_face().map(|f| f.family.clone()), Some(family.clone()));
+    // It stands in; it isn't a family, so the text's own family still counts as missing.
+    assert!(db.families().is_empty());
+    assert!(!db.has_family(&family));
+    assert!(db.find("Helvetica Neue", "Regular").is_none());
+}
+
+#[test]
+fn a_real_face_wins_over_the_last_resort() {
+    let Some(bytes) = some_font_bytes() else {
+        eprintln!("skipping: no font file to stand in");
+        return;
+    };
+    let mut db = FontDb::default();
+    let Some(stand_in) = Face::from_bytes(FontBytes::Shared(Arc::new(bytes.clone())), 0, Some("Stand In"), None) else { panic!("not a font") };
+    db.set_last_resort(stand_in);
+    db.add_bytes(bytes);
+    assert_ne!(db.default_face().map(|f| f.family.clone()).as_deref(), Some("Stand In"));
+}

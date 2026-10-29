@@ -517,6 +517,10 @@ pub struct FontDb {
     /// Font files added as bytes (hash and length → families), so loading one again adds nothing.
     loaded_bytes: std::collections::HashMap<(u64, usize), Vec<String>>,
     system_scanned: bool,
+    /// The face drawn when the database has no other (a web build without craft-fonts): the UI
+    /// toolkit's own font, so text never draws as nothing. Not a family: it isn't listed, and a
+    /// family it stands in for still counts as missing ([`set_last_resort_font`]).
+    last_resort: Option<Arc<Face>>,
 }
 
 /// What a later walk of the font folders found ([`rescan_system_fonts`]).
@@ -743,7 +747,12 @@ impl FontDb {
                 return Some(f);
             }
         }
-        self.faces.first().cloned()
+        self.faces.first().cloned().or_else(|| self.last_resort.clone())
+    }
+
+    /// Draw text in `face` when the database has no other ([`set_last_resort_font`]).
+    pub fn set_last_resort(&mut self, face: Face) {
+        self.last_resort = Some(Arc::new(face));
     }
 
     /// Faces to try for characters the primary face lacks.
@@ -1173,6 +1182,22 @@ pub fn load_font_bytes(bytes: Vec<u8>) -> Vec<String> {
         crate::clear_layout_cache();
     }
     families
+}
+
+/// The font text is drawn in when no embedded, installed or loaded face exists (a web build
+/// without craft-fonts has none, and its text drew as nothing): the UI toolkit's own font. It
+/// isn't a family, so text in a family it stands in for is still reported missing. Set once (a
+/// later call keeps the first). False when `bytes` isn't a font.
+pub fn set_last_resort_font(bytes: &[u8]) -> bool {
+    let mut db = raw_db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if db.last_resort.is_some() {
+        return true;
+    }
+    let Some(face) = Face::from_bytes(FontBytes::Shared(Arc::new(bytes.to_vec())), 0, None, None) else { return false };
+    db.set_last_resort(face);
+    drop(db);
+    crate::clear_layout_cache();
+    true
 }
 
 /// `FIGCRAFT_NO_SYSTEM_FONTS` is set (and not `0`), or the process opted out
