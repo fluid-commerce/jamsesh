@@ -127,7 +127,13 @@ the client.
   hub/src/index.ts` from a checkout. It reuses a healthy hub on 4747, 4848, or 4949, otherwise it
   takes the first free one. It waits up to 60 seconds for `/healthz`. The hub in turn starts
   `figcraft-server` and, when installed, `whisper-server`. Quitting the app stops the hub
-  (`SIGTERM`, then kill after 10 seconds), which stops its children.
+  (`SIGTERM`, then kill after 10 seconds), which stops its children. Every helper the hub starts
+  (canvas server, canvas participants, the key helper, `whisper-server`) runs under a watcher that
+  stops it if the hub dies outright, and is tracked in one list that stopping the hub walks:
+  `SIGTERM`, then `SIGKILL` for one that ignores it. Shutdown reports the helpers reaped only when
+  each one's exit was seen, and warns otherwise; a helper that starts after shutdown began is
+  stopped at once. (A `whisper-server` already running on its port when the hub starts isn't the
+  hub's, and is left alone.)
 - Opens the **big screen** window at `/host`. With two or more displays it moves to the first
   display that isn't the main one; with one it stays there. It uses same-Space full screen, so
   app windows the brain arranges can sit on top of it [A29c]. The menu item **Move the big screen
@@ -491,9 +497,18 @@ target. Directives reach agents four ways [B14, B16]:
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate
-(compare with the other agents through `jam_message`; change code only for a gap both confirm,
+(compare with the named agents through `jam_message`; change code only for a gap both confirm,
 then show parity), answer, or **note** (write something down or keep a
 record: pain points, a list, meeting notes; no code to build and nothing to draw on the canvas).
+
+A `coordinate` directive always names its **counterparts**, the agents in the room each target
+compares with; one that would leave a target with nobody but itself is refused, whether the brain,
+`pair_agents`, a parity check, or `POST /directives` made it (the other targets count, and unknown
+ids are dropped). The inbox lists them ("compare with: ..."). A target can finish it (`jam_ack`
+done) only after a two-way exchange with one counterpart on that directive: a message or question
+from the target to them and one back, each carrying the directive's id. Nothing is inferred from
+who else the target talked to, so an older record without counterparts can only be dropped
+(`cancelled`), which is always allowed.
 
 People steer agents that misread something [B17] by prompting their own agent, by telling the
 room brain, or by sending a directive from the client.

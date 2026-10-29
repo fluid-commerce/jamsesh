@@ -99,7 +99,7 @@ Directives say which:
 
 - **explore**: make variants on the canvas. Don't touch your repository.
 - **implement**: change code in your repository, then verify against the chosen mockup.
-- **coordinate**: align with another agent (often desktop and mobile) before or while building.
+- **coordinate**: align with another agent (often desktop and mobile) before or while building. It names who with ("compare with: ..."); only an exchange with one of them, both ways, lets you finish it.
 - **answer**: a person answered your question.
 - **note**: write something down for the room (pain points, a list, meeting notes) in the form it asks for. No code to build, nothing to draw.
 
