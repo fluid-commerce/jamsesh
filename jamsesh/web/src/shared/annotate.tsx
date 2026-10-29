@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { closeUnattended, sendSummary, type RecordNote, type SendReply } from "./notes";
+import { closeUnattended, newRecordToken, sendSummary, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -800,10 +800,14 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
 
   const starting = useRef(false);
   const alive = useRef(true);
+  /** The token made before a Start and kept until the hub answers it: the page closing in between cancels by it. */
+  const pendingToken = useRef<string | null>(null);
   const unmuted = useRef(false);
   const start = async () => {
     if (recRef.current.phase !== "idle" || starting.current || review) return;
     starting.current = true;
+    const token = newRecordToken();
+    pendingToken.current = token;
     try {
       // Recording while muted would capture nothing: switch the mic on for the recording, or say why it can't be.
       if (mic && !mic.status.on && !typed.current) {
@@ -816,7 +820,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       // The hub answers first, with the recording's id: Record is live only once the hub has one, and Stop names it.
       let id: string;
       try {
-        const started = await api<{ id?: string }>("/record/start", { deviceId: hub.deviceId, personId, ...(screen ? { screen } : {}) }, undefined, { queue: false });
+        const started = await api<{ id?: string }>("/record/start", { deviceId: hub.deviceId, personId, token, ...(screen ? { screen } : {}) }, undefined, { queue: false });
         if (!started?.id) throw new Error("Couldn't start recording.");
         id = started.id;
       } catch (e) {
@@ -848,6 +852,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       setRec({ phase: "live", t0, id, screen });
     } finally {
       starting.current = false;
+      pendingToken.current = null;
     }
   };
 
@@ -951,11 +956,19 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       else void r.stop().then(send, () => send([]));
       return true;
     };
-    const onHide = () => release(true);
+    const cancelPending = (unloading: boolean) => {
+      const token = pendingToken.current;
+      if (!token) return;
+      // Start is still in flight: the hub ends it by the token if it began, or refuses it if it comes later.
+      if (unloading) fetch("/api/record/cancel", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: hub.deviceId, token }) }).catch(() => {});
+      else api("/record/cancel", { deviceId: hub.deviceId, token }, undefined, { queue: false, timeoutMs: 15_000 }).catch(() => {});
+    };
+    const onHide = () => (cancelPending(true), release(true));
     alive.current = true;
     window.addEventListener("pagehide", onHide);
     return () => {
       alive.current = false;
+      cancelPending(false);
       window.removeEventListener("pagehide", onHide);
       if (!release(false)) void recorder.current?.stop();
     };

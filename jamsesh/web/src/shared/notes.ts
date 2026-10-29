@@ -36,6 +36,9 @@ export function pinWords(n: RecordNote) {
   return `${t.label}, ${spot(n.pin.x, n.pin.y)}${t.page ? ` · ${t.page}` : ""}${n.screenId ? " · big screen" : ""}`;
 }
 
+/** Made by the page before it asks the hub to start a recording, so the page closing mid-request can still cancel it. */
+export const newRecordToken = () => `rt_${crypto.randomUUID().replace(/-/g, "")}`;
+
 /** A recording that began after its page went away has nobody to stop it: closes it, sending the words alone. */
 export function closeUnattended(post: (path: string, body: object) => Promise<unknown>, deviceId: string, personId: string | null, recordingId: string) {
   return post("/prompt-window", { deviceId, personId, recordingId, pointer: [] }).catch(() => {});

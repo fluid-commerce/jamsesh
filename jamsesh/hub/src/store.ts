@@ -178,6 +178,16 @@ export class Store {
 
   // ---- events ----
 
+  /** Runs the writes as one: all of them land or none do (and the cached collections are reloaded from what landed). */
+  atomic<T>(fn: () => T): T {
+    try {
+      return this.db.transaction(fn)();
+    } catch (e) {
+      this.cache.clear();
+      throw e;
+    }
+  }
+
   addEvent(e: {
     kind: EventKind;
     authorType: JamEvent["authorType"];

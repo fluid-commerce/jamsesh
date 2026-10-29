@@ -837,6 +837,90 @@ test("a send that fails after a directive went out repeats nothing when it is tr
   expect(r.s.annotations().length).toBe(2);
 }, 60_000);
 
+test("the directive and its event are one write: a failure between them leaves no directive, and the retry makes exactly one", async () => {
+  const r = room();
+  const atlas = r.reg("Ben", "acme/web");
+  const a = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", agentId: atlas.id, image: "/renders/a.png" });
+  const recordingId = await r.stopped();
+  const notes = [{ id: "n0", text: "fix A", t0: 1, t1: 2, pin: { target: { kind: "artifact", ref: a.id, label: "A" }, x: 0.5, y: 0.5, kind: "click" } }];
+  const real = r.s.store.addEvent.bind(r.s.store);
+  let failed = false;
+  (r.s.store as any).addEvent = (e: any) => {
+    if (e.kind === "directive" && !failed) (failed = true, (() => { throw new Error("database is locked"); })());
+    return real(e);
+  };
+  expect((await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).status).toBeGreaterThanOrEqual(500);
+  expect(r.s.directives().length).toBe(0);
+  expect((await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).status).toBe(200);
+  expect(r.s.directives().length).toBe(1);
+  expect(r.s.store.recentEvents({ kinds: ["directive"], limit: 20 }).length).toBe(1);
+  // The same key asked for again finds the directive.
+  const again = r.s.createDirective({ text: "x", mode: "implement", targets: [atlas.id], requestedBy: "Maya", key: r.s.directives()[0].key });
+  expect(again.id).toBe(r.s.directives()[0].id);
+  expect(r.s.directives().length).toBe(1);
+}, 60_000);
+
+test("a send is frozen once made: the same notes answer the same, different notes are refused and change nothing", async () => {
+  const r = room();
+  const atlas = r.reg("Ben", "acme/web");
+  const a = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", agentId: atlas.id, image: "/renders/a.png" });
+  const recordingId = await r.stopped();
+  const mk = (text: string) => [{ id: "n0", text, t0: 1, t1: 2, pin: { target: { kind: "artifact", ref: a.id, label: "A" }, x: 0.5, y: 0.5, kind: "click" } }];
+  const first = (await (await r.post("/record/send", { recordingId, personId: r.maya.id, notes: mk("fix A") })).json()) as any;
+  const same = (await (await r.post("/record/send", { recordingId, personId: r.maya.id, notes: mk("fix A") })).json()) as any;
+  expect(same.sent).toEqual(first.sent);
+  const changed = await r.post("/record/send", { recordingId, personId: r.maya.id, notes: mk("fix A, and bigger") });
+  expect(changed.status).toBe(409);
+  expect(((await changed.json()) as any).error ?? "").toContain("Record again");
+  expect(r.s.directives().length).toBe(1);
+  expect(r.s.directives()[0].text).toContain("fix A");
+  expect(r.s.directives()[0].text).not.toContain("bigger");
+}, 60_000);
+
+test("a window closing while its Start is in flight: the token cancels whichever side wins", async () => {
+  const r = room();
+  const tok = "rt_aaaaaaaaaaaaaaaa";
+  const tok2 = "rt_bbbbbbbbbbbbbbbb";
+  // Start first, cancel after: the recording ends and its screen/speech window go.
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  expect((await r.post("/record/cancel", { deviceId: "mayaLaptop", token: tok })).status).toBe(200);
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
+  expect(r.s.recordings().length).toBe(0);
+  // Cancel first, Start after: the Start is refused and nothing runs.
+  expect((await r.post("/record/cancel", { deviceId: "mayaLaptop", token: tok2 })).status).toBe(200);
+  const late = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, token: tok2 });
+  expect(late.status).toBe(409);
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
+  // A cancel names its own token: another recording is untouched, and a malformed or foreign-device cancel is refused.
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, "rt_cccccccccccccccc");
+  if (!b.ok) throw new Error("start");
+  await r.post("/record/cancel", { deviceId: "mayaLaptop", token: "rt_dddddddddddddddd" });
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
+  expect((await r.post("/record/cancel", { deviceId: "mayaLaptop", token: "x" })).status).toBe(400);
+  expect((await r.post("/record/cancel", { deviceId: "nobodyLaptop", token: tok })).status).toBe(403);
+}, 60_000);
+
+test("a recording's speech bound is kept on the recording itself: twenty-five replacements during its wait pull nothing in", async () => {
+  const r = room();
+  const base = Date.now() - 60_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "said in A", r.maya.id, "mayaLaptop", base + 1000);
+  r.at(base + 5000);
+  const stoppingA = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  r.at(base + 5100);
+  for (let i = 0; i < 25; i++) {
+    const x = r.hub.recordStart("mayaLaptop", r.maya.id);
+    if (!x.ok) throw new Error("start");
+    if (i === 0) line(r.hub, "said in B", r.maya.id, "mayaLaptop", base + 5200);
+    r.at(base + 5300 + i);
+  }
+  const gotA = await stoppingA;
+  expect(gotA.ok && gotA.notes.map((n) => n.text)).toEqual(["said in A"]);
+}, 60_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

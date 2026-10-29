@@ -83,7 +83,7 @@ interface PromptWindow {
   rec?: string;
 }
 
-type SendProgress = { directives: Map<string, string>; brain?: boolean };
+type SendProgress = { brain?: boolean };
 
 export class Hub {
   store: Store;
@@ -354,7 +354,7 @@ export class Hub {
   }
 
   /** What this device heard in a closed recording window, once the last words are transcribed (about 7 s at most). */
-  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }, open: PromptWindow | undefined, ownId?: string): Promise<Utterance[]> {
+  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }, open: PromptWindow | undefined, rec?: { nextT0?: number }): Promise<Utterance[]> {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
@@ -367,11 +367,9 @@ export class Hub {
     const max = open?.max ?? Hub.PROMPT_MAX_MS;
     // A line belongs to this recording if it began after the recording did and before it stopped. Only the stopping recording gets the
     // 300 ms for a last word still being transcribed, and never past the start of the next recording on this device: no line is in two.
-    // The bound is the earliest start after this one, from the device's log of starts: it holds even if that successor is replaced or ends first.
-    const upto = () => {
-      const next = (this.starts.get(w.deviceId) ?? []).find((x) => x.id !== ownId && x.t0 >= w.t0);
-      return Math.min(w.t1 + 300, next ? next.t0 : Infinity);
-    };
+    // The bound is the start of the recording that followed this one, written on this recording when that start happened: it holds
+    // however that successor ends, and nothing is dropped from it to make room.
+    const upto = () => Math.min(w.t1 + 300, rec?.nextT0 ?? Infinity);
     const heard = () => s.store.all("utterances").filter((u) => u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
@@ -406,7 +404,7 @@ export class Hub {
     } else if (!open || open.rec || open.t1 !== undefined) return { ok: false, reason: "There is no recording to stop.", status: 409 };
     const t0 = open.t0;
     const t1 = this.clock();
-    const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open, w.recordingId);
+    const lines = await this.waiting(w.deviceId, w.recordingId ? rec : undefined, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open, w.recordingId ? rec : undefined));
     if (rec && w.recordingId) this.recordEnd(w.deviceId, rec);
     w = { ...w, pointer: this.inWindow(w.pointer, t0, t1) };
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
@@ -442,9 +440,22 @@ export class Hub {
    * Recording laptops. `lock` is the screen lock this recording took (its owner and `since`), so only
    * that lock is given back: never one someone took after it.
    */
-  private recs = new Map<string, { id: string; t0: number; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number; stopping?: boolean }>();
-  /** Each device's recent recording starts, oldest first: a recording's speech never runs past the next start, whatever became of that one. */
-  private starts = new Map<string, { id: string; t0: number }[]>();
+  private recs = new Map<string, { id: string; t0: number; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number; stopping?: boolean; nextT0?: number; token?: string }>();
+  /** Recordings stopped and still gathering their last words, by device: a Start in that time writes its time on each (`nextT0`). */
+  private stoppingRecs = new Map<string, Set<{ nextT0?: number }>>();
+  private async waiting<T>(deviceId: string, rec: { nextT0?: number } | undefined, run: () => Promise<T>): Promise<T> {
+    if (!rec) return run();
+    const set = this.stoppingRecs.get(deviceId) ?? new Set();
+    this.stoppingRecs.set(deviceId, set.add(rec));
+    try {
+      return await run();
+    } finally {
+      set.delete(rec);
+      if (!set.size) this.stoppingRecs.delete(deviceId);
+    }
+  }
+  /** Recording tokens a window cancelled before (or while) its Start was answered, so the Start can't outlive the page. */
+  private cancelled = new Map<string, number>();
   private recSweep = (() => {
     const t = setInterval(() => this.sweepRecordings(), 15_000);
     t.unref?.();
@@ -455,16 +466,17 @@ export class Hub {
    * the right to send and the receipt of the send are kept and dropped together (the oldest 200 go): a record that is gone is a 404,
    * never a send that happens a second time. A repeated send (a lost reply, a double click) gets the same answer and does nothing twice.
    */
-  private noteRecs = new Map<string, { caller: string; personId: string | null; sending?: Promise<RecordSendResult>; done: SendProgress }>();
+  private noteRecs = new Map<string, { caller: string; personId: string | null; sending?: Promise<RecordSendResult>; sig?: string; done: SendProgress }>();
 
   /**
    * Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last
    * recording there ends. A device's earlier recording whose Stop never came ends first, but only the same person's: the caller has
    * already shown the device is its window's.
    */
-  recordStart(deviceId: string, personId: string | null, t0 = this.clock(), screen?: string | null): { ok: true; id: string } | { ok: false; reason: string; status: number } {
+  recordStart(deviceId: string, personId: string | null, t0 = this.clock(), screen?: string | null, token?: string): { ok: true; id: string } | { ok: false; reason: string; status: number } {
     const s = this.session;
     const person = s.person(personId);
+    if (token && this.cancelled.has(token)) return { ok: false, reason: "That recording was cancelled.", status: 409 };
     const earlier = this.recs.get(deviceId);
     if (earlier?.personId && earlier.personId !== person?.id) return { ok: false, reason: "Someone else is recording in this window.", status: 409 };
     // Everything that can refuse is checked first: a rejected Start leaves the earlier recording running.
@@ -478,6 +490,8 @@ export class Hub {
       if (lock && !s.driversOf(sc.id).includes(person.id) && lock.personId !== person.id) return { ok: false, reason: `${lock.by} is driving the big screen. Ask them to pass control or drive together first.`, status: 409 };
     }
     // Ended before the lock is taken, so giving back its lock can't release the one this recording relies on.
+    // The first start after a recording is that recording's bound, kept on the recording itself (also while it still waits for its last words).
+    for (const r of [earlier, ...(this.stoppingRecs.get(deviceId) ?? [])]) if (r && r.nextT0 === undefined) r.nextT0 = t0;
     this.recordEnd(deviceId);
     let screenId: string | null = null;
     let lockTaken: { personId?: string | null; since: number } | null = null;
@@ -495,16 +509,27 @@ export class Hub {
     const id = newId("rec");
     const prompt = this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
     prompt.rec = id;
-    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, t0, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0 };
+    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, t0, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0, ...(token ? { token } : {}) };
     // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
     (rec.cap = setTimeout(() => this.abandonRecording(deviceId, rec), Hub.RECORD_MAX_MS + 1000)).unref?.();
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
     if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
     this.recs.set(deviceId, rec);
-    const log = [...(this.starts.get(deviceId) ?? []), { id, t0 }].sort((a, b) => a.t0 - b.t0);
-    this.starts.set(deviceId, log.slice(-20));
     s.setRecording({ id, deviceId, personId: rec.personId, personName: person?.name ?? "Someone", screenId, since: Date.now() });
     return { ok: true, id };
+  }
+
+  /**
+   * A window's recording token (made before its Start) is cancelled, because the page is going away. Whichever came first wins: a
+   * recording already begun under it ends, and a Start that arrives later is refused. The words said are not kept.
+   */
+  recordCancel(deviceId: string, token: string) {
+    const now = Date.now();
+    for (const [t, at] of this.cancelled) if (now - at > Hub.RECORD_MAX_MS) this.cancelled.delete(t);
+    this.cancelled.set(token, now);
+    if (this.cancelled.size > 500) this.cancelled.delete(this.cancelled.keys().next().value!);
+    const rec = this.recs.get(deviceId);
+    if (rec?.token === token && !rec.stopping) this.abandonRecording(deviceId, rec);
   }
 
   private abandonRecording(deviceId: string, only: unknown) {
@@ -557,7 +582,7 @@ export class Hub {
     const t0 = rec.t0;
     const t1 = this.clock();
     const open = this.promptMode.get(w.deviceId);
-    const lines = await this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined, rec.id);
+    const lines = await this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined, rec));
     // Only the recording this Stop belongs to: a Start that came in while the words were gathered stays.
     this.recordEnd(w.deviceId, rec);
     const marks = this.inWindow(Array.isArray(w.pointer) ? w.pointer : [], t0, t1).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
@@ -571,7 +596,7 @@ export class Hub {
       n.ownerName = owner ? s.agent(owner)?.name ?? null : null;
     }
     const recordingId = rec.id;
-    this.noteRecs.set(recordingId, { caller: w.caller, personId: person?.id ?? null, done: { directives: new Map() } });
+    this.noteRecs.set(recordingId, { caller: w.caller, personId: person?.id ?? null, done: {} });
     if (this.noteRecs.size > NOTE_RECS_MAX) this.noteRecs.delete(this.noteRecs.keys().next().value!);
     return { ok: true, recordingId, notes };
   }
@@ -616,10 +641,16 @@ export class Hub {
     const owner = this.noteRecs.get(w.recordingId);
     if (!owner) return Promise.resolve({ ok: false, reason: "That recording isn't one of this session's. Record again.", status: 404 });
     if (owner.caller !== w.caller || (owner.personId && owner.personId !== person.id)) return Promise.resolve({ ok: false, reason: "Those notes belong to someone else.", status: 403 });
+    // What is sent is frozen at the first attempt: a retry says the same, and different notes are refused rather than half-applied.
+    const notes = this.normalizeNotes(person, w.notes);
+    if (!notes.length) return Promise.resolve({ ok: false, reason: "There are no notes to send." });
+    const sig = JSON.stringify(notes);
+    if (owner.sig && owner.sig !== sig) return Promise.resolve({ ok: false, reason: "Those notes were already sent. Record again to change them.", status: 409 });
+    owner.sig = sig;
     // Reserved before anything waits, so two sends at once share one.
     if (owner.sending) return owner.sending;
     // Nothing went out (no notes, or it failed): the reservation goes, so a corrected send may follow.
-    const sending: Promise<RecordSendResult> = this.sendNotes(person, w.recordingId, w.notes, owner.done).then(
+    const sending: Promise<RecordSendResult> = this.sendNotes(person, w.recordingId, notes, owner.done).then(
       (r) => (r.ok || owner.sending !== sending || (owner.sending = undefined), r),
       (e) => {
         if (owner.sending === sending) owner.sending = undefined;
@@ -630,12 +661,10 @@ export class Hub {
     return sending;
   }
 
-  /** `done` is what this recording has already delivered: a send that failed part-way and is tried again repeats none of it. */
-  private async sendNotes(person: { id: string; name: string }, recordingId: string, raw: RecordNote[], done: SendProgress): Promise<RecordSendResult> {
-    const s = this.session;
-    const w = { recordingId, notes: raw };
+  /** The notes as they will be sent: cleaned, capped, and owned by the person sending. */
+  private normalizeNotes(person: { id: string }, raw: RecordNote[]): RecordNote[] {
     const clamp = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
-    const notes: RecordNote[] = (Array.isArray(w.notes) ? w.notes : [])
+    return (Array.isArray(raw) ? raw : [])
       .slice(0, 80)
       .map((n, i) => ({
         id: String(n?.id ?? `n${i}`).slice(0, 60),
@@ -647,8 +676,12 @@ export class Hub {
         pin: n?.pin?.target?.kind && typeof n.pin.target.ref === "string" ? { ...n.pin, x: clamp(n.pin.x), y: clamp(n.pin.y) } : null,
       }))
       .filter((n) => n.text);
-    if (!notes.length) return { ok: false, reason: "There are no notes to send." };
+  }
 
+  /** `done` is what this recording has already delivered to the brain; directives are found by their key, so a retried send repeats none of it. */
+  private async sendNotes(person: { id: string; name: string }, recordingId: string, notes: RecordNote[], done: SendProgress): Promise<RecordSendResult> {
+    const s = this.session;
+    const w = { recordingId };
     const pins: Annotation[] = [];
     const byAgent = new Map<string, { n: RecordNote; crop: string | null }[]>();
     const loose: { n: RecordNote; crop: string | null }[] = [];
@@ -669,11 +702,6 @@ export class Hub {
 
     const sent: { agentId: string; agentName: string; notes: number; directiveId: string }[] = [];
     for (const [agentId, items] of byAgent) {
-      const had = done.directives.get(agentId);
-      if (had) {
-        sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: had });
-        continue;
-      }
       const lines = items.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
       const d = s.createDirective({
         text: `Notes from ${person.name}'s recording (${items.length}). Each is what they said while pointing at the spot described:\n${lines.join("\n")}`,
@@ -681,8 +709,8 @@ export class Hub {
         rationale: "Notes pinned to this agent's work from a recording.",
         targets: [agentId],
         requestedBy: person.name,
+        key: `${recordingId}:${agentId}`,
       });
-      done.directives.set(agentId, d.id);
       sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: d.id });
     }
     if (loose.length && !done.brain) {

@@ -129,6 +129,8 @@ export interface Directive {
   rationale: string;
   targets: string[];
   status: DirectiveStatus;
+  /** Set when the directive is made for something that must happen once (a recording's notes for one agent): a repeat finds this one. */
+  key?: string;
   /** Each target agent's own progress; status is done only when every target is. */
   progress: Record<string, DirectiveStatus>;
   priority: number;

@@ -29,7 +29,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -915,8 +915,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (path === "/record/start") {
       if (!body?.deviceId) return bad("deviceId is required");
       if (!ownDevice(body.deviceId)) return bad("Record from your own window.", 403);
-      const r = hub.recordStart(String(body.deviceId), actor().id, undefined, typeof body.screen === "string" ? body.screen : null);
+      const token = typeof body.token === "string" && /^[\w-]{8,64}$/.test(body.token) ? body.token : undefined;
+      const r = hub.recordStart(String(body.deviceId), actor().id, undefined, typeof body.screen === "string" ? body.screen : null, token);
       return r.ok ? json(r) : bad(r.reason, r.status);
+    }
+    // The window is closing with a Start possibly still in flight: the token it made before Start ends that recording, or refuses it.
+    if (path === "/record/cancel") {
+      if (!body?.deviceId || typeof body?.token !== "string" || !/^[\w-]{8,64}$/.test(body.token)) return bad("deviceId and token are required");
+      if (!ownDevice(body.deviceId)) return bad("Cancel from the window that started it.", 403);
+      hub.recordCancel(String(body.deviceId), body.token);
+      return json({ ok: true });
     }
     if (path === "/record/stop") {
       if (!body?.deviceId || !body?.recordingId) return bad("deviceId and recordingId are required");

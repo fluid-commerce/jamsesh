@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { closeUnattended, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { closeUnattended, newRecordToken, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -41,4 +41,10 @@ test("a recording that began after its page was gone is closed by id, with the w
   await closeUnattended(async (path, body) => void calls.push([path, body]), "dev1", "p1", "rec9");
   expect(calls).toEqual([["/prompt-window", { deviceId: "dev1", personId: "p1", recordingId: "rec9", pointer: [] }]]);
   await closeUnattended(async () => { throw new Error("offline"); }, "dev1", null, "rec9");
+});
+
+test("a recording token is made before Start, is unique, and is one the hub accepts", () => {
+  const a = newRecordToken();
+  expect(a).toMatch(/^[\w-]{8,64}$/);
+  expect(newRecordToken()).not.toBe(a);
 });

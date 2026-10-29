@@ -860,11 +860,18 @@ export class Session {
     requestedBy: string;
     sourceEventIds?: number[];
     workstreamId?: string | null;
+    /** Once per key: asking again for the same key returns the directive already made. */
+    key?: string;
   }): Directive {
+    if (d.key) {
+      const had = this.store.all("directives").find((x) => x.key === d.key);
+      if (had) return had;
+    }
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") d = { ...d, targets: d.targets.filter((t) => this.agent(t)?.role !== "observer") };
     const directive: Directive = {
       id: newId("d"),
+      ...(d.key ? { key: d.key } : {}),
       ts: Date.now(),
       text: d.text,
       mode: d.mode,
@@ -880,8 +887,10 @@ export class Session {
       deliveredAt: null,
       updatedAt: Date.now(),
     };
-    this.store.put("directives", directive);
     const names = d.targets.map((t) => this.agent(t)?.name).filter(Boolean);
+    // The directive and its event are one write: a failure between them leaves neither, so a retry can't double it.
+    this.store.atomic(() => {
+    this.store.put("directives", directive, false);
     this.store.addEvent({
       kind: "directive",
       authorType: "brain",
@@ -891,6 +900,8 @@ export class Session {
       workstreamId: directive.workstreamId,
       data: { directiveId: directive.id, mode: d.mode, targets: d.targets, targetNames: names, requestedBy: d.requestedBy, rationale: directive.rationale },
     });
+    });
+    bus.changed("directives");
     bus.send({
       type: "toast",
       tone: "directive",
