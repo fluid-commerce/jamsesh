@@ -79,8 +79,49 @@ test("a share the host ended stays ended: its capture stops, and a missed end is
     await rtc.reregister();
     expect(lost.track.stopped).toBe(false);
     expect(rtc.localPublication("sh-lost-2")).toBeTruthy();
+    await rtc.stopPublishing("sh-lost-2", { notifyHub: false });
   } finally {
     Date.now = realNow;
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
+  }
+});
+
+test("two starts while the picker is open share one capture, and Stop releases every track", async () => {
+  const media = (globalThis.navigator as any).mediaDevices;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("{}")) as any;
+  const streams: ReturnType<typeof fakeStream>[] = [];
+  let pick!: () => void;
+  Object.defineProperty(globalThis.navigator, "mediaDevices", {
+    value: {
+      getDisplayMedia: () => {
+        const fake = fakeStream();
+        streams.push(fake);
+        return new Promise((r) => (pick = () => r(fake.stream)));
+      },
+    },
+    configurable: true,
+  });
+  try {
+    const rtc = await import("../src/shared/rtc");
+    const first = rtc.publish("screen", "sh-req-a");
+    const second = rtc.publish("screen", "sh-req-b");
+    await Bun.sleep(5);
+    expect(streams).toHaveLength(1); // one picker
+    pick();
+    const [a, b] = await Promise.all([first, second]);
+    expect(b).toBe(a);
+    await rtc.stopPublishing(a.shareId);
+    expect(streams.every((s) => s.track.stopped)).toBe(true);
+    expect(rtc.activePublication("screen")).toBeUndefined();
+    // Once the first is done, a new start opens the picker again.
+    const third = rtc.publish("screen", "sh-req-c");
+    await Bun.sleep(5);
+    expect(streams).toHaveLength(2);
+    pick();
+    await rtc.stopPublishing((await third).shareId);
+  } finally {
     globalThis.fetch = realFetch;
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
   }
