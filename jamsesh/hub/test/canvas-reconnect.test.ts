@@ -57,6 +57,7 @@ test("a dead host canvas process is started again; if that fails the canvas says
   const dead = { alive: false, close: () => void calls.push("close") };
   const canvas: any = { host: dead, polling: false, stopped: false, recovering: false, session, agents: new Map(), serverUrl: "http://127.0.0.1:1" };
   canvas.restartHost = (Canvas.prototype as any).restartHost;
+  canvas.recover = (Canvas.prototype as any).recover;
   canvas.startHost = async () => {
     calls.push("startHost");
     canvas.host = { alive: true };
@@ -131,4 +132,29 @@ test("stop() clears the watchdog and the reaper", () => {
   } finally {
     globalThis.clearInterval = real;
   }
+});
+
+test("a failed canvas server restart marks the canvas failed instead of leaving it live, and is retried", async () => {
+  const session = { canvas: { status: "live", editLink: "x" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; }, store: { setting: () => null } };
+  let starts = 0;
+  const canvas: any = { host: { alive: true }, polling: false, stopped: false, recovering: false, session, agents: new Map(), serverUrl: "http://127.0.0.1:1", serverProc: null };
+  for (const k of ["watchdog", "revive", "recover"]) canvas[k] = (Canvas.prototype as any)[k];
+  canvas.startServer = async () => {
+    starts++;
+    throw new Error("figcraft-server didn't start: address in use");
+  };
+  await canvas.watchdog();
+  expect(session.canvas.status).toBe("failed");
+  expect(session.canvas.reason).toContain("didn't start");
+  // Still down on the next round: tried again, not left for dead.
+  await canvas.watchdog();
+  expect(starts).toBe(2);
+  // One recovery at a time.
+  let release!: () => void;
+  canvas.startServer = () => new Promise<void>((r) => (release = () => r()));
+  const first = canvas.revive();
+  await canvas.revive();
+  release();
+  await first;
+  expect(canvas.recovering).toBe(false);
 });

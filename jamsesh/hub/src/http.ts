@@ -640,7 +640,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!body?.deviceId) return bad("deviceId is required");
     if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
     const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
-    hub.brain.placeShare(share);
+    s.placeShare(share);
     return json(share);
   }
   if (path === "/shares/request" && req.method === "POST") {

@@ -339,7 +339,7 @@ describe("9. cross-platform parity", () => {
       expect(ds.every((d) => d.mode === "coordinate" || d.mode === "implement")).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.mobile.id)).toBe(true);
       // What the other platform's agent actually reads.
-      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toMatch(/\[coordinate\][^\n]*sidebar/i);
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toMatch(/\[coordinate\][^\n]*Parity check, not a build task[^\n]*sidebar[^\n]*Build only if you both confirm a gap/i);
       expect(r.hub.mcp.inboxText(r.agents.design, false)).toBe("Nothing new.");
     });
   }, T);
@@ -352,6 +352,15 @@ describe("9. cross-platform parity", () => {
       expect(r.newDirectives()).toHaveLength(0);
       expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toBe("Nothing new.");
       expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toBe("Nothing new.");
+    });
+  }, T);
+
+  t("a ship with nothing a person sees stays news", async () => {
+    await runScenario("parity: invisible ship -> none", [9], async (r) => {
+      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Moved the auth token refresh into a background worker and added retry with backoff in acme/desktop.");
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toBe("Nothing new.");
     });
   }, T);
 
@@ -384,7 +393,7 @@ describe("9. cross-platform parity", () => {
       expect(ds.every((d) => d.mode === "coordinate" || d.mode === "implement")).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.desktop.id)).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.mobile.id)).toBe(true);
-      expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toMatch(/\[coordinate\][^\n]*onboarding/i);
+      expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toMatch(/\[coordinate\][^\n]*Parity check, not a build task[^\n]*onboarding/i);
     });
   }, T);
 

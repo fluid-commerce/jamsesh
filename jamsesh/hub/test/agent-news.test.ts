@@ -49,7 +49,8 @@ test("repeated ships from one agent in a window are considered once, and not aga
   expect(calls).toHaveLength(1);
   expect(calls[0]).toContain("new spacing");
   expect(calls[0]).toContain("spacing fix");
-  expect(calls[0]).toContain("Call no_action only when nothing in it is something a person sees");
+  expect(calls[0]).toContain("sends a parity check, not build work");
+  expect(calls[0]).toContain("When the text names nothing a person sees, call no_action.");
   s.postUpdate(desktop.id, "shipped", "Header: spacing fix again");
   await wait(80);
   expect(calls).toHaveLength(1);
@@ -154,16 +155,26 @@ test("the parity tool needs a named cross-platform feature, and its directives a
   const tools = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped the collapsible sidebar navigation" }]);
   const said = async (input: object) => ((r: any) => r?.text ?? String(r))(await tools.coordinate_parity.execute(input));
   // Same platform only, or a shipper that isn't in the batch: refused, nothing sent.
-  expect(await said({ feature: "Sidebar", shippedBy: [desktop.id], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
-  expect(await said({ feature: "Sidebar", shippedBy: [mobile.id], platforms: ["desktop"] })).toContain("Name the shipping agents");
+  expect(await said({ feature: "Sidebar", seen: "a sidebar", shippedBy: [desktop.id], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
+  expect(await said({ feature: "Sidebar", seen: "a sidebar", shippedBy: [mobile.id], platforms: ["desktop"] })).toContain("Name the shipping agents");
   expect(hub.mcp.inboxText(mobile, false)).toBe("Nothing new.");
-  await tools.coordinate_parity.execute({ feature: "Collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] });
+  // Nothing a person sees: refused.
+  expect(await said({ feature: "Sidebar", seen: " ", shippedBy: [desktop.id], platforms: ["mobile"] })).toContain("names nothing a person sees");
+  expect(s.directives()).toHaveLength(0);
+  const check = { feature: "Collapsible sidebar navigation", seen: "a left sidebar that collapses to icons", shippedBy: [desktop.id], platforms: ["mobile"] };
+  await tools.coordinate_parity.execute(check);
   const inbox = hub.mcp.inboxText(mobile, false);
   expect(inbox).toContain("[coordinate]");
-  expect(inbox).toContain("Collapsible sidebar navigation shipped on desktop");
-  expect(hub.mcp.inboxText(desktop, false)).toContain("you shipped it on desktop");
+  expect(inbox).toContain("Parity check, not a build task: Jonathan's");
+  expect(inbox).toContain("Does the mobile app have it, and does it match?");
+  expect(inbox).toContain("Build only if you both confirm a gap");
+  expect(inbox).toContain("Change code only for a gap you both confirm");
+  expect(inbox).not.toMatch(/implement your side/);
+  const shipper = hub.mcp.inboxText(desktop, false);
+  expect(shipper).toContain("Parity check, not a build task: you shipped Collapsible sidebar navigation on desktop");
+  expect(shipper).toContain("No code changes unless you both confirm a gap");
   // Asked twice: one open coordinate directive each.
-  await tools.coordinate_parity.execute({ feature: "Collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] });
+  await tools.coordinate_parity.execute(check);
   expect(s.directives()).toHaveLength(2);
   // The pass gets only this tool and no_action, never pair_agents or create_directive.
   expect(Object.keys(tools).sort()).toEqual(["coordinate_parity", "no_action"]);
@@ -176,7 +187,7 @@ test("other workstreams' decisions can't crowd out an older relevant one, or mov
   const checkout = s.store.all("workstreams").find((w) => w.title === "Checkout")!;
   const add = (text: string, workstreamId: string | null) => s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, workstreamId, relevance: "work", data: {} });
   add("Nav goes in a sidebar", nav.id);
-  for (let i = 0; i < 250; i++) add(`Checkout rule ${i}`, checkout.id);
+  for (let i = 0; i < 2_100; i++) add(`Checkout rule ${i}`, checkout.id); // more than 20 pages of 100
   expect(s.roomDecisions(desktop.id, { limit: 10 }).map((e) => e.text)).toEqual(["Nav goes in a sidebar"]);
   // The prompt hook hands it over (and only then marks it seen).
   expect(JSON.stringify(hooksOf(hub).prompt(desktop, { prompt: "next" }))).toContain("Nav goes in a sidebar");
