@@ -282,9 +282,8 @@ its own: no clips (the audio element is never made), no chime, and nothing in a 
 playing stops the moment the page learns the room is silent, and the chime comes back when sound does.
 A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame cannot be
 muted from outside, so a quiet card stands in for it. A scripted HTML tile or custom stage is drawn
-inert (no clicks or keys reach it, so no link can navigate it), with an empty sandbox (no scripts,
-popups or navigation) and a content policy of `media-src 'none'; script-src 'none'`; if the frame loads
-anything else it is put back. A shared screen or camera is captured without audio, its `<video>` is
+inert (no clicks or keys reach it, so no link can navigate it), with an empty sandbox (no scripts or
+popups, no navigating the page that holds it) and a content policy of `media-src 'none'; script-src 'none'`. A shared screen or camera is captured without audio, its `<video>` is
 muted, and any audio track that arrives is stopped.
 
 ### 3.6 Projects

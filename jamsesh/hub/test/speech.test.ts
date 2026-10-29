@@ -117,9 +117,10 @@ describe("silent mode reaches the page", () => {
     const long = "One is done. Two is done. Three is done.";
     expect(await speak(hub.session, long, { source: "voice", kind: "answer" })).toBe("muted");
     expect(sent.find((m) => m.type === "speak")).toMatchObject({ text: long });
-    // Not throttled as if something had been said a moment ago.
-    expect(await speak(hub.session, "Next.", { source: "voice", kind: "answer" })).toBe("muted");
-    expect(sent.filter((m) => m.type === "toast")).toEqual([]);
+    // Sound back on: the next reply takes the spoken path at once, not held back as if something had just been said.
+    delete process.env.JAMSESH_SILENT;
+    expect(await speak(hub.session, "Next.", { source: "voice", kind: "answer" })).toBe("spoken");
+    process.env.JAMSESH_SILENT = "1";
   });
 
   test("without the flag chime still goes out and the state says not silent", () => {
