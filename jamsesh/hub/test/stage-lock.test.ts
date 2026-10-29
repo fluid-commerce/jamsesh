@@ -1,6 +1,6 @@
 // Phase 3 on the big screen: a person's cast is locked (3.1), a rebuilt screen is one item with versions
 // (3.5), and each screen remembers what it showed (3.6). Simulated rooms: fake people and agents, no sound.
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,10 @@ import type { Agent, JamEvent, ShowRequest, Stage } from "../src/types";
 process.env.JAMSESH_SILENT = "1";
 const dir = mkdtempSync(join(tmpdir(), "jam-stage-"));
 const hubs: Hub[] = [];
+afterEach(() => {
+  // Each test's hub (and its timers) ends with it, so nothing of one test publishes during the next.
+  for (const h of hubs.splice(0)) h.stop();
+});
 afterAll(() => {
   for (const h of hubs) h.stop();
   bus.resolver = null;
@@ -1679,11 +1683,8 @@ test("an expand request is for the content that was clicked: a long parity key e
   }
 });
 
-test("Expand is a transaction like every stage write: a failed save leaves the revision, what clients were sent and other work's claims alone, on main and on an extra screen", async () => {
-  bus.reset(); // what earlier tests left to send doesn't reach this one
+test("Expand is a transaction like every stage write: a failed save leaves the revision, what clients were sent and other work's claims alone, on main and on an extra screen", () => {
   const { s } = room();
-  const oldResolver = bus.resolver;
-  bus.resolver = (k) => (s as any).resolve(k);
   const a = artifact(s, "A");
   const b = artifact(s, "B");
   const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
@@ -1691,24 +1692,30 @@ test("Expand is a transaction like every stage write: a failed save leaves the r
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   for (const screen of ["main", "screen-2"]) {
     s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", screen, { override: true });
-    bus.reset();
     const rev = s.stageRev(screen);
     const claim = s.stageClaim();
-    const sent: any[] = [];
-    const off = bus.on((m: any) => sent.push(m));
+    // Only what the failing call itself sends or announces is watched (nothing else is in flight in this window).
+    const calls: string[] = [];
+    const realSend = bus.send.bind(bus);
+    const realChanged = bus.changed.bind(bus) as (key: string) => void;
+    (bus as any).send = (m: any) => { calls.push(`send:${m.type}`); realSend(m); };
+    (bus as any).changed = (k: string) => { calls.push(`changed:${k}`); realChanged(k); };
     const real = s.store.setSetting.bind(s.store);
     (s.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage" || k === "screenStages") throw new Error("disk full"); real(k, v); };
-    expect(() => s.expandTile(a.id, screen)).toThrow("disk full");
-    (s.store as any).setSetting = real;
-    await Bun.sleep(90);
-    off();
-    expect(sent.filter((m) => m.type === "stage" || (m.type === "patch" && (m.key === "screens" || m.key === "stageTiles")))).toEqual([]);
+    try {
+      expect(() => s.expandTile(a.id, screen)).toThrow("disk full");
+    } finally {
+      (s.store as any).setSetting = real;
+      (bus as any).send = realSend;
+      (bus as any).changed = realChanged;
+    }
+    expect(calls).toEqual([]);
+    expect((s as any).effects).toBeNull();
     expect(s.stageRev(screen)).toBe(rev);
     expect(s.stage(screen).expanded).toBeUndefined();
     // Other work's claim still holds.
     expect(s.setStage({ mode: "agents" }, "Room brain", screen, { claim })).toMatchObject({ applied: true });
   }
-  bus.resolver = oldResolver;
 });
 
 test("an expanded tile whose artifact is deleted is collapsed and published, and a screen's density change reaches clients with its value", async () => {
@@ -1857,10 +1864,9 @@ test("the return-to-board deadline is saved with the stage: Expand, Unlock and t
     // The hub restarts three minutes later: both screens resume the saved deadline, not one worked out from their age.
     now = start + 10 * 60_000;
     const s2 = new Session(new Store(rdir));
-    const left = kept! - now;
-    expect(left).toBeGreaterThan(0);
-    expect((s2 as any).armRevert("main", s2.stage(), 1000)).toBe(left);
-    expect((s2 as any).armRevert("screen-2", s2.stage("screen-2"), 1000)).toBe(left);
+    expect(kept! - now).toBeGreaterThan(0);
+    expect(s2.stage().revertAt).toBe(kept);
+    expect(s2.stage("screen-2").revertAt).toBe(kept);
     // Unlock restarts the wait: a pinned, locked view goes back to being timed from the unlock.
     const chey = s2.upsertPerson({ name: "Chey" });
     s2.setStage({ mode: "compare", items: [a.id, a.id === b.id ? b.id : a.id].slice(0, 1) }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
@@ -1878,10 +1884,66 @@ test("the return-to-board deadline is saved with the stage: Expand, Unlock and t
     now += 60_000;
     s2.reportScreen("screen-2", info());
     expect(s2.stage("screen-2").revertAt).toBe(saved);
-    expect((s2 as any).armRevert("screen-2", s2.stage("screen-2"), 1000)).toBe(Math.max(1000, saved - now));
     s2.stop();
   } finally {
     Date.now = realNow;
     Session.STAGE_REVERT_MS = prev;
   }
 });
+
+test("real time: a restart resumes the saved deadline, a legacy stage without one is timed from its age and not extended by cleanup, and a failed timer write is retried instead of killing the hub", async () => {
+  const prev = [Session.STAGE_REVERT_MS, Session.REVERT_RETRY_MS];
+  Session.STAGE_REVERT_MS = 2500;
+  Session.REVERT_RETRY_MS = 150;
+  const err = console.error;
+  console.error = () => {};
+  try {
+    const rdir = mkdtempSync(join(tmpdir(), "jam-realtime-"));
+    const s1 = new Session(new Store(rdir));
+    const a = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", image: "/renders/a.png" });
+    const b = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "B", image: "/renders/b.png" });
+    s1.setStage({ mode: "compare", items: [a.id, b.id] }, "Room brain", "main", { override: true });
+    s1.expandTile(b.id);
+    const t0 = Date.now();
+    await Bun.sleep(700);
+    s1.store.remove("artifacts", b.id);
+    s1.stop();
+    (s1.store as any).db.close();
+    const s2 = new Session(new Store(rdir));
+    expect(s2.stage().mode).toBe("compare");
+    expect(s2.stage().expanded).toBeUndefined();
+    // About 1.8 s of the 2.5 s wait remain (cleanup didn't restart it): still up at 1.5 s, back on the board by 3 s.
+    await Bun.sleep(Math.max(0, t0 + 1500 - Date.now()));
+    expect(s2.stage().mode).toBe("compare");
+    await Bun.sleep(Math.max(0, t0 + 3000 - Date.now()));
+    expect(s2.stage().mode).toBe("board");
+    // A stage saved before deadlines existed: 1.5 s old, so about 1 s remains, also through cleanup.
+    const legacy = { ...s2.stage(), mode: "compare" as const, items: [a.id, b.id], expanded: b.id, pinned: false, since: Date.now() - 1500 };
+    delete (legacy as any).revertAt;
+    s2.store.setSetting("stage", legacy);
+    s2.stop();
+    (s2.store as any).db.close();
+    const t1 = Date.now();
+    const s3 = new Session(new Store(rdir));
+    expect(s3.stage().expanded).toBeUndefined();
+    await Bun.sleep(300);
+    expect(s3.stage().mode).toBe("compare");
+    await Bun.sleep(Math.max(0, t1 + 1900 - Date.now()));
+    expect(s3.stage().mode).toBe("board");
+    // The timer's write fails once: the hub carries on, and the board comes back on the retry.
+    s3.setStage({ mode: "compare", items: [a.id] }, "Room brain", "main", { override: true });
+    const real = s3.store.setSetting.bind(s3.store);
+    let failed = 0;
+    (s3.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage" && failed++ < 1 && (v as any).mode === "board") throw new Error("disk full"); real(k, v); };
+    Session.STAGE_REVERT_MS = 200;
+    s3.expandTile(a.id);
+    await Bun.sleep(1200);
+    (s3.store as any).setSetting = real;
+    expect(failed).toBeGreaterThan(0);
+    expect(s3.stage().mode).toBe("board");
+    s3.stop();
+  } finally {
+    console.error = err;
+    [Session.STAGE_REVERT_MS, Session.REVERT_RETRY_MS] = prev;
+  }
+}, 20_000);

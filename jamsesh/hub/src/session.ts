@@ -1815,7 +1815,7 @@ export class Session {
    */
   private commitStage(stage: Stage, screen: string, opts: { keepDeadline?: boolean } = {}) {
     if (!this.effects) throw new Error("commitStage outside Session.atomically");
-    stage.revertAt = opts.keepDeadline && stage.revertAt !== undefined ? stage.revertAt : Date.now() + Session.STAGE_REVERT_MS;
+    stage.revertAt = opts.keepDeadline ? stage.revertAt ?? stage.since + Session.STAGE_REVERT_MS : Date.now() + Session.STAGE_REVERT_MS;
     this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
     this.after(() => bus.changed("stageTiles"));
@@ -1841,7 +1841,7 @@ export class Session {
   }
 
   /** Sets the screen's return-to-board timer from the stage's saved deadline (none when it stays up). Returns the delay, for tests. */
-  private armRevert(screen: string, st: Stage, minDelay = 0): number | null {
+  private armRevert(screen: string, st: Stage, minDelay = 0) {
     if (screen === "main") {
       if (this.stageRevert) clearTimeout(this.stageRevert);
       this.stageRevert = null;
@@ -1849,14 +1849,29 @@ export class Session {
       clearTimeout(this.screenReverts.get(screen));
       this.screenReverts.delete(screen);
     }
-    if (!this.revertsToBoard(st)) return null;
+    if (!this.revertsToBoard(st)) return;
     // A stage saved before deadlines were kept falls back to its age.
     const delay = Math.max(minDelay, (st.revertAt ?? st.since + Session.STAGE_REVERT_MS) - Date.now());
-    const t = setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), delay);
+    const t = setTimeout(() => this.revertToBoard(screen, st.since), delay);
     t.unref?.();
     if (screen === "main") this.stageRevert = t;
     else this.screenReverts.set(screen, t);
-    return delay;
+  }
+
+  /** How long to wait before trying again when putting the board back failed (the store said no). */
+  static REVERT_RETRY_MS = 5_000;
+  /** The timer's write: a storage error is reported and tried again later (only if the stage is still the one that timed out), never thrown into the process. */
+  private revertToBoard(screen: string, since: number) {
+    try {
+      if (this.stage(screen).since !== since) return;
+      void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true });
+    } catch (e) {
+      console.error(`putting the board back on ${screen} failed; trying again:`, e);
+      const t = setTimeout(() => this.revertToBoard(screen, since), Session.REVERT_RETRY_MS);
+      t.unref?.();
+      if (screen === "main") this.stageRevert = t;
+      else this.screenReverts.set(screen, t);
+    }
   }
 
   // ---- locks: what a person puts up stays up (3.1) ----
