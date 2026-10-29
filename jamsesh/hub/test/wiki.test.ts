@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { commitPaths, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -2656,16 +2656,64 @@ test("a changed and a deleted page are committed by the next commit even though 
   expect(Bun.spawnSync(["git", "status", "--porcelain", "--", "wiki"], { cwd: dir }).stdout.toString().trim()).toBe("");
 });
 
-test("pagePaths names unstaged page changes and leaves a person's staged-only change alone", () => {
+const gitOut_ = (dir: string, ...args: string[]) => void Bun.spawnSync(["git", ...args], { cwd: dir });
+const gitOutOf = (dir: string, ...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir }).stdout.toString();
+
+test("the wiki commits through a private index: a person's staged and unstaged edits of the same page survive, and the index follows the wiki's own files", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
   w.editPage("mine", "# Mine\n\nCommitted.", { by: "Chey" });
-  w.editPage("theirs", "# Theirs\n\nCommitted.", { by: "Chey" });
-  const edit = (slug: string) => writeFileSync(join(dir, "wiki", `${slug}.md`), readFileSync(join(dir, "wiki", `${slug}.md`), "utf8") + "\nMore.\n");
-  edit("mine");
-  Bun.spawnSync(["git", "add", "wiki/mine.md"], { cwd: dir }); // staged only
-  edit("theirs"); // changed, not staged
-  expect(pagePaths(dir)).toEqual(["wiki/theirs.md"]);
+  const file = join(dir, "wiki", "mine.md");
+  writeFileSync(file, readFileSync(file, "utf8") + "\nStaged line.\n");
+  gitOut_(dir, "add", "wiki/mine.md");
+  writeFileSync(file, readFileSync(file, "utf8") + "Unstaged line.\n");
+  const stagedBefore = gitOutOf(dir, "diff", "--cached", "--", "wiki/mine.md");
+  expect(stagedBefore).toContain("+Staged line.");
+  expect(stagedBefore).not.toContain("Unstaged line.");
+  writePage(dir, "other", "# Other\n\nUnrelated.");
+  expect(commitPaths(dir, "Add other", ["wiki/other.md", "index.md", "log.md"])).toBe("done");
+  expect(gitOutOf(dir, "diff", "--cached", "--", "wiki/mine.md")).toBe(stagedBefore); // still staged, unchanged
+  expect(readFileSync(file, "utf8")).toContain("Unstaged line."); // and the work tree too
+  expect(gitOutOf(dir, "show", "--name-only", "--pretty=format:", "HEAD")).not.toContain("wiki/mine.md");
+  expect(gitOutOf(dir, "show", "--name-only", "--pretty=format:", "HEAD")).toContain("wiki/other.md");
+  // The wiki's own file is clean in the person's view: no phantom staged deletion, no staged change.
+  expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki/other.md").trim()).toBe("");
+  // pagePaths sees the page whatever is staged.
+  expect(pagePaths(dir)).toEqual(["wiki/mine.md"]);
+});
+
+test("a commit that fails is made at the next pass, and again after a restart", () => {
+  if (!gitAvailable()) return;
+  const { w, dir, s } = room();
+  const heads = join(dir, ".git", "refs", "heads");
+  w.addSource("document", "A note", "Something.", "Chey");
+  writePage(dir, "first", "# First\n\nA page.");
+  chmodSync(heads, 0o555); // the branch can't be moved
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(commitPaths(dir, "Add first", ["wiki/first.md"])).toBe("failed");
+  } finally {
+    console.error = err;
+    chmodSync(heads, 0o755);
+  }
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("wiki/first.md");
+  const again = new WikiService(s, dir, s.sessionId); // a restart
+  again.editPage("second", "# Second\n\nAnother.", { by: "Chey" }); // its commit takes the changed pages git reports, the earlier one included
+  const history = gitOutOf(dir, "log", "--name-only", "--pretty=format:");
+  expect(history).toContain("wiki/first.md");
+  expect(history).toContain("wiki/second.md");
+  expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki").trim()).toBe("");
+});
+
+test("the first commit of a new repository and a deletion are made the same way", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("gone", "# Gone\n\nWill be removed.", { by: "Chey" });
+  rmSync(join(dir, "wiki", "gone.md"));
+  expect(commitPaths(dir, "Remove gone", ["wiki/gone.md"])).toBe("done");
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("wiki/gone.md");
+  expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki/gone.md").trim()).toBe("");
 });
 
 test("a pass whose hand edits could not be filed does not ingest over them", async () => {

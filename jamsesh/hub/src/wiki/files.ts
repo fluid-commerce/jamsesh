@@ -175,57 +175,108 @@ function git(dir: string, args: string[]) {
   }
 }
 
+const GIT_ID = ["-c", "user.name=JamSesh", "-c", "user.email=jamsesh@localhost", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+
+/** Runs git in the vault and returns its output (null on failure). `env` is added to the environment; `input` goes to stdin. */
+function gitOut(dir: string, args: string[], env: Record<string, string> = {}, input?: string): string | null {
+  try {
+    const r = Bun.spawnSync(["git", ...GIT_ID, ...args], { cwd: dir, env: { ...process.env, ...env }, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    return r.exitCode === 0 ? r.stdout.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+const ZERO = "0000000000000000000000000000000000000000";
+
 /**
- * One commit per change set, of the wiki's own files named in `paths` (relative to `dir`) and nothing else: a vault can
- * hold people's notes and work they staged themselves, and those stay as they were. Does nothing without git or a
- * repository, and never throws.
+ * One commit per change set, of the wiki's own files named in `paths` (relative to `dir`) and nothing else. It is made in
+ * a private index (GIT_INDEX_FILE): HEAD is read into it, the named files are added there, a tree and a commit are written
+ * from it, and the branch is moved with a compare-and-swap on the HEAD it started from (retrying from the new HEAD if
+ * someone else committed meanwhile). The person's own index, and so everything they have staged, is never touched, except
+ * that for the files this commit changed it follows HEAD where the person had not staged anything different. Does nothing
+ * without a repository, and never throws.
  */
 export function commitPaths(dir: string, message: string, paths: string[]): "done" | "nothing" | "failed" {
   if (!existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
-  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+){0,2}$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && (existsSync(join(dir, p)) || git(dir, ["ls-files", "--error-unmatch", "--", p]))); // a file that is gone is committed only if git tracked it (a deletion)
+  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+){0,2}$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && !p.split("/").includes(".git"));
   if (!own.length) return "nothing";
-  if (!git(dir, ["add", "--", ...own])) return "failed";
-  if (git(dir, ["diff", "--cached", "--quiet", "--", ...own])) return "nothing"; // nothing of these differs from history
-  return git(dir, ["commit", "-q", "--only", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200), "--", ...own]) ? "done" : "failed";
+  const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
+  if (!gitDir) return "failed";
+  const msg = message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200);
+  const idx = join(gitDir, `jamsesh-index-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
+  const env = { GIT_INDEX_FILE: idx };
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const both = gitOut(dir, ["rev-parse", "HEAD", "HEAD^{tree}"])?.trim().split("\n");
+      const head = both?.[0] ?? null; // null: no commit yet
+      const headTree = both?.[1] ?? null;
+      rmSync(idx, { force: true });
+      if (head ? gitOut(dir, ["read-tree", head], env) === null : false) return "failed";
+      // The named files that exist, or that HEAD has (a deletion): HEAD is only asked when one is missing.
+      const missing = own.filter((p) => !existsSync(join(dir, p)));
+      const inHead = new Set(head && missing.length ? (gitOut(dir, ["ls-tree", "-r", "--name-only", "-z", head, "--", ...missing]) ?? "").split("\0").filter(Boolean) : []);
+      const names = own.filter((p) => existsSync(join(dir, p)) || inHead.has(p));
+      if (!names.length) return "nothing";
+      if (gitOut(dir, ["add", "-A", "--", ...names], env) === null) return "failed";
+      const tree = gitOut(dir, ["write-tree"], env)?.trim();
+      if (!tree) return "failed";
+      if (head && tree === headTree) return "nothing"; // nothing of these differs from history
+      const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : []), "-m", msg])?.trim();
+      if (!commit) return "failed";
+      // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
+      if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) continue; // someone committed meanwhile: again from the new HEAD
+      followHead(dir, head, commit, names);
+      return "done";
+    }
+    return "failed";
+  } finally {
+    rmSync(idx, { force: true });
+  }
+}
+
+/** After the wiki's commit: the person's index entry for each file it changed follows HEAD, unless the person had staged something else there. */
+function followHead(dir: string, oldHead: string | null, newHead: string, names: string[]) {
+  // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
+  const entries = (text: string | null, kind: "index" | "tree") => {
+    const m = new Map<string, string>();
+    for (const rec of (text ?? "").split("\0").filter(Boolean)) {
+      const tab = rec.indexOf("\t");
+      const f = rec.slice(0, tab).split(" ");
+      m.set(rec.slice(tab + 1), kind === "index" ? `${f[0]} ${f[1]}` : `${f[0]} ${f[2]}`);
+    }
+    return m;
+  };
+  const index = entries(gitOut(dir, ["ls-files", "-s", "-z", "--", ...names]), "index");
+  const before = entries(oldHead ? gitOut(dir, ["ls-tree", "-r", "-z", oldHead, "--", ...names]) : "", "tree");
+  const after = entries(gitOut(dir, ["ls-tree", "-r", "-z", newHead, "--", ...names]), "tree");
+  let info = "";
+  for (const p of names) {
+    if ((index.get(p) ?? "") !== (before.get(p) ?? "")) continue; // the person staged something different here: theirs stays
+    info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
+  }
+  if (info) gitOut(dir, ["update-index", "-z", "--index-info"], {}, info); // (if the person's git holds the index lock, it simply doesn't follow)
 }
 
 /**
- * What git says changed under `folder` (raw/ or wiki/) since the last commit, filtered to the wiki's own file names: new
- * and modified files, deletions, and both sides of a move. Null when git can't say. Only what changed, so the list is as
- * long as the change; a person's own files there are not the wiki's and are never named.
+ * What differs from the last commit under `folder` (raw/ or wiki/), filtered to the wiki's own file names: changed and
+ * deleted files against HEAD (the work tree against history, whatever is staged), and new files. Null when git can't say.
+ * Only what changed, so the list is as long as the change; a person's own files there are never named.
  */
 function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boolean): string[] | null {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
-  const out = new Set<string>();
-  try {
-    const r = Bun.spawnSync(["git", "status", "--porcelain=v1", "-z", "-uall", "--", folder], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
-    if (r.exitCode !== 0) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
-    const parts = r.stdout.toString().split("\0");
-    for (let i = 0; i < parts.length; i++) {
-      const e = parts[i];
-      if (e.length < 4) continue;
-      // A change that is only staged (index column set, work tree column blank) is a person's own staging: left alone, never re-added.
-      if (e[1] === " " && e[0] !== "?") {
-        if (e[0] === "R" || e[0] === "C") i++;
-        continue;
-      }
-      if (own(e.slice(3))) out.add(e.slice(3));
-      if (e[0] === "R" || e[0] === "C") {
-        i++; // a rename lists the old name next
-        if (own(parts[i] ?? "")) out.add(parts[i]);
-      }
-    }
-  } catch {
-    return null;
-  }
-  return [...out];
+  const hasHead = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"]) !== null;
+  const changed = hasHead ? gitOut(dir, ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--", folder]) : "";
+  const fresh = gitOut(dir, ["ls-files", "-o", "--exclude-standard", "-z", "--", folder]);
+  if (changed === null || fresh === null) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
+  return [...new Set([...changed.split("\0"), ...fresh.split("\0")].filter((f) => f && own(f)))];
 }
 
 /** The source files in raw/ and raw/archive/ that changed: new ones, and the two sides of a move to the archive. */
 export const rawPaths = (dir: string) => changedOwn(dir, "raw", (f) => /^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3)));
 
-/** The page files in wiki/ that changed, deletions included. This is the commit debt itself: it is read from git, so no state file has to survive for it to be owed. */
+/** The page files in wiki/ that changed, deletions included. */
 export const pagePaths = (dir: string) => changedOwn(dir, "wiki", (f) => /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(f) && isPageSlug(f.slice(5, -3)));
 
 // ---- pages ----
