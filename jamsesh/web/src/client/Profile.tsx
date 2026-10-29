@@ -4,7 +4,8 @@ import { encodeWav } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
 import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
-import { beginRead, endRead } from "../shared/voiceprint";
+import { deviceCopiesProblem } from "../shared/voiceprint";
+import { browserReadDeps, VoiceRead, type ReadView } from "../shared/voiceRead";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
 export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person; brainName: string; onClose: () => void; micError?: string | null }) {
@@ -72,11 +73,10 @@ const FALLBACK_SCRIPT = [
 
 /** Read a few sentences; the hub turns them into a voiceprint so lines are attributed right from the start. */
 export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName: string; micError?: string | null }) {
-  const [state, setState] = useState<"idle" | "recording" | "saving" | "done" | "error">("idle");
-  const [msg, setMsg] = useState("");
-  const [secs, setSecs] = useState(0);
+  const [view, setView] = useState<ReadView>({ state: "idle", msg: "", secs: 0 });
   const [script, setScript] = useState(FALLBACK_SCRIPT);
-  const rec = useRef<{ stop: () => void } | null>(null);
+  const [oldCopy, setOldCopy] = useState<string | null>(() => deviceCopiesProblem());
+  const reader = useRef<VoiceRead | null>(null);
 
   useEffect(() => {
     api<{ sentences?: string[] }>("/voice/script")
@@ -84,68 +84,28 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       .catch(() => {});
   }, []);
 
-  // Over plain http (the default LAN join address) the browser has no mic API at all.
-  const blocked = micError || (mediaAvailable()?.replace("Sharing", "Reading aloud") ?? ("getUserMedia" in (navigator.mediaDevices ?? {}) ? null : "This page can't use the microphone. Open the host's secure address."));
+  // One reader per person; closing the profile (unmount) or switching person cancels a read wherever it is.
+  useEffect(() => {
+    const r = new VoiceRead(me.id, brainName, browserReadDeps(toWav16k), setView);
+    reader.current = r;
+    return () => {
+      r.cancel();
+      if (reader.current === r) reader.current = null;
+    };
+  }, [me.id, brainName]);
 
-  const start = async () => {
-    if (blocked) return setState("error"), setMsg(blocked);
-    // Every laptop hears the read, yours loudest: the host keeps it out of the transcript while you read.
-    // If it can't, don't read, or the room would see it.
-    let epoch: number;
-    try {
-      epoch = await beginRead(me.id);
-    } catch (e) {
-      setState("error");
-      return setMsg(`The host couldn't get ready for your read, so nothing was recorded. ${e instanceof Error ? e.message : ""}`.trim());
-    }
-    let stream: MediaStream | null = null;
-    let tick: ReturnType<typeof setInterval> | undefined;
-    let auto: ReturnType<typeof setTimeout> | undefined;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
-      const live = stream;
-      const chunks: Blob[] = [];
-      const mr = new MediaRecorder(live);
-      mr.ondataavailable = (e) => chunks.push(e.data);
-      const t0 = Date.now();
-      tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
-      auto = setTimeout(() => mr.state === "recording" && mr.stop(), 45_000);
-      mr.onstop = async () => {
-        clearInterval(tick);
-        clearTimeout(auto);
-        live.getTracks().forEach((t) => t.stop());
-        setState("saving");
-        try {
-          const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
-          const res = await fetch(`/api/people/${me.id}/voice?epoch=${epoch}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav });
-          // The host ends the read itself once it has the recording (taken or refused); anything else, we end it.
-          if (!res.ok) void endRead(me.id, true);
-          const r = await res.json();
-          if (r.ok) {
-            setState("done");
-            setMsg(`${brainName} knows your voice.`);
-          } else (setState("error"), setMsg(r.reason ?? r.error ?? "That didn't work. Try again."));
-        } catch (e) {
-          void endRead(me.id, true);
-          setState("error");
-          setMsg(String(e));
-        }
-      };
-      // A recorder that fails mid-read ends the read the same way a stop does (the microphone is let go in onstop).
-      mr.onerror = () => mr.state === "recording" && mr.stop();
-      rec.current = { stop: () => mr.state === "recording" && mr.stop() };
-      mr.start();
-      setSecs(0);
-      setState("recording");
-    } catch (e) {
-      // No microphone, or the recorder wouldn't start: stop the timers, let the microphone go, and the room is heard again at once.
-      clearInterval(tick);
-      clearTimeout(auto);
-      stream?.getTracks().forEach((t) => t.stop());
-      void endRead(me.id, false);
-      setState("error");
-      setMsg(e instanceof Error ? e.message : String(e));
-    }
+  useEffect(() => {
+    if (!oldCopy) return;
+    const t = setInterval(() => setOldCopy(deviceCopiesProblem()), 15_000);
+    return () => clearInterval(t);
+  }, [oldCopy]);
+
+  const blocked = micError || (mediaAvailable()?.replace("Sharing", "Reading aloud") ?? ("getUserMedia" in (navigator.mediaDevices ?? {}) ? null : "This page can't use the microphone. Open the host's secure address."));
+  const { state, msg, secs } = view;
+
+  const start = () => {
+    if (blocked) return setView({ ...view, state: "error", msg: blocked });
+    void reader.current?.start();
   };
 
   const l = me.voiceLearned;
@@ -168,16 +128,17 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       </p>
       <div className="row">
         {state === "recording" ? (
-          <button className="btn" onClick={() => rec.current?.stop()} style={{ borderColor: "rgba(255,107,94,.5)", color: "var(--warn)" }}>
+          <button className="btn" onClick={() => reader.current?.stop()} style={{ borderColor: "rgba(255,107,94,.5)", color: "var(--warn)" }}>
             <span className="dot" style={{ background: "var(--warn)", animation: "pulse 1s infinite" }} /> Done reading · {secs}s
           </button>
         ) : (
-          <button className="btn primary" onClick={start} disabled={state === "saving" || !!blocked}>
+          <button className="btn primary" onClick={start} disabled={state === "saving" || !!blocked || !!reader.current?.busy}>
             {state === "saving" ? "Learning your voice…" : state === "done" ? "Read again" : "Start reading"}
           </button>
         )}
         {blocked && !msg && <span className="chip" style={{ whiteSpace: "normal", color: "var(--warn)" }}>{blocked}</span>}
         {msg && <span className="chip" style={{ whiteSpace: "normal", color: state === "error" ? "var(--warn)" : "var(--built)" }}>{msg}</span>}
+        {oldCopy && <span className="chip" style={{ whiteSpace: "normal", color: "var(--warn)" }}>{oldCopy}</span>}
       </div>
     </div>
   );

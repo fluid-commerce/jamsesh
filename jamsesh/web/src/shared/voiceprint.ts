@@ -5,24 +5,51 @@ import { api } from "./hub";
 /** Earlier builds kept a copy of a voice, and whether to take it to other hosts, in the browser: those go. */
 const OLD_COPIES = /^jamsesh\.(voiceprint|voiceCarry)(\.|:|$)/;
 
-/** Deletes what earlier builds kept of a voice in this browser. Returns how many entries went. */
-export function forgetDeviceCopies(storage: Pick<Storage, "key" | "length" | "removeItem">): number {
-  const old: string[] = [];
-  for (let i = 0; i < storage.length; i++) {
-    const k = storage.key(i);
-    if (k && OLD_COPIES.test(k)) old.push(k);
+/**
+ * Deletes what earlier builds kept of a voice in this browser, then reads the storage again. Returns the keys
+ * deleted and the keys still there (a removeItem that threw or did nothing). Throws when the storage can't be read.
+ */
+export function forgetDeviceCopies(storage: Pick<Storage, "key" | "length" | "removeItem">): { removed: string[]; left: string[] } {
+  const find = () => {
+    const old: string[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (k && OLD_COPIES.test(k)) old.push(k);
+    }
+    return old;
+  };
+  const old = find();
+  for (const k of old) {
+    try {
+      storage.removeItem(k);
+    } catch {
+      // Read back below.
+    }
   }
-  for (const k of old) storage.removeItem(k);
-  return old.length;
+  const left = find();
+  return { removed: old.filter((k) => !left.includes(k)), left };
 }
 
-if (typeof localStorage !== "undefined") {
+const BLOCKED = "This browser's storage is blocked, so a voice copy an earlier version may have kept here couldn't be checked. JamSesh will try again.";
+
+/**
+ * Whether this browser may still hold an earlier build's copy of a voice, as a sentence to show, or null when it
+ * holds none. Tries the deletion again each time it's asked, so a copy is gone as soon as storage lets it go.
+ * Blocked storage isn't taken as empty: it could hold a copy that can't be seen now.
+ */
+export function deviceCopiesProblem(get: () => Pick<Storage, "key" | "length" | "removeItem"> | undefined = () => (typeof localStorage === "undefined" ? undefined : localStorage)): string | null {
   try {
-    forgetDeviceCopies(localStorage);
+    const storage = get();
+    if (!storage) return null;
+    const { left } = forgetDeviceCopies(storage);
+    return left.length ? `An earlier version kept a copy of a voice in this browser and it couldn't be deleted (${left.join(", ")}). Clear this site's data in the browser to remove it.` : null;
   } catch {
-    /* storage blocked: nothing can have been kept there either */
+    return BLOCKED;
   }
 }
+
+// At load: deleted now; anything left is shown on the profile (deviceCopiesProblem), which tries again.
+deviceCopiesProblem();
 
 /**
  * Tells the host this person starts the join read, so the room's copies of it stay out of the transcript.
