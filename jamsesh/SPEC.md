@@ -1169,6 +1169,11 @@ Every client window and the big screen capture audio; it's consolidated on the h
   window can send audio as another's microphone (403), and an unregistered device gets 404, which
   the window retries until its registration lands. Segments that end while the brain is speaking are dropped, so it doesn't transcribe
   itself.
+- **A WAV is read only when it is whole.** `RIFF`/`WAVE`, every chunk inside the file, exactly one
+  complete `fmt ` chunk (16 bytes or more) before `data`, whole sample frames, a rate of 8 to 48 kHz,
+  1 or 2 channels, 8/16/32-bit PCM or 32-bit float, at most 120 seconds. Anything else is refused
+  with 400 for a segment and for a join read, before any audio is allocated, and a refused segment
+  isn't remembered as received.
 - **Clock sync.** Each device measures its offset from the host clock (six pings at connect, then
   every minute; the lowest round trip wins) and stamps segments in host time [B33].
 - **Mute.** `M` (or the mic button) stops the microphone entirely; the browser's indicator goes
@@ -1182,7 +1187,19 @@ Every client window and the big screen capture audio; it's consolidated on the h
   It learns each device's lag. A copy that arrives up to 15 seconds late still joins its
   utterance; it can improve the text (when it's clearer by more than 6 dB) and the speaker, and
   updates the same line in place [A2].
-- The **cleanest copy** has the highest `0.7 × SNR + 0.3 × level` [B33]. Only it is transcribed.
+- The **cleanest copy** has the highest `0.7 × SNR + 0.3 × level` [B33]. It is always transcribed.
+- **Copies that could be someone else.** Grouping by time can put two people talking at once on
+  different laptops into one group. So another copy is transcribed too when it could be different
+  speech: its voice level is within 10 dB of the cleanest copy's (`DIFFERENT_SPEECH_DB`), or its
+  own laptop heard it the loudest of all copies for at least 400 ms of the span (a short reply over
+  a long sentence). A transcribed copy whose words don't agree one by one with the cleanest copy's
+  (case and punctuation aside) becomes its own line, after the line it was grouped with; copies with
+  the same other words make one line together. The original line is labelled from the copies left.
+  A split-out line never teaches a voice and stays "Someone" unless a voice match names it (its
+  laptop's owner doesn't count). A late copy is checked the same way. Cost: with four laptops,
+  whisper runs once per line before; now once per copy within 10 dB, which is 2 for laptops spread
+  across a room (6 dB apart) and 4 around one table (2 to 3 dB apart). Known limit: a quieter copy
+  whisper hears slightly differently ("cup" for "up") shows as a second line.
 - Non-speech is dropped before transcription: level below -62 dB, SNR below 4 dB, clicks and
   knocks (little sustained energy), or hum.
 - Common speech-to-text hallucinations on short or noisy clips ("thank you", "bye", "[BLANK_AUDIO]")
@@ -1236,7 +1253,9 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    progress). It runs in its own process (the hub binary with `--stt-server`) whose stdin is a pipe
    from the hub, so it ends with the hub however the hub ends. English only: with another language,
    or `auto`, the whisper engines take over. `JAMSESH_PARAKEET=0` keeps it off;
-   `JAMSESH_PARAKEET_DIR` points at a copy elsewhere.
+   `JAMSESH_PARAKEET_DIR` points at a copy elsewhere. The managed copy's files are checked against
+   the SHA-256 list written at install before every start, whatever spelling or link of its path
+   found it; a changed file means the copy is deleted (and downloaded again where allowed).
 2. **Host whisper.cpp, the default** (`whisper-server` on `127.0.0.1:8178`, or
    `JAMSESH_WHISPER_PORT`). A server already answering there is used only if it transcribes half a
    second of silence like whisper-server (a `text` in JSON), and is never stopped by the hub; anything
@@ -1257,7 +1276,9 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    - **Model:** ggml-large-v3-turbo-q5_0 (574 MB, MIT). Found in order: `JAMSESH_WHISPER_MODEL`,
      `~/.jamsesh/models`, then `~/.cache/whisper-cpp` (large-v3-turbo, then medium.en, base.en).
      A file of the pinned name is used only at its exact size and SHA-256 (checked once per file
-     each run); a bad one in `~/.jamsesh/models` is deleted, one elsewhere is passed over. Other
+     each run); a bad one is passed over, and deleted only when it is the exact file the hub downloaded
+     itself (recorded in `~/.jamsesh/models/downloaded.json`, compared by real path), never one chosen
+     with `JAMSESH_WHISPER_MODEL` or put there by anyone else. Other
      models must be at least a model's size (25 MB). With none, the hub downloads it on the first
      host session from Hugging Face (`ggerganov/whisper.cpp`), checked against the pinned size and
      SHA-256 by the same code as Parakeet's, into `~/.jamsesh/models`, with progress in Settings;
@@ -1342,11 +1363,15 @@ read ("Read again") and says what the voiceprint was learned from.
 
 - Click a speaker's name in the transcript and pick the right person (or add someone new).
 - Or say it ("that was Felipe"); the brain calls `fix_speaker`.
-- Either way, the line becomes Felipe's (confidence 1). Its voice joins Felipe's voiceprint as a
-  correction (weight 10).
-- What the wrong label taught is taken back: the sample from that line leaves the wrong person, and
-  so do that person's automatic samples that sound more like the corrected voice than like what
-  they read or were corrected on.
+- Either way, the line becomes Felipe's (confidence 1), whoever corrects it. Its voice joins
+  Felipe's voiceprint as a correction (weight 10) only when the correction comes from Felipe's own
+  window or the host's.
+- What the wrong label taught is taken back only when the correction comes from the wrongly named
+  person's window or the host's: the sample from that line leaves them, and so do their automatic
+  samples that sound more like the corrected voice than like what they read or were corrected on.
+- Anyone else's correction (another person's laptop, or a relabel said aloud to the brain, where who
+  said it isn't certain) relabels the line and changes no one's voice; the note says so ("only
+  Felipe or the host can teach Felipe's voice").
 - Earlier lines nobody could place ("Someone", among the last 60) that sound like the corrected
   voice (cosine 0.75 or more) become Felipe's too.
 - JamSesh confirms on screen (the popover) and out loud when the room allows it, through the same
@@ -1362,8 +1387,11 @@ again. The profile says so under the read ("This host keeps your voice so it kno
 start a read for, record for, or reset their voice: another person's device, an agent's credential
 (even one acting for that person), and a window with no person get 403. Removing a person (which
 erases their voiceprint) is for the host's window or that person. Samples an earlier build brought
-from another host (kind `carried`) are deleted when the host opens its store, and the Mac app
-deletes the copy an earlier build kept (`voiceprint.json`) when it starts.
+from another host (kind `carried`) are deleted when the host opens its store. A browser deletes what
+an earlier build kept there (`jamsesh.voiceprint*` and `jamsesh.voiceCarry*` local storage) when the
+page loads. The Mac app deletes the copy an earlier build kept (`voiceprint.json`, and
+`voiceprint.json.<pid>.<n>.part` left by an interrupted write) when it starts, trying each twice; one
+it can't delete is named in a warning dialog, and it tries again at the next start.
 
 **Who a browser may become** (one rule, `becomePerson` in http.ts, since the voiceprint and every
 owner-only answer follow it). A browser credential becomes a person when it registers a device for
@@ -1386,6 +1414,16 @@ clock (a segment's synced start or its arrival, whichever is earlier; a line's e
 `heardAt`): nothing heard at or before the reset teaches the voice again, so a line still being
 transcribed, a correction of an older "Someone" line, or a held first sample can't.
 
+Device clocks can't be trusted for this, so the host also issues a **reset epoch**: the number of
+resets it has made (`voiceResets`, each one's moment kept). It goes with every clock pong and with
+`POST /api/people/:id/voice/start`. A device stamps each segment with the epoch it had when it
+captured it (`epoch` on `/api/audio`), and a read sends back the epoch its start returned
+(`POST /api/people/:id/voice?epoch=`). Audio from an older epoch counts as heard no later than the
+first reset after it, whatever its timestamp says; a missing or unknown epoch counts as the oldest.
+So audio buffered across a Reset with a clock ahead of the host, or a read started before the Reset
+and finished after it, teaches nothing (the read is refused: "Your voice was reset while you read").
+A read started after the Reset teaches as usual. Segments are transcribed either way.
+
 **Why voice matching might be off.** `voiceprintStatus()` (in `/api/engines` and the state the
 screens read) says `ok`, `missing-model`, `missing-library` or `load-failed`, with a `reason` and a `fix`
 written as an action: for a missing model, where to download `wespeaker_en_voxceleb_resnet34_LM.onnx`
@@ -1402,9 +1440,10 @@ JamSesh works with everyone in the room, everyone remote, or a mix [A18]:
 - In-room devices merge with each other. A remote laptop is its own room: its lines never merge
   with the room's or with another remote laptop's [A18c].
 - **Echo.** When the room's speakers play a remote voice into the room mics (or a remote laptop
-  hears the room through the call), a line that matches a line from the other location (start
-  within 3 seconds, end within 3.5 seconds, 55 percent shared words) is kept from the clearer copy
-  and the other is dropped.
+  hears the room through the call), a line with the very same words as a line from the other
+  location (one by one, case and punctuation aside; start within 3 seconds, end within 3.5 seconds)
+  is kept from the clearer copy and the other is dropped. A line that adds or changes a word ("Yes"
+  and "Yes please") is someone answering and stays.
 - Remote people get the big screen mirrored in their **Screen** tab, hear the brain's voice and
   chime on their laptop, and get links that use the address they connected through.
 
@@ -1653,7 +1692,7 @@ Pins are app-wide [A7a, A7c]:
 | Voice and host | Voice replies, voice, **Let the brain drive this Mac** | Host only |
 | Saved | Snapshots with downloads, **Save now**, restore, saved layouts | Anyone |
 | Transcription | Auto, local, or gateway; the engines and their health; the faster engine (host only) and its download; words to listen for | Anyone |
-| People | Name, title, weight, voice samples, ask to share, reset voice, remove | Anyone |
+| People | Name, title, weight, voice samples, reset voice (own row), remove | Anyone |
 | Devices | Each mic, its level, and its owner | Anyone |
 | Remote access | Status and the setup wizard | Host only |
 | Connected devices | Every paired laptop, phone, and agent; **Disconnect** | Host only |
