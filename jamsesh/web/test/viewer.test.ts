@@ -54,3 +54,33 @@ test("a frame is drawn larger only when its box would upscale the stored 1600 px
   expect(fullSize({ ...frame, kind: "screenshot" as const }, { w: 3600, h: 2000 }, 1)).toBeNull();
   expect(fullSize({ ...frame, nodeId: null }, { w: 3600, h: 2000 }, 1)).toBeNull();
 });
+
+test("Expand goes out through the real api() helper to the hub's expand route, and is never queued for later", async () => {
+  (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
+  (globalThis as any).navigator ??= {};
+  Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });
+  const { expandTile } = await import("../src/host/Stage");
+  const seen: { url: string; body: unknown }[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    if (url === "/api/pair/info") return Response.json({ hostId: "h" });
+    seen.push({ url, body: JSON.parse(String(init.body ?? "null")) });
+    return Response.json({});
+  }) as typeof fetch;
+  try {
+    await expandTile("art_1", "screen-2");
+    await expandTile(null);
+    expect(seen).toEqual([
+      { url: "/api/stage/expand", body: { tile: "art_1", screen: "screen-2" } },
+      { url: "/api/stage/expand", body: { tile: null, screen: "main" } },
+    ]);
+    // Offline, nothing is held back to replay minutes later over a screen that has moved on.
+    Object.defineProperty(globalThis.navigator, "onLine", { value: false, configurable: true });
+    seen.length = 0;
+    await expandTile("art_1");
+    expect(seen).toEqual([]);
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });
+  }
+});

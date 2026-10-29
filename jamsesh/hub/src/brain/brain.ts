@@ -538,6 +538,21 @@ export class Brain {
           return "On screen.";
         },
       }),
+      expand_tile: tool({
+        description:
+          "Make one tile of a side-by-side or bento screen fill the screen (the rest become a strip of thumbnails), or put it back. 'Expand the second one': position 2, counted left to right, top to bottom. 'Make the checkout build big': its artifact id. Leave both out to collapse.",
+        inputSchema: z.object({
+          position: z.number().int().min(1).optional().describe("The tile's place on the screen, starting at 1"),
+          artifactId: z.string().optional(),
+          screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
+        }),
+        execute: async (i) => {
+          const r = s.expandWhich({ artifactId: i.artifactId, position: i.position }, screenId(i.screen));
+          if (!r.ok) return refuse(r.error);
+          this.lastRoomStageAt = Date.now();
+          return r.stage.expanded ? "Expanded." : "Back to all tiles.";
+        },
+      }),
       search_artifacts: tool({
         description: "Find artifacts (canvas frames, screenshots, dev servers) by words in their title or note.",
         inputSchema: z.object({ query: z.string() }),

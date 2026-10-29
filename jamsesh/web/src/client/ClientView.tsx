@@ -8,7 +8,7 @@ import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, m
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
-import { Stage } from "../host/Stage";
+import { Stage, expandTile, stageTiles } from "../host/Stage";
 import { InviteButton } from "./Invite";
 import { WorkViewer } from "./WorkViewer";
 import { groupArtifacts, settle, type WorkFilter } from "./viewerNav";
@@ -272,7 +272,12 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
       </div>
       {tab === "screen" &&
         (phone ? (
-          <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
+          <div className="m-screen">
+            <div className="m-screen-view">
+              <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
+            </div>
+            <TileBar state={state} />
+          </div>
         ) : (
           <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
             <Stage state={state} interactive />
@@ -457,6 +462,28 @@ function PhoneClient({
         </>
       )}
       {overlays}
+    </div>
+  );
+}
+
+/** Under the phone's mirror (too small to hit a tile's own Expand): one chip per tile, and Collapse. */
+function TileBar({ state }: { state: HubState }) {
+  const tiles = useMemo(() => stageTiles(state), [state]);
+  const open = state.stage.expanded;
+  if (tiles.length < 2 && !open) return null;
+  return (
+    <div className="m-tilebar" role="group" aria-label="Fill the big screen with one tile">
+      {open && (
+        <button className="btn small primary" onClick={() => expandTile(null)}>
+          Collapse
+        </button>
+      )}
+      {tiles.map((t, i) => (
+        <button key={t.key} className={`btn small ${t.key === open ? "on" : ""}`} aria-pressed={t.key === open} onClick={() => expandTile(t.key)}>
+          <b>{i + 1}</b>
+          <span>{t.label}</span>
+        </button>
+      ))}
     </div>
   );
 }

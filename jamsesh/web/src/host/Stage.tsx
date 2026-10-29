@@ -20,8 +20,8 @@ export function Stage({ state, interactive, tilePins = true, screen = "main" }: 
   const expand = useMemo(
     () => ({
       expanded: stage.expanded ?? null,
-      expand: (tile: string) => void api("/stage/expand", { tile, screen }).catch(() => {}),
-      collapse: () => void api("/stage/expand", { tile: null, screen }).catch(() => {}),
+      expand: (tile: string) => void expandTile(tile, screen),
+      collapse: () => void expandTile(null, screen),
     }),
     [stage.expanded, screen],
   );
@@ -92,8 +92,10 @@ export function stageTiles(state: HubState): StageTile[] {
     case "board":
       return state.artifacts.slice(0, BOARD_MAX).map(art);
     case "spotlight":
-    case "compare":
       return pick(stage.items);
+    case "compare":
+      // Drawn lettered, so counted that way.
+      return pick(stage.items).sort((x, y) => (x.art!.variant || x.label).localeCompare(y.art!.variant || y.label));
     case "parity":
       return pick((stage.columns?.length ? stage.columns : [{ label: "", items: stage.items }]).flatMap((c) => c.items));
     case "layout":
@@ -121,6 +123,9 @@ function tileLabel(t: Tile, state: HubState): string {
 }
 
 /** One tile filling the presentation area, the others as a strip of thumbnails along the edge. */
+/** Ask the hub to expand a tile of this screen's stage, or (tile null) collapse. */
+export const expandTile = (tile: string | null, screen = "main") => api("/stage/expand", { tile, screen }).catch(() => {});
+
 function Expanded({ tiles, open, onPick }: { tiles: StageTile[]; open: StageTile; onPick: (key: string) => void }) {
   const rest = tiles.filter((t) => t !== open);
   return (

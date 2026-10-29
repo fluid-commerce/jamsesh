@@ -3069,3 +3069,42 @@ html.in-app .app-header {
   width: 100%;
   height: 100%;
 }
+
+/* The phone's Screen tab: the mirror, and under it a chip per tile to expand. */
+.m-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+.m-screen-view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.m-tilebar {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+.m-tilebar .btn {
+  flex: none;
+  max-width: 200px;
+}
+.m-tilebar .btn b {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--dim);
+}
+.m-tilebar .btn span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.m-tilebar .btn.on {
+  border-color: var(--text);
+}

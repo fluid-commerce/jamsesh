@@ -67,8 +67,8 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Capability | Status | Notes |
 |---|---|---|
 | Work tab viewer (arrows, Esc, Show on big screen as the person) | Simulated | Headless Chromium at 1440 and 390 px wide against a throwaway hub; keys and click-does-not-cast checked. |
-| Expand / Collapse on a bento | Simulated | Headless Chromium at 1920x1080 and 3840x2160. Phone mirror has no Expand control yet. |
-| Full-size frame render (`/renders/full`) | Not tested | Needs a running canvas; screenshots uploaded without one show their stored image. |
+| Expand / Collapse on a bento | Simulated | Headless Chromium at 1920x1080 and 3840x2160. Phone Screen tab has a chip per tile (390 px). |
+| Full-size frame render (`/renders/full`) | Tested live | Against a real figcraft-server: 1440x900 frame came back 1600, 3200 and 4096 px wide. Not yet seen on a TV. |
 | Expand on a second display | Not tested | Needs a real second screen. |
 
 ## Remote access
