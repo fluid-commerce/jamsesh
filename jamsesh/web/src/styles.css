@@ -1064,6 +1064,15 @@ select {
   cursor: pointer;
 }
 
+/* A choice this window can't change reads as plain text: no chevron, no box. */
+select:disabled {
+  cursor: default;
+  color: var(--dim);
+  background: transparent;
+  border-color: transparent;
+  opacity: 1;
+}
+
 .btn,
 .chip,
 .badge,
@@ -2726,6 +2735,22 @@ html.in-app .app-header {
 }
 
 /* ---------- put on screen: pick a big screen ---------- */
+.cast-note {
+  position: fixed;
+  left: 50%;
+  /* Above the connection banner, which says the same thing while offline. */
+  bottom: 72px;
+  transform: translateX(-50%);
+  z-index: 75;
+  max-width: calc(100% - 32px);
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--warn);
+  font-size: 13.5px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
 .cast-modal {
   width: min(760px, 100%);
   padding-top: 18px;

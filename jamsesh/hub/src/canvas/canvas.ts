@@ -41,12 +41,17 @@ const POLL_MS = 2000;
 const SETTLE_MS = 2500;
 
 export class Canvas {
+  /** Health checks (150 ms apart) a new canvas server gets before it counts as failed to start. */
+  static START_TRIES = 40;
   private serverProc: ReturnType<typeof Bun.spawn> | null = null;
   host: FigcraftMcp | null = null;
   private agents = new Map<string, AgentCanvas>();
   private tracked = new Map<string, Tracked>();
   private touched = new Map<string, { agentId: string; at: number }>();
   private poller: ReturnType<typeof setInterval> | null = null;
+  private timers: ReturnType<typeof setInterval>[] = [];
+  private stopped = false;
+  private recovering = false;
   private polling = false;
   private serverDir: string;
   rendersDir: string;
@@ -93,9 +98,9 @@ export class Canvas {
     try {
       await this.startServer();
       await this.startHost();
+      if (this.stopped) return;
       this.poller = setInterval(() => this.poll(), POLL_MS);
-      setInterval(() => this.reapIdleAgents(), 60_000);
-      setInterval(() => this.watchdog().catch(() => {}), 30_000);
+      this.timers = [setInterval(() => this.reapIdleAgents(), 60_000), setInterval(() => this.watchdog().catch(() => {}), 30_000)];
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       console.error("canvas:", reason);
@@ -104,7 +109,9 @@ export class Canvas {
   }
 
   stop() {
+    this.stopped = true;
     if (this.poller) clearInterval(this.poller);
+    for (const t of this.timers.splice(0)) clearInterval(t);
     this.host?.close();
     for (const a of this.agents.values()) a.mcp.close();
     this.serverProc?.kill();
@@ -129,12 +136,16 @@ export class Canvas {
       stdout: "ignore",
       stderr: "pipe",
     });
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < Canvas.START_TRIES; i++) {
       if (await healthy(this.serverUrl)) return;
       await Bun.sleep(150);
     }
-    const err = await new Response(this.serverProc.stderr as ReadableStream).text().catch(() => "");
-    throw new Error(`figcraft-server didn't start: ${err.slice(0, 300)}`);
+    // A server that is still running holds its stderr open: read what it has said, then stop it.
+    const proc = this.serverProc;
+    this.serverProc = null;
+    const err = await readFor(proc.stderr as ReadableStream<Uint8Array>, 500);
+    await stopHelper(proc);
+    throw new Error(`figcraft-server didn't start${err.trim() ? `: ${err.trim().slice(0, 300)}` : ""}`);
   }
 
   private async serverKey(): Promise<string> {
@@ -548,12 +559,30 @@ export class Canvas {
 
   /** The host should see every agent participant the hub runs; if it doesn't, it lost the session. */
   private async watchdog() {
-    if (!this.host?.alive || this.polling) return;
+    if (this.stopped || this.recovering || !this.host || this.polling) return;
+    if (!this.host.alive) return this.restartHost();
     if (this.session.canvas.status === "live" && !(await healthy(this.serverUrl)) && !(await healthy(this.serverUrl))) return this.revive();
     const ready = [...this.agents.values()].filter((a) => a.mcp.alive);
     const peers = await this.host.command("collab.peers").catch(() => null);
     if (!peers) return;
     if (peers.status !== "live" || (ready.length && (peers.peers?.length ?? 0) < ready.length)) await this.resync(`status ${peers.status}, ${peers.peers?.length ?? 0} peers for ${ready.length} agents`);
+  }
+
+  /** The host's own canvas process died: start a new one and rejoin the session file, or say the canvas failed. */
+  private async restartHost() {
+    this.recovering = true;
+    console.warn("canvas: the host's canvas process stopped; starting it again");
+    try {
+      this.host?.close();
+      this.host = null;
+      await this.startHost();
+    } catch (e) {
+      const reason = `The host's canvas stopped and didn't come back: ${e instanceof Error ? e.message : String(e)}`;
+      console.error("canvas:", reason);
+      this.session.setCanvas({ status: "failed", reason });
+    } finally {
+      this.recovering = false;
+    }
   }
 
   private reapIdleAgents() {
@@ -573,6 +602,25 @@ export class Canvas {
 function portFree(port: number) {
   const r = Bun.spawnSync(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
   return r.stdout.toString().trim() === "";
+}
+
+/** What a stream has said so far, read for at most `ms` (a process that's still running keeps its pipe open). */
+async function readFor(stream: ReadableStream<Uint8Array>, ms: number) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const late = Bun.sleep(ms).then(() => null);
+  let out = "";
+  try {
+    while (out.length < 2000) {
+      const r = await Promise.race([reader.read(), late]);
+      if (!r || r.done) break;
+      out += decoder.decode(r.value, { stream: true });
+    }
+  } catch {
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return out;
 }
 
 async function healthy(url: string) {

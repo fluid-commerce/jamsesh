@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, deviceId, hub, pref, setPref, useHub, type HubState, type StageMode } from "../shared/hub";
+import { stageAction } from "../shared/StageControls";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
@@ -100,12 +101,12 @@ export function HostView() {
       const k = e.key.toLowerCase();
       if (k === "escape") {
         if (invOpen.current) return setInvite(false);
-        if (!settings) api("/stage", { mode: "board", by: "Host" });
+        if (!settings) stageAction("/stage", { mode: "board", by: "Host" });
         return;
       }
       const m = MODES.find((x) => x.key === e.key);
-      if (m) return void api("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" });
-      if (k === "j") return void api("/stage", { mode: stageMode.current === "join" ? "board" : "join", by: "Host" });
+      if (m) return void stageAction("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" });
+      if (k === "j") return void stageAction("/stage", { mode: stageMode.current === "join" ? "board" : "join", by: "Host" });
       if (k === "f") return void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
       if (e.key === ",") return setSettings(true);
       if (k === "m") {
@@ -149,7 +150,7 @@ export function HostView() {
                 key={m.mode}
                 className="btn small"
                 style={{ background: active ? "var(--panel-3)" : "transparent", borderColor: "transparent", color: active ? "var(--text)" : "var(--muted)", height: 32, padding: "0 16px", fontSize: 14 }}
-                onClick={() => api("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" })}
+                onClick={() => stageAction("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" })}
               >
                 {m.label}
               </button>
@@ -159,7 +160,7 @@ export function HostView() {
             <button
               className="btn small"
               style={{ height: 32, background: "var(--panel-3)", borderColor: "transparent", minWidth: 0 }}
-              onClick={() => api("/stage", { mode: "board", by: "Host" })}
+              onClick={() => stageAction("/stage", { mode: "board", by: "Host" })}
               title={`${state.stage.pinned ? "Pinned: the room won't change this until you release it. " : "Comes back to the board by itself. "}Back to the board (Esc)`}
             >
               {state.stage.pinned && <PinGlyph />}

@@ -41,6 +41,38 @@ export function canvasSrc(o: { link: string; name?: string; webgl?: boolean; pan
 export const START_TIMEOUT_MS = 30_000;
 export const CONNECT_TIMEOUT_MS = 25_000;
 
+/** How long one `collab.peers` read may take, and how many failed reads in a row make a failed join. */
+export const POLL_TIMEOUT_MS = 4000;
+export const POLL_FAILURES = 2;
+
+/**
+ * Reads the canvas's join one poll at a time. A read that rejects or doesn't answer in time is a
+ * failed poll; a few in a row are a failed join, which the caller rejoins like any other.
+ */
+export class JoinWatch {
+  private busy = false;
+  private misses = 0;
+  constructor(private timeoutMs = POLL_TIMEOUT_MS) {}
+
+  /** The join state now, or null when there's nothing new (a read still running, or a single miss). */
+  async poll(fc: Fc): Promise<JoinState | null> {
+    if (this.busy) return null;
+    this.busy = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const late = new Promise<typeof MISSED>((r) => (timer = setTimeout(() => r(MISSED), this.timeoutMs)));
+      const peers = await Promise.race([fc.execute("collab.peers", {}), late]).catch(() => MISSED);
+      if (peers === MISSED) return ++this.misses >= POLL_FAILURES ? { state: "failed", reason: "The canvas stopped answering." } : null;
+      this.misses = 0;
+      return joinStateOf(peers);
+    } finally {
+      clearTimeout(timer);
+      this.busy = false;
+    }
+  }
+}
+const MISSED = Symbol("missed");
+
 /** The wait before rejoining by itself after the `n`th failure in a row (0-based): 3 s, 6 s, 12 s, then 30 s. */
 export function rejoinDelay(n: number) {
   return Math.min(30_000, 3000 * 2 ** Math.max(0, n));

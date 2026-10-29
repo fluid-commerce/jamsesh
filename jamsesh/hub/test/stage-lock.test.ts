@@ -238,16 +238,18 @@ test("the room brain's show tools don't replace a lock; its owner asking does", 
     expect(String(r)).not.toBe("On screen.");
   }
   expect(s.stage().items).toEqual([mine.id]);
-  // Unlock needs a person's yes in the lines.
-  expect(String(await t1.unlock_screen.execute({}))).toContain("nobody in these lines said to replace it");
-  const t2 = tools([said(felipe, "yeah go ahead and replace it")]);
-  expect(await t2.unlock_screen.execute({})).toContain("Unlocked");
+  // Unlock needs a person's plain yes, named by its line, in answer to the question.
+  const asking = said(felipe, "show the checkout");
+  expect(String(await tools([asking]).unlock_screen.execute({ line: asking.id }))).toContain("no line here plainly says to replace it");
+  const yes = said(felipe, "yeah go ahead and replace it");
+  const t2 = tools([yes]);
+  expect(await t2.unlock_screen.execute({ line: yes.id })).toContain("Unlocked");
   expect(await t2.show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
   expect(s.stage().items).toEqual([a.id]);
   expect(s.stage().lock).toBeUndefined();
-  // The owner themself asking just works.
+  // The owner themself asking JamSesh directly just works.
   s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  const t3 = tools([said(chey, "bring up the checkout")]);
+  const t3 = tools([{ ...said(chey, "bring up the checkout"), data: { direct: true } } as JamEvent]);
   expect(await t3.show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
   expect(s.stage().items).toEqual([a.id]);
 });
@@ -520,4 +522,220 @@ test("locks, the queue and history are per screen: a lock on main doesn't hold t
   expect(s.readyToShow().map((r) => r.screen)).toEqual(["screen-2"]);
   expect(s.stageHistory()["screen-2"].map((e) => e.by)).toEqual(["Felipe", "Room brain"]);
   expect(s.stageHistory().main.map((e) => e.by)).toEqual(["Chey"]);
+});
+
+test("a paired window is the person it's bound to: another device naming the owner can't answer or take the lock", async () => {
+  const { hub, s, chey, felipe, reg } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const a = artifact(s, "Checkout");
+    // Three browsers paired from other machines: Chey's, Felipe's, and one that hasn't said who it is.
+    const browser = (label: string, personId: string | null) => hub.auth.issue({ kind: "browser", label, personId, ip: "10.0.0.9" }).token;
+    const [cheys, felipes, nobody] = [browser("Chey's Mac", chey.id), browser("Felipe's laptop", felipe.id), browser("Phone", null)];
+    const as = (token: string) => (path: string, body: any) =>
+      fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.9", authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const me = async (token: string) => (await (await fetch(`http://127.0.0.1:${server.port}/api/me`, { headers: { "x-forwarded-for": "10.0.0.9", authorization: `Bearer ${token}` } })).json()).person?.id ?? null;
+
+    // Felipe's browser says it's Chey when it casts: the lock is still Felipe's.
+    expect((await as(felipes)("/stage", { mode: "spotlight", items: [a.id], personId: chey.id })).status).toBe(200);
+    expect(s.stage().lock?.personId).toBe(felipe.id);
+    // A browser that hasn't picked anyone is nobody in particular, not the person it names.
+    await as(nobody)("/stage", { mode: "spotlight", items: [a.id], personId: chey.id, by: "Phone" });
+    expect(s.stage().lock?.personId).toBeNull();
+    expect((await as(cheys)("/stage", { mode: "spotlight", items: [a.id] })).status).toBe(200);
+    expect(s.stage().lock?.personId).toBe(chey.id);
+
+    const agent = reg("Felipe");
+    const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [a.id] } });
+    s.onShowRequest = () => {};
+    age(s, 6 * 60_000);
+    const req = s.askOwner(item)!;
+    expect(req.ownerId).toBe(chey.id);
+    // Felipe's browser claims Chey's id in the answer, then tries to become Chey: neither works, and it stays Felipe's.
+    expect((await as(felipes)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
+    expect((await as(felipes)("/devices", { deviceId: "felipe-laptop", personId: chey.id })).status).toBe(200);
+    expect(await me(felipes)).toBe(felipe.id);
+    // One model: the device belongs to Felipe's window, and that window's devices are Felipe's.
+    expect(s.store.get("devices", "felipe-laptop")?.personId).toBe(felipe.id);
+    // Chey's browser can't take over the device Felipe's window registered (Phase 1's window-owned devices).
+    expect((await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: chey.id })).status).toBe(403);
+    expect((await as(felipes)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
+    // The unbound browser naming Chey can't answer either.
+    expect((await as(nobody)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
+    expect(s.showRequests()[0].status).toBe("pending");
+    expect(s.stage().lock?.personId).toBe(chey.id);
+    // Chey's own browser answers; the repeat is a clean refusal.
+    expect((await as(cheys)(`/show-requests/${req.id}`, { approve: false })).status).toBe(200);
+    expect((await as(cheys)(`/show-requests/${req.id}`, { approve: true })).status).toBe(404);
+
+    // The unbound browser picks who it is once; picking again doesn't move it. A removed person frees it to pick again.
+    const maya = s.upsertPerson({ name: "Maya" });
+    await as(nobody)("/devices", { deviceId: "phone", personId: maya.id });
+    expect(await me(nobody)).toBe(maya.id);
+    await as(nobody)("/devices", { deviceId: "phone", personId: chey.id });
+    expect(await me(nobody)).toBe(maya.id);
+    // Assigning another device in Settings never moves the caller's own credential.
+    await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: felipe.id });
+    expect(await me(cheys)).toBe(chey.id);
+    s.removePerson(maya.id);
+    await as(nobody)("/devices", { deviceId: "phone", personId: felipe.id });
+    expect(await me(nobody)).toBe(felipe.id);
+    // Someone who doesn't exist is never bound.
+    const fresh = browser("Tablet", null);
+    await as(fresh)("/devices", { deviceId: "tablet", personId: "per_nope" });
+    expect(await me(fresh)).toBeNull();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a named lock with no window of its owner's on record lets go after the grace period", () => {
+  const { s, chey } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  s.store.remove("devices", "chey-mac");
+  // Recently active: it stays.
+  s.store.setSetting("stage", { ...s.stage(), lock: { ...s.stage().lock!, lastActive: Date.now() - 60_000 } });
+  expect(s.lockOf()?.by).toBe("Chey");
+  s.store.setSetting("stage", { ...s.stage(), lock: { ...s.stage().lock!, lastActive: Date.now() - Session.LOCK_GONE_MS - 1000 } });
+  s.sweepLocks();
+  expect(s.stage().lock).toBeUndefined();
+  expect(s.stage().mode).toBe("spotlight");
+});
+
+test("a stopped hub's screen timers stop too: none of them touches its store after it closes", () => {
+  const { hub, s, chey } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const timers = () => [(s as any).lockSweep, (s as any).stageRevert, (s as any).shareSweep, ...(s as any).screenReverts.values()].filter(Boolean);
+  expect(timers().length).toBeGreaterThan(0);
+  hub.stop();
+  expect(timers()).toEqual([]);
+});
+
+test("only the owner's own direct request lets the brain replace their lock; their other words nearby don't", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  const mine = artifact(s, "Pricing");
+  const direct = (who: { id: string; name: string }, text: string) => ({ ...said(who, text), data: { direct: true } }) as JamEvent;
+  const cast = () => s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  cast();
+  // Chey's unrelated remark in the same batch as Felipe's request isn't consent.
+  const r1: any = await tools([said(chey, "this coffee is great"), direct(felipe, "JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] });
+  expect(String(r1)).toContain("Chey has this screen locked");
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Nor is Chey talking (not to JamSesh) while the brain acts on its own.
+  expect(String(await tools([said(chey, "bring up the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] }))).toContain("locked");
+  // Chey and Felipe both asking JamSesh in one batch: whose ask this is isn't clear, so it stays.
+  expect(String(await tools([direct(chey, "JamSesh, show pricing"), direct(felipe, "JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] }))).toContain("locked");
+  expect(s.stage().items).toEqual([mine.id]);
+  // Chey asking directly, alone: it goes up.
+  expect(await tools([direct(chey, "JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
+  expect(s.stage().items).toEqual([a.id]);
+});
+
+test("unlock_screen takes only a whole plain yes: negations, questions and mixed answers don't unlock", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const mine = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  // The brain asked the room (a refused show), so a yes now answers that question.
+  await tools([said(felipe, "show something else")]).show_on_screen.execute({ mode: "agents" });
+  for (const text of ["No, don't unlock it", "don't unlock it", "should I unlock it?", "Yes, keep mine up", "yes but not yet", "I wouldn't unlock it", "unlock it?", "no", "keep it up", "maybe go ahead"]) {
+    const line = said(felipe, text);
+    const r: any = await tools([line]).unlock_screen.execute({ line: line.id });
+    expect([text, String(r)]).toEqual([text, expect.stringContaining("plainly says")]);
+    expect(s.stage().lock?.by).toBe("Chey");
+  }
+  // The line has to be one of these lines, from a person.
+  expect(String(await tools([said(felipe, "yes")]).unlock_screen.execute({ line: 999_999_999 }))).toContain("plainly says");
+  // A plain yes, said to the brain by name too, does.
+  const yes = said(felipe, "JamSesh, yes, go ahead and replace it");
+  expect(await tools([yes]).unlock_screen.execute({ line: yes.id })).toContain("Unlocked");
+});
+
+test("a bystander's yes counts only as the answer to the brain's question; the owner may ask to unlock directly", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const mine = artifact(s, "Pricing");
+  const cast = () => s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  cast();
+  // Nobody asked: Felipe's "unlock it" out of the blue does nothing.
+  const out = said(felipe, "unlock it");
+  expect(String(await tools([out]).unlock_screen.execute({ line: out.id }))).toContain("plainly says");
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Chey asking JamSesh to unlock her own screen does.
+  const own = { ...said(chey, "JamSesh, unlock my screen"), data: { direct: true } } as JamEvent;
+  expect(await tools([own]).unlock_screen.execute({ line: own.id })).toContain("Unlocked");
+});
+
+test("a show request answers only the lock it asked about: a later cast or an unlock expires it, and a late yes does nothing", async () => {
+  const { hub, s, chey, felipe, reg } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const a = artifact(s, "Checkout");
+    const agent = reg("Rae");
+    s.onShowRequest = () => {};
+    const ask = () => {
+      const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "agents" } });
+      age(s, 6 * 60_000);
+      return { item, req: s.askOwner(item)! };
+    };
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    const first = ask();
+    expect(first.req.lockSince).toBe(s.stage().lock!.since);
+    // Felipe casts over it before Chey answers: the question is over, and Chey's late yes doesn't replace Felipe's cast.
+    s.setStage({ mode: "spotlight", items: [a.id], title: "Felipe's" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
+    expect(s.showRequests().find((r) => r.id === first.req.id)?.status).toBe("expired");
+    expect(s.answerShowRequest(first.req.id, true, "Chey")).toBeNull();
+    expect(s.stage().title).toBe("Felipe's");
+    expect(s.readyToShow().map((r) => r.id)).toContain(first.item.id);
+    // Unlocked, then locked again by the same person: a new lock, so the old question still doesn't count.
+    s.dismissReady(first.item.id);
+    const second = ask();
+    expect(second.req.ownerId).toBe(felipe.id);
+    s.unlockStage();
+    s.setStage({ mode: "spotlight", items: [a.id], title: "Felipe again" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    expect((await post(`/show-requests/${second.req.id}`, { approve: true })).status).toBeGreaterThanOrEqual(404);
+    expect(s.stage().title).toBe("Felipe again");
+    // A question whose lock still stands but whose item went away: the yes doesn't claim it went up.
+    s.dismissReady(second.item.id);
+    const third = ask();
+    s.dismissReady(third.item.id);
+    expect((await post(`/show-requests/${third.req.id}`, { approve: true })).status).toBe(409);
+    expect(s.stage().title).toBe("Felipe again");
+    expect(s.store.recentEvents({ kinds: ["system"], limit: 20 }).some((e) => /is on the big screen/.test(e.text))).toBe(false);
+    // The same lock, the same item: the owner's yes still works.
+    const fourth = ask();
+    expect((await post(`/show-requests/${fourth.req.id}`, { approve: true })).status).toBe(200);
+    expect(s.stage().mode).toBe("agents");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the owner's own share keeps their lock, and their cast comes back locked when it ends", async () => {
+  const { hub, s, felipe } = room();
+  // No model: the share goes up the brain's own way (the path every share falls back to).
+  (s as any).gatewayKey = () => "";
+  const a = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [a.id], title: "Felipe's cast" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
+  const since = s.stage().lock!.since;
+  const sh = s.startShare("felipe-laptop", "screen");
+  await hub.brain.placeShare(sh);
+  expect(s.stage().mode).toBe("layout");
+  expect(s.stage().lock).toMatchObject({ personId: felipe.id, since });
+  s.endShare(sh.id);
+  expect(s.stage().title).toBe("Felipe's cast");
+  expect(s.stage().lock).toMatchObject({ personId: felipe.id, since });
+  // Let go of during the share: what comes back is unlocked.
+  const again = s.startShare("felipe-laptop", "screen");
+  await hub.brain.placeShare(again);
+  s.unlockStage();
+  s.endShare(again.id);
+  expect(s.stage().title).toBe("Felipe's cast");
+  expect(s.stage().lock).toBeUndefined();
 });

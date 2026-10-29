@@ -503,6 +503,11 @@ pub async fn post_as_window(origin: &str, path: &str) -> Result<String, String> 
     send_on("POST", origin, path, None, "{}", true).await
 }
 
+/// Sends a small JSON body to the hub this app started, as one of this app's windows (see `get_as_window`).
+pub async fn send_as_window(method: &str, origin: &str, path: &str, body: &str) -> Result<String, String> {
+    send_on(method, origin, path, None, body, true).await
+}
+
 /// Sends a small JSON body to the host directly (not through a relay), optionally as a paired device.
 pub async fn send(method: &str, origin: &str, path: &str, bearer: Option<&str>, body: &str) -> Result<String, String> {
     send_on(method, origin, path, bearer, body, false).await

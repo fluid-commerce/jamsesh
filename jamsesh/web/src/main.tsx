@@ -56,7 +56,7 @@ createRoot(document.getElementById("root")!).render(
         <ConnectionBanner />
       </ErrorBoundary>
     )}
-    {!isConnect && !isSetup && !isProjects && !extraScreen && <BuildRequests big={isHost} />}
+    {!isConnect && !isSetup && !isProjects && <BuildRequests big={isHost} screen={extraScreen ?? "main"} />}
     {!isConnect && !isSetup && !isProjects && !isHost && <CastHost />}
     {!isConnect && !isSetup && !isProjects && !isHost && <FontShare />}
   </StrictMode>,

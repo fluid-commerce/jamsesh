@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "projects",
+  "description": "The host's Projects picker (the client window, on the hub this Mac starts) may open a project. A joined host's page is at 127.0.0.1 too, so open_project also checks the window, its page and that this Mac is hosting.",
+  "windows": ["client"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-open-project"]
+}

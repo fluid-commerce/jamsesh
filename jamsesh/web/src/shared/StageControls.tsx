@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { DriveControls } from "./DriveControls";
-import { api, pref, useHub, type Artifact, type HubState } from "./hub";
+import { api, pref, useHub, type Artifact, type HubState, type ShowRequest } from "./hub";
 import "./stagecontrols.css";
 
 function useNow(ms: number) {
@@ -32,20 +32,36 @@ const Lock = () => (
   </svg>
 );
 
+/**
+ * A screen control (cast, unlock, show, dismiss, restore). These go out live or not at all (api() never
+ * queues them: an Unlock sent after reconnecting could clear a newer lock). Resolves with what to tell
+ * the person when it didn't go through, or "" when it did.
+ */
+export async function stageAction(path: string, body: Record<string, unknown>): Promise<string> {
+  try {
+    await api(path, body);
+    return "";
+  } catch (e) {
+    return e instanceof Error && e.name !== "OfflineError" ? e.message : "Not connected to the host. Try again when you're back.";
+  }
+}
+
 /** Above the stage: who holds the screen, and what's waiting to go up. Nothing when neither applies. */
 export function StageBar({ state, screen = state.stage.screenId ?? "main", drive }: { state: HubState; screen?: string; drive?: boolean }) {
   const [open, setOpen] = useState(false);
+  const [note, setNote] = useState("");
   const lock = state.stage.lock;
   const ready = state.readyToShow.filter((r) => r.screen === screen);
   if (!lock && !ready.length) return null;
   const me = pref("personId");
+  const act = async (path: string, body: Record<string, unknown>) => setNote(await stageAction(path, body));
   return (
     <div className="stage-bar" role="region" aria-label="Screen lock and waiting items">
       <div className="stage-bar-row">
         {lock && (
           <span className="stage-lock">
             <Lock /> Locked by <b>{lock.by}</b>
-            <button className="btn small" onClick={() => api("/stage/unlock", { screen })} title={lock.personId && lock.personId === me ? "Let the room's agents and the brain change this screen again" : `Let go of ${lock.by}'s hold on this screen`}>
+            <button className="btn small" onClick={() => act("/stage/unlock", { screen })} title={lock.personId && lock.personId === me ? "Let the room's agents and the brain change this screen again" : `Let go of ${lock.by}'s hold on this screen`}>
               Unlock
             </button>
           </span>
@@ -64,15 +80,20 @@ export function StageBar({ state, screen = state.stage.screenId ?? "main", drive
               <span className="stage-queue-what">
                 <b>{r.label}</b> <span>{r.agentName}</span>
               </span>
-              <button className="btn small primary" onClick={() => api(`/stage/ready/${r.id}`, { action: "show", personId: me })}>
+              <button className="btn small primary" onClick={() => act(`/stage/ready/${r.id}`, { action: "show", personId: me })}>
                 Show
               </button>
-              <button className="btn small" onClick={() => api(`/stage/ready/${r.id}`, { action: "dismiss" })}>
+              <button className="btn small" onClick={() => act(`/stage/ready/${r.id}`, { action: "dismiss" })}>
                 Dismiss
               </button>
             </li>
           ))}
         </ul>
+      )}
+      {note && (
+        <span className="history-note" role="alert">
+          {note}
+        </span>
       )}
     </div>
   );
@@ -85,14 +106,7 @@ export function HistoryStrip({ state, screen = "main" }: { state: HubState; scre
   const all = state.stageHistory?.[screen] ?? [];
   const entries = all[0]?.at === (screen === "main" ? state.stage : state.screens.find((s) => s.id === screen)?.stage)?.since ? all.slice(1) : all;
   if (!entries.length) return null;
-  const restore = async (id: string) => {
-    setNote("");
-    try {
-      await api("/stage/restore", { id, screen, personId: pref("personId") });
-    } catch (e) {
-      setNote(e instanceof Error ? e.message : "Couldn't bring that back.");
-    }
-  };
+  const restore = async (id: string) => setNote(await stageAction("/stage/restore", { id, screen, personId: pref("personId") }));
   return (
     <div className="history-strip" role="region" aria-label="Recent screens">
       <span className="history-label">Earlier</span>
@@ -172,9 +186,16 @@ function Versions({ art, onClose }: { art: Artifact; onClose: () => void }) {
   );
 }
 
-/** Mounted with the host's build requests: the question to a lock's owner, on the big screen and in the owner's own window. */
-export function useShowAsks(big?: boolean) {
+/**
+ * The questions to a lock's owner that a view shows: a big screen shows the ones about itself (each display
+ * asks about its own lock), and the owner's own window shows all of theirs.
+ */
+export function showAsksFor(requests: ShowRequest[], view: { big?: boolean; screen?: string; me?: string }) {
+  return requests.filter((r) => r.status === "pending" && (view.big ? (r.screen || "main") === (view.screen ?? "main") : !!r.ownerId && r.ownerId === view.me));
+}
+
+/** Mounted with the host's build requests (see `showAsksFor`). */
+export function useShowAsks(big?: boolean, screen = "main") {
   const { state } = useHub();
-  const me = pref("personId");
-  return (state?.showRequests ?? []).filter((r) => r.status === "pending" && (big || (r.ownerId && r.ownerId === me)));
+  return showAsksFor(state?.showRequests ?? [], { big, screen, me: pref("personId") });
 }

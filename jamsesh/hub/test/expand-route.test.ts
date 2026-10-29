@@ -43,6 +43,15 @@ test("the expand route: a person's window expands and collapses; strangers, agen
   // Malformed tiles never collapse by accident.
   for (const bad of [{}, { tile: 5 }, { tile: {} }, { tile: "" }, { tile: ["a"] }]) expect((await expand(bad)).status).toBe(400);
   expect(s.stage().expanded).toBe(b.id);
+  // Another process on the host (loopback with no window key) can't steer the screen.
+  expect((await expand({ tile: a.id }, {})).status).toBe(403);
+  expect(s.stage().expanded).toBe(b.id);
+  // A tile that isn't on this stage is refused, and a tile key padded with spaces is the tile.
+  expect((await expand({ tile: "art_not_here" })).status).toBe(404);
+  expect((await expand({ tile: frame.id })).status).toBe(404);
+  expect(s.stage().expanded).toBe(b.id);
+  expect((await expand({ tile: ` ${a.id} ` })).status).toBe(200);
+  expect(s.stage().expanded).toBe(a.id);
   // An unknown screen is refused; null collapses.
   expect((await expand({ tile: a.id, screen: "screen-9" })).status).toBe(404);
   expect((await expand({ tile: null })).status).toBe(200);

@@ -60,6 +60,10 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     await post("/display", { ...size, screen: "screen-2", screenX: 1921 });
     // Only the host's own machine names screens; the relay marks anyone else's request.
     expect((await post("/screens/config", { screens: [{ id: "main", name: "x" }] }, { "x-forwarded-for": "9.9.9.9" })).status).toBeGreaterThanOrEqual(401);
+    // Nor another process on the host without the app's window key.
+    const bare = await fetch(`${base}/api/screens/config`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ screens: [{ id: "main", name: "Hijacked" }] }) });
+    expect(bare.status).toBe(403);
+    expect(hub.session.screens().some((sc) => sc.name === "Hijacked")).toBe(false);
     const named = await (await post("/screens/config", { screens: [{ id: "main", name: "Left TV" }, { id: "screen-2", name: "Right TV" }] })).json();
     expect(named.screens.map((sc: any) => sc.name)).toEqual(["Left TV", "Right TV"]);
     const s = hub.session;

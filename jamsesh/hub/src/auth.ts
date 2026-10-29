@@ -167,6 +167,18 @@ export class Auth {
     return d;
   }
 
+  /** A live (not revoked) paired device by id. */
+  get(id: string | null | undefined): PairedDevice | null {
+    const d = id ? this.devices.get(id) : undefined;
+    return d && !d.revoked ? d : null;
+  }
+
+  /** Whether a credential id is still paired (not revoked or forgotten). */
+  live(id: string) {
+    const d = this.devices.get(id);
+    return !!d && !d.revoked;
+  }
+
   update(id: string, fields: Partial<Pick<PairedDevice, "label" | "personId">>) {
     const d = this.devices.get(id);
     if (!d) return null;
@@ -207,12 +219,6 @@ export class Auth {
   /** Revokes the agents credentials an owner window issued earlier (the app issues a new one on each launch). */
   revokeAgentsOf(ownerDeviceId: string) {
     for (const a of this.devices.values()) if (a.ownerDeviceId === ownerDeviceId && a.kind === "agent" && !a.revoked) this.revoke(a.id);
-  }
-
-  /** A device that is still paired. */
-  get(id: string | null | undefined): PairedDevice | null {
-    const d = id ? this.devices.get(id) : undefined;
-    return d && !d.revoked ? d : null;
   }
 
   list() {
