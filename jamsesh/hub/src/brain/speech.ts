@@ -124,7 +124,7 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   // Silent: the text still shows, but no speech is made or sent.
   if (silent()) {
     bus.send({ type: "speak", audio: null, mime: "", text: words });
-    return "spoken";
+    return "shown";
   }
   let reason = "";
   try {

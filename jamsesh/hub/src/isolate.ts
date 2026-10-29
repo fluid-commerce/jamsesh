@@ -3,7 +3,7 @@
 // environment from JAMSESH_APP_DATA alone, and refuses to run if anything points at the real app.
 
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 /** The real app's ports: refused whether derived, saved or given. */
@@ -25,8 +25,18 @@ export const LOCATION_VARS = [
   "JAMSESH_PUBLIC_HOST",
 ];
 
-/** realpath of the deepest part that exists, then the rest: a folder not made yet still resolves through its real parents. */
+/**
+ * The path with links and `..` resolved for the part that exists, then the rest. A `..` anywhere that can't be
+ * resolved (a folder that doesn't exist) is refused: once made, it could lead anywhere.
+ */
 export function realish(p: string): string {
+  if (p.split(/[\\/]/).includes("..")) {
+    try {
+      return realpathSync(p);
+    } catch {
+      throw new Error(`${p} can't be resolved (a ".." inside a folder that doesn't exist).`);
+    }
+  }
   const abs = resolve(p);
   const rest: string[] = [];
   for (let cur = abs; ; cur = dirname(cur)) {
@@ -39,9 +49,14 @@ export function realish(p: string): string {
   }
 }
 
-/** The real app's storage: ~/.jamsesh and its system app data folder. */
-export function realRoots(home = homedir()): string[] {
+/** The real app's storage: ~/.jamsesh and its system app data folder, under the OS account's home (never `HOME`, which a launcher can set to anything). */
+export function realRoots(home = userInfo().homedir): string[] {
   return [join(home, ".jamsesh"), join(home, "Library", "Application Support", "com.fluidcommerce.jamsesh")].map(realish);
+}
+
+/** The one rule for a port: an isolated hub never binds, restores, mirrors or targets the real app's. */
+export function refusesPort(port: number, isolated: boolean): boolean {
+  return isolated && REAL_PORTS.includes(port);
 }
 
 export function underReal(p: string, roots = realRoots()): string | null {

@@ -62,26 +62,39 @@ impl Default for Isolation {
     }
 }
 
-/// The real app's storage: `~/.jamsesh` and its system app data folder, resolved through links.
-fn real_roots(home: Option<&str>) -> Vec<PathBuf> {
-    let Some(h) = home else { return Vec::new() };
-    [Path::new(h).join(".jamsesh"), Path::new(h).join("Library/Application Support/com.fluidcommerce.jamsesh")].iter().map(|p| realish(p)).collect()
+/// The home folder of the account this process runs as, from the OS (never from `HOME`, which a launcher can set to anything).
+pub fn account_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: getpwuid returns null or a pointer to a passwd entry valid until the next call; it is read at once.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(std::ffi::CStr::from_ptr((*pw).pw_dir).to_bytes())))
+    }
 }
 
-/// realpath of the deepest part that exists, then the rest (a folder not made yet still resolves through its real parents).
-fn realish(p: &Path) -> PathBuf {
+/// The real app's storage: `~/.jamsesh` and its system app data folder, fully resolved.
+fn real_roots(home: &Path) -> Vec<PathBuf> {
+    [home.join(".jamsesh"), home.join("Library/Application Support/com.fluidcommerce.jamsesh")].iter().filter_map(|p| realish(p).ok()).collect()
+}
+
+/// The path with every link and `..` resolved for the part that exists, then the rest. A `..` in the part that
+/// doesn't exist can't be resolved, so it is refused (it could lead anywhere once the folders are made).
+fn realish(p: &Path) -> Result<PathBuf, String> {
     let mut rest = Vec::new();
     let mut cur = p;
     loop {
         if let Ok(real) = cur.canonicalize() {
-            return rest.iter().rev().fold(real, |acc, c: &&std::ffi::OsStr| acc.join(c));
+            return Ok(rest.iter().rev().fold(real, |acc, c: &&std::ffi::OsStr| acc.join(c)));
         }
         match (cur.file_name(), cur.parent()) {
             (Some(name), Some(parent)) => {
                 rest.push(name);
                 cur = parent;
             }
-            _ => return p.to_path_buf(),
+            _ => return Err(format!("{} can't be resolved (a \"..\" inside a folder that doesn't exist).", p.display())),
         }
     }
 }
@@ -104,6 +117,11 @@ fn port(name: &str, v: &str) -> Result<u16, String> {
 
 impl Isolation {
     pub fn from_vars(get: impl Fn(&str) -> Option<String>) -> Result<Isolation, String> {
+        Self::from_vars_for(get, account_home())
+    }
+
+    /// `from_vars` with the account's home folder given (the real one comes from the OS).
+    pub fn from_vars_for(get: impl Fn(&str) -> Option<String>, account_home: Option<PathBuf>) -> Result<Isolation, String> {
         let mut o = Isolation::default();
         if let Some(v) = present("JAMSESH_RELAY_PORT", get("JAMSESH_RELAY_PORT"))? {
             o.relay_port = port("JAMSESH_RELAY_PORT", &v)?;
@@ -148,9 +166,11 @@ impl Isolation {
             o.bonjour = v.trim_end_matches('.').trim_end_matches(".local").to_string();
         }
         if o.isolated() {
-            let roots = real_roots(get("HOME").as_deref());
+            let home = account_home.ok_or("Can't tell which account's home folder is the real JamSesh's.")?;
+            let roots = real_roots(&home);
             for p in [o.app_data.as_ref(), o.hub_home.as_ref()].into_iter().flatten() {
-                if let Some(root) = roots.iter().find(|r| realish(p).starts_with(r)) {
+                let real = realish(p)?;
+                if let Some(root) = roots.iter().find(|r| real.starts_with(r)) {
                     return Err(format!("{} is inside the real JamSesh's storage ({}). A test build needs its own JAMSESH_APP_DATA.", p.display(), root.display()));
                 }
             }
@@ -158,11 +178,16 @@ impl Isolation {
                 return Err("A build with JAMSESH_APP_DATA set can't use the real app's Keychain service or Bonjour type.".into());
             }
             let mut mine = std::iter::once(o.relay_port).chain(o.hub_ports.iter().copied());
-            if let Some(p) = mine.find(|p| REAL_PORTS.contains(p)) {
+            if let Some(p) = mine.find(|p| o.refuses_port(*p)) {
                 return Err(format!("Port {p} belongs to the real JamSesh. A build with JAMSESH_APP_DATA set must say its own JAMSESH_RELAY_PORT and JAMSESH_HUB_PORTS (and any other port it sets) and use none of the real app's."));
             }
         }
         Ok(o)
+    }
+
+    /// The one rule for a port: an isolated build never listens on, mirrors or targets the real app's.
+    pub fn refuses_port(&self, p: u16) -> bool {
+        self.isolated() && REAL_PORTS.contains(&p)
     }
 
     /// Whether this is a test build beside the real app: a set `JAMSESH_APP_DATA` means it shares nothing with
@@ -230,6 +255,11 @@ pub fn app_data_or(system: Option<PathBuf>) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn vars_owned(pairs: &[(&str, String)]) -> impl Fn(&str) -> Option<String> {
+        let m: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        move |k| m.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+    }
+
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let m: Vec<(String, String)> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |k| m.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
@@ -270,7 +300,7 @@ mod tests {
     fn iso(extra: &[(&str, &str)]) -> Result<Isolation, String> {
         let mut pairs: Vec<_> = BASE.iter().filter(|(n, _)| !extra.iter().any(|(k, _)| k == n)).copied().collect();
         pairs.extend_from_slice(extra);
-        Isolation::from_vars(vars(&pairs))
+        Isolation::from_vars_for(vars(&pairs), Some(PathBuf::from("/nonexistent-account-home")))
     }
 
     #[test]
@@ -313,20 +343,44 @@ mod tests {
     }
 
     #[test]
-    fn refusal_a_data_folder_inside_the_real_storage_even_through_a_link_or_a_missing_folder() {
+    fn refusal_a_data_folder_inside_the_real_storage_even_through_a_link_dotdot_or_a_missing_folder() {
         let tmp = std::env::temp_dir().join(format!("jam-iso-{}", std::process::id()));
         let home = tmp.join("home");
         std::fs::create_dir_all(home.join(".jamsesh")).unwrap();
+        std::fs::create_dir_all(tmp.join("elsewhere")).unwrap();
         std::os::unix::fs::symlink(home.join(".jamsesh"), tmp.join("link")).unwrap();
-        let h = home.to_string_lossy().into_owned();
-        let try_dir = |d: &std::path::Path| iso(&[("JAMSESH_APP_DATA", &d.to_string_lossy()), ("HOME", &h)]);
+        // HOME says something harmless: the real home is the one the caller (the OS) gives.
+        let try_dir = |d: &std::path::Path| {
+            let pairs = [("JAMSESH_APP_DATA", d.to_string_lossy().into_owned()), ("HOME", "/somewhere/harmless".into()), ("JAMSESH_RELAY_PORT", "5890".into()), ("JAMSESH_HUB_PORTS", "5747".into())];
+            Isolation::from_vars_for(vars_owned(&pairs), Some(home.clone()))
+        };
         assert!(try_dir(&home.join(".jamsesh")).is_err());
         assert!(try_dir(&home.join(".jamsesh/deeper/not-made-yet")).is_err());
         assert!(try_dir(&tmp.join("link")).is_err());
         assert!(try_dir(&tmp.join("link/new")).is_err());
         assert!(try_dir(&home.join("Library/Application Support/com.fluidcommerce.jamsesh/x")).is_err());
-        assert!(try_dir(&tmp.join("elsewhere")).is_ok());
+        // `..` through an existing folder resolves; through one that isn't there it is refused, whatever it would reach.
+        assert!(try_dir(&tmp.join("elsewhere/../home/.jamsesh")).is_err());
+        assert!(try_dir(&tmp.join("missing/../home/.jamsesh/x")).is_err());
+        assert!(try_dir(&tmp.join("missing/../elsewhere")).is_err());
+        assert!(try_dir(&tmp.join("elsewhere/fine")).is_ok());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn the_real_home_comes_from_the_os_account_not_from_home() {
+        let h = account_home().expect("an account home");
+        assert!(h.is_absolute() && h.is_dir());
+    }
+
+    #[test]
+    fn refusal_one_rule_for_every_port_an_isolated_build_touches() {
+        let o = iso(&[]).unwrap();
+        for p in REAL_PORTS {
+            assert!(o.refuses_port(p), "{p}");
+        }
+        assert!(!o.refuses_port(5890));
+        assert!(!Isolation::default().refuses_port(4747));
     }
 
     #[test]

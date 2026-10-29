@@ -724,7 +724,7 @@ async fn sync_mirrors(state: &App, st: &serde_json::Value) {
         .flatten()
         .filter_map(|d| d["hostPort"].as_u64())
         .filter_map(|p| u16::try_from(p).ok())
-        .filter(|p| *p != relay_port() && *p >= 1024)
+        .filter(|p| *p != relay_port() && *p >= 1024 && !isolation::get().refuses_port(*p))
         .collect();
     let mut inner = state.inner.lock().await;
     let gone: Vec<u16> = inner.mirrors.keys().filter(|p| !wanted.contains(*p)).copied().collect();

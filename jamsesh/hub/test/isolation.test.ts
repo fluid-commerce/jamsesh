@@ -3,7 +3,7 @@
 // helper, the canvas and live-build ports.
 import { afterAll, afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 
 // The hub's config creates its folders when first imported: point them at a throwaway place first.
@@ -15,6 +15,8 @@ const { config, ownPort } = await import("../src/config");
 const { freePort, isolateEnv, isolatedPort, LOCATION_VARS, listenerPid, ownsListener, REAL_PORTS, realRoots } = await import("../src/isolate");
 const { Network } = await import("../src/net");
 const { Canvas } = await import("../src/canvas/canvas");
+const { Hub } = await import("../src/hub");
+const { realpathSync } = await import("node:fs");
 
 const wasHome = process.env.HOME;
 const wasIsolated = config.isolated;
@@ -51,6 +53,40 @@ test("refusal: a data folder inside the real storage, by real path (links, folde
   expect(() => isolateEnv({ JAMSESH_APP_DATA: join(dir, "fine") }, roots)).not.toThrow();
 });
 
+test("refusal: a .. in a folder that isn't there, and one that leads into the real storage", () => {
+  expect(() => isolateEnv({ JAMSESH_APP_DATA: `${dir}/missing/../x` }, roots)).toThrow("can't be resolved");
+  expect(() => isolateEnv({ JAMSESH_APP_DATA: `${fakeHome}/nope/../.jamsesh/x` }, roots)).toThrow("can't be resolved");
+  // Through a folder that exists the .. resolves, and the result is checked.
+  expect(() => isolateEnv({ JAMSESH_APP_DATA: `${fakeHome}/../fake-home/.jamsesh` }, roots)).toThrow("real JamSesh");
+  expect(() => isolateEnv({ JAMSESH_APP_DATA: `${fakeHome}/../fake-home` }, roots)).not.toThrow();
+});
+
+test("refusal: the real storage is found from the OS account, whatever HOME says", () => {
+  process.env.HOME = "/somewhere/harmless";
+  const real = realpathSync(userInfo().homedir);
+  expect(realRoots()[0]).toBe(join(real, ".jamsesh"));
+  expect(() => isolateEnv({ JAMSESH_APP_DATA: join(real, ".jamsesh", "x") })).toThrow("real JamSesh");
+});
+
+test("refusal: a saved dev registration on the real hub's port is never bound at restore, and a dev target can't point at it", async () => {
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "dev-hub") });
+  const bound: number[] = [];
+  const realServe = Bun.serve;
+  (Bun as any).serve = (o: any) => (bound.push(o.port), { port: o.port, stop() {}, requestIP: () => null });
+  try {
+    config.isolated = true;
+    hub.session.store.put("devservers", { id: "dev_x", agentId: "a", name: "real", target: "127.0.0.1:3000", hostPort: 4747, url: "http://x:4747", platform: null, createdAt: 1, generation: 1, up: true } as any, false);
+    hub.devproxy.restore();
+    await Bun.sleep(50);
+    expect(bound).toEqual([]);
+    expect(hub.session.devservers().find((d) => d.id === "dev_x")?.up).toBe(false);
+    await expect(hub.devproxy.register({ agentId: "a", name: "t", target: "127.0.0.1:4747" })).rejects.toThrow("belongs to JamSesh");
+  } finally {
+    (Bun as any).serve = realServe;
+    hub.devproxy.stop();
+  }
+});
+
 test("refusal: no real port, however it is given", () => {
   for (const real of REAL_PORTS) {
     expect(() => isolatedPort("JAMSESH_PORT", String(real))).toThrow("real app");
@@ -61,13 +97,6 @@ test("refusal: no real port, however it is given", () => {
   // Not isolated: as always.
   expect(ownPort("JAMSESH_PORT", 1234, {}, false)).toBe(1234);
   expect(ownPort("JAMSESH_PORT", 1234, { JAMSESH_PORT: "4790" }, false)).toBe(4790);
-  for (const p of [7979, 8178, 5100, 5104, 4790, 4747, 4848, 4949]) expect(REAL_PORTS).toContain(p);
-});
-
-test("the canvas and live builds take OS-assigned ports in an isolated hub, never the real ones", () => {
-  const p = freePort();
-  expect(p).toBeGreaterThan(1023);
-  expect(REAL_PORTS).not.toContain(p);
 });
 
 test("refusal: an isolated hub never reads a saved net.json, so remote access can't come back", async () => {

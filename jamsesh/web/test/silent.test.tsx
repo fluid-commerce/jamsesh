@@ -6,9 +6,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
 (globalThis as any).navigator ??= {};
 const { hub } = await import("../src/shared/hub");
-const { clip, dropAudio, htmlFrame, playChime, roomSilent, soundAllowed, stopAllSound, QUIET_CSP } = await import("../src/shared/sound");
+const { clip, dropAudio, htmlFrame, playChime, roomSilent, soundAllowed, stopAllSound, forgetChimeContext, QUIET_CSP } = await import("../src/shared/sound");
 const { CanvasFrame, ScaledFrame } = await import("../src/shared/ui");
 const { HtmlTile } = await import("../src/host/Stage");
+const { loadGuard } = await import("../src/shared/htmlframe");
 
 const was = hub.snap.state;
 const setSilent = (silent: boolean) => (hub.snap.state = { session: { silent, canvas: { status: "starting", reason: "" } }, devservers: [] } as any);
@@ -127,4 +128,62 @@ test("the live canvas is not mounted in a silent room, and is otherwise", () => 
   setSilent(false);
   // Not silent: the live canvas component runs (it has nothing to show without a link, but it isn't the quiet card).
   expect(renderToStaticMarkup(<CanvasFrame kind="view" title="Live canvas" />)).not.toContain("data-quiet-frame");
+});
+
+test("a link click inside a silent tile that loads another page puts the quiet document back", () => {
+  let resets = 0;
+  const onLoad = loadGuard(() => resets++);
+  onLoad(); // the document we gave it
+  expect(resets).toBe(0);
+  onLoad(); // a link was followed: the frame loaded something else
+  expect(resets).toBe(1);
+  onLoad(); // the put-back document
+  expect(resets).toBe(1);
+  onLoad(); // and another click
+  expect(resets).toBe(2);
+});
+
+test("a silent tile's links open nowhere and its forms go nowhere", () => {
+  const f = htmlFrame(true, "<!doctype html><a href='https://example.com/song'>x</a>");
+  expect(f.srcDoc).toContain('<base target="_blank">');
+  expect(f.sandbox).toBe("");
+  expect(f.sandbox).not.toContain("allow-popups");
+  expect(f.sandbox).not.toContain("allow-top-navigation");
+  expect(QUIET_CSP).toContain("form-action 'none'");
+});
+
+test("the chime's audio context is suspended when the room turns silent and resumed when sound is back", () => {
+  const calls: string[] = [];
+  let state = "running";
+  (globalThis as any).AudioContext = class {
+    currentTime = 0;
+    destination = {};
+    get state() {
+      return state;
+    }
+    suspend() {
+      calls.push("suspend");
+      state = "suspended";
+      return Promise.resolve();
+    }
+    resume() {
+      calls.push("resume");
+      state = "running";
+      return Promise.resolve();
+    }
+    createOscillator() {
+      return { frequency: {}, connect: () => ({ connect: () => {} }), start() {}, stop() {} };
+    }
+    createGain() {
+      return { gain: { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect: () => ({ connect: () => {} }) };
+    }
+  };
+  forgetChimeContext();
+  setSilent(false);
+  playChime();
+  (hub as any).set({ state: { session: { silent: true, canvas: { status: "starting", reason: "" } }, devservers: [] } });
+  expect(calls).toContain("suspend");
+  setSilent(false);
+  playChime();
+  expect(calls.at(-1)).toBe("resume");
 });

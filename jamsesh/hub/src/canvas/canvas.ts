@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config";
-import { REAL_PORTS } from "../isolate";
+import { refusesPort } from "../isolate";
 import type { Session } from "../session";
 import type { Agent, Platform } from "../types";
 import { HelperRegistry, stopHelper, withParentWatch } from "../children";
@@ -94,7 +94,7 @@ export class Canvas {
     for (const p of candidates) {
       // An isolated hub only ever takes a free port that isn't the real app's, and never adopts a server already listening.
       if (config.isolated) {
-        if (!REAL_PORTS.includes(p) && portFree(p)) return p;
+        if (!refusesPort(p, true) && portFree(p)) return p;
         continue;
       }
       if (await healthy(`http://127.0.0.1:${p}`) && p === saved) return p; // our server from before

@@ -33,6 +33,11 @@ export function clip(mime: string, audio: string, make: (src: string) => HTMLAud
 /** Clips made and not yet stopped, so a room that turns silent (a reconnect to a silent hub) can stop them. */
 const clips = new Set<{ pause(): void }>();
 
+/** Drops the chime's audio context so the next chime makes a new one (tests). */
+export function forgetChimeContext() {
+  ctx = null;
+}
+
 /** Stops everything this page is playing: clips already going, and the chime's audio context. */
 export function stopAllSound() {
   for (const a of clips) {
@@ -55,11 +60,11 @@ hub.subscribe(() => {
  * Pages inside the app (a scripted HTML tile, a custom stage) can make sound on their own. In a silent room
  * they get no scripts, no media and no plugins: the document is still drawn, but it can't play anything.
  */
-export const QUIET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob: http: https:; font-src data:; media-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'";
+export const QUIET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob: http: https:; font-src data:; media-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'";
 
 export function htmlFrame(silent: boolean, doc: string): { srcDoc: string; sandbox: string } {
   if (!silent) return { srcDoc: doc, sandbox: "allow-scripts" };
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${QUIET_CSP}">`;
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${QUIET_CSP}"><base target="_blank">`;
   const at = doc.search(/<!doctype html>/i);
   const srcDoc = at === 0 ? doc.replace(/^<!doctype html>/i, (m) => m + meta) : meta + doc;
   return { srcDoc, sandbox: "" };
@@ -78,6 +83,8 @@ export function playChime() {
   if (!soundAllowed()) return;
   try {
     ctx ??= new AudioContext();
+    // The room was silent a moment ago (stopAllSound suspended this): sound is back on.
+    if (ctx.state === "suspended") void ctx.resume();
     const t = ctx.currentTime + 0.01;
     for (const [i, f] of [660, 990].entries()) {
       const osc = ctx.createOscillator();

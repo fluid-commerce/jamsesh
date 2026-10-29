@@ -1602,6 +1602,7 @@ dependencies = [
  "hyper-util",
  "if-addrs",
  "keyring",
+ "libc",
  "mdns-sd",
  "objc2",
  "objc2-foundation",

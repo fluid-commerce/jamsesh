@@ -74,7 +74,7 @@ describe("silent mode reaches the page", () => {
     resetSpeechState();
     hub.session.updateSettings({ voiceReplies: true });
     sent.length = 0;
-    expect(await speak(hub.session, "Two agents are working.", { source: "voice", kind: "answer" })).toBe("spoken");
+    expect(await speak(hub.session, "Two agents are working.", { source: "voice", kind: "answer" })).toBe("shown");
     chime(hub.session, "dev1");
     expect(sent.filter((m) => m.type === "chime")).toEqual([]);
     expect(sent.filter((m) => m.type === "speak")).toEqual([{ type: "speak", audio: null, mime: "", text: "Two agents are working." }]);
@@ -96,7 +96,7 @@ describe("silent mode reaches the page", () => {
     process.env.NODE_ENV = "production";
     sent.length = 0;
     try {
-      expect(await speak(hub.session, "Nothing should be said.", { source: "voice", kind: "answer" })).toBe("spoken");
+      expect(await speak(hub.session, "Nothing should be said.", { source: "voice", kind: "answer" })).toBe("shown");
     } finally {
       (Bun as any).spawn = realSpawn;
       if (wasEnv === undefined) delete process.env.NODE_ENV;

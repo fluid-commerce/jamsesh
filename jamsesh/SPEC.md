@@ -277,8 +277,8 @@ Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 **Run a test build beside the real app.** A build for trying changes shares nothing with the real
 app. Setting `JAMSESH_APP_DATA` is what turns this on: from then on the app and the hub it starts
 treat every resource below as the test build's own. The whole environment is built from that one
-folder; the app and the hub refuse to start if it (or its `home`) resolves, by real path, into
-`~/.jamsesh` or the real app's data folder, and refuse the real app's ports (4790, 4747, 4848,
+folder; the app and the hub refuse to start if it (or its `home`) resolves, by real path (the real home is the OS account's, never `HOME`; a `..` in a folder that
+doesn't exist is refused), into `~/.jamsesh` or the real app's data folder, and refuse the real app's ports (4790, 4747, 4848,
 4949, 4443, 5100 to 5104, 7979, 8178, 47900) and the real Keychain service and Bonjour type, even
 when given explicitly. The app reads its
 variables once at launch. A value that is set but empty or invalid stops the launch with a message
@@ -330,9 +330,9 @@ A test build's agents are connected by hand with the test relay, never with the 
 **Silent mode.** With `JAMSESH_SILENT=1` the hub sends no audio (`speak` carries text only), no
 chimes, no voice samples and never falls back to the Mac's `say`; a reply is recorded and labelled "Shown, not spoken"; its state says `silent`, and the
 page then plays nothing of its own: no clips (the audio element is never made), no chime, and
-nothing in a frame, and a clip already playing stops the moment the page learns the room is silent. A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame
+nothing in a frame, and a clip already playing stops the moment the page learns the room is silent (and the chime comes back when sound does). A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame
 cannot be muted from outside, so a quiet card stands in for it. A scripted HTML tile or custom
-stage is drawn without scripts, media or plugins (an empty sandbox plus a content policy of
+stage is drawn without scripts, media or plugins (an empty sandbox, links that open nowhere, put back if the frame loads anything else, plus a content policy of
 `media-src 'none'; script-src 'none'`). A shared screen or camera is captured without audio, its
 `<video>` is muted, and any audio track that arrives is stopped.
 
