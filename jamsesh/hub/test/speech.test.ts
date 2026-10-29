@@ -1,5 +1,12 @@
-import { expect, test } from "bun:test";
-import { quietRoom, speechDecision, trimForSpeech } from "../src/brain/speech";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { bus } from "../src/bus";
+import { Hub } from "../src/hub";
+import { startHttp } from "../src/http";
+import type { BusMessage } from "../src/types";
+import { chime, quietRoom, resetSpeechState, speak, speechDecision, trimForSpeech } from "../src/brain/speech";
 import { speechSource } from "../src/brain/brain";
 
 const d = (o: Partial<Parameters<typeof speechDecision>[0]>) => speechDecision({ voiceReplies: true, source: "voice", kind: "answer", quietRoom: false, sinceLastMs: 60_000, ...o });
@@ -44,4 +51,44 @@ test("decisions that differ in specifics are not duplicates", () => {
   expect(sameSpecifics("Mobile nav uses direction A (bottom tabs)", "The mobile navigation will use Option A, bottom tabs")).toBe(true);
   expect(sameSpecifics("Card radius is 16px", "Card radius is 24px")).toBe(false);
   expect(sameSpecifics("Accent is #FF6B4A", "Accent color is #FF6B4A")).toBe(true);
+});
+
+describe("silent mode reaches the page", () => {
+  const dir = mkdtempSync(join(tmpdir(), "jam-silent-"));
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "hub") });
+  const server = startHttp(hub, 0);
+  const sent: BusMessage[] = [];
+  const off = bus.on((m) => sent.push(m));
+  const was = process.env.JAMSESH_SILENT;
+  afterAll(() => {
+    off();
+    if (was === undefined) delete process.env.JAMSESH_SILENT;
+    else process.env.JAMSESH_SILENT = was;
+    server.stop(true);
+    hub.devproxy.stop();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("speak sends text with no audio, chime sends nothing, and the state says silent", async () => {
+    process.env.JAMSESH_SILENT = "1";
+    resetSpeechState();
+    hub.session.updateSettings({ voiceReplies: true });
+    sent.length = 0;
+    expect(await speak(hub.session, "Two agents are working.", { source: "voice", kind: "answer" })).toBe("spoken");
+    chime(hub.session, "dev1");
+    expect(sent.filter((m) => m.type === "chime")).toEqual([]);
+    expect(sent.filter((m) => m.type === "speak")).toEqual([{ type: "speak", audio: null, mime: "", text: "Two agents are working." }]);
+    expect(hub.session.state().session.silent).toBe(true);
+    const laptop = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.10" });
+    const r = await fetch(`http://127.0.0.1:${server.port}/api/voice-preview`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", "content-type": "application/json", authorization: `Bearer ${laptop.token}` }, body: "{}" });
+    expect(r.status).toBe(409);
+  });
+
+  test("without the flag chime still goes out and the state says not silent", () => {
+    delete process.env.JAMSESH_SILENT;
+    sent.length = 0;
+    chime(hub.session, null as any);
+    expect(sent.filter((m) => m.type === "chime").length).toBe(1);
+    expect(hub.session.state().session.silent).toBe(false);
+  });
 });

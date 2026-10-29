@@ -703,7 +703,7 @@ export interface FontsState {
 }
 
 export interface HubState {
-  session: { roomId: string; name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
+  session: { roomId: string; name: string; code: string; silent: boolean; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
   settings: Settings;
   people: Person[];
   devices: Device[];

@@ -3,6 +3,7 @@
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { MAX_PER_MESSAGE, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
+import { silent } from "./brain/speech";
 import { cleanVocabulary } from "./audio/vocabulary";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
@@ -222,7 +223,7 @@ export class Session {
 
   state(): HubState {
     return {
-      session: { roomId: this.roomId(), name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
+      session: { roomId: this.roomId(), name: this.settings().sessionName, code: this.code, silent: silent(), startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),

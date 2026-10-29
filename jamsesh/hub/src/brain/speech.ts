@@ -90,7 +90,13 @@ export function trimForSpeech(text: string) {
   return sentences.slice(0, 2).map((x) => x.trim()).join(" ");
 }
 
+/** True when nothing may make a sound: JAMSESH_SILENT=1 stops the hub's `say`, the audio it sends to pages, and chimes. */
+export function silent() {
+  return process.env.JAMSESH_SILENT === "1";
+}
+
 export function chime(session: Session, deviceId?: string) {
+  if (silent()) return;
   bus.send({ type: "chime", deviceId: deviceId ?? null } as any);
   void session;
 }
@@ -113,6 +119,11 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
     return "shown";
   }
   lastSpokeAt = Date.now();
+  // Silent: the text still shows, but no speech is made or sent.
+  if (silent()) {
+    bus.send({ type: "speak", audio: null, mime: "", text: words });
+    return "spoken";
+  }
   let reason = "";
   try {
     const { audio, mime } = await synthesize(session, words);
@@ -125,8 +136,7 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   bus.send({ type: "speak", audio: null, mime: "", text: words });
   const mac = process.platform === "darwin";
   // Tests never talk out loud: bun test sets NODE_ENV=test, and hubs they spawn inherit it.
-  const silent = process.env.JAMSESH_SILENT === "1" || process.env.NODE_ENV === "test";
-  if (mac && !silent) {
+  if (mac && process.env.NODE_ENV !== "test") {
     Bun.spawn(["say", words], { stdout: "ignore", stderr: "ignore" });
   }
   // Said in a worse voice than the room chose: tell them why, once in a while.

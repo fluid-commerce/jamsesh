@@ -11,7 +11,7 @@ import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
 import { learningNote } from "./audio/voiceprint";
 import { BadWav } from "./audio/wav";
 import { describeError } from "./brain/llm";
-import { synthesize } from "./brain/speech";
+import { silent, synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import { lendMessage } from "./fonts";
 import type { Hub } from "./hub";
@@ -819,6 +819,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/voice-preview" && req.method === "POST") {
+    if (silent()) return bad("The hub is in silent mode, so voice samples are off.", 409);
     // A fixed sentence in the chosen voice, so the picker can be tried without a real reply. Each one costs a speech call:
     // one per device every few seconds is plenty for clicking through voices.
     const voice = typeof body?.voice === "string" ? body.voice.trim() : undefined;
