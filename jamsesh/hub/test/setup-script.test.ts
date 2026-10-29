@@ -1012,6 +1012,18 @@ describe("agent setup script", () => {
     connectionIntact(dir, files);
   });
 
+  test("JamSesh's own settings file saved between the read and the write is not overwritten", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    // A curl that, after the host answers, lets the person save client.env before setup writes it.
+    writeFileSync(join(box.bin, "curl"), `#!/bin/sh\n/usr/bin/curl "$@" || exit $?\ncase "$*" in *api/me*) echo "JAMSESH_EXTRA=1" >> "$HOME/.jamsesh/client.env" ;; esac\n`, { mode: 0o755 });
+    const { dir, files } = earlierInstall(box);
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("JamSesh settings changed while setting up; run Connect my agents again");
+    expect(readFileSync(join(dir, "client.env"), "utf8")).toBe(`${files["client.env"]}JAMSESH_EXTRA=1\n`);
+  });
+
   test("a CLI that exits 0 without registering the entry fails the setup and puts the earlier entry back", async () => {
     const box = sandbox();
     writeFileSync(join(box.bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });

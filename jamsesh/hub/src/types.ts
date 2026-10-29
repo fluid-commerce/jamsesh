@@ -42,7 +42,7 @@ export interface Agent {
   branch: string;
   cwd: string;
   machine: string;
-  /** The chat this agent is: Claude Code's session id (what its hooks carry) or the MCP connection. A second chat in the same folder is a different agent. */
+  /** The chat this agent is: Claude Code's session id (what its hooks carry) or the MCP connection. A second Claude Code chat in the same folder is a different agent; Codex chats are keyed by machine and folder, so two in one folder are one agent. */
   chatId?: string;
   platform: Platform;
   focus: string;

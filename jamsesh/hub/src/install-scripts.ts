@@ -506,9 +506,9 @@ q() { printf "'%s'" "$(printf '%s' "$1" | tr -d '\\n\\r' | sed "s/'/'\\"'\\"'/g"
 conf() { sed -n "s/^$1=//p" "$DIR/client.env" 2>/dev/null | head -n 1 | sed -e "s/^[\\"']//" -e "s/[\\"']\\$//" -e "s/'\\"'\\"'/'/g"; }
 # The person is whoever the host already knows this computer as. The setup never adds a person:
 # a guessed name only made duplicates.
+client_sha="$(sha "$DIR/client.env")"
 NAME="$(curl -fsS --max-time 5 "\${AUTH[@]}" "$HUB/api/me" 2>/dev/null | perl -MJSON::PP -0777 -ne 'my $m = eval { decode_json($_) }; print $m->{person}{name} // "" if ref $m eq "HASH" && ref $m->{person} eq "HASH"' || true)"
 [ -n "$NAME" ] || NAME="\${JAMSESH_NAME:-}"
-client_sha="$(sha "$DIR/client.env")"
 if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)"; fi
 
 {

@@ -593,9 +593,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // is only ever sent to this room.
     if (hook === "joined") return json({ joined: hub.chatJoined(b, machine), room: s.roomId() });
     // Sent for one room (a queued prompt, or a call made just before this Mac's relay switched hosts):
-    // refused before anything is recorded, read or acknowledged, so the hook keeps it for that room.
+    // refused before anything is recorded, read or acknowledged, so the hook keeps it for that room. A call
+    // that doesn't name its room (an older hook, or a direct caller) can't show it is meant for this one.
     const room = req.headers.get("x-jam-room");
-    if (room && room !== s.roomId()) return json({ error: "That was meant for another JamSesh room.", room: s.roomId() }, 409);
+    if (room !== s.roomId()) return json({ error: "That was meant for another JamSesh room.", room: s.roomId() }, 409);
     // What the hook script passed on to the agent since its last call (see Hub.offer).
     const promptId = req.headers.get("x-jam-prompt-id") ?? "";
     if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;

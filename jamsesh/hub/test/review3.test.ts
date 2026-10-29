@@ -94,7 +94,7 @@ test("disconnecting a device ends its agents' open listener and jam_wait before 
   const window = hub.auth.issue({ kind: "browser", label: "Rae's Mac", ip: "10.0.0.20" });
   const cred = hub.auth.issue({ kind: "agent", label: "Rae's agents", ip: "10.0.0.20", ownerDeviceId: window.device.id });
   const a = join_({ chatId: "chat-revoke", machine: window.device.id, cwd: "/r3/revoke" }).agent;
-  const listening = fetch(`${base}/api/hooks/listen`, { method: "POST", headers: { ...remote, authorization: `Bearer ${cred.token}` }, body: JSON.stringify({ session_id: "chat-revoke" }) }).then((r) => r.text());
+  const listening = fetch(`${base}/api/hooks/listen`, { method: "POST", headers: { ...remote, authorization: `Bearer ${cred.token}`, "x-jam-room": hub.session.roomId() }, body: JSON.stringify({ session_id: "chat-revoke" }) }).then((r) => r.text());
   await Bun.sleep(100); // the listener is in place (a new listener ends any wait already running)
   const ctx = { agentId: a.id, ip: "relayed", device: cred.device.id, origin: base };
   const waiting = hub.mcp.call(ctx, "jam_wait", { seconds: 30 }).then(() => "handed something over", (e: Error) => e.message);

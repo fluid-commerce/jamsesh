@@ -38,7 +38,7 @@ const directive = (text: string, targets: string[]) => s.createDirective({ text,
 const joinChat = (chatId: string, machine = "dev_macA", cwd = "/work/app") =>
   s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "app", cwd, machine, platform: "web", chatId }).agent;
 const hook = (kind: string, token: string, body: object, ack = "") =>
-  fetch(`${base}/api/hooks/${kind}`, { method: "POST", headers: { ...bearer(token), ...(ack ? { "x-jam-ack": ack } : {}) }, body: JSON.stringify(body) });
+  fetch(`${base}/api/hooks/${kind}`, { method: "POST", headers: { ...bearer(token), "x-jam-room": s.roomId(), ...(ack ? { "x-jam-ack": ack } : {}) }, body: JSON.stringify(body) });
 
 // ---- 1. MCP sessions ----
 
@@ -119,7 +119,7 @@ test("the host's own loopback is the host's agents only", async () => {
   const remoteChat = joinChat("chat-remote", "dev_macA", "/remote/app");
   directive("Host task", [onHost.id]);
   directive("Remote task", [remoteChat.id]);
-  const local = (body: object) => fetch(`${base}/api/hooks/tool`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const local = (body: object) => fetch(`${base}/api/hooks/tool`, { method: "POST", headers: { "content-type": "application/json", "x-jam-room": s.roomId() }, body: JSON.stringify(body) });
   expect(await (await local({ session_id: "chat-remote", tool_name: "Edit" })).text()).not.toContain("Remote task");
   expect(await (await local({ session_id: "chat-host", tool_name: "Edit" })).text()).toContain("Host task");
 });
@@ -373,7 +373,7 @@ test("removing an agent ends its waiting listener and jam_wait, drops its handov
 
 test("a prompt that arrives twice under one id is recorded once", async () => {
   joinChat("chat-dup");
-  const post = () => fetch(`${base}/api/hooks/prompt`, { method: "POST", headers: { ...bearer(macA.token), "x-jam-prompt-id": "p123-dup" }, body: JSON.stringify({ session_id: "chat-dup", prompt: "make the header sticky" }) });
+  const post = () => fetch(`${base}/api/hooks/prompt`, { method: "POST", headers: { ...bearer(macA.token), "x-jam-room": s.roomId(), "x-jam-prompt-id": "p123-dup" }, body: JSON.stringify({ session_id: "chat-dup", prompt: "make the header sticky" }) });
   await (await post()).body?.cancel();
   await (await post()).body?.cancel();
   expect(s.store.recentEvents({ kinds: ["prompt"] }).filter((e) => e.text === "make the header sticky")).toHaveLength(1);
@@ -521,4 +521,16 @@ test("only a prompt that asks to connect counts as asking: \"don't connect to ja
   } finally {
     fake.stop(true);
   }
+});
+
+test("a hook call that names no room, or another, is refused before anything is applied", async () => {
+  joinChat("chat-noroom");
+  const base_ = { method: "POST", body: JSON.stringify({ session_id: "chat-noroom", prompt: "do the header" }) };
+  const noRoom = await fetch(`${base}/api/hooks/prompt`, { ...base_, headers: { ...bearer(macA.token) } });
+  expect(noRoom.status).toBe(409);
+  const other = await fetch(`${base}/api/hooks/prompt`, { ...base_, headers: { ...bearer(macA.token), "x-jam-room": "someone-elses-room" } });
+  expect(other.status).toBe(409);
+  expect(s.store.recentEvents({ kinds: ["prompt"], limit: 50 }).some((e) => e.text.includes("do the header"))).toBe(false);
+  const ok = await fetch(`${base}/api/hooks/prompt`, { ...base_, headers: { ...bearer(macA.token), "x-jam-room": s.roomId() } });
+  expect(ok.status).toBe(200);
 });
