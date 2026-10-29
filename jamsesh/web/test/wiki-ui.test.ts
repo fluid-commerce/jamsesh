@@ -14,6 +14,7 @@ import { onRefresh, saveRev } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
 import { diffView } from "../src/wiki/WikiCard";
 import { cutDiff, lineDiff } from "../../hub/src/wiki/diff";
+import { listPages, readPage, readState, writeState } from "../../hub/src/wiki/files";
 import { bus } from "../../hub/src/bus";
 import type { Decider } from "../../hub/src/wiki/service";
 
@@ -266,6 +267,11 @@ test("a card's diff never hides lines silently: past 400 it says how many more a
 
 test("a card's cut change is fetched whole through the client's api(): every added line is there, and a gone proposal says so", async () => {
   const body = Array.from({ length: 701 }, (_, i) => `new-${i}`).join("\n");
+  // The seeded pages were put in the folder directly; they are the wiki's own here, not hand edits to file.
+  const st = readState(hub.wiki.dir);
+  st.seen = Object.fromEntries(listPages(hub.wiki.dir).map((i) => [i.slug, { mtime: Math.floor(i.mtime), rev: readPage(hub.wiki.dir, i.slug)!.rev }]));
+  for (const id of hub.wiki.pendingSources()) st.ingested[id] = { at: 1 }; // and what earlier tests left waiting is not this test's business
+  writeState(hub.wiki.dir, st);
   await api("/wiki/page/replace-me", { markdown: `# Replace me\n\n${Array.from({ length: 701 }, (_, i) => `old-${i}`).join("\n")}` }, "PUT");
   hub.wiki.addSource("document", "Rewrite", "replace me rewrite", "Chey");
   hub.wiki.decide = (async () => ({ summary: "Rewrite", pages: [{ slug: "replace-me", title: "Replace me", type: "topic" as const, workstreams: [], markdown: `# Replace me\n\n${body}`, sources: [] }] })) as Decider;

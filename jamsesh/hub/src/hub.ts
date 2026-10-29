@@ -94,6 +94,8 @@ export class Hub {
   net: Network;
   /** Open WebSocket connections from people's devices (not the host's own screen). */
   peopleOnline = 0;
+  /** The hub is saving its last state: nothing new is taken in (http.ts answers 503), so nothing arrives after the wiki's final capture. */
+  closing = false;
   uploadsDir: string;
 
   constructor(private opts: HubOptions = {}) {
@@ -176,6 +178,12 @@ export class Hub {
     } catch (e) {
       console.error("wiki migrate:", e instanceof Error ? e.message : e);
     }
+    try {
+      // Pages changed by hand in the vault while the hub was off are filed as people's edits.
+      this.wiki.syncVault();
+    } catch (e) {
+      console.error("wiki sync:", e instanceof Error ? e.message : e);
+    }
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
@@ -221,6 +229,10 @@ export class Hub {
 
   /** Stops, saving a final snapshot first when there is a canvas to save. */
   async shutdown() {
+    // First of all, close every way in: requests that would add something are refused, and the brain and the transcriber stop making events.
+    this.closing = true;
+    this.brain.stop();
+    this.transcriber.stop();
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);
     // The last stretch of conversation goes into the wiki's sources first, on its own (it never waits behind a slow ingest); it is read in if the model answers in time, or at the next start.

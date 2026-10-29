@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, archiveSources, gitAvailable, graph, initWiki, listPages, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { io, addSource, writeState, archiveSources, gitAvailable, graph, initWiki, listPages, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { WikiService, ingestPrompt, type Decider } from "../src/wiki/service";
 
@@ -31,6 +31,13 @@ function room() {
   const agent = s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/w", machine: "/w", platform: "web", branch: "main" }).agent;
   return { hub, s, w: hub.wiki, chey, agent, dir: hub.wiki.dir };
 }
+
+/** Pages a test put in the vault with writePage are the wiki's own: recorded as known, so they aren't taken for hand edits. */
+const adopt = (dir: string) => {
+  const st = readState(dir);
+  st.seen = Object.fromEntries(listPages(dir).map((i) => [i.slug, { mtime: Math.floor(i.mtime), rev: readPage(dir, i.slug)!.rev }]));
+  writeState(dir, st);
+};
 
 const page = (slug: string, title: string, type: any = "topic", body = "", sources: string[] = []) => ({ slug, title, type, workstreams: [] as string[], markdown: `# ${title}\n\n${body}`, sources });
 
@@ -542,6 +549,7 @@ test("an existing page is rewritten only when the model saw all of it", async ()
   const long = `# Checkout\n\n${Array.from({ length: 600 }, (_, i) => `- Rule ${i}: checkout keeps guest mode for case ${i}.`).join("\n")}`;
   writePage(dir, "checkout", long, { category: "features" });
   writePage(dir, "unrelated", "# Unrelated\n\nSomething else entirely.");
+  adopt(dir);
   w.addSource("document", "Checkout note", "More about checkout and guest mode.", "Chey");
   let seen: any = null;
   w.decide = (async (input) => {
@@ -1286,6 +1294,7 @@ test("an update to a page the model wasn't shown is asked for again, not dropped
   const { w, s, dir } = room();
   // Twelve pages that all match the source; only ten can go in.
   for (let i = 0; i < 12; i++) writePage(dir, `crowd-${String(i).padStart(2, "0")}`, `# Crowd ${i}\n\nguest checkout rules number ${i}`);
+  adopt(dir);
   w.addSource("document", "Note", "guest checkout rules changed for everyone", "Chey");
   const shownOnce: string[][] = [];
   w.decide = (async (input) => {
@@ -1315,6 +1324,7 @@ test("an update to a page the model wasn't shown is asked for again, not dropped
 test("a source whose only proposed change is to an unseen page stays pending and is run again", async () => {
   const { w, dir } = room();
   for (let i = 0; i < 12; i++) writePage(dir, `seen-${String(i).padStart(2, "0")}`, `# Seen ${i}\n\nguest checkout rules number ${i}`);
+  adopt(dir);
   w.addSource("document", "Note", "guest checkout rules changed", "Chey");
   let calls = 0;
   w.decide = (async (input) => {
@@ -1550,36 +1560,34 @@ test("a person's edit keeps the whole change in its source, even one long line",
 
 // ---------- round 7 ----------
 
-test("only a write's own token proves it landed: a person's identical edit is an edit, not the accept", async () => {
+test("a person's edit during the proposal is an edit: the page is skipped on accept, and an intent that never reached the page is rolled back", async () => {
   const { w, s, dir } = room();
   w.addSource("document", "One page", "a", "Chey");
   w.decide = (async () => ({ summary: "One", pages: [page("same-text", "Same", "decision", "Proposed words.")] })) as Decider;
   const id = (await w.tick())!.card!.id;
   // A person writes exactly what was proposed, before anyone accepts.
   expect(w.editPage("same-text", "# Same\n\nProposed words.", { by: "Ana" }).ok).toBe(true);
-  expect(readFileSync(join(dir, "wiki", "same-text.md"), "utf8")).not.toContain("write:");
   const r = s.board.add(id, "Chey");
   expect(r).toMatchObject({ ok: false, status: 409 }); // the page changed since: skipped, never counted as the accept
   expect(readPage(dir, "same-text")!.frontMatter.type).toBe("topic"); // the proposal's category was not applied by a guess
   // And an intent that never reached the page is rolled back, not matched to the person's text.
   const rec = JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8"));
-  writeFileSync(join(dir, ".proposals", `${id}.json`), JSON.stringify({ ...rec, writing: { slug: "same-text", token: `${id}:same-text`, rev: "0" } }));
+  writeFileSync(join(dir, ".proposals", `${id}.json`), JSON.stringify({ ...rec, writing: { slug: "same-text", rev: "0" } }));
   new WikiService(s, dir, s.sessionId).restore();
   expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).applied ?? []).toEqual([]);
 });
 
-test("a page the accept wrote carries its token until someone edits it; a later edit can't hide a write that wasn't recorded", async () => {
+test("a later edit can't hide a write that wasn't recorded: the page's exact bytes are the proof", async () => {
   const { w, s, dir } = room();
   w.addSource("document", "Two pages", "a b", "Chey");
   w.decide = (async () => ({ summary: "Two", pages: [page("t-one", "One", "topic", "1"), page("t-two", "Two", "topic", "2")] })) as Decider;
   const id = (await w.tick())!.card!.id;
   const first = failRecordAfterPage(() => s.board.add(id, "Chey"));
   expect(first).toMatchObject({ ok: false, status: 500 });
-  expect(readFileSync(join(dir, "wiki", "t-one.md"), "utf8")).toContain(`write: ${id}:t-one`);
+  expect(readFileSync(join(dir, "wiki", "t-one.md"), "utf8")).not.toContain("write"); // nothing is added to the page
   // A person edits the page before anything reconciled the record.
   const edited = w.editPage("t-one", "# One\n\nChanged by a person.", { by: "Ana", rev: readPage(dir, "t-one")!.rev });
   expect(edited.ok).toBe(true);
-  expect(readFileSync(join(dir, "wiki", "t-one.md"), "utf8")).not.toContain("write:");
   expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).applied).toEqual(["t-one"]);
   expect(s.board.dismiss(id, "Chey").ok).toBe(true);
   expect(readFileSync(join(dir, "log.md"), "utf8")).toMatch(/Ingest: .*\[\[t-one\]\]/);
@@ -1621,3 +1629,162 @@ test("at the end of a session the transcript is saved at once, even while an ing
   release();
   await slow;
 });
+
+// ---------- round 8 ----------
+
+test("pages changed by hand in the vault are filed as a person's edit: source, log, index, commit; the wiki's own writes are not", async () => {
+  const { w, s, dir } = room();
+  writePage(dir, "by-hand", "# By hand\n\nOriginal words.");
+  writePage(dir, "left-alone", "# Left alone\n\nUnchanged.");
+  adopt(dir);
+  expect(sourceIds(dir).filter((id) => readSource(dir, id)!.kind === "edit")).toEqual([]);
+  // A change in Obsidian (same file, new text), a page made there, and a touch that changes nothing.
+  const file = join(dir, "wiki", "by-hand.md");
+  const text = readFileSync(file, "utf8");
+  writeFileSync(file, text.replace("Original words.", "Words changed in Obsidian."));
+  writeFileSync(join(dir, "wiki", "born-there.md"), "---\ntype: topic\nworkstreams: []\nupdated: 2026-10-29\nsources: []\n---\n# Born there\n\nMade in the vault.\n");
+  const left = join(dir, "wiki", "left-alone.md");
+  writeFileSync(left, readFileSync(left, "utf8"));
+  const before = sourceIds(dir).length;
+  expect(w.syncVault().sort()).toEqual(["born-there", "by-hand"]);
+  const edits = sourceIds(dir).map((id) => readSource(dir, id)!).filter((x) => x.kind === "edit");
+  expect(edits).toHaveLength(2);
+  expect(sourceIds(dir).length).toBe(before + 2);
+  expect(edits.map((e) => e.text).join("\n")).toContain("Words changed in Obsidian.");
+  expect(readLog(dir).map((l) => l.text).join("\n")).toMatch(/edited a page|wrote a page/);
+  expect(readLog(dir).flatMap((l) => l.pages)).toEqual(expect.arrayContaining(["by-hand", "born-there"]));
+  expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[born-there|Born there]]");
+  // Run again: nothing new. And the wiki's own writes (a person's edit through the app, an accept) are never mistaken for it.
+  expect(w.syncVault()).toEqual([]);
+  expect(w.editPage("by-hand", "# By hand\n\nEdited in the app.", { by: "Ana", rev: readPage(dir, "by-hand")!.rev }).ok).toBe(true);
+  w.addSource("document", "Note", "x", "Chey");
+  w.decide = (async () => ({ summary: "X", pages: [page("accepted-page", "Accepted", "topic", "Yes.")] })) as Decider;
+  s.board.add((await w.tick())!.card!.id, "Chey");
+  expect(w.syncVault()).toEqual([]);
+  expect(sourceIds(dir).map((id) => readSource(dir, id)!).filter((x) => x.kind === "edit")).toHaveLength(3); // the two by hand, one through the app
+});
+
+test("the first look at a vault only records what is there", () => {
+  const { w, dir } = room();
+  writePage(dir, "old-page", "# Old page\n\nAlready here.");
+  const st = readState(dir);
+  delete st.seen;
+  writeState(dir, st);
+  expect(w.syncVault()).toEqual([]);
+  expect(readState(dir).seen!["old-page"]).toBeTruthy();
+  expect(sourceIds(dir).filter((id) => readSource(dir, id)!.kind === "edit")).toEqual([]);
+});
+
+test("a page changed by hand while the hub was off is found at start", () => {
+  const { dir } = room();
+  writePage(dir, "offline-edit", "# Offline edit\n\nBefore.");
+  const a = new Hub({ canvas: false, whisper: false, dataDir: join(root, `off-${Math.random()}`), wikiDir: dir });
+  hubs.push(a);
+  const file = join(dir, "wiki", "offline-edit.md");
+  writeFileSync(file, readFileSync(file, "utf8").replace("Before.", "After, by hand."));
+  const b = new Hub({ canvas: false, whisper: false, dataDir: join(root, `off2-${Math.random()}`), wikiDir: dir });
+  hubs.push(b);
+  expect(sourceIds(dir).map((id) => readSource(dir, id)!).filter((x) => x.kind === "edit" && x.text.includes("After, by hand."))).toHaveLength(1);
+});
+
+test("cursors and offsets that don't fit what they point at stop the wiki instead of skipping events or text", async () => {
+  const bad: [string, (id: string) => string][] = [
+    ["a fractional cursor", (sid) => JSON.stringify({ cursors: { [sid]: 1.5 } })],
+    ["an unsafe integer", (sid) => JSON.stringify({ cursors: { [sid]: 2 ** 60 } })],
+    ["a negative offset", (sid) => `{"read":{"${sid}":-1}}`],
+    ["a transcript cursor past the last event", (sid) => JSON.stringify({ cursors: { [sid]: 99999 } })],
+    ["a report cursor past the last event", (sid) => JSON.stringify({ reports: { [sid]: 99999 } })],
+  ];
+  for (const [name, make] of bad) {
+    const { w, s, dir } = room();
+    s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "Something worth keeping for the wiki later on.", relevance: "work" });
+    const text = make(s.sessionId);
+    writeFileSync(join(dir, ".wiki-state.json"), text);
+    await expect(w.tick(), name).rejects.toThrow("damaged");
+    expect(readFileSync(join(dir, ".wiki-state.json"), "utf8")).toBe(text);
+    expect(sourceIds(dir), name).toEqual([]);
+  }
+  // A read offset past the end of its source, and a part offset past the end of an event.
+  const { w, s, dir } = room();
+  const src = w.addSource("document", "Short", "tiny", "Chey");
+  w.decide = (async () => ({ summary: "x", pages: [] })) as Decider;
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify({ read: { [src.id]: 999 } }));
+  await expect(w.tick()).rejects.toThrow("damaged");
+  expect(w.pendingSources()).toEqual([src.id]);
+  // Offsets and cursors that fit are fine.
+  const ev = s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "x".repeat(60_000), relevance: "work" });
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify({ partial: { [s.sessionId]: { id: ev.id, off: 10_000_000 } } }));
+  await expect(w.tick()).rejects.toThrow("damaged");
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify({ cursors: { [s.sessionId]: ev.id } }));
+  await w.tick();
+});
+
+test("a 1,500-page vault where every page links every other still sends a small graph, fast; the page view keeps every link", () => {
+  const { dir } = room();
+  const slugs = Array.from({ length: 1500 }, (_, i) => `p${String(i).padStart(4, "0")}`);
+  const mk = (slug: string, i: number) => `---\ntype: topic\nworkstreams: []\nupdated: 2026-10-29\nsources: []\n---\n# Page ${i}\n\n${slugs.filter((x) => x !== slug).map((x) => `[[${x}]]`).join(" ")}\n`;
+  slugs.forEach((slug, i) => writeFileSync(join(dir, "wiki", `${slug}.md`), mk(slug, i)));
+  const t0 = performance.now();
+  const g = graph(dir);
+  const ms = performance.now() - t0;
+  expect(g.nodes).toHaveLength(1500);
+  expect(g.edges.length).toBeLessThanOrEqual(6000);
+  expect(g.edges.length).toBeGreaterThan(1500); // still a connected-looking map
+  expect(JSON.stringify(g).length).toBeLessThan(700_000);
+  expect(ms).toBeLessThan(8000);
+  expect((g as any).trimmed).toBe(true);
+  expect(new Set(g.edges.map((e) => e.from)).size).toBe(1500); // every page keeps some
+  // The page view has every link of a page.
+  expect(readPage(dir, "p0000")!.markdown.match(/\[\[/g)!.length).toBe(1499);
+}, 60_000);
+
+test("the page index lists a capped number of links a page; the page route lists them all", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  try {
+    const others = Array.from({ length: 60 }, (_, i) => `o${i}`);
+    for (const o of others) writePage(r.dir, o, `# ${o}\n`);
+    writePage(r.dir, "linker", `# Linker\n\n${others.map((o) => `[[${o}]]`).join(" ")}`);
+    const cookie = `jam_window=${r.hub.auth.windows.take(r.hub.auth.windows.mint())}`;
+    const get = async (path: string) => (await fetch(`http://127.0.0.1:${server.port}/api${path}`, { headers: { cookie } })).json() as Promise<any>;
+    const pages = await get("/wiki/pages");
+    expect(pages.pages.find((p: any) => p.slug === "linker").links.length).toBe(20);
+    expect((await get("/wiki/page/linker")).links.length).toBe(60);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("while the hub is saving its last state, a message sent is refused, so nothing arrives after the final capture", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  try {
+    const { w, s, hub } = r;
+    w.addSource("document", "Early note", "something waiting", "Chey");
+    let release!: () => void;
+    let entered!: () => void;
+    const inside = new Promise<void>((res) => (entered = res));
+    w.decide = (async () => {
+      entered();
+      await new Promise<void>((res) => (release = res));
+      return { summary: "none", pages: [] };
+    }) as Decider;
+    const slow = w.tick();
+    await inside; // an ingest is waiting on the model
+    s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "Said before the shutdown began.", relevance: "work" });
+    const done = hub.shutdown();
+    await Bun.sleep(100); // the shutdown is now waiting
+    const cookie = `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
+    const late = await fetch(`http://127.0.0.1:${server.port}/api/say`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: JSON.stringify({ text: "Said during the shutdown wait.", personId: r.chey.id }) });
+    expect(late.status).toBe(503);
+    expect((await fetch(`http://127.0.0.1:${server.port}/api/wiki/pages`, { headers: { cookie } })).status).toBe(200); // reading still works
+    expect(s.store.eventsAfter(0).some((e) => e.text.includes("during the shutdown wait"))).toBe(false);
+    // The earlier words were saved at once, while the ingest was still waiting.
+    expect(sourceIds(w.dir).map((id) => readSource(w.dir, id)!.text).join("\n")).toContain("Said before the shutdown began.");
+    release();
+    await slow;
+    await done;
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);

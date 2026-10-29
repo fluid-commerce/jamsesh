@@ -203,3 +203,12 @@ test("pointing at a page with hundreds of links still names no more than the bud
   // Idle: the stage's own set, which is already within the budget.
   expect(nameCandidates(g.nodes, { hot: null, focus: null, top: labelledAtLeast(g, 2, 8, NAME_BUDGET), rank })).toHaveLength(NAME_BUDGET);
 });
+
+test("a reply with millions of links can't ask the layout for more than the edge cap", async () => {
+  const { MAX_EDGES } = await import("../src/wiki/graph");
+  const nodes = Array.from({ length: 1500 }, (_, i) => ({ id: `n${i}`, title: `N${i}`, category: "topics", backlinks: 0 }));
+  const edges: any[] = [];
+  for (let i = 0; i < 1500; i++) for (let j = 0; j < 1500; j++) if (i !== j && edges.length < 300_000) edges.push({ from: `n${i}`, to: `n${j}` });
+  const g = shapeGraph({ nodes, edges } as any);
+  expect(g.edges.length).toBe(MAX_EDGES);
+});

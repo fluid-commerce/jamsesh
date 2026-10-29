@@ -180,8 +180,6 @@ export interface FrontMatter {
   workstreams: string[];
   updated: string;
   sources: string[];
-  /** Set only on a page the maintainer wrote from an accepted proposal: names that write ("<card>:<slug>"). Any later write by writePage drops it, so a person's edit never carries it. */
-  write?: string;
 }
 
 export interface Page {
@@ -230,14 +228,13 @@ export function parseFrontMatter(text: string): { fm: Partial<FrontMatter>; body
     else if (kv[1] === "updated") fm.updated = kv[2].trim();
     else if (kv[1] === "workstreams") fm.workstreams = list(kv[2]);
     else if (kv[1] === "sources") fm.sources = list(kv[2]).filter(isSourceId);
-    else if (kv[1] === "write" && /^[\w:-]{1,120}$/.test(kv[2].trim())) fm.write = kv[2].trim();
   }
   return { fm, body: text.slice(m[0].length) };
 }
 
 export function serializePage(fm: FrontMatter, body: string): string {
   const arr = (a: string[]) => `[${a.map((x) => JSON.stringify(x)).join(", ")}]`;
-  return `---\ntype: ${fm.type}\nworkstreams: ${arr(fm.workstreams)}\nupdated: ${fm.updated}\nsources: ${arr(fm.sources)}\n${fm.write ? `write: ${fm.write}\n` : ""}---\n${body.replace(/^\n+/, "")}`;
+  return `---\ntype: ${fm.type}\nworkstreams: ${arr(fm.workstreams)}\nupdated: ${fm.updated}\nsources: ${arr(fm.sources)}\n---\n${body.replace(/^\n+/, "")}`;
 }
 
 export const categoryOf = (type: string): Category => TYPES[type] ?? "topics";
@@ -290,7 +287,7 @@ export function readPage(dir: string, slug: string): Page | null {
     slug,
     title: titleOf(body, slug),
     category: categoryOf(type),
-    frontMatter: { type, workstreams: fm.workstreams ?? [], updated: fm.updated ?? today(statSync(file).mtimeMs), sources: fm.sources ?? [], ...(fm.write ? { write: fm.write } : {}) },
+    frontMatter: { type, workstreams: fm.workstreams ?? [], updated: fm.updated ?? today(statSync(file).mtimeMs), sources: fm.sources ?? [] },
     markdown: body,
     rev: revOf(text),
     mtime: statSync(file).mtimeMs,
@@ -331,12 +328,31 @@ export function backlinksOf(dir: string, slug: string): { slug: string; title: s
   return listPages(dir).filter((p) => p.links.includes(slug)).map((p) => ({ slug: p.slug, title: p.title }));
 }
 
+/** The most links drawn from one page, and the most drawn in all: a vault where every page links every other still sends a graph a screen can lay out. */
+export const GRAPH_LINKS_PER_PAGE = 8;
+export const GRAPH_EDGES_MAX = 6000;
+
+/**
+ * The link map. Each page keeps its strongest links (to the pages most linked to, then by name), and the whole map keeps
+ * the strongest edges up to a budget. The page view has every link of a page; this is only what is drawn.
+ */
 export function graph(dir: string) {
   const infos = listPages(dir);
-  const have = new Set(infos.map((p) => p.slug));
+  const weight = new Map(infos.map((p) => [p.slug, p.backlinks]));
+  const edges: { from: string; to: string; w: number }[] = [];
+  // Every page keeps its share of the edge budget, so a crowded vault thins every page's links evenly instead of dropping whole pages' links.
+  const perPage = Math.max(1, Math.min(GRAPH_LINKS_PER_PAGE, Math.floor(GRAPH_EDGES_MAX / Math.max(1, infos.length))));
+  for (const p of infos) {
+    const own = p.links.filter((l) => weight.has(l) && l !== p.slug).map((to) => ({ from: p.slug, to, w: weight.get(to)! }));
+    own.sort((a, b) => b.w - a.w || a.to.localeCompare(b.to));
+    edges.push(...own.slice(0, perPage));
+  }
+  edges.sort((a, b) => b.w - a.w || a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+  const kept = edges.slice(0, GRAPH_EDGES_MAX);
   return {
     nodes: infos.map((p) => ({ id: p.slug, title: p.title, category: p.category, backlinks: p.backlinks })),
-    edges: infos.flatMap((p) => p.links.filter((l) => have.has(l)).map((l) => ({ from: p.slug, to: l }))),
+    edges: kept.map(({ from, to }) => ({ from, to })),
+    ...(kept.length < edges.length || infos.some((p) => p.links.length > perPage) ? { trimmed: true } : {}),
   };
 }
 
@@ -349,7 +365,7 @@ export interface WriteResult {
  * Writes a page. `body` is the Markdown after the front matter; the front matter is kept up to date
  * here (updated today, sources unioned) so every writer, a person or the maintainer, leaves a page the same way.
  */
-export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number; write?: string; beforeWrite?: (text: string) => void } = {}): Page {
+export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number; beforeWrite?: (text: string) => void } = {}): Page {
   const file = pageFile(dir, slug, true)!;
   if (body.length > PAGE_MAX) throw new Error(`A page can hold ${PAGE_MAX.toLocaleString("en-US")} characters; split this one.`);
   const prior = readPage(dir, slug);
@@ -362,7 +378,6 @@ export function writePage(dir: string, slug: string, body: string, opts: { categ
     updated: today(opts.now),
     sources: [...new Set([...(prior?.frontMatter.sources ?? []), ...(opts.sources ?? [])].filter(isSourceId))].slice(-60),
   };
-  if (opts.write) fm.write = opts.write;
   const text = serializePage(fm, body.replace(/\r\n/g, "\n"));
   opts.beforeWrite?.(text); // the exact bytes, for a record made just before they land
   writeAtomic(file, text);
@@ -574,13 +589,15 @@ export interface WikiState {
   queued?: { kind: SourceKind; title: string; text: string; by: string }[];
   /** Existing pages the model asked to change without having been shown them whole: the next ingest shows these first. */
   need?: string[];
+  /** Each page as the wiki last knew it (file time and hash): a page that differs was changed by hand in the vault. Absent until the first look, which only records. */
+  seen?: Record<string, { mtime: number; rev: string }>;
 }
 
 const stateFile = (dir: string) => join(dir, ".wiki-state.json");
 
 const KINDS: readonly string[] = ["transcript", "document", "link", "agent", "edit"];
 const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-const isNat = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const isNat = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const recOf = <T>(v: unknown, ok: (x: unknown) => x is T): Record<string, T> | undefined => {
   if (v === undefined) return undefined;
   if (!isRec(v) || !Object.values(v).every(ok)) throw new Error("bad shape");
@@ -600,6 +617,7 @@ function parseState(j: unknown): WikiState {
   const partial = recOf(j.partial, (x): x is { id: number; off: number } => isRec(x) && isNat(x.id) && isNat(x.off));
   const queued = j.queued;
   if (queued !== undefined && !(Array.isArray(queued) && queued.every((q) => isRec(q) && KINDS.includes(q.kind as string) && typeof q.title === "string" && typeof q.text === "string" && typeof q.by === "string"))) throw new Error("bad queue");
+  const seen = recOf(j.seen, (x): x is { mtime: number; rev: string } => isRec(x) && isNat(x.mtime) && typeof x.rev === "string");
   const need = j.need;
   if (need !== undefined && !(Array.isArray(need) && need.every((x) => typeof x === "string"))) throw new Error("bad need");
   if (j.migrated !== undefined && typeof j.migrated !== "boolean") throw new Error("bad migrated");
@@ -614,23 +632,31 @@ function parseState(j: unknown): WikiState {
     ...(partial ? { partial } : {}),
     ...(queued ? { queued: queued as NonNullable<WikiState["queued"]> } : {}),
     ...(need ? { need: need as string[] } : {}),
+    ...(seen ? { seen } : {}),
   };
+}
+
+/**
+ * Stops everything on a state file that can't be trusted: a copy is set aside and nothing proceeds on a blank one, because
+ * the queue, the read offsets and the transcript cursors it holds can't be guessed again. Used for a file of the wrong
+ * shape and for values that don't fit what they point at (a cursor past the last event, an offset past the end of a source).
+ */
+export function stateDamaged(dir: string): never {
+  const file = stateFile(dir);
+  const aside = `${file}.damaged`;
+  try {
+    if (!existsSync(aside)) copyFileSync(file, aside);
+  } catch {}
+  throw Object.assign(new Error(".wiki-state.json in the wiki folder is damaged; a copy is kept as .wiki-state.json.damaged. Fix or remove it to carry on."), { code: "ESTATE" });
 }
 
 export function readState(dir: string): WikiState {
   // A link in place of the state file throws: better no ingest than one that starts again from nothing.
-  const file = stateFile(dir);
-  const text = readPlain(file);
+  const text = readPlain(stateFile(dir));
   try {
     return parseState(JSON.parse(text ?? "{}"));
   } catch {
-    // A damaged state file is kept as it is (a copy is set aside) and nothing proceeds on a blank one: the queue, the
-    // read offsets and the transcript cursors it holds can't be guessed again.
-    const aside = `${file}.damaged`;
-    try {
-      if (!existsSync(aside)) copyFileSync(file, aside);
-    } catch {}
-    throw Object.assign(new Error(".wiki-state.json in the wiki folder is damaged; a copy is kept as .wiki-state.json.damaged. Fix or remove it to carry on."), { code: "ESTATE" });
+    return stateDamaged(dir);
   }
 }
 

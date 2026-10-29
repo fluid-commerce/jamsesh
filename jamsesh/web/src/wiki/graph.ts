@@ -3,6 +3,8 @@ import { asCategory, CATEGORIES, type Category, type RawGraph } from "./types";
 
 /** As many pages as a vault holds (hub MAX_PAGES): the map shows every page; the cap only guards a malformed reply. */
 export const MAX_NODES = 1500;
+/** And as many links as the hub sends (GRAPH_EDGES_MAX): a malformed reply can't ask the layout for millions. */
+export const MAX_EDGES = 6000;
 const arr = <T>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
 
 export interface GNode {
@@ -46,6 +48,7 @@ export function shapeGraph(raw: Partial<RawGraph> | null | undefined, scale = 1)
   const edges: GEdge[] = [];
   const have = new Set<string>();
   for (const e of arr(raw?.edges)) {
+    if (edges.length >= MAX_EDGES) break;
     if (!e || e.from === e.to || !seen.has(e.from) || !seen.has(e.to)) continue;
     const key = `${e.from}\u0000${e.to}`;
     if (have.has(key)) continue;

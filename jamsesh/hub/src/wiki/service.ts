@@ -15,7 +15,7 @@ import type { JamEvent, TriageCard, WikiCardPayload, WikiChange } from "../types
 import { cutDiff, diffStats, lineDiff } from "./diff";
 import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
-  listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, today, vaultDir, writeAtomic, writePage, writeState,
+  listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, today, vaultDir, writeAtomic, writePage, writeState,
 } from "./files";
 
 const EVERY_MS = 15 * 60_000;
@@ -122,8 +122,8 @@ interface Proposal {
   sources: string[];
   /** The card as it was raised, to raise it again on a later session's board. */
   card?: WikiCardPayload;
-  /** The page an accept is writing right now, recorded before the write: the token the write puts in the page's front matter and the hash (rev) of its exact bytes. A crash in the write is finished or rolled back from this. */
-  writing?: { slug: string; token: string; rev: string };
+  /** The page an accept is writing right now, recorded before the write, with the hash (rev) of the exact bytes it will hold. A crash in the write is finished or rolled back from this. */
+  writing?: { slug: string; rev: string };
   /** Pages an accept that didn't finish already wrote: a retry counts them and doesn't write them again. */
   applied?: string[];
   /** How far into each source this proposal read (a long source is read in parts). */
@@ -337,7 +337,7 @@ export class WikiService {
    */
   agentUpdate(): Source[] {
     const out: Source[] = [];
-    const start = (this.reportCursor ??= readState(this.dir).reports?.[this.sessionId] ?? 0);
+    const start = (this.reportCursor ??= this.cursorOf(readState(this.dir).reports?.[this.sessionId]));
     let cursor = start;
     const done = () => {
       if (cursor !== start) this.saveReportCursor(cursor);
@@ -363,6 +363,13 @@ export class WikiService {
       }
       if (page.length < EVENT_PAGE) return done();
     }
+  }
+
+  /** A cursor from the state file, which must not point past the last event: that would skip what comes next. Past it, the state fails closed. */
+  private cursorOf(saved: number | undefined): number {
+    if (saved === undefined) return 0;
+    if (saved > this.s.store.lastEventId()) stateDamaged(this.dir);
+    return saved;
   }
 
   private saveReportCursor(id: number) {
@@ -402,7 +409,7 @@ export class WikiService {
    */
   captureTranscript(final = false): Source[] {
     const out: Source[] = [];
-    let cursor = readState(this.dir).cursors[this.sessionId] ?? 0;
+    let cursor = this.cursorOf(readState(this.dir).cursors[this.sessionId]);
     const body = (e: JamEvent) => ((e.data?.documentId ? this.s.store.get("documents", e.data.documentId)?.text : null) ?? e.text).replace(/\s+/g, " ");
     const head = (e: JamEvent) => `[${new Date(e.ts).toTimeString().slice(0, 5)}] ${e.authorName}${e.kind === "speech" ? "" : ` (${e.kind})`}: `;
     for (let n = 0; n < 100; n++) {
@@ -439,7 +446,9 @@ export class WikiService {
         // The offset into it is saved after each part, so a long typed prompt or decision is kept whole across restarts.
         const text = body(big);
         const prefix = head(big);
-        let off = readState(this.dir).partial?.[this.sessionId]?.id === big.id ? readState(this.dir).partial![this.sessionId].off : 0;
+        const had = readState(this.dir).partial?.[this.sessionId];
+        let off = had?.id === big.id ? had.off : 0;
+        if (off > text.length) stateDamaged(this.dir); // an offset past the end of what it points into
         while (off < text.length) {
           let end = Math.min(text.length, off + TRANSCRIPT_MAX - 200);
           const sp = text.lastIndexOf(" ", end);
@@ -499,9 +508,13 @@ export class WikiService {
   tick(final = false): Promise<IngestResult | null> {
     return this.serial(async () => {
       if (this.stopped) return null;
+      // Nothing proceeds on a cursor that points past the last event: it would skip what comes next.
+      this.cursorOf(readState(this.dir).cursors[this.sessionId]);
+      this.cursorOf(readState(this.dir).reports?.[this.sessionId]);
       this.drainQueue();
       this.agentUpdate();
       try {
+        this.syncVault();
         this.catchUpLog();
         this.archiveOld(); // only once every source has its log line
       } catch (e) {
@@ -510,6 +523,63 @@ export class WikiService {
       this.captureTranscript(final);
       return this.ingestNow();
     });
+  }
+
+  // ---- changes made by hand in the vault ----
+
+  /** Records a page as the wiki knows it, so a write the wiki itself made is never mistaken for a hand edit. Best effort: an unreadable state is reported where it is used. */
+  private markSeen(p: { slug: string; rev: string; mtime: number }) {
+    try {
+      const st = readState(this.dir);
+      if (!st.seen) return; // the first look hasn't happened: it will record this page with the rest
+      st.seen[p.slug] = { mtime: Math.floor(p.mtime), rev: p.rev };
+      writeState(this.dir, st);
+    } catch (e) {
+      console.error("wiki:", errText(e));
+    }
+  }
+
+  /**
+   * Finds pages changed (or made, or removed) by hand in the vault since the wiki last knew them, by file time then hash,
+   * and files each as a person's edit: a source, a log line, the index, a commit. The first look only records what is
+   * there. Run at start, each pass and before a person's edit through the app, so History never misses a change.
+   */
+  syncVault(): string[] {
+    for (const p of this.proposals()) if (p.prop.writing) this.reconcile(p.id, p.prop); // a write the last run died in is the wiki's own
+    const seen = { ...(readState(this.dir).seen ?? {}) };
+    const first = readState(this.dir).seen === undefined;
+    const touched: string[] = [];
+    const here = new Set<string>();
+    for (const info of listPages(this.dir)) {
+      here.add(info.slug);
+      const known = seen[info.slug];
+      const mtime = Math.floor(info.mtime);
+      if (known && known.mtime === mtime) continue;
+      const page = readPage(this.dir, info.slug);
+      if (!page) continue;
+      if (known && known.rev === page.rev) {
+        seen[info.slug] = { mtime, rev: page.rev }; // touched, not changed
+        continue;
+      }
+      seen[info.slug] = { mtime, rev: page.rev };
+      if (first) continue;
+      try {
+        addSource(this.dir, { kind: "edit", title: `Edit to ${page.title} (${page.slug})`, by: "Someone in the vault", text: `Someone ${known ? "changed" : "wrote"} the page "${page.slug}" by hand in the vault. It now reads:\n\n${page.markdown.trim()}` });
+        touched.push(page.slug);
+      } catch (e) {
+        delete seen[info.slug]; // not filed: found again next time
+        console.error("wiki:", errText(e));
+      }
+    }
+    for (const slug of Object.keys(seen)) if (!here.has(slug)) delete seen[slug]; // removed by hand: nothing to file
+    writeState(this.dir, { ...readState(this.dir), seen });
+    if (touched.length) {
+      this.catchUpLog();
+      rebuildIndex(this.dir);
+      commitPaths(this.dir, "Changes made by hand in the vault", [...touched.map((p) => `wiki/${p}.md`), "index.md", "log.md", "raw"]);
+      this.notify("edit", touched, "Someone in the vault");
+    }
+    return touched;
   }
 
   /**
@@ -546,7 +616,8 @@ export class WikiService {
       const src = readSource(this.dir, id);
       if (!src) continue;
       const whole = src.text.length;
-      const from = Math.min(read[id] ?? 0, whole);
+      if ((read[id] ?? 0) > whole) stateDamaged(this.dir); // read past the end of the source
+      const from = read[id] ?? 0;
       let to = Math.min(whole, from + MAX_BATCH_CHARS);
       if (to < whole) {
         const nl = src.text.lastIndexOf("\n", to);
@@ -750,9 +821,11 @@ export class WikiService {
   private reconcile(cardId: string, prop: Proposal): Proposal {
     if (!prop.writing) return prop;
     const w = prop.writing;
-    // Only this write's own token (or its exact bytes) proves it landed: a person's edit carries neither, whatever it says.
+    // The page counts as written when it holds exactly the bytes the write meant to leave: if it does, the vault holds
+    // what was proposed, whoever put it there. A page that differs (edited since, or never written) is not counted.
     const page = prop.changes.some((x) => x.slug === w.slug) ? readPage(this.dir, w.slug) : null;
-    const landed = !!page && (page.frontMatter.write === w.token || page.rev === w.rev);
+    const landed = !!page && page.rev === w.rev;
+    if (landed) this.markSeen(page!);
     const next: Proposal = { ...prop, applied: landed ? [...new Set([...(prop.applied ?? []), w.slug])] : prop.applied };
     delete next.writing;
     this.saveProposal(cardId, next);
@@ -867,16 +940,15 @@ export class WikiService {
         continue;
       }
       try {
-        // The intent (the page, a token written into the file, and the hash of the exact bytes) is recorded before the write
-        // and the page after it: a crash between leaves a record that says which page to look at and how to know it landed.
-        const token = `${card.id}:${c.slug}`;
-        writePage(this.dir, c.slug, c.body, {
+        // The intent (the page and the hash of the exact bytes) is recorded before the write and the page after it: a crash
+        // between leaves a record that says which page to look at and what it holds if the write landed. Nothing is added to the page.
+        const page = writePage(this.dir, c.slug, c.body, {
           category: c.category,
           workstreams: c.workstreams,
           sources: c.sources,
-          write: token,
-          beforeWrite: (text) => this.saveProposal(card.id, { ...prop, applied: [...done], writing: { slug: c.slug, token, rev: revOf(text) } }),
+          beforeWrite: (text) => this.saveProposal(card.id, { ...prop, applied: [...done], writing: { slug: c.slug, rev: revOf(text) } }),
         });
+        this.markSeen(page);
         applied.push(c.slug);
         done.add(c.slug);
         this.saveProposal(card.id, { ...prop, applied: [...done] });
@@ -912,7 +984,7 @@ export class WikiService {
     if (!isPageSlug(slug)) return { ok: false, error: "That isn't a page name.", status: 400 };
     // A proposal write that landed and wasn't recorded is recorded now, while the page still carries its token: an edit can't hide it.
     try {
-      for (const p of this.proposals()) if (p.prop.writing) this.reconcile(p.id, p.prop);
+      this.syncVault(); // also reconciles; a hand edit made since is filed before this one
     } catch (e) {
       return { ok: false, error: errText(e), status: 500 };
     }
@@ -928,6 +1000,7 @@ export class WikiService {
     try {
       src = addSource(this.dir, { kind: "edit", title: `Edit to ${cur?.title ?? opts.title ?? slug} (${slug})`, by: opts.by, text: `${opts.by} ${cur ? "changed" : "wrote"} the page "${slug}".\n\n${lineDiff(cur?.markdown.trim() ?? "", text)}` });
       page = writePage(this.dir, slug, text, { category: opts.category, sources: [src.id] });
+      this.markSeen(page);
     } catch (e) {
       // The write can fail after the page landed (reading it back): then the edit happened, and its source stays.
       const now = readPage(this.dir, slug);
@@ -1059,7 +1132,7 @@ export class WikiService {
         if (!cur?.frontMatter.sources.includes(src.id)) theirs++;
         return;
       }
-      writePage(this.dir, slug, `# ${title}\n\n${lines.join("\n")}\n\n(src: ${src.id})\n`, { category, workstreams, sources: [src.id] });
+      this.markSeen(writePage(this.dir, slug, `# ${title}\n\n${lines.join("\n")}\n\n(src: ${src.id})\n`, { category, workstreams, sources: [src.id] }));
       written.push(slug);
     };
     const kind = (...k: string[]) => uniq.filter((f) => k.includes(f.kind));

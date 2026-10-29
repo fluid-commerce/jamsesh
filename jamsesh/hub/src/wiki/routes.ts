@@ -4,6 +4,8 @@ import { type Category, CATEGORIES, backlinksOf, graph, isSourceId, linksOf, lis
 import type { Page } from "./files";
 import type { WikiService } from "./service";
 
+const LINKS_LISTED = 20;
+
 export interface WikiReply {
   status: number;
   body: unknown;
@@ -34,7 +36,8 @@ export function pageJson(w: WikiService, p: Page) {
 export async function wikiRoute(w: WikiService, method: string, path: string, url: URL, body: any, who: { name: string }): Promise<WikiReply | null> {
   if (path !== "/wiki" && !path.startsWith("/wiki/")) return null;
 
-  if (path === "/wiki/pages" && method === "GET") return ok({ ready: w.info().ready, project: w.project, pages: listPages(w.dir) });
+  // The index lists up to LINKS_LISTED links a page (a fully linked vault would be millions); a page's own route has every one.
+  if (path === "/wiki/pages" && method === "GET") return ok({ ready: w.info().ready, project: w.project, pages: listPages(w.dir).map((p) => ({ ...p, links: p.links.slice(0, LINKS_LISTED) })) });
   if (path === "/wiki/graph" && method === "GET") return ok(graph(w.dir));
   if (path === "/wiki/log" && method === "GET") return ok({ entries: readLog(w.dir, Math.min(200, Number(url.searchParams.get("limit")) || 100)) });
   if (path === "/wiki/search" && method === "GET") return ok({ results: searchPages(w.dir, url.searchParams.get("q") ?? "", 20) });

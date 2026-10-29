@@ -1715,11 +1715,15 @@ closes; if the hub stops in between, the next start closes the card with what wa
 since marked `stale`). The card's diff per page is cut at 6,000 characters, at a line, with a note of how many changed lines are left out and `cut: true`;
 `GET /api/wiki/proposal/:card/:slug` (people only) returns the whole change (`{diff, added, removed}`), and the card offers it as
 "Show the whole change". A change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff
-lines and says how many more there are, with a button that shows them all. Before each page is written the proposal records the intent (page, a token, the hash of the exact bytes); the token is written into the
-page's front matter (`write: <card>:<slug>`) and dropped by any later write, so only the accept's own write proves it landed, never a
-person's identical edit; a person's edit reconciles any unrecorded write first. `GET /api/wiki/proposal/:card/:slug` serves the diff
+lines and says how many more there are, with a button that shows them all. Before each page is written the proposal records the intent (the page and the hash of the exact bytes it will hold); nothing is
+added to the page. A page that holds exactly those bytes counts as written, whoever put them there: if a person made the same edit, the
+vault holds what was proposed, so recording the proposal as applied and its sources as read is the right outcome, not a misrecord. A
+page that differs (edited since, or never written) is not counted, and an accept skips a page edited since it was proposed. A
+person's edit through the app reconciles any unrecorded write first. Pages changed by hand in the vault (Obsidian) are found at start,
+each pass and before an app edit, by file time then hash against `.wiki-state.json` `seen`, and filed as an edit source with a log
+line, an index rebuild and a commit; the first look only records. `GET /api/wiki/proposal/:card/:slug` serves the diff
 made from the page as proposed, stored with the proposal. At session end the transcript, agent reports and queue are saved to the
-sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. Pages a failed accept already wrote stay part of its
+sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. From the first moment of shutdown the hub answers every request that would add something with 503 and stops the brain and the transcriber, so nothing arrives after that capture. Pages a failed accept already wrote stay part of its
 record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
 When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
 stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its
@@ -1742,7 +1746,7 @@ and for accepting or dismissing a wiki card.
 | `GET /api/wiki/page/:slug` | `{slug,title,category,frontMatter,markdown,rev,backlinks:[{slug,title}],links:[{slug,title,exists}],sources:[{id,title,kind,ts,exists}]}` |
 | `PUT /api/wiki/page/:slug` | body `{markdown, rev?, title?, category?}`; `rev` is required to change a page and absent to create one; 409 `{error,current}` when stale |
 | `GET /api/wiki/search?q=` | `{results:[{slug,title,category,snippet,score}]}` |
-| `GET /api/wiki/graph` | `{nodes:[{id,title,category,backlinks}],edges:[{from,to}]}` |
+| `GET /api/wiki/graph` | `{nodes:[{id,title,category,backlinks}],edges:[{from,to}],trimmed?}`; each page keeps its strongest links (by how linked-to the target is), an even share of a 6,000-edge budget (at most 8 a page); the page route has every link, the index lists 20 a page |
 | `GET /api/wiki/log` | `{entries:[{ts,text,pages}]}` newest first |
 | `GET /api/wiki/sources`, `GET /api/wiki/source/:id` | the source list (with `ingested`), one source's text |
 | `POST /api/wiki/sources` | `{title, text}`, `{title, url}` (kept as a link; never fetched) or `{title, attachment}` (text file or PDF; a PDF is read by the router model, 503 without a key) |
@@ -1758,7 +1762,7 @@ decision reports are read from the session's events by a cursor in `.wiki-state.
 source except the room's transcript chunks (a line every 15 minutes would bury History) gets one keyed log line (`%%src:<id>%%`),
 written again at the next change, pass or start if the first write failed. An agent report's source is named by its event, so a
 replay finds it. When `raw/` passes 4,800 sources the oldest read-in ones move to `raw/archive/` (still readable and citable by id).
-`.wiki-state.json` is checked field by field when read; a wrong shape anywhere is treated as damaged. An event
+`.wiki-state.json` is checked field by field when read (cursors and offsets must be safe non-negative integers); a wrong shape, a cursor past the last event, or an offset past the end of its source is treated as damaged. An event
 longer than one source is written in parts, with its offset in the state file. A damaged `.wiki-state.json` stops ingest (a copy is kept
 as `.wiki-state.json.damaged`) rather than restarting from nothing. The project folder must be a real folder directly inside the
 projects folder (never a link, never behind one); otherwise the session uses its own folder.
