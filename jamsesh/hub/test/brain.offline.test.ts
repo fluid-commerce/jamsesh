@@ -19,7 +19,7 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: banter", [1], async (r) => {
       r.say("jonathan", "dude your shirt is hilarious lol");
       await r.settle();
-      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.directives()).toHaveLength(0);
     });
   }, 30_000);
 
@@ -27,7 +27,7 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: sarcasm", [1], async (r) => {
       r.say("jonathan", "yeah let's just delete the whole app lol");
       await r.settle();
-      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.directives()).toHaveLength(0);
     });
   }, 30_000);
 
@@ -36,7 +36,7 @@ describe("offline rule-based brain", () => {
       r.say("chey", "let's try some variants of the profile screen");
       await r.settle();
       // Overheard, so it waits on the Tasks board.
-      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.directives()).toHaveLength(0);
       const cs = r.hub.session.board.open();
       expect(cs.length).toBe(1);
       expect(cs[0].mode).toBe("explore");
@@ -47,7 +47,7 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: implement mobile", [2, 3], async (r) => {
       r.say("chey", "let's ship the bottom tabs in the mobile app");
       await r.settle();
-      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.directives()).toHaveLength(0);
       const cs = r.hub.session.board.open();
       expect(cs.length).toBe(1);
       expect(cs[0].mode).toBe("implement");
@@ -87,7 +87,7 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: show me options", [6], async (r) => {
       r.say("felipe", "show me the options for the nav");
       await r.settle();
-      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.directives()).toHaveLength(0);
       expect(["compare", "spotlight"]).toContain(r.stage().mode);
     });
   }, 30_000);
@@ -104,7 +104,7 @@ describe("offline rule-based brain", () => {
     await runScenario("offline: decision builds", [6], async (r) => {
       r.say("felipe", "ok let's go with B");
       await r.settle();
-      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.directives()).toHaveLength(0);
       const task = r.hub.session.board.open().find((c) => c.type === "task");
       expect(task?.mode).toBe("implement");
       expect(task?.text).toContain(r.art.navB.title);

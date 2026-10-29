@@ -1628,7 +1628,8 @@ select {
   padding: 20px;
   -webkit-overflow-scrolling: touch;
 }
-.pins-pane {
+.pins-pane,
+.tasks-pane {
   overflow: hidden;
 }
 .wrap-row {

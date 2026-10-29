@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
-import type { Agent, Artifact, Directive, JamEvent, Person, Stage } from "../src/types";
+import type { Agent, Artifact, Directive, JamEvent, Person, Stage, TriageCard } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
 
@@ -25,6 +25,8 @@ export interface Room {
   /** Wait until the brain has no pending lines, no running pass and no side passes. */
   settle(timeoutMs?: number): Promise<void>;
   directives(): Directive[];
+  /** Cards waiting on the Tasks board: what was overheard and not yet sent or added. */
+  cards(): TriageCard[];
   /** Directives created after the baseline (seeded ones excluded). */
   newDirectives(): Directive[];
   decisions(): JamEvent[];
@@ -74,8 +76,8 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
   // Trace every router tool call so failures show what the model actually did.
   const trace: string[] = [];
   const origTools = brain.tools.bind(brain);
-  brain.tools = (batch: JamEvent[], pass: { effects: number }) => {
-    const tools = origTools(batch, pass);
+  brain.tools = (batch: JamEvent[], pass: { effects: number }, ...rest: unknown[]) => {
+    const tools = origTools(batch, pass, ...rest);
     for (const [name, t] of Object.entries<any>(tools)) {
       const exec = t.execute;
       t.execute = async (input: any, o: any) => {
@@ -113,8 +115,16 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
       }
     },
     directives: () => s.directives(),
-    newDirectives: () => s.directives().filter((d) => !baseline.has(d.id)),
-    decisions: () => s.store.recentEvents({ kinds: ["decision"], limit: 50 }).filter((e) => e.authorType === "brain"),
+    cards: () => s.board.open(),
+    // Routing is what the scenarios judge: a task the brain proposed on the Tasks board counts like one it sent.
+    newDirectives: () => [
+      ...s.directives().filter((d) => !baseline.has(d.id)),
+      ...s.board.open().filter((c) => c.type === "task").map((c) => ({ id: c.id, ts: c.ts, text: c.text, mode: c.mode, targets: c.targets, rationale: "proposed on the Tasks board", requestedBy: c.by }) as unknown as Directive),
+    ],
+    decisions: () => [
+      ...s.store.recentEvents({ kinds: ["decision"], limit: 50 }).filter((e) => e.authorType === "brain"),
+      ...s.board.open().filter((c) => c.type === "context" && c.kind === "decision").map((c) => ({ id: 0, text: c.text, authorType: "brain" }) as unknown as JamEvent),
+    ],
     spoken: () => s.store.recentEvents({ kinds: ["brain"], limit: 20 }),
     stage: () => s.stage(),
     targetsOf: (ds) => new Set(ds.flatMap((d) => d.targets)),
@@ -122,7 +132,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
       const ds = room.newDirectives().map((d) => `  - [${d.mode}] -> ${d.targets.map(nameOf).join(", ")} :: ${d.text.slice(0, 160)} || why: ${d.rationale.slice(0, 120)}`);
       const st = room.stage();
       const dec = room.decisions().map((e) => `  - ${e.text.slice(0, 140)}`);
-      return `directives(${ds.length}):\n${ds.join("\n") || "  (none)"}\ndecisions(${dec.length}):\n${dec.join("\n") || "  (none)"}\ntools: ${trace.join(" ;; ") || "(none called)"}\nstage: ${st.mode} items=[${st.items.map((i) => s.store.get("artifacts", i)?.title ?? i).join(" | ")}] pinned=${st.pinned}\nbrain: ${hub.session.brainStatus.status}${hub.session.brainStatus.lastError ? ` err=${hub.session.brainStatus.lastError}` : ""}`;
+      return `directives(${ds.length}), cards(${room.cards().length}):\n${ds.join("\n") || "  (none)"}\ndecisions(${dec.length}):\n${dec.join("\n") || "  (none)"}\ntools: ${trace.join(" ;; ") || "(none called)"}\nstage: ${st.mode} items=[${st.items.map((i) => s.store.get("artifacts", i)?.title ?? i).join(" | ")}] pinned=${st.pinned}\nbrain: ${hub.session.brainStatus.status}${hub.session.brainStatus.lastError ? ` err=${hub.session.brainStatus.lastError}` : ""}`;
     },
     stop() {
       hub.stop();

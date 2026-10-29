@@ -16,13 +16,14 @@ import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
+import { TasksView, triageCount } from "../shared/Tasks";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
 const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 
-type Tab = "canvas" | "screen" | "work" | "pins" | "agents";
+type Tab = "canvas" | "screen" | "work" | "tasks" | "pins" | "agents";
 
 export function ClientView() {
   const { state, connected } = useHub();
@@ -220,11 +221,12 @@ function BigScreenChip({ stage }: { stage: StageState }) {
 }
 
 type Tab_ = Tab;
-const TABS: Tab_[] = ["canvas", "screen", "work", "pins", "agents"];
-const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", pins: "Pins", agents: "Agents" };
+const TABS: Tab_[] = ["canvas", "screen", "work", "tasks", "pins", "agents"];
+const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", tasks: "Tasks", pins: "Pins", agents: "Agents" };
 
 function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setTab: (t: Tab) => void; phone?: boolean }) {
   const open = state.annotations.filter((a) => a.status === "open").length;
+  const waiting = triageCount(state);
   return (
     <nav className={phone ? "m-tabs" : "header-center row"} aria-label="Views" style={phone ? undefined : { gap: 2, background: "var(--panel)", padding: 3, borderRadius: 999, border: "1px solid var(--line)", flex: "none" }}>
       {TABS.map((t) => (
@@ -236,6 +238,7 @@ function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setT
           onClick={() => setTab(t)}
         >
           {TAB_LABEL[t]}
+          {t === "tasks" && waiting > 0 && (phone ? <span className="m-tab-count">{waiting}</span> : ` · ${waiting}`)}
           {t === "pins" && open > 0 && (phone ? <span className="m-tab-count">{open}</span> : ` · ${open}`)}
         </button>
       ))}
@@ -261,7 +264,7 @@ function EnrollModal({ me, brainName, done }: { me: HubState["people"][number]; 
   );
 }
 
-/** The five views, the same on every screen size except the Screen tab, which a phone scales down. */
+/** The six views, the same on every screen size except the Screen tab, which a phone scales down. */
 function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me: HubState["people"][number]; layout: Layout }) {
   const phone = layout !== "desktop";
   return (
@@ -290,6 +293,11 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
           </div>
         ))}
       {tab === "work" && <WorkGallery state={state} personId={me.id} />}
+      {tab === "tasks" && (
+        <div className="tab-pane tasks-pane">
+          <TasksView state={state} personId={me.id} />
+        </div>
+      )}
       {tab === "pins" && (
         <div className="tab-pane scrollbars-thin pins-pane">
           <AnnotationsPanel personId={me.id} />
