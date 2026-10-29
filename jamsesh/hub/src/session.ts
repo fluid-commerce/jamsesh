@@ -865,7 +865,10 @@ export class Session {
     // The files that came with the request ride along, so the agent can fetch what the room is looking at.
     const files = new Map<string, AttachmentRef>();
     // Given a list, that list is the delivery, exactly (a card's reviewed files); otherwise the files on the lines it came from.
-    if (d.attachments) for (const a of d.attachments) files.set(a.id, a);
+    if (d.attachments) {
+      for (const a of d.attachments) files.set(a.id, a);
+      if (files.size > MAX_PER_MESSAGE) throw new Error(`A task carries at most ${MAX_PER_MESSAGE} files.`);
+    }
     else for (const id of d.sourceEventIds ?? []) for (const a of (this.store.event(id)?.data.attachments ?? []) as AttachmentRef[]) files.set(a.id, a);
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") d = { ...d, targets: d.targets.filter((t) => this.agent(t)?.role !== "observer") };

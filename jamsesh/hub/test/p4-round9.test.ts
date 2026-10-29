@@ -12,6 +12,7 @@ const { Hub } = await import("../src/hub");
 const { acceptedEvent } = await import("../src/brain/brain");
 const { ContextUnavailable, contextExport, readProjectContext, saveProjectContext, seedFromProject } = await import("../src/carryover");
 const { createProject } = await import("../src/projects");
+const { weightForRole } = await import("../src/session");
 const { Attachments } = await import("../src/attachments");
 const { usePdfTool, makePdf, pdfToolAvailable } = await import("./pdftool");
 usePdfTool();
@@ -847,6 +848,8 @@ test("competing title edits: the one saved first stands, in either save order, a
     expect(saveProjectContext(dir, p.slug, "second", second.s)).toBe("written");
     expect(readProjectContext(dir, p.slug)!.people).toMatchObject([{ name: "Chey", role: winner }]);
     expect(second.s.personByName("Chey")!.role).toBe(winner);
+    // The title brings its weight with it.
+    expect(second.s.personByName("Chey")!.weight).toBe(winner === "Art director" ? weightForRole("Art director") : weightForRole("Design lead"));
   }
 });
 
@@ -859,6 +862,7 @@ test("a session started with its own title takes the project's, not the other wa
   old.s.upsertPerson({ name: "Chey", role: "Designer" });
   seedFromProject(dir, p.slug, "old", old.s);
   expect(old.s.personByName("Chey")!.role).toBe("Design lead");
+  expect(old.s.personByName("Chey")!.weight).toBe(weightForRole("Design lead"));
   old.s.board.rememberNow({ text: "A call", kind: "decision", by: "Chey" });
   expect(saveProjectContext(dir, p.slug, "old", old.s)).toBe("written");
   expect(readProjectContext(dir, p.slug)!.people).toMatchObject([{ name: "Chey", role: "Design lead" }]);
@@ -883,4 +887,17 @@ test("file links in an agent's inbox use the address that agent connected by, a 
   const out = (r.hub.mcp as any).inboxText(agent, true, "https://room.example.net");
   expect(out).toContain(`https://room.example.net/api/attachments/${att.id}`);
   expect(out).not.toContain(r.s.hubUrl + "/api/attachments");
+});
+
+
+test("the first-join briefing shows each file link once, from the agent's address; an explicit file list over six is refused", () => {
+  const r = room();
+  const att = { id: "att_b1", name: "brief.txt", type: "text/plain", kind: "text" as const, size: 5 };
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  r.s.createDirective({ text: "Build from the brief", mode: "implement", targets: [agent.id], requestedBy: "Chey", attachments: [att] });
+  const brief = (r.hub.mcp as any).briefing(agent, false, false, "https://room.example.net") as string;
+  expect(brief.split(`/api/attachments/${att.id}`).length - 1).toBe(1);
+  expect(brief).toContain(`https://room.example.net/api/attachments/${att.id}`);
+  const seven = Array.from({ length: 7 }, (_, i) => ({ ...att, id: `att_${i}` }));
+  expect(() => r.s.createDirective({ text: "Too many", mode: "note", targets: [agent.id], requestedBy: "Chey", attachments: seven })).toThrow();
 });

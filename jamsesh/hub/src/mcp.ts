@@ -725,7 +725,7 @@ export class McpEndpoint {
       "",
       `## Session brief\n${brief || "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
       ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
-      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300) + attachmentLine(d, origin)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
+      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective({ ...d, attachments: undefined }, s.agent.bind(s)), 300) + attachmentLine(d, origin)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
       this.unreadLine(agent),
       "",
       "## Fetch more when you need it",

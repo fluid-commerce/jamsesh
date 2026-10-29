@@ -1874,7 +1874,7 @@ it.
   alone only reads, though; acting as a person on the host needs the host window key (below).
   Pairing takes the rotating code (see [4.2](#42-pairing-code)) or a single-use invite code (eight
   characters, ten minutes) that a person or the host creates for someone outside the room.
-- **Host names.** The hub answers only to loopback names, IP addresses, `.local` names, its own
+- **Host names.** The hub answers only to loopback names, IP addresses, this Mac's own `.local` names (its hostname, its Bonjour name, and any in `JAMSESH_HOSTNAMES`; no other), its own
   DuckDNS domain and its subdomains, and `JAMSESH_PUBLIC_URL`, so a web page can't reach it through
   DNS rebinding. Browser WebSockets must come from the hub's own origin (or the Mac app's relay).
   Remote-access setup accepts JSON bodies only.

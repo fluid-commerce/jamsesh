@@ -406,7 +406,8 @@ export function saveProjectContext(home: string, slug: string, sessionId: string
   // A title another session changed first stands: this session takes it.
   for (const [name, win] of result.peopleLost ?? []) {
     const person = s.personByName(name);
-    if (person) s.store.put("people", { ...person, role: win.role }, false);
+    // Through upsertPerson, so the title brings its weight with it (a hand-set weight stays).
+    if (person) s.upsertPerson({ id: person.id, name: person.name, role: win.role });
     bases[`person:${name}`] = { v: win.version, sig: win.role };
   }
   const now = Date.now();
@@ -618,7 +619,7 @@ export function seedFromProject(home: string, slug: string, sessionId: string, s
     bases[`person:${p.name}`] = { v: p.version, sig: p.role };
     const person = s.personByName(p.name);
     // The session starts with the project's title, whatever it held before.
-    if (person && p.role && person.role !== p.role) s.store.put("people", { ...person, role: p.role }, false);
+    if (person && p.role && person.role !== p.role) s.upsertPerson({ id: person.id, name: person.name, role: p.role });
   }
   s.store.setSetting("carryBase", bases);
   s.store.setSetting("carried", { fromSession: ctx.fromSession, at: now, brief: ctx.brief, goal: ctx.goal, glossary: ctx.glossary, items: n });
