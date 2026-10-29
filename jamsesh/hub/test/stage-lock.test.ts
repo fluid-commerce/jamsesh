@@ -1074,3 +1074,23 @@ test("ids match ids only, and a name two screens share is asked about", () => {
   expect("choices" in two && two.choices).toEqual(["Left TV (main)", "Left TV (screen-3)"]);
   expect(s.screenRef("left")).toBeNull();
 });
+
+test("a direct request from the lock's owner that fails keeps their lock and what it holds; one that lands replaces both", async () => {
+  const { s, chey, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  const mine = artifact(s, "Mine");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const direct = (text: string) => ({ ...said(chey, text), data: { direct: true } }) as JamEvent;
+  // A share that has ended: a layout of only it is refused by the stage.
+  const sh = s.startShare("chey-mac", "screen");
+  s.endShare(sh.id);
+  const lockBefore = s.stage().lock;
+  const r = String(await tools([direct("JamSesh, show my screen")]).set_layout.execute({ tiles: [{ kind: "screen", ref: sh.id }] }));
+  expect(r).not.toContain("On screen");
+  expect(s.stage().items).toEqual([mine.id]);
+  expect(s.stage().lock).toEqual(lockBefore);
+  // A custom view and a restore go through the same gate: a write that lands replaces the lock with the owner's new one.
+  expect(await tools([direct("JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
+  expect(s.stage().items).toEqual([a.id]);
+  expect(s.stage().lock?.personId).toBe(chey.id);
+});

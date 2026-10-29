@@ -109,3 +109,38 @@ test("the presenter's own set_layout, answering late, lands only on the screen i
   await placing2;
   expect(ended.s.stage().mode).not.toBe("layout");
 });
+
+test("a late presenter layout of the share plus another tile is refused whole once the share ended, and one that leaves the share out is refused too", async () => {
+  let act: (tiles: any[]) => Promise<unknown> = async () => {};
+  mock.module("ai", () => ({
+    ...ai,
+    generateText: (o: any) =>
+      new Promise((done) => {
+        act = async (tiles: any[]) => {
+          const id = o.prompt.match(/share id (\S+)\)/)[1];
+          const said = await o.tools.set_layout.execute({ tiles: tiles.map((t) => (t.kind === "screen" ? { ...t, ref: id } : t)) });
+          done({});
+          return said;
+        };
+      }),
+  }));
+  const r = room();
+  const before = r.s.stage();
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  const placing = r.hub.brain.placeShare(sh);
+  // The share ends before it was ever shown; the model then answers with the share and another tile.
+  r.s.endShare(sh.id);
+  await act([{ kind: "screen" }, { kind: "artifact", ref: r.a.id }]);
+  await placing;
+  expect(r.s.stage().mode).toBe(before.mode);
+  expect(r.s.stage().layout).toBeUndefined();
+
+  // Live share, but the layout leaves it out: refused, not committed as some other screen.
+  const live = room();
+  const sh2 = live.s.startShare("felipe-laptop", "screen");
+  const placing2 = live.hub.brain.placeShare(sh2);
+  const said = String(await act([{ kind: "artifact", ref: live.a.id }]));
+  await placing2;
+  expect(said).toContain("must include the share");
+  expect(live.s.stage().layout?.tiles.some((t) => t.kind === "artifact")).not.toBe(true);
+});

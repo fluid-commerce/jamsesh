@@ -1452,6 +1452,7 @@ export class Session {
     if (id === "main" || !this.bigScreens.delete(id)) return;
     clearTimeout(this.screenReverts.get(id));
     this.screenReverts.delete(id);
+    this.defaultStages.delete(id);
     bus.changed("screens");
   }
 
@@ -1468,15 +1469,20 @@ export class Session {
       });
   }
 
+  private defaultStages = new Map<string, { at: number }>();
+
   stage(screen = "main"): Stage {
-    if (screen !== "main") return this.store.setting<Record<string, Stage>>("screenStages", {})[screen] ?? { mode: "board", title: "", caption: "", items: [], pinned: false, since: Date.now(), by: "JamSesh" };
+    // A screen nothing was ever put on shows a default that stays the same stage between reads (same `since`, and its own `screenId`).
+    let first = this.defaultStages.get(screen);
+    if (!first) this.defaultStages.set(screen, (first = { at: Date.now() }));
+    if (screen !== "main") return this.store.setting<Record<string, Stage>>("screenStages", {})[screen] ?? { mode: "board", title: "", caption: "", items: [], pinned: false, since: first.at, by: "JamSesh", screenId: screen };
     return this.store.setting<Stage>("stage", {
       mode: "welcome",
       title: "",
       caption: "",
       items: [],
       pinned: false,
-      since: Date.now(),
+      since: first.at,
       by: "JamSesh",
     });
   }
@@ -1558,7 +1564,15 @@ export class Session {
   setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen: string, opts: StageOpts) {
     const cur = this.stage(screen);
     if (!this.claimHolds(opts.claim, screen)) return cur;
-    if (!opts.person && !opts.override && this.lockOf(screen)) return cur;
+    const held = this.lockOf(screen);
+    // The lock's owner asked for this very write: it replaces their lock in the same step (nothing is released ahead of it).
+    if (!opts.person && !opts.override && held && !(opts.mayReplaceLock && opts.mayReplaceLock === held.personId)) return cur;
+    // Work bound to one share (the presenter's placement) lands only while that share is live and in the layout.
+    if (opts.requireShare) {
+      const need = opts.requireShare;
+      const inLayout = next.mode === "layout" && !!next.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === need);
+      if (!inLayout || this.store.get("shares", need)?.status !== "live") return cur;
+    }
     // A share is shown only while it's live: an ended one's tile is dropped, and a layout that was only ended shares isn't put up.
     if (next.mode === "layout" && next.layout?.tiles.length) {
       const tiles = next.layout.tiles.filter((t) => t.kind !== "screen" || this.store.get("shares", t.shareId)?.status === "live");
@@ -1574,6 +1588,12 @@ export class Session {
     opts.claim?.revs.set(screen, this.stageRev(screen));
     this.recordHistory(stage, screen);
     return stage;
+  }
+
+  /** Whether this person's direct request may replace the lock on a screen: they own it, and nothing changed it since the claim. Releases nothing. */
+  mayReplaceLock(screen: string, owner: string, claim: StageClaim): boolean {
+    const lock = this.lockOf(screen);
+    return !lock || (this.claimHolds(claim, screen) && !!lock.personId && lock.personId === owner);
   }
 
   /** Counts every change to a screen's stage or its lock (cast, expand, unlock, lapse), in this process. */
@@ -1769,7 +1789,7 @@ export class Session {
   }
 
   /** Puts a queued item on its screen. A person showing it takes the screen's lock; with no person (the owner said yes) it goes up unlocked. */
-  showReady(id: string, who: { person: { id: string | null; name: string } } | { override: true } | { claim: StageClaim }): Stage | null {
+  showReady(id: string, who: { person: { id: string | null; name: string } } | { override: true } | { claim: StageClaim; mayReplaceLock?: string }): Stage | null {
     const item = this.readyToShow().find((r) => r.id === id);
     if (!item) return null;
     if ("claim" in who && !this.claimHolds(who.claim, item.screen)) return null;
@@ -1895,7 +1915,7 @@ export class Session {
   }
 
   /** Brings an earlier screen back. A person's tap takes the lock; anyone else is held off by one. */
-  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string } } | { claim: StageClaim }, by = "JamSesh"): Stage | null {
+  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string } } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): Stage | null {
     const entry = (this.stageHistory(screen)[screen] ?? []).find((e) => e.id === id);
     if (!entry) return null;
     return this.setStage({ ...entry.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);
@@ -1921,6 +1941,10 @@ interface StageOptsBase {
   /** The new stage keeps this lock: the owner's own share over their cast, and that cast coming back when it ends. */
   keepLock?: StageLock;
   claim?: StageClaim;
+  /** The write needs this share live and in the layout, or none of it lands (a presenter's placement of one share). */
+  requireShare?: string;
+  /** The write may replace the lock this person owns, and does so only if it lands. */
+  mayReplaceLock?: string;
 }
 
 /**

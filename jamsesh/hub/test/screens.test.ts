@@ -89,3 +89,17 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     hub.devproxy.stop();
   }
 });
+
+test("an extra screen nothing was put on has one stable default stage of its own, whatever the main screen shows", () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "def-"))));
+  const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "feed" }] } }, "Chey", "main", { override: true });
+  const a = s.stage("screen-2");
+  expect(a.screenId).toBe("screen-2");
+  expect(s.stage("screen-2").since).toBe(a.since);
+  expect(s.screens().find((x) => x.id === "screen-2")?.stage.since).toBe(a.since);
+  expect(s.stage().screenId).toBe("main");
+  s.removeScreen("screen-2");
+});

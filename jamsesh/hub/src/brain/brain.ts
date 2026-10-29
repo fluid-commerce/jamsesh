@@ -367,7 +367,7 @@ export class Brain {
         model: m,
         system: this.system(),
         prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
-        tools: { set_layout: this.tools([], pass, "person", claim).set_layout },
+        tools: { set_layout: this.tools([], pass, "person", claim, share.id).set_layout },
         stopWhen: isStepCount(2),
       });
       if (!pass.effects && !this.stopped) fallback();
@@ -466,6 +466,8 @@ export class Brain {
   }
   /** Locked screens the brain was refused this pass (by lock `since`), until it asks the room about them (the question itself is the session's). */
   private unlockRefused = new Map<string, number>();
+  /** Screens whose lock this pass's direct requester owns and may replace with the write that follows (screen -> owner). */
+  private replaceOk = new Map<string, string>();
 
   /**
    * A screen a person locked stays up for the brain too. Returns what to tell the model when it may not
@@ -479,7 +481,11 @@ export class Brain {
     const lock = s.lockOf(screen);
     if (!lock) return null;
     const asks = batch.filter((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
-    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen) && s.releaseLock(screen, { owner: lock.personId }, claim)) return null;
+    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen) && s.mayReplaceLock(screen, lock.personId, claim)) {
+      // Nothing is released here: the write that follows replaces the lock, or nothing changes (see castBy).
+      this.replaceOk.set(screen, lock.personId);
+      return null;
+    }
     this.unlockRefused.set(screen, lock.since);
     return `${lock.by} has this screen locked, so you can't replace it. Ask the room with ask_to_replace_screen (it asks the one question about this screen). If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
@@ -489,9 +495,10 @@ export class Brain {
    * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
    * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
    */
-  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim()) {
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim(), onlyShare?: string) {
     const s = this.session;
     this.unlockRefused.clear();
+    this.replaceOk.clear();
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
     // approves (button, or a clear spoken answer to that request), whoever or whatever asked.
@@ -512,11 +519,11 @@ export class Brain {
     const asker = batch.find((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct && e.authorId);
     // Every stage write of this pass carries the claim taken when the pass began (see StageClaim): nothing it decided
     // lands on a screen someone changed while the model thought.
-    const castBy = asker ? { person: { id: asker.authorId!, name: asker.authorName }, claim } : { claim };
+    const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(onlyShare ? { requireShare: onlyShare } : {}), ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
     // The pass's stage writes: whether it went up (a screen changed meanwhile, or a share that ended, refuses it).
     const put = (next: Partial<Stage> & { mode: Stage["mode"] }, screen: string) => {
       const before = s.stageRev(screen);
-      s.setStage(next, "Room brain", screen, castBy);
+      s.setStage(next, "Room brain", screen, castBy(screen));
       return s.stageRev(screen) !== before;
     };
     const MOVED_ON = "The screen changed while you were deciding (someone put something else up, or the share ended), so nothing was replaced. Look at the screen again before showing anything.";
@@ -797,6 +804,7 @@ export class Brain {
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
           const screen = screenId(i.screen);
           if (!screen) return noScreen();
+          if (onlyShare && !tiles.some((t) => t.kind === "screen" && t.shareId === onlyShare)) return refuse("The layout must include the share you are placing.");
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
@@ -941,7 +949,7 @@ export class Brain {
           const held = this.lockBlock(item.screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!s.showReady(id, { claim })) return refuse("The screen changed since; look again.");
+          if (!s.showReady(id, { claim, mayReplaceLock: this.replaceOk.get(item.screen) })) return refuse("The screen changed since; look again.");
           return `On screen: ${item.label}.`;
         },
       }),
@@ -957,7 +965,7 @@ export class Brain {
           const held = this.lockBlock(id, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!s.restoreHistory(entry.id, id, { claim }, "Room brain")) return refuse("That screen is no longer in the history.");
+          if (!s.restoreHistory(entry.id, id, { claim, mayReplaceLock: this.replaceOk.get(id) }, "Room brain")) return refuse("That screen is no longer in the history.");
           return `Brought back ${entry.label}, which ${entry.by} had up.`;
         },
       }),
@@ -1041,17 +1049,18 @@ export class Brain {
         this.lockRefused = true;
         continue;
       }
-      if (held) s.releaseLock("main", { owner: ev.authorId }, claim);
+      // The owner's own request replaces their lock in the write itself; nothing is released ahead of it.
+      const wo = { claim, ...(held && ev.authorId ? { mayReplaceLock: ev.authorId } : {}) };
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
-        s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", { claim });
+        s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", wo);
         continue;
       }
       if (line.intent === "present") {
         const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
         const hit = s.artifacts().find((a) => words.some((w) => a.title.toLowerCase().includes(w)));
-        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) }, "Room brain", "main", { claim });
-        else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain", "main", { claim });
-        else s.setStage({ mode: "board" }, "Room brain", "main", { claim });
+        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) }, "Room brain", "main", wo);
+        else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain", "main", wo);
+        else s.setStage({ mode: "board" }, "Room brain", "main", wo);
         continue;
       }
       if (line.intent === "decision") {
