@@ -355,6 +355,18 @@ describe("9. cross-platform parity", () => {
     });
   }, T);
 
+  t("two features shipped together get separate checks", async () => {
+    await runScenario("parity: two features -> separate", [9], async (r) => {
+      const up = (text: string, seen: string) => r.hub.mcp.call({ agentId: r.agents.desktop.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text, seen });
+      await up("Shipped the collapsible sidebar navigation in the desktop app.", "A left sidebar that collapses to icons.");
+      await up("Shipped a dark mode toggle in desktop settings.", "A dark mode switch in Settings that turns the whole app dark.");
+      await r.settle();
+      const ds = r.newDirectives();
+      expect(ds.length).toBeGreaterThanOrEqual(1);
+      expect(ds.every((d) => !(/sidebar/i.test(d.text) && /dark mode/i.test(d.text)))).toBe(true);
+    });
+  }, T);
+
   t("a ship with nothing a person sees stays news", async () => {
     await runScenario("parity: invisible ship -> none", [9], async (r) => {
       // The shipper declared nothing a person sees, whatever the text sounds like.

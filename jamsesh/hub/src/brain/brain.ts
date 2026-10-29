@@ -846,6 +846,7 @@ export class Brain {
   /** How long to collect ships before one parity check (tests shorten it). */
   shipWindowMs = 25_000;
   private shipped: Shipped[] = [];
+  private shipSeq = 0;
   private shipTimer: ReturnType<typeof setTimeout> | null = null;
   /** Shipped notes already considered, and parity checks already sent, in the last ten minutes: deduplicated by feature, not by agent. */
   private shipConsidered: { agentId: string; text: string; at: number }[] = [];
@@ -873,10 +874,10 @@ export class Brain {
     // refactors, fixes, tooling and deliberately one-platform changes, a shipped note is news only.
     const seen = typeof data?.seen === "string" ? data.seen.trim() : "";
     if (!seen || data?.platformSpecific === true || !parityCandidate(text)) return;
-    // Several notices from one agent in a window are one notice.
-    const same = this.shipped.find((b) => b.agent.id === agent.id);
-    if (same) ((same.text = `${same.text} Then: ${text}`.slice(0, 600)), (same.seen = `${same.seen}; ${seen}`.slice(0, 600)));
-    else this.shipped.push({ agent, text, seen });
+    // Several notices from one agent about one feature in a window are one notice; a different feature stays its own.
+    const same = this.shipped.find((b) => b.agent.id === agent.id && sameFeature(b.seen, seen));
+    if (same) same.text = `${same.text} Then: ${text}`.slice(0, 600);
+    else this.shipped.push({ id: `ship-${++this.shipSeq}`, agent, text, seen });
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
       const batch = this.shipped.splice(0);
@@ -900,9 +901,9 @@ export class Brain {
     const ids = new Set(batch.map((b) => b.agent.id));
     const others = apps.filter((a) => !ids.has(a.id) && !batch.some((b) => b.agent.platform === a.platform));
     void this.consider(
-      `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}\n  What a person sees, in the shipper's words: ${b.seen}`).join("\n")}\n` +
+      `Shipped just now (one line per feature):\n${batch.map((b) => `- ${b.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}\n  What a person sees, in the shipper's words: ${b.seen}`).join("\n")}\n` +
         `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
-        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. Each shipper here said what a person sees. coordinate_parity sends a parity check about it, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it with the feature's name and the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). Call no_action when what they see plainly can't exist on the other platforms.`,
+        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. Each shipper here said what a person sees. coordinate_parity sends a parity check about it, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it once per feature, with that feature's shipment ids and the other platforms (or, when several platforms shipped the same feature, each of their shipment ids and no platforms). Never put two different features in one call. Call no_action when what they see plainly can't exist on the other platforms.`,
       "agent",
       this.parityTools(batch),
     );
@@ -918,14 +919,16 @@ export class Brain {
         description: "Send a parity check about one user-visible feature a shipper described: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
           feature: z.string().describe("The feature's name, as a person would say it"),
-          shippedBy: z.array(z.string()).describe("Ids from 'Shipped just now' of the agents that shipped it"),
+          shipments: z.array(z.string()).describe("Ids from 'Shipped just now' (ship-…) of this one feature's shipments: one, or one per platform that shipped the same feature"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
-        execute: async ({ feature, shippedBy, platforms }) => {
-          const from = batch.filter((b) => shippedBy.includes(b.agent.id));
-          if (!from.length) return refuse("Name the shipping agents by id from 'Shipped just now'.");
+        execute: async ({ feature, shipments, platforms }) => {
+          const from = batch.filter((b) => shipments.includes(b.id));
+          if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
           // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
           if (from.some((b) => !b.seen)) return refuse("A shipper didn't say what a person sees, so there is nothing to check: call no_action.");
+          // One check is one feature: shipments whose shippers describe different things are separate calls.
+          if (from.some((b) => !sameFeature(b.seen, from[0].seen))) return refuse("Those shipments are different features (their shippers describe different things): send one check per feature.");
           const shippers = from.map((b) => b.agent);
           const seen = from.map((b) => b.seen).join("; ");
           const made = new Set(shippers.map((a) => a.platform));
@@ -1219,6 +1222,7 @@ const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
 /** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
 /** One shipped note waiting for its parity look: the shipper's text and what they said a person sees. */
 interface Shipped {
+  id: string;
   agent: Agent;
   text: string;
   seen: string;

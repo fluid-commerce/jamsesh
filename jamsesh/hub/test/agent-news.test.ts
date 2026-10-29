@@ -42,7 +42,9 @@ test("repeated ships from one agent in a window are considered once, and not aga
   await wait(80);
   expect(calls).toHaveLength(1);
   expect(calls[0]).toContain("new spacing");
-  expect(calls[0]).toContain("What a person sees, in the shipper's words: The header has more room around the title; The header title lines up with the sidebar");
+  // Two different things a person sees: two lines in the one look.
+  expect(calls[0]).toContain("- ship-1: Jonathan's Claude (desktop, desktop): Header: new spacing\n  What a person sees, in the shipper's words: The header has more room around the title");
+  expect(calls[0]).toContain("- ship-2: Jonathan's Claude (desktop, desktop): Header: spacing fix\n  What a person sees, in the shipper's words: The header title lines up with the sidebar");
   expect(calls[0]).toContain("sends a parity check about it, not build work");
   ship(s, desktop.id, "Header: spacing fix again", "The header has more room around the title");
   await wait(80);
@@ -148,19 +150,19 @@ test("no coordination without an app on another platform in the room", async () 
 
 test("the parity tool uses the shipper's own 'seen', refuses without one, and its directives are what lands in the inboxes", async () => {
   const { hub, s, desktop, mobile } = room();
-  const tools = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped the collapsible sidebar navigation", seen: "A left sidebar that collapses to icons" }]);
+  const tools = (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped the collapsible sidebar navigation", seen: "A left sidebar that collapses to icons" }]);
   const said = async (input: object) => ((r: any) => r?.text ?? String(r))(await tools.coordinate_parity.execute(input));
   // The brain can't supply what a person sees: the tool has no such input.
-  expect(Object.keys(tools.coordinate_parity.inputSchema.shape).sort()).toEqual(["feature", "platforms", "shippedBy"]);
+  expect(Object.keys(tools.coordinate_parity.inputSchema.shape).sort()).toEqual(["feature", "platforms", "shipments"]);
   // Same platform only, or a shipper that isn't in the batch: refused, nothing sent.
-  expect(await said({ feature: "Sidebar", shippedBy: [desktop.id], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
-  expect(await said({ feature: "Sidebar", shippedBy: [mobile.id], platforms: ["desktop"] })).toContain("Name the shipping agents");
+  expect(await said({ feature: "Sidebar", shipments: ["ship-1"], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
+  expect(await said({ feature: "Sidebar", shipments: ["ship-9"], platforms: ["desktop"] })).toContain("Name the shipments");
   // A shipper who said nothing a person sees: refused.
-  const none = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped background sync status telemetry to the metrics collector", seen: "" }]);
-  expect(((r: any) => r?.text ?? String(r))(await none.coordinate_parity.execute({ feature: "Sync status badge", shippedBy: [desktop.id], platforms: ["mobile"] }))).toContain("didn't say what a person sees");
+  const none = (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped background sync status telemetry to the metrics collector", seen: "" }]);
+  expect(((r: any) => r?.text ?? String(r))(await none.coordinate_parity.execute({ feature: "Sync status badge", shipments: ["ship-1"], platforms: ["mobile"] }))).toContain("didn't say what a person sees");
   expect(s.directives()).toHaveLength(0);
   expect(hub.mcp.inboxText(mobile, false)).toBe("Nothing new.");
-  const check = { feature: "Collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] };
+  const check = { feature: "Collapsible sidebar navigation", shipments: ["ship-1"], platforms: ["mobile"] };
   await tools.coordinate_parity.execute(check);
   const inbox = hub.mcp.inboxText(mobile, false);
   expect(inbox).toContain("[coordinate]");
@@ -216,7 +218,7 @@ test("two different features from one agent each get their look; the same featur
 
 test("parity checks are deduplicated by feature and agent, and a short feature doesn't swallow a longer, different one", async () => {
   const { hub, s, desktop, mobile } = room();
-  const send = (seen: string) => (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped", seen }]).coordinate_parity.execute({ feature: seen, shippedBy: [desktop.id], platforms: ["mobile"] });
+  const send = (seen: string) => (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped", seen }]).coordinate_parity.execute({ feature: seen, shipments: ["ship-1"], platforms: ["mobile"] });
   await send("A sidebar that collapses to icons");
   await send("A sidebar that collapses to icons");
   await send("A dark mode toggle in settings");
@@ -231,4 +233,35 @@ test("feature identity matches both ways", async () => {
   expect(sameFeature("A sidebar that collapses to icons", "the sidebar collapses to icons")).toBe(true);
   expect(sameFeature("dark mode toggle", "dark mode toggle with a schedule picker and per-screen overrides")).toBe(false);
   expect(sameFeature("dark mode toggle", "sidebar")).toBe(false);
+});
+
+test("two different features shipped in one window stay separate: two looks' worth of lines, never one check for both", async () => {
+  const { hub, s, desktop, mobile, calls } = room();
+  ship(s, desktop.id, "Shipped the collapsible sidebar navigation", "A sidebar that collapses to icons");
+  ship(s, desktop.id, "Shipped a dark mode toggle in settings", "A dark mode toggle in settings");
+  ship(s, desktop.id, "Sidebar: animated the collapse", "A sidebar that collapses to icons, animated");
+  await wait(80);
+  expect(calls).toHaveLength(1);
+  // One line per feature: the sidebar notes merged, the toggle on its own.
+  expect(calls[0]).toContain("- ship-1: ");
+  expect(calls[0]).toContain("Then: Sidebar: animated the collapse");
+  expect(calls[0]).toContain("- ship-2: ");
+  expect(calls[0]).toContain("What a person sees, in the shipper's words: A dark mode toggle in settings");
+  // The tool refuses both features in one check; one per feature goes through.
+  const batch = [
+    { id: "ship-1", agent: desktop, text: "Shipped the collapsible sidebar navigation", seen: "A sidebar that collapses to icons" },
+    { id: "ship-2", agent: desktop, text: "Shipped a dark mode toggle in settings", seen: "A dark mode toggle in settings" },
+    { id: "ship-3", agent: mobile, text: "Shipped a profile photo picker", seen: "A profile photo picker on the account screen" },
+  ];
+  const tools = (hub.brain as any).parityTools(batch);
+  const r = await tools.coordinate_parity.execute({ feature: "Sidebar and dark mode", shipments: ["ship-1", "ship-2"], platforms: ["mobile"] });
+  expect(r?.text ?? String(r)).toContain("different features");
+  const mixed = await tools.coordinate_parity.execute({ feature: "Sidebar", shipments: ["ship-1", "ship-3"], platforms: [] });
+  expect(mixed?.text ?? String(mixed)).toContain("different features");
+  expect(s.directives()).toHaveLength(0);
+  await tools.coordinate_parity.execute({ feature: "Collapsible sidebar", shipments: ["ship-1"], platforms: ["mobile"] });
+  await tools.coordinate_parity.execute({ feature: "Dark mode toggle", shipments: ["ship-2"], platforms: ["mobile"] });
+  const inbox = hub.mcp.inboxText(mobile, false);
+  expect(inbox.match(/\[coordinate\]/g)).toHaveLength(2);
+  expect(inbox.split("\n").filter((l) => l.includes("[coordinate]")).every((l) => !(l.includes("sidebar") && l.includes("dark mode")))).toBe(true);
 });
