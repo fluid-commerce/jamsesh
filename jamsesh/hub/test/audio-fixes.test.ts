@@ -125,7 +125,7 @@ test("U4: relabeling twice removes the voice sample from the first, wrong, perso
   s.touchDevice("x", { location: "room", micOn: true });
   (hub.transcriber as any).transcribe = async () => ({ text: "hello there team", engine: "fake" });
   const t = Date.now() - 5000;
-  await hub.audio.ingest({ deviceId: "x", t0: t, t1: t + 2000, wav: tone(2), levelDb: -25, noiseDb: -55 });
+  await hub.audio.ingest({ deviceId: "x", t0: t, t1: t + 2000, wav: tone(2) });
   await hub.audio.flush();
   const u = s.store.all("utterances")[0];
   hub.audio.assign(u.id, ben.id);

@@ -443,7 +443,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       // So this is the browser's own device. The browser becomes the person it first says it is; after that a
       // request can't make it someone else (only a person who was removed frees it to pick again), and its
       // devices are that person's. Owner-only answers rest on this.
-      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) hub.auth.update(paired.id, { personId: String(body.personId) });
+      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) {
+        // A person already on another laptop (or the host's own window) isn't claimed by a new pairing that names
+        // them: their voice and every owner-only answer follow the credential. The host removes the old pairing first.
+        const claimed = String(body.personId);
+        if (s.store.setting<string>("hostPersonId", "") === claimed || hub.auth.list().some((d) => d.kind === "browser" && !d.revoked && d.id !== paired.id && d.personId === claimed)) return bad("That person is already here on another laptop. Ask the host to remove the old one first.", 403);
+        hub.auth.update(paired.id, { personId: claimed });
+      }
       if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
     }
     // The person using the host's own window: agents on the host Mac work for them.
@@ -476,8 +482,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
         t0: Number(q.get("t0")),
         t1: Number(q.get("t1")),
         wav: bytes,
-        levelDb: q.has("level") ? Number(q.get("level")) : undefined,
-        noiseDb: q.has("noise") ? Number(q.get("noise")) : undefined,
       });
       remember(recentSegments, segKey, 4000);
       return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });

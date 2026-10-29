@@ -396,7 +396,8 @@ export class Hub {
     // A copy made before the person reset their voice here would bring the old voice back.
     const resetAt = this.session.store.setting<Record<string, number>>("voiceResetAt", {})[personId];
     const madeAt = Number((body as { updatedAt?: unknown } | null)?.updatedAt);
-    if (resetAt && !(madeAt > resetAt)) return { ok: false as const, reason: "Your voice was reset on this host after that copy was made.", reset: true };
+    // The copy's own clock is only believed up to now: a time in the future is how a stale copy would slip past a reset.
+    if (resetAt && !(madeAt > resetAt && madeAt <= Date.now() + 60_000)) return { ok: false as const, reason: "Your voice was reset on this host after that copy was made.", reset: true };
     const r = parseCarried(body);
     if (!r.ok) return r;
     const kept = this.audio.voiceprints.importCarried(personId, r.samples);

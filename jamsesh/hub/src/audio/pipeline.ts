@@ -149,12 +149,12 @@ export class AudioPipeline {
     return this.lag.get(deviceId)?.ms ?? 0;
   }
 
-  async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array; levelDb?: number; noiseDb?: number }): Promise<Segment> {
+  async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array }): Promise<Segment> {
     const raw = decodeWav(input.wav);
     const pcm = resample(raw, 16000);
     const measured = speechLevelDb(pcm);
-    const levelDb = input.levelDb ?? measured.levelDb;
-    const noiseDb = input.noiseDb ?? measured.noiseDb;
+    // What the decoded audio measures, never what the sender says: levels pick the copy and label the speaker.
+    const { levelDb, noiseDb } = measured;
     const now = Date.now();
     const seg: Segment = {
       id: newId("seg"),
@@ -377,7 +377,7 @@ export class AudioPipeline {
           Math.abs(x.t0 - g.t0) < TWIN_MS &&
           Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 &&
           !x.devices.some((d) => mine.has(d.deviceId)) &&
-          (same(x.text) || (wordCount(x.text) >= 4 && wordCount(text) >= 4 && textSimilarity(x.text, text) >= 0.75 && Math.abs(wordCount(x.text) - wordCount(text)) <= 3)),
+          (same(x.text) || sameWords(x.text, text, this.spokenMs(x), best.pcm.samples.length / 16)),
       )
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
     if (!twin) return false;
@@ -395,6 +395,12 @@ export class AudioPipeline {
     if (home.busy) await home.busy;
     await this.revisit(home, g.segments[0]);
     return true;
+  }
+
+  /** How long the line was spoken: its best copy's audio when that is still held (the line's own span includes laptop clock skew). */
+  private spokenMs(u: Utterance) {
+    const home = this.finalized.find((x) => x.utteranceId === u.id);
+    return home?.segments.length ? pickBest(home.segments).pcm.samples.length / 16 : u.t1 - u.t0;
   }
 
   /** "drop" when this line is an echo of a clearer copy heard in the other location. */
@@ -597,6 +603,7 @@ export class AudioPipeline {
   /** The voice sample of a line, from its copies while they are kept and from its event after that. */
   /** A person's voice was reset: the lines of theirs still held here no longer teach anyone. */
   forgetVoice(personId: string) {
+    this.candidates.delete(personId);
     for (const g of this.finalized) if (g.utteranceId && this.session.store.get("utterances", g.utteranceId)?.personId === personId) g.forgotten = true;
   }
 
@@ -664,6 +671,22 @@ export class AudioPipeline {
   }
 }
 
+/**
+ * Same sentence heard twice. As many words, nearly all alike (a word misheard); or a copy that lost a
+ * word or two at the end (a far laptop), when it was said over as long a stretch of audio. A word the
+ * other copy has, over speech that is longer, is speech and not noise: that is another line.
+ */
+function sameWords(a: string, b: string, aMs: number, bMs: number) {
+  const x = plainText(a).split(" ");
+  const y = plainText(b).split(" ");
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  if (short.length < 4 || long.length - short.length > 2) return false;
+  if (long.length === short.length) return x.filter((w, i) => w !== y[i]).length <= Math.floor(x.length / 4);
+  if (Math.abs(aMs - bMs) > Math.max(400, 0.15 * Math.max(aMs, bMs))) return false;
+  let at = 0;
+  for (const w of long) if (w === short[at]) at++;
+  return at === short.length;
+}
 const wordCount = (t: string) => t.split(/\s+/).filter(Boolean).length;
 /** Lowercase words only: "Looks good." and "looks good" are the same words. */
 const plainText = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}\s']+/gu, " ").replace(/\s+/g, " ").trim();
