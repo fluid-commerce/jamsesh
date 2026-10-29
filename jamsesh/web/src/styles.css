@@ -2725,7 +2725,8 @@ html.in-app .app-header {
 .cast-note {
   position: fixed;
   left: 50%;
-  bottom: 24px;
+  /* Above the connection banner, which says the same thing while offline. */
+  bottom: 72px;
   transform: translateX(-50%);
   z-index: 75;
   max-width: calc(100% - 32px);
