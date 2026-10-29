@@ -504,7 +504,7 @@ export function HtmlTile({ html, title }: { html: string; title: string }) {
   return <HtmlFrame doc={doc} title={title} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: 0 }} />;
 }
 
-function Custom({ state }: { state: HubState }) {
+export function Custom({ state }: { state: HubState }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const pins = useContext(TilePins);
   const target: SlotTarget = { kind: "screen", ref: "stage:custom", label: state.stage.title || "Big screen" };

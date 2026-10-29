@@ -173,7 +173,7 @@ test("when the room turns silent the chime's audio context is closed, so no old 
 });
 
 // The real thing, in a real browser (muted): each production frame, flipped from a normal room to a silent one.
-for (const which of ["frame", "tile"]) {
+for (const which of ["frame", "tile", "custom"]) {
   test(`in a browser, the mounted ${which} stops running and goes inert when the room turns silent`, async () => {
     const pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
     const built = await Bun.build({ entrypoints: [`${import.meta.dir}/browser-entry.tsx`], target: "browser" });
@@ -200,7 +200,8 @@ for (const which of ["frame", "tile"]) {
         await page.waitForTimeout(400);
         const after = await page.evaluate(() => (window as any).__ticks);
         const frame = page.frames().find((f: any) => f !== page.mainFrame());
-        await page.mouse.click(50, 50);
+        const box = await frame.locator("a").boundingBox();
+        await page.mouse.click(box.x + 20, box.y + 20);
         await page.waitForTimeout(300);
         return { running: after > before, url: frame.url(), media: requested.filter((u) => u.includes("x.mp4") || u.includes("x.mp3")) };
       } finally {
