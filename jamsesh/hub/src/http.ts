@@ -54,6 +54,22 @@ function knownHost(req: Request, hub: Hub) {
 }
 
 /** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
+/**
+ * The device a live-session socket speaks for (RTC signaling, mic level, and the share cleanup when
+ * its last socket closes): the one it names only when that device belongs to this window (its pairing,
+ * or "host" for the host's own windows). A device not registered yet, or whose window's pairing is
+ * gone, is claimed for this window. Any other id gets a socket that speaks for no device.
+ */
+function socketDevice(hub: Hub, wanted: string | null, caller: string | null): string | null {
+  if (!wanted || !caller || !/^[\w-]{1,64}$/.test(wanted)) return null;
+  const d = hub.session.store.get("devices", wanted);
+  if (!d) return wanted;
+  const owner = d.pairedId && (d.pairedId === "host" || hub.auth.live(d.pairedId)) ? d.pairedId : null;
+  if (owner && owner !== caller) return null;
+  if (!owner) hub.session.touchDevice(wanted, { pairedId: caller });
+  return wanted;
+}
+
 function sameOrigin(req: Request) {
   const origin = req.headers.get("origin");
   if (!origin) return true; // not a browser
@@ -203,7 +219,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null } as any })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), hostWindow ? "host" : device?.kind === "browser" ? device.id : null), local, pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });

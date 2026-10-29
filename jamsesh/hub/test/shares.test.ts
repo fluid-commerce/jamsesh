@@ -393,6 +393,37 @@ describe("share calls act only for the window that made them", () => {
     expect(s.store.get("shares", cam.id)?.status).toBe("live");
   });
 
+  test("a socket speaks only for its own window's device: no spoofed signaling, no ending someone else's share", async () => {
+    const open = (token: string, device: string) =>
+      new Promise<{ ws: WebSocket; got: any[] }>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=${device}`, { headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${token}` } } as any);
+        const got: any[] = [];
+        ws.onmessage = (e) => got.push(JSON.parse(String(e.data)));
+        ws.onopen = () => resolve({ ws, got });
+        ws.onerror = reject;
+      });
+    const closed = (ws: WebSocket) => new Promise((r) => ((ws.onclose = r), ws.close()));
+    const sh = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera" })).json();
+    const felipeWs = await open(felipeLaptop.token, "dev-felipe");
+    const raeWs = await open(raeLaptop.token, "dev-rae");
+    // Rae's window claims to be Felipe's device.
+    const spoof = await open(raeLaptop.token, "dev-felipe");
+    spoof.ws.send(JSON.stringify({ type: "rtc", to: "dev-rae", data: { op: "offer", shareId: sh.id, pc: "x", sdp: "fake" } }));
+    // Felipe's real device can still signal.
+    felipeWs.ws.send(JSON.stringify({ type: "rtc", to: "dev-rae", data: { op: "bye", shareId: sh.id } }));
+    await Bun.sleep(100);
+    const rtc = raeWs.got.filter((m) => m.type === "rtc");
+    expect(rtc).toEqual([{ type: "rtc", from: "dev-felipe", to: "dev-rae", data: { op: "bye", shareId: sh.id } }]);
+    // The spoofing socket closing doesn't end Felipe's share; his own last socket closing does (as a lost share).
+    await closed(spoof.ws);
+    await Bun.sleep(50);
+    expect(s.store.get("shares", sh.id)?.status).toBe("live");
+    await closed(felipeWs.ws);
+    await Bun.sleep(50);
+    expect(s.store.get("shares", sh.id)).toMatchObject({ status: "ended", lost: true });
+    await closed(raeWs.ws);
+  });
+
   test("the same person sharing from their second window replaces the first, over HTTP", async () => {
     const one = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen" })).json();
     const two = await (await call(felipePhone.token, "POST", "/shares", { deviceId: "dev-felipe-phone", kind: "screen" })).json();
