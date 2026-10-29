@@ -436,9 +436,16 @@ person [B4, B50].
   person's name, and its person's title [A13, A15]. The new name shows everywhere, including the
   agent's cursor on the canvas. The briefing asks the agent to set its person's title when it's
   missing.
-- `jam_join` returns a briefing: welcome, canvas status, upload instructions, the roster, the
-  agent's context (see [7.4](#74-what-agents-read)), its inbox, and the full skill on first join
-  [B8].
+- `jam_join` returns a short briefing, about 1,000 tokens on a busy session (a test holds it under
+  1,500): welcome, canvas status, upload instructions, a compact roster (name, platform, repo,
+  status; `jam_agents` has the stacks), a session brief clipped to 600 characters, the agent's
+  workstream brief, its open directives (five, each clipped), how many inbox items wait, and the
+  tools that fetch more (`jam_context`, `jam_search`, `jam_artifacts`, `jam_directives`). On first
+  join it adds five working rules and where the full skill is (the `jamsesh` prompt, `/skill.md`).
+  It used to carry the whole context and the skill, about 8,000 tokens.
+- A message to `all`, or an update, longer than 1,200 characters is stored once as a document. The
+  feed and other agents' inboxes get its opening and a pointer; `jam_artifacts` with `id` returns the
+  whole text. Direct messages are never cut.
 - An agent shows as offline after 20 minutes without activity.
 
 ### 6.2 Tools
@@ -547,8 +554,15 @@ Agents run their dev servers bound to `0.0.0.0` (`vite --host 0.0.0.0`, `next de
 `expo start --lan`) and call `jam_devserver` [B18]. The hub opens a port on the host (from `5100`,
 skipping taken ports) that forwards raw TCP to the agent's machine, so HTTP, WebSockets, and hot
 reload work. The dev server then reads as **Live build** on the host for the rest of the session.
-Registrations survive hub restarts; the hub checks each target every 30 seconds and shows it as
-down when it doesn't answer; an agent can remove its own.
+Registrations survive hub restarts; an agent can remove its own.
+
+The skill tells every agent to share each dev server it starts. When an agent's update or message
+mentions a `localhost`, `127.0.0.1` or `0.0.0.0` address it hasn't shared, the tool result carries the
+exact step (once per agent and port). The hub checks each target every 30 seconds. One that stops
+answering shows a plain reason on its tile ("Chey's Context Gatherer stopped this build" when its
+agent has gone offline, otherwise "The build at port 5173 stopped responding") with a **Stopped**
+badge, and the agent gets an inbox message. If it answers again the tile recovers; after 5 minutes down
+the tile clears itself and the agent is told to call `jam_devserver` again.
 
 Dev-server ports are reachable only by paired devices and the host: requests through the host's
 HTTPS address go to `dev-<port>.<name>` and need a token, and the LAN ports refuse anyone who

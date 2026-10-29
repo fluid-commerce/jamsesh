@@ -307,14 +307,17 @@ export function ArtifactTile({
       {variant && <div className="variant">{variant}</div>}
       <div className="corner">
         {art.platform && art.platform !== "other" && <span className="badge neutral">{art.platform}</span>}
-        <span className={`badge ${art.stage} ${art.kind === "devserver" ? "live" : ""}`}>{art.kind === "devserver" ? "Live build" : art.stage === "built" ? "Built" : "Mockup"}</span>
+        <span className={`badge ${art.kind === "devserver" && dev?.up === false ? "neutral" : art.stage} ${art.kind === "devserver" && dev?.up !== false ? "live" : ""}`}>{art.kind === "devserver" ? (dev?.up === false ? "Stopped" : "Live build") : art.stage === "built" ? "Built" : "Mockup"}</span>
       </div>
       <div className="media" style={big ? { padding: 28 } : undefined}>
         {art.kind === "devserver" && art.url ? (
           live && dev?.up !== false ? (
             <ScaledFrame src={art.url} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} pin={target} />
           ) : (
-            <div className="empty-note mono">{art.url} isn't answering</div>
+            <div className="empty-note dev-down">
+              <strong>{dev?.problem ?? "This build isn't answering"}</strong>
+              <span>The tile clears itself in a few minutes. It comes back if the build does.</span>
+            </div>
           )
         ) : art.image ? (
           <img src={art.image} alt={art.title} loading="lazy" />

@@ -2706,3 +2706,17 @@ html.in-app .app-header {
   color: var(--warn);
   font-size: 13px;
 }
+
+.empty-note.dev-down {
+  display: grid;
+  gap: 6px;
+  align-content: center;
+  text-align: center;
+  height: 100%;
+  padding: 18px 20px;
+}
+.empty-note.dev-down strong {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 16px;
+}

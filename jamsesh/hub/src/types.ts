@@ -149,6 +149,16 @@ export interface Artifact {
   page?: string;
 }
 
+/** A long message or update, stored once; the feed and other agents' inboxes carry a short pointer to it. */
+export interface Document {
+  id: string;
+  ts: number;
+  authorId: string | null;
+  authorName: string;
+  title: string;
+  text: string;
+}
+
 export interface DevServer {
   id: string;
   agentId: string;
@@ -159,6 +169,10 @@ export interface DevServer {
   platform: Platform | null;
   createdAt: number;
   up: boolean;
+  /** Why it isn't answering, in words for the tile ("Chey's Context Gatherer stopped this build"). */
+  problem?: string;
+  /** Since when it hasn't answered; the tile clears itself a few minutes after. */
+  downSince?: number;
 }
 
 export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";

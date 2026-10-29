@@ -145,10 +145,14 @@ Ask a person to open, save or share files.
 
 1. `jam_context` with your workstream for the decision and the chosen mockup.
 2. `canvas_render` the chosen frame and keep it in view while you implement.
-3. Run your dev server bound to `0.0.0.0` (`vite --host 0.0.0.0`, `next dev -H 0.0.0.0`) and
-   call `jam_devserver` with its local URL so the room can open it on the host. The URL is only
-   for people in the session, and hot reload works through it. It has to be a server on your own
-   machine. When you stop the server, call `jam_devserver_remove`.
+3. **Share every dev server you start.** Run it bound to `0.0.0.0` (`vite --host 0.0.0.0`,
+   `next dev -H 0.0.0.0`) and call `jam_devserver` with its local URL (`http://localhost:5173`)
+   straight away, so the room can open it on the host. Do this for anything that serves a page,
+   even a quick check; don't just say the address in an update. The URL is only for people in
+   the session, and hot reload works through it. It has to be a server on your own machine. If
+   you mention a `localhost` address without sharing it, JamSesh answers with this step. If a
+   build stops, its tile says so and you get a message; start it again and call `jam_devserver`.
+   When you stop the server on purpose, call `jam_devserver_remove`.
    - **Expo / React Native:** `expo start --lan` serves a manifest for the Expo Go app, not a page
      anyone can look at. For a tile the room can open, run `expo start --web`. For the native
      look, run the app in the iOS Simulator on your own Mac, screenshot it, and post the
