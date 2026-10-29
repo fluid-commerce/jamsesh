@@ -588,8 +588,7 @@ export class Session {
 
   /**
    * Chats the room removed. Their jam_join is refused until a person lets them back in: "Allow again"
-   * in Settings, or the person saying "connect to jamsesh" in that chat (its hook tells us, from the
-   * same machine). Kept in the session, so a hub restart doesn't let them straight back.
+   * in Settings, a people-only route; nothing a chat or its hook says clears one. Kept in the session, so a hub restart doesn't let them straight back.
    */
   removedChats(): RemovedChat[] {
     return this.store.setting<RemovedChat[]>("removedChats", []);

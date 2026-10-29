@@ -193,11 +193,11 @@ test("a removed chat can't join again until a person allows it, or its person sa
   const join = (c: ReturnType<typeof ctx>) => hub.mcp.call(c, "jam_join", { harness: "claude-code", repo: "app", cwd: "/work/app", chat: "chat-gone" });
   await expect(join(ctx(macA.device.id))).rejects.toThrow("removed this chat");
   // Another machine saying "connect" for this chat doesn't let it back.
-  expect((await (await hook("joined", macB.token, { session_id: "chat-gone", connect: true })).json()).joined).toBe(false);
+  expect((await (await hook("joined", macB.token, { session_id: "chat-gone" })).json()).joined).toBe(false);
   await expect(join(ctx(macA.device.id))).rejects.toThrow("removed this chat");
   // Its own chat saying "connect" doesn't either (an agent could say it for itself): the hook is only told
   // it was removed, so it can tell its person who can allow it.
-  const ans = await (await hook("joined", macA.token, { session_id: "chat-gone", connect: true })).json();
+  const ans = await (await hook("joined", macA.token, { session_id: "chat-gone" })).json();
   expect(ans).toMatchObject({ joined: false, removed: true });
   await expect(join(ctx(macA.device.id))).rejects.toThrow("removed this chat");
   expect(s.removedChats().some((r) => r.chatId === "chat-gone")).toBe(true);
@@ -325,11 +325,11 @@ test("hook.sh sends nothing more for a chat once the room removed it, or after a
     expect(JSON.stringify(bodies)).not.toContain("secret");
     expect(existsSync(join(home, "chats/chat-m"))).toBe(false);
     // The joined question carries only the session id.
-    expect(JSON.parse(bodies[0]!.body)).toEqual({ session_id: "chat-m", connect: false });
+    expect(JSON.parse(bodies[0]!.body)).toEqual({ session_id: "chat-m" });
     // "connect to jamsesh" in that chat asks to be let back in, and still sends no prompt.
     bodies.length = 0;
     const c = await run("prompt", { session_id: "chat-m", prompt: "connect to jamsesh" });
-    expect(JSON.parse(bodies[0]!.body)).toEqual({ session_id: "chat-m", connect: true });
+    expect(JSON.parse(bodies[0]!.body)).toEqual({ session_id: "chat-m" });
     expect(c.out).toContain("JamSesh chat id for jam_join (pass it as chat): chat-m");
     expect(bodies).toHaveLength(1);
     // If the room removed it, the chat is told plainly who can let it back in, and still sends nothing.
@@ -519,21 +519,14 @@ test("hook.sh outbox: a prompt queued for one room is never sent to another", as
   }
 }, 30_000);
 
-test("only a prompt that asks to connect counts as asking: \"don't connect to jamsesh\" doesn't", async () => {
-  const asks: boolean[] = [];
-  const fake = Bun.serve({
-    port: 0,
-    fetch: async (req) => {
-      const body = await req.json().catch(() => ({}));
-      if (new URL(req.url).pathname.endsWith("/hooks/joined")) asks.push(body.connect === true);
-      return Response.json({ joined: false });
-    },
-  });
+test("only a prompt that asks to connect is answered with the chat id: \"don't connect to jamsesh\" isn't", async () => {
+  const fake = Bun.serve({ port: 0, fetch: async () => Response.json({ joined: false }) });
   try {
     const { run } = box(`http://127.0.0.1:${fake.port}`, "tok");
+    const asked: boolean[] = [];
     for (const prompt of ["connect to jamsesh", "Please connect to jamsesh", "  /jamsesh mobile nav", "don't connect to jamsesh", "why did you join the session?", "we should not join jamsesh yet"])
-      await run("prompt", { session_id: "chat-c", prompt });
-    expect(asks).toEqual([true, true, true, false, false, false]);
+      asked.push((await run("prompt", { session_id: "chat-c", prompt })).out.includes("JamSesh chat id for jam_join"));
+    expect(asked).toEqual([true, true, true, false, false, false]);
   } finally {
     fake.stop(true);
   }
@@ -549,4 +542,32 @@ test("a hook call that names no room, or another, is refused before anything is 
   expect(s.store.recentEvents({ kinds: ["prompt"], limit: 50 }).some((e) => e.text.includes("do the header"))).toBe(false);
   const ok = await fetch(`${base}/api/hooks/prompt`, { ...base_, headers: { ...bearer(macA.token), "x-jam-room": s.roomId() } });
   expect(ok.status).toBe(200);
+});
+
+test("hook.sh listen keeps asking through a host that is down, then wakes the idle chat with no prompt or tool call in between", async () => {
+  let joinedCalls = 0;
+  const fake = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/hooks/joined")) return ++joinedCalls <= 3 ? new Response("down", { status: 503 }) : Response.json({ joined: true, room: "r1" });
+      if (path.endsWith("/hooks/listen")) return new Response("Wake up: fix the footer", { headers: { "x-jam-joined": "1", "content-type": "text/plain" } });
+      return Response.json({});
+    },
+  });
+  try {
+    const home = mkdtempSync(join(tmpdir(), "jam-listen-"));
+    const env = join(home, "client.env");
+    writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+    const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "listen"], {
+      env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "30", JAMSESH_RETRY_SECONDS: "0.2" },
+      stdin: new Blob([JSON.stringify({ session_id: "chat-idle" })]),
+      stderr: "pipe",
+    });
+    expect(await proc.exited).toBe(2);
+    expect(await new Response(proc.stderr).text()).toContain("Wake up: fix the footer");
+    expect(joinedCalls).toBe(4);
+  } finally {
+    fake.stop(true);
+  }
 });

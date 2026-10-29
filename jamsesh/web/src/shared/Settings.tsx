@@ -288,10 +288,20 @@ function Paired({ host }: { host: boolean }) {
 function RemovedChats() {
   const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number }[]>([]);
   const [error, setError] = useState("");
-  const load = () => api("/removed-chats").then(setList).catch(() => {});
+  const [loadFailed, setLoadFailed] = useState(false);
+  const load = () => api("/removed-chats").then((l) => (setList(l), setLoadFailed(false))).catch(() => setLoadFailed(true));
   useEffect(() => {
     load();
   }, []);
+  if (loadFailed)
+    return (
+      <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in here.">
+        <div className="empty-note">Couldn't load the removed chats.</div>
+        <button className="btn small" onClick={load}>
+          Try again
+        </button>
+      </Section>
+    );
   if (!list.length) return null;
   const allow = (id: string) => api(`/removed-chats/${id}/allow`, {}).then(() => (setError(""), load())).catch((e) => setError(e.message));
   return (

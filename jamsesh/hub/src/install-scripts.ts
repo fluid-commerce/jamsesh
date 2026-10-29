@@ -45,7 +45,7 @@ sent="$(ls "$acks" 2>/dev/null | tr '\\n' ',' | sed 's/,$//')"
 confirmed() { local id; for id in $(printf '%s' "$sent" | tr ',' ' '); do rm -f "$acks/$id"; done; }
 handed_over() { local id; id="$(header x-jam-delivery)"; [ -n "$id" ] && mkdir -p "$acks" && : > "$acks/$id"; }
 gone() { [ "$(header x-jam-joined)" = "0" ]; }
-joined() { printf '{"session_id":"%s","connect":%s}' "$1" "\${2:-false}" | post --max-time 3 --data-binary @- "$hub/api/hooks/joined" 2>/dev/null; }
+joined() { printf '{"session_id":"%s"}' "$1" | post --max-time 3 --data-binary @- "$hub/api/hooks/joined" 2>/dev/null; }
 
 # Each prompt has an id that goes with it, and stays with it in the outbox, so the host records it once
 # however often it arrives (a send whose answer was lost, then the same prompt replayed).
@@ -72,10 +72,20 @@ queue() {
 # away from) gets nothing more. The question carries only the session id.
 connect=false
 if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eiq '"prompt"[[:space:]]*:[[:space:]]*"([[:space:]]|\\\\n)*((please|ok|okay|hey|now)[[:space:],]+)*(connect to jamsesh|join jamsesh|join the (jam)?session|/jamsesh)'; then connect=true; fi
+# The idle listener outlives a host that is down for a while: it keeps asking (until its own time is up)
+# instead of ending, since nothing starts it again until the agent next stops.
+have_ans=0
+if [ "$1" = "listen" ]; then
+  until ans="$(joined "$sid")"; do
+    [ "$(date +%s)" -lt $((now + \${JAMSESH_LISTEN_SECONDS:-3000})) ] || exit 0
+    sleep "\${JAMSESH_RETRY_SECONDS:-5}"
+  done
+  have_ans=1
+fi
 # The cooldown after a failed call only holds back automatic notifications: a person asking to connect
 # always tries the host, which may have come back.
-if hub_down && [ "$connect" != true ]; then queue "$1"; exit 0; fi
-if ! ans="$(joined "$sid" "$connect")"; then
+if [ "$have_ans" != 1 ] && hub_down && [ "$connect" != true ]; then queue "$1"; exit 0; fi
+if [ "$have_ans" != 1 ] && ! ans="$(joined "$sid")"; then
   printf '%s' "$now" > "$down"
   queue "$1"
   exit 0
@@ -108,7 +118,7 @@ if [ "$1" = "listen" ]; then
       if [ -n "$out" ]; then printf '%s\\n' "$out" >&2; handed_over; exit 2; fi
     else
       # The answer didn't arrive: ask again in a moment (the host offers the same items again).
-      sleep 5
+      sleep "\${JAMSESH_RETRY_SECONDS:-5}"
     fi
   done
   exit 0
