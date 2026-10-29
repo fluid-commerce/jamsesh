@@ -1720,10 +1720,18 @@ added to the page. A page that holds exactly those bytes counts as written, whoe
 vault holds what was proposed, so recording the proposal as applied and its sources as read is the right outcome, not a misrecord. A
 page that differs (edited since, or never written) is not counted, and an accept skips a page edited since it was proposed. A
 person's edit through the app reconciles any unrecorded write first. Pages changed by hand in the vault (Obsidian) are found at start,
-each pass and before an app edit, by file time then hash against `.wiki-state.json` `seen`, and filed as an edit source with a log
-line, an index rebuild and a commit; the first look only records. `GET /api/wiki/proposal/:card/:slug` serves the diff
+each pass and before an app edit, by hash against `.wiki-state.json` `seen` (every page every time: an editor can keep the file time),
+and filed as an edit source ("Someone in the vault") with a log line, an index rebuild and a commit; a page deleted by hand is filed the
+same way ("deleted a page") and leaves the index. The first look only records. Filing records its intent first (`filing`: page, hash,
+source id) and the wiki's own writes theirs (`own`: page, hash of the bytes); the next pass settles either, so a state file that fails
+to save never files a change twice nor takes the wiki's own write for a hand edit. A change to a page's category or workstreams alone
+is a change. Before a pass writes anything, every cursor and offset in the state file is checked against what it points into. `GET /api/wiki/proposal/:card/:slug` serves the diff
 made from the page as proposed, stored with the proposal. At session end the transcript, agent reports and queue are saved to the
-sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. From the first moment of shutdown the hub answers every request that would add something with 503 and stops the brain and the transcriber, so nothing arrives after that capture. Pages a failed accept already wrote stay part of its
+sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. From the first moment of shutdown the hub answers every request that would add something with 503 and
+the brain takes no new pass; what is already under way (requests being answered, body and all; speech still waiting, transcribed at
+once; the brain's pass) finishes first, for up to 10 s, and only then is the local whisper stopped. The store's events are then sealed
+before that capture (everything is sealed once the hub has stopped): a write past it throws `ESEALED`, which a request answers with
+503, so nothing lands after the capture unseen. Pages a failed accept already wrote stay part of its
 record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
 When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
 stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its

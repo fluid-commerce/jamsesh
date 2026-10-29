@@ -558,8 +558,8 @@ export class WikiService {
     const page = writePage(this.dir, slug, body, {
       ...opts,
       beforeWrite: (text) => {
-        const st = readState(this.dir);
-        writeState(this.dir, { ...st, own: { slug, rev: revOf(text) } });
+        // An earlier intent whose record didn't save is settled first, so it is never lost under this one.
+        writeState(this.dir, { ...this.ownSettled(readState(this.dir)), own: { slug, rev: revOf(text) } });
         opts.beforeWrite?.(text);
       },
     });
@@ -575,26 +575,33 @@ export class WikiService {
     writeState(this.dir, st);
   }
 
-  /** The write the last run died in the middle of: if the page holds the bytes meant for it, it is known; if not, nothing was written. */
-  private settleOwn() {
-    const st = readState(this.dir);
-    if (!st.own) return;
-    const page = readPage(this.dir, st.own.slug);
-    if (page && page.rev === st.own.rev && st.seen) st.seen[page.slug] = { mtime: Math.floor(page.mtime), rev: page.rev };
-    delete st.own;
-    writeState(this.dir, st);
+  /** A write of the wiki's own that was cut short or not recorded: if the page holds the bytes meant for it, it is known; if not, nothing was written. */
+  private ownSettled(st: WikiState): WikiState {
+    if (!st.own) return st;
+    const { own, ...rest } = st;
+    const page = readPage(this.dir, own.slug);
+    return page && page.rev === own.rev && rest.seen ? { ...rest, seen: { ...rest.seen, [page.slug]: { mtime: Math.floor(page.mtime), rev: page.rev } } } : rest;
+  }
+
+  /** A hand change the last pass was filing when it stopped: if its source is there it was filed and is recorded now; if not, it is found again. */
+  private filingSettled(st: WikiState): WikiState {
+    if (!st.filing) return st;
+    const { filing, ...rest } = st;
+    if (!readSource(this.dir, filing.id) || !rest.seen) return rest;
+    const seen = { ...rest.seen };
+    if (filing.rev.startsWith("gone-")) delete seen[filing.slug];
+    else seen[filing.slug] = { mtime: Math.floor(readPage(this.dir, filing.slug)?.mtime ?? 0), rev: filing.rev };
+    return { ...rest, seen };
   }
 
   /**
-   * Files one hand change as a source, atomically with recording it: the intent (page, hash) is saved first, the source is
-   * filed under an id made from that hash (so filing it again finds it), and only then is the page recorded as known. A
-   * crash or a state that can't be saved leaves the intent, and the next pass finishes without a second source; the
-   * failure is loud, never swallowed.
+   * Files one hand change as a source, atomically with recording it: the intent (page, hash, the source's id) is saved
+   * first, then the source, then the page is recorded as known. A crash or a state that can't be saved in between leaves
+   * the intent, which the next pass settles (filingSettled) without a second source; the failure is loud, never swallowed.
    */
   private fileHandChange(slug: string, rev: string, title: string, text: string, record: (seen: NonNullable<WikiState["seen"]>) => void) {
     const st = readState(this.dir);
-    // A retry of the same change reuses the id; a later change that happens to read the same gets its own.
-    const id = st.filing?.slug === slug && st.filing.rev === rev ? st.filing.id : `${today()}_vault-${slug.slice(0, 30)}-${rev.slice(0, 8)}-${Date.now().toString(36)}`;
+    const id = `${today()}_vault-${slug.slice(0, 30)}-${rev.slice(0, 8)}-${Date.now().toString(36)}`;
     writeState(this.dir, { ...st, filing: { slug, rev, id } });
     addSource(this.dir, { kind: "edit", title, by: "Someone in the vault", text, id });
     const done = readState(this.dir);
@@ -612,46 +619,52 @@ export class WikiService {
    */
   syncVault(): string[] {
     for (const p of this.proposals()) if (p.prop.writing) this.reconcile(p.id, p.prop);
-    this.settleOwn();
+    const st = readState(this.dir);
+    // A hand change filed by a pass that stopped before recording it: recorded now, and finished below like a new one.
+    const filed = st.filing && readSource(this.dir, st.filing.id) ? st.filing : null;
+    if (st.own || st.filing) writeState(this.dir, this.filingSettled(this.ownSettled(st)));
     const first = readState(this.dir).seen === undefined;
     const base: NonNullable<WikiState["seen"]> = { ...(readState(this.dir).seen ?? {}) };
-    const touched: string[] = [];
+    const touched: string[] = filed && !filed.rev.startsWith("gone-") ? [filed.slug] : [];
+    const gone: string[] = filed?.rev.startsWith("gone-") ? [filed.slug] : [];
     const here = new Set<string>();
-    for (const info of listPages(this.dir)) {
-      const page = readPage(this.dir, info.slug);
-      if (!page) continue;
-      here.add(page.slug);
-      const known = base[page.slug];
-      if (known?.rev === page.rev) continue;
-      const mtime = Math.floor(info.mtime);
-      if (first) {
-        base[page.slug] = { mtime, rev: page.rev };
-        continue;
-      }
-      this.fileHandChange(page.slug, page.rev, `Edit to ${page.title} (${page.slug})`, `Someone ${known ? "changed" : "wrote"} the page "${page.slug}" by hand in the vault. It now reads:\n\n${page.markdown.trim()}`, (seen) => {
-        seen[page.slug] = { mtime, rev: page.rev };
-      });
-      base[page.slug] = { mtime, rev: page.rev };
-      touched.push(page.slug);
-    }
-    if (first) writeState(this.dir, { ...readState(this.dir), seen: base });
-    const gone: string[] = [];
-    if (!first) {
-      for (const [slug, known] of Object.entries(base)) {
-        if (here.has(slug)) continue;
-        this.fileHandChange(slug, `gone-${known.rev}`, `Edit to ${slug} (${slug})`, `Someone deleted the page "${slug}" by hand in the vault.`, (seen) => {
-          delete seen[slug];
+    try {
+      for (const info of listPages(this.dir)) {
+        const page = readPage(this.dir, info.slug);
+        if (!page) continue;
+        here.add(page.slug);
+        const known = base[page.slug];
+        if (known?.rev === page.rev) continue;
+        const mtime = Math.floor(info.mtime);
+        if (first) {
+          base[page.slug] = { mtime, rev: page.rev };
+          continue;
+        }
+        this.fileHandChange(page.slug, page.rev, `Edit to ${page.title} (${page.slug})`, `Someone ${known ? "changed" : "wrote"} the page "${page.slug}" by hand in the vault. It now reads:\n\n${page.markdown.trim()}`, (seen) => {
+          seen[page.slug] = { mtime, rev: page.rev };
         });
-        gone.push(slug);
+        base[page.slug] = { mtime, rev: page.rev };
+        touched.push(page.slug);
+      }
+      if (first) writeState(this.dir, { ...readState(this.dir), seen: base });
+      else
+        for (const [slug, known] of Object.entries(base)) {
+          if (here.has(slug)) continue;
+          this.fileHandChange(slug, `gone-${known.rev}`, `Edit to ${slug} (${slug})`, `Someone deleted the page "${slug}" by hand in the vault.`, (seen) => {
+            delete seen[slug];
+          });
+          gone.push(slug);
+        }
+    } finally {
+      // What was filed is finished even when a later change couldn't be: the log, the index, a commit.
+      if (touched.length || gone.length) {
+        this.catchUpLog();
+        rebuildIndex(this.dir);
+        commitPaths(this.dir, "Changes made by hand in the vault", ["wiki", "index.md", "log.md", "raw"]);
+        this.notify("edit", [...new Set([...touched, ...gone])], "Someone in the vault");
       }
     }
-    if (touched.length || gone.length) {
-      this.catchUpLog();
-      rebuildIndex(this.dir);
-      commitPaths(this.dir, "Changes made by hand in the vault", ["wiki", "index.md", "log.md", "raw"]);
-      this.notify("edit", [...touched, ...gone], "Someone in the vault");
-    }
-    return [...touched, ...gone];
+    return [...new Set([...touched, ...gone])];
   }
 
   /**

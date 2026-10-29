@@ -1,15 +1,17 @@
 // The project wiki (SPEC 12.8): files and their limits, ingest through the Tasks board, people's edits, the routes, the agent tools.
 // No model: ingest takes a scripted decider. Run with JAMSESH_OFFLINE=1.
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, writeState, archiveSources, gitAvailable, graph, initWiki, listPages, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { WikiService, ingestPrompt, type Decider } from "../src/wiki/service";
+import { encodeWav } from "../src/audio/wav";
 
 process.env.JAMSESH_SILENT = "1";
 const root = mkdtempSync(join(tmpdir(), "jam-wiki-"));
@@ -193,7 +195,7 @@ test("people's edits apply directly, are logged as sources, and a stale revision
   expect(w.editPage("roadmap", "   ", { rev: (ok as any).page.rev, by: "Chey" })).toMatchObject({ ok: false, status: 400 });
   const edits = readdirSync(join(dir, "raw")).filter((f) => f.includes("edit-to-roadmap"));
   expect(edits.length).toBe(2);
-  expect(readFileSync(join(dir, "raw", edits[1]), "utf8")).toContain("+Q4: ship the wiki. Q1: graph.");
+  expect(edits.map((f) => readFileSync(join(dir, "raw", f), "utf8")).join("\n")).toContain("+Q4: ship the wiki. Q1: graph.");
 });
 
 test("hostile model output can only write wiki pages: bad slugs are fixed, front matter and oversize bodies dropped", async () => {
@@ -1785,6 +1787,273 @@ test("while the hub is saving its last state, a message sent is refused, so noth
     await slow;
     await done;
   } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+// ---------- round 9 ----------
+
+const handEdits = (dir: string) => sourceIds(dir).map((id) => readSource(dir, id)!).filter((x) => x.kind === "edit" && x.by === "Someone in the vault");
+
+/** Fails the state file's `n`th write from now (1 = the next), as a full disk would. */
+function failStateWrite(n: number) {
+  const write = io.write;
+  let seen = 0;
+  io.write = ((f: any, data: any, o: any) => {
+    if (String(f).includes(".wiki-state.json.") && ++seen === n) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    return write(f, data, o);
+  }) as typeof io.write;
+  return () => (io.write = write);
+}
+
+// The same table is in web/test/wiki-markdown.test.ts: the hub and the web must name a page the same way.
+const SLUGS: [string, string][] = [
+  ["Passport login!", "passport-login"],
+  ["  Café  Menu ", "cafe-menu"],
+  ["a".repeat(70), "a".repeat(60)],
+  ["a".repeat(59) + " b", "a".repeat(59)],
+  ["x".repeat(58) + " - yz", "x".repeat(58) + "-y"],
+  ["!!!", "page"],
+  ["---Lead---", "lead"],
+  ["Ünïcödé — Straße", "unicode-stra-e"],
+  ["Ｆｕｌｌｗｉｄｔｈ ①", "fullwidth-1"],
+];
+
+test("page names: the same rules as the web, long links included", () => {
+  for (const [title, slug] of SLUGS) expect(slugifyTitle(title)).toBe(slug);
+});
+
+test("a hand edit that keeps the page's file time is still filed", () => {
+  const { w, dir } = room();
+  writePage(dir, "kept-time", "# Kept time\n\nBefore.");
+  adopt(dir);
+  const file = join(dir, "wiki", "kept-time.md");
+  const { atime, mtime } = statSync(file);
+  writeFileSync(file, readFileSync(file, "utf8").replace("Before.", "After, same time."));
+  utimesSync(file, atime, mtime);
+  expect(Math.floor(statSync(file).mtimeMs)).toBe(readState(dir).seen!["kept-time"]!.mtime);
+  expect(w.syncVault()).toEqual(["kept-time"]);
+  expect(handEdits(dir).filter((e) => e.text.includes("After, same time."))).toHaveLength(1);
+  expect(w.syncVault()).toEqual([]);
+});
+
+test("a hand change whose record didn't save is filed once: a retry finds its source, and still logs, indexes and commits it", () => {
+  for (const kind of ["change", "deletion"] as const) {
+    const { w, dir } = room();
+    writePage(dir, "moved-on", "# Moved on\n\nBefore.");
+    writePage(dir, "other", "# Other\n\nStays.");
+    adopt(dir);
+    const file = join(dir, "wiki", "moved-on.md");
+    if (kind === "change") writeFileSync(file, readFileSync(file, "utf8").replace("Before.", "After."));
+    else rmSync(file);
+    // The intent saves, the source is filed, the record after it fails.
+    const restore = failStateWrite(2);
+    try {
+      expect(() => w.syncVault(), kind).toThrow("disk full");
+    } finally {
+      restore();
+    }
+    expect(handEdits(dir), kind).toHaveLength(1);
+    expect(readState(dir).filing?.slug, kind).toBe("moved-on");
+    expect(w.syncVault(), kind).toEqual(["moved-on"]);
+    expect(handEdits(dir), kind).toHaveLength(1);
+    expect(readState(dir).filing, kind).toBeUndefined();
+    expect(readLog(dir).some((l) => l.text.startsWith("Someone in the vault")), kind).toBe(true);
+    expect(readFileSync(join(dir, "index.md"), "utf8").includes("[[moved-on|"), kind).toBe(kind === "change");
+    expect(w.syncVault(), kind).toEqual([]);
+  }
+  // The intent itself can't be saved: nothing is filed, and the next pass files it once.
+  const { w, dir } = room();
+  writePage(dir, "later", "# Later\n\nBefore.");
+  adopt(dir);
+  const file = join(dir, "wiki", "later.md");
+  writeFileSync(file, readFileSync(file, "utf8").replace("Before.", "After."));
+  const restore = failStateWrite(1);
+  try {
+    expect(() => w.syncVault()).toThrow("disk full");
+  } finally {
+    restore();
+  }
+  expect(handEdits(dir)).toHaveLength(0);
+  expect(w.syncVault()).toEqual(["later"]);
+  expect(handEdits(dir)).toHaveLength(1);
+});
+
+test("an app edit whose record can't be saved after the page landed is never filed again as a hand edit", () => {
+  const { w, dir } = room();
+  const made = w.editPage("app-page", "# App page\n\nFirst.", { by: "Ana", category: "topics" });
+  expect(made.ok).toBe(true);
+  // The write's intent saves, the page lands, recording it fails: the edit happened, and the intent says so.
+  const restore = failStateWrite(2);
+  let r: ReturnType<typeof w.editPage>;
+  try {
+    r = w.editPage("app-page", "# App page\n\nSecond.", { by: "Ana", rev: (made as any).page.rev });
+  } finally {
+    restore();
+  }
+  expect(r.ok).toBe(true);
+  expect(readPage(dir, "app-page")!.markdown).toContain("Second.");
+  expect(readState(dir).own?.slug).toBe("app-page");
+  expect(w.syncVault()).toEqual([]);
+  expect(handEdits(dir)).toEqual([]);
+  expect(readState(dir).own).toBeUndefined();
+  // A failure before the page is written refuses the edit and leaves nothing behind.
+  const before = sourceIds(dir).length;
+  const again = failStateWrite(1);
+  try {
+    expect(w.editPage("app-page", "# App page\n\nThird.", { by: "Ana", rev: readPage(dir, "app-page")!.rev }).ok).toBe(false);
+  } finally {
+    again();
+  }
+  expect(readPage(dir, "app-page")!.markdown).toContain("Second.");
+  expect(sourceIds(dir).length).toBe(before);
+  expect(w.syncVault()).toEqual([]);
+});
+
+test("a page deleted by hand is filed as a source, logged, and leaves the index", () => {
+  const { w, dir } = room();
+  writePage(dir, "doomed", "# Doomed\n\nGoing.");
+  writePage(dir, "survivor", "# Survivor\n\nStaying.");
+  rebuildIndex(dir);
+  adopt(dir);
+  expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[doomed|");
+  rmSync(join(dir, "wiki", "doomed.md"));
+  expect(w.syncVault()).toEqual(["doomed"]);
+  const [src] = handEdits(dir);
+  expect(src!.text).toContain('deleted the page "doomed"');
+  expect(readLog(dir).find((l) => l.text === "Someone in the vault deleted a page")).toBeTruthy();
+  expect(readFileSync(join(dir, "index.md"), "utf8")).not.toContain("[[doomed|");
+  expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[survivor|");
+  expect(readState(dir).seen!.doomed).toBeUndefined();
+  expect(w.syncVault()).toEqual([]);
+  expect(handEdits(dir)).toHaveLength(1);
+});
+
+test("a bad read offset refuses the whole tick before anything is written, however much new conversation there is", async () => {
+  const { w, s, dir } = room();
+  const src = w.addSource("document", "Short", "tiny", "Chey");
+  for (let i = 0; i < 30; i++) s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Felipe", text: `A point worth keeping about the nav, number ${i}, said at some length so it counts for the wiki.`, relevance: "work" });
+  w.decide = (async () => ({ summary: "x", pages: [] })) as Decider;
+  const text = JSON.stringify({ read: { [src.id]: 999 } });
+  writeFileSync(join(dir, ".wiki-state.json"), text);
+  const ids = sourceIds(dir);
+  await expect(w.tick()).rejects.toThrow("damaged");
+  expect(sourceIds(dir)).toEqual(ids); // no transcript source, nothing drained
+  expect(readFileSync(join(dir, ".wiki-state.json"), "utf8")).toBe(text);
+  expect(() => w.captureFinal()).toThrow("damaged");
+  expect(sourceIds(dir)).toEqual(ids);
+});
+
+test("a change to only a page's category or workstreams is proposed, not dropped with its source", async () => {
+  const { w, s, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  w.addSource("document", "Pricing", "We decided pricing: two tiers.", "Chey");
+  w.decide = (async (input) => {
+    expect(input.existing.some((p) => p.slug === "pricing")).toBe(true);
+    return { summary: "Pricing is a decision", pages: [{ ...page("pricing", "Pricing", "decision", "Two tiers."), workstreams: ["billing"] }] };
+  }) as Decider;
+  const card = (await w.tick())!.card!;
+  expect(card.wiki!.changes.map((c) => c.slug)).toEqual(["pricing"]);
+  expect(s.board.add(card.id, "Chey").ok).toBe(true);
+  expect(readPage(dir, "pricing")!.category).toBe("decisions");
+  expect(readPage(dir, "pricing")!.frontMatter.workstreams).toEqual(["billing"]);
+  // The same text, filed the same way, is no change: no card, and its source is read.
+  w.addSource("document", "Pricing again", "Still pricing: two tiers.", "Chey");
+  w.decide = (async () => ({ summary: "Same", pages: [{ ...page("pricing", "Pricing", "decision", "Two tiers."), workstreams: ["billing"] }] })) as Decider;
+  expect((await w.tick())?.card ?? null).toBeNull();
+  expect(w.pendingSources()).toEqual([]);
+});
+
+/** A POST whose body is held back: the hub has the request, and waits for the rest of it. */
+async function heldPost(port: number, path: string, cookie: string, body: string) {
+  const sock = connect(port, "127.0.0.1");
+  await new Promise((res) => sock.once("connect", res));
+  let got = "";
+  sock.on("data", (d) => (got += d));
+  const closed = new Promise((res) => sock.once("close", res));
+  sock.write(`POST ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nCookie: ${cookie}\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body.slice(0, 4)}`);
+  await Bun.sleep(150); // the request is in
+  return {
+    async finish() {
+      sock.write(body.slice(4));
+      await closed;
+      return Number(got.split(" ")[1]);
+    },
+  };
+}
+
+const flag = (p: Promise<unknown>) => {
+  const f = { done: false };
+  void p.then(() => (f.done = true));
+  return f;
+};
+
+test("shutdown waits for a request already in: its message lands before the final capture", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  try {
+    const cookie = `jam_window=${r.hub.auth.windows.take(r.hub.auth.windows.mint())}`;
+    const held = await heldPost(server.port!, "/api/say", cookie, JSON.stringify({ text: "Said while the room was closing, sent before.", personId: r.chey.id }));
+    const done = r.hub.shutdown();
+    const state = flag(done);
+    await Bun.sleep(200);
+    expect(state.done).toBe(false); // waiting on the request
+    expect(await held.finish()).toBe(200);
+    await done;
+    expect(r.s.store.eventsAfter(0).some((e) => e.text.includes("sent before"))).toBe(true);
+    expect(sourceIds(r.dir).map((id) => readSource(r.dir, id)!.text).join("\n")).toContain("sent before");
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+function tone(sec: number) {
+  const len = Math.round(16000 * sec); const x = new Float32Array(len); let a = 1;
+  for (let i = 0; i < len; i++) { a = (a * 1664525 + 1013904223) >>> 0; x[i] = 0.2 * (0.5 + 0.5 * Math.sin(i / 900)) * ((a / 4294967296) * 2 - 1 + Math.sin(i / 7)); }
+  return encodeWav({ sampleRate: 16000, samples: x });
+}
+
+test("shutdown transcribes speech still waiting and waits for it: the line lands before the final capture", async () => {
+  const { hub, s, chey, dir } = room();
+  s.touchDevice("cheyLaptop", { personId: chey.id, location: "room", micOn: true });
+  let release!: () => void;
+  let entered!: () => void;
+  const inside = new Promise<void>((res) => (entered = res));
+  (hub.transcriber as any).transcribe = async () => {
+    entered();
+    await new Promise<void>((res) => (release = res));
+    return { text: "the last words before we stopped", engine: "fake" };
+  };
+  const t = Date.now() - 3000;
+  await hub.audio.ingest({ deviceId: "cheyLaptop", t0: t, t1: t + 2000, wav: tone(2), levelDb: -25, noiseDb: -55 });
+  const done = hub.shutdown();
+  const state = flag(done);
+  await inside; // finalized now, not on its timer
+  await Bun.sleep(100);
+  expect(state.done).toBe(false);
+  release();
+  await done;
+  expect(s.store.eventsAfter(0).some((e) => e.text.includes("the last words"))).toBe(true);
+  expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).toContain("the last words");
+}, 30_000);
+
+test("past shutdown's wait the store is sealed: a late request is refused with 503 and nothing lands", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  const wait = Hub.SHUTDOWN_WAIT_MS;
+  Hub.SHUTDOWN_WAIT_MS = 200;
+  try {
+    const cookie = `jam_window=${r.hub.auth.windows.take(r.hub.auth.windows.mint())}`;
+    const held = await heldPost(server.port!, "/api/say", cookie, JSON.stringify({ text: "Too late for the save.", personId: r.chey.id }));
+    await r.hub.shutdown(); // gives up on the request after its wait
+    expect(await held.finish()).toBe(503);
+    expect(r.s.store.eventsAfter(0).some((e) => e.text.includes("Too late"))).toBe(false);
+    expect(() => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "after", relevance: "work" })).toThrow("closed");
+    expect(() => r.s.store.setSetting("x", 1)).toThrow("closed");
+    expect(() => r.s.store.put("people", { ...r.chey })).toThrow("closed"); // the team store too
+  } finally {
+    Hub.SHUTDOWN_WAIT_MS = wait;
     server.stop(true);
   }
 }, 30_000);
