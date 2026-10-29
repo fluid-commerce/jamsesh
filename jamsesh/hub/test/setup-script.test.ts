@@ -1,7 +1,7 @@
 // Runs the real /agent/setup.sh against a throwaway home folder: finding agent CLIs that aren't on
 // PATH, never wiping a settings file it can't parse, and failing when no agent was set up.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Hub } from "../src/hub";
@@ -40,7 +40,8 @@ afterAll(() => server.stop(true));
 
 /** A home folder, a bin folder for stub CLIs, and the log the stubs write their arguments to. */
 function sandbox() {
-  const root = mkdtempSync(join(tmpdir(), "jamsesh-setup-"));
+  // realpath: on macOS tmpdir() is under /var, a link to /private/var, and the script reports the real path.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "jamsesh-setup-")));
   const home = join(root, "home");
   const bin = join(root, "bin");
   mkdirSync(home, { recursive: true });
