@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, utimesSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store";
@@ -211,6 +211,29 @@ describe("migration from the single-session layout", () => {
     expect(migrateLegacy(other, 200)).toEqual([]);
     expect(listProjects(other)).toEqual([]);
   });
+
+  test("a live migration keeps its lock however old: another start never takes it, and goes ahead once the holder is gone", async () => {
+    const home = oldHome();
+    mkdirSync(join(home, "projects"), { recursive: true });
+    // A long migration in another process: alive, its lock an hour old.
+    const holder = Bun.spawn(["sleep", "30"]);
+    const lock = join(home, "projects", ".migration.lock");
+    const held = `${holder.pid} other-attempt`;
+    writeFileSync(lock, held);
+    const hourAgo = new Date(Date.now() - 60 * 60_000);
+    utimesSync(lock, hourAgo, hourAgo);
+    const src = join(import.meta.dir, "..", "src", "projects.ts");
+    const second = Bun.spawn(["bun", "-e", `const { migrateLegacy } = await import(${JSON.stringify(src)}); console.log(JSON.stringify(migrateLegacy(${JSON.stringify(home)}, 300)));`], { stdout: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+    await second.exited;
+    expect(JSON.parse((await new Response(second.stdout).text()).trim())).toEqual([]);
+    expect(readFileSync(lock, "utf8")).toBe(held);
+    expect(listProjects(home)).toEqual([]);
+    // The holder dies without letting go: the next start takes over and migrates.
+    holder.kill("SIGKILL");
+    await holder.exited;
+    expect(migrateLegacy(home, 300).filter((r) => r.verified).length).toBe(3);
+    expect(existsSync(lock)).toBe(false);
+  }, 30_000);
 
   test("a copy cut off part way never counts as a session", () => {
     const home = tmp();

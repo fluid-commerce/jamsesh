@@ -587,7 +587,13 @@ pub fn watch(app: &AppHandle) {
     }
 }
 
-/// A big-screen window moved: if it left its display, put the screens back in order.
+/// A big-screen window event that may leave it not filling its display: moved, or resized (out of full
+/// screen, or dragged smaller in place). Either goes through `moved`'s debounced arrangement.
+pub fn rearranges_on(event: &tauri::WindowEvent) -> bool {
+    matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_))
+}
+
+/// A big-screen window moved or was resized: if it no longer fills its display, put the screens back in order.
 pub fn moved(app: &AppHandle) {
     let ours = app.state::<Arc<App>>().screens.arranged_until.lock().ok().and_then(|u| *u).is_some_and(|until| std::time::Instant::now() < until);
     if !ours {
@@ -919,6 +925,14 @@ mod tests {
         assert!(matches!(&plan(&s, &at(windowed))[..], [Act::Move(_)]));
         // Its frame unknown: put in place to be sure.
         assert_eq!(plan(&s, &[Existing { label: "bigscreen".into(), on: Some(s[0].rect), frame: None }]).len(), 1);
+    }
+
+    #[test]
+    fn moving_or_resizing_a_big_screen_rearranges_and_nothing_else_does() {
+        assert!(rearranges_on(&tauri::WindowEvent::Resized(tauri::PhysicalSize::new(1280, 720))));
+        assert!(rearranges_on(&tauri::WindowEvent::Moved(tauri::PhysicalPosition::new(10, 10))));
+        assert!(!rearranges_on(&tauri::WindowEvent::Focused(true)));
+        assert!(!rearranges_on(&tauri::WindowEvent::Destroyed));
     }
 
     #[test]

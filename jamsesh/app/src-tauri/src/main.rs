@@ -90,12 +90,24 @@ fn devtools() -> bool {
 }
 
 impl App {
-    fn save(&self, cfg: &Config) {
-        let _ = std::fs::create_dir_all(&self.dir);
-        if let Ok(json) = serde_json::to_vec_pretty(cfg) {
-            let _ = std::fs::write(self.dir.join("app.json"), json);
-        }
+    fn save(&self, cfg: &Config) -> Result<(), String> {
+        write_config(&self.dir, cfg)
     }
+}
+
+/// Writes app.json whole or not at all (a temp file renamed over it), so an interrupted or failed
+/// write never leaves relaunch reading half a config.
+fn write_config(dir: &std::path::Path, cfg: &Config) -> Result<(), String> {
+    let failed = |e: std::io::Error| format!("Couldn't save JamSesh's settings: {e}");
+    std::fs::create_dir_all(dir).map_err(failed)?;
+    let json = serde_json::to_vec_pretty(cfg).map_err(|e| e.to_string())?;
+    let tmp = dir.join("app.json.tmp");
+    std::fs::write(&tmp, json).map_err(failed)?;
+    std::fs::rename(&tmp, dir.join("app.json")).map_err(failed)
+}
+
+fn warn(app: &AppHandle, title: &str, message: String) {
+    app.dialog().message(message).title(title).kind(MessageDialogKind::Warning).show(|_| {});
 }
 
 fn keychain(origin: &str) -> Option<keyring::Entry> {
@@ -178,7 +190,7 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
     if let Launch::Lobby { new_project } = launch {
         inner.cfg.lobby = true;
         inner.cfg.role = Some("host".into());
-        state.save(&inner.cfg);
+        state.save(&inner.cfg)?;
         drop(inner);
         let path = if new_project { "/projects?new=1" } else { "/projects" };
         show_window(app, "client", &host::window_url(&origin, path), "JamSesh")?;
@@ -204,7 +216,7 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
         .and_then(|v| v["token"].as_str().map(str::to_string));
     inner.relay = proxy::start(proxy::Upstream::parse(&origin)?, None, agents, RELAY_PORT, |_| {}).await.ok();
     inner.cfg.role = Some("host".into());
-    state.save(&inner.cfg);
+    state.save(&inner.cfg)?;
     let setup_done = inner.cfg.host_setup_done;
     let userless = inner.cfg.userless;
     drop(inner);
@@ -279,7 +291,7 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     if name.is_some() {
         inner.cfg.host_name = name;
     }
-    state.save(&inner.cfg);
+    state.save(&inner.cfg)?;
     drop(inner);
     if let Some(w) = app.get_webview_window("client") {
         let _ = w.close();
@@ -326,7 +338,9 @@ fn offer_agents(app: AppHandle) {
                 return;
             }
             inner.cfg.agents_asked = true;
-            state.save(&inner.cfg);
+            if let Err(e) = state.save(&inner.cfg) {
+                warn(&app, "Settings not saved", e);
+            }
         }
         let handle = app.clone();
         app.dialog()
@@ -386,6 +400,16 @@ async fn leave(app: &AppHandle, state: &App) {
     leave_now(app, state).await;
 }
 
+/// A transition (hosting, joining, resuming) that failed part way leaves nothing behind: its hub or
+/// relay stops, the saved role is cleared and the start window is back, so trying again starts clean.
+/// The caller holds `state.switching`.
+async fn rolled_back(app: &AppHandle, state: &App, result: Result<(), String>) -> Result<(), String> {
+    if result.is_err() {
+        leave_now(app, state).await;
+    }
+    result
+}
+
 /// `leave` for a caller that already holds `state.switching` (a switch cleaning up after itself).
 async fn leave_now(app: &AppHandle, state: &App) {
     let mut inner = state.inner.lock().await;
@@ -398,8 +422,11 @@ async fn leave_now(app: &AppHandle, state: &App) {
     let hub = inner.hub.take();
     inner.cfg.role = None;
     inner.cfg.lobby = false;
-    state.save(&inner.cfg);
+    let saved = state.save(&inner.cfg);
     drop(inner);
+    if let Err(e) = saved {
+        warn(app, "Settings not saved", e);
+    }
     // The session saves before anything else starts.
     if let Some(mut h) = hub
         && let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || h.stop()).await
@@ -688,7 +715,9 @@ fn on_menu(app: &AppHandle, id: &str) {
                 let on = {
                     let mut inner = state.inner.lock().await;
                     inner.cfg.userless = !inner.cfg.userless;
-                    state.save(&inner.cfg);
+                    if let Err(e) = state.save(&inner.cfg) {
+                        warn(&app, "Settings not saved", e);
+                    }
                     inner.cfg.userless
                 };
                 set_userless(&app, on, hub_origin.as_deref());
@@ -706,7 +735,28 @@ fn on_menu(app: &AppHandle, id: &str) {
             },
             "leave" => leave(&app, &state).await,
             id if id == "projects-all" || id == "project-new" || id.starts_with("project:") => projects_menu_action(&app, &state, id).await,
-            "quit" => app.exit(0),
+            // The session saves first (after any switch under way), and a save that didn't finish is said before quitting.
+            "quit" => {
+                let hub = {
+                    let _turn = state.switching.lock().await;
+                    state.inner.lock().await.hub.take()
+                };
+                let stopped = match hub {
+                    Some(mut h) => tauri::async_runtime::spawn_blocking(move || h.stop()).await.unwrap_or_else(|e| Err(e.to_string())),
+                    None => Ok(()),
+                };
+                match stopped {
+                    Ok(()) => app.exit(0),
+                    Err(e) => {
+                        let handle = app.clone();
+                        app.dialog()
+                            .message(e)
+                            .title("The session didn't finish saving")
+                            .kind(MessageDialogKind::Warning)
+                            .show(move |_| handle.exit(0));
+                    }
+                }
+            }
             _ => {}
         }
     });
@@ -746,7 +796,8 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 #[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
     let _turn = state.switching.lock().await;
-    start_hosting(&app, &state, Launch::Lobby { new_project: false }).await
+    let started = start_hosting(&app, &state, Launch::Lobby { new_project: false }).await;
+    rolled_back(&app, &state, started).await
 }
 
 /// Whether a page may open a project: only the host's own Projects picker, in the "client" window and
@@ -821,7 +872,8 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
 #[tauri::command]
 async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>) -> Result<(), String> {
     let _turn = state.switching.lock().await;
-    start_joining(&app, &state, &url, name).await
+    let joined = start_joining(&app, &state, &url, name).await;
+    rolled_back(&app, &state, joined).await
 }
 
 /// Switches between a host someone uses (one big screen plus their window) and a user-less one
@@ -850,7 +902,7 @@ async fn toggle_userless(app: AppHandle, state: State<'_, Arc<App>>) -> Result<b
     let (on, origin) = {
         let mut inner = state.inner.lock().await;
         inner.cfg.userless = !inner.cfg.userless;
-        state.save(&inner.cfg);
+        state.save(&inner.cfg)?;
         (inner.cfg.userless, inner.hub.as_ref().map(|h| h.origin()))
     };
     set_userless(&app, on, origin.as_deref());
@@ -879,7 +931,7 @@ fn perm_settings(kind: String) {
 async fn finish_setup(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
     let mut inner = state.inner.lock().await;
     inner.cfg.host_setup_done = true;
-    state.save(&inner.cfg);
+    state.save(&inner.cfg)?;
     drop(inner);
     if let Some(w) = app.get_webview_window("setup") {
         let _ = w.close();
@@ -925,10 +977,10 @@ fn main() {
             if !label.starts_with("bigscreen") {
                 return;
             }
-            match event {
-                tauri::WindowEvent::Moved(_) => screens::moved(window.app_handle()),
-                tauri::WindowEvent::Destroyed => screens::closed(window.app_handle(), label),
-                _ => {}
+            if screens::rearranges_on(event) {
+                screens::moved(window.app_handle());
+            } else if matches!(event, tauri::WindowEvent::Destroyed) {
+                screens::closed(window.app_handle(), label);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -979,19 +1031,24 @@ fn main() {
             // Pick up where this Mac left off: keep hosting, or rejoin the same host.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let resumed = match (cfg.role.as_deref(), cfg.host_url.clone()) {
-                    (Some("host"), _) => {
-                        let _turn = state.switching.lock().await;
-                        start_hosting(&handle, &state, resume_launch(&cfg)).await
-                    }
-                    (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
-                    _ => Err(String::new()),
-                };
-                if let Err(e) = resumed {
+                let resumed = {
+                    let _turn = state.switching.lock().await;
+                    let r = match (cfg.role.as_deref(), cfg.host_url.clone()) {
+                        (Some("host"), _) => start_hosting(&handle, &state, resume_launch(&cfg)).await,
+                        (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
+                        _ => Err(String::new()),
+                    };
                     // Say why on the start window instead of just showing it.
-                    if !e.is_empty() {
-                        state.inner.lock().await.resume_error = Some(e);
+                    if let Err(e) = &r
+                        && !e.is_empty()
+                    {
+                        state.inner.lock().await.resume_error = Some(e.clone());
+                        rolled_back(&handle, &state, r.clone()).await
+                    } else {
+                        r
                     }
+                };
+                if resumed.is_err() {
                     open_start(&handle);
                 }
                 refresh_tray(&handle).await;
@@ -1046,6 +1103,26 @@ mod tests {
         assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/client"), Some("host"), hub));
         assert!(!picker_may_open("client", &at("http://localhost:4801/projects"), Some("host"), hub));
         assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/projects"), None, None));
+    }
+
+    #[test]
+    fn the_config_is_written_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("jamsesh-config-{}", std::process::id()));
+        let cfg = Config { role: Some("host".into()), project: Some("passport".into()), ..Default::default() };
+        write_config(&dir, &cfg).unwrap();
+        let back: Config = serde_json::from_slice(&std::fs::read(dir.join("app.json")).unwrap()).unwrap();
+        assert_eq!(back.project.as_deref(), Some("passport"));
+        assert!(!dir.join("app.json.tmp").exists());
+        // A folder that can't be written: an error, and the saved config is untouched.
+        let blocked = dir.join("blocked");
+        std::fs::write(&blocked, "a file, not a folder").unwrap();
+        assert!(write_config(&blocked, &cfg).unwrap_err().starts_with("Couldn't save JamSesh's settings"));
+        // A failed write never replaces the good copy with a partial one.
+        std::fs::create_dir_all(dir.join("app.json.tmp")).unwrap();
+        assert!(write_config(&dir, &Config::default()).is_err());
+        let still: Config = serde_json::from_slice(&std::fs::read(dir.join("app.json")).unwrap()).unwrap();
+        assert_eq!(still.project.as_deref(), Some("passport"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

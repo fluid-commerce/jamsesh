@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
-import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
+import { ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, ExpandButton, ExpandCtx, RecordCatch, RoomFeed, ScaledFrame, Slot, TileKeyCtx, artifactTarget, colorFor, stripMd, tileSlots, useIsExpanded, useNow, type SlotTarget } from "../shared/ui";
 
 export { tileSlots };
@@ -11,8 +11,8 @@ const TilePins = createContext(true);
 function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
-import { StageBar } from "../shared/StageControls";
-import { cast } from "../client/CastPicker";
+import { StageBar, stageAction } from "../shared/StageControls";
+import { cast, tellNote } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
@@ -128,8 +128,12 @@ function tileLabel(t: Tile, state: HubState): string {
 }
 
 /** One tile filling the presentation area, the others as a strip of thumbnails along the edge. */
-/** Ask the hub to expand a tile of this screen's stage, or (tile null) collapse. */
-export const expandTile = (tile: string | null, screen = "main") => api("/stage/expand", { tile, screen }).catch(() => {});
+/** Ask the hub to expand a tile of this screen's stage, or (tile null) collapse. Live only; a failure is said on screen. Resolves with that note ("" when it went through). */
+export const expandTile = async (tile: string | null, screen = "main") => {
+  const note = await stageAction("/stage/expand", { tile, screen });
+  tellNote(note);
+  return note;
+};
 
 function Expanded({ tiles, open, onPick }: { tiles: StageTile[]; open: StageTile; onPick: (key: string) => void }) {
   const rest = tiles.filter((t) => t !== open);

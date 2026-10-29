@@ -112,6 +112,18 @@ test("shutdown says whether the final save finished: a save that hangs or fails 
     throw new Error("disk full");
   };
   expect(await failed.shutdown()).toBe(false);
+  // A second shutdown while the first is saving waits for that same result; it never ends early.
+  const { sharedOnce } = await import("../src/hub");
+  let finish!: (ok: boolean) => void;
+  let runs = 0;
+  const shutdown = sharedOnce(() => ((runs += 1), new Promise<boolean>((r) => (finish = r))));
+  const first = shutdown();
+  let secondDone = false;
+  const second = shutdown().then((v) => ((secondDone = true), v));
+  await Bun.sleep(20);
+  expect(secondDone).toBe(false);
+  finish(false);
+  expect([await first, await second, runs]).toEqual([false, false, 1]);
   // The budget the app's wait is built on: its steps add up to 15 seconds.
   expect(budget.snapshot + budget.thumbnail + budget.network).toBe(15_000);
 });
