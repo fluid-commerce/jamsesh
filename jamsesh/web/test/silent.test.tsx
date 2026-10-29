@@ -53,6 +53,16 @@ test("a clip already playing stops the moment the hub says the room is silent", 
   expect(paused.length).toBe(2);
 });
 
+test("a clip stops when the connection drops, since the hub may come back silent", () => {
+  let paused = 0;
+  const a = { pause: () => paused++, addEventListener() {} } as unknown as HTMLAudioElement;
+  setSilent(false);
+  clip("audio/mpeg", "Z", () => a);
+  (hub as any).set({ status: "connecting" });
+  expect(paused).toBe(1);
+  (hub as any).set({ status: "connected" });
+});
+
 test("a clip that has ended, been paused or failed is forgotten, so a long session doesn't keep every one", () => {
   for (const ev of ["ended", "pause", "error"]) {
     const handlers = new Map<string, () => void>();

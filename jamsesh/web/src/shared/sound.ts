@@ -60,8 +60,9 @@ export function stopAllSound() {
 }
 
 // The moment the hub says the room is silent, whatever was playing stops.
+// Also when the connection drops: the hub may come back silent, and until it says so the page can't know.
 hub.subscribe(() => {
-  if (!soundAllowed()) stopAllSound();
+  if (!soundAllowed() || hub.snap.status === "connecting" || hub.snap.status === "offline") stopAllSound();
 });
 
 /**
