@@ -5,7 +5,8 @@
 // caller sends reaches a path.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { config } from "./config";
 import type { AttachmentKind, AttachmentRef } from "./types";
 
 export type { AttachmentKind, AttachmentRef };
@@ -188,22 +189,47 @@ export class Attachments {
   }
 }
 
-/** Where poppler's pdftotext may be: the PATH, or Homebrew's folders (an app started from the Dock has a short PATH). */
-const PDFTOTEXT = [Bun.which("pdftotext"), "/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"].filter((p): p is string => !!p);
+/**
+ * The PDF reader: `jamsesh-pdftext` (native/jamsesh-pdftext.swift, Apple's PDFKit). The Mac app ships it built, beside the hub;
+ * from a checkout it is built from source on first use into the JamSesh home. JAMSESH_PDFTEXT names a ready-made one (tests).
+ */
+let helper: Promise<string | null> | null = null;
+export function pdfHelper(): Promise<string | null> {
+  return (helper ??= (async () => {
+    const given = process.env.JAMSESH_PDFTEXT;
+    if (given) return existsSync(given) ? given : null;
+    const shipped = join(dirname(process.execPath), "jamsesh-pdftext");
+    if (existsSync(shipped)) return shipped;
+    const src = join(import.meta.dir, "..", "native", "jamsesh-pdftext.swift");
+    if (!existsSync(src)) return null;
+    const bin = join(config.home, "bin", `jamsesh-pdftext-${createHash("sha1").update(readFileSync(src)).digest("hex").slice(0, 10)}`);
+    if (existsSync(bin)) return bin;
+    try {
+      mkdirSync(join(config.home, "bin"), { recursive: true });
+      const build = Bun.spawn(["swiftc", "-O", "-swift-version", "5", src, "-o", bin], { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+      const stop = setTimeout(() => build.kill(), 300_000);
+      const code = await build.exited;
+      clearTimeout(stop);
+      return code === 0 && existsSync(bin) ? bin : null;
+    } catch {
+      return null;
+    }
+  })());
+}
 
 /**
- * The words in a PDF, for a card a person reviews: poppler's pdftotext when the machine has it (first 20 pages,
- * 5 s at most), otherwise the plain text runs JamSesh can read itself. At most `max` characters; "" when there's
- * no text to read (a scan, or fonts that only map glyphs). The built-in reader runs in a worker (pdfworker.ts).
+ * The words in a PDF, for a card a person reviews: the helper's text (first 20 pages, at most `max` characters, five seconds
+ * counting the process exit), or "" when there's none to read (a scan, a locked or damaged file, no helper). Nothing else reads
+ * a PDF here: a file the helper can't read is one a person has to word themselves.
  */
-export async function pdfText(path: string, max = 4000, poppler = true): Promise<string> {
-  const tidy = (t: string) => t.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").replace(/[ \t]+/g, " ").replace(/\n\s*\n\s*/g, "\n\n").trim().slice(0, max);
-  const tool = poppler ? PDFTOTEXT.find((p) => existsSync(p)) : undefined;
-  if (tool) {
+export async function pdfText(path: string, max = 4000): Promise<string> {
+  const bin = await pdfHelper();
+  if (!bin) return "";
+  try {
+    const run = Bun.spawn([bin, path, String(max)], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+    const stop = setTimeout(() => run.kill(), 5000);
     try {
-      const run = Bun.spawn([tool, "-l", "20", "-enc", "UTF-8", "-q", path, "-"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
-      const timer = setTimeout(() => run.kill(), 5000);
-      // Read only as much as the result can use (UTF-8 is at most 4 bytes a character); then stop the process.
+      // Read only as much as the result can use (UTF-8 is at most 4 bytes a character).
       const cap = max * 4 + 1024;
       const chunks: Uint8Array[] = [];
       let got = 0;
@@ -214,41 +240,17 @@ export async function pdfText(path: string, max = 4000, poppler = true): Promise
         chunks.push(value);
         got += value.length;
       }
-      const capped = got >= cap;
-      if (capped) run.kill();
+      if (got >= cap) run.kill();
       reader.cancel().catch(() => {});
-      clearTimeout(timer);
-      const out = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, cap));
-      if (((await run.exited) === 0 || capped) && tidy(out)) return tidy(out);
-    } catch {
-      // Fall through to the built-in reader.
+      const code = await run.exited;
+      const text = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, cap));
+      return code === 0 || got >= cap ? text.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").replace(/[ \t]+/g, " ").replace(/\n\s*\n\s*/g, "\n\n").trim().slice(0, max) : "";
+    } finally {
+      clearTimeout(stop);
     }
-  }
-  try {
-    return tidy(await inWorker(new Uint8Array(readFileSync(path))));
   } catch {
     return "";
   }
-}
-
-/** JamSesh's own reader (pdfworker.ts) in a worker with a time limit, so a big or hostile file can't hold up the hub. */
-function inWorker(bytes: Uint8Array, ms = 5000): Promise<string> {
-  return new Promise((resolve) => {
-    let w: Worker;
-    try {
-      // From source, the file beside this one; in the compiled hub (bundle-hub.sh builds pdfworker.ts in as an
-      // entrypoint) it's addressed by its bundled name.
-      const beside = new URL("./pdfworker.ts", import.meta.url);
-      w = new Worker(beside.protocol === "file:" && existsSync(Bun.fileURLToPath(beside)) ? beside.href : "./pdfworker.ts");
-    } catch {
-      return resolve("");
-    }
-    const done = (text: string) => (clearTimeout(timer), w.terminate(), resolve(text));
-    const timer = setTimeout(() => done(""), ms);
-    w.onmessage = (e: MessageEvent<string>) => done(typeof e.data === "string" ? e.data : "");
-    w.onerror = () => done("");
-    w.postMessage(bytes);
-  });
 }
 
 /** A short "name (size)" line for lists and logs. */

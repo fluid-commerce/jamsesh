@@ -10,11 +10,10 @@ import { readWindowLinks } from "./auth";
 import { linkSecretFile } from "./projects";
 
 const args = new Set(process.argv.slice(2));
-// A check of the bundled PDF reader: `jamsesh-hub --pdf-text <file>` prints what JamSesh's own reader (the worker,
-// not poppler) gets from it, so a release build can be tested without starting a session.
+// A check of the PDF reader in a release build: `jamsesh-hub --pdf-text <file>` prints what the helper reads from it.
 if (process.argv[2] === "--pdf-text" && process.argv[3]) {
   const { pdfText } = await import("./attachments");
-  console.log(await pdfText(process.argv[3], 4000, false));
+  console.log(await pdfText(process.argv[3]));
   process.exit(0);
 }
 enterProject();

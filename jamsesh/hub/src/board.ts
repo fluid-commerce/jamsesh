@@ -31,6 +31,8 @@ export type BoardResult<T = {}> = ({ ok: true; card: TriageCard } & T) | { ok: f
 
 const fail = (error: string, status = 400): { ok: false; error: string; status: number } => ({ ok: false, error, status });
 const clean = (t: unknown) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, TEXT_MAX);
+/** A card carries at most the files one message can: the same limit its Send delivers. */
+const capFiles = (list: TriageCard["attachments"]) => (list ? [...new Map(list.map((a) => [a.id, a])).values()].slice(0, MAX_PER_MESSAGE) : undefined);
 const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
@@ -159,6 +161,7 @@ export class Board {
   // ---- proposing ----
 
   proposeTask(p: TaskProposal): TriageCard | null {
+    p = { ...p, attachments: capFiles(p.attachments) };
     const text = clean(p.text);
     if (!text) return null;
     const mode = MODES.includes(p.mode) ? p.mode : "explore";
@@ -181,6 +184,7 @@ export class Board {
   }
 
   proposeContext(p: ContextProposal): TriageCard | null {
+    p = { ...p, attachments: capFiles(p.attachments) };
     const text = clean(p.text);
     if (!text) return null;
     const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
@@ -347,6 +351,8 @@ export class Board {
         targets,
         requestedBy: card.by,
         sourceEventIds: card.sources.map((x) => x.eventId).filter((x): x is number => x != null),
+        // Exactly the files the card showed: what was reviewed is what the agent receives.
+        attachments: card.attachments ?? [],
         workstreamId: ws?.id ?? null,
         rationale: `${card.origin === "agent" ? `${card.by} reported this` : card.origin === "document" ? "From a document" : `Heard from ${card.by}`}; ${by} sent it from the Tasks board${card.edits.length ? " after editing it" : ""}.`,
       });
@@ -456,7 +462,8 @@ export class Board {
    * Overheard: the room wants a task stopped. The cancellation waits as a card (sending it cancels the task and
    * tells its agents); nothing an agent is doing changes until a person sends it.
    */
-  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"]; attachments?: TriageCard["attachments"] }): TriageCard | null {
+  proposeCancel(p0: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"]; attachments?: TriageCard["attachments"] }): TriageCard | null {
+    const p = { ...p0, attachments: capFiles(p0.attachments) };
     const d = p.directive;
     if (d.status === "done" || d.status === "cancelled") return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);

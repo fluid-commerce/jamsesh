@@ -557,6 +557,8 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
         if (!hasFiles(e)) return;
         e.preventDefault();
         setDragging(false);
+        // Not while a send is in flight: a file added now would be cleared with the ones that were sent.
+        if (busy) return;
         files.add(filesFrom(e.dataTransfer));
       }}
       onSubmit={async (e) => {

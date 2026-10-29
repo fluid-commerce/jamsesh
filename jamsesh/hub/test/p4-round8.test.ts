@@ -1,6 +1,6 @@
 // Phase 4 round 8: a database still being set up is never read as empty; contradictory facts aren't duplicates;
 // a pending document card lands before shutdown saves; a blob is written whole or not at all; a merge's own
-// wording keeps the fact's platform; retire proposals keep their status; invisible PDF text isn't read.
+// wording keeps the fact's platform; retire proposals keep their status.
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -13,7 +13,6 @@ const { Hub } = await import("../src/hub");
 const { contextExport, contextFile, readProjectContext, saveProjectContext } = await import("../src/carryover");
 const { createProject } = await import("../src/projects");
 const { Attachments } = await import("../src/attachments");
-const { drawnText } = await import("../src/pdfworker");
 const { restates } = await import("../src/similarity");
 
 const dir = mkdtempSync(join(tmpdir(), "jam-r8-"));
@@ -153,7 +152,7 @@ test("an interrupted blob write can't be reused: a truncated blob is replaced, a
   expect(readdirSync(blobs).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 });
 
-// ---------- merge wording, retire statuses, invisible PDF text ----------
+// ---------- merge wording, retire statuses ----------
 
 test("merge: the wording a person supplies keeps the fact's platform", () => {
   const r = room();
@@ -177,14 +176,4 @@ test("retire proposals for one fact with different statuses stay separate cards"
   expect(again.id).toBe(done.id);
   expect(r.s.board.replace(sup.id, "Chey").ok).toBe(true);
   expect(r.s.store.get("facts", f.id)!.status).toBe("superseded");
-});
-
-test("the built-in PDF reader skips invisible and clip-only text", () => {
-  const doc = (stream: string) =>
-    new TextEncoder().encode(`%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n%%EOF`);
-  expect(drawnText(doc("BT 3 Tr (Hidden) Tj ET BT 0 Tr (Shown) Tj ET"))).toBe("Shown");
-  expect(drawnText(doc("BT 7 Tr (Clipped) Tj ET"))).toBe("");
-  // Only the operators that hide are skipped: a block that switches the mode keeps what's drawn visibly.
-  expect(drawnText(doc("BT 0 Tr (Visible) Tj 3 Tr (Hidden) Tj 0 Tr ( again) Tj ET"))).toBe("Visible again");
-  expect(drawnText(doc("BT /F1 12 Tf 72 700 Td (Plain) Tj ET"))).toBe("Plain");
 });

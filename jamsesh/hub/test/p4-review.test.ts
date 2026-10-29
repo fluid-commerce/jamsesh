@@ -35,7 +35,8 @@ const { buildBrief } = await import("../src/brief");
 const { applyCuration } = await import("../src/brain/curation");
 const { acceptedEvent } = await import("../src/brain/brain");
 const { pdfText, MAX_UPLOAD_BYTES } = await import("../src/attachments");
-const { drawnText: pdfTextRuns } = await import("../src/pdfworker");
+const { usePdfTool, makePdf, pdfToolAvailable } = await import("./pdftool");
+usePdfTool();
 
 const wasOffline = config.offline;
 config.offline = false;
@@ -321,34 +322,9 @@ test("a context file with one malformed nested value fails the seeding and seeds
 
 // ---------- 7. a PDF on its own: its words on the card, or a card a person has to word ----------
 
-function pdf(stream: string, flate = false): Uint8Array {
-  const body = flate ? deflateSync(Buffer.from(stream)) : Buffer.from(stream);
-  const head = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n4 0 obj\n<< /Length ${body.length}${flate ? " /Filter /FlateDecode" : ""} >>\nstream\n`;
-  const tail = `\nendstream\nendobj\n5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF`;
-  return new Uint8Array(Buffer.concat([Buffer.from(head), body, Buffer.from(tail)]));
-}
-
-test("the built-in PDF reader gets the words from plain and compressed pages, and nothing from a page with none", () => {
-  expect(pdfTextRuns(pdf("BT /F1 24 Tf 72 700 Td (Checkout is one page) Tj ET"))).toBe("Checkout is one page");
-  expect(pdfTextRuns(pdf("BT /F1 12 Tf [(Prices ) -20 (include tax) ] TJ 0 -14 Td (\\(always\\)) Tj ET", true))).toBe("Prices include tax (always)");
-  expect(pdfTextRuns(pdf("0 0 m 100 100 l S"))).toBe("");
-  expect(pdfTextRuns(new TextEncoder().encode("%PDF-1.4 garbage << /Filter /FlateDecode >> stream\nnot zlib\nendstream"))).toBe("");
-  // Only strings a text operator draws: one used as anything else, or outside BT…ET, isn't wording.
-  expect(pdfTextRuns(pdf("(Outside text) Tj BT /F1 12 Tf (Not drawn) 5 Ts (Shown) Tj (Also not) Tz ET"))).toBe("Shown");
-  expect(pdfTextRuns(pdf("BT 0 0 (Quoted) \" ET"))).toBe("Quoted");
-});
-
-test("the built-in reader runs in a worker: the hub gets the words, and a broken file gives nothing", async () => {
+test.skipIf(!pdfToolAvailable)("a PDF sent with no words becomes a card with its text, which a person can add as a fact", async () => {
   const r = room();
-  const good = r.hub.attachments.save(pdf("BT /F1 24 Tf 72 700 Td (Prices always include tax) Tj ET", true), "pricing.pdf", "Chey");
-  expect(await pdfText(r.hub.attachments.file(good.id)!.path, 4000, false)).toBe("Prices always include tax");
-  const broken = r.hub.attachments.save(new TextEncoder().encode("%PDF-1.4 << /Filter /FlateDecode >> stream\nnot zlib\nendstream"), "broken.pdf", "Chey");
-  expect(await pdfText(r.hub.attachments.file(broken.id)!.path, 4000, false)).toBe("");
-});
-
-test("a PDF sent with no words becomes a card with its text, which a person can add as a fact", async () => {
-  const r = room();
-  const rec = r.hub.attachments.save(pdf("BT /F1 24 Tf 72 700 Td (Prices always include tax) Tj ET", true), "pricing.pdf", "Chey");
+  const rec = r.hub.attachments.save(makePdf("Prices always include tax"), "pricing.pdf", "Chey");
   expect(await pdfText(r.hub.attachments.file(rec.id)!.path)).toContain("Prices always include tax");
   const ev = r.hub.typed(r.chey.id, "", false, [r.hub.attachments.ref(rec.id)!]);
   let card = r.s.board.open()[0];
@@ -363,11 +339,11 @@ test("a PDF sent with no words becomes a card with its text, which a person can 
 
 test("a PDF with no text to read asks a person to word it before it is added", async () => {
   const r = room();
-  const rec = r.hub.attachments.save(pdf("0 0 m 300 300 l S"), "sketch.pdf", "Chey");
+  const rec = r.hub.attachments.save(new TextEncoder().encode("%PDF-1.4\n%%EOF"), "sketch.pdf", "Chey");
   r.hub.typed(r.chey.id, "", false, [r.hub.attachments.ref(rec.id)!]);
   let card = r.s.board.open()[0];
   for (let i = 0; !card && i < 100; i++) (await Bun.sleep(20), (card = r.s.board.open()[0]));
-  expect(structuredClone(card)).toMatchObject({ needsWording: true, text: expect.stringContaining("sketch.pdf") });
+  expect(structuredClone(card)).toMatchObject({ needsWording: true, text: "Couldn't read this PDF; write what to keep." });
   expect(r.s.board.add(card.id, "Chey")).toMatchObject({ ok: false, error: expect.stringContaining("Write what the file says") });
   expect(r.s.board.add(card.id, "Chey", { text: card.text })).toMatchObject({ ok: false });
   expect(r.s.board.merge(card.id, r.s.board.rememberNow({ text: "Settings has a sidebar", kind: "fact", by: "Chey" })!.id, "Chey")).toMatchObject({ ok: false });
@@ -697,11 +673,7 @@ test("an accepted fact is never cut to fit; the brain's brief is; a change past 
   expect(readProjectContext(home, p.slug)!.facts.map((f) => f.text)).not.toContain("Fine");
 });
 
-test("the PDF reader takes only streams a page draws, and the brief keeps the carried glossary", () => {
-  const stream = "BT (On the page) Tj ET";
-  const hidden = "BT (Not on any page) Tj ET";
-  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R] >>\nendobj\n4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n5 0 obj\n<< /Length ${hidden.length} >>\nstream\n${hidden}\nendstream\nendobj\n%%EOF`;
-  expect(pdfTextRuns(new TextEncoder().encode(doc))).toBe("On the page");
+test("the brief keeps the carried glossary", () => {
   const r = room();
   r.s.store.setSetting("carried", { fromSession: "old", at: 1, brief: "", goal: "Settings", glossary: [{ term: "Passport", meaning: "customer login" }], items: 0 });
   expect(buildBrief(r.s).full).toContain("Passport: customer login");

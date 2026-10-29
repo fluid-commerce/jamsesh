@@ -864,8 +864,9 @@ export class Session {
   }): Directive {
     // The files that came with the request ride along, so the agent can fetch what the room is looking at.
     const files = new Map<string, AttachmentRef>();
-    for (const a of d.attachments ?? []) files.set(a.id, a);
-    for (const id of d.sourceEventIds ?? []) for (const a of (this.store.event(id)?.data.attachments ?? []) as AttachmentRef[]) files.set(a.id, a);
+    // Given a list, that list is the delivery, exactly (a card's reviewed files); otherwise the files on the lines it came from.
+    if (d.attachments) for (const a of d.attachments) files.set(a.id, a);
+    else for (const id of d.sourceEventIds ?? []) for (const a of (this.store.event(id)?.data.attachments ?? []) as AttachmentRef[]) files.set(a.id, a);
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") d = { ...d, targets: d.targets.filter((t) => this.agent(t)?.role !== "observer") };
     const directive: Directive = {

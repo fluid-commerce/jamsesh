@@ -765,7 +765,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const form = body?.__form as FormData | undefined;
     const f = form?.get("file");
     if (!(f instanceof Blob)) return bad("send the image as form field 'file'");
-    const agent = s.agent(String(form!.get("agent") ?? "")) ?? null;
+    // The agent is the credential's, never just the form's word: an upload for an agent comes from that agent's own machine
+    // credential (or the host's own agents on loopback); a named agent that isn't theirs is refused, not replaced by a guess.
+    const named = String(form!.get("agent") ?? "");
+    const agent = named ? (s.agent(named) ?? null) : null;
+    if (named) {
+      const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
+      if (!agent || (paired && paired.kind !== "agent") || !machine || agent.machine !== machine) return bad("That agent isn't yours to upload for.", 403);
+    }
     const art = await hub.saveUpload(agent, new Uint8Array(await f.arrayBuffer()), {
       title: String(form!.get("title") ?? "Screenshot"),
       stage: form!.get("stage") === "mockup" ? "mockup" : "built",

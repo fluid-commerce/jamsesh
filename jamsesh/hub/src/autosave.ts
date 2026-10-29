@@ -4,7 +4,8 @@
 // around: the canvas as a .figcraft file, the session's context as JSON, and readable
 // session notes. One every few minutes while something changes, one on request, and
 // one when the host stops.
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Hub } from "./hub";
 
@@ -31,6 +32,8 @@ export class Autosave {
   constructor(private hub: Hub, dataDir: string) {
     this.dir = join(dataDir, "snapshots");
     mkdirSync(this.dir, { recursive: true });
+    // A save that was cut off while it was being built left a staging folder; it was never a snapshot.
+    for (const d of readdirSync(this.dir)) if (d.startsWith(".staging-")) rmSync(join(this.dir, d), { recursive: true, force: true });
   }
 
   start() {
@@ -66,12 +69,29 @@ export class Autosave {
       const at = Date.now();
       const stamp = new Date(at).toISOString().replace(/[:T]/g, "-").slice(0, 16);
       const slug = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
-      const id = `${stamp}${slug ? `-${slug}` : ""}`;
+      // Every save has a directory of its own (so an earlier save in the same minute can't leave files in it), built beside it and
+      // moved into place whole: a snapshot that is listed has all its files, from this save.
+      const id = `${stamp}${slug ? `-${slug}` : ""}.${randomBytes(3).toString("hex")}`;
       const dir = join(this.dir, id);
-      mkdirSync(dir, { recursive: true });
+      const staging = join(this.dir, `.staging-${id}`);
+      mkdirSync(staging, { recursive: true });
+      try {
+        return await this.build(staging, dir, id, at, label, rev, canvasKey);
+      } catch (e) {
+        rmSync(staging, { recursive: true, force: true });
+        throw e;
+      }
+    };
+    this.saving = run().finally(() => (this.saving = null));
+    return this.saving;
+  }
+
+  private async build(staging: string, dir: string, id: string, at: number, label: string, rev: number, canvasKey: string): Promise<SnapshotInfo> {
+    {
+      const s = this.hub.session;
 
       let canvasFailed = false;
-      const canvas = await this.hub.canvas.saveCopy(join(dir, "canvas.figcraft")).catch((e) => {
+      const canvas = await this.hub.canvas.saveCopy(join(staging, "canvas.figcraft")).catch((e) => {
         console.error("autosave canvas:", e instanceof Error ? e.message : e);
         canvasFailed = true;
         return false;
@@ -93,26 +113,25 @@ export class Autosave {
         layouts: s.savedLayouts(),
         digest: state.digest,
       };
-      writeFileSync(join(dir, "context.json"), JSON.stringify(context, null, 2));
-      writeFileSync(join(dir, "notes.md"), notes(context));
+      writeFileSync(join(staging, "context.json"), JSON.stringify(context, null, 2));
+      writeFileSync(join(staging, "notes.md"), notes(context));
+      renameSync(staging, dir);
       this.lastRev = rev;
       this.lastCanvasKey = canvasKey;
       this.prune();
       // No copy from a canvas that was running is a failure too (its host is gone), not just a thrown error.
       if (!canvas && this.hub.canvas.hostStarted) canvasFailed = true;
       return { id, label, at, canvas, ...(canvasFailed ? { canvasFailed } : {}), dir };
-    };
-    this.saving = run().finally(() => (this.saving = null));
-    return this.saving;
+    }
   }
 
   list(): SnapshotInfo[] {
     if (!existsSync(this.dir)) return [];
     return readdirSync(this.dir)
-      .filter((d) => statSync(join(this.dir, d)).isDirectory())
+      .filter((d) => !d.startsWith(".") && statSync(join(this.dir, d)).isDirectory())
       .map((id) => ({
         id,
-        label: id.slice(17).replace(/-/g, " "),
+        label: id.replace(/\.[0-9a-f]{6}$/, "").slice(17).replace(/-/g, " "),
         at: statSync(join(this.dir, id)).mtimeMs,
         canvas: existsSync(join(this.dir, id, "canvas.figcraft")),
         dir: join(this.dir, id),

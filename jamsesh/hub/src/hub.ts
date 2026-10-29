@@ -363,7 +363,7 @@ export class Hub {
 
   /**
    * A document sent with no request becomes a context card with what it says: text files' text, PDFs' text
-   * (pdfText). A file with nothing readable gets a placeholder a person has to replace before the card is added.
+   * (pdfText). A file with nothing readable gets "Couldn't read this PDF; write what to keep.", which a person has to replace before the card is added.
    */
   async proposeDocument(ev: JamEvent, attached: AttachmentRef[]) {
     const texts: string[] = [this.attachments.brainInput(attached.filter((a) => a.kind === "text")).text];
@@ -375,10 +375,9 @@ export class Hub {
       else unread.push(a.name);
     }
     const read = texts.filter(Boolean).join("\n\n").replace(/^### .+\n/gm, "").trim().slice(0, 600);
-    const names = attached.map((a) => a.name).join(", ");
     // Said on the card, so the person who reviews it knows what the text leaves out.
     const left = unread.length && read ? `\n(Couldn't read: ${unread.join(", ")})` : "";
-    return this.session.proposeContext({ text: `${read || `${names} (no text to read: write what to keep)`}${left}`, needsWording: !read, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
+    return this.session.proposeContext({ text: `${read || `Couldn't read ${attached.length > 1 ? "these files" : attached[0]?.kind === "pdf" ? "this PDF" : "this file"}; write what to keep.`}${left}`, needsWording: !read, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
   }
 
   /**

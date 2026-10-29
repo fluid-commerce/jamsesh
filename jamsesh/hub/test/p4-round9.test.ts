@@ -2,7 +2,7 @@
 // an export's generation is validated; the card says what couldn't be read.
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,7 +13,8 @@ const { acceptedEvent } = await import("../src/brain/brain");
 const { ContextUnavailable, contextExport, readProjectContext, saveProjectContext, seedFromProject } = await import("../src/carryover");
 const { createProject } = await import("../src/projects");
 const { Attachments } = await import("../src/attachments");
-const { drawnText } = await import("../src/pdfworker");
+const { usePdfTool, makePdf, pdfToolAvailable } = await import("./pdftool");
+usePdfTool();
 
 const dir = mkdtempSync(join(tmpdir(), "jam-r9-"));
 const hubs: InstanceType<typeof Hub>[] = [];
@@ -384,19 +385,9 @@ test("a request body past the cap is refused with 413 before any route sees it, 
   }
 });
 
-test("a PDF's invisible text mode carries across its content streams", () => {
-  const body = (s: string) => s;
-  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>\nendobj\n4 0 obj\n<< /Length 13 >>\nstream\nBT 3 Tr ET\nendstream\nendobj\n5 0 obj\n<< /Length 29 >>\nstream\nBT (SECRET HIDDEN TEXT) Tj ET\nendstream\nendobj\n%%EOF`;
-  expect(drawnText(new TextEncoder().encode(body(doc)))).toBe("");
-});
 
 // ---------- round 15 ----------
 
-test("PDF render mode resets at each page: an invisible first page doesn't hide the next one", () => {
-  const obj = (n: number, body: string) => `${n} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}\nendstream\nendobj\n`;
-  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n${obj(4, "BT 3 Tr (PAGE ONE HIDDEN) Tj ET")}6 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>\nendobj\n${obj(7, "BT (PAGE TWO VISIBLE) Tj ET")}%%EOF`;
-  expect(drawnText(new TextEncoder().encode(doc))).toBe("PAGE TWO VISIBLE");
-});
 
 test("a failed recovery of the project's context fails the start, like a malformed row", () => {
   const p = saved("Recovery fails");
@@ -524,11 +515,6 @@ test("share placement runs the real path under the brain's count, and a stopped 
 
 // ---------- round 17 ----------
 
-test("the PDF reader follows the catalog's page tree: a page object no tree names isn't read", () => {
-  const obj = (n: number, body: string) => `${n} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}\nendstream\nendobj\n`;
-  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n${obj(4, "BT (VISIBLE) Tj ET")}8 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>\nendobj\n${obj(9, "BT (UNREFERENCED) Tj ET")}trailer\n<< /Root 1 0 R >>\n%%EOF`;
-  expect(drawnText(new TextEncoder().encode(doc))).toBe("VISIBLE");
-});
 
 test("HEAD and OPTIONS never act, and a GET can't pair an agent while the session is closing", async () => {
   const r = room();
@@ -594,11 +580,6 @@ test("a body that never finishes is dropped at the deadline, and bodies share a 
   }
 }, 20_000);
 
-test("a forged /Root in a PDF comment can't pick a different catalog", () => {
-  const obj = (n: number, body: string) => `${n} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}\nendstream\nendobj\n`;
-  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n${obj(4, "BT (VISIBLE) Tj ET")}5 0 obj\n<< /Type /Catalog /Pages 6 0 R >>\nendobj\n6 0 obj\n<< /Type /Pages /Kids [7 0 R] /Count 1 >>\nendobj\n7 0 obj\n<< /Type /Page /Parent 6 0 R /Contents 8 0 R >>\nendobj\n${obj(8, "BT (ORPHAN) Tj ET")}trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n% trailer << /Root 5 0 R >>\n% /Root 5 0 R`;
-  expect(drawnText(new TextEncoder().encode(doc))).toBe("VISIBLE");
-});
 
 test("a database lost and replaced by a new generation with no export fails the start; a generation that isn't a count does too", () => {
   const p = saved("Lost export");
@@ -635,12 +616,6 @@ test("cards made from a file carry the file: a task, a decision, and a repeat", 
 
 // ---------- round 19 ----------
 
-test("object-shaped text inside a page's content stream can't pass for an object", () => {
-  const real = "BT (VISIBLE) Tj ET";
-  const forged = "BT 3 Tr (\n8 0 obj\n<< /Type /Page /Contents 9 0 R >>\nendobj\n) Tj ET";
-  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>\nendobj\n4 0 obj\n<< /Length ${real.length} >>\nstream\n${real}\nendstream\nendobj\n5 0 obj\n<< /Length ${forged.length} >>\nstream\n${forged}\nendstream\nendobj\n9 0 obj\n<< /Length 23 >>\nstream\nBT (ORPHAN) Tj ET      \nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF`;
-  expect(drawnText(new TextEncoder().encode(doc))).toBe("VISIBLE");
-});
 
 test("a card shows what Send delivers: cancellations carry their file, and files past six make another card", () => {
   const r = room();
@@ -678,4 +653,96 @@ test("HEAD never renders: /renders/full is not a file read", async () => {
   const { methodAllowed } = await import("../src/methods");
   expect((await methodAllowed(new Request("http://x/renders/full/art_1.png", { method: "HEAD" })))?.status).toBe(405);
   expect(await methodAllowed(new Request("http://x/renders/art_1.png", { method: "HEAD" }))).toBeNull();
+});
+
+// ---------- round 20 ----------
+
+test.skipIf(!pdfToolAvailable)("a real PDF is read by the PDFKit helper, capped, and a file it can't read says so on its card", async () => {
+  const { pdfText } = await import("../src/attachments");
+  const dirp = mkdtempSync(join(tmpdir(), "jam-pdfhelper-"));
+  const good = join(dirp, "good.pdf");
+  writeFileSync(good, makePdf("Prices always include tax.\nCheckout is one page."));
+  expect(await pdfText(good)).toContain("Prices always include tax.");
+  expect((await pdfText(good, 6)).length).toBeLessThanOrEqual(6);
+  const bad = join(dirp, "bad.pdf");
+  writeFileSync(bad, "%PDF-1.4 not really");
+  expect(await pdfText(bad)).toBe("");
+  expect(await pdfText(join(dirp, "missing.pdf"))).toBe("");
+  const r = room();
+  const rec = r.hub.attachments.save(new TextEncoder().encode("%PDF-1.4\n%%EOF"), "scan.pdf", "Chey");
+  const card = (await r.hub.proposeDocument({ id: 1, authorName: "Chey" } as any, [r.hub.attachments.ref(rec.id)!]))!;
+  expect(card.text).toBe("Couldn't read this PDF; write what to keep.");
+  expect(card.needsWording).toBe(true);
+});
+
+test("without the helper a PDF is unreadable, never guessed at", async () => {
+  const saved = process.env.JAMSESH_PDFTEXT;
+  process.env.JAMSESH_PDFTEXT = "/nonexistent/jamsesh-pdftext";
+  try {
+    const spec = "../src/attachments?nohelper"; // a fresh copy of the module, so its helper lookup runs again
+    const mod = (await import(spec)) as typeof import("../src/attachments");
+    expect(await mod.pdfText("/tmp/anything.pdf")).toBe("");
+  } finally {
+    if (saved) process.env.JAMSESH_PDFTEXT = saved;
+  }
+});
+
+test("an upload for an agent comes from that agent's own credential: a named agent that isn't theirs is refused", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const cred = r.hub.auth.issue({ kind: "agent", label: "Agents", ip: "10.0.0.4", personId: r.chey.id, ownerDeviceId: "host" });
+    const mine = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/web", cwd: "/x", machine: r.hub.auth.machineOf(cred.device.id)!, platform: "desktop" }).agent;
+    const other = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "a/ios", cwd: "/y", machine: "felipe-mac", platform: "mobile" }).agent;
+    const person = r.hub.auth.issue({ kind: "browser", label: "L", ip: "10.0.0.5", personId: r.chey.id });
+    const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    const post = (token: string, agent?: string) => {
+      const form = new FormData();
+      form.set("file", new File([png], "s.png", { type: "image/png" }));
+      if (agent) form.set("agent", agent);
+      return fetch(`http://127.0.0.1:${server.port}/api/upload`, { method: "POST", headers: { authorization: `Bearer ${token}`, "x-forwarded-for": "10.0.0.4" }, body: form });
+    };
+    expect((await post(cred.token, mine.id)).status).toBe(200);
+    expect((await post(cred.token, other.id)).status).toBe(403);
+    expect((await post(cred.token, "agent_nope")).status).toBe(403);
+    expect((await post(person.token, mine.id)).status).toBe(403);
+    expect((await post(person.token)).status).toBe(200);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("Send delivers exactly the files the card showed, and a card never shows more than a message can carry", () => {
+  const r = room();
+  const att = (n: number) => ({ id: `att_${n}`, name: `f${n}.txt`, type: "text/plain", kind: "text" as const, size: 5 });
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const lines = [0, 1, 2].map((n) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: `line ${n}`, relevance: "work", data: { attachments: [att(90 + n)] } }));
+  // Eight files offered on one proposal: the card holds six.
+  const card = r.s.proposeTask({ text: "Build the page from the files", mode: "implement", targets: [agent.id], by: "Chey", sourceEventIds: lines.map((l) => l.id), attachments: [1, 2, 3, 4, 5, 6, 7, 8].map(att) })!;
+  expect(card.attachments).toHaveLength(6);
+  const sent = r.s.board.send(card.id, "Chey");
+  expect(sent.ok).toBe(true);
+  const d = r.s.directives()[0];
+  expect(d.attachments?.map((a) => a.id)).toEqual(card.attachments!.map((a) => a.id));
+  // Files that came on other lines of the source aren't added behind the person's back.
+  expect(d.attachments?.some((a) => a.id.startsWith("att_9"))).toBe(false);
+});
+
+test("each snapshot has a directory of its own, and a failed canvas copy never leaves an earlier save's canvas beside the new context", async () => {
+  const r = room();
+  const canvasCopy = async (dest: string) => (writeFileSync(dest, "an earlier canvas"), true);
+  r.hub.canvas.saveCopy = canvasCopy;
+  const first = (await r.hub.autosave.save("same minute", {}))!;
+  expect(existsSync(join(first.dir, "canvas.figcraft"))).toBe(true);
+  (r.hub.canvas as any).hostStarted = true;
+  r.hub.canvas.saveCopy = async () => false;
+  const second = (await r.hub.autosave.save("same minute", {}))!;
+  expect(second.dir).not.toBe(first.dir);
+  expect(second.canvasFailed).toBe(true);
+  expect(existsSync(join(second.dir, "canvas.figcraft"))).toBe(false);
+  const listed = r.hub.autosave.list();
+  expect(listed.map((s) => s.label)).toEqual(["same minute", "same minute"]);
+  expect(listed.find((s) => s.id === second.id)!.canvas).toBe(false);
+  expect(readdirSync(join(first.dir, "..")).some((d) => d.startsWith(".staging-"))).toBe(false);
 });
