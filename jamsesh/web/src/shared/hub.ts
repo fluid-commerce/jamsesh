@@ -145,6 +145,8 @@ class HubClient {
       this.missed = 0;
       this.touch();
       this.lastRecv = Date.now();
+      // Whatever HTTP asked before this connection is older than the state it is about to send.
+      this.taken = ++this.seq;
       this.set({ epoch: this.snap.epoch + 1 });
       this.status("connected");
       this.startHeartbeat();
@@ -276,10 +278,23 @@ class HubClient {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  /** Every state source takes the next number: an HTTP request, a new connection, and every socket message that can change what is held (a state, or any patch or event once there is a state). An HTTP answer is applied only if nothing has been applied since its request started, so a late answer never overwrites newer room updates. */
+  private seq = 0;
+  private taken = 0;
+
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
+    const n = ++this.seq;
     const state = await api<HubState>("/state");
-    this.set({ state });
+    if (n < this.taken) return;
+    this.taken = n;
+    this.adopt(state);
+  }
+
+  /** Takes a full state, from the socket or from HTTP. Another room (this window outlived a relay restart into a new one): its purge ids and live indicators mean nothing here. */
+  private adopt(state: HubState) {
+    const s = this.snap.state;
+    this.set(s && s.session?.roomId !== state.session?.roomId ? { state, removed: [], thinking: null, speaking: null, levels: {}, toasts: [], clockSynced: false, clockOffset: 0 } : { state });
   }
 
   /** Host time now, for stamping audio. */
@@ -289,6 +304,7 @@ class HubClient {
 
   private handle(m: BusMessage | { type: "pong"; t: number; now: number }) {
     const s = this.snap.state;
+    if (m.type === "state" || (m.type !== "pong" && s)) this.taken = ++this.seq;
     switch (m.type) {
       case "pong": {
         const t1 = Date.now();
@@ -301,7 +317,7 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
-        return this.set({ state: m.state });
+        return this.adopt(m.state);
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });
         return;

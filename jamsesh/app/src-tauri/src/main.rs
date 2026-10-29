@@ -489,10 +489,56 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
             (false, true) => ("Codex on this Mac is", "it"),
             (false, false) => ("Your agents on this Mac are", "them"),
         };
-        Ok(format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in."))
+        let mut msg = format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in.");
+        let old = old_block_notices(&String::from_utf8_lossy(&out.stderr));
+        if !old.is_empty() {
+            msg.push_str(&format!("\n\nOne more step: an earlier JamSesh left instructions that can still make a chat join the room by itself. Delete them:\n{}", old.join("\n")));
+        }
+        Ok(msg)
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         Err(format!("Setup didn't finish: {}", err.lines().last().unwrap_or("unknown error")))
+    }
+}
+
+/// Held while the agent setup runs; taking it fails if another run holds it.
+struct SetupGuard;
+static SETUP_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+impl SetupGuard {
+    fn take() -> Option<SetupGuard> {
+        (!SETUP_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(SetupGuard)
+    }
+}
+impl Drop for SetupGuard {
+    fn drop(&mut self) {
+        SETUP_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The setup's notices about the block an earlier JamSesh wrote into an instruction file (file, lines,
+/// what to delete), taken from its stderr. Any other stderr line is not shown.
+fn old_block_notices(stderr: &str) -> Vec<String> {
+    stderr.lines().filter(|l| l.starts_with("JamSesh: ") && l.contains(" still has the block an earlier JamSesh wrote")).map(str::to_string).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::old_block_notices;
+
+    #[test]
+    fn only_one_setup_at_a_time() {
+        let first = super::SetupGuard::take();
+        assert!(first.is_some());
+        assert!(super::SetupGuard::take().is_none());
+        drop(first);
+        assert!(super::SetupGuard::take().is_some());
+    }
+
+    #[test]
+    fn keeps_only_the_old_block_notices() {
+        let err = "some warning\nJamSesh: /Users/a/.claude/CLAUDE.md still has the block an earlier JamSesh wrote (lines 4-9). Delete them.\nJamSesh: other\n";
+        assert_eq!(old_block_notices(err), vec!["JamSesh: /Users/a/.claude/CLAUDE.md still has the block an earlier JamSesh wrote (lines 4-9). Delete them."]);
+        assert!(old_block_notices("").is_empty());
     }
 }
 
@@ -708,12 +754,17 @@ fn on_menu(app: &AppHandle, id: &str) {
             }
             "screens" => screens::open_setup(&app),
             "agents" => {
-                let result = set_up_agents(&app, &state).await;
-                let (kind, title, text) = match result {
-                    Ok(t) => (MessageDialogKind::Info, "Agents connected", t),
-                    Err(t) => (MessageDialogKind::Warning, "Couldn't set up your agents", t),
-                };
-                app.dialog().message(text).title(title).kind(kind).show(|_| {});
+                // One setup at a time: a second would race the first over the same files.
+                if let Some(_running) = SetupGuard::take() {
+                    let result = set_up_agents(&app, &state).await;
+                    let (kind, title, text) = match result {
+                        Ok(t) => (MessageDialogKind::Info, "Agents connected", t),
+                        Err(t) => (MessageDialogKind::Warning, "Couldn't set up your agents", t),
+                    };
+                    app.dialog().message(text).title(title).kind(kind).show(|_| {});
+                } else {
+                    app.dialog().message("Agent setup is already running. Wait for it to finish.").title("Setup is running").kind(MessageDialogKind::Info).show(|_| {});
+                }
             }
             // The windows' own M shortcut, so muting works from the menu bar without finding the window.
             "mute" | "muteroom" => {

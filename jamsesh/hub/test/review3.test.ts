@@ -9,7 +9,6 @@ import { Hub } from "../src/hub";
 import { originOf, startHttp } from "../src/http";
 import { joinScript } from "../src/install-scripts";
 import { AGENT_OFFLINE_MS, TASK_OFFER_MS, TASK_STALE_MS } from "../src/session";
-import { hooksOf } from "./hooks";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-review3-"));
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
@@ -167,5 +166,4 @@ test("two targets going quiet in the same tick both keep their nudge, then both 
   expect(offers()).toBe(2);
   s.tick(t0 + TASK_STALE_MS + TASK_OFFER_MS + 6000);
   expect(offers()).toBe(2);
-  void hooksOf;
 });

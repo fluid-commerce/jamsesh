@@ -1,9 +1,9 @@
 // Runs the real /agent/setup.sh against a throwaway home folder: finding agent CLIs that aren't on
 // PATH, never wiping a settings file it can't parse, and failing when no agent was set up.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Hub } from "../src/hub";
 import { OLD_BLOCKS, agentGuide, hookScript, joinScript } from "../src/install-scripts";
 
@@ -13,6 +13,8 @@ let people = 0;
 /** The name the host knows this computer's person by (the room controls it); null: /api/me fails. */
 let meName: string | null = "Chey";
 const HOOK_OK = "#!/usr/bin/env bash\nexit 0\n";
+/** What the fake host serves as skill.md (null: an error). */
+let skillBody: string | null = "# JamSesh skill\n";
 /** What the fake host serves as hook.sh (null: an error). */
 let hookBody: string | null = HOOK_OK;
 /** The credential each request to the fake host carried. */
@@ -25,7 +27,7 @@ beforeAll(() => {
       const path = new URL(req.url).pathname;
       auths.push(req.headers.get("authorization") ?? "");
       if (path === "/hook.sh") return hookBody === null ? new Response("down", { status: 503 }) : new Response(hookBody);
-      if (path === "/skill.md") return new Response("# JamSesh skill\n");
+      if (path === "/skill.md") return skillBody === null ? new Response("down", { status: 503 }) : new Response(skillBody);
       if (path === "/launcher.md") return new Response("# JamSesh launcher\n");
       if (path === "/api/me") return meName === null ? new Response("down", { status: 503 }) : Response.json({ person: { id: "p_1", name: meName } });
       if (path === "/api/people") return (people++, Response.json({ ok: true }));
@@ -46,15 +48,38 @@ function sandbox() {
   return { home, bin, log: join(root, "cli.log") };
 }
 
-function stubCli(path: string, log: string) {
+/**
+ * A CLI that logs its arguments and keeps the "jamsesh" MCP entry where Claude Code does, in the sandbox's
+ * ~/.claude.json: `mcp add-json` stores it, `mcp remove` deletes it, `mcp get` succeeds only while it is there.
+ * Marker files next to the log make it refuse: `.refuse-add` (an `add-json` call whose arguments contain its
+ * text fails; empty refuses all), `.refuse-remove` and `.refuse-get`.
+ */
+function stubCli(path: string, log: string, opts: { refuseAdd?: string; refuseRemove?: boolean; refuseGet?: boolean } = {}) {
   mkdirSync(join(path, ".."), { recursive: true });
-  writeFileSync(path, `#!/bin/sh\necho "$0 $*" >> "${log}"\n`);
+  const cfg = join(dirname(log), "home/.claude.json");
+  if (opts.refuseAdd !== undefined) writeFileSync(`${log}.refuse-add`, opts.refuseAdd);
+  if (opts.refuseRemove) writeFileSync(`${log}.refuse-remove`, "");
+  if (opts.refuseGet) writeFileSync(`${log}.refuse-get`, "");
+  const edit = (code: string) => `perl -MJSON::PP -e 'my ($cfg, $arg) = @ARGV; my $d = -f $cfg ? decode_json(do { local $/; open my $f, "<", $cfg or exit 1; <$f> }) : {}; ${code}; open my $o, ">", $cfg or exit 1; print $o encode_json($d)' "${cfg}"`;
+  writeFileSync(
+    path,
+    `#!/bin/sh
+echo "$0 $*" >> "${log}"
+for last; do :; done
+case "$*" in
+  *"mcp remove"*) [ -e "${log}.refuse-remove" ] && exit 1; [ -f "${cfg}" ] && ${edit("delete $d->{mcpServers}{jamsesh}")}; exit 0 ;;
+  *"add-json"*) if [ -e "${log}.refuse-add" ]; then pat="$(cat "${log}.refuse-add")"; case "$*" in *"$pat"*) exit 1 ;; esac; fi; ${edit("$d->{mcpServers}{jamsesh} = decode_json($arg)")} "$last"; exit $? ;;
+  *"mcp get"*) [ -e "${log}.refuse-get" ] && exit 1; [ -f "${cfg}" ] && perl -MJSON::PP -0777 -ne 'exit(decode_json($_)->{mcpServers}{jamsesh} ? 0 : 1)' "${cfg}"; exit $? ;;
+esac
+exit 0
+`,
+  );
   chmodSync(path, 0o755);
 }
 
-async function run(box: ReturnType<typeof sandbox>, name = "Felipe") {
+async function run(box: ReturnType<typeof sandbox>, name = "Felipe", extra: Record<string, string> = {}) {
   const proc = Bun.spawn(["/bin/bash", "-c", joinScript({} as Hub, origin, "tok")], {
-    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: name, JAMSESH_CLI_DIRS: box.bin },
+    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: name, JAMSESH_CLI_DIRS: box.bin, ...extra },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -226,7 +251,7 @@ describe("agent setup script", () => {
     }
   });
 
-  test("Codex: replaces its earlier JamSesh server, and takes its old instructions block out", async () => {
+  test("Codex: replaces its earlier JamSesh server, and leaves its old instructions block for the person to delete", async () => {
     const box = sandbox();
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
@@ -241,8 +266,38 @@ describe("agent setup script", () => {
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`url = "${origin}/mcp"`);
     expect(toml).toContain('authorization = "Bearer tok"');
-    // Nothing of ours is left in the person's own instructions, and nothing of theirs is lost.
-    expect(readFileSync(agents, "utf8")).toBe("# Mine\n");
+    // The person's instructions are never edited, and the notice says which lines are the old block.
+    expect(readFileSync(agents, "utf8")).toBe(`# Mine\n\n${OLD_BLOCKS[0]}\n`);
+  });
+
+  test("Codex: a symlinked config.toml stays a link and its target is what changes", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    mkdirSync(join(box.home, "dotfiles"), { recursive: true });
+    const target = join(box.home, "dotfiles/codex.toml");
+    const link = join(box.home, ".codex/config.toml");
+    writeFileSync(target, 'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n');
+    symlinkSync(target, link);
+    for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(link)).toBe(target);
+    const toml = readFileSync(target, "utf8");
+    expect(toml).toContain('model = "gpt"');
+    expect(toml).not.toContain("http://old/mcp");
+    expect(toml).toContain(`url = "${origin}/mcp"`);
+    expect(readdirSync(join(box.home, "dotfiles"))).toEqual(["codex.toml"]);
+  });
+
+  test("Codex: a symlink to a config that doesn't exist yet is filled in, not replaced", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    mkdirSync(join(box.home, "dotfiles"), { recursive: true });
+    const target = join(box.home, "dotfiles/codex.toml");
+    const link = join(box.home, ".codex/config.toml");
+    symlinkSync(target, link);
+    expect((await run(box)).code).toBe(0);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, "utf8")).toContain(`url = "${origin}/mcp"`);
   });
 
   test("reinstalling never widens a file's mode, and tightens JamSesh's own credential files", async () => {
@@ -377,19 +432,466 @@ describe("agent setup script", () => {
     hookBody = HOOK_OK;
   });
 
-  test("if Claude Code won't take the new MCP entry, the earlier one is put back, without its token on a command line", async () => {
+  test("if Claude Code won't take the new MCP entry, the earlier one is put back, with none of its secrets on a command line", async () => {
     const box = sandbox();
-    // A claude that logs its arguments and refuses the new entry (the one for this host).
-    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
-    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headers: { Authorization: "Bearer old-secret", "X-Other": "1" } } } }));
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
+    const entry = { type: "http", url: "http://old-host:4747/mcp", headers: { Authorization: "Bearer old-secret", "X-Other": "x-secret" } };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: entry } }));
     const r = await run(box);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain("the earlier one was put back");
-    const log = readFileSync(box.log, "utf8").trim().split("\n");
-    const back = log.find((l) => l.includes("add-json") && l.includes("old-host"))!;
-    expect(back).toBeDefined();
-    expect(back).toContain(`"headersHelper":"${box.home}/.jamsesh/mcp-headers.sh"`);
-    expect(back).toContain('"X-Other":"1"');
-    expect(log.join("\n")).not.toContain("old-secret");
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh).toEqual(entry);
+    expect(readFileSync(box.log, "utf8")).not.toMatch(/old-secret|x-secret/);
+    expect(existsSync(join(box.home, ".jamsesh/mcp-headers.json"))).toBe(false);
   });
+
+  test("a failed reinstall puts the earlier room's credential back, so the earlier entry still signs in to it", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
+    writeFileSync(join(dir, "mcp-headers.sh"), `#!/bin/sh\nexec cat '${dir}/mcp-headers.json'\n`, { mode: 0o700 });
+    const entry = { type: "http", url: "http://old-host:4747/mcp", headersHelper: join(dir, "mcp-headers.sh") };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: entry } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("the earlier one was put back");
+    expect(readFileSync(join(dir, "mcp-headers.json"), "utf8")).toBe('{"authorization":"Bearer old-room"}');
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh).toEqual(entry);
+  });
+
+  test("if the earlier entry can't be put back, setup says so instead of claiming it was", async () => {
+    const box = sandbox();
+    // add-json is refused and leaves a folder where ~/.claude.json was, so no file can be renamed over it
+    // (a read-only home would do on a Mac, but not for root, which these tests may run as).
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) rm -f "$HOME/.claude.json"; mkdir "$HOME/.claude.json"; exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("couldn't put the jamsesh entry");
+    expect(r.stderr).toContain("couldn't put your earlier connection back completely");
+    expect(r.stderr).not.toContain("was put back");
+    expect(readdirSync(box.home).filter((f) => f.startsWith(".claude.jamsesh-"))).toEqual([]);
+  });
+
+  test("a failed first install leaves no credential behind, and a good one leaves no spare copies", async () => {
+    const failing = sandbox();
+    stubCli(join(failing.bin, "claude"), failing.log, { refuseAdd: "" });
+    expect((await run(failing)).code).not.toBe(0);
+    expect(existsSync(join(failing.home, ".jamsesh/mcp-headers.json"))).toBe(false);
+    const good = sandbox();
+    stubCli(join(good.bin, "claude"), good.log);
+    writeFileSync(join(good.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old/mcp", headers: { Authorization: "Bearer x" } } } }));
+    expect((await run(good)).code).toBe(0);
+    expect(readdirSync(join(good.home, ".jamsesh")).filter((f) => /\.prev$|rollback/.test(f))).toEqual([]);
+  });
+
+  /** A home with an earlier install for another host: its connection files, which a failed setup must leave exactly as they were. */
+  function earlierInstall(box: ReturnType<typeof sandbox>) {
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true });
+    const files = { "auth.header": "authorization: Bearer old-room\n", "client.env": "JAMSESH_HUB='http://old-host:4747'\nJAMSESH_NAME='Old'\nJAMSESH_ACTIVE=1\n", "hook.sh": "#!/usr/bin/env bash\n# old hook\n" };
+    for (const [f, body] of Object.entries(files)) writeFileSync(join(dir, f), body, { mode: f === "hook.sh" ? 0o755 : 0o600 });
+    return { dir, files };
+  }
+  const connectionIntact = (dir: string, files: Record<string, string>) => {
+    for (const [f, body] of Object.entries(files)) expect(readFileSync(join(dir, f), "utf8")).toBe(body);
+    expect(statSync(join(dir, "hook.sh")).mode & 0o777).toBe(0o755);
+    expect(readdirSync(dir).filter((f) => f.startsWith(".saved") || f.endsWith(".restore"))).toEqual([]);
+  };
+
+  test("a failed hook download leaves auth.header, client.env and hook.sh as they were", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const { dir, files } = earlierInstall(box);
+    hookBody = null;
+    try {
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      connectionIntact(dir, files);
+    } finally {
+      hookBody = HOOK_OK;
+    }
+  });
+
+  test("a refused MCP entry leaves auth.header, client.env and hook.sh as they were, so no file points at the new host", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
+    const { dir, files } = earlierInstall(box);
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    connectionIntact(dir, files);
+    expect(readFileSync(join(dir, "client.env"), "utf8")).not.toContain(origin);
+  });
+
+  test("a failed first install leaves none of the connection files; a good one keeps no token in client.env", async () => {
+    const failing = sandbox();
+    stubCli(join(failing.bin, "claude"), failing.log, { refuseAdd: "" });
+    expect((await run(failing)).code).not.toBe(0);
+    expect(readdirSync(join(failing.home, ".jamsesh")).filter((f) => ["auth.header", "client.env", "hook.sh"].includes(f) || f.startsWith(".saved"))).toEqual([]);
+    const good = sandbox();
+    stubCli(join(good.bin, "claude"), good.log);
+    expect((await run(good)).code).toBe(0);
+    expect(readFileSync(join(good.home, ".jamsesh/client.env"), "utf8")).not.toContain("tok");
+    expect(readdirSync(join(good.home, ".jamsesh")).filter((f) => f.startsWith(".saved"))).toEqual([]);
+  });
+
+  /** An earlier install for another host that still works: its MCP entry (credential in a helper), settings and Codex config. */
+  function earlierWholeInstall(box: ReturnType<typeof sandbox>) {
+    const earlier = earlierInstall(box);
+    const { dir } = earlier;
+    writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
+    writeFileSync(join(dir, "mcp-headers.sh"), `#!/bin/sh\nexec cat '${dir}/mcp-headers.json'\n`, { mode: 0o700 });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headersHelper: join(dir, "mcp-headers.sh") } } }));
+    mkdirSync(join(box.home, ".claude/skills/jamsesh"), { recursive: true });
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const extra = { ".claude/skills/jamsesh/SKILL.md": "old launcher\n", ".codex/config.toml": '[mcp_servers.jamsesh]\nurl = "http://old-host:4747/mcp"\n' };
+    for (const [f, body] of Object.entries(extra)) writeFileSync(join(box.home, f), body);
+    return { ...earlier, extra, mcp: { ...earlier.files, "mcp-headers.json": '{"authorization":"Bearer old-room"}' } };
+  }
+  /** A claude that records its arguments, keeps no state, and passes `mcp get`. */
+  const okClaude = (box: ReturnType<typeof sandbox>) => stubCli(join(box.bin, "claude"), box.log);
+  const earlierEntryBack = (box: ReturnType<typeof sandbox>) => {
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh.url).toBe("http://old-host:4747/mcp");
+    expect(readFileSync(box.log, "utf8")).not.toContain("old-host");
+  };
+
+  test("settings that won't parse, after the MCP entry is in, undo the whole install", async () => {
+    const box = sandbox();
+    okClaude(box);
+    const { dir, files, mcp, extra } = earlierWholeInstall(box);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    connectionIntact(dir, files);
+    for (const [f, body] of Object.entries(mcp)) expect(readFileSync(join(dir, f), "utf8")).toBe(body);
+    for (const [f, body] of Object.entries(extra)) expect(readFileSync(join(box.home, f), "utf8")).toBe(body);
+    expect(readFileSync(join(box.home, ".claude/settings.json"), "utf8")).toBe("{ not json");
+    earlierEntryBack(box);
+    expect(r.stdout).toContain("your earlier connection was put back");
+    expect(r.stderr.split("\n").at(-1)).toContain("isn't valid JSON");
+  });
+
+  test("a failing Codex step undoes the Claude Code step too, including the Codex config", async () => {
+    const box = sandbox();
+    okClaude(box);
+    const { dir, files, mcp, extra } = earlierWholeInstall(box);
+    skillBody = null;
+    try {
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      connectionIntact(dir, files);
+      for (const [f, body] of Object.entries(mcp)) expect(readFileSync(join(dir, f), "utf8")).toBe(body);
+      for (const [f, body] of Object.entries(extra)) expect(readFileSync(join(box.home, f), "utf8")).toBe(body);
+      expect(existsSync(join(box.home, ".claude/commands/jamsesh.md"))).toBe(false);
+      earlierEntryBack(box);
+    } finally {
+      skillBody = "# JamSesh skill\n";
+    }
+  });
+
+  test("a symlinked Codex config is put back at its target on failure, and stays a link", async () => {
+    const box = sandbox();
+    okClaude(box);
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const target = join(box.home, "dotfiles-config.toml");
+    writeFileSync(target, "model = \"x\"\n");
+    symlinkSync(target, join(box.home, ".codex/config.toml"));
+    skillBody = null;
+    try {
+      expect((await run(box)).code).not.toBe(0);
+    } finally {
+      skillBody = "# JamSesh skill\n";
+    }
+    expect(lstatSync(join(box.home, ".codex/config.toml")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe('model = "x"\n');
+  });
+
+  test("when no agent is installed nothing is left behind", async () => {
+    const box = sandbox();
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(readdirSync(join(box.home, ".jamsesh")).filter((f) => f !== "setup.lock")).toEqual([]);
+  });
+
+  test("a restore that fails is reported by path, keeps its saved copy and exits non-zero, without claiming success", async () => {
+    const box = sandbox();
+    okClaude(box);
+    const { dir } = earlierInstall(box);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    // A mv that lets the install put hook.sh in place but refuses the second time, when the rollback puts the earlier one back.
+    writeFileSync(join(box.bin, "mv"), `#!/bin/sh\nfor last; do :; done\ncase "$last" in */hook.sh) [ -e "${box.log}.mv" ] && exit 1; : > "${box.log}.mv" ;; esac\nexec /bin/mv "$@"\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(`${dir}/hook.sh`);
+    expect(r.stderr).toContain("couldn't put your earlier connection back completely");
+    expect(r.stderr).not.toContain("nothing was changed");
+    const saved = readdirSync(dir).filter((f) => f.startsWith(".saved"));
+    expect(saved).toHaveLength(1);
+    expect(readFileSync(join(dir, "auth.header"), "utf8")).toBe("authorization: Bearer old-room\n");
+    // No half-made temporary file is left beside it.
+    expect(readdirSync(dir).filter((f) => /^hook\.sh\./.test(f))).toEqual([]);
+  });
+
+  test("a file someone else changed while setup ran is left as it is and listed; the rest is put back", async () => {
+    const box = sandbox();
+    const dir = join(box.home, ".jamsesh");
+    const { files } = earlierInstall(box);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    writeFileSync(join(box.home, ".codex/config.toml"), "model = \"mine\"\n");
+    // While the MCP entry is being added, a person saves client.env and edits the Codex config (setup never reaches it).
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) echo theirs > "$HOME/.jamsesh/client.env"; echo 'model = "edited meanwhile"' > "$HOME/.codex/config.toml" ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("Changed by someone else while setup ran");
+    expect(r.stderr).toContain(`${dir}/client.env`);
+    expect(readFileSync(join(dir, "client.env"), "utf8")).toBe("theirs\n");
+    expect(readFileSync(join(dir, "auth.header"), "utf8")).toBe(files["auth.header"]);
+    expect(readFileSync(join(dir, "hook.sh"), "utf8")).toBe(files["hook.sh"]);
+    // Never written by setup, so never touched by its rollback.
+    expect(readFileSync(join(box.home, ".codex/config.toml"), "utf8")).toBe('model = "edited meanwhile"\n');
+  });
+
+  test("a rollback keeps what Claude Code wrote to ~/.claude.json meanwhile, and only puts the jamsesh key back", async () => {
+    const box = sandbox();
+    const entry = { type: "http", url: "http://old-host:4747/mcp" };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ numStartups: 1, mcpServers: { jamsesh: entry } }));
+    // The add is refused, but Claude Code (the stub) saved its own settings in the same file first.
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"mcp remove"*|*"add-json"*) perl -MJSON::PP -e 'my $c = "$ENV{HOME}/.claude.json"; open my $f, "<", $c; local $/; my $d = decode_json(<$f>); delete $d->{mcpServers}{jamsesh}; $d->{numStartups} = 7; $d->{newKey} = "kept"; open my $o, ">", $c; print $o encode_json($d)' ;; esac\ncase "$*" in *"add-json"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("the earlier one was put back");
+    const after = JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8"));
+    expect(after).toEqual({ numStartups: 7, newKey: "kept", mcpServers: { jamsesh: entry } });
+  });
+
+  test("the entry is judged from the user-scope key in the file: another jamsesh entry elsewhere proves nothing", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
+    const project = { "/some/project": { mcpServers: { jamsesh: { type: "http", url: "http://project/mcp" } } } };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ projects: project }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    // There was no user-scope entry before; the CLI would have said one exists (the project's), the file says none does.
+    expect(r.stderr).toContain("none is registered");
+    const after = JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8"));
+    expect(after.mcpServers?.jamsesh).toBeUndefined();
+    expect(after.projects).toEqual(project);
+  });
+
+  test("an entry someone else set while setup ran is not overwritten by the rollback", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) perl -MJSON::PP -e 'my $c = "$ENV{HOME}/.claude.json"; open my $o, ">", $c; print $o encode_json({ mcpServers => { jamsesh => { type => "http", url => "http://theirs/mcp" } } })'; exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("was changed by someone else");
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh.url).toBe("http://theirs/mcp");
+  });
+
+  test("a link that leads to CLAUDE.md or AGENTS.md is never written through, and nothing else is left changed", async () => {
+    for (const [link, target] of [
+      [".claude/skills/jamsesh/SKILL.md", ".claude/CLAUDE.md"],
+      [".claude/commands/jamsesh.md", ".claude/CLAUDE.md"],
+      [".codex/prompts/jamsesh.md", ".codex/AGENTS.md"],
+      [".codex/skills/jamsesh/SKILL.md", ".codex/AGENTS.md"],
+    ]) {
+      const box = sandbox();
+      stubCli(join(box.bin, "claude"), box.log);
+      for (const d of [".claude/skills/jamsesh", ".claude/commands", ".codex/prompts", ".codex/skills/jamsesh"]) mkdirSync(join(box.home, d), { recursive: true });
+      writeFileSync(join(box.home, target), "my own rules\n");
+      symlinkSync(join(box.home, target), join(box.home, link));
+      const { dir, files } = earlierInstall(box);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("instruction file");
+      expect(readFileSync(join(box.home, target), "utf8")).toBe("my own rules\n");
+      expect(lstatSync(join(box.home, link)).isSymbolicLink()).toBe(true);
+      connectionIntact(dir, files);
+    }
+  }, 60_000);
+
+  test("a folder where setup would put a file is refused, and nothing is put inside it or left changed", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".claude/commands/jamsesh.md"), { recursive: true });
+    const { dir, files } = earlierInstall(box);
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("it is a folder");
+    expect(readdirSync(join(box.home, ".claude/commands/jamsesh.md"))).toEqual([]);
+    connectionIntact(dir, files);
+  });
+
+  test("a folder that took a written file's place by the rollback is left as it is and listed", async () => {
+    const box = sandbox();
+    const { dir } = earlierInstall(box);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) rm -f "$HOME/.jamsesh/client.env"; mkdir "$HOME/.jamsesh/client.env" ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(`Changed by someone else while setup ran, so not put back: ${dir}/client.env`);
+    expect(readdirSync(join(dir, "client.env"))).toEqual([]);
+  });
+
+  test("a ~/.claude.json that is a link to an instruction file is never written by the rollback", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    // Contrived so that it parses: the point is that the rollback's one edit of that file passes the guard.
+    const rules = join(box.home, ".claude/CLAUDE.md");
+    writeFileSync(rules, "{}");
+    symlinkSync(rules, join(box.home, ".claude.json"));
+    stubCli(join(box.bin, "claude"), box.log);
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("instruction file");
+    expect(r.stderr).toContain("couldn't put the jamsesh entry");
+    // What the CLI (the stub) wrote through the link is all that changed; setup's rollback didn't rewrite it.
+    expect(JSON.parse(readFileSync(rules, "utf8")).mcpServers.jamsesh.url).toBe(`${origin}/mcp`);
+    expect(lstatSync(join(box.home, ".claude.json")).isSymbolicLink()).toBe(true);
+  });
+
+  test("a setup lock that is a link is refused before anything is written", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const { dir, files } = earlierInstall(box);
+    symlinkSync(join(box.home, ".claude/CLAUDE.md"), join(dir, "setup.lock"));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("it is a link");
+    expect(existsSync(join(box.home, ".claude/CLAUDE.md"))).toBe(false);
+    connectionIntact(dir, files);
+  });
+
+  test("a link that leads outside the home folder is refused", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const outside = mkdtempSync(join(tmpdir(), "jamsesh-outside-"));
+    writeFileSync(join(outside, "x"), "keep\n");
+    mkdirSync(join(box.home, ".claude/commands"), { recursive: true });
+    symlinkSync(join(outside, "x"), join(box.home, ".claude/commands/jamsesh.md"));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("outside your home folder");
+    expect(readFileSync(join(outside, "x"), "utf8")).toBe("keep\n");
+  });
+
+  test("a symlinked settings file is replaced at its target, a link stays a link, and an unchanged file is not touched", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    const target = join(box.home, "dotfiles-settings.json");
+    writeFileSync(target, '{"theme":"dark"}');
+    symlinkSync(target, join(box.home, ".claude/settings.json"));
+    expect((await run(box)).code).toBe(0);
+    expect(lstatSync(join(box.home, ".claude/settings.json")).isSymbolicLink()).toBe(true);
+    expect(JSON.parse(readFileSync(target, "utf8")).theme).toBe("dark");
+    expect(JSON.parse(readFileSync(target, "utf8")).hooks).toBeDefined();
+  });
+
+  test("a first install that fails later has its entry removed again, read back from the file", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh).toBeUndefined();
+  });
+
+  test("an earlier entry with extra secret headers goes back whole, with none of them in any command", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
+    const entry = { type: "http", url: "http://old-host:4747/mcp/s3cret-path", headers: { Authorization: "Bearer a-secret", "X-Api-Key": "k-secret" } };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: entry } }));
+    expect((await run(box)).code).not.toBe(0);
+    expect(readFileSync(box.log, "utf8")).not.toMatch(/a-secret|k-secret|s3cret-path/);
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh).toEqual(entry);
+  });
+
+  test("an earlier entry whose secret is in env (or the address) is written back to Claude Code's config, never passed as an argument", async () => {
+    const box = sandbox();
+    const config = join(box.home, ".claude.json");
+    const entry = { type: "stdio", command: "old-jamsesh", args: ["--token", "arg-secret"], env: { TOKEN: "env-secret" } };
+    writeFileSync(config, JSON.stringify({ other: 1, mcpServers: { jamsesh: entry, keep: { type: "http", url: "http://keep/mcp" } } }), { mode: 0o600 });
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(readFileSync(box.log, "utf8")).not.toMatch(/env-secret|arg-secret/);
+    expect(r.stderr).not.toMatch(/env-secret|arg-secret/);
+    const after = JSON.parse(readFileSync(config, "utf8"));
+    expect(after.mcpServers.jamsesh).toEqual(entry);
+    expect(after.mcpServers.keep).toEqual({ type: "http", url: "http://keep/mcp" });
+    expect(after.other).toBe(1);
+    expect(statSync(config).mode & 0o777).toBe(0o600);
+    expect(r.stdout + r.stderr).toContain("put back");
+  });
+
+  /** A process that holds the setup lock until killed (the way a running setup does). */
+  async function holdLock(dir: string) {
+    mkdirSync(dir, { recursive: true });
+    const holder = Bun.spawn(["perl", "-MFcntl=:flock", "-e", '$| = 1; open(F, ">>", $ARGV[0]) or die; flock(F, LOCK_EX) or die; print "held\\n"; sleep 60', join(dir, "setup.lock")], { stdout: "pipe" });
+    const reader = holder.stdout.getReader();
+    await reader.read();
+    return holder;
+  }
+
+  test("a second setup waits, then says another is running, and leaves the first one's files alone", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const dir = join(box.home, ".jamsesh");
+    const holder = await holdLock(dir);
+    try {
+      writeFileSync(join(dir, "client.env"), "mine\n");
+      const r = await run(box, "Felipe", { JAMSESH_LOCK_WAIT: "1" });
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("Another JamSesh setup is running");
+      expect(readFileSync(join(dir, "client.env"), "utf8")).toBe("mine\n");
+      expect(readdirSync(dir).filter((f) => f.startsWith(".saved"))).toEqual([]);
+    } finally {
+      holder.kill();
+    }
+    // The holder is gone and so is its lock: the next setup just runs.
+    expect((await run(box)).code).toBe(0);
+  });
+
+  test("a lock file left by a run that died holds nothing, and a failed setup releases its lock too", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "setup.lock"), "999999\n");
+    expect((await run(box)).code).toBe(0);
+    hookBody = null;
+    try {
+      expect((await run(box)).code).not.toBe(0);
+    } finally {
+      hookBody = HOOK_OK;
+    }
+    expect((await run(box)).code).toBe(0);
+  });
+
+  test("two setups started at once against a stale lock never run at the same time, twenty times over", async () => {
+    // A setup's transaction is open from the moment its saved folder is made (just after the lock) until it
+    // is removed at the end. Every CLI call takes a moment and checks that its run's folder is the only one.
+    const marker = (box: ReturnType<typeof sandbox>) => {
+      writeFileSync(join(box.bin, "claude"), `#!/bin/sh\nn="$(ls -d "$HOME"/.jamsesh/.saved.* 2>/dev/null | wc -l)"\n[ "$n" -eq 1 ] || echo "overlap $n" >> "${box.log}.overlap"\nsleep 0.1\nexit 0\n`, { mode: 0o755 });
+    };
+    for (let i = 0; i < 20; i++) {
+      const box = sandbox();
+      marker(box);
+      mkdirSync(join(box.home, ".jamsesh"), { recursive: true });
+      writeFileSync(join(box.home, ".jamsesh/setup.lock"), "999999\n");
+      const [a, b] = await Promise.all([run(box), run(box)]);
+      expect([a.code, b.code]).toEqual([0, 0]);
+      expect(existsSync(`${box.log}.overlap`)).toBe(false);
+    }
+  }, 240_000);
 });
