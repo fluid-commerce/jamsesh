@@ -305,3 +305,18 @@ test("the same words from two laptops whose clocks are too far apart to group, t
   expect(r.lines()).toHaveLength(1);
   expect(copies(r)).toEqual(["lap-a", "lap-b"]);
 });
+
+test("a copy flushed so late its line's group is gone still joins that line (its devices), and isn't shown twice", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(50, [A(3), 1]), "Put the pricing page up.");
+  await r.pipeline.flush();
+  const first = r.lines()[0];
+  // The line's group has been let go (the keep window passed).
+  (r.pipeline as any).finalized = [];
+  await r.hear("lap-b", t0 + 200, mix(51, [A(3), 0.7]), "Put the pricing page up.");
+  await r.pipeline.flush();
+  expect(r.lines()).toHaveLength(1);
+  expect(r.lines()[0]).toMatchObject({ id: first.id, personId: first.personId, text: first.text });
+  expect(copies(r)).toEqual(["lap-a", "lap-b"]);
+});
