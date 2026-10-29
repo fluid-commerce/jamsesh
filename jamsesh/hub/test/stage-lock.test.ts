@@ -274,6 +274,8 @@ test("a finished variant set waits in the queue while a screen is locked", () =>
 
 test("a share doesn't take a screen someone else locked, and shows over its own sharer's", async () => {
   const { hub, s, chey, felipe } = room();
+  // No model: the placement's own fallback, not a network call that can outlast the test.
+  (s as any).gatewayKey = () => "";
   const a = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   const sh = s.startShare("felipe-laptop", "screen");
@@ -821,7 +823,7 @@ test("the owner's unrelated direct question doesn't clear their lock, but a requ
 
 // ---------- round 6: one consent gate for every unlock, and no stale screen targets ----------
 
-test("releaseLock is the one gate: the owner, the host's windows for the host's or nobody's lock, or a timely answer to the question", () => {
+test("releaseLock is the one gate: the owner, the host's windows for the host's or nobody's lock, or a timely answer to the question", async () => {
   const { s, chey, felipe } = room();
   const a = artifact(s, "Checkout");
   const lockAs = (p: { id: string | null; name: string }) => s.setStage({ mode: "spotlight", items: [a.id] }, p.name, "main", { person: p });
@@ -833,6 +835,7 @@ test("releaseLock is the one gate: the owner, the host's windows for the host's 
   // A yes with no question asked, or to a question about an earlier lock: no.
   expect(s.releaseLock("main", { answeredAt: Date.now() })).toBe(false);
   s.askedAboutLock("main");
+  await Bun.sleep(2);
   lockAs(chey);
   expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(false);
   expect(s.stage().lock?.by).toBe("Chey");
@@ -842,6 +845,7 @@ test("releaseLock is the one gate: the owner, the host's windows for the host's 
   expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(true);
   expect(s.stage().lock).toBeUndefined();
   lockAs(chey);
+  // The question was used up.
   expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(false);
   // The owner always can.
   expect(s.releaseLock("main", { owner: chey.id })).toBe(true);

@@ -295,7 +295,10 @@ projects (`~/.jamsesh/host` and the `host-YYYY-MM-DD-HHMM` archives) are copied 
 from each session's name, same names together. Nothing is moved or deleted: each database is copied
 privately and written out with `VACUUM INTO`, its event and document counts are compared with the
 copy (a mismatch removes the copy and is recorded), and the originals stay where they were. What
-happened is written to `projects/.migration.json`, and the migration doesn't run again. The old
+happened is written to `projects/.migration.json`, and the migration doesn't run again. One start
+migrates at a time: it holds an exclusive SQLite transaction on `projects/.migration-lock.db` (an
+advisory lock the system lets go when its holder exits or dies), and another start waits up to a
+minute, then fails rather than go on with unfinished projects. The old
 live session becomes `last-session` in its project, so opening that project the same day continues it.
 
 ## 4. Setup, pairing, and remote access
@@ -1313,7 +1316,13 @@ history strip brings the earlier one back. A restore from the strip is the excep
 off (409) while someone else holds the screen. Housekeeping (a share ending, a timer) is never held
 back. Brain stages are not locked.
 
-A person's lock stays until they unlock it, however long they talk through it. It also lets go when
+A person's lock stays until they unlock it, however long they talk through it. **Unlock** is shown
+to the lock's owner and goes through one check in the hub, whoever asks: the owner's own window (by
+its credential, never a name in the request), the host's own windows for a lock held by no one in
+particular or by the person at the host, or, through the brain, the owner telling JamSesh to unlock
+or replace it, or anyone's plain yes said after the brain's question about that very lock and within
+3 minutes (the owner's bare "yes" counts only that way). A screen named in a request that isn't
+connected any more is refused (404), never taken to mean the main screen. It also lets go when
 its owner is removed or has no live window for 10 minutes (a 30-second sweep applies it). A lock held
 by no one in particular (the host before anyone picked who they are) lets go after 20 minutes
 untouched. An agent's only way in is the 5-minute question below.
@@ -1364,7 +1373,9 @@ top. People's apps show the earlier ones as a strip of chips that bring one back
     changes the big screen.
   - **Expand:** every tile of a multi-tile stage (board, spotlight, compare, parity, layout) has
     **Expand** in its header, on the big screen and in the Screen tab. The stage's `expanded` field
-    holds the tile key (an artifact id, or `t<n>` for a layout's nth tile); `POST /api/stage/expand
+    holds the tile key (an artifact id, or `t<n>` for a layout's nth tile). Only the hub makes keys:
+    the state's `stageTiles` lists each screen's tiles in drawing order (sent again whenever a stage
+    or the artifacts change), and windows draw from it; `POST /api/stage/expand
     {tile, screen?}` sets it (tile null collapses). The tile fills the presentation area, the others
     become a strip of thumbnails along the right edge (bottom on tall areas), and **Collapse**
     returns. On a phone, a chip per tile under the mirror does the same (Collapse first). The room
