@@ -280,11 +280,13 @@ export function migrateLegacy(home: string, waitMs = 60_000): MigrationRecord[] 
   const root = projectsDir(home);
   mkdirSync(root, { recursive: true });
   const lock = join(root, MIGRATION_LOCK);
+  // Who holds it: this process and this attempt, so releasing never removes another start's lock.
+  const mine = `${process.pid} ${crypto.randomUUID()}`;
   const until = Date.now() + waitMs;
   for (;;) {
     try {
       const fd = openSync(lock, "wx");
-      writeSync(fd, String(process.pid));
+      writeSync(fd, mine);
       closeSync(fd);
       break;
     } catch (e) {
@@ -301,18 +303,22 @@ export function migrateLegacy(home: string, waitMs = 60_000): MigrationRecord[] 
   try {
     return migrateNow(home);
   } finally {
-    rmSync(lock, { force: true });
+    try {
+      if (readFileSync(lock, "utf8") === mine) rmSync(lock, { force: true });
+    } catch {}
   }
 }
 
 const MIGRATION_LOCK = ".migration.lock";
 
-/** A lock left by a process that's gone (or one far older than any migration takes). */
+/**
+ * A lock left by a process that's gone. A live holder keeps it however long its migration takes (a
+ * start that can't wait that long leaves the work to it). With no process id in it, it was being written,
+ * or its writer died before finishing: abandoned once that's been a few seconds.
+ */
 function lockAbandoned(lock: string) {
   try {
-    if (Date.now() - statSync(lock).mtimeMs > 10 * 60_000) return true;
-    const pid = Number(readFileSync(lock, "utf8"));
-    // Being written right now: not abandoned yet.
+    const pid = Number.parseInt(readFileSync(lock, "utf8"), 10);
     if (!pid) return Date.now() - statSync(lock).mtimeMs > 5_000;
     process.kill(pid, 0);
     return false;

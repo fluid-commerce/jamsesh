@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config, enterProject } from "./config";
-import { Hub } from "./hub";
+import { Hub, sharedOnce } from "./hub";
 import { startHttp } from "./http";
 import { advertise, stopAdvertising } from "./bonjour";
 import { readWindowLinks } from "./auth";
@@ -99,10 +99,9 @@ function openBigScreen(url: string) {
   else Bun.spawn(["open", url]);
 }
 
-let stopping = false;
-const shutdown = async () => {
-  if (stopping) return process.exit(0);
-  stopping = true;
+// A second signal (or the parent app vanishing mid-save) waits for the first shutdown's result:
+// it never exits early, or reports a save as finished before it is.
+const shutdown = sharedOnce(async () => {
   console.log("Saving the session…");
   stopAdvertising();
   const complete = await hub.shutdown();
@@ -111,7 +110,7 @@ const shutdown = async () => {
   // 0: everything was saved. 3: a save failed or ran out of time (the Mac app says the save is incomplete).
   if (!complete) console.error("The session's final save didn't finish.");
   process.exit(complete ? 0 : 3);
-};
+});
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 

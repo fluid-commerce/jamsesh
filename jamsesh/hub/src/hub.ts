@@ -66,6 +66,12 @@ export interface HubOptions {
 
 const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)>/;
 
+/** `fn` runs once; every call, including those made while it runs, gets that one run's result. */
+export function sharedOnce<T>(fn: () => Promise<T>): () => Promise<T> {
+  let run: Promise<T> | null = null;
+  return () => (run ??= fn());
+}
+
 export class Hub {
   store: Store;
   session: Session;
