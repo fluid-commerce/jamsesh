@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// What a device may carry, as the hub checks it (hub/src/audio/voiceprint.ts).
 const DIM: usize = 256;
 const MAX_SAMPLES: usize = 32;
+const KEY_MAX: usize = 200;
 
 static LOCK: Mutex<()> = Mutex::new(());
 static WRITES: AtomicU64 = AtomicU64::new(0);
@@ -53,7 +54,7 @@ pub struct Kept {
     pub me: String,
     pub consent: Option<bool>,
     pub copy: Option<Copy>,
-    /// Hosts (by host id) the person said Share or Not this room to.
+    /// Hosts (by the address the app reached them at, with the id they gave) the person said Share or Not this room to.
     #[serde(default)]
     pub hosts: BTreeMap<String, bool>,
 }
@@ -126,7 +127,7 @@ pub fn set_consent(dir: &Path, on: bool) -> Result<(), String> {
 }
 
 /// Keeps a copy, only for someone who said yes (checked under the lock, so a "no" can't be overtaken).
-pub fn put(dir: &Path, copy: Copy) -> Result<(), String> {
+fn put_now(dir: &Path, copy: Copy) -> Result<(), String> {
     check(&copy)?;
     change(dir, |k| {
         if k.consent != Some(true) {
@@ -137,12 +138,74 @@ pub fn put(dir: &Path, copy: Copy) -> Result<(), String> {
     })
 }
 
+/// A copy a host's page brought, to keep in place of the app's own. The page is the host's code, so
+/// this is a host's say and not the person's: it's kept only for a host the person trusted with their
+/// voice (said Share, or Keep, to it), and the first time `ask` puts the question in a native dialog.
+pub async fn put<F, Fut>(dir: &Path, host_key: &str, copy: Copy, ask: F) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    if host_key.is_empty() || host_key.len() > KEY_MAX {
+        return Err("This host didn't say who it is.".into());
+    }
+    check(&copy)?;
+    let kept = load(dir);
+    if kept.consent != Some(true) {
+        return Err("Keeping your voice in the app is off.".into());
+    }
+    match kept.hosts.get(host_key) {
+        Some(true) => {}
+        Some(false) => return Err("You said not this room.".into()),
+        None => {
+            let answer = ask().await;
+            change(dir, |k| {
+                if k.consent == Some(true) {
+                    k.hosts.insert(host_key.to_string(), answer);
+                }
+                Ok(())
+            })?;
+            if !answer {
+                return Err("You said not this room.".into());
+            }
+        }
+    }
+    put_now(dir, copy)
+}
+
 /// Their voice was reset on a host: the copy goes too (the choice stays), so it can't bring the old voice back.
-pub fn forget(dir: &Path) -> Result<(), String> {
+/// A host's page can ask, so this happens only when the person says yes in a native dialog.
+/// True when no copy is left.
+pub async fn forget<F, Fut>(dir: &Path, ask: F) -> Result<bool, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    if load(dir).copy.is_none() {
+        return Ok(true);
+    }
+    if !ask().await {
+        return Ok(false);
+    }
     change(dir, |k| {
         k.copy = None;
         Ok(())
-    })
+    })?;
+    Ok(true)
+}
+
+/// Their choice from a host's page. Yes only turns keeping on (a copy still needs a trusted host); turning it
+/// off erases the copy and every host's answer, so it happens only when the person says yes in a native dialog.
+pub async fn choose<F, Fut>(dir: &Path, on: bool, ask: F) -> Result<bool, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    if !on && load(dir).consent == Some(true) && !ask().await {
+        return Ok(false);
+    }
+    set_consent(dir, on)?;
+    Ok(true)
 }
 
 /// What a host's page may see of the copy: everything once the person said Share to this host, else
@@ -164,7 +227,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = bool>,
 {
-    if host_id.is_empty() || host_id.len() > 64 {
+    if host_id.is_empty() || host_id.len() > KEY_MAX {
         return Err("This host didn't say who it is.".into());
     }
     let kept = load(dir);
@@ -195,9 +258,20 @@ pub fn host_of(info: &str, fallback: &str) -> Option<(String, String)> {
     (!id.is_empty()).then(|| (id, name.chars().take(60).collect()))
 }
 
-/// The question, in the dialog's words.
-pub fn question(person: &str, room: &str) -> String {
-    format!("Share {person}'s voice with {room}? It's numbers that describe your voice, never a recording.")
+/// What a host is known by here: the address the app itself reached it at, with the id it says it has. A
+/// host can say any id, so an id another host used is a different key at a different address.
+pub fn host_key(address: &str, host_id: &str) -> String {
+    format!("{}#{}", address.trim(), host_id.trim()).chars().take(KEY_MAX).collect()
+}
+
+/// The question, in the dialog's words. The address is the app's, not the host's.
+pub fn question(person: &str, room: &str, address: &str) -> String {
+    format!("Share {person}'s voice with {room} ({address})? It's numbers that describe your voice, never a recording.")
+}
+
+/// Asked when a host's page brings a copy for the app to keep.
+pub fn keep_question(person: &str, room: &str, address: &str) -> String {
+    format!("Keep {person}'s voice from {room} ({address}) on this Mac, and let that host have it? It's numbers that describe your voice, never a recording.")
 }
 
 /// The window's person on the host it shows, from `/api/me` as the host answers it for this app's window:
@@ -246,22 +320,83 @@ mod tests {
     fn one_person_one_copy_kept_only_after_a_yes() {
         let d = dir();
         assert_eq!(load(&d), Kept::default());
-        assert!(put(&d, copy(2, 0.1)).is_err());
+        assert!(put_now(&d, copy(2, 0.1)).is_err());
         set_consent(&d, true).unwrap();
         let me = load(&d).me;
         assert_eq!(me.len(), 32);
-        put(&d, copy(2, 0.1)).unwrap();
+        put_now(&d, copy(2, 0.1)).unwrap();
         assert_eq!(load(&d).copy, Some(copy(2, 0.1)));
-        // The id is made once and kept.
         set_consent(&d, true).unwrap();
         assert_eq!(load(&d).me, me);
-        // A reset on a host takes the copy, not the choice.
-        forget(&d).unwrap();
+        let asked = std::cell::Cell::new(0);
+        assert!(block(forget(&d, stub(true, &asked))).unwrap());
         assert_eq!((load(&d).consent, load(&d).copy), (Some(true), None));
-        // No forgets the copy.
-        put(&d, copy(2, 0.1)).unwrap();
+        put_now(&d, copy(2, 0.1)).unwrap();
         set_consent(&d, false).unwrap();
         assert_eq!((load(&d).consent, load(&d).copy), (Some(false), None));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_hosts_page_cannot_erase_or_switch_off_without_the_person_saying_yes_in_the_dialog() {
+        let d = dir();
+        let asked = std::cell::Cell::new(0);
+        set_consent(&d, true).unwrap();
+        put_now(&d, copy(2, 0.1)).unwrap();
+        // Declined: the copy and the choice stay.
+        assert!(!block(forget(&d, stub(false, &asked))).unwrap());
+        assert!(!block(choose(&d, false, stub(false, &asked))).unwrap());
+        assert_eq!((load(&d).consent, load(&d).copy.is_some()), (Some(true), true));
+        assert_eq!(asked.get(), 2);
+        // Turning on is never a prompt; with nothing to delete, neither is forgetting.
+        assert!(block(choose(&d, true, stub(false, &asked))).unwrap());
+        assert_eq!(asked.get(), 2);
+        // Agreed: gone.
+        assert!(block(choose(&d, false, stub(true, &asked))).unwrap());
+        assert_eq!((load(&d).consent, load(&d).copy), (Some(false), None));
+        assert!(block(forget(&d, stub(false, &asked))).unwrap());
+        assert_eq!(asked.get(), 3);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_hosts_copy_is_kept_only_for_a_host_the_person_trusted() {
+        let d = dir();
+        let asked = std::cell::Cell::new(0);
+        // Keeping is off: no dialog, no copy.
+        assert!(block(put(&d, "10.0.0.2:4747#a", copy(2, 0.1), stub(true, &asked))).is_err());
+        assert_eq!(asked.get(), 0);
+        set_consent(&d, true).unwrap();
+        // A host the person declines never replaces anything, and isn't asked again.
+        assert!(block(put(&d, "evil:4747#a", copy(2, 0.9), stub(false, &asked))).is_err());
+        assert!(block(put(&d, "evil:4747#a", copy(2, 0.9), stub(true, &asked))).is_err());
+        assert_eq!((asked.get(), load(&d).copy), (1, None));
+        // A trusted host's copy is kept, and replaces the last one without another question.
+        block(put(&d, "10.0.0.2:4747#a", copy(2, 0.1), stub(true, &asked))).unwrap();
+        block(put(&d, "10.0.0.2:4747#a", copy(3, 0.2), stub(false, &asked))).unwrap();
+        assert_eq!((asked.get(), load(&d).copy), (2, Some(copy(3, 0.2))));
+        // The declined host still can't poison it.
+        assert!(block(put(&d, "evil:4747#a", copy(2, 0.9), stub(true, &asked))).is_err());
+        assert_eq!(load(&d).copy, Some(copy(3, 0.2)));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_id_another_host_used_is_not_the_same_host() {
+        let d = dir();
+        let asked = std::cell::Cell::new(0);
+        set_consent(&d, true).unwrap();
+        put_now(&d, copy(3, 0.1)).unwrap();
+        let a = host_key("10.0.0.2:4747", "same-id");
+        let b = host_key("evil.example", "same-id");
+        assert_ne!(a, b);
+        assert_eq!(block(share(&d, &a, stub(true, &asked))).unwrap(), Some(copy(3, 0.1)));
+        // The second host copied the first one's id and is asked as a stranger; the answer is no.
+        assert_eq!(block(share(&d, &b, stub(false, &asked))).unwrap(), None);
+        assert_eq!(asked.get(), 2);
+        assert!(for_page(load(&d), &b).copy.unwrap().samples.is_empty());
+        assert_eq!(for_page(load(&d), &a).copy.unwrap().samples.len(), 3);
+        assert!(question("Chey", "Review", "evil.example").contains("(evil.example)"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -271,7 +406,7 @@ mod tests {
         for _ in 0..40 {
             set_consent(&d, true).unwrap();
             let (a, b) = (d.clone(), d.clone());
-            let put_t = std::thread::spawn(move || put(&a, copy(3, 0.1)));
+            let put_t = std::thread::spawn(move || put_now(&a, copy(3, 0.1)));
             let off_t = std::thread::spawn(move || set_consent(&b, false));
             let put_r = put_t.join().unwrap();
             off_t.join().unwrap().unwrap();
@@ -320,7 +455,7 @@ mod tests {
         // Nothing kept yet: nothing to send, nobody asked.
         assert_eq!(block(share(&d, "hostA", stub(true, &asked))).unwrap(), None);
         set_consent(&d, true).unwrap();
-        put(&d, copy(3, 0.1)).unwrap();
+        put_now(&d, copy(3, 0.1)).unwrap();
         // Before any answer the page sees the copy's dates, not its samples.
         let seen = for_page(load(&d), "hostA");
         assert!(seen.copy.as_ref().unwrap().samples.is_empty());
@@ -348,8 +483,8 @@ mod tests {
         assert_eq!(host_of(r#"{"name":"","hostId":"ab12"}"#, "10.0.0.2:4747"), Some(("ab12".into(), "10.0.0.2:4747".into())));
         assert_eq!(host_of(r#"{"name":"Design review"}"#, "x"), None);
         assert_eq!(
-            question("Chey", "Design review"),
-            "Share Chey's voice with Design review? It's numbers that describe your voice, never a recording."
+            question("Chey", "Design review", "10.0.0.2:4747"),
+            "Share Chey's voice with Design review (10.0.0.2:4747)? It's numbers that describe your voice, never a recording."
         );
     }
 

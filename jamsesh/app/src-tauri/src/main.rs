@@ -931,22 +931,43 @@ async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Re
     Ok((name, port))
 }
 
-/// The host the window shows: its id and its room's name (else its address), as the host says.
-async fn voice_host(state: &App, port: u16) -> Result<(String, String), String> {
-    let fallback = {
+/// The host the window shows, as (the key its answers are kept under, its room's name, the address the app
+/// reached it at). The key and address are the app's own knowledge (this Mac, or the address it joined), with
+/// the id the host gave beside them: a host can claim any id, but not another host's address.
+async fn voice_host(state: &App, port: u16) -> Result<(String, String, String), String> {
+    let address = {
         let inner = state.inner.lock().await;
-        inner.cfg.host_url.clone().unwrap_or_else(|| "this host".into()).replace("https://", "").replace("http://", "")
+        if inner.hub.is_some() {
+            "this Mac".to_string()
+        } else {
+            let url = inner.cfg.host_url.clone().ok_or("This window isn't joined to a host.")?;
+            url.replace("https://", "").replace("http://", "").trim_end_matches('/').to_string()
+        }
     };
     let (status, info) = proxy::get_as_window(port, "/api/pair/info").await?;
-    voiceprints::host_of(&info, &fallback).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())
+    let (id, room) = voiceprints::host_of(&info, &address).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())?;
+    Ok((voiceprints::host_key(&address, &id), room, address))
+}
+
+/// A yes or no in the app's own dialog: the person's say, which a host's page can ask for but not give.
+async fn confirm(app: AppHandle, title: &str, text: String, yes: &str, no: &str) -> bool {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .message(text)
+        .title(title)
+        .buttons(MessageDialogButtons::OkCancelCustom(yes.into(), no.into()))
+        .show(move |ok| {
+            let _ = tx.send(ok);
+        });
+    rx.await.unwrap_or(false)
 }
 
 /// The copy as this host's page may see it: without its samples until the person said Share to this host.
 #[tauri::command]
 async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
     let (_, port) = voice_owner(&window, &state, &person_id).await?;
-    let (host_id, _) = voice_host(&state, port).await?;
-    Ok(voiceprints::for_page(voiceprints::load(&state.dir), &host_id))
+    let (key, _, _) = voice_host(&state, port).await?;
+    Ok(voiceprints::for_page(voiceprints::load(&state.dir), &key))
 }
 
 /// The whole copy, to send to this host: asks the person the first time, in a native dialog.
@@ -958,39 +979,50 @@ async fn voiceprint_share(
     person_id: String,
 ) -> Result<Option<voiceprints::Copy>, String> {
     let (name, port) = voice_owner(&window, &state, &person_id).await?;
-    let (host_id, room) = voice_host(&state, port).await?;
-    let question = voiceprints::question(&name, &room);
-    let ask = || async move {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        app.dialog()
-            .message(question)
-            .title("Share your voice")
-            .buttons(MessageDialogButtons::OkCancelCustom("Share".into(), "Not this room".into()))
-            .show(move |yes| {
-                let _ = tx.send(yes);
-            });
-        rx.await.unwrap_or(false)
-    };
-    voiceprints::share(&state.dir, &host_id, ask).await
+    let (key, room, address) = voice_host(&state, port).await?;
+    let question = voiceprints::question(&name, &room, &address);
+    voiceprints::share(&state.dir, &key, || confirm(app, "Share your voice", question, "Share", "Not this room")).await
 }
 
+/// A copy this host's page brought for the app to keep. The host's code can ask, so a host the person hasn't
+/// trusted with their voice is put to them in a native dialog first.
 #[tauri::command]
-async fn voiceprint_put(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, copy: voiceprints::Copy) -> Result<(), String> {
-    voice_owner(&window, &state, &person_id).await?;
-    voiceprints::put(&state.dir, copy)
+async fn voiceprint_put(
+    app: AppHandle,
+    window: tauri::Window,
+    state: State<'_, Arc<App>>,
+    person_id: String,
+    copy: voiceprints::Copy,
+) -> Result<(), String> {
+    let (name, port) = voice_owner(&window, &state, &person_id).await?;
+    let (key, room, address) = voice_host(&state, port).await?;
+    let question = voiceprints::keep_question(&name, &room, &address);
+    voiceprints::put(&state.dir, &key, copy, || confirm(app, "Keep your voice", question, "Keep", "Not this room")).await
 }
 
+/// Their yes or no to keeping their voice in the app. A no erases it, so it needs the person's yes in a native dialog.
 #[tauri::command]
-async fn voiceprint_consent(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
+async fn voiceprint_consent(app: AppHandle, window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
     voice_owner(&window, &state, &person_id).await?;
-    voiceprints::set_consent(&state.dir, on)
+    let text = "Stop keeping your voice in this app? The copy on this Mac is deleted, and every host will be asked again.".to_string();
+    if voiceprints::choose(&state.dir, on, || confirm(app, "Forget your voice", text, "Delete it", "Keep it")).await? {
+        Ok(())
+    } else {
+        Err("You kept your voice in the app.".into())
+    }
 }
 
 /// The person reset their voice on a host: the app's copy goes too, so it can't bring the old voice back.
+/// Deleting needs the person's yes in a native dialog.
 #[tauri::command]
-async fn voiceprint_forget(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<(), String> {
+async fn voiceprint_forget(app: AppHandle, window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<(), String> {
     voice_owner(&window, &state, &person_id).await?;
-    voiceprints::forget(&state.dir)
+    let text = "Delete the copy of your voice this app keeps on this Mac? A host asked, usually because you reset your voice there.".to_string();
+    if voiceprints::forget(&state.dir, || confirm(app, "Delete your voice copy", text, "Delete it", "Keep it")).await? {
+        Ok(())
+    } else {
+        Err("You kept the copy on this Mac.".into())
+    }
 }
 
 /// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
