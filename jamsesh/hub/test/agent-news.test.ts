@@ -152,7 +152,7 @@ test("fixes in any wording never become parity checks, even with a 'seen'", asyn
 
 test("a second inbox read with a parity check pending still asks for the comparison first", () => {
   const { hub, s, desktop, mobile } = room();
-  s.createDirective({ text: "Parity check, not a build task: compare the sidebar with desktop.", mode: "coordinate", targets: [mobile.id], requestedBy: "JamSesh", rationale: "Parity" });
+  s.createDirective({ text: "Parity check, not a build task: compare the sidebar with desktop.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "Parity" });
   s.createDirective({ text: "Add the footer", mode: "implement", targets: [mobile.id], requestedBy: "Jonathan", rationale: "" });
   hub.mcp.inboxText(mobile); // reads (and marks) them
   const again = hub.mcp.inboxText(mobile);
@@ -163,7 +163,6 @@ test("a second inbox read with a parity check pending still asks for the compari
   s2.createDirective({ text: "Add the footer", mode: "implement", targets: [m2.id], requestedBy: "Jonathan", rationale: "" });
   h2.mcp.inboxText(m2);
   expect(h2.mcp.inboxText(m2)).toContain("don't wait for others to reply first");
-  void desktop;
 });
 
 test("no coordination without an app on another platform in the room", async () => {
@@ -358,9 +357,9 @@ test("an inline jam_ask answered with the directive id counts as the exchange", 
 });
 
 test("a coordinate directive can always be dropped, and other modes close on jam_update as before", async () => {
-  const { hub, s, mobile } = room();
+  const { hub, s, desktop, mobile } = room();
   const ctx = { agentId: mobile.id, ip: "127.0.0.1", device: "host" };
-  const c = s.createDirective({ text: "Parity check: compare.", mode: "coordinate", targets: [mobile.id], requestedBy: "JamSesh", rationale: "" });
+  const c = s.createDirective({ text: "Parity check: compare.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
   await hub.mcp.call(ctx, "jam_ack", { directiveId: c.id, status: "cancelled", result: "nobody answers" });
   expect(s.store.get("directives", c.id)!.status).toBe("cancelled");
   const i = s.createDirective({ text: "Add the footer", mode: "implement", targets: [mobile.id], requestedBy: "Jonathan", rationale: "" });
@@ -433,4 +432,44 @@ test("an answer counts only when jam_answer carries the directiveId, and the inb
   await hub.mcp.call({ agentId: desktop.id, ip: "127.0.0.1", device: "host" }, "jam_answer", { askId: ask2, text: "yes", directiveId: d.id });
   await q2.answer;
   expect(gap()).toBeNull();
+});
+
+test("a coordinate directive must name a counterpart in the room, however it is made", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const make = (counterparts?: string[], targets = [mobile.id]) => () => s.createDirective({ text: "Parity check", mode: "coordinate", targets, ...(counterparts ? { counterparts } : {}), requestedBy: "JamSesh", rationale: "" });
+  // The session refuses one with nobody, only the target itself, or only agents that aren't here.
+  for (const c of [undefined, [], [mobile.id], ["a_gone"]]) expect(make(c)).toThrow("has to name the agent(s) to compare with");
+  // Two targets compare with each other, but each needs someone other than itself.
+  expect(make([mobile.id], [mobile.id, desktop.id])).toThrow("has to name");
+  expect(s.directives()).toHaveLength(0);
+  // Only agents in the room are kept, once each.
+  const d = make([desktop.id, desktop.id, "a_gone"])();
+  expect(d.counterparts).toEqual([desktop.id]);
+  expect(hub.mcp.inboxText(mobile)).toContain(`compare with: ${desktop.name}`);
+  // The brain's generic tool: one target and no counterparts is refused; given counterparts or two targets, it goes.
+  const tools: any = hub.brain.tools([], { effects: 0 });
+  const create = (i: object) => tools.create_directive.execute({ mode: "coordinate", text: "Compare the onboarding flows", rationale: "parity", ...i }, { toolCallId: "t", messages: [] });
+  const refused = await create({ targets: [mobile.id] });
+  expect(String(refused?.text ?? refused)).toContain("needs another agent to compare with");
+  expect(String(await create({ targets: [mobile.id], counterparts: ["a_gone"] }))).toContain("needs another agent");
+  expect(s.directives()).toHaveLength(1);
+  await create({ targets: [mobile.id], counterparts: [desktop.id], text: "Compare the settings screens" });
+  expect(s.directives()[0].counterparts).toEqual([mobile.id, desktop.id]);
+  await create({ targets: [mobile.id, desktop.id], text: "Compare the empty states" });
+  expect(s.directives()[0].counterparts?.slice().sort()).toEqual([desktop.id, mobile.id].sort());
+});
+
+test("an older coordinate directive that names nobody can't be completed by talking to anyone, only dropped", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const ctx = (a: any) => ({ agentId: a.id, ip: "127.0.0.1", device: "host" });
+  // Stored before counterparts were required: nothing is inferred from who it talked to.
+  const d = { ...s.createDirective({ text: "Parity check", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" }) };
+  delete (d as any).counterparts;
+  s.store.put("directives", d);
+  await hub.mcp.call(ctx(mobile), "jam_message", { to: desktop.name, text: "Ours has it", directiveId: d.id });
+  await hub.mcp.call(ctx(desktop), "jam_message", { to: mobile.name, text: "Ours too", directiveId: d.id });
+  expect(s.exchangeGap(s.store.get("directives", d.id)!, mobile.id)).toContain("names nobody to compare with");
+  await expect(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" })).rejects.toThrow("names nobody");
+  await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "cancelled", result: "no counterpart" });
+  expect(s.store.get("directives", d.id)!.status).toBe("cancelled");
 });

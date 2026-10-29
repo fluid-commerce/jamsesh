@@ -871,7 +871,7 @@ export class Brain {
     if (kind === "question" || kind === "blocked") {
       // The room already sees a toast and the feed entry; the brain adds an answer when the record has one.
       void this.consider(
-        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) is ${kind === "blocked" ? "blocked" : "asking the room"}: ${text}\nThe room already sees this in the feed. If the room's decisions, knowledge or an earlier line answer it, send an 'answer' directive to ${agent.name} (id ${agent.id}). If another agent is better placed to unblock it, send that agent a 'coordinate' directive. Otherwise call no_action and leave it for a person.`,
+        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) is ${kind === "blocked" ? "blocked" : "asking the room"}: ${text}\nThe room already sees this in the feed. If the room's decisions, knowledge or an earlier line answer it, send an 'answer' directive to ${agent.name} (id ${agent.id}). If another agent is better placed to unblock it, send that agent a 'coordinate' directive with counterparts ["${agent.id}"]. Otherwise call no_action and leave it for a person.`,
       );
       return;
     }

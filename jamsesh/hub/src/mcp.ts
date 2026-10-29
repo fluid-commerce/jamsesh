@@ -741,8 +741,10 @@ export class McpEndpoint {
     }
     const out: string[] = [];
     for (const d of directives) {
+      // A comparison names who with (only those count toward finishing it), whatever its text says.
+      const mates = (d.counterparts ?? []).filter((c) => c !== agent.id).map((c) => s.agent(c)?.name).filter(Boolean);
       out.push(
-        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
+        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}${d.mode === "coordinate" && mates.length ? `\n  compare with: ${mates.join(", ")}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
     for (const m of messages) {

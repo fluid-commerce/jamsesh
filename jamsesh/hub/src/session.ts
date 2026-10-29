@@ -581,11 +581,10 @@ export class Session {
     sourceEventIds?: number[];
     workstreamId?: string | null;
   }): Directive {
-    // A coordinate directive is a comparison, so it must name who with, whatever made it: each target needs a known counterpart other than itself.
-    if (d.mode === "coordinate") {
-      const known = (d.counterparts ?? []).filter((c) => this.agent(c));
-      if (!d.targets.length || d.targets.some((t) => !known.some((c) => c !== t))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
-    }
+    // Only agents in the room are kept as counterparts. A coordinate directive is a comparison, so it must
+    // name who with, whatever made it: each target needs a known counterpart other than itself.
+    const counterparts = [...new Set(d.counterparts ?? [])].filter((c) => this.agent(c));
+    if (d.mode === "coordinate" && (!d.targets.length || d.targets.some((t) => !counterparts.some((c) => c !== t)))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
     const directive: Directive = {
       id: newId("d"),
       ts: Date.now(),
@@ -593,7 +592,7 @@ export class Session {
       mode: d.mode,
       rationale: d.rationale ?? "",
       targets: d.targets,
-      ...(d.counterparts?.length ? { counterparts: d.counterparts } : {}),
+      ...(counterparts.length ? { counterparts } : {}),
       status: "pending",
       progress: Object.fromEntries(d.targets.map((t) => [t, "pending" as const])),
       priority: d.priority ?? 1,
