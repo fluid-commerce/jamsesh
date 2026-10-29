@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { encodeWav } from "../src/audio/wav";
+import { voiceprintStatus } from "../src/audio/voiceprint";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r7-"));
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
@@ -147,14 +148,99 @@ test("the start-order fence outlives the newer read: an older or equal start aft
   expect((await call(ude.token, "POST", `/people/${p.id}/voice/end`, { read: false, id: read })).status).toBe(200);
   expect((hub.audio as any).enrolling.get(p.id)).toBeUndefined();
   for (const seq of [1000, 2000, undefined, "x", null]) expect([seq, (await start(seq)).status]).toEqual([seq, 409]);
-  // Run out: still fenced.
+  // Later in the page's order: taken. Left open until its window runs out: an older start is still refused.
+  expect((await start(2001)).status).toBe(200);
   const realNow = Date.now;
   Date.now = () => realNow() + 10 * 60_000;
   try {
     expect((await start(1500)).status).toBe(409);
+    expect((await start(2002)).status).toBe(200);
   } finally {
     Date.now = realNow;
   }
-  // Later in the page's order: taken.
-  expect((await start(2001)).status).toBe(200);
+  // A window's first start needs a real number too: null, false, [], "5" are not 0 (a second credential of Ude's that
+  // has made no start yet, so only the seq can refuse it).
+  const second = hub.auth.issue({ kind: "browser", label: "Ude's other window", ip: "10.0.0.21", personId: p.id });
+  for (const seq of [null, false, [], "5", {}]) expect([seq, (await start(seq, second.token)).status]).toEqual([seq, 409]);
+  expect((await start(0, second.token)).status).toBe(200);
+});
+
+test("a request whose credential is disconnected while its body is on its way acts as disconnected: it can't start a read over the new laptop's", async () => {
+  const p = hub.session.upsertPerson({ name: "Vic" });
+  const old = browser("Vic's old laptop");
+  expect((await call(old.token, "POST", "/devices", { deviceId: "d-vic-old", personId: p.id })).status).toBe(200);
+  // The old laptop's start: headers sent, body held.
+  let send!: (s: string) => void;
+  const held = new ReadableStream<Uint8Array>({ start: (c) => void (send = (s) => (c.enqueue(new TextEncoder().encode(s)), c.close())) });
+  const late = fetch(`${base}/api/people/${p.id}/voice/start`, { method: "POST", headers: { ...remote, authorization: `Bearer ${old.token}` }, body: held, duplex: "half" } as RequestInit);
+  await Bun.sleep(50);
+  // Meanwhile: a new laptop asks to be Vic, the host lets it in (disconnecting the old one), and it starts reading.
+  const fresh = browser("Vic's new laptop");
+  expect((await call(fresh.token, "POST", "/devices", { deviceId: "d-vic-new", personId: p.id })).status).toBe(403);
+  expect((await asHostWindow("POST", `/paired/${fresh.device.id}/allow`, { personId: p.id })).status).toBe(200);
+  expect(hub.auth.get(old.device.id)).toBeNull();
+  const started = await call(fresh.token, "POST", `/people/${p.id}/voice/start`, { seq: 10 });
+  expect(started.status).toBe(200);
+  const read = (await started.json()).read;
+  send(JSON.stringify({ seq: 9e15 }));
+  expect((await late).status).toBe(401);
+  expect((hub.audio as any).enrolling.get(p.id)).toMatchObject({ read, open: true });
+});
+
+
+// ---- an adopted late copy is never its line's voice, through the hub's correction and Reset (review round 5)
+
+const RATE = 16000;
+const buzz = (pitch: number, rate: number, gain: number, seed: number) => {
+  const out = new Float32Array(RATE * 3);
+  let r = seed;
+  for (let i = 0; i < out.length; i++) {
+    const t = i / RATE;
+    out[i] = gain * 0.3 * Math.max(0, Math.sin(2 * Math.PI * rate * t)) ** 2 * (Math.sin(2 * Math.PI * pitch * t) + 0.5 * Math.sin(2 * Math.PI * 2 * pitch * t)) + 0.002 * (((r = (r * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) - 0.5);
+  }
+  return encodeWav({ sampleRate: RATE, samples: out });
+};
+
+test.skipIf(!voiceprintStatus().available)("a correction or Reset after a late copy was adopted uses the line's own voice sample, never the adopted copy's", async () => {
+  const pipeline = hub.audio as any;
+  pipeline.transcriber = { transcribe: async () => ({ text: "Ship the header change today.", engine: "stub" }) };
+  const ivo = hub.session.upsertPerson({ name: "Ivo" });
+  const jun = hub.session.upsertPerson({ name: "Jun" });
+  for (const id of ["d-adopt-a", "d-adopt-b"]) hub.session.touchDevice(id, { label: id, micOn: true, location: "room", kind: "client" });
+  hub.session.touchDevice("d-adopt-a", { personId: ivo.id });
+  const taught: Float32Array[] = [];
+  const add = hub.audio.voiceprints.add.bind(hub.audio.voiceprints);
+  hub.audio.voiceprints.add = ((pid: string, e: Float32Array, kind: any, at: number) => (pid === jun.id && taught.push(e), add(pid, e, kind, at))) as any;
+  const line = async (t0: number) => {
+    await hub.audio.ingest({ deviceId: "d-adopt-a", t0, t1: t0 + 3000, wav: buzz(140, 3.5, 1, t0 % 97) });
+    await hub.audio.flush();
+    const u = hub.session.store.all("utterances").find((x) => x.t0 === t0)!;
+    const own = [...(hub.session.store.event(u.eventId!)!.data.embedding as number[])];
+    // Its group is let go; a much later copy (the same voice, so the line takes it) is adopted by the line. Its sample
+    // is then made unlike the line's: whatever a correction teaches can be told apart.
+    pipeline.finalized = [];
+    await hub.audio.ingest({ deviceId: "d-adopt-b", t0: t0 + 200, t1: t0 + 3200, wav: buzz(140, 3.5, 0.7, t0 % 89) });
+    await hub.audio.flush();
+    const g = pipeline.finalized.find((x: any) => x.adopted && x.utteranceId === u.id);
+    expect(g).toBeDefined();
+    for (const seg of g.segments) seg.embedding = Float32Array.from(own, (x, i) => (i % 2 ? -x : x));
+    return { u, own };
+  };
+  try {
+    const t0 = Date.now() - 60_000;
+    // After Ivo's Reset scrubbed his line's sample, a correction teaches nobody: the adopted copy doesn't stand in.
+    const b = await line(t0);
+    expect(b.u.personId).toBe(ivo.id);
+    hub.resetVoice(ivo.id);
+    const r = hub.audio.assign(b.u.id, jun.id, { host: true, personId: null });
+    expect(r.learning.learned).toBe(false);
+    expect(taught).toHaveLength(0);
+    // Correction by the host: Jun is taught the line's own sample, not the adopted copy's.
+    const a = await line(t0 + 10_000);
+    hub.audio.assign(a.u.id, jun.id, { host: true, personId: null });
+    expect(taught).toHaveLength(1);
+    expect([...taught[0]]).toEqual(a.own.map((x) => Math.fround(x)));
+  } finally {
+    hub.audio.voiceprints.add = add as any;
+  }
 });

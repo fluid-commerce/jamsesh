@@ -351,7 +351,7 @@ test("after a pruned line takes a late copy, still later copies join it too: one
   }
 });
 
-test("an adopted late copy never stands in for its line's voice: a correction teaches the line's own sample, or nothing after a Reset", async () => {
+test("an adopted late copy is never its line's voice sample (voiceOf, voiceFor): the line's event sample is, or none once it is scrubbed", async () => {
   const r = room(["lap-a", "lap-b"]);
   const t0 = t();
   await r.hear("lap-a", t0, mix(55, [A(3), 1]), "Put the pricing page up.");

@@ -396,10 +396,14 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   return md(agentGuide(origin, r.token));
 }
 
-async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
+async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE" ? await readBody(req) : null;
+  // The credential is read again after the body arrived: one disconnected (or changed) while its request was
+  // on its way acts as it is now, never as it was when the request began.
+  const paired = pairedAtStart ? hub.auth.get(pairedAtStart.id) : null;
+  if (pairedAtStart && !paired) return new Response(JSON.stringify({ error: "This device was disconnected." }), { status: 401, headers: { "content-type": "application/json" } });
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
@@ -537,7 +541,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
     // Its id goes with its end and its recording: only this read is closed or taken by them.
     // The window's place in its own order of starts (`seq`); a credential's starts are fenced per credential.
-    const read = hub.audio.beginEnrolment(m[1], { window: hostWindow ? "host" : paired?.id ?? "local", seq: Number(body?.seq) });
+    // Only a JSON number counts as a place in the order (Number(null), Number(false), Number([]) are 0).
+    const seq = typeof body?.seq === "number" ? body.seq : NaN;
+    const read = hub.audio.beginEnrolment(m[1], { window: hostWindow ? "host" : paired?.id ?? "local", seq });
     if (!read) return bad("A newer read has already started.", 409);
     return json({ ok: true, epoch: s.store.voiceEpoch(), read });
   }
