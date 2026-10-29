@@ -411,3 +411,149 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
   expect(await Promise.race([child.exited, Bun.sleep(5000).then(() => "still running")])).toBe(0);
   delete process.env.JAMSESH_PARAKEET_DIR;
 }, 60_000);
+
+// ---- the host's whisper.cpp: bundled server, model downloaded once ----
+
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { findWhisperServer, findWhisperModel, LocalWhisper, WHISPER_MODEL } from "../src/audio/whisper";
+
+const freePort = () => {
+  const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+  const p = s.port as number;
+  s.stop(true);
+  return p;
+};
+
+/** A stand-in whisper-server: a script that answers on --port like the real one. */
+function fakeWhisperServer(where: string) {
+  mkdirSync(where, { recursive: true });
+  const file = join(where, "whisper-server");
+  writeFileSync(
+    file,
+    `#!/usr/bin/env bun
+const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+const model = process.argv[process.argv.indexOf("-m") + 1];
+Bun.serve({ hostname: "127.0.0.1", port, fetch: (r) => new URL(r.url).pathname === "/inference" ? Response.json({ text: "Shay used " + model.split("/").pop() }) : new Response("whisper") });
+`,
+  );
+  chmodSync(file, 0o755);
+  return file;
+}
+
+function withEnv(vars: Record<string, string | undefined>) {
+  const old = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  return () => {
+    for (const [k, v] of Object.entries(old)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+  };
+}
+
+test("whisper-server is found in order: a chosen path, the app bundle, ~/.jamsesh/bin, then Homebrew", () => {
+  const root = join(dir, "find-bin");
+  const res = join(root, "res");
+  const restore = withEnv({ JAMSESH_RESOURCES: res, JAMSESH_WHISPER_SERVER: undefined });
+  try {
+    const brew = ["/opt/homebrew/bin/whisper-server", "/usr/local/bin/whisper-server"].find((p) => existsSync(p)) ?? null;
+    expect(findWhisperServer()).toBe(brew);
+    const own = fakeWhisperServer(join(config.home, "bin"));
+    expect(findWhisperServer()).toBe(own);
+    const bundled = fakeWhisperServer(join(res, "bin"));
+    expect(findWhisperServer()).toBe(bundled);
+    process.env.JAMSESH_WHISPER_SERVER = own;
+    expect(findWhisperServer()).toBe(own);
+  } finally {
+    restore();
+    rmSync(join(config.home, "bin"), { recursive: true, force: true });
+  }
+});
+
+test("the model is found in order: a chosen file, ~/.jamsesh/models, then ~/.cache/whisper-cpp", () => {
+  const home = join(dir, "find-model-home");
+  const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined });
+  try {
+    expect(findWhisperModel()).toBeNull();
+    const cache = join(home, ".cache", "whisper-cpp");
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, "ggml-base.en.bin"), "x");
+    expect(findWhisperModel()).toBe(join(cache, "ggml-base.en.bin"));
+    writeFileSync(join(cache, "ggml-large-v3-turbo-q5_0.bin"), "x");
+    expect(findWhisperModel()).toBe(join(cache, "ggml-large-v3-turbo-q5_0.bin"));
+    mkdirSync(join(config.home, "models"), { recursive: true });
+    const own = join(config.home, "models", WHISPER_MODEL.name);
+    writeFileSync(own, "x");
+    expect(findWhisperModel()).toBe(own);
+    process.env.JAMSESH_WHISPER_MODEL = join(cache, "ggml-base.en.bin");
+    expect(findWhisperModel()).toBe(join(cache, "ggml-base.en.bin"));
+  } finally {
+    restore();
+    rmSync(join(config.home, "models"), { recursive: true, force: true });
+  }
+});
+
+test("first host session: the gateway covers the room while the model downloads, then whisper takes over", () => online(async () => {
+  const home = join(dir, "first-session-home");
+  const port = freePort();
+  const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "first-bin")), JAMSESH_WHISPER_PORT: String(port) });
+  const body = new TextEncoder().encode("a small stand-in for the model");
+  const pinned = { sha256: WHISPER_MODEL.sha256, bytes: WHISPER_MODEL.bytes };
+  Object.assign(WHISPER_MODEL, { sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"), bytes: body.length });
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  const real = globalThis.fetch;
+  const asked: string[] = [];
+  globalThis.fetch = (async (url: any, init?: any) => (String(url) === WHISPER_MODEL.url ? (asked.push(String(url)), await held, new Response(body)) : real(url, init))) as typeof fetch;
+  const hub = room();
+  hub.session.updateSettings({ gatewayKey: "test-key" });
+  (hub.transcriber as any).cloud = async () => "Shay from the cloud";
+  try {
+    expect(await hub.transcriber.startLocal()).toBe(false);
+    for (let i = 0; i < 50 && hub.transcriber.whisper.status().state !== "downloading"; i++) await Bun.sleep(20);
+    expect(hub.transcriber.whisper.status()).toMatchObject({ state: "downloading", progress: 0 });
+    expect(hub.transcriber.problem()).toBeNull();
+    expect((await hub.transcriber.transcribe(clip, 2)).engine).toBe("gateway");
+    release();
+    for (let i = 0; i < 100 && !engines(hub).has("local"); i++) await Bun.sleep(50);
+    expect(asked).toEqual([WHISPER_MODEL.url]);
+    expect(hub.transcriber.whisper.status()).toMatchObject({ state: "ready", installed: true });
+    expect(readdirSync(join(config.home, "models"))).toEqual([WHISPER_MODEL.name]);
+    expect(await hub.transcriber.transcribe(clip, 2)).toEqual({ text: `Chey used ${WHISPER_MODEL.name}`, engine: "host whisper.cpp" });
+  } finally {
+    hub.stop();
+    globalThis.fetch = real;
+    Object.assign(WHISPER_MODEL, pinned);
+    restore();
+    rmSync(join(config.home, "models"), { recursive: true, force: true });
+  }
+  await Bun.sleep(200);
+  expect(await fetch(`http://127.0.0.1:${port}/`).catch(() => null)).toBeNull();
+}));
+
+test("a model download that fails its checksum leaves nothing, and offline never downloads", () => online(async () => {
+  const restore = withEnv({ HOME: join(dir, "bad-home"), JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "bad-bin")) });
+  const real = globalThis.fetch;
+  const asked: string[] = [];
+  globalThis.fetch = (async (url: any, init?: any) => (String(url) === WHISPER_MODEL.url ? (asked.push(String(url)), new Response("tampered")) : real(url, init))) as typeof fetch;
+  try {
+    const w = new LocalWhisper();
+    expect(await w.start(freePort(), true)).toBeNull();
+    expect(w.status()).toMatchObject({ state: "failed", detail: "The speech model download didn't match its checksum.", installed: false });
+    const models = join(config.home, "models");
+    expect(existsSync(models) ? readdirSync(models) : []).toEqual([]);
+    const offline = new LocalWhisper();
+    expect(await offline.start(freePort(), false)).toBeNull();
+    expect(offline.status().state).toBe("missing");
+    expect(asked.length).toBe(1);
+  } finally {
+    globalThis.fetch = real;
+    restore();
+  }
+}));
+
+test("a whisper-server already answering on the port is used, and left running when the hub stops", async () => {
+  const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ text: "already here" }) });
+  servers.push(other);
+  const w = new LocalWhisper();
+  expect(await w.start(other.port as number, false)).toBe(`http://127.0.0.1:${other.port}`);
+  w.stop();
+  expect((await fetch(`http://127.0.0.1:${other.port}/`)).status).toBe(200);
+});

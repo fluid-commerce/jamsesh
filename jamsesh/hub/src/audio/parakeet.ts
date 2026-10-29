@@ -5,11 +5,13 @@
 // against a pinned hash. It runs in a child process (stt-server.ts): a decode never blocks the hub,
 // and its memory (about 2 GB) goes back when the hub stops.
 
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { stopHelper } from "../children";
 import { config } from "../config";
+import { downloadVerified, type ModelState, type ModelStatus } from "./models";
+
+export type { ModelState, ModelStatus };
 
 export const PARAKEET = {
   name: "parakeet-tdt-0.6b-v2-int8",
@@ -20,22 +22,6 @@ export const PARAKEET = {
   files: ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"],
   licence: "Model CC-BY-4.0 (NVIDIA), converted by sherpa-onnx (Apache-2.0)",
 };
-
-export type ModelState = "ready" | "starting" | "downloading" | "missing" | "failed" | "off";
-
-export interface ModelStatus {
-  engine: string;
-  state: ModelState;
-  /** A sentence for Settings and /engines: what it's doing, or why it isn't running. */
-  detail: string;
-  /** Download progress, 0 to 100, while downloading. */
-  progress: number | null;
-  sizeMb: number;
-  /** The model is on this machine. */
-  installed: boolean;
-  source: string;
-  licence: string;
-}
 
 const has = (dir: string) => PARAKEET.files.every((f) => existsSync(join(dir, f)));
 
@@ -100,22 +86,8 @@ export class Parakeet {
     const work = mkdtempSync(join(models, ".parakeet-"));
     try {
       this.set("downloading", `Downloading the speech model (${Math.round(PARAKEET.bytes / 1e6)} MB, once).`, 0);
-      const r = await fetch(PARAKEET.url, { redirect: "follow" });
-      if (!r.ok || !r.body) throw new Error(`Couldn't download the speech model: HTTP ${r.status}.`);
       const archive = join(work, "model.tar.bz2");
-      const out = Bun.file(archive).writer();
-      const hash = createHash("sha256");
-      let got = 0;
-      for await (const chunk of r.body) {
-        if (this.stopped) throw new Error("Stopped while downloading.");
-        hash.update(chunk);
-        out.write(chunk);
-        got += chunk.byteLength;
-        if (got > PARAKEET.bytes) throw new Error("The speech model download is larger than expected.");
-        this.progress = Math.floor((100 * got) / PARAKEET.bytes);
-      }
-      await out.end();
-      if (hash.digest("hex") !== PARAKEET.sha256) throw new Error("The speech model download didn't match its checksum.");
+      await downloadVerified(PARAKEET, archive, (pct) => (this.progress = pct), () => this.stopped);
       const tar = Bun.spawnSync(["tar", "-xjf", archive, "-C", work], { stdout: "ignore", stderr: "pipe" });
       if (tar.exitCode !== 0) throw new Error(`Couldn't unpack the speech model: ${tar.stderr.toString().trim().slice(0, 120)}`);
       const unpacked = join(work, `sherpa-onnx-nemo-${PARAKEET.name}`);

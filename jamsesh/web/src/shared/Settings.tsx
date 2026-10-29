@@ -151,11 +151,15 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             {engines && (
               <div className="chip" style={{ display: "block", whiteSpace: "normal" }}>
                 {engines.transcription.length ? engines.transcription.map((e) => `${e.label}${e.healthy ? "" : " (failing)"}`).join(" · ") : "No local engine; using the gateway."}
-                {engines.speechModel && !["ready", "off"].includes(engines.speechModel.state) && (
-                  <div style={{ color: engines.speechModel.state === "failed" ? "var(--warn)" : "var(--dim)", marginTop: 4 }}>
-                    {engines.speechModel.engine}: {engines.speechModel.detail}
-                    {engines.speechModel.progress !== null && ` ${engines.speechModel.progress}%`}
-                  </div>
+                {[engines.whisperModel, engines.speechModel].map(
+                  (m) =>
+                    m &&
+                    !["ready", "off"].includes(m.state) && (
+                      <div key={m.engine} style={{ color: m.state === "failed" ? "var(--warn)" : "var(--dim)", marginTop: 4 }}>
+                        {m.engine}: {m.detail}
+                        {m.progress !== null && ` ${m.progress}%`}
+                      </div>
+                    ),
                 )}
               </div>
             )}
@@ -413,9 +417,17 @@ function VoiceMatchingOff({ reason }: { reason: string }) {
   );
 }
 
+interface ModelStatus {
+  engine: string;
+  state: string;
+  detail: string;
+  progress: number | null;
+}
+
 interface Engines {
   transcription: { label: string; inflight: number; healthy: boolean }[];
-  speechModel?: { engine: string; state: string; detail: string; progress: number | null };
+  whisperModel?: ModelStatus;
+  speechModel?: ModelStatus;
   voiceprints: { available: boolean; reason: string; enrolled: number };
 }
 

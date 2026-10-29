@@ -8,6 +8,7 @@ import type { Session } from "../session";
 import { describeError, gateway } from "../brain/llm";
 import { brainNames } from "../names";
 import { Parakeet } from "./parakeet";
+import { LocalWhisper, ping, whisperPort } from "./whisper";
 import { buildVocabulary, correctTranscript, hotwords, promptWith, type VocabEntry } from "./vocabulary";
 
 interface Engine {
@@ -61,7 +62,7 @@ const RANK = { parakeet: 0, local: 1, worker: 2 };
 
 export class Transcriber {
   private engines = new Map<string, Engine>();
-  private localProc: ReturnType<typeof Bun.spawn> | null = null;
+  readonly whisper = new LocalWhisper();
   readonly parakeet = new Parakeet();
   /** Project terms beyond the session's own names (the brief's glossary); the hub sets this. */
   glossary: () => string[] = () => [];
@@ -85,10 +86,10 @@ export class Transcriber {
     const local = this.pool().length > 0;
     if (mode !== "gateway" && local) return null;
     if (mode !== "local" && gateway(this.session)) return null;
-    const model = this.parakeet.status();
-    if (model.state === "downloading" || model.state === "starting") return `Speech can't be turned into text yet: ${model.detail.replace(/\.$/, "")}${model.progress !== null ? ` (${model.progress}%)` : ""}.`;
+    const model = [this.whisper.status(), this.parakeet.status()].find((m) => m.state === "downloading" || m.state === "starting");
+    if (model) return `Speech can't be turned into text yet: ${model.detail.split(". ")[0].replace(/\.$/, "")}${model.progress !== null ? ` (${model.progress}%)` : ""}.`;
     return mode === "local"
-      ? `Speech can't be turned into text: no speech model is running on this host (${model.detail.replace(/\.$/, "")}). Let the gateway transcribe in Settings.`
+      ? `Speech can't be turned into text: no speech model is running on this host (${this.whisper.status().detail.replace(/\.$/, "")}). Let the gateway transcribe in Settings.`
       : `Speech can't be turned into text: no speech model is running on this host and no gateway key is set. Add a gateway key in Settings.`;
   }
 
@@ -150,23 +151,25 @@ export class Transcriber {
     this.session.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: reason, relevance: "work", data: { transcriptionProblem: true } });
   }
 
-  async startLocal(port = 8178) {
-    if (!config.whisperServerBin || !config.whisperModel) return false;
-    const url = `http://127.0.0.1:${port}`;
-    if (!(await ping(url))) {
-      this.localProc = Bun.spawn(
-        [config.whisperServerBin, "-m", config.whisperModel, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "auto"],
-        { stdout: "ignore", stderr: "ignore" },
-      );
-      for (let i = 0; i < 60 && !(await ping(url)); i++) await Bun.sleep(250);
-    }
-    if (!(await ping(url))) return false;
-    this.engines.set("local", { id: "local", label: "host whisper.cpp", kind: "local", url, inflight: 0, failures: 0, lastOk: Date.now() });
-    return true;
+  /**
+   * Starts the host's whisper.cpp, the default engine. With the model on this Mac it resolves once
+   * it's running; on the first host session it downloads the model in the background (never
+   * offline) and resolves false at once, while the gateway covers the room.
+   */
+  async startLocal(port = whisperPort()) {
+    const now = this.whisper.canStartNow() || (await ping(`http://127.0.0.1:${port}`));
+    const run = this.whisper.start(port, !config.offline).then((url) => {
+      console.log(`whisper: ${url ? "ready" : this.whisper.status().detail}`);
+      if (!url) return false;
+      this.engines.set("local", { id: "local", label: "host whisper.cpp", kind: "local", url, inflight: 0, failures: 0, lastOk: Date.now() });
+      this.trouble = null;
+      return true;
+    });
+    return now ? run : false;
   }
 
   stop() {
-    this.localProc?.kill();
+    this.whisper.stop();
     this.parakeet.stop();
   }
 
@@ -232,15 +235,6 @@ export class Transcriber {
     // Bounded, so a slow gateway can't hold a recorded prompt past its window.
     const r = await aiTranscribe({ abortSignal: AbortSignal.timeout(20_000), model: gw.transcription(this.session.settings().models.transcribe), audio: wav, providerOptions: { openai: { ...(lang === "auto" ? {} : { language: lang }), ...(prompt ? { prompt } : {}) } } });
     return r.text;
-  }
-}
-
-async function ping(url: string) {
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(800) });
-    return r.status < 500;
-  } catch {
-    return false;
   }
 }
 

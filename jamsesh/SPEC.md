@@ -126,7 +126,7 @@ the client.
 - Starts the hub as a child process: the bundled `jamsesh-hub` binary, or `bun run
   hub/src/index.ts` from a checkout. It reuses a healthy hub on 4747, 4848, or 4949, otherwise it
   takes the first free one. It waits up to 60 seconds for `/healthz`. The hub in turn starts
-  `figcraft-server` and, when installed, `whisper-server`. Quitting the app stops the hub
+  `figcraft-server` and `whisper-server`. Quitting the app stops the hub
   (`SIGTERM`, then kill after 10 seconds), which stops its children.
 - Opens the **big screen** at `/host`, full screen in its own display (same-Space full screen, so
   app windows the brain arranges can sit on top of it [A29c]). With one display it is there. With
@@ -185,11 +185,12 @@ the client.
   starts with `JAMSESH_DEVTOOLS=1`); then right-click > Inspect Element works in its windows. It's
   for finding out why a page froze.
 - Carries the whole host runtime: the hub compiled to one program, the web app, the WebAssembly
-  canvas, `figcraft-server` and `figcraft-cli`, the skill, the voiceprint library, and the
-  speaker-embedding model, so the host Mac needs nothing else [B29]. Speech-to-text runs on the Mac
-  when whisper.cpp and a model are installed (`brew install whisper-cpp`); otherwise it goes through
-  the gateway. The opt-in faster engine (Parakeet, see [9.3](#93-transcription)) downloads its model
-  only when the host turns it on. The room sees a notice if no engine is available [B28a].
+  canvas, `figcraft-server`, `figcraft-cli` and `whisper-server` (whisper.cpp, MIT), the skill, the
+  voiceprint library, and the speaker-embedding model, so the host Mac needs nothing else [B29].
+  Speech-to-text runs on the Mac with the bundled whisper-server; its model (574 MB) is downloaded
+  on a Mac's first host session while the gateway covers the room (see [9.3](#93-transcription)).
+  The opt-in faster engine (Parakeet) downloads its model only when the host turns it on. The room
+  sees a notice if no engine is available [B28a].
 - Advertises itself on the local network with Bonjour (`dns-sd -R <ComputerName> _jamsesh._tcp`,
   TXT `session=<name>` and `https=<public URL>` when remote access is on). The record carries no
   secret.
@@ -236,7 +237,7 @@ Developers can run the host from a checkout without the app:
 
 | Command | What it does |
 |---|---|
-| `./jamsesh/install.sh` | Builds the FigCraft binaries, the WebAssembly canvas, and the web app; installs whisper.cpp and its model and the speaker model; links `jamsesh` into `~/.local/bin`. |
+| `./jamsesh/install.sh` | Builds the FigCraft binaries, `whisper-server` (`app/build-whisper.sh`, needs cmake), the WebAssembly canvas, and the web app; fetches whisper's model and the speaker model; links `jamsesh` into `~/.local/bin`. |
 | `jamsesh host [--no-open] [--project NAME] [--new-session]` | Runs the hub (`JAMSESH_PORT`, default 4747) and opens the big screen in a full-screen Chrome app window, or reopens it if a hub is already running. `--project` opens (or creates) that project; with none it opens the project used last. `--new-session` skips today's session in it ([3.6](#36-projects)). |
 | `jamsesh join <host>` | Connects this computer's agents to a host (pairs with a code, then installs the agent setup). |
 | `jamsesh on` / `jamsesh off` | Turns this computer's agent hooks on or off. The MCP server stays registered. |
@@ -1128,8 +1129,20 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    from the hub, so it ends with the hub however the hub ends. English only: with another language,
    or `auto`, the whisper engines take over. `JAMSESH_PARAKEET=0` keeps it off;
    `JAMSESH_PARAKEET_DIR` points at a copy elsewhere.
-2. **Host whisper.cpp, the default** (`whisper-server` on `127.0.0.1:8178`), using a model already on
-   the Mac (large-v3-turbo, quantized, which `install.sh` downloads). In the synthetic bake-off
+2. **Host whisper.cpp, the default** (`whisper-server` on `127.0.0.1:8178`, or
+   `JAMSESH_WHISPER_PORT`; a server already answering there is used, and never stopped by the hub).
+   - **Server:** the app bundles `whisper-server` from whisper.cpp v1.8.4, built by
+     `app/build-whisper.sh` for arm64 with Metal (shaders embedded, ggml static, system libraries
+     only); `bundle-hub.sh` copies it from `~/.jamsesh/bin` like the FigCraft binaries. Found in
+     order: `JAMSESH_WHISPER_SERVER`, the app bundle, `~/.jamsesh/bin`, then Homebrew's.
+   - **Model:** ggml-large-v3-turbo-q5_0 (574 MB, MIT). Found in order: `JAMSESH_WHISPER_MODEL`,
+     `~/.jamsesh/models`, then `~/.cache/whisper-cpp` (large-v3-turbo, then medium.en, base.en).
+     With none, the hub downloads it on the first host session from Hugging Face
+     (`ggerganov/whisper.cpp`), checked against a pinned size and SHA-256 by the same code as
+     Parakeet's, into `~/.jamsesh/models`, with progress in Settings; the gateway covers the room
+     until it's running. Offline, nothing is downloaded.
+
+   In the synthetic bake-off
    ([docs/transcription-bakeoff.md](docs/transcription-bakeoff.md)) it had the lowest word error
    with the vocabulary prompt and the correction pass, at under half Parakeet's memory, in any
    language, and without inventing the room's words on silence. The office's bake-off with real
@@ -1158,7 +1171,7 @@ everyday word (the system word list decides; without one, only capitalized words
 a word that is itself in the vocabulary, or a near-miss that's equally close to two entries. So
 "share" never becomes "Chey" and "password" stays "password" with Passport in the room.
 
-`GET /api/engines` reports the engines, the faster engine's state (`off`, `downloading` with a
+`GET /api/engines` reports the engines, whisper's model state (`whisperModel`) and the faster engine's state (`off`, `downloading` with a
 percentage, `starting`, `ready`, `missing` when offline without the model, or `failed` with the
 reason), and the vocabulary.
 
@@ -1661,10 +1674,10 @@ it.
 
 JamSesh uses the computers in the room [B28]:
 
-- **Host:** speech-to-text (whisper.cpp, or Parakeet when the faster engine is on) and speaker
-  embeddings (sherpa-onnx) run locally [B28a]. The speaker model ships with the app; whisper's comes
-  from `brew install whisper-cpp` or `install.sh`; Parakeet's is downloaded when the host turns the
-  faster engine on (see [9.3](#93-transcription)). Without a local engine speech goes through the gateway.
+- **Host:** speech-to-text (the bundled whisper.cpp, or Parakeet when the faster engine is on) and
+  speaker embeddings (sherpa-onnx) run locally [B28a]. The speaker model ships with the app;
+  whisper's model is downloaded on the first host session and Parakeet's when the host turns the
+  faster engine on (see [9.3](#93-transcription)). Until a local engine runs, speech goes through the gateway.
 - **Clients:** a JamSesh for Mac client with spare capacity runs whisper.cpp and offers itself to
   the host as a transcription worker (`POST /api/workers`) [B28b].
 - **Brain:** the brain's language models run on the gateway, where the best model for each job is
@@ -1794,7 +1807,7 @@ in [`docs/spec-gaps.md`](docs/spec-gaps.md). Paths are under `jamsesh/` unless t
 | B25 | A gateway model parses directives and sends them to the agents handling that work | 8.3, 8.4 | `hub/src/brain/brain.ts` | Implemented |
 | B26 | Tested thoroughly and fully working | 16 | `hub/test/`, `web/test/`, `STATUS.md` | Partial |
 | B27 | Context is stored so an agent starting a new leg of work can refresh itself | 7.3, 7.4, 6.3 | `hub/src/brain/brain.ts`, `hub/src/mcp.ts`, `hub/src/hub.ts` | Implemented |
-| B28a | Local inference on the host | 9.3, 15 | `hub/src/audio/transcribe.ts`, `hub/src/audio/parakeet.ts`, `hub/src/audio/stt-server.ts`, `hub/src/audio/vocabulary.ts`, `hub/src/audio/voiceprint.ts`, `app/bundle-hub.sh` | Partial |
+| B28a | Local inference on the host | 9.3, 15 | `hub/src/audio/transcribe.ts`, `hub/src/audio/whisper.ts`, `hub/src/audio/models.ts`, `app/build-whisper.sh`, `hub/src/audio/parakeet.ts`, `hub/src/audio/stt-server.ts`, `hub/src/audio/vocabulary.ts`, `hub/src/audio/voiceprint.ts`, `app/bundle-hub.sh` | Partial |
 | B28b | Local inference on client machines | 9.3, 15 | `hub/src/http.ts` (`/api/workers` only) | Missing |
 | B29 | Installs on the Mac mini; everyone connects and it works | 3.2, 4 | `app/src-tauri/src/`, `app/bundle-hub.sh` | Implemented |
 | B30 | Agents check canvas mockups against the real design system, one to one | 6.7 | `skill/SKILL.md` | Implemented |

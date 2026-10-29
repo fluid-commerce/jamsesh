@@ -50,7 +50,8 @@ On an 18-second clip both whisper (Metal) and Parakeet (CPU, 4 threads) take 0.5
 ## Decision
 
 **whisper.cpp with the vocabulary prompt and the correction pass is the default host engine**
-(SPEC 9.3). It had the lowest word error here, uses under half Parakeet's memory (876 MB against
+(SPEC 9.3). The Mac app bundles `whisper-server` (whisper.cpp, MIT, arm64 with Metal) and
+downloads the model on a Mac's first host session, pinned by SHA-256, while the gateway covers the room. It had the lowest word error here, uses under half Parakeet's memory (876 MB against
 about 2 GB), needs no 482 MB download, works in any language, and doesn't invent the room's words on
 silence.
 

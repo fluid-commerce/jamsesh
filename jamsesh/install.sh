@@ -16,9 +16,10 @@ step "Checking tools"
 command -v cargo >/dev/null || { echo "Install Rust first: https://rustup.rs" >&2; exit 1; }
 command -v bun >/dev/null || { echo "Install Bun first: curl -fsSL https://bun.sh/install | bash" >&2; exit 1; }
 ok "cargo $(cargo --version | cut -d' ' -f2), bun $(bun --version)"
-if ! command -v whisper-server >/dev/null; then
-  if command -v brew >/dev/null; then brew install whisper-cpp >/dev/null && ok "Installed whisper-cpp"; else warn "No whisper-server: transcription will use the gateway"; fi
-else ok "whisper-server"; fi
+if [ -x "$HOME_DIR/bin/whisper-server" ]; then ok "whisper-server"
+elif command -v cmake >/dev/null && [ "$(uname -s)" = Darwin ]; then jamsesh/app/build-whisper.sh "$HOME_DIR/bin" >/dev/null && ok "Built whisper-server"
+elif command -v whisper-server >/dev/null; then ok "whisper-server (Homebrew)"
+else warn "No whisper-server (needs cmake to build): transcription will use the gateway"; fi
 
 step "Building FigCraft (server, CLI, desktop app)"
 cargo build --release -p figcraft-server -p figcraft-cli -p figcraft
