@@ -51,3 +51,12 @@ export async function downloadVerified(pin: Pinned, file: string, progress: (pct
   }
   if (got !== pin.bytes || hash.digest("hex") !== pin.sha256) throw new Error("The speech model download didn't match its checksum.");
 }
+
+/** Whether the file at `path` is exactly the pinned one: its size, then its SHA-256. */
+export async function fileMatches(pin: Pinned, path: string): Promise<boolean> {
+  const f = Bun.file(path);
+  if (f.size !== pin.bytes) return false;
+  const hash = createHash("sha256");
+  for await (const chunk of f.stream()) hash.update(chunk);
+  return hash.digest("hex") === pin.sha256;
+}

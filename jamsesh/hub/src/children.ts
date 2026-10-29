@@ -23,6 +23,31 @@ export function withParentWatch(cmd: string[], parentPid = process.pid): string[
   return ["/bin/sh", "-c", script, "jamsesh-child", String(parentPid), ...cmd];
 }
 
+/**
+ * Runs a helper the hub doesn't control the code of (whisper-server) so it ends the moment the hub
+ * does, the way Parakeet's child watches its stdin: spawn the result with `stdin: "pipe"`. The hub
+ * holds that pipe; when it closes (the hub exited, crashed or was killed outright) the wrapper stops
+ * the helper. Stopping the wrapper (SIGTERM) stops the helper too, and a helper that ends on its own
+ * ends the wrapper with its exit status.
+ */
+export function withStdinWatch(cmd: string[]): string[] {
+  const script = [
+    // A background job's stdin is /dev/null, so the watcher reads the hub's pipe through fd 3.
+    "exec 3<&0",
+    '"$@" </dev/null 3<&- &',
+    "child=$!",
+    // `read` is the shell's own, so stopping this watcher leaves no process behind.
+    "(while read -r _; do :; done <&3; kill $child 2>/dev/null) &",
+    "watch=$!",
+    "exec 3<&-",
+    "trap 'kill $child $watch 2>/dev/null; wait $child 2>/dev/null; exit 0' TERM INT HUP",
+    "wait $child; code=$?",
+    "kill $watch 2>/dev/null",
+    "exit $code",
+  ].join("\n");
+  return ["/bin/sh", "-c", script, "jamsesh-child", ...cmd];
+}
+
 /** Stops a wrapped helper and waits for it. A helper still alive after the grace gets SIGKILL, so a hung one can't hold its port. */
 export async function stopHelper(proc: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void }, graceMs = 2_000) {
   proc.kill();

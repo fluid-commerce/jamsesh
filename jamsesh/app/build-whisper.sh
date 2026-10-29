@@ -5,9 +5,15 @@
 set -euo pipefail
 OUT="${1:?output dir}"
 TAG=v1.8.4
+# The commit that tag named when it was pinned: a tag can be moved, a commit can't.
+COMMIT=9386f239401074690479731c1e41683fbbeac557
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 git clone --quiet --depth 1 --branch "$TAG" https://github.com/ggml-org/whisper.cpp "$WORK/src"
+if [ "$(git -C "$WORK/src" rev-parse HEAD)" != "$COMMIT" ]; then
+  echo "whisper.cpp $TAG is no longer commit $COMMIT; check the new commit before pinning it" >&2
+  exit 1
+fi
 cmake -S "$WORK/src" -B "$WORK/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DBUILD_SHARED_LIBS=OFF -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON -DGGML_NATIVE=OFF \
   -DWHISPER_BUILD_TESTS=OFF -DWHISPER_SDL2=OFF >/dev/null

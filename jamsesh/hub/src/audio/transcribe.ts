@@ -159,6 +159,7 @@ export class Transcriber {
    * offline) and resolves false at once, while the gateway covers the room.
    */
   async startLocal(port = whisperPort()) {
+    this.whisper.onExit = () => this.engines.delete("local");
     const now = this.whisper.canStartNow() || (await ping(`http://127.0.0.1:${port}`));
     const run = this.whisper.start(port, !config.offline).then((url) => {
       console.log(`whisper: ${url ? "ready" : this.whisper.status().detail}`);

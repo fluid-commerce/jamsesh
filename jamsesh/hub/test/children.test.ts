@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { stopHelper, withParentWatch } from "../src/children";
+import { stopHelper, withParentWatch, withStdinWatch } from "../src/children";
 
 const alive = (pid: number) => {
   try {
@@ -77,4 +77,39 @@ test("a helper that ignores SIGTERM is killed after the grace", async () => {
   expect(Date.now() - t0).toBeGreaterThanOrEqual(500);
   expect(alive(hung)).toBe(false);
   expect(alive(p.pid)).toBe(false);
+});
+
+// ---- withStdinWatch: the hub holds the helper's stdin ----
+
+const sleeperUnder = (pid: number) => Number(Bun.spawnSync(["pgrep", "-P", String(pid), "-x", "sleep"]).stdout.toString().trim().split("\n")[0]);
+
+test("a stdin-watched helper dies at once when its hub is killed outright", async () => {
+  const code = `
+    import { withStdinWatch } from ${JSON.stringify(import.meta.dir + "/../src/children")};
+    const p = Bun.spawn(withStdinWatch(["sleep", "300"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+    await Bun.sleep(500);
+    const kid = Bun.spawnSync(["pgrep", "-P", String(p.pid), "-x", "sleep"]).stdout.toString().trim();
+    console.log(JSON.stringify({ wrapper: p.pid, sleeper: Number(kid.split("\\n")[0]) }));
+    await Bun.sleep(300000);
+  `;
+  const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit" });
+  const { value } = await hub.stdout.getReader().read();
+  const { wrapper, sleeper } = JSON.parse(new TextDecoder().decode(value)) as { wrapper: number; sleeper: number };
+  expect(sleeper).toBeGreaterThan(0);
+  expect(alive(sleeper)).toBe(true);
+  hub.kill("SIGKILL");
+  expect(await until(() => !alive(sleeper) && !alive(wrapper), 2000)).toBe(true);
+});
+
+test("a stdin-watched helper: stopping the wrapper stops it, leaving nothing behind, and its own exit status comes through", async () => {
+  const p = Bun.spawn(withStdinWatch(["sleep", "300"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+  await Bun.sleep(400);
+  const sleeper = sleeperUnder(p.pid);
+  expect(sleeper).toBeGreaterThan(0);
+  expect(alive(sleeper)).toBe(true);
+  await stopHelper(p);
+  expect(alive(sleeper)).toBe(false);
+  expect(Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim()).toBe("");
+  const own = Bun.spawn(withStdinWatch(["sh", "-c", "exit 7"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+  expect(await own.exited).toBe(7);
 });

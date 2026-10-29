@@ -2,7 +2,7 @@
 // engine, and the fallbacks when the local engine is missing or failing.
 import "./hear.env";
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
@@ -423,8 +423,8 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
 
 // ---- the host's whisper.cpp: bundled server, model downloaded once ----
 
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { findWhisperServer, findWhisperModel, LocalWhisper, WHISPER_MODEL } from "../src/audio/whisper";
+import { chmodSync, mkdirSync, truncateSync, writeFileSync } from "node:fs";
+import { findWhisperServer, findWhisperModel, isWhisperServer, LocalWhisper, WHISPER_MODEL } from "../src/audio/whisper";
 
 const freePort = () => {
   const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
@@ -433,8 +433,8 @@ const freePort = () => {
   return p;
 };
 
-/** A stand-in whisper-server: a script that answers on --port like the real one. */
-function fakeWhisperServer(where: string) {
+/** A stand-in whisper-server: a script that answers on --port like the real one, or misbehaves as told. */
+function fakeWhisperServer(where: string, how: "ok" | "dies-after-start" | "never-listens" | "exits" = "ok") {
   mkdirSync(where, { recursive: true });
   const file = join(where, "whisper-server");
   writeFileSync(
@@ -442,10 +442,21 @@ function fakeWhisperServer(where: string) {
     `#!/usr/bin/env bun
 const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
 const model = process.argv[process.argv.indexOf("-m") + 1];
+const how = ${JSON.stringify(how)};
+if (how === "exits") process.exit(3);
+if (how === "never-listens") await Bun.sleep(600_000);
 Bun.serve({ hostname: "127.0.0.1", port, fetch: (r) => new URL(r.url).pathname === "/inference" ? Response.json({ text: "Shay used " + model.split("/").pop() }) : new Response("whisper") });
+if (how === "dies-after-start") setTimeout(() => process.exit(9), 1500);
 `,
   );
   chmodSync(file, 0o755);
+  return file;
+}
+
+/** A file of `bytes` that takes no disk space. */
+function sized(file: string, bytes: number) {
+  writeFileSync(file, "");
+  truncateSync(file, bytes);
   return file;
 }
 
@@ -476,7 +487,7 @@ test("whisper-server is found in order: a chosen path, the app bundle, ~/.jamses
   }
 });
 
-test("the model is found in order: a chosen file, ~/.jamsesh/models, then ~/.cache/whisper-cpp", () => {
+test("the model is found in order: a chosen file, ~/.jamsesh/models, then ~/.cache/whisper-cpp; a file cut short is passed over", () => {
   const home = join(dir, "find-model-home");
   const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined });
   try {
@@ -484,13 +495,18 @@ test("the model is found in order: a chosen file, ~/.jamsesh/models, then ~/.cac
     const cache = join(home, ".cache", "whisper-cpp");
     mkdirSync(cache, { recursive: true });
     writeFileSync(join(cache, "ggml-base.en.bin"), "x");
+    expect(findWhisperModel()).toBeNull();
+    sized(join(cache, "ggml-base.en.bin"), 147_964_211);
     expect(findWhisperModel()).toBe(join(cache, "ggml-base.en.bin"));
-    writeFileSync(join(cache, "ggml-large-v3-turbo-q5_0.bin"), "x");
+    // An interrupted download of the pinned model (what install.sh used to leave) is not the model.
+    sized(join(cache, "ggml-large-v3-turbo-q5_0.bin"), WHISPER_MODEL.bytes - 1000);
+    expect(findWhisperModel()).toBe(join(cache, "ggml-base.en.bin"));
+    sized(join(cache, "ggml-large-v3-turbo-q5_0.bin"), WHISPER_MODEL.bytes);
     expect(findWhisperModel()).toBe(join(cache, "ggml-large-v3-turbo-q5_0.bin"));
     mkdirSync(join(config.home, "models"), { recursive: true });
-    const own = join(config.home, "models", WHISPER_MODEL.name);
-    writeFileSync(own, "x");
+    const own = sized(join(config.home, "models", WHISPER_MODEL.name), WHISPER_MODEL.bytes);
     expect(findWhisperModel()).toBe(own);
+    expect(findWhisperModel(new Set([own]))).toBe(join(cache, "ggml-large-v3-turbo-q5_0.bin"));
     process.env.JAMSESH_WHISPER_MODEL = join(cache, "ggml-base.en.bin");
     expect(findWhisperModel()).toBe(join(cache, "ggml-base.en.bin"));
   } finally {
@@ -557,6 +573,93 @@ test("a model download that fails its checksum leaves nothing, and offline never
     restore();
   }
 }));
+
+test("a model with the pinned name but the wrong checksum is never used: deleted from ~/.jamsesh/models, left alone in the cache", () => online(async () => {
+  const home = join(dir, "tampered-home");
+  const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "tampered-bin")) });
+  const real = globalThis.fetch;
+  const asked: string[] = [];
+  globalThis.fetch = (async (url: any, init?: any) => (String(url) === WHISPER_MODEL.url ? (asked.push(String(url)), new Response("still not it")) : real(url, init))) as typeof fetch;
+  try {
+    const cache = join(home, ".cache", "whisper-cpp");
+    mkdirSync(cache, { recursive: true });
+    mkdirSync(join(config.home, "models"), { recursive: true });
+    const own = sized(join(config.home, "models", WHISPER_MODEL.name), WHISPER_MODEL.bytes);
+    const cached = sized(join(cache, WHISPER_MODEL.name), WHISPER_MODEL.bytes);
+    const w = new LocalWhisper();
+    const port = freePort();
+    // Offline: nothing usable and nothing downloaded.
+    expect(await w.start(port, false)).toBeNull();
+    expect(w.status()).toMatchObject({ state: "missing", installed: false });
+    expect(existsSync(own)).toBe(false);
+    expect(existsSync(cached)).toBe(true);
+    expect(asked).toEqual([]);
+    expect(await fetch(`http://127.0.0.1:${port}/`).catch(() => null)).toBeNull();
+  } finally {
+    globalThis.fetch = real;
+    restore();
+    rmSync(join(config.home, "models"), { recursive: true, force: true });
+  }
+}), 60_000);
+
+test("install.sh downloads the model beside its name and keeps it only when it matches the hub's pin", () => {
+  const sh = readFileSync(join(import.meta.dir, "../../install.sh"), "utf8");
+  expect(sh).toContain(`WHISPER_SHA256=${WHISPER_MODEL.sha256}`);
+  expect(sh).toContain(`WHISPER_BYTES=${WHISPER_MODEL.bytes}`);
+  expect(sh).toContain(`WHISPER_URL=${WHISPER_MODEL.url}`);
+  // Never written straight to the name the hub looks for.
+  expect(sh).not.toMatch(/-o "\$WHISPER_MODEL"/);
+  expect(sh).toMatch(/model_ok "\$WHISPER_MODEL.part" \|\|[^\n]*\n\s*mv -f "\$WHISPER_MODEL.part" "\$WHISPER_MODEL"/);
+});
+
+test("a service on the whisper port that isn't whisper-server is never adopted", async () => {
+  const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("<html>a dev server</html>") });
+  servers.push(other);
+  expect(await isWhisperServer(`http://127.0.0.1:${other.port}`)).toBe(false);
+  const w = new LocalWhisper();
+  expect(await w.start(other.port as number, false)).toBeNull();
+  expect(w.status()).toMatchObject({ state: "failed" });
+  expect(w.status().detail).toContain(`port ${other.port}`);
+  // And it's left alone.
+  expect(await (await fetch(`http://127.0.0.1:${other.port}/`)).text()).toContain("a dev server");
+});
+
+test("whisper-server that exits, never answers, or dies later is cleaned up, and leaves the pool", () => online(async () => {
+  const home = join(dir, "lifecycle-home");
+  const cache = join(home, ".cache", "whisper-cpp");
+  mkdirSync(cache, { recursive: true });
+  sized(join(cache, "ggml-base.en.bin"), 147_964_211);
+  const run = async (how: "exits" | "never-listens") => {
+    const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, `bin-${how}`), how) });
+    try {
+      const w = new LocalWhisper();
+      w.startupMs = 1500;
+      expect(await w.start(freePort(), false)).toBeNull();
+      expect(w.status().state).toBe("failed");
+      expect((w as any).proc).toBeNull();
+      return w.status().detail;
+    } finally {
+      restore();
+    }
+  };
+  expect(await run("exits")).toContain("exited (3) while starting");
+  expect(await run("never-listens")).toContain("didn't start in time");
+  expect(Bun.spawnSync(["pgrep", "-f", join(dir, "bin-never-listens")]).stdout.toString().trim()).toBe("");
+  // Running, then it dies: the room stops sending it lines.
+  const port = freePort();
+  const restore = withEnv({ HOME: home, JAMSESH_WHISPER_MODEL: undefined, JAMSESH_WHISPER_SERVER: fakeWhisperServer(join(dir, "bin-dies"), "dies-after-start"), JAMSESH_WHISPER_PORT: String(port) });
+  const hub = room();
+  try {
+    expect(await hub.transcriber.startLocal()).toBe(true);
+    expect(engines(hub).has("local")).toBe(true);
+    for (let i = 0; i < 60 && engines(hub).has("local"); i++) await Bun.sleep(100);
+    expect(engines(hub).has("local")).toBe(false);
+    expect(hub.transcriber.whisper.status()).toMatchObject({ state: "failed", detail: "whisper-server stopped (exit 9)." });
+  } finally {
+    hub.stop();
+    restore();
+  }
+}), 60_000);
 
 test("a whisper-server already answering on the port is used, and left running when the hub stops", async () => {
   const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ text: "already here" }) });
