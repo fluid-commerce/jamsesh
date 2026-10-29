@@ -229,6 +229,10 @@ export interface LiveApp {
   height: number;
   orientation: "portrait" | "landscape-left";
   appearance: "light" | "dark" | null;
+  /** iOS: how the picture is captured: the Simulator's window at 30 fps, or screenshots (about 8 to 15 fps). */
+  capture?: "window" | "screenshots";
+  /** One line on how to get the faster capture, when it isn't on. */
+  hint?: string;
   /** Whether taps can reach it. Watching works without. */
   canTap: boolean;
   /** Who is driving: one person at a time. */

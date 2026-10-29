@@ -86,11 +86,54 @@ const bytes = (fs: [number, number | Uint8Array][], f: number) => {
 
 // ---- the messages ----
 const hidPress = (action: Uint8Array, up: boolean) => lenField(1, cat(lenField(1, action), intField(2, up ? 1 : 0)));
+const hidDelay = (seconds: number) => lenField(3, dblField(1, seconds));
 const touchAction = (x: number, y: number) => lenField(1, lenField(1, point(x, y)));
 const buttonAction = (button: number) => lenField(2, intField(1, button));
 
 export const BUTTON = { home: 1, lock: 2, side: 3, siri: 4 } as const;
 export const ORIENTATION = { portrait: 0, upsideDown: 1, landscapeLeft: 2, landscapeRight: 3 } as const;
+
+// ---- typing: a US keyboard as HID usage codes (the Keyboard page of the USB HID spec) ----
+const LETTERS = "abcdefghijklmnopqrstuvwxyz";
+const DIGITS = "1234567890";
+// Unshifted symbol keys and what shift turns them into.
+const SYMBOLS: [string, string, number][] = [["-", "_", 45], ["=", "+", 46], ["[", "{", 47], ["]", "}", 48], ["\\", "|", 49], [";", ":", 51], ["'", '"', 52], ["`", "~", 53], [",", "<", 54], [".", ">", 55], ["/", "?", 56]];
+const SHIFTED_DIGITS = "!@#$%^&*()";
+export const KEY_SHIFT = 225;
+const SHIFT_BEAT = 0.03;
+export const NAMED_KEYS = { return: 40, delete: 42, tab: 43, escape: 41 } as const;
+
+/** One character as a key press: its HID code and whether shift is held. Null for anything a US keyboard can't type. */
+export function hidKey(ch: string): { code: number; shift: boolean } | null {
+  if (ch.length !== 1) return null;
+  const lower = LETTERS.indexOf(ch.toLowerCase());
+  if (lower >= 0) return { code: 4 + lower, shift: ch !== ch.toLowerCase() };
+  const d = DIGITS.indexOf(ch);
+  if (d >= 0) return { code: 30 + d, shift: false };
+  const sd = SHIFTED_DIGITS.indexOf(ch);
+  if (sd >= 0) return { code: 30 + sd, shift: true };
+  if (ch === " ") return { code: 44, shift: false };
+  if (ch === "\n") return { code: NAMED_KEYS.return, shift: false };
+  if (ch === "\t") return { code: NAMED_KEYS.tab, shift: false };
+  for (const [plain, shifted, code] of SYMBOLS) {
+    if (ch === plain) return { code, shift: false };
+    if (ch === shifted) return { code, shift: true };
+  }
+  return null;
+}
+
+/** Key down/up steps for a whole string (shift pressed around each capital or symbol), or null if any character can't be typed. */
+export function hidSteps(text: string): { code: number; down: boolean }[] | null {
+  const out: { code: number; down: boolean }[] = [];
+  for (const ch of text) {
+    const k = hidKey(ch);
+    if (!k) return null;
+    if (k.shift) out.push({ code: KEY_SHIFT, down: true });
+    out.push({ code: k.code, down: true }, { code: k.code, down: false });
+    if (k.shift) out.push({ code: KEY_SHIFT, down: false });
+  }
+  return out;
+}
 
 /** What a Simulator's screen is: device pixels and the points taps are given in. */
 export interface ScreenInfo {
@@ -258,6 +301,24 @@ export class Companion {
   async button(name: keyof typeof BUTTON) {
     const a = buttonAction(BUTTON[name]);
     await this.call("hid", [hidPress(a, false), hidPress(a, true)]);
+  }
+
+  /** Types text (a US keyboard; throws on a character it can't type). */
+  async type(text: string) {
+    const steps = hidSteps(text);
+    if (!steps) throw new Error("That text has characters a US keyboard can't type.");
+    // Shift needs a beat on each side of the key, or the Simulator sees the key without it.
+    const msgs: Uint8Array[] = [];
+    for (const k of steps) {
+      if (k.code === KEY_SHIFT && !k.down) msgs.push(hidDelay(SHIFT_BEAT));
+      msgs.push(hidPress(lenField(3, intField(1, k.code)), !k.down));
+      if (k.code === KEY_SHIFT && k.down) msgs.push(hidDelay(SHIFT_BEAT));
+    }
+    await this.call("hid", msgs, { timeoutMs: 10_000 + steps.length * 100 });
+  }
+
+  async key(name: keyof typeof NAMED_KEYS) {
+    await this.call("hid", [true, false].map((down) => hidPress(lenField(3, intField(1, NAMED_KEYS[name])), !down)));
   }
 
   async orientation(o: number) {

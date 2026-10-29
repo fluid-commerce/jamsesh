@@ -25,7 +25,7 @@ process.env.PATH = `${shim}:${process.env.PATH}`;
 
 const { Hub } = await import("../src/hub");
 const { startHttp } = await import("../src/http");
-const { CONTROL_IDLE_MS } = await import("../src/liveapps");
+const { CONTROL_IDLE_MS, pickSimWindow, planCapture } = await import("../src/liveapps");
 
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
 const server = startHttp(hub, 0);
@@ -48,8 +48,12 @@ hub.live.companionFor = () => ({
   swipe: async (x: number, y: number, x2: number, y2: number) => void calls.push(`swipe ${Math.round(x)},${Math.round(y)}>${Math.round(x2)},${Math.round(y2)}`),
   button: async (b: string) => void calls.push(`button ${b}`),
   orientation: async (o: number) => void calls.push(`orientation ${o}`),
+  type: async (t: string) => void calls.push(`type ${t}`),
+  key: async (k: string) => void calls.push(`key ${k}`),
   stop: () => {},
 });
+// No Mac helper by default: window capture has its own tests below.
+hub.live.helper = async () => "no helper in tests";
 s.store.setSetting("hostControl", true);
 const maya = s.upsertPerson({ name: "Maya" });
 const sam = s.upsertPerson({ name: "Sam" });
@@ -271,4 +275,119 @@ while read -r line; do echo "$line" >> "${dir}/mac-input"; done
 
 test("the Mac helper source ships with the hub", () => {
   expect(existsSync(join(import.meta.dir, "..", "native", "jamsesh-live.swift"))).toBe(true);
+});
+
+test("typing and named keys reach the Simulator for the person driving; bad ones don't", async () => {
+  hub.live.pickSim = async () => ({ udid: "U1", name: "iPhone Test" });
+  const r = (await (await post("/apps", { kind: "ios" })).json()) as any;
+  const id = r.app.id as string;
+  const send = async (b: unknown, h = samHeaders) => ((await (await post(`/apps/${id}/input`, b, h)).json()) as any);
+  expect((await send({ t: "text", text: "hi" })).ok).toBe(false);
+  await post(`/apps/${id}/control`, { action: "take" }, samHeaders);
+  calls.length = 0;
+  expect((await send({ t: "text", text: "Hi!" })).ok).toBe(true);
+  expect((await send({ t: "key", key: "return" })).ok).toBe(true);
+  expect((await send({ t: "key", key: "rm -rf" })).ok).toBe(false);
+  expect(calls).toEqual(["type Hi!", "key return"]);
+  hub.live.stop(id);
+});
+
+test("choosing the capture: window at 30 fps only when everything is there, else screenshots with a hint", () => {
+  const win = (title: string, id = 1) => ({ id, title, w: 460, h: 920 });
+  const base = { helper: true, screenAccess: true, windows: [win("iPhone 16 Pro – iOS 18.6")], deviceName: "iPhone 16 Pro", portrait: true, haveScreen: true };
+  expect(planCapture(base)).toEqual({ mode: "window", window: win("iPhone 16 Pro – iOS 18.6") });
+  // A longer name that starts the same is a different device.
+  expect(pickSimWindow([win("iPhone 16 Pro Max – iOS 18.6")], "iPhone 16 Pro")).toBeNull();
+  expect(pickSimWindow([win("iPhone 16 Pro - iOS 26.5")], "iPhone 16 Pro")).toMatchObject({ id: 1 });
+  expect(planCapture({ ...base, helper: false })).toMatchObject({ mode: "screenshots", hint: expect.stringContaining("command line tools") });
+  expect(planCapture({ ...base, screenAccess: false })).toMatchObject({ mode: "screenshots", hint: expect.stringContaining("Screen Recording") });
+  expect(planCapture({ ...base, windows: [] })).toMatchObject({ mode: "screenshots", hint: expect.stringContaining("open this device in Simulator") });
+  expect(planCapture({ ...base, windows: [win("iPhone 16 Pro – iOS 18.6"), win("iPhone 16 Pro – iOS 26.5", 2)] })).toMatchObject({ mode: "screenshots", hint: expect.stringContaining("Two Simulator windows") });
+  // Turned screens and unknown screen sizes use screenshots, quietly.
+  expect(planCapture({ ...base, portrait: false })).toEqual({ mode: "screenshots" });
+  expect(planCapture({ ...base, haveScreen: false })).toEqual({ mode: "screenshots" });
+});
+
+function fakeHelper(name: string, opts: { screen: boolean; windows: unknown[]; frames?: boolean }) {
+  const f = join(dir, name);
+  writeFileSync(
+    f,
+    `#!/bin/bash
+[ "$1" = "--check" ] && { echo '{"screen":${opts.screen},"accessibility":true}'; exit 0; }
+[ "$1" = "--windows" ] && { echo '${JSON.stringify(opts.windows)}'; exit 0; }
+echo "$@" > "${dir}/${name}.args"
+${opts.frames === false ? "exit 0" : `printf '\\x00\\x00\\x00\\x08\\xff\\xd8win!\\xff\\xd9'; sleep 30`}
+`,
+  );
+  chmodSync(f, 0o755);
+  return f;
+}
+
+test("a Simulator with Screen Recording and its window open streams the window, cropped to the screen, and says so", async () => {
+  const f = fakeHelper("live-ok", { screen: true, windows: [{ id: 77, title: "iPhone Test – iOS 18.6", w: 460, h: 940 }] });
+  hub.live.helper = async () => [f];
+  hub.live.pickSim = async () => ({ udid: "U1", name: "iPhone Test" });
+  const r = (await (await post("/apps", { kind: "ios" })).json()) as any;
+  const id = r.app.id as string;
+  for (let i = 0; i < 30 && s.state().liveApps.find((a) => a.id === id)?.capture !== "window"; i++) await Bun.sleep(100);
+  const app = () => s.state().liveApps.find((a) => a.id === id)!;
+  expect(app().capture).toBe("window");
+  expect(app().hint).toBeUndefined();
+  const got: string[] = [];
+  const off = hub.live.subscribe(id, (fr) => got.push(new TextDecoder().decode(fr).replace(/[^\w!]/g, "")))!;
+  await Bun.sleep(500);
+  expect(got).toContain("win!");
+  // The screenshot loop stays off while the window is streamed.
+  const n = readFileSync(join(dir, "n"), "utf8");
+  await Bun.sleep(500);
+  expect(readFileSync(join(dir, "n"), "utf8")).toBe(n);
+  expect(readFileSync(join(dir, "live-ok.args"), "utf8")).toMatch(/Simulator 30 --window 77 --crop [\d.]+,[\d.]+,[\d.]+,[\d.]+/);
+  // Rotating drops to screenshots (the window isn't the screen's shape any more); the person is told why nothing is wrong.
+  await post(`/apps/${id}/control`, { action: "take" }, samHeaders);
+  await post(`/apps/${id}/input`, { t: "rotate" }, samHeaders);
+  for (let i = 0; i < 30 && app().capture !== "screenshots"; i++) await Bun.sleep(100);
+  expect(app().capture).toBe("screenshots");
+  off();
+  hub.live.stop(id);
+});
+
+test("without Screen Recording the Simulator uses screenshots and the tile carries the hint; a helper that dies falls back too", async () => {
+  hub.live.helper = async () => [fakeHelper("live-noaccess", { screen: false, windows: [] })];
+  hub.live.pickSim = async () => ({ udid: "U1", name: "iPhone Test" });
+  const r = (await (await post("/apps", { kind: "ios" })).json()) as any;
+  const id = r.app.id as string;
+  const app = () => s.state().liveApps.find((a) => a.id === id)!;
+  for (let i = 0; i < 30 && !app().hint; i++) await Bun.sleep(100);
+  expect(app().capture).toBe("screenshots");
+  expect(app().hint).toContain("Screen Recording");
+  hub.live.stop(id);
+  // The helper starts, then exits at once: back to screenshots, with the reason.
+  const dying = fakeHelper("live-dies", { screen: true, windows: [{ id: 5, title: "iPhone Test – iOS 18.6", w: 460, h: 940 }], frames: false });
+  hub.live.helper = async () => [dying];
+  const r2 = (await (await post("/apps", { kind: "ios" })).json()) as any;
+  const id2 = r2.app.id as string;
+  for (let i = 0; i < 30 && !s.state().liveApps.find((a) => a.id === id2)?.hint; i++) await Bun.sleep(100);
+  const a2 = s.state().liveApps.find((a) => a.id === id2)!;
+  expect(a2.capture).toBe("screenshots");
+  expect(a2.hint).toContain("Window capture stopped");
+  expect(a2.status).toBe("live");
+  hub.live.stop(id2);
+});
+
+test("the brain puts a live app tile on a layout by id or by name", async () => {
+  const { Brain } = await import("../src/brain/brain");
+  hub.live.pickSim = async () => ({ udid: "U1", name: "iPhone Test" });
+  hub.live.helper = async () => "no helper in tests";
+  const app = (await hub.live.startIos(undefined, "Felipe's Claude (approved by Maya)")) as any;
+  const brain = new Brain(s, {} as any);
+  clearInterval((brain as any).digestTimer);
+  const tools = (brain as any).tools([], { effects: 0 });
+  const a = s.upsertArtifact({ kind: "screenshot", title: "Checkout mockup" });
+  const out = await tools.set_layout.execute({ tiles: [{ kind: "artifact", ref: a.id }, { kind: "app", ref: "felipe" }, { kind: "app", ref: "no such app" }] });
+  expect(out).toContain("2 tile(s)");
+  expect(s.stage().layout?.tiles).toEqual([{ kind: "artifact", artifactId: a.id, label: undefined }, { kind: "app", appId: app.id, label: "iPhone Test" }]);
+  // A tile for an app that stopped doesn't resolve.
+  hub.live.stop(app.id);
+  const gone = await tools.set_layout.execute({ tiles: [{ kind: "app", ref: app.id }] });
+  expect(gone).toContain("None of those tiles resolved");
 });

@@ -29,6 +29,7 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
   const me = useMe();
   const driving = !!me && app.controller?.personId === me;
   const turned = app.orientation === "landscape-left";
+  const KEYS: Record<string, string> = { Enter: "return", Backspace: "delete", Tab: "tab", Escape: "escape" };
   const down = useRef<{ x: number; y: number; px: number; py: number; t: number; moved: boolean; at: number } | null>(null);
 
   // Frames in. The newest wins: a frame that arrives while one is still decoding replaces the waiting one.
@@ -50,7 +51,8 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
           const c = canvas.current;
           const ctx = c?.getContext("2d");
           if (c && ctx) {
-            const rot = app.orientation === "landscape-left";
+            // In window capture the Simulator's own window has already turned.
+            const rot = app.orientation === "landscape-left" && app.capture !== "window";
             const w = rot ? bmp.height : bmp.width;
             const h = rot ? bmp.width : bmp.height;
             if (c.width !== w || c.height !== h) (c.width = w), (c.height = h), setDims([w, h]);
@@ -83,7 +85,7 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
       dead = true;
       ws?.close();
     };
-  }, [app.id, app.status, app.orientation]);
+  }, [app.id, app.status, app.orientation, app.capture]);
 
   const send = (body: Record<string, unknown>) =>
     api<{ ok: boolean; error?: string }>(`/apps/${app.id}/input`, body, "POST", { queue: false }).then(
@@ -124,6 +126,15 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
       setRipple({ x: p.x, y: p.y, k: Date.now() });
     }
   };
+  // Typing goes to the app while the tile has focus and you're driving.
+  const onKey = (e: React.KeyboardEvent) => {
+    if (!driving || e.metaKey || e.ctrlKey || e.altKey) return;
+    const named = KEYS[e.key];
+    if (named) void send({ t: "key", key: named });
+    else if (e.key.length === 1) void send({ t: "text", text: e.key });
+    else return;
+    e.preventDefault();
+  };
   const onWheel = (e: React.WheelEvent) => {
     const p = at(e);
     if (!driving || !p || !mac) return;
@@ -139,7 +150,7 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
     <div className="liveapp">
       <div className={`liveapp-stage ${app.kind}`}>
         <div className={`liveapp-device ${app.kind} ${driving ? "driving" : ""}`} style={{ ["--r" as string]: ratio }}>
-          <canvas ref={canvas} className="liveapp-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => (down.current = null)} onWheel={onWheel} style={{ touchAction: driving ? "none" : "auto", cursor: driving ? "pointer" : "default" }} />
+          <canvas ref={canvas} className="liveapp-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => (down.current = null)} onWheel={onWheel} onKeyDown={onKey} tabIndex={driving ? 0 : -1} style={{ touchAction: driving ? "none" : "auto", cursor: driving ? "pointer" : "default" }} />
           {ripple && <span key={ripple.k} className="liveapp-tap" style={{ left: `${ripple.x * 100}%`, top: `${ripple.y * 100}%` }} />}
           {!live && <div className="liveapp-wait">Connecting to {app.name}…</div>}
         </div>
@@ -185,7 +196,8 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
             )}
           </>
         )}
-        {(msg || (!app.canTap && app.note)) && <span className="liveapp-note">{msg || app.note}</span>}
+        {app.kind === "ios" && app.capture && <span className="liveapp-mode">{app.capture === "window" ? "30 fps" : "Screenshots"}</span>}
+        {(msg || (!app.canTap && app.note) || (app.capture === "screenshots" && app.hint)) && <span className="liveapp-note">{msg || (!app.canTap && app.note) || app.hint}</span>}
       </div>
     </div>
   );

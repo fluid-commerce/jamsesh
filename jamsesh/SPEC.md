@@ -1540,7 +1540,12 @@ the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps`
   window only, with host control on. Starting a tile builds nothing, so the build approval flow
   ([8.11](#811-build-approvals)) is unchanged: an unapproved, denied or expired request never opens one.
   At most four tiles are live at once.
-- **Picture, iOS.** `simctl io <device> screenshot --type=jpeg`, three calls in flight, newest first, a
+- **Picture, iOS, two modes.** When the host has already granted Screen Recording (checked with `jamsesh-live
+  --check`, which never prompts) and the device's own Simulator window is open and unambiguous (title
+  "<device name> – <runtime>"), the helper captures that window, cropped to the screen, at 30 fps (`capture:
+  "window"`). Otherwise `capture: "screenshots"` and the tile's `hint` says what would enable the faster mode.
+  The tile shows which mode it is in. The window mode drops to screenshots while the screen is turned.
+  The screenshot mode is `simctl io <device> screenshot --type=jpeg`, three calls in flight, newest first, a
   frame identical to the last dropped, running only while someone watches. `recordVideo` can't stream (its
   file is finished only when it stops) and idb's MJPEG stream fails to start on macOS 26. Frames travel as
   binary WebSocket messages on `/ws/app/<id>` (people only; a slow viewer skips frames).
@@ -1553,6 +1558,12 @@ the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps`
   turned (checked on iOS 18.6), so taps wait for portrait.
 - **Taps, Mac.** The same helper posts CGEvents to the app's pid at points inside its window (the Mac's own
   cursor never moves). Needs Accessibility; without it the tile is watch-only.
+- **Typing.** `{ t: "text", text }` and `{ t: "key", key: "return" | "delete" | "tab" | "escape" }` go through the
+  companion as HID key events on a US layout (shift pressed around capitals and symbols; characters outside
+  it are refused). A tile that has focus and is driven types with the keyboard. On a Mac app the helper posts
+  the characters and keys to the app.
+- **Brain.** `set_layout` accepts `{ kind: "app", ref }` (a live app's id, or part of its name or who started
+  it), and the brain's context lists the live apps.
 - **Controls (iOS).** Home, Rotate, Light/Dark. Appearance is `simctl ui appearance`; Home and Rotate go
   through the companion. The device frame is a plain rounded rectangle drawn in CSS.
 - **Who is driving.** One controller per tile (`controller: { personId, name, since }`). `POST

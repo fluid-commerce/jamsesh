@@ -18,7 +18,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { bus } from "./bus";
 import { config } from "./config";
-import { Companion, companionPath } from "./idb";
+import { simScreenRect } from "./hostctl";
+import { Companion, companionPath, type ScreenInfo } from "./idb";
 import type { Session } from "./session";
 import type { LiveApp } from "./types";
 
@@ -35,6 +36,7 @@ export type Input =
   | { t: "down" | "move" | "up"; x: number; y: number }
   | { t: "scroll"; x: number; y: number; dx?: number; dy?: number }
   | { t: "text"; text: string }
+  | { t: "key"; key: "return" | "delete" | "tab" | "escape" }
   | { t: "home" | "rotate" }
   | { t: "appearance"; mode?: "light" | "dark" };
 
@@ -48,6 +50,7 @@ interface Live {
   lastActive: number;
   // iOS
   udid?: string;
+  screen?: ScreenInfo | null;
   companion?: NonNullable<ReturnType<LiveApps["companionFor"]>>;
   // Mac
   proc?: ReturnType<typeof Bun.spawn>;
@@ -62,6 +65,32 @@ async function run(cmd: string[], timeoutMs = 15_000): Promise<{ code: number; o
   return { code, out: (out + (err ? `\n${err}` : "")).trim() };
 }
 
+export interface SimWindow {
+  id: number;
+  title: string;
+  w: number;
+  h: number;
+}
+
+/** The one Simulator window for a device: Simulator titles read "<device name> – <runtime>". None, or two that look alike, is no match. */
+export function pickSimWindow(windows: SimWindow[], deviceName: string): SimWindow | { ambiguous: true } | null {
+  const want = deviceName.trim().toLowerCase();
+  const hits = windows.filter((w) => w.title.split(/\s[–-]\s/)[0]?.trim().toLowerCase() === want);
+  return hits.length === 1 ? hits[0]! : hits.length > 1 ? { ambiguous: true } : null;
+}
+
+/** Window capture (30 fps) when everything it needs is there, else screenshots with a one-line hint on what would enable it. */
+export function planCapture(o: { helper: boolean; screenAccess: boolean; windows: SimWindow[]; deviceName: string; portrait: boolean; haveScreen: boolean }): { mode: "window"; window: SimWindow } | { mode: "screenshots"; hint?: string } {
+  if (!o.helper) return { mode: "screenshots", hint: "For smoother video, install Xcode's command line tools on the host (xcode-select --install)." };
+  if (!o.screenAccess) return { mode: "screenshots", hint: "For 30 fps, allow Screen Recording for JamSesh in System Settings > Privacy & Security, then reopen the app." };
+  if (!o.portrait) return { mode: "screenshots" };
+  if (!o.haveScreen) return { mode: "screenshots" };
+  const w = pickSimWindow(o.windows, o.deviceName);
+  if (!w) return { mode: "screenshots", hint: "For 30 fps, open this device in Simulator (File > Open Simulator) and keep its window on screen." };
+  if ("ambiguous" in w) return { mode: "screenshots", hint: "Two Simulator windows share this device's name; close one for 30 fps." };
+  return { mode: "window", window: w };
+}
+
 const finite = (...v: unknown[]) => v.every((n) => typeof n === "number" && Number.isFinite(n));
 const unit = (n: number) => Math.min(1, Math.max(0, n));
 
@@ -71,8 +100,11 @@ export class LiveApps {
   pickSim: (device?: string) => Promise<{ udid: string; name: string } | string> = async () => "No simulator.";
   log: (text: string) => void = () => {};
   /** The input helper for a Simulator, when idb's companion is installed (tests supply their own). */
-  companionFor: (udid: string) => Pick<Companion, "start" | "describe" | "tap" | "swipe" | "button" | "orientation" | "stop" | "onExit"> | null = (udid) =>
+  companionFor: (udid: string) => Pick<Companion, "start" | "describe" | "tap" | "swipe" | "button" | "orientation" | "type" | "key" | "stop" | "onExit"> | null = (udid) =>
     companionPath() ? new Companion(udid, join(config.home, "live", `${udid.slice(0, 8)}.sock`)) : null;
+
+  /** The `jamsesh-live` command (tests supply a fake). */
+  helper: () => Promise<string[] | string> = () => this.macHelper();
 
   constructor(private session: Session) {}
 
@@ -115,6 +147,7 @@ export class LiveApps {
     const r = this.add(
       {
         kind: "ios",
+        capture: "screenshots",
         name: pick.name,
         width: screen?.widthPt ?? 402,
         height: screen?.heightPt ?? 874,
@@ -124,24 +157,25 @@ export class LiveApps {
         startedBy: by,
         ...(note ? { note } : {}),
       },
-      { udid: pick.udid, companion: note ? undefined : companion },
+      { udid: pick.udid, companion: note ? undefined : companion, screen },
     );
     if (typeof r === "string") return (companion?.stop(), r);
     if (note) companion?.stop();
     if (companion && !note) companion.onExit = () => this.update(r, { canTap: false, note: "Taps stopped: the Simulator's input helper exited." });
     this.log(`${by} put ${pick.name} (Simulator) on a live tile.`);
+    void this.beginCapture(r);
     return { ...r.info };
   }
 
   /** A Mac app's window (by app name) as a live tile; needs the jamsesh-live helper (built from source on first use). */
   async startMac(appName: string, by: string, helper?: string[]): Promise<LiveApp | string> {
     if (!appName.trim() || appName.length > 80) return "Give the app's name.";
-    const cmd = helper ?? (await this.macHelper());
+    const cmd = helper ?? (await this.helper());
     if (typeof cmd === "string") return cmd;
     const proc = Bun.spawn([...cmd, appName.trim(), "30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     const live = this.add({ kind: "mac", name: appName.trim(), width: 0, height: 0, orientation: "portrait", appearance: null, canTap: true, startedBy: by }, { proc });
     if (typeof live === "string") return (proc.kill(), live);
-    void this.readMac(live, proc);
+    void this.readHelper(live, proc);
     // The first word from the helper says whether it's capturing; an error ends the tile at once.
     for (let i = 0; i < 60 && live.info.width === 0 && live.info.status === "live"; i++) await sleep(100);
     if (live.info.status !== "live") {
@@ -152,6 +186,40 @@ export class LiveApps {
     }
     this.log(`${by} put ${appName} (Mac app) on a live tile.`);
     return { ...live.info };
+  }
+
+  /** Picks how a Simulator's picture is captured: its window at 30 fps if the host allows it, else screenshots. Starts as screenshots and upgrades. */
+  private async beginCapture(live: Live) {
+    const old = live.proc;
+    live.proc = undefined;
+    try {
+      old?.kill();
+    } catch {}
+    const cmd = await this.helper();
+    let access = false;
+    let windows: SimWindow[] = [];
+    if (typeof cmd !== "string") {
+      access = (await run([...cmd, "--check"])).out.includes('"screen":true');
+      if (access) {
+        try {
+          windows = JSON.parse((await run([...cmd, "--windows", "Simulator"])).out) as SimWindow[];
+        } catch {}
+      }
+    }
+    if (live.info.status !== "live") return;
+    const plan = planCapture({ helper: typeof cmd !== "string", screenAccess: access, windows, deviceName: live.info.name, portrait: live.info.orientation === "portrait", haveScreen: !!live.screen });
+    if (plan.mode === "screenshots" || typeof cmd === "string" || !live.screen) {
+      this.update(live, { capture: "screenshots", ...(plan.mode === "screenshots" && plan.hint ? { hint: plan.hint } : { hint: undefined }) });
+      if (live.subs.size) void this.pump(live);
+      return;
+    }
+    // The screen sits inside the window's frame: crop to it so taps map onto the picture.
+    const rect = simScreenRect({ x: 0, y: 0, width: plan.window.w, height: plan.window.h }, live.screen.widthPx, live.screen.heightPx, live.screen.density);
+    if (!rect) return void this.update(live, { capture: "screenshots", hint: undefined });
+    const proc = Bun.spawn([...cmd, "Simulator", "30", "--window", String(plan.window.id), "--crop", `${rect.x},${rect.y},${rect.width},${rect.height}`], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    live.proc = proc;
+    this.update(live, { capture: "window", hint: undefined });
+    void this.readHelper(live, proc);
   }
 
   private async macHelper(): Promise<string[] | string> {
@@ -167,7 +235,7 @@ export class LiveApps {
     return [bin];
   }
 
-  private async readMac(live: Live, proc: ReturnType<typeof Bun.spawn>) {
+  private async readHelper(live: Live, proc: ReturnType<typeof Bun.spawn>) {
     const errs = (async () => {
       const dec = new TextDecoder();
       let buf = "";
@@ -178,6 +246,7 @@ export class LiveApps {
           buf = buf.slice(i + 1);
           try {
             const m = JSON.parse(line);
+            if (live.info.kind === "ios") continue;
             if (m.event === "window" && finite(m.w, m.h)) this.update(live, { width: m.w, height: m.h });
             else if (m.event === "error" && m.code === "accessibility") this.update(live, { canTap: false, note: String(m.text).slice(0, 200) });
             else if (m.event === "error") this.update(live, { status: "gone", note: String(m.text).slice(0, 200) });
@@ -193,14 +262,23 @@ export class LiveApps {
       buf = joined;
       while (buf.length >= 4) {
         const n = new DataView(buf.buffer, buf.byteOffset).getUint32(0);
-        if (n > 32 * 1024 * 1024) return this.end(live, "The helper sent something unreadable.");
+        if (n > 32 * 1024 * 1024) return this.helperEnded(live, proc, "The helper sent something unreadable.");
         if (buf.length < 4 + n) break;
         this.emit(live, buf.slice(4, 4 + n));
         buf = buf.slice(4 + n);
       }
     }
     await errs;
-    this.end(live, live.info.note ?? "The app's window closed.");
+    this.helperEnded(live, proc, live.info.note ?? "The app's window closed.");
+  }
+
+  /** A capture helper stopped. A Mac app's tile ends with it; a Simulator falls back to screenshots (unless a newer helper replaced this one). */
+  private helperEnded(live: Live, proc: ReturnType<typeof Bun.spawn>, note: string) {
+    if (live.info.kind === "mac") return this.end(live, note);
+    if (live.proc !== proc || live.info.status !== "live") return;
+    live.proc = undefined;
+    this.update(live, { capture: "screenshots", hint: "Window capture stopped (is the Simulator window still open?). Showing screenshots." });
+    if (live.subs.size) void this.pump(live);
   }
 
   private update(live: Live, patch: Partial<LiveApp>) {
@@ -251,7 +329,7 @@ export class LiveApps {
     if (!live || live.info.status !== "live") return null;
     live.subs.add(fn);
     if (live.latest) fn(live.latest);
-    if (live.info.kind === "ios") void this.pump(live);
+    if (live.info.kind === "ios" && !live.proc) void this.pump(live);
     return () => {
       live.subs.delete(fn);
     };
@@ -380,6 +458,17 @@ export class LiveApps {
         const landscape = info.orientation === "portrait";
         await companion.orientation(landscape ? 2 : 0);
         this.update(live, { orientation: landscape ? "landscape-left" : "portrait" });
+        // A turned screen isn't the window's shape any more: screenshots until it's upright again.
+        void this.beginCapture(live);
+        return null;
+      }
+      if (ev.t === "text") {
+        await companion.type(String(ev.text).slice(0, 200));
+        return null;
+      }
+      if (ev.t === "key") {
+        if (!["return", "delete", "tab", "escape"].includes(ev.key)) return "That key isn't supported.";
+        await companion.key(ev.key);
         return null;
       }
       // The Simulator doesn't map a touch while the screen is turned (checked on iOS 18.6), so taps wait for portrait.
@@ -412,6 +501,7 @@ export class LiveApps {
       return null;
     }
     if (ev.t === "text") line = { t: "text", text: String(ev.text).slice(0, 200) };
+    else if (ev.t === "key") line = { t: "key", key: ev.key };
     else if (["tap", "down", "move", "up", "scroll"].includes(ev.t) && "x" in ev && finite(ev.x, ev.y)) line = { ...ev, x: unit(ev.x), y: unit(ev.y) };
     else return "That input isn't valid.";
     return this.macSend(live, line) ? null : "The app isn't taking input.";

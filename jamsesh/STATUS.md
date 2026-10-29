@@ -37,6 +37,9 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Capability | Status | Notes |
 |---|---|---|
 | iPhone Simulator streamed into a tile, device frame, Home, Rotate, Light/Dark, taps and swipes from the tile | Tested live | Real Simulator (iOS 18.6, a throwaway device), real idb companion, headless Chromium: a tap on the tile turned a test app green in about 160 ms; Dark, Home and Rotate checked in screenshots. About 8 frames a second at full resolution on a busy Mac (15 to 18 on an idle one). |
+| Typing into the Simulator (US layout, shift, Return, Delete) | Tested live | Through idb on a throwaway device into a text field: capitals, digits, symbols and Return arrived as typed. Mapping unit-tested. |
+| Window capture of the Simulator at 30 fps, and its fallback | Simulated | Selection logic and the fallbacks (no permission, no or two windows, helper dying, turned screen) tested with fake helpers. The real capture needs Screen Recording on a host (office checklist). |
+| Brain puts a live app tile on a layout | Simulated | Tested through the layout tool by id and by name. |
 | Taps while the screen is turned | Not working | The companion's touches don't land in landscape; the hub refuses them with a reason. Rotating and watching work. |
 | Control passing, agents refused, a person without control refused, a device that vanishes mid-stream | Simulated | `hub/test/liveapps.test.ts` with a fake `xcrun`, a fake companion and a fake Mac helper. |
 | Mac and Electron apps: capture and input | Not tested | The Swift helper compiles and refuses cleanly without Screen Recording; capture and CGEvent input need those permissions on a real host (office checklist). |

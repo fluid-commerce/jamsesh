@@ -2,11 +2,14 @@
 // that window only. The hub starts it for an approved build that opened a desktop app (a native
 // .app or an Electron app).
 //
-//   jamsesh-live <app name> [fps]
+//   jamsesh-live --check                      {"screen":true|false,"accessibility":true|false}; never prompts
+//   jamsesh-live --windows <app name>         [{"id":..,"title":"..","w":..,"h":..}] for that app's windows
+//   jamsesh-live <app name> [fps] [--window <id>] [--crop x,y,w,h]
+//                                             stream; --window picks one window, --crop is a rectangle in points inside it
 //   stdout  frames: 4-byte big-endian length, then a JPEG
 //   stderr  one JSON line per event: {"event":"window","w":..,"h":..} {"event":"error","code":"screen|accessibility|nowindow","text":".."}
 //   stdin   one JSON line per input: {"t":"tap|down|move|up|scroll|text","x":0..1,"y":0..1,"dx":..,"dy":..,"text":".."}
-//           x and y are fractions of the window. The Mac's own cursor never moves.
+//           or {"t":"key","key":"return|delete|tab"}. x and y are fractions of the window. The Mac's own cursor never moves.
 //
 // Needs Screen Recording (to see the window) and Accessibility (to send input) for whatever
 // started it. Nothing here force-unwraps or traps: every failure is reported and the stream ends.
@@ -45,13 +48,47 @@ func writeOut(_ data: Data) {
 }
 
 let args = CommandLine.arguments
-guard args.count >= 2, !args[1].isEmpty else { fail("args", "Usage: jamsesh-live <app name> [fps]") }
+
+/// Whether the permissions are already granted. Asking the user is the app's job, never this helper's.
+if args.count >= 2 && args[1] == "--check" {
+  print("{\"screen\":\(CGPreflightScreenCaptureAccess()),\"accessibility\":\(AXIsProcessTrusted())}")
+  exit(0)
+}
+
+func windowInfos(_ owner: String) -> [[String: Any]] {
+  guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
+  return list.filter { w in
+    guard (w[kCGWindowLayer as String] as? Int) == 0, let o = w[kCGWindowOwnerName as String] as? String else { return false }
+    return o.lowercased().contains(owner.lowercased())
+  }
+}
+
+if args.count >= 3 && args[1] == "--windows" {
+  let out: [[String: Any]] = windowInfos(args[2]).compactMap { w in
+    guard let id = w[kCGWindowNumber as String] as? UInt32, let b = w[kCGWindowBounds as String] as? [String: CGFloat], let width = b["Width"], let height = b["Height"] else { return nil }
+    return ["id": Int(id), "title": (w[kCGWindowName as String] as? String) ?? "", "w": Int(width), "h": Int(height)]
+  }
+  if let d = try? JSONSerialization.data(withJSONObject: out), let s = String(data: d, encoding: .utf8) { print(s) }
+  exit(0)
+}
+
+guard args.count >= 2, !args[1].isEmpty else { fail("args", "Usage: jamsesh-live <app name> [fps] [--window id] [--crop x,y,w,h]") }
 let appName = args[1].lowercased()
-let fps = max(1, min(60, args.count > 2 ? (Int(args[2]) ?? 30) : 30))
+var fps = 30
+var wantWindow: UInt32?
+var crop: CGRect?
+var i = 2
+while i < args.count {
+  let a = args[i]
+  if a == "--window", i + 1 < args.count { wantWindow = UInt32(args[i + 1]); i += 2 }
+  else if a == "--crop", i + 1 < args.count {
+    let v = args[i + 1].split(separator: ",").compactMap { Double($0) }
+    if v.count == 4, v[2] > 0, v[3] > 0 { crop = CGRect(x: v[0], y: v[1], width: v[2], height: v[3]) }
+    i += 2
+  } else { fps = max(1, min(60, Int(a) ?? 30)); i += 1 }
+}
 
 if !CGPreflightScreenCaptureAccess() {
-  // Asks once; macOS shows its own prompt and the grant needs the app restarted.
-  _ = CGRequestScreenCaptureAccess()
   fail("screen", "Screen Recording isn't allowed for JamSesh on this Mac (System Settings > Privacy & Security).")
 }
 
@@ -74,6 +111,7 @@ func findWindow() -> Target? {
       let b = w[kCGWindowBounds as String] as? [String: CGFloat],
       let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"], width > 60, height > 60
     else { continue }
+    if let only = wantWindow, only != id { continue }
     let t = Target(id: id, pid: pid, bounds: CGRect(x: x, y: y, width: width, height: height))
     if let b = best, b.bounds.width * b.bounds.height >= t.bounds.width * t.bounds.height { continue }
     best = t
@@ -136,6 +174,13 @@ func handle(_ line: String) {
         e?.postToPid(pid)
       }
     }
+  case "key":
+    lock.lock()
+    let pid = current?.pid
+    lock.unlock()
+    let codes: [String: CGKeyCode] = ["return": 36, "delete": 51, "tab": 48, "escape": 53]
+    guard let pid, let name = m["key"] as? String, let code = codes[name] else { return }
+    for down in [true, false] { CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)?.postToPid(pid) }
   default:
     return
   }
@@ -176,8 +221,10 @@ Task {
     let filter = SCContentFilter(desktopIndependentWindow: win)
     let cfg = SCStreamConfiguration()
     let scale = max(1, Int(filter.pointPixelScale))
-    cfg.width = Int(win.frame.width) * scale
-    cfg.height = Int(win.frame.height) * scale
+    let area = crop ?? CGRect(origin: .zero, size: win.frame.size)
+    if crop != nil { cfg.sourceRect = area }
+    cfg.width = Int(area.width) * scale
+    cfg.height = Int(area.height) * scale
     cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
     cfg.pixelFormat = kCVPixelFormatType_32BGRA
     cfg.showsCursor = false
@@ -186,7 +233,7 @@ Task {
     let stream = SCStream(filter: filter, configuration: cfg, delegate: output)
     try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "frames"))
     try await stream.startCapture()
-    say(["event": "window", "w": Int(win.frame.width), "h": Int(win.frame.height)])
+    say(["event": "window", "w": Int(area.width), "h": Int(area.height)])
   } catch {
     fail("screen", "Couldn't start capturing: \(error.localizedDescription)")
   }

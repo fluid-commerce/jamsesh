@@ -92,3 +92,10 @@
   flex-basis: 100%;
   color: var(--directive);
 }
+.liveapp-mode {
+  color: var(--dim);
+  font-size: 12px;
+}
+.liveapp-screen:focus {
+  outline: none;
+}
