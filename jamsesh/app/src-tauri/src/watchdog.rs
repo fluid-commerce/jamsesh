@@ -101,6 +101,13 @@ pub fn log(dir: &std::path::Path, line: &str) {
 /// the Mac slept), and the silence in it isn't the pages' fault.
 pub fn tick(app: &AppHandle, beats: &std::sync::Mutex<Beats>, dir: &std::path::Path, last: &mut Instant) {
     let now = Instant::now();
+    // Which windows someone could be looking at, read before taking the lock: the read waits on the
+    // main thread, where a page's heartbeat command also takes this lock.
+    let known = match beats.lock() {
+        Ok(b) => b.known(),
+        Err(_) => return,
+    };
+    let visible: HashMap<String, bool> = known.iter().map(|l| (l.clone(), app.get_webview_window(l).is_some_and(|w| watched(app, &w)))).collect();
     let stalled = {
         let Ok(mut b) = beats.lock() else { return };
         if now.duration_since(*last) > Duration::from_secs(20) {
@@ -111,7 +118,7 @@ pub fn tick(app: &AppHandle, beats: &std::sync::Mutex<Beats>, dir: &std::path::P
                 b.forget(&label);
             }
         }
-        b.stalled(now, |label| app.get_webview_window(label).is_some_and(|w| watched(&w)))
+        b.stalled(now, |label| visible.get(label).copied().unwrap_or(false))
     };
     *last = now;
     for label in stalled {
@@ -122,12 +129,24 @@ pub fn tick(app: &AppHandle, beats: &std::sync::Mutex<Beats>, dir: &std::path::P
 /// A window is watched when someone could be looking at it: shown, not minimized, and with some part
 /// of it on screen. A fully covered window (or one on another Space) may have its page throttled or
 /// suspended by WebKit, which would look like a hang; when the state can't be read, it isn't watched.
-fn watched(w: &tauri::WebviewWindow) -> bool {
-    w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && on_screen(w) == Some(true)
+fn watched(app: &AppHandle, w: &tauri::WebviewWindow) -> bool {
+    w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && on_screen(app, w) == Some(true)
 }
 
-/// Whether any part of the window is visible (NSWindow.occlusionState has the Visible bit).
-fn on_screen(w: &tauri::WebviewWindow) -> Option<bool> {
+/// Whether any part of the window is visible. NSWindow is main-thread-only, so this asks the main
+/// thread and waits briefly for its answer (none in time: unknown, so the window isn't watched).
+fn on_screen(app: &AppHandle, w: &tauri::WebviewWindow) -> Option<bool> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let w = w.clone();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(occlusion_visible(&w));
+    })
+    .ok()?;
+    rx.recv_timeout(Duration::from_secs(2)).ok().flatten()
+}
+
+/// On the main thread only: NSWindow.occlusionState has the Visible bit.
+fn occlusion_visible(w: &tauri::WebviewWindow) -> Option<bool> {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     const NS_WINDOW_OCCLUSION_STATE_VISIBLE: usize = 1 << 1;
