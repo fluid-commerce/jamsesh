@@ -327,6 +327,15 @@ class HubClient {
         return this.set({ thinking: m.on ? m.label ?? "Thinking" : null });
       case "level":
         return this.set({ levels: { ...this.snap.levels, [m.deviceId]: m.level } });
+      case "share-ended": {
+        // The hub ended a share of this device (replaced, or its tile left the big screen): say so once.
+        if (m.text && m.deviceId === this.deviceId) {
+          const t: Toast = { id: ++this.toastId, text: m.text, tone: "info", at: Date.now() };
+          this.set({ toasts: [...this.snap.toasts, t].slice(-4) });
+          setTimeout(() => this.set({ toasts: this.snap.toasts.filter((x) => x.id !== t.id) }), 7000);
+        }
+        return;
+      }
       case "rtc":
       case "share-request":
         return;

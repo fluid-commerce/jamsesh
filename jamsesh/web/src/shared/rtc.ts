@@ -10,11 +10,25 @@ import { api, hub, type Share } from "./hub";
 type Kind = Share["kind"];
 
 type Signal =
-  | { op: "want"; shareId: string }
+  | { op: "want"; shareId: string; host?: boolean }
   | { op: "offer"; shareId: string; pc: string; sdp: string }
   | { op: "answer"; shareId: string; pc: string; sdp: string }
   | { op: "ice"; shareId: string; pc: string; candidate: RTCIceCandidateInit | null }
   | { op: "bye"; shareId: string };
+
+/**
+ * The big screen's window (the host's /host pages) gets the full-quality stream; people's own
+ * windows only draw a preview of the Stage, so the sharer sends them a small one. The viewer says
+ * which it is in its "want"; a person who claims to be the big screen just gets a sharper picture.
+ */
+const isBigScreen = () => typeof location !== "undefined" && location.pathname.startsWith("/host");
+
+/** Screen capture ceiling: native size up to 4K, at a pace that keeps text sharp. */
+const SCREEN_MAX = { width: 3840, height: 2160 };
+const SCREEN_FPS = 15;
+const HOST_SCREEN_BITRATE = 14_000_000;
+const PREVIEW_SCREEN_BITRATE = 1_200_000;
+const PREVIEW_SCALE = 3;
 
 // Public STUN lets shares connect across home and office networks; strict networks would need TURN.
 const STUN: RTCIceServer[] = [{ urls: ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"] }];
@@ -85,6 +99,11 @@ export function usePublications(): Publication[] {
   );
 }
 
+/** The capture this device already has running for a kind, if any. */
+export function activePublication(kind: Kind): Publication | undefined {
+  return [...pubs.values()].find((p) => p.kind === kind && !p.stopped);
+}
+
 export function localPublication(shareId: string): Publication | undefined {
   return pubs.get(shareId);
 }
@@ -94,7 +113,7 @@ export async function capture(kind: Kind): Promise<MediaStream> {
   if (unavailable) throw new Error(unavailable);
   if (kind === "screen") {
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { ideal: 30, max: 30 } },
+      video: { width: { ideal: SCREEN_MAX.width, max: SCREEN_MAX.width }, height: { ideal: SCREEN_MAX.height, max: SCREEN_MAX.height }, frameRate: { ideal: SCREEN_FPS, max: SCREEN_FPS } },
       audio: false,
     });
     for (const t of stream.getVideoTracks()) t.contentHint = "detail";
@@ -158,7 +177,7 @@ function closePc(pc: RTCPeerConnection) {
   } catch {}
 }
 
-async function onWant(viewer: string, shareId: string) {
+async function onWant(viewer: string, shareId: string, bigScreen = false) {
   const pub = pubs.get(shareId);
   if (!pub || pub.stopped) return;
   // A repeat "want" (viewer reloaded or gave up) replaces any earlier connection.
@@ -176,7 +195,9 @@ async function onWant(viewer: string, shareId: string) {
       try {
         const p = sender.getParameters();
         p.encodings = p.encodings?.length ? p.encodings : [{}];
-        p.encodings[0].maxBitrate = pub.kind === "screen" ? 8_000_000 : 3_000_000;
+        const preview = pub.kind === "screen" && !bigScreen;
+        p.encodings[0].maxBitrate = pub.kind === "screen" ? (preview ? PREVIEW_SCREEN_BITRATE : HOST_SCREEN_BITRATE) : 3_000_000;
+        if (preview) p.encodings[0].scaleResolutionDownBy = PREVIEW_SCALE;
         // Text stays sharp; motion gives up frames first.
         (p as any).degradationPreference = pub.kind === "screen" ? "maintain-resolution" : "balanced";
         await sender.setParameters(p);
@@ -248,7 +269,7 @@ function setSnap(s: Session, patch: Partial<WatchState>) {
 }
 
 function want(s: Session) {
-  send(s.publisher, { op: "want", shareId: s.shareId });
+  send(s.publisher, { op: "want", shareId: s.shareId, host: isBigScreen() });
   setSnap(s, { attempts: s.snap.attempts + 1 });
 }
 
@@ -422,12 +443,14 @@ function init() {
   });
   setInterval(() => pubs.size > 0 && void reregister(), 8000);
   hub.onMessage((m) => {
+    // The hub ended one of this device's shares (replaced, or off the big screen): release the capture.
+    if (m?.type === "share-ended" && m.deviceId === hub.deviceId) void stopPublishing(String(m.shareId), { notifyHub: false });
     if (m?.type !== "rtc" || !m.data || m.from === hub.deviceId) return;
     const d = m.data as Signal;
     const from = String(m.from);
     switch (d.op) {
       case "want":
-        void onWant(from, d.shareId);
+        void onWant(from, d.shareId, d.host === true);
         return;
       case "offer":
         void onOffer(from, d);
@@ -461,6 +484,17 @@ function init() {
       }
     }
   });
+}
+
+/** What this viewer is receiving for a share, from the connection's own stats (for the debug overlay). */
+export async function receiveStats(shareId: string): Promise<{ width: number; height: number; fps: number; bytes: number } | null> {
+  const pc = sessions.get(shareId)?.pc;
+  if (!pc) return null;
+  const report = await pc.getStats();
+  for (const r of report.values()) {
+    if (r.type === "inbound-rtp" && r.kind === "video") return { width: r.frameWidth ?? 0, height: r.frameHeight ?? 0, fps: Math.round(r.framesPerSecond ?? 0), bytes: r.bytesReceived ?? 0 };
+  }
+  return null;
 }
 
 /** React hook: the live stream (or null while connecting) for a share. */
