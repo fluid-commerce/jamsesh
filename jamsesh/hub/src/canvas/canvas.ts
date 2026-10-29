@@ -91,23 +91,41 @@ export class Canvas {
     throw new Error(`no free port for the canvas server near ${config.figcraftPort}`);
   }
 
+  /** Failed starts so far, and the next try (a failed first start is tried again, backing off, a few times). */
+  private startFailures = 0;
+  private startRetry: ReturnType<typeof setTimeout> | null = null;
+  static START_RETRIES = 6;
+  static START_RETRY_MS = 5_000;
+
   async start() {
+    this.startRetry = null;
     this.session.setCanvas({ status: "starting", reason: null });
     try {
       await this.startServer();
       await this.startHost();
       if (this.stopped) return;
+      this.startFailures = 0;
       this.poller = setInterval(() => this.poll(), POLL_MS);
       this.timers = [setInterval(() => this.reapIdleAgents(), 60_000), setInterval(() => this.watchdog().catch(() => {}), 30_000)];
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       console.error("canvas:", reason);
+      // Nothing half-started stays behind: the host participant and the server this start spawned stop.
+      this.host?.close();
+      this.host = null;
+      if (this.serverProc) await stopHelper(this.serverProc).catch(() => {});
+      this.serverProc = null;
       this.session.setCanvas({ status: "failed", reason });
+      if (this.stopped || ++this.startFailures > Canvas.START_RETRIES) return;
+      const wait = Math.min(5 * 60_000, Canvas.START_RETRY_MS * 2 ** (this.startFailures - 1));
+      this.startRetry = setTimeout(() => void this.start(), wait);
+      this.startRetry.unref?.();
     }
   }
 
   stop() {
     this.stopped = true;
+    if (this.startRetry) clearTimeout(this.startRetry);
     if (this.poller) clearInterval(this.poller);
     for (const t of this.timers.splice(0)) clearInterval(t);
     this.host?.close();
@@ -134,16 +152,33 @@ export class Canvas {
       stdout: "ignore",
       stderr: "pipe",
     });
+    // Read all it says while it runs (a full pipe would block it), keeping only the latest part.
+    this.serverLog = "";
+    void this.drainServerLog(this.serverProc.stderr as ReadableStream<Uint8Array>);
     for (let i = 0; i < Canvas.START_TRIES; i++) {
       if (await healthy(this.serverUrl)) return;
       await Bun.sleep(150);
     }
-    // A server that is still running holds its stderr open: read what it has said, then stop it.
+    // Stop it, and report the latest of what it said.
     const proc = this.serverProc;
     this.serverProc = null;
-    const err = await readFor(proc.stderr as ReadableStream<Uint8Array>, 500);
+    await Bun.sleep(100);
+    const err = this.serverLog.slice(-300);
     await stopHelper(proc);
     throw new Error(`figcraft-server didn't start${err.trim() ? `: ${err.trim().slice(0, 300)}` : ""}`);
+  }
+
+  /** The latest of what the canvas server wrote to stderr, at most SERVER_LOG_MAX characters. */
+  serverLog = "";
+  static SERVER_LOG_MAX = 16_384;
+
+  private async drainServerLog(stream: ReadableStream<Uint8Array>) {
+    const decoder = new TextDecoder();
+    try {
+      for await (const chunk of stream) {
+        this.serverLog = (this.serverLog + decoder.decode(chunk, { stream: true })).slice(-Canvas.SERVER_LOG_MAX);
+      }
+    } catch {}
   }
 
   private async serverKey(): Promise<string> {
@@ -160,7 +195,11 @@ export class Canvas {
   }
 
   private async startHost() {
-    const host = await this.spawnParticipant(join(this.filesDir, "host")).init();
+    const participant = this.spawnParticipant(join(this.filesDir, "host"));
+    const host = await participant.init().catch((e) => {
+      participant.close(); // a process whose start failed doesn't linger
+      throw e;
+    });
     this.host = host;
     await host.command("pref.userName", { name: "JamSesh" });
     const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
@@ -604,25 +643,6 @@ export class Canvas {
 function portFree(port: number) {
   const r = Bun.spawnSync(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]);
   return r.stdout.toString().trim() === "";
-}
-
-/** What a stream has said so far, read for at most `ms` (a process that's still running keeps its pipe open). */
-async function readFor(stream: ReadableStream<Uint8Array>, ms: number) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  const late = Bun.sleep(ms).then(() => null);
-  let out = "";
-  try {
-    while (out.length < 2000) {
-      const r = await Promise.race([reader.read(), late]);
-      if (!r || r.done) break;
-      out += decoder.decode(r.value, { stream: true });
-    }
-  } catch {
-  } finally {
-    reader.cancel().catch(() => {});
-  }
-  return out;
 }
 
 async function healthy(url: string) {
