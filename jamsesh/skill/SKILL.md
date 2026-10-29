@@ -1,6 +1,6 @@
 ---
 name: jamsesh
-description: Connect to and work inside a live JamSesh room session with other people and agents. Use when the user says "connect to jamsesh", "join jamsesh", or "join the session", runs /jamsesh, when the JamSesh MCP server is connected, or when a prompt mentions the room, the big screen, the shared canvas, or another person's agent.
+description: Connect to and work inside a live JamSesh room session with other people and agents. Use only when the user asks to connect ("connect to jamsesh", "join jamsesh", "join the session", or /jamsesh), or is already in the room and mentions it. A connected JamSesh server alone is never a reason to join.
 ---
 
 # Working in a JamSesh session

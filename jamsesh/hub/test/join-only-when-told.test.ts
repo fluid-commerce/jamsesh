@@ -84,7 +84,9 @@ describe("the install", () => {
     mkdirSync(join(home, ".claude"), { recursive: true });
     mkdirSync(join(home, ".codex"), { recursive: true });
     mkdirSync(bin, { recursive: true });
-    for (const n of ["claude", "codex"]) writeFileSync(join(bin, n), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // A claude that registers the entry the way Claude Code does.
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\ncase "$*" in *add-json*) for last; do :; done; printf '{"mcpServers":{"jamsesh":%s}}' "$last" > "$HOME/.claude.json" ;; esac\nexit 0\n`, { mode: 0o755 });
     writeFileSync(join(home, ".claude/CLAUDE.md"), `# Me\n\n${BLOCK}`);
     writeFileSync(join(home, ".codex/AGENTS.md"), `# Codex me\r\n\r\n${BLOCK.replaceAll("\n", "\r\n")}`);
     writeFileSync(join(home, ".claude/settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "/x/.jamsesh/hook.sh start" }] }, { hooks: [{ type: "command", command: "mine.sh" }] }] } }));
@@ -261,5 +263,22 @@ describe("joining is announced, and an accidental join can be removed", () => {
     s.removeAgent(agent.id);
     expect(s.agent(agent.id)).toBeUndefined();
     expect(s.store.recentEvents().some((e) => e.text === "did a thing")).toBe(true);
+  });
+});
+
+describe("shipped wording never tells an agent to join on connect", () => {
+  const BAD = /MCP server is connected|when (the )?(jamsesh )?(mcp )?server is connected|call jam_join first|join (on|when) connect/i;
+  test("the full skill, the launcher skill and the server instructions", async () => {
+    const full = readFileSync(join(import.meta.dir, "../../skill/SKILL.md"), "utf8");
+    const desc = full.split("\n").find((l) => l.startsWith("description:")) ?? "";
+    expect(desc).toContain("A connected JamSesh server alone is never a reason to join");
+    expect(desc).not.toMatch(BAD);
+    const { launcherMarkdown, JOIN_RULE } = await import("../src/skill");
+    expect(launcherMarkdown()).not.toMatch(BAD);
+    const mcp = readFileSync(join(import.meta.dir, "../src/mcp.ts"), "utf8");
+    const instructions = mcp.slice(mcp.indexOf("instructions:"), mcp.indexOf("server.setRequestHandler(ListToolsRequestSchema"));
+    expect(instructions).toContain("${JOIN_RULE}");
+    expect(JOIN_RULE).toContain("Never join on your own");
+    expect(instructions).not.toMatch(BAD);
   });
 });
