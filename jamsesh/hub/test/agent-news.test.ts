@@ -160,3 +160,17 @@ test("the parity tool needs a named cross-platform feature, and its directives a
   // The pass gets only this tool and no_action, never pair_agents or create_directive.
   expect(Object.keys(tools).sort()).toEqual(["coordinate_parity", "no_action"]);
 });
+
+test("other workstreams' decisions can't crowd out an older relevant one, or move the seen mark past it", () => {
+  const { hub, s, desktop, mobile } = room();
+  const nav = s.claim(desktop.id, "Navigation").workstream;
+  s.claim(mobile.id, "Checkout");
+  const checkout = s.store.all("workstreams").find((w) => w.title === "Checkout")!;
+  const add = (text: string, workstreamId: string | null) => s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, workstreamId, relevance: "work", data: {} });
+  add("Nav goes in a sidebar", nav.id);
+  for (let i = 0; i < 250; i++) add(`Checkout rule ${i}`, checkout.id);
+  expect(s.roomDecisions(desktop.id, { limit: 10 }).map((e) => e.text)).toEqual(["Nav goes in a sidebar"]);
+  // The prompt hook hands it over (and only then marks it seen).
+  expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "next" }, "127.0.0.1"))).toContain("Nav goes in a sidebar");
+  expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "again" }, "127.0.0.1"))).not.toContain("Nav goes in a sidebar");
+});

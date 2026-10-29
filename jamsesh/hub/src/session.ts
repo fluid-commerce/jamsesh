@@ -704,10 +704,17 @@ export class Session {
   /** Decisions the room made (the brain's; agents' own decisions are updates), relevant to this agent's workstream when it has one. */
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
-    return this.store
-      .recentEvents({ kinds: ["decision"], afterId: opts.afterId, limit: opts.limit * 3 })
-      .filter((e) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId)))
-      .slice(-opts.limit);
+    const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
+    // Page back until enough are relevant: other workstreams' decisions can't crowd one out.
+    const out: JamEvent[] = [];
+    let beforeId: number | undefined;
+    for (let pages = 0; out.length < opts.limit && pages < 20; pages++) {
+      const page = this.store.recentEvents({ kinds: ["decision"], afterId: opts.afterId, beforeId, limit: 100 });
+      out.unshift(...page.filter(relevant));
+      if (page.length < 100) break;
+      beforeId = page[0].id;
+    }
+    return out.slice(-opts.limit);
   }
 
   sendMessage(fromAgentId: string, to: string, text: string, data: Record<string, any> = {}) {
