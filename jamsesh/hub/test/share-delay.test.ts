@@ -320,7 +320,7 @@ test("a share ending that fails part way changes nothing and runs none of its ef
   expect(r.s.stage().layout?.tiles.length).toBe(1);
 });
 
-test("an ended share still on a screen with no saved snapshot is left as it is at restart", async () => {
+test("an ended share still on a screen with no saved snapshot loses its tile at restart (the board, if it was alone)", async () => {
   mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
   const r = room();
   const sh = r.s.startShare("felipe-laptop", "screen");
@@ -380,7 +380,9 @@ test("a post-commit effect that throws is logged and never undoes the committed 
   }
   expect(r.s.store.get("shares", sh.id)?.status).toBe("ended");
   expect(r.s.stage().mode).toBe("spotlight");
-  expect(seen).toContain("shares");
+  // The failing listener was the second effect; the ones queued after it still ran.
+  expect(seen.indexOf("shares")).toBeLessThan(seen.indexOf("stageTiles"));
+  expect(seen.length).toBeGreaterThan(seen.indexOf("stageTiles") + 1);
 });
 
 test("a failed BEGIN leaves the store usable: the next atomic write still opens a real transaction", () => {

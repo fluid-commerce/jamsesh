@@ -1,4 +1,5 @@
 // HTTP, WebSocket and MCP on one port.
+import { parseStage } from "./stageSchema";
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
@@ -552,8 +553,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const noScreen = () => bad("error" in where ? where.error : "", "choices" in where && where.choices ? 409 : 404);
 
   if (path === "/stage" && req.method === "POST") {
-    const stage = body as Partial<Stage> & { mode: Stage["mode"] };
-    if (!stage?.mode) return bad("mode is required");
+    if (!body?.mode) return bad("mode is required");
+    const checked = parseStage(body);
+    if (!checked.ok) return bad(checked.error);
+    const stage = checked.stage;
     const who = actor();
     const screen = screenOf();
     if (!screen) return noScreen();

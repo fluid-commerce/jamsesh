@@ -1,5 +1,6 @@
 // The session: people, devices, agents, workstreams, directives, artifacts and the
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
+import { parseStage } from "./stageSchema";
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
@@ -1519,8 +1520,8 @@ export class Session {
     // A screen nothing was ever put on shows a default that stays the same stage between reads (same `since`, and its own `screenId`).
     let first = this.defaultStages.get(screen);
     if (!first) this.defaultStages.set(screen, (first = { at: Date.now() }));
-    if (screen !== "main") return this.store.setting<Record<string, Stage>>("screenStages", {})[screen] ?? { mode: "board", title: "", caption: "", items: [], pinned: false, since: first.at, by: "JamSesh", screenId: screen };
-    return this.store.setting<Stage>("stage", {
+    if (screen !== "main") return this.valid(this.store.setting<Record<string, Stage>>("screenStages", {})[screen], screen) ?? { mode: "board", title: "", caption: "", items: [], pinned: false, since: first.at, by: "JamSesh", screenId: screen };
+    return this.valid(this.store.setting<Stage | null>("stage", null), "main") ?? {
       mode: "welcome",
       title: "",
       caption: "",
@@ -1528,7 +1529,21 @@ export class Session {
       pinned: false,
       since: first.at,
       by: "JamSesh",
-    });
+    };
+  }
+
+  private badStageLogged = new Set<string>();
+  /** A stored stage that passes the same check a cast does (missing basics filled in), or undefined, logged once, when it doesn't: a bad one is dropped, never served. */
+  private valid(raw: Stage | null | undefined, screen: string): Stage | undefined {
+    if (!raw) return undefined;
+    const r = parseStage(raw);
+    if (!r.ok) {
+      if (!this.badStageLogged.has(screen)) console.error(`the stored stage of ${screen} is malformed and was dropped: ${r.error}`);
+      this.badStageLogged.add(screen);
+      return undefined;
+    }
+    this.badStageLogged.delete(screen);
+    return { title: "", caption: "", items: [], pinned: false, since: Date.now(), by: "JamSesh", ...(raw as Partial<Stage>) } as Stage;
   }
 
   /** How long a brought-up screen stays before the board comes back (tests shorten it). */
@@ -1770,7 +1785,7 @@ export class Session {
     if (!cur.lock) return;
     // The lock goes and so does the claim a person's pin had on the screen.
     const { lock: _drop, pinnedById: _pin, ...rest } = cur;
-    this.commitStage(rest, screen);
+    this.commitStage({ ...rest, pinned: false }, screen);
   }
 
   /** A person's yes to the lock question counts this long after it was asked. */
@@ -1881,17 +1896,30 @@ export class Session {
   }
 
   /** Puts a queued item on its screen. A person showing it takes the screen's lock; with no person (the owner said yes) it goes up unlocked. */
-  showReady(id: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { override: true } | { claim: StageClaim; mayReplaceLock?: string }): Stage | null {
+  showReady(id: string, who: ShowWho): Stage | null {
+    try {
+      return this.atomically(() => this.showReadyIn(id, who));
+    } catch (e) {
+      if (e instanceof NotShown) return null;
+      throw e;
+    }
+  }
+
+  /** `showReady` inside a transaction: the item leaves the queue only if the stage really changed, else NotShown undoes it all. */
+  private showReadyIn(id: string, who: ShowWho): Stage {
     const item = this.readyToShow().find((r) => r.id === id);
-    if (!item) return null;
-    if ("claim" in who && !this.claimHolds(who.claim, item.screen)) return null;
+    if (!item) throw new NotShown();
+    if ("claim" in who && !this.claimHolds(who.claim, item.screen)) throw new NotShown();
     this.dismissReady(id);
-    return this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
+    const before = this.stageRev(item.screen);
+    const stage = this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
+    if (this.stageRev(item.screen) === before) throw new NotShown();
+    return stage;
   }
 
   dismissReady(id: string) {
     this.store.setSetting("readyToShow", this.readyToShow().filter((r) => r.id !== id));
-    bus.changed("readyToShow");
+    this.after(() => bus.changed("readyToShow"));
   }
 
   // ---- asking the lock's owner ----
@@ -1950,11 +1978,19 @@ export class Session {
     const waiting = this.readyToShow().some((r) => r.id === req.readyId);
     if (!lock || lock.since !== req.lockSince || lock.personId !== req.ownerId || (approve && !waiting)) return this.expireShowRequest(req);
     const done: ShowRequest = { ...req, status: approve ? "approved" : "denied", decidedBy: by, at: approve ? req.at : Date.now() };
-    this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === id ? done : r)));
-    if (approve) this.showReady(req.readyId, { override: true });
-    else this.touchLock(req.screen);
-    this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: approve ? `${by} said yes: ${req.agentName}'s ${req.label} is on the big screen.` : `${by} is keeping their screen up. ${req.agentName}'s ${req.label} waits in the queue.`, relevance: "work", data: { showRequest: id } });
-    bus.changed("showRequests");
+    // The approval, the item leaving the queue and the stage write happen together or not at all.
+    try {
+      this.atomically(() => {
+        this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === id ? done : r)));
+        if (approve) this.showReadyIn(req.readyId, { override: true });
+        else this.touchLock(req.screen);
+        this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: approve ? `${by} said yes: ${req.agentName}'s ${req.label} is on the big screen.` : `${by} is keeping their screen up. ${req.agentName}'s ${req.label} waits in the queue.`, relevance: "work", data: { showRequest: id } });
+        this.after(() => bus.changed("showRequests"));
+      });
+    } catch (e) {
+      if (e instanceof NotShown) return this.expireShowRequest(req);
+      throw e;
+    }
     return done;
   }
 
@@ -2020,6 +2056,11 @@ export class Session {
  * work's next write still lands. Anything that decides and writes later than the moment it acts on (the brain, whose
  * model takes seconds; an agent) carries one.
  */
+type ShowWho = { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { override: true } | { claim: StageClaim; mayReplaceLock?: string };
+
+/** Thrown inside a transaction when a queued item couldn't actually go up: everything the attempt wrote is undone. */
+class NotShown extends Error {}
+
 export interface StageClaim {
   revs: Map<string, number>;
 }

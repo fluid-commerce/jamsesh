@@ -1187,3 +1187,71 @@ test("a refusal beats a model's 'present' label, and the label alone never repla
   expect(String(await tools([overheard]).show_on_screen.execute({ mode: "spotlight", artifactIds: [b.id] }))).not.toBe("On screen.");
   expect(s.stage().items).toEqual([a.id]);
 });
+
+test("a malformed cast is refused whole, and a malformed stored stage is dropped instead of breaking the room's state", async () => {
+  const { hub, s } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (body: any) => fetch(`http://127.0.0.1:${server.port}/api/stage`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    const a = artifact(s, "Checkout");
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { override: true });
+    for (const bad of [{ mode: "spotlight", items: "x" }, { mode: "nope" }, { mode: "layout", layout: { tiles: [{ kind: "web" }] } }, { mode: "spotlight", items: Array.from({ length: 500 }, (_, i) => `a${i}`) }, { mode: "layout", layout: { tiles: Array.from({ length: 40 }, () => ({ kind: "feed" })) } }, { mode: "custom", html: "x".repeat(600_000) }]) {
+      expect((await post(bad)).status).toBe(400);
+    }
+    expect(s.stage().items).toEqual([a.id]);
+    expect((await post({ mode: "layout", layout: { tiles: [{ kind: "feed" }] } })).status).toBe(200);
+  } finally {
+    server.stop();
+  }
+  // Already stored badly (an older build, or a hand edit): dropped with a log, and the reads that walk the stage don't throw.
+  s.store.setSetting("stage", { mode: "spotlight", items: "x", pinned: true, since: 1, by: "x", title: "", caption: "" });
+  s.store.setSetting("screenStages", { "screen-2": { mode: "layout", layout: { tiles: "no" } } });
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(() => s.stageTileKeys()).not.toThrow();
+    expect(() => s.stageTileKeys("screen-2")).not.toThrow();
+    expect(s.stage().mode).toBe("welcome");
+    expect(s.stage("screen-2").mode).toBe("board");
+    expect(() => JSON.stringify((s as any).resolve("stage"))).not.toThrow();
+  } finally {
+    console.error = err;
+  }
+});
+
+test("Unlock lets the pin go with the lock: the screen returns to the board on its timer, and another person's share can take it", async () => {
+  const { hub, s, chey, felipe } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id], pinned: true }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  expect(s.stage().pinned).toBe(true);
+  expect(s.releaseLock("main", { owner: chey.id })).toBe(true);
+  expect(s.stage().pinned).toBe(false);
+  expect(s.stage().pinnedById).toBeUndefined();
+  expect((s as any).stageRevert).not.toBeNull();
+  const sh = s.startShare("felipe-laptop", "screen");
+  await hub.brain.placeShare(sh);
+  expect(s.stage().mode).toBe("layout");
+  void felipe;
+});
+
+test("approving a show request is one write: when the item can't go up, the approval and the queue are left as they were", () => {
+  const { s, chey, reg } = room();
+  const a = artifact(s, "Checkout");
+  const agent = reg("Felipe");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [a.id] } });
+  s.onShowRequest = () => {};
+  age(s, 6 * 60_000);
+  const req = s.askOwner(item)!;
+  const real = s.store.setSetting.bind(s.store);
+  (s.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage") throw new Error("disk full"); real(k, v); };
+  expect(() => s.answerShowRequest(req.id, true, "Chey")).toThrow("disk full");
+  (s.store as any).setSetting = real;
+  expect(s.readyToShow().some((r) => r.id === item.id)).toBe(true);
+  expect(s.showRequests().find((r) => r.id === req.id)?.status).toBe("pending");
+  // And a plain show that can't land (the screen changed under its claim) keeps the item queued.
+  const claim = s.stageClaim();
+  s.setStage({ mode: "agents" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  expect(s.showReady(item.id, { claim })).toBeNull();
+  expect(s.readyToShow().some((r) => r.id === item.id)).toBe(true);
+});
