@@ -276,15 +276,23 @@ class HubClient {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  /** Bumped by every state the socket delivers; an HTTP answer older than the latest one is stale. */
+  private stateGen = 0;
+
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
-    this.adopt(await api<HubState>("/state"));
+    const gen = this.stateGen;
+    const room = this.snap.state?.session?.roomId;
+    const state = await api<HubState>("/state");
+    // The socket moved on while this was in flight (or the window is in another room now): the answer is the past.
+    if (gen !== this.stateGen || (room !== undefined && this.snap.state?.session?.roomId !== room)) return;
+    this.adopt(state);
   }
 
-  /** Takes a full state, from the socket or from HTTP. Another room (this window outlived a relay restart into a new one): its purge ids mean nothing here. */
+  /** Takes a full state, from the socket or from HTTP. Another room (this window outlived a relay restart into a new one): its purge ids and live indicators mean nothing here. */
   private adopt(state: HubState) {
     const s = this.snap.state;
-    this.set(s && s.session?.roomId !== state.session?.roomId ? { state, removed: [] } : { state });
+    this.set(s && s.session?.roomId !== state.session?.roomId ? { state, removed: [], thinking: null, speaking: null, levels: {}, toasts: [] } : { state });
   }
 
   /** Host time now, for stamping audio. */
@@ -306,6 +314,7 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
+        this.stateGen++;
         return this.adopt(m.state);
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });

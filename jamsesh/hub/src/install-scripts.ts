@@ -298,17 +298,67 @@ case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing toke
 command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 # The credential goes in files (mode 600) that curl and Claude Code read, never in a command's
 # arguments, which any process on this computer can list. Empty: the JamSesh app's relay adds it.
-# The files that say which host this computer talks to are saved first and put back if setup fails
-# anywhere before the MCP entry is in, so a failure never leaves hooks on one host and the MCP server on another.
-CONNFILES="auth.header client.env hook.sh"
+# Setup is one transaction. Every file it can change is saved before the first change, the saved copies
+# stay until the very last step has succeeded, and any failure before then (any command that fails
+# under set -e, or an explicit exit) puts every file and the Claude Code MCP entry back. A restore that
+# fails is reported by path and its saved copy is kept, never swallowed. Paths are saved by where a
+# symlink leads, since that is where setup writes.
 SAVED="$(mktemp -d "$DIR/.saved.XXXXXXXX")"
-for f in $CONNFILES; do if [ -f "$DIR/$f" ]; then cp -p "$DIR/$f" "$SAVED/$f"; fi; done
-restore_files() {
-  local f
-  for f in $CONNFILES; do
-    if [ -f "$SAVED/$f" ]; then cp -p "$SAVED/$f" "$DIR/$f.restore" && mv -f "$DIR/$f.restore" "$DIR/$f"; else rm -f "$DIR/$f"; fi
-  done
+TRACKED=()
+track() {
+  local real i
+  real="$(perl -MCwd=abs_path -MFile::Basename=dirname -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { $r = readlink $p; $r = dirname($p) . "/" . $r unless $r =~ m{^/} } print $r // $p' "$1")"
+  i=\${#TRACKED[@]}
+  TRACKED+=("$real")
+  if [ -f "$real" ]; then cp -p "$real" "$SAVED/$i"; else : > "$SAVED/$i.absent"; fi
 }
+for f in "$DIR/auth.header" "$DIR/client.env" "$DIR/hook.sh" "$DIR/mcp-headers.json" "$DIR/mcp-headers.sh" \\
+  "$HOME/.claude/settings.json" "$HOME/.claude/commands/jamsesh.md" "$HOME/.claude/skills/jamsesh/SKILL.md" \\
+  "$HOME/.codex/config.toml" "$HOME/.codex/prompts/jamsesh.md" "$HOME/.codex/skills/jamsesh/SKILL.md"; do track "$f"; done
+committed=0
+reason=""
+mcp_touched=0
+CLAUDE=""
+rollback_mcp=""
+rollback_json="$DIR/mcp-headers.rollback.json"
+rollback_sh="$DIR/mcp-headers.rollback.sh"
+on_exit() {
+  local rc=$? i real bad="" restored=1
+  trap - EXIT
+  set +e
+  [ "$committed" = 1 ] && exit "$rc"
+  [ "$rc" = 0 ] && rc=1
+  for ((i = 0; i < \${#TRACKED[@]}; i++)); do
+    real="\${TRACKED[$i]}"
+    if [ -f "$SAVED/$i" ]; then
+      { cp -p "$SAVED/$i" "$real.restore" && mv -f "$real.restore" "$real"; } || bad="$bad $real"
+    else
+      rm -f "$real" || bad="$bad $real"
+    fi
+  done
+  if [ "$mcp_touched" = 1 ]; then
+    "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1
+    if [ -n "$rollback_mcp" ]; then
+      { "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; } || restored=0
+    fi
+  fi
+  [ -z "$bad" ] || restored=0
+  if [ "$restored" = 1 ]; then
+    rm -rf "$SAVED"
+    case "$reason" in
+      hook) echo "JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2 ;;
+      mcp) echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2 ;;
+      quiet) ;;
+      *) echo "Setup didn't finish, so your earlier connection was put back. Try connecting again." ;;
+    esac
+  else
+    [ -z "$bad" ] || echo "JamSesh couldn't put these files back:$bad (the earlier copies are in $SAVED)." >&2
+    [ "$mcp_touched" = 0 ] || echo "Check the Claude Code entry with: claude mcp get jamsesh" >&2
+    echo "Setup didn't finish, and JamSesh couldn't put your earlier connection back completely." >&2
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 printf 'authorization: Bearer %s\\n' "$TOKEN" | private "$DIR/auth.header"
 AUTH=(-H "@$DIR/auth.header")
 # A value as one single-quoted shell word, so sourcing client.env (the jamsesh command does) runs
@@ -334,9 +384,7 @@ if curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$hooktmp" && head -n 1 "$hooktmp" 
   chmod 755 "$hooktmp" && mv -f "$hooktmp" "$DIR/hook.sh"
 else
   rm -f "$hooktmp"
-  restore_files || echo "JamSesh couldn't put its earlier connection files back." >&2
-  rm -rf "$SAVED"
-  echo "JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2
+  reason=hook
   exit 1
 fi
 
@@ -371,15 +419,9 @@ if [ -n "$CLAUDE" ]; then
   # the credential it uses are saved first (the new token goes in only after), and both are put back
   # if the new one can't be added. Nothing here puts a token on a command line.
   cred="$DIR/mcp-headers.json"
-  prev_cred="$DIR/mcp-headers.json.prev"
-  rollback_json="$DIR/mcp-headers.rollback.json"
-  rollback_sh="$DIR/mcp-headers.rollback.sh"
-  rm -f "$prev_cred"
   old_mcp="$(perl -MJSON::PP -0777 -ne 'my $d = eval { decode_json($_) }; my $o = ref $d eq "HASH" && ref $d->{mcpServers} eq "HASH" ? $d->{mcpServers}{jamsesh} : undef; print JSON::PP->new->canonical->encode($o) if ref $o eq "HASH"' "$HOME/.claude.json" 2>/dev/null || true)"
-  [ -f "$cred" ] && private "$prev_cred" < "$cred"
   # An earlier entry with its credential inline: the credential goes to a helper of its own, since
   # putting the entry back with it would put the token on a command line.
-  rollback_mcp=""
   if [ -n "$old_mcp" ]; then
     old_auth="$(printf '%s' "$old_mcp" | perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); my $h = ref $o->{headers} eq "HASH" ? $o->{headers} : {}; my ($k) = grep { lc eq "authorization" } keys %$h; print encode_json({ authorization => $h->{$k} }) if defined $k && !ref $h->{$k}' 2>/dev/null || true)"
     if [ -n "$old_auth" ]; then
@@ -399,25 +441,9 @@ if [ -n "$CLAUDE" ]; then
     helper="$DIR/mcp-headers.sh"
   fi
   new_mcp="$(JAMSESH_URL="$HUB/mcp" JAMSESH_HELPER="$helper" perl -MJSON::PP -e 'print JSON::PP->new->canonical->encode({ type => "http", url => $ENV{JAMSESH_URL}, ($ENV{JAMSESH_HELPER} ? (headersHelper => $ENV{JAMSESH_HELPER}) : ()) })')"
+  mcp_touched=1
   "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
-  if ! "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null; then
-    restored=1
-    # The earlier credential first, then the earlier entry, then a check that it is really there.
-    if [ -f "$prev_cred" ]; then mv -f "$prev_cred" "$cred" || restored=0; else rm -f "$cred" "$DIR/mcp-headers.sh"; fi
-    if [ -n "$rollback_mcp" ]; then
-      "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1 || restored=0
-    fi
-    restore_files || restored=0
-    rm -rf "$SAVED"
-    if [ "$restored" = 1 ]; then
-      echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2
-    else
-      echo "JamSesh couldn't register its MCP server with Claude Code, and couldn't put the earlier one back. Check it with: claude mcp get jamsesh" >&2
-    fi
-    exit 1
-  fi
-  rm -f "$prev_cred" "$rollback_json" "$rollback_sh"
-  rm -rf "$SAVED"
+  if ! "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null; then reason=mcp; exit 1; fi
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
   # JamSesh used to write a block into CLAUDE.md. It never does now, and says where the old one is.
@@ -587,8 +613,13 @@ fi
 # Saying "done" when no agent was set up sent people off to restart agents that would never connect.
 if [ "$configured" -eq 0 ]; then
   echo "Didn't find Claude Code or Codex on this computer, so no agent was connected. Install one (or open it once), then connect again." >&2
+  reason=quiet
   exit 1
 fi
+# Every step worked: the saved copies and the earlier entry's helper are no longer needed.
+committed=1
+rm -rf "$SAVED"
+rm -f "$rollback_json" "$rollback_sh"
 echo "Done. Restart Claude Code or Codex (or run /mcp and reconnect jamsesh), then tell it: connect to jamsesh."
 }
 main "$@" </dev/null

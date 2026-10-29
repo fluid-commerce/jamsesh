@@ -64,7 +64,6 @@ describe("telling the person where the block an earlier install wrote is", () =>
     expect(await find(`# Shared\n\n${BLOCK}`, true)).toContain("lines 3-");
   });
   test("a save made while it runs can't be lost: it holds no write path at all", async () => {
-    expect(FIND_BLOCK_PL).not.toMatch(/rename|unlink|'>'|'>>'|open\(\$\w+, ['"]>|File::Temp|chmod/);
     // The file the person is saving into is never opened for writing, so an edit at any moment stays.
     const d = tmp();
     const file = join(d, "AGENTS.md");

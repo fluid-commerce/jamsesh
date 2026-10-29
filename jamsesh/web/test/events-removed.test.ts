@@ -50,3 +50,29 @@ test("the HTTP fallback drops the old room's purge ids too", async () => {
   expect(hub.get().removed).toEqual([]);
   expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([1, 2]);
 });
+
+test("a slow HTTP answer from the old room can't replace the room the socket moved to", async () => {
+  const state = (roomId: string, ids: number[]) => ({ session: { roomId }, events: ids.map((id) => ({ id })) });
+  (hub as any).snap = { ...(hub as any).snap, removed: [], state: state("room-a", [1]) };
+  let answer: (r: Response) => void = () => {};
+  const real = globalThis.fetch;
+  globalThis.fetch = (() => new Promise<Response>((res) => (answer = res))) as any;
+  try {
+    const pending = hub.refreshState();
+    (hub as any).handle({ type: "state", state: state("room-b", [7, 8]) });
+    answer(Response.json(state("room-a", [1, 2, 3])));
+    await pending;
+  } finally {
+    globalThis.fetch = real;
+  }
+  expect(hub.get().state!.session.roomId).toBe("room-b");
+  expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([7, 8]);
+});
+
+test("a room change clears the old room's thinking, speaking, levels and toasts", () => {
+  const state = (roomId: string) => ({ session: { roomId }, events: [] });
+  (hub as any).snap = { ...(hub as any).snap, state: state("room-a"), thinking: "Thinking", speaking: "hi", levels: { d: 1 }, toasts: [{ id: 1 }] };
+  (hub as any).handle({ type: "state", state: state("room-b") });
+  const s = hub.get();
+  expect([s.thinking, s.speaking, s.levels, s.toasts]).toEqual([null, null, {}, []]);
+});

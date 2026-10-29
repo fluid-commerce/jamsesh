@@ -13,6 +13,8 @@ let people = 0;
 /** The name the host knows this computer's person by (the room controls it); null: /api/me fails. */
 let meName: string | null = "Chey";
 const HOOK_OK = "#!/usr/bin/env bash\nexit 0\n";
+/** What the fake host serves as skill.md (null: an error). */
+let skillBody: string | null = "# JamSesh skill\n";
 /** What the fake host serves as hook.sh (null: an error). */
 let hookBody: string | null = HOOK_OK;
 /** The credential each request to the fake host carried. */
@@ -25,7 +27,7 @@ beforeAll(() => {
       const path = new URL(req.url).pathname;
       auths.push(req.headers.get("authorization") ?? "");
       if (path === "/hook.sh") return hookBody === null ? new Response("down", { status: 503 }) : new Response(hookBody);
-      if (path === "/skill.md") return new Response("# JamSesh skill\n");
+      if (path === "/skill.md") return skillBody === null ? new Response("down", { status: 503 }) : new Response(skillBody);
       if (path === "/launcher.md") return new Response("# JamSesh launcher\n");
       if (path === "/api/me") return meName === null ? new Response("down", { status: 503 }) : Response.json({ person: { id: "p_1", name: meName } });
       if (path === "/api/people") return (people++, Response.json({ ok: true }));
@@ -453,7 +455,8 @@ describe("agent setup script", () => {
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
     const r = await run(box);
     expect(r.code).not.toBe(0);
-    expect(r.stderr).toContain("couldn't put the earlier one back");
+    expect(r.stderr).toContain("couldn't put your earlier connection back completely");
+    expect(r.stderr).toContain("claude mcp get jamsesh");
     expect(r.stderr).not.toContain("was put back");
   });
 
@@ -517,5 +520,108 @@ describe("agent setup script", () => {
     expect((await run(good)).code).toBe(0);
     expect(readFileSync(join(good.home, ".jamsesh/client.env"), "utf8")).not.toContain("tok");
     expect(readdirSync(join(good.home, ".jamsesh")).filter((f) => f.startsWith(".saved"))).toEqual([]);
+  });
+
+  /** An earlier install for another host that still works: its MCP entry (credential in a helper), settings and Codex config. */
+  function earlierWholeInstall(box: ReturnType<typeof sandbox>) {
+    const earlier = earlierInstall(box);
+    const { dir } = earlier;
+    writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
+    writeFileSync(join(dir, "mcp-headers.sh"), `#!/bin/sh\nexec cat '${dir}/mcp-headers.json'\n`, { mode: 0o700 });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headersHelper: join(dir, "mcp-headers.sh") } } }));
+    mkdirSync(join(box.home, ".claude/skills/jamsesh"), { recursive: true });
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const extra = { ".claude/skills/jamsesh/SKILL.md": "old launcher\n", ".codex/config.toml": '[mcp_servers.jamsesh]\nurl = "http://old-host:4747/mcp"\n' };
+    for (const [f, body] of Object.entries(extra)) writeFileSync(join(box.home, f), body);
+    return { ...earlier, extra, mcp: { ...earlier.files, "mcp-headers.json": '{"authorization":"Bearer old-room"}' } };
+  }
+  /** A claude that records its arguments, keeps no state, and passes `mcp get`. */
+  const okClaude = (box: ReturnType<typeof sandbox>) => writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\nexit 0\n`, { mode: 0o755 });
+  const earlierEntryBack = (box: ReturnType<typeof sandbox>) => {
+    const log = readFileSync(box.log, "utf8").trim().split("\n");
+    const lastAdd = log.filter((l) => l.includes("add-json")).pop()!;
+    expect(lastAdd).toContain("old-host");
+    expect(lastAdd).not.toContain(origin);
+  };
+
+  test("settings that won't parse, after the MCP entry is in, undo the whole install", async () => {
+    const box = sandbox();
+    okClaude(box);
+    const { dir, files, mcp, extra } = earlierWholeInstall(box);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    connectionIntact(dir, files);
+    for (const [f, body] of Object.entries(mcp)) expect(readFileSync(join(dir, f), "utf8")).toBe(body);
+    for (const [f, body] of Object.entries(extra)) expect(readFileSync(join(box.home, f), "utf8")).toBe(body);
+    expect(readFileSync(join(box.home, ".claude/settings.json"), "utf8")).toBe("{ not json");
+    earlierEntryBack(box);
+    expect(r.stdout).toContain("your earlier connection was put back");
+    expect(r.stderr.split("\n").at(-1)).toContain("isn't valid JSON");
+  });
+
+  test("a failing Codex step undoes the Claude Code step too, including the Codex config", async () => {
+    const box = sandbox();
+    okClaude(box);
+    const { dir, files, mcp, extra } = earlierWholeInstall(box);
+    skillBody = null;
+    try {
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      connectionIntact(dir, files);
+      for (const [f, body] of Object.entries(mcp)) expect(readFileSync(join(dir, f), "utf8")).toBe(body);
+      for (const [f, body] of Object.entries(extra)) expect(readFileSync(join(box.home, f), "utf8")).toBe(body);
+      expect(existsSync(join(box.home, ".claude/commands/jamsesh.md"))).toBe(false);
+      earlierEntryBack(box);
+    } finally {
+      skillBody = "# JamSesh skill\n";
+    }
+  });
+
+  test("a symlinked Codex config is put back at its target on failure, and stays a link", async () => {
+    const box = sandbox();
+    okClaude(box);
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const target = join(box.home, "dotfiles-config.toml");
+    writeFileSync(target, "model = \"x\"\n");
+    symlinkSync(target, join(box.home, ".codex/config.toml"));
+    skillBody = null;
+    try {
+      expect((await run(box)).code).not.toBe(0);
+    } finally {
+      skillBody = "# JamSesh skill\n";
+    }
+    expect(lstatSync(join(box.home, ".codex/config.toml")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe('model = "x"\n');
+  });
+
+  test("when no agent is installed nothing is left behind", async () => {
+    const box = sandbox();
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(readdirSync(join(box.home, ".jamsesh"))).toEqual([]);
+  });
+
+  test("a restore that fails is reported by path, keeps its saved copy and exits non-zero, without claiming success", async () => {
+    const box = sandbox();
+    okClaude(box);
+    const { dir } = earlierInstall(box);
+    // hook.sh.restore is a directory, so putting the earlier hook back fails; the other files are fine.
+    mkdirSync(join(dir, "hook.sh.restore"));
+    hookBody = null;
+    try {
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain(`${dir}/hook.sh`);
+      expect(r.stderr).toContain("couldn't put your earlier connection back completely");
+      expect(r.stderr).not.toContain("nothing was changed");
+      const saved = readdirSync(dir).filter((f) => f.startsWith(".saved"));
+      expect(saved).toHaveLength(1);
+      expect(readdirSync(join(dir, saved[0])).length).toBeGreaterThan(0);
+      expect(readFileSync(join(dir, "auth.header"), "utf8")).toBe("authorization: Bearer old-room\n");
+    } finally {
+      hookBody = HOOK_OK;
+    }
   });
 });

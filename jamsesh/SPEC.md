@@ -330,7 +330,7 @@ setup only tells you where the `<!-- jamsesh:start -->` block an earlier install
 line numbers, on stderr) and never edits the file: replacing a file you may be saving in your editor
 can't be made safe with plain file operations, so you delete those lines yourself. Only the exact text
 of one of the two blocks earlier installs wrote counts (an edited or indented block, or anything else
-between the markers, is yours and isn't mentioned). Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
+between the markers, is yours and isn't mentioned). Nothing JamSesh installs joins by itself (until an earlier install's block is deleted, that block still can): an agent joins when its person says "connect to jamsesh" (or runs
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
 which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
 harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect
