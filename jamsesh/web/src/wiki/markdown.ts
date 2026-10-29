@@ -4,13 +4,16 @@
 import MarkdownIt from "markdown-it";
 import DOMPurify from "dompurify";
 
+/** A title to its page name, by the same rules as the hub's slugifyTitle (so a link resolves the same on both sides). */
 export const slugify = (s: string) =>
   s
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60)
+    .replace(/-+$/g, "") || "page";
 
 /** What the renderer needs to know about the wiki: which pages exist, which ids are sources. */
 export interface RenderCtx {

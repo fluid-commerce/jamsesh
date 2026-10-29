@@ -1,8 +1,8 @@
 // The graph's data: shaped safely from whatever the hub sends, and the lookups the canvas relies on.
 import { expect, test } from "bun:test";
-import { labelled, localGraph, MAX_NODES, nodeAt, radiusFor, shapeGraph, walkOrder } from "../src/wiki/graph";
+import { byImportance, labelled, localGraph, MAX_NODES, nodeAt, radiusFor, shapeGraph, walkOrder } from "../src/wiki/graph";
 import { PULSE_MS, PulseStore } from "../src/wiki/pulse";
-import { keepDrawing } from "../src/wiki/GraphCanvas";
+import { keepDrawing, pulseLook } from "../src/wiki/GraphCanvas";
 
 const raw = {
   nodes: [
@@ -47,6 +47,12 @@ test("size grows with backlinks but flattens, and scales for the big screen", ()
   expect(radiusFor(8) - radiusFor(4)).toBeLessThan(radiusFor(4) - radiusFor(0));
   expect(radiusFor(4, 2)).toBeCloseTo(radiusFor(4) * 2);
   expect(radiusFor(NaN)).toBe(radiusFor(0));
+});
+
+test("every page of a full vault is on the map", () => {
+  const nodes = Array.from({ length: 1500 }, (_, i) => ({ id: `p${i}`, title: `P${i}`, category: "topics", backlinks: 0 }));
+  expect(shapeGraph({ nodes, edges: [] }).nodes).toHaveLength(1500);
+  expect(MAX_NODES).toBeGreaterThanOrEqual(1500);
 });
 
 test("a huge wiki is cut to the best-connected pages, with no edges left dangling", () => {
@@ -130,4 +136,86 @@ test("a settled map stops asking for frames, the big screen's too; motion, easin
   expect(keepDrawing({ ...still, hot: true })).toBe(true);
   expect(keepDrawing({ ...still, k: 1.2 })).toBe(true);
   expect(keepDrawing({ ...still, drag: true })).toBe(true);
+});
+
+test("with reduced motion a pulse is a still ring that asks for no frames; otherwise it spreads and fades", () => {
+  const looks = [1, 0.6, 0.1].map((l) => pulseLook(l, true));
+  for (const l of looks) expect(l).toEqual(looks[0]!);
+  expect(looks[0]!.moving).toBe(false);
+  expect(pulseLook(0.6, false)).toEqual({ p: 0.6, t: 0.4, moving: true });
+});
+
+// ---------- round 5: a full vault ----------
+
+import { nameRoom, settleFor } from "../src/wiki/GraphCanvas";
+import { NAME_BUDGET, labelledAtLeast } from "../src/wiki/graph";
+
+const vault = (n: number) => {
+  const nodes = Array.from({ length: n }, (_, i) => ({ id: `p${i}`, title: `Page title number ${i}`, category: "topics", backlinks: 2 + (i % 4) }));
+  const edges = Array.from({ length: n - 1 }, (_, i) => ({ from: `p${i + 1}`, to: `p${(i * 7) % (i + 1)}` }));
+  return shapeGraph({ nodes, edges } as any, 2);
+};
+
+test("the big screen names at most NAME_BUDGET pages, the most important first", () => {
+  const g = vault(1500);
+  const names = labelledAtLeast(g, 2, 8, NAME_BUDGET);
+  expect(names.size).toBe(NAME_BUDGET);
+  expect(labelledAtLeast(g, 2, 8).size).toBe(1500);
+  expect(labelled(g, 3).size).toBe(3);
+});
+
+test("name room clears two overlapping names, and leaves far apart ones alone", () => {
+  const g = shapeGraph({ nodes: [{ id: "a", title: "Alpha page", category: "topics", backlinks: 3 }, { id: "b", title: "Beta page", category: "topics", backlinks: 3 }, { id: "c", title: "Far page", category: "topics", backlinks: 0 }], edges: [] } as any);
+  const nodes = g.nodes.map((n, i) => ({ ...n, x: i === 2 ? 5000 : i * 3, y: i === 2 ? 5000 : 0 }));
+  const force = nameRoom(nodes, new Set(["a", "b"]), () => 1);
+  for (let i = 0; i < 30; i++) force(1);
+  expect(Math.hypot(nodes[0].x! - nodes[1].x!, nodes[0].y! - nodes[1].y!)).toBeGreaterThan(30);
+  expect([nodes[2].x, nodes[2].y]).toEqual([5000, 5000]);
+});
+
+test("name room at 1500 pages does bounded work: a tick is far from pairs-squared", () => {
+  const g = vault(1500);
+  const nodes = g.nodes.map((n, i) => ({ ...n, x: Math.cos(i * 2.4) * 40 * Math.sqrt(i + 1), y: Math.sin(i * 2.4) * 40 * Math.sqrt(i + 1) }));
+  const force = nameRoom(nodes, labelledAtLeast(g, 2, 8, NAME_BUDGET), () => 0.3);
+  const t0 = performance.now();
+  for (let i = 0; i < 5; i++) force(1);
+  // 5 ticks of the old all-pairs pass was ~850 million box checks (many seconds); this is a few milliseconds a tick.
+  expect(performance.now() - t0).toBeLessThan(1500);
+});
+
+test("the first ticks of a layout stop at their time budget, however many were asked for", () => {
+  let ticks = 0;
+  let clock = 0;
+  settleFor({ tick: () => void ticks++ }, 320, 250, () => (clock += 10));
+  expect(ticks).toBeGreaterThan(0);
+  expect(ticks).toBeLessThan(30);
+  ticks = 0;
+  settleFor({ tick: () => void ticks++ }, 30, 250, () => 0);
+  expect(ticks).toBe(30);
+  // At least one tick always runs, even with no time left.
+  ticks = 0;
+  settleFor({ tick: () => void ticks++ }, 30, 0, () => 1e9);
+  expect(ticks).toBe(1);
+});
+
+test("pointing at a page with hundreds of links still names no more than the budget, the page itself first", async () => {
+  const { nameCandidates } = await import("../src/wiki/GraphCanvas");
+  const g = vault(1500);
+  const rank = new Map(byImportance(g).map((n, i) => [n.id, i]));
+  const hub = g.nodes[700];
+  const near = new Set(g.nodes.slice(0, 900).map((n) => n.id));
+  const want = nameCandidates(g.nodes, { hot: hub.id, focus: null, near, top: new Set(), rank });
+  expect(want).toHaveLength(NAME_BUDGET);
+  expect(want[0].id).toBe(hub.id);
+  // Idle: the stage's own set, which is already within the budget.
+  expect(nameCandidates(g.nodes, { hot: null, focus: null, top: labelledAtLeast(g, 2, 8, NAME_BUDGET), rank })).toHaveLength(NAME_BUDGET);
+});
+
+test("a reply with millions of links can't ask the layout for more than the edge cap", async () => {
+  const { MAX_EDGES } = await import("../src/wiki/graph");
+  const nodes = Array.from({ length: 1500 }, (_, i) => ({ id: `n${i}`, title: `N${i}`, category: "topics", backlinks: 0 }));
+  const edges: any[] = [];
+  for (let i = 0; i < 1500; i++) for (let j = 0; j < 1500; j++) if (i !== j && edges.length < 300_000) edges.push({ from: `n${i}`, to: `n${j}` });
+  const g = shapeGraph({ nodes, edges } as any);
+  expect(g.edges.length).toBe(MAX_EDGES);
 });

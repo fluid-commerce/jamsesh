@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { api, type HubState, type TriageCard, type WikiChange } from "../shared/hub";
 import { asCategory, CATEGORY_COLOR, CATEGORY_LABEL } from "./types";
+import { wikiApi } from "./wikiApi";
 import "./wiki.css";
 
 const KIND_WORDS = { ingest: "Wiki update", lint: "Wiki check", answer: "Answer to file" } as const;
@@ -59,7 +60,7 @@ export function WikiCardView({ card, index, personId, now }: { card: TriageCard;
                   +{c.added ?? 0} −{c.removed}
                 </span>
               )}
-              {open === c.slug && <Diff c={c} />}
+              {open === c.slug && <Diff c={c} cardId={card.id} />}
             </li>
           ))}
         </ul>
@@ -92,18 +93,31 @@ const SHOWN = 400;
 
 /**
  * What the diff box shows: the first SHOWN lines until the person asks for the rest, never fewer without saying so.
- * The hub's own notes ("(cut here…)", "(and N more lines removed)") always show, whatever is folded away.
+ * The hub's own notes ("(cut here…)") always show, whatever is folded away.
  */
 export function diffView(diff: string, all: boolean): { lines: string[]; hidden: number; notes: string[] } {
   const every = diff.split("\n");
-  const isNote = (l: string) => /^\((cut here|and \d+ more line|too long to line up)/.test(l);
+  const isNote = (l: string) => /^\((cut here|too long to line up)/.test(l);
   const lines = all ? every : every.slice(0, SHOWN);
   return { lines, hidden: every.length - lines.length, notes: all ? [] : every.slice(SHOWN).filter(isNote) };
 }
 
-function Diff({ c }: { c: WikiChange }) {
+function Diff({ c, cardId }: { c: WikiChange; cardId: string }) {
   const [all, setAll] = useState(false);
-  const v = diffView(c.diff, all);
+  // A change the hub cut short is fetched whole when asked for: the card never asks anyone to approve text it can't show.
+  const [full, setFull] = useState<string | null>(null);
+  const [state, setState] = useState<"" | "loading" | "failed">("");
+  const v = diffView(full ?? c.diff, all);
+  const load = async () => {
+    setState("loading");
+    try {
+      setFull((await wikiApi.fullChange(cardId, c.slug)).diff);
+      setAll(true);
+      setState("");
+    } catch {
+      setState("failed");
+    }
+  };
   return (
     <div className="wk-diff-wrap">
       <pre className="wk-diff scrollbars-thin" tabIndex={0} aria-label={`Changes to ${c.title}`}>
@@ -114,7 +128,16 @@ function Diff({ c }: { c: WikiChange }) {
           </span>
         ))}
       </pre>
-      {v.hidden > 0 && (
+      {c.cut && full === null && (
+        <p className="wk-diff-more">
+          This shows part of the change.{" "}
+          <button className="btn ghost small" disabled={state === "loading"} onClick={() => void load()}>
+            {state === "loading" ? "Loading…" : "Show the whole change"}
+          </button>
+          {state === "failed" && <span role="alert"> Couldn't load it. Try again.</span>}
+        </p>
+      )}
+      {v.hidden > 0 && !(c.cut && full === null) && (
         <p className="wk-diff-more">
           {v.notes.map((n) => (
             <span key={n}>{n} </span>

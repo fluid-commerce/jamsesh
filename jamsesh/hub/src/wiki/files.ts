@@ -9,7 +9,7 @@
 // Everything here takes the project folder as an argument and touches only that folder: page names are
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -78,7 +78,9 @@ This folder is a project's memory. JamSesh keeps it from the room's conversation
  * One of the vault's folders (wiki/, raw/, .proposals/): a real folder in `dir`, never a link to somewhere else, so no
  * read or write can leave the project through it. Made when `make` is set; null when it isn't there yet.
  */
-export function vaultDir(dir: string, name: "wiki" | "raw" | ".proposals", make = false): string | null {
+export function vaultDir(dir: string, name: "wiki" | "raw" | "raw/archive" | ".proposals", make = false): string | null {
+  // A folder inside raw/ is only as safe as raw/ itself.
+  if (name === "raw/archive" && !vaultDir(dir, "raw", make)) return null;
   const p = join(dir, name);
   try {
     const st = lstatSync(p);
@@ -203,7 +205,7 @@ export interface PageInfo {
 }
 
 export const today = (now = Date.now()) => new Date(now).toISOString().slice(0, 10);
-const revOf = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
+export const revOf = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
 
 function list(v: string): string[] {
   const t = v.trim();
@@ -326,25 +328,39 @@ export function backlinksOf(dir: string, slug: string): { slug: string; title: s
   return listPages(dir).filter((p) => p.links.includes(slug)).map((p) => ({ slug: p.slug, title: p.title }));
 }
 
+/** The most links drawn from one page, and the most drawn in all: a vault where every page links every other still sends a graph a screen can lay out. */
+export const GRAPH_LINKS_PER_PAGE = 8;
+export const GRAPH_EDGES_MAX = 6000;
+
+/**
+ * The link map. Each page keeps its strongest links (to the pages most linked to, then by name), and the whole map keeps
+ * the strongest edges up to a budget. The page view has every link of a page; this is only what is drawn.
+ */
 export function graph(dir: string) {
   const infos = listPages(dir);
-  const have = new Set(infos.map((p) => p.slug));
+  const weight = new Map(infos.map((p) => [p.slug, p.backlinks]));
+  const edges: { from: string; to: string; w: number }[] = [];
+  // Every page keeps its share of the edge budget, so a crowded vault thins every page's links evenly instead of dropping whole pages' links.
+  const perPage = Math.max(1, Math.min(GRAPH_LINKS_PER_PAGE, Math.floor(GRAPH_EDGES_MAX / Math.max(1, infos.length))));
+  for (const p of infos) {
+    const own = p.links.filter((l) => weight.has(l) && l !== p.slug).map((to) => ({ from: p.slug, to, w: weight.get(to)! }));
+    own.sort((a, b) => b.w - a.w || a.to.localeCompare(b.to));
+    edges.push(...own.slice(0, perPage));
+  }
+  edges.sort((a, b) => b.w - a.w || a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+  const kept = edges.slice(0, GRAPH_EDGES_MAX);
   return {
     nodes: infos.map((p) => ({ id: p.slug, title: p.title, category: p.category, backlinks: p.backlinks })),
-    edges: infos.flatMap((p) => p.links.filter((l) => have.has(l)).map((l) => ({ from: p.slug, to: l }))),
+    edges: kept.map(({ from, to }) => ({ from, to })),
+    ...(kept.length < edges.length || infos.some((p) => p.links.length > perPage) ? { trimmed: true } : {}),
   };
-}
-
-export interface WriteResult {
-  ok: true;
-  page: Page;
 }
 
 /**
  * Writes a page. `body` is the Markdown after the front matter; the front matter is kept up to date
  * here (updated today, sources unioned) so every writer, a person or the maintainer, leaves a page the same way.
  */
-export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number } = {}): Page {
+export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number; beforeWrite?: (text: string) => void } = {}): Page {
   const file = pageFile(dir, slug, true)!;
   if (body.length > PAGE_MAX) throw new Error(`A page can hold ${PAGE_MAX.toLocaleString("en-US")} characters; split this one.`);
   const prior = readPage(dir, slug);
@@ -357,7 +373,9 @@ export function writePage(dir: string, slug: string, body: string, opts: { categ
     updated: today(opts.now),
     sources: [...new Set([...(prior?.frontMatter.sources ?? []), ...(opts.sources ?? [])].filter(isSourceId))].slice(-60),
   };
-  writeAtomic(file, serializePage(fm, body.replace(/\r\n/g, "\n")));
+  const text = serializePage(fm, body.replace(/\r\n/g, "\n"));
+  opts.beforeWrite?.(text); // the exact bytes, for a record made just before they land
+  writeAtomic(file, text);
   return readPage(dir, slug)!;
 }
 
@@ -447,26 +465,39 @@ export interface Source {
 }
 
 /** Saves a source under a new id. A file is created exclusively and never rewritten, so a source can't change after it lands. */
-export function addSource(dir: string, s: { kind: SourceKind; title: string; text: string; by: string; now?: number }): Source {
+export function addSource(dir: string, s: { kind: SourceKind; title: string; text: string; by: string; now?: number; id?: string }): Source {
   const raw = rawDir(dir, true)!;
   const now = s.now ?? Date.now();
-  if (readdirSync(raw).length >= MAX_SOURCES) throw new Error("This wiki holds as many sources as it can.");
+  // A source with a fixed id (one made from an event) that is already here is that source: made again after a crash, it isn't written twice.
+  if (s.id) {
+    const have = isSourceId(s.id) ? readSource(dir, s.id) : null;
+    if (have) return have;
+  }
+  if (readdirSync(raw).length >= MAX_SOURCES) throw new Error("This wiki holds as many sources as it can. Older ones that are read in move to raw/archive on their own; if they can't, free some.");
   const title = s.title.replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled";
   const text = s.text.length > SOURCE_MAX ? `${s.text.slice(0, SOURCE_MAX)}\n\n[Cut here: the source was longer than ${SOURCE_MAX.toLocaleString("en-US")} characters.]` : s.text;
-  const stem = `${today(now)}_${slugifyTitle(title).slice(0, 50)}`;
+  const stem = s.id && isSourceId(s.id) ? s.id : `${today(now)}_${slugifyTitle(title).slice(0, 50)}`;
   const header = `---\nkind: ${s.kind}\ntitle: ${JSON.stringify(title)}\nby: ${JSON.stringify(s.by.slice(0, 80))}\nts: ${now}\n---\n`;
   // Written whole to a temp file first (never listed as a source), then linked to its name, which fails rather than
   // replace a source already there: a source is either all there or not there at all.
   const tmp = join(raw, `.${stem}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`);
   try {
     io.write(tmp, header + text, { flag: "wx" });
-    for (let n = 1; n < 200; n++) {
+    for (let n = 1; n < (s.id ? 2 : 200); n++) {
       const id = n === 1 ? stem : `${stem}-${n}`;
+      // An id is never reused: one a source moved to raw/archive/ still holds it.
+      if (!s.id && archived(dir, id)) continue;
       try {
         io.link(tmp, join(raw, `${id}.md`));
         return { id, title, kind: s.kind, ts: now, by: s.by, text };
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // Written by a run that was cut short, between the check and here: that one stands.
+        if (s.id) {
+          const have = readSource(dir, id);
+          if (have) return have;
+          throw e;
+        }
       }
     }
     throw new Error("Couldn't name that source.");
@@ -475,16 +506,45 @@ export function addSource(dir: string, s: { kind: SourceKind; title: string; tex
   }
 }
 
+/** Where a source is: raw/, or raw/archive/ once it was moved there. A name that isn't a plain file is not a source. */
+function sourceFile(dir: string, id: string): string | null {
+  for (const where of ["raw", "raw/archive"] as const) {
+    try {
+      const d = vaultDir(dir, where);
+      const f = d && join(d, `${id}.md`);
+      if (f && plainFile(f)) return f;
+    } catch {} // a link where a folder should be: nothing is read through it, and the other folder is still looked in
+  }
+  return null;
+}
+
+const archived = (dir: string, id: string): boolean => {
+  try {
+    const d = vaultDir(dir, "raw/archive");
+    return !!d && existsSync(join(d, `${id}.md`));
+  } catch {
+    return false;
+  }
+};
+
+/** Moves read-in sources out of raw/ into raw/archive/, where they can still be read and cited but no longer count toward the cap. */
+export function archiveSources(dir: string, ids: string[]): number {
+  const raw = rawDir(dir);
+  const to = raw && ids.length ? vaultDir(dir, "raw/archive", true) : null;
+  let n = 0;
+  for (const id of ids) {
+    // Never over a source already archived under that name.
+    if (!raw || !to || !isSourceId(id) || !plainFile(join(raw, `${id}.md`)) || existsSync(join(to, `${id}.md`))) continue;
+    io.rename(join(raw, `${id}.md`), join(to, `${id}.md`));
+    n++;
+  }
+  return n;
+}
+
 export function readSource(dir: string, id: string): Source | null {
   if (!isSourceId(id)) return null;
-  let raw: string | null;
-  try {
-    raw = rawDir(dir);
-  } catch {
-    return null;
-  }
-  const file = raw && join(raw, `${id}.md`);
-  if (!file || !plainFile(file)) return null;
+  const file = sourceFile(dir, id);
+  if (!file) return null;
   const text = readFileSync(file, "utf8");
   const m = text.match(/^---\nkind: (\w+)\ntitle: (".*")\nby: (".*")\nts: (\d+)\n---\n/);
   if (!m) return { id, title: id, kind: "document", ts: statSync(file).mtimeMs, by: "", text };
@@ -516,20 +576,95 @@ export interface WikiState {
   migrating?: string;
   /** A long source read in parts: how many characters of it are handled so far. */
   read?: Record<string, number>;
-  /** Sources that couldn't be written when they came in (an agent's shipped or decision report, a saved fact), to try again. */
+  /** Per session: the last event id whose agent report (shipped or decision) is a source. Events are the durable record; this is how far they are read. */
+  reports?: Record<string, number>;
+  /** Per session: an event too long for one source, and how far into it the sources written so far reach. */
+  partial?: Record<string, { id: number; off: number }>;
+  /** Sources that couldn't be written when they came in (a saved fact), to try again. */
   queued?: { kind: SourceKind; title: string; text: string; by: string }[];
+  /** Existing pages the model asked to change without having been shown them whole: the next ingest shows these first. */
+  need?: string[];
+  /** Each page as the wiki last knew it (file time and hash): a page that differs was changed by hand in the vault. Absent until the first look, which only records. */
+  seen?: Record<string, { mtime: number; rev: string }>;
+  /** The wiki's own page write in progress (the page and the hash of the bytes it will hold), recorded before the write so a crash can't make it look like a hand edit. */
+  own?: { slug: string; rev: string };
+  /** The hand change being filed as a source (page, hash, the source's id), recorded before filing so a retry files nothing twice. */
+  filing?: { slug: string; rev: string; id: string };
 }
 
 const stateFile = (dir: string) => join(dir, ".wiki-state.json");
+
+const KINDS: readonly string[] = ["transcript", "document", "link", "agent", "edit"];
+const isRec = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const isNat = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+const recOf = <T>(v: unknown, ok: (x: unknown) => x is T): Record<string, T> | undefined => {
+  if (v === undefined) return undefined;
+  if (!isRec(v) || !Object.values(v).every(ok)) throw new Error("bad shape");
+  return v as Record<string, T>;
+};
+
+/**
+ * The state file read back, every field checked: a value of the wrong shape (an array where a table goes, a null in the
+ * queue) throws, because JSON can hold things that save back as nothing, or that make every pass fail. Absent fields are fine.
+ */
+function parseState(j: unknown): WikiState {
+  if (!isRec(j)) throw new Error("not an object");
+  const ingested = recOf(j.ingested, (x): x is { at: number; card?: string } => isRec(x) && isNat(x.at) && (x.card === undefined || typeof x.card === "string")) ?? {};
+  const cursors = recOf(j.cursors, isNat) ?? {};
+  const read = recOf(j.read, isNat);
+  const reports = recOf(j.reports, isNat);
+  const partial = recOf(j.partial, (x): x is { id: number; off: number } => isRec(x) && isNat(x.id) && isNat(x.off));
+  const queued = j.queued;
+  if (queued !== undefined && !(Array.isArray(queued) && queued.every((q) => isRec(q) && KINDS.includes(q.kind as string) && typeof q.title === "string" && typeof q.text === "string" && typeof q.by === "string"))) throw new Error("bad queue");
+  const seen = recOf(j.seen, (x): x is { mtime: number; rev: string } => isRec(x) && isNat(x.mtime) && typeof x.rev === "string");
+  const pair = <T extends object>(v: unknown, ok: (x: Record<string, unknown>) => boolean): T | undefined => {
+    if (v === undefined) return undefined;
+    if (!isRec(v) || !ok(v)) throw new Error("bad shape");
+    return v as T;
+  };
+  const own = pair<{ slug: string; rev: string }>(j.own, (x) => typeof x.slug === "string" && typeof x.rev === "string");
+  const filing = pair<{ slug: string; rev: string; id: string }>(j.filing, (x) => typeof x.slug === "string" && typeof x.rev === "string" && isSourceId(x.id));
+  const need = j.need;
+  if (need !== undefined && !(Array.isArray(need) && need.every((x) => typeof x === "string"))) throw new Error("bad need");
+  if (j.migrated !== undefined && typeof j.migrated !== "boolean") throw new Error("bad migrated");
+  if (j.migrating !== undefined && typeof j.migrating !== "string") throw new Error("bad migrating");
+  return {
+    ingested,
+    cursors,
+    migrated: !!j.migrated,
+    ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}),
+    ...(read ? { read } : {}),
+    ...(reports ? { reports } : {}),
+    ...(partial ? { partial } : {}),
+    ...(queued ? { queued: queued as NonNullable<WikiState["queued"]> } : {}),
+    ...(need ? { need: need as string[] } : {}),
+    ...(seen ? { seen } : {}),
+    ...(own ? { own } : {}),
+    ...(filing ? { filing } : {}),
+  };
+}
+
+/**
+ * Stops everything on a state file that can't be trusted: a copy is set aside and nothing proceeds on a blank one, because
+ * the queue, the read offsets and the transcript cursors it holds can't be guessed again. Used for a file of the wrong
+ * shape and for values that don't fit what they point at (a cursor past the last event, an offset past the end of a source).
+ */
+export function stateDamaged(dir: string): never {
+  const file = stateFile(dir);
+  const aside = `${file}.damaged`;
+  try {
+    if (!existsSync(aside)) copyFileSync(file, aside);
+  } catch {}
+  throw Object.assign(new Error(".wiki-state.json in the wiki folder is damaged; a copy is kept as .wiki-state.json.damaged. Fix or remove it to carry on."), { code: "ESTATE" });
+}
 
 export function readState(dir: string): WikiState {
   // A link in place of the state file throws: better no ingest than one that starts again from nothing.
   const text = readPlain(stateFile(dir));
   try {
-    const j = JSON.parse(text ?? "{}") as Partial<WikiState>;
-    return { ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {}, cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {}, migrated: !!j.migrated, ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}), ...(j.read && typeof j.read === "object" ? { read: j.read } : {}), ...(Array.isArray(j.queued) ? { queued: j.queued } : {}) };
+    return parseState(JSON.parse(text ?? "{}"));
   } catch {
-    return { ingested: {}, cursors: {} };
+    return stateDamaged(dir);
   }
 }
 

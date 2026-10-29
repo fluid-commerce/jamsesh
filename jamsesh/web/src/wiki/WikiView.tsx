@@ -5,7 +5,7 @@ import { useLayout } from "../client/mobile";
 import { cast } from "../client/CastPicker";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
-import { onWikiOpen, takePendingWikiPage } from "./nav";
+import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
 import { onRefresh, saveRev } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
@@ -318,7 +318,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
     } else if (a.classList.contains("cite")) {
       e.preventDefault();
       onSource(a.getAttribute("data-src") ?? "", a.getAttribute("data-at"));
-    } else if (!/^https?:/i.test(a.getAttribute("href") ?? "")) e.preventDefault();
+    } else if (!followsNatively(a.getAttribute("href"))) e.preventDefault();
   };
 
   const save = async (keepMine = false) => {

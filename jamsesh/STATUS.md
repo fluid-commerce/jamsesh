@@ -142,6 +142,8 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | The graph on the big screen ("show the wiki graph") | Simulated | Brain tool tested; drawn at 1920 x 1080 in headless Chromium. Not seen on a real TV, and not asked by voice. |
 | Wiki cards on the Tasks board: per-page toggles and diffs, Add N pages | Simulated | Accepting through `api()` tested; the card was looked at in Chromium. |
 | Rendered page text: raw HTML, `javascript:` and `data:` links, pictures, hostile titles | Simulated | Unit tests on the markdown layer; a hostile page opened in headless Chromium ran nothing (DOMPurify itself is only exercised in a browser, by hand). |
+| Changes made by hand in the vault (edits, new pages, deletions) filed as edit sources, once, across failed state writes | Simulated | Fault-injected state writes before and after the source, an app edit whose record fails after the page lands, a hand edit that keeps the file time, a deletion alone. Not done in Obsidian itself. |
+| Shutdown: requests and transcriptions already in flight land before the final capture; anything later is refused | Simulated | A held request body and a held transcription across `hub.shutdown()`; a request held past the wait gets 503 and no event. Not tried with the Mac app quitting a live room. |
 | The Work tab shows the project's decisions, requirements and open questions by page category, each with a count; the old fact list is gone from the app | Simulated | A page per item counts one, a list page counts its bullets; clicking opens the list page or the newest. Looked at in headless Chromium. |
 
 ## Big screen: locks, versions, history

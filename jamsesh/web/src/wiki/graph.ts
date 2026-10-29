@@ -1,7 +1,10 @@
 // The link graph as data: shaped from the hub's nodes and edges, with the lookups the canvas needs.
 import { asCategory, CATEGORIES, type Category, type RawGraph } from "./types";
 
-export const MAX_NODES = 400;
+/** As many pages as a vault holds (hub MAX_PAGES): the map shows every page; the cap only guards a malformed reply. */
+export const MAX_NODES = 1500;
+/** And as many links as the hub sends (GRAPH_EDGES_MAX): a malformed reply can't ask the layout for millions. */
+export const MAX_EDGES = 6000;
 const arr = <T>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
 
 export interface GNode {
@@ -45,6 +48,7 @@ export function shapeGraph(raw: Partial<RawGraph> | null | undefined, scale = 1)
   const edges: GEdge[] = [];
   const have = new Set<string>();
   for (const e of arr(raw?.edges)) {
+    if (edges.length >= MAX_EDGES) break;
     if (!e || e.from === e.to || !seen.has(e.from) || !seen.has(e.to)) continue;
     const key = `${e.from}\u0000${e.to}`;
     if (have.has(key)) continue;
@@ -91,11 +95,14 @@ export function labelled(g: Graph, max: number): Set<string> {
   return new Set(byImportance(g).slice(0, Math.max(0, max)).map((n) => n.id));
 }
 
-/** Every page with `min` or more backlinks, plus up to `extra` of the rest; only the smallest leaves go unnamed. */
-export function labelledAtLeast(g: Graph, min: number, extra: number): Set<string> {
+/** The most names the big screen draws and makes room for: past this many they couldn't be read anyway, and finding room for each costs more than a frame. */
+export const NAME_BUDGET = 120;
+
+/** Every page with `min` or more backlinks, plus up to `extra` of the rest (only the smallest leaves go unnamed), at most `cap` in all. */
+export function labelledAtLeast(g: Graph, min: number, extra: number, cap = Infinity): Set<string> {
   const all = byImportance(g);
   const key = all.filter((n) => n.backlinks >= min);
-  return new Set([...key, ...all.slice(key.length, key.length + extra)].map((n) => n.id));
+  return new Set([...key, ...all.slice(key.length, key.length + extra)].slice(0, cap).map((n) => n.id));
 }
 
 /** The nearest node under a point, if the point is within its radius plus a little slack. */

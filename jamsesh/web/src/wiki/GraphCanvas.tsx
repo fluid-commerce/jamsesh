@@ -3,7 +3,7 @@
 // it settles once, off screen, and shows the result.
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY, type Simulation } from "d3-force";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { byImportance, labelled, labelledAtLeast, nodeAt, walkOrder, type GNode, type Graph } from "./graph";
+import { byImportance, labelled, labelledAtLeast, NAME_BUDGET, nodeAt, walkOrder, type GNode, type Graph } from "./graph";
 import { pulses, PULSE_MS } from "./pulse";
 import { CATEGORY_COLOR, CATEGORY_LABEL } from "./types";
 
@@ -31,7 +31,7 @@ const ease = (cur: number, to: number, dt: number, rate = 9) => cur + (to - cur)
 /** A force that keeps the names of the important pages clear of each other and of other pages: each such node is a box
  * (the dot and its name below it), and boxes that overlap are pushed apart along the shorter way out. `k` is the screen
  * scale, because a name is a fixed size on screen and so a different size on the map as the map is zoomed to fit. */
-function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
+export function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
   const FS = 22;
   const force = (_alpha: number) => {
     const kk = Math.max(0.2, k());
@@ -44,23 +44,42 @@ function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
     // A few passes a tick, moving nodes directly: velocity nudges are too soft to clear a crowded middle.
     for (let pass = 0; pass < 5; pass++) {
       const boxes = nodes.map(box);
+      // Boxes are bucketed on a grid as wide as the widest pair can reach, so a named box meets only its neighbours:
+      // the work follows the number of names, not the number of pages squared.
+      let cw = 1, ch = 1;
+      for (const b of boxes) (cw = Math.max(cw, b.hw * 2), (ch = Math.max(ch, b.hh * 2)));
+      const grid = new Map<string, number[]>();
+      const cell = (b: { x: number; y: number }) => `${Math.floor(b.x / cw)},${Math.floor(b.y / ch)}`;
+      boxes.forEach((b, i) => {
+        const c = cell(b);
+        const at = grid.get(c);
+        if (at) at.push(i);
+        else grid.set(c, [i]);
+      });
       for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          if (!named.has(nodes[i].id) && !named.has(nodes[j].id)) continue;
-          const a = boxes[i], b = boxes[j];
-          const dx = b.x - a.x, dy = b.y - a.y;
-          const ox = a.hw + b.hw - Math.abs(dx), oy = a.hh + b.hh - Math.abs(dy);
-          if (ox <= 0 || oy <= 0) continue;
-          const [p, q] = [nodes[i], nodes[j]];
-          // Names are wide and short, so most clashes are cleared by moving up or down.
-          if (ox * 0.55 < oy) {
-            const m = (dx < 0 ? -1 : 1) * ox * 0.35;
-            p.x = (p.x ?? 0) - m;
-            q.x = (q.x ?? 0) + m;
-          } else {
-            const m = (dy < 0 ? -1 : 1) * oy * 0.35;
-            p.y = (p.y ?? 0) - m;
-            q.y = (q.y ?? 0) + m;
+        if (!named.has(nodes[i].id)) continue;
+        const gx = Math.floor(boxes[i].x / cw), gy = Math.floor(boxes[i].y / ch);
+        for (let cx = gx - 1; cx <= gx + 1; cx++) {
+          for (let cy = gy - 1; cy <= gy + 1; cy++) {
+            for (const j of grid.get(`${cx},${cy}`) ?? []) {
+              // Two names are met from both sides: take the pair once.
+              if (j === i || (named.has(nodes[j].id) && j < i)) continue;
+              const a = boxes[i], b = boxes[j];
+              const dx = b.x - a.x, dy = b.y - a.y;
+              const ox = a.hw + b.hw - Math.abs(dx), oy = a.hh + b.hh - Math.abs(dy);
+              if (ox <= 0 || oy <= 0) continue;
+              const [p, q] = [nodes[i], nodes[j]];
+              // Names are wide and short, so most clashes are cleared by moving up or down.
+              if (ox * 0.55 < oy) {
+                const m = (dx < 0 ? -1 : 1) * ox * 0.35;
+                p.x = (p.x ?? 0) - m;
+                q.x = (q.x ?? 0) + m;
+              } else {
+                const m = (dy < 0 ? -1 : 1) * oy * 0.35;
+                p.y = (p.y ?? 0) - m;
+                q.y = (q.y ?? 0) + m;
+              }
+            }
           }
         }
       }
@@ -68,6 +87,30 @@ function nameRoom(nodes: GNode[], named: Set<string>, k: () => number) {
   };
   force.initialize = () => {};
   return force as any;
+}
+
+/**
+ * The pages whose names are tried this frame, best first: the one pointed at, the one in focus, then by importance. Never more
+ * than NAME_BUDGET, whatever is hovered: a page with hundreds of links doesn't get hundreds of names.
+ */
+export function nameCandidates(list: GNode[], o: { hot: string | null; focus: string | null; near?: Set<string>; top: Set<string>; rank: Map<string, number> }): GNode[] {
+  const want = list.filter((n) => n.id === o.hot || n.id === o.focus || (o.hot && o.near?.has(n.id)) || (!o.hot && o.top.has(n.id)));
+  const lead = (n: GNode) => (n.id === o.hot ? -2 : n.id === o.focus ? -1 : 0);
+  return want.sort((a, b) => lead(a) - lead(b) || (o.rank.get(a.id) ?? 0) - (o.rank.get(b.id) ?? 0)).slice(0, NAME_BUDGET);
+}
+
+/** The first ticks of a layout, run before the first frame: as many as asked for, but stopping at `ms` so a full vault never freezes the page. */
+export function settleFor(s: { tick: (n?: number) => unknown }, ticks: number, ms = 250, now: () => number = () => performance.now()) {
+  const t0 = now();
+  for (let i = 0; i < ticks && (i === 0 || now() - t0 < ms); i++) s.tick(1);
+}
+
+/**
+ * How a pulse at `level` (1 at the touch, falling to 0) is drawn: its strength and how far the ring has spread. With
+ * reduced motion it is a still ring for as long as it lasts, so it needs no frames of its own (a slow timer clears it).
+ */
+export function pulseLook(level: number, reduced: boolean): { p: number; t: number; moving: boolean } {
+  return reduced ? { p: 0.6, t: 0.4, moving: false } : { p: level, t: 1 - level, moving: true };
 }
 
 /**
@@ -93,6 +136,9 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
   const nodes = useRef<GNode[]>([]);
   const hopIx = useRef(-1);
   const order = useMemo(() => walkOrder(graph), [graph]);
+  // Worked out once per graph, not every frame.
+  const rank = useMemo(() => new Map(byImportance(graph).map((n, i) => [n.id, i])), [graph]);
+  const stageNames = useMemo(() => labelledAtLeast(graph, 2, 8, NAME_BUDGET), [graph]);
   const byId = useRef(new Map<string, GNode>());
 
   useEffect(() => {
@@ -165,10 +211,10 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
         const r = Math.max(stage ? 7 : coarse ? 5.5 : 3.5, n.r * Math.min(1.6, Math.max(0.7, k)));
         const col = CATEGORY_COLOR[n.category];
         const a = lit(n.id) ? 1 : dim;
-        const p = pulses.level(n.id, Date.now());
-        if (p > 0) {
-          moving = true;
-          const t = reduced ? 0.4 : 1 - p;
+        const level = pulses.level(n.id, Date.now());
+        if (level > 0) {
+          const { p, t, moving: m } = pulseLook(level, reduced);
+          moving ||= m;
           g.strokeStyle = hex(col, 0.7 * p);
           g.lineWidth = (stage ? 3 : 2) * (0.5 + p);
           g.beginPath();
@@ -198,11 +244,8 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       g.textAlign = "center";
       g.textBaseline = "top";
       const room = Math.floor((size.w * size.h) / (stage ? 52000 : coarse ? 30000 : mode === "local" ? 9000 : 15000));
-      const top = stage ? labelledAtLeast(graph, 2, 8) : labelled(graph, Math.min(coarse ? 7 : 40, Math.max(mode === "local" ? 14 : 4, room)));
-      const want: GNode[] = [];
-      for (const n of list) if (n.id === hot || n.id === focus || (hot && near?.has(n.id)) || (!hot && top.has(n.id))) want.push(n);
-      const rank = new Map(byImportance(graph).map((n, i) => [n.id, i]));
-      want.sort((a, b) => (a.id === hot ? -2 : a.id === focus ? -1 : 0) - (b.id === hot ? -2 : b.id === focus ? -1 : 0) || (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+      const top = stage ? stageNames : labelled(graph, Math.min(coarse ? 7 : 40, Math.max(mode === "local" ? 14 : 4, room)));
+      const want = nameCandidates(list, { hot, focus, near, top, rank });
       const placed: [number, number, number, number][] = [];
       // Every node as a circle on screen, so a name can be kept off other nodes as well as off other names.
       const discs = list.map((n) => ({ id: n.id, x: sx(n.x ?? 0), y: sy(n.y ?? 0), r: Math.max(stage ? 7 : coarse ? 5.5 : 3.5, n.r * Math.min(1.6, Math.max(0.7, k))) + 2 }));
@@ -241,7 +284,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       const settling = !!s && s.alpha() > s.alphaMin();
       return keepDrawing({ moving, settling, emph: L.emph, hot: !!hot, k: L.k, kFit, drag: !!L.drag });
     },
-    [graph, size, focus, picked, stage, mode, coarse, S],
+    [graph, size, focus, picked, stage, mode, coarse, S, rank, stageNames],
   );
 
   // The loop always calls the latest draw, so a tap or a resize never rebuilds the layout.
@@ -289,7 +332,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       .force("x", forceX<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : (stage ? 0.03 : 0.07) / aspect) : 0.3)))
       .force("y", forceY<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : 0.07 * aspect) : 0.3)))
       .force("collide", forceCollide<GNode>((n) => n.r + 5 * S))
-      .force("names", stage ? nameRoom(fresh, labelledAtLeast(graph, 2, 8), () => live.current.k) : null)
+      .force("names", stage ? nameRoom(fresh, stageNames, () => live.current.k) : null)
       // Nothing drifts out of the map: a loose page stays within reach of the rest.
       .force("fence", () => {
         const R = (150 + 34 * Math.sqrt(fresh.length)) * S * (stage ? 1.6 : 1);
@@ -303,7 +346,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
     sim.current = s;
     s.stop();
     L.fitted = false;
-    s.tick(prefersReducedMotion() ? 320 : 30);
+    settleFor(s, prefersReducedMotion() ? 320 : 30);
     s.alpha(prefersReducedMotion() ? 0 : Math.max(s.alpha(), 0.5));
     wake();
     return () => {
@@ -312,7 +355,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       cancelAnimationFrame(L.raf);
       L.raf = 0;
     };
-  }, [graph, size.w, size.h, mode, focus, S, wake]);
+  }, [graph, size.w, size.h, mode, focus, S, wake, stageNames]);
 
   useEffect(() => {
     wake();

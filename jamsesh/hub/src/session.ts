@@ -91,6 +91,8 @@ export class Session {
   wikiAccept: ((c: TriageCard, pages: string[] | undefined, by: string) => { applied: string[]; skipped: string[] } | { error: string; status: number }) | null = null;
   /** Set by the hub: a wiki card was closed (added or dismissed), for the wiki to finish with its proposal. */
   wikiClosed: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: a wiki card is about to be dismissed. An error string keeps it open (pages an earlier accept wrote couldn't be recorded). */
+  wikiDismiss: ((c: TriageCard, by: string) => string | null) | null = null;
   /** Set by the hub: a fact was saved in the session, for the wiki to file as a source. */
   onFactSaved: ((f: Fact) => void) | null = null;
   /** The Tasks board's triage: proposals wait here until a person acts. */

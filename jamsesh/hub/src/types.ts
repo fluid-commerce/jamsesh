@@ -408,8 +408,10 @@ export interface WikiChange {
   title: string;
   category: string;
   op: "create" | "update";
-  /** Unified diff against the page now (a new page is all additions), cut to a readable size. */
+  /** Unified diff against the page now (a new page is all additions), cut to a readable size (see `cut`). */
   diff: string;
+  /** The diff above stops short of the whole change: the rest is one request away (GET /wiki/proposal/<card>/<slug>). */
+  cut?: boolean;
   /** The page changed (a person edited it) since this was proposed: it is skipped on accept. */
   stale: boolean;
   /** Lines the change adds and removes, counted over the whole page even when the diff is cut. */

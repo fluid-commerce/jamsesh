@@ -15,9 +15,22 @@ test("[[page]], [[page|alias]] and [[page#heading]] become links to a page; unkn
   expect(h).toContain('class="wl missing" data-slug="nothing-here" title="No page yet">Nothing Here</a>');
 });
 
+// The same table is in hub/test/wiki.test.ts: the hub and the web must name a page the same way.
+const SLUGS: [string, string][] = [
+  ["Passport login!", "passport-login"],
+  ["  Café  Menu ", "cafe-menu"],
+  ["a".repeat(70), "a".repeat(60)],
+  ["a".repeat(59) + " b", "a".repeat(59)],
+  ["x".repeat(58) + " - yz", "x".repeat(58) + "-y"],
+  ["!!!", "page"],
+  ["---Lead---", "lead"],
+  ["Ünïcödé — Straße", "unicode-stra-e"],
+  ["Ｆｕｌｌｗｉｄｔｈ ①", "fullwidth-1"],
+];
+
 test("slugs and links are read the same way the hub writes them", () => {
-  expect(slugify("Passport login!")).toBe("passport-login");
-  expect(slugify("  Café  Menu ")).toBe("cafe-menu");
+  for (const [title, slug] of SLUGS) expect(slugify(title)).toBe(slug);
+  expect(linksIn(`[[${"Long name ".repeat(8)}]]`)).toEqual([slugify("Long name ".repeat(8))]);
   expect(linksIn("a [[One]] b [[two|2]] c [[One]] d [[raw/2026-10-28_x]] e [[a\nb]]")).toEqual(["one", "two"]);
   expect(parseWikilink("")).toBeNull();
   expect(parseWikilink("x".repeat(300))).toBeNull();
@@ -108,4 +121,13 @@ test("huge or odd input is cut and never throws", () => {
   expect(() => md("[[".repeat(50_000))).not.toThrow();
   expect(() => md("x".repeat(2_000_000))).not.toThrow();
   expect(md("")).toBe("");
+});
+
+test("mail and web links are followed by the browser; other links stay in the app", async () => {
+  const { followsNatively } = await import("../src/wiki/nav");
+  expect(followsNatively("mailto:a@b.co")).toBe(true);
+  expect(followsNatively("https://example.com")).toBe(true);
+  expect(followsNatively("javascript:alert(1)")).toBe(false);
+  expect(followsNatively("#top")).toBe(false);
+  expect(followsNatively(null)).toBe(false);
 });

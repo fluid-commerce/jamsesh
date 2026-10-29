@@ -13,7 +13,8 @@ import { seedWiki } from "./wiki-fixture";
 import { onRefresh, saveRev } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
 import { diffView } from "../src/wiki/WikiCard";
-import { lineDiff } from "../../hub/src/wiki/diff";
+import { cutDiff, lineDiff } from "../../hub/src/wiki/diff";
+import { listPages, readPage, readState, writeState } from "../../hub/src/wiki/files";
 import { bus } from "../../hub/src/bus";
 import type { Decider } from "../../hub/src/wiki/service";
 
@@ -256,10 +257,30 @@ test("a card's diff never hides lines silently: past 400 it says how many more a
   expect(open.hidden).toBe(0);
   expect(open.lines).toContain("-r699");
   // When the hub had to cut, its note is in what shows, folded or not.
-  const big = lineDiff(Array.from({ length: 2000 }, (_, i) => `a removed line of page text ${i}`).join("\n"), "# x");
+  const big = cutDiff(Array.from({ length: 2000 }, (_, i) => `a removed line of page text ${i}`).join("\n"), "# x", 6000).text;
   const shown = diffView(big, false);
-  expect([...shown.lines, ...shown.notes].join("\n")).toMatch(/\(and \d+ more lines removed\)/);
+  expect([...shown.lines, ...shown.notes].join("\n")).toMatch(/\(cut here: \d+ more changed lines\)/);
   // A note past the fold is carried up into view.
-  const late = [...Array.from({ length: 450 }, (_, i) => `-l${i}`), "(and 9 more lines removed)"].join("\n");
-  expect(diffView(late, false).notes).toEqual(["(and 9 more lines removed)"]);
+  const late = [...Array.from({ length: 450 }, (_, i) => `-l${i}`), "(cut here: 9 more changed lines)"].join("\n");
+  expect(diffView(late, false).notes).toEqual(["(cut here: 9 more changed lines)"]);
+});
+
+test("a card's cut change is fetched whole through the client's api(): every added line is there, and a gone proposal says so", async () => {
+  const body = Array.from({ length: 701 }, (_, i) => `new-${i}`).join("\n");
+  // The seeded pages were put in the folder directly; they are the wiki's own here, not hand edits to file.
+  const st = readState(hub.wiki.dir);
+  st.seen = Object.fromEntries(listPages(hub.wiki.dir).map((i) => [i.slug, { mtime: Math.floor(i.mtime), rev: readPage(hub.wiki.dir, i.slug)!.rev }]));
+  for (const id of hub.wiki.pendingSources()) st.ingested[id] = { at: 1 }; // and what earlier tests left waiting is not this test's business
+  writeState(hub.wiki.dir, st);
+  await api("/wiki/page/replace-me", { markdown: `# Replace me\n\n${Array.from({ length: 701 }, (_, i) => `old-${i}`).join("\n")}` }, "PUT");
+  hub.wiki.addSource("document", "Rewrite", "replace me rewrite", "Chey");
+  hub.wiki.decide = (async () => ({ summary: "Rewrite", pages: [{ slug: "replace-me", title: "Replace me", type: "topic" as const, workstreams: [], markdown: `# Replace me\n\n${body}`, sources: [] }] })) as Decider;
+  const card = hub.session.board.get((await hub.wiki.tick())!.card!.id)!;
+  const ch = card.wiki!.changes[0];
+  expect(ch.cut).toBe(true);
+  expect(diffView(ch.diff, true).lines.filter((l) => l.startsWith("+new-")).length).toBeLessThan(701);
+  const full = await wikiApi.fullChange(card.id, "replace-me");
+  expect(diffView(full.diff, true).lines.filter((l) => l.startsWith("+new-"))).toHaveLength(701);
+  expect(full).toMatchObject({ added: 701, removed: 701 });
+  await expect(wikiApi.fullChange(card.id, "nope")).rejects.toBeTruthy();
 });

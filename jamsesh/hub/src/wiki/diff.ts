@@ -5,27 +5,31 @@ const CONTEXT = 2;
 
 type Op = { k: " " | "+" | "-"; s: string };
 
-/** The line-by-line edit from `before` to `after`. Past MAX_LINES it doesn't line them up, but still names every line removed and added. */
+/**
+ * The line-by-line edit from `before` to `after`. The lines both pages start and end with are matched first. If what is
+ * left between is still too long to line up, it is shown whole (every line removed, then every line added), in order:
+ * a reordered page is never reported as unchanged.
+ */
 function ops(before: string, after: string): { ops: Op[]; aligned: boolean } {
-  const a = before ? before.split("\n") : [];
-  const b = after ? after.split("\n") : [];
+  const full = (before ? before.split("\n") : []) as string[];
+  const fullB = (after ? after.split("\n") : []) as string[];
+  let lo = 0;
+  while (lo < full.length && lo < fullB.length && full[lo] === fullB[lo]) lo++;
+  let hiA = full.length;
+  let hiB = fullB.length;
+  while (hiA > lo && hiB > lo && full[hiA - 1] === fullB[hiB - 1]) hiA--, hiB--;
+  const a = full.slice(lo, hiA);
+  const b = fullB.slice(lo, hiB);
+  const head: Op[] = full.slice(0, lo).map((s) => ({ k: " ", s }));
+  const tail: Op[] = full.slice(hiA).map((s) => ({ k: " ", s }));
   if (a.length > MAX_LINES || b.length > MAX_LINES) {
-    const count = (ls: string[]) => ls.reduce((m, l) => m.set(l, (m.get(l) ?? 0) + 1), new Map<string, number>());
-    const only = (ls: string[], other: Map<string, number>, k: "+" | "-") =>
-      ls.flatMap((l): Op[] => {
-        const n = other.get(l) ?? 0;
-        if (!n) return [{ k, s: l }];
-        other.set(l, n - 1);
-        return [];
-      });
-    return { ops: [...only(a, count(b), "-"), ...only(b, count(a), "+")], aligned: false };
+    return { ops: [...head, ...a.map((s): Op => ({ k: "-", s })), ...b.map((s): Op => ({ k: "+", s })), ...tail], aligned: false };
   }
-  // Longest common subsequence table, suffix form.
   const n = a.length;
   const m = b.length;
   const t: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) t[i][j] = a[i] === b[j] ? t[i + 1][j + 1] + 1 : Math.max(t[i + 1][j], t[i][j + 1]);
-  const out: Op[] = [];
+  const out: Op[] = [...head];
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
@@ -35,16 +39,21 @@ function ops(before: string, after: string): { ops: Op[]; aligned: boolean } {
   }
   while (i < n) out.push({ k: "-", s: a[i++] });
   while (j < m) out.push({ k: "+", s: b[j++] });
-  return { ops: out, aligned: true };
+  return { ops: [...out, ...tail], aligned: true };
 }
 
-export function lineDiff(before: string, after: string, maxChars = 6000): string {
+/**
+ * The change as a unified diff with a little context. Past `maxChars` it is cut at a line and says how many lines of
+ * the change are left out; `cut` tells the caller to offer the whole (call again without a limit). Nothing is ever
+ * dropped without being counted: the cut is at the end, never a choice of which lines to keep.
+ */
+export function cutDiff(before: string, after: string, maxChars = Infinity): { text: string; cut: boolean } {
   const { ops: all, aligned } = ops(before, after);
   const keep = new Array(all.length).fill(false);
   all.forEach((o, x) => {
     if (o.k !== " ") for (let y = Math.max(0, x - CONTEXT); y <= Math.min(all.length - 1, x + CONTEXT); y++) keep[y] = true;
   });
-  const out: string[] = aligned ? [] : ["(too long to line up: every line removed, then every line added)"];
+  const out: string[] = aligned ? [] : ["(too long to line up: the lines that changed are shown whole, removed then added)"];
   let gap = false;
   all.forEach((o, x) => {
     if (!keep[x]) return void (gap = out.length > 0);
@@ -53,22 +62,15 @@ export function lineDiff(before: string, after: string, maxChars = 6000): string
     out.push(`${o.k}${o.s}`);
   });
   const text = out.join("\n");
-  if (text.length <= maxChars) return text;
-  // Cut at a line, but the removed lines past the cut still follow: what a change takes away is what most needs a look.
-  const head = text.slice(0, Math.max(0, text.lastIndexOf("\n", maxChars)));
-  const shown = head.split("\n").filter((l) => l.startsWith("-")).length;
-  const rest = all.filter((o) => o.k === "-").slice(shown).map((o) => `-${o.s}`);
-  if (!rest.length) return `${head}\n(cut here)`;
-  const tail: string[] = [];
+  if (text.length <= maxChars) return { text, cut: false };
   let room = maxChars;
-  for (const l of rest) {
-    if (l.length + 1 > room) break;
-    tail.push(l);
-    room -= l.length + 1;
-  }
-  const more = rest.length - tail.length;
-  return `${head}\n(cut here; the rest of the lines it removes:)\n${tail.join("\n")}${more ? `\n(and ${more} more line${more === 1 ? "" : "s"} removed)` : ""}`;
+  let n = 0;
+  while (n < out.length && out[n].length + 1 <= room) room -= out[n++].length + 1;
+  const left = out.slice(n).filter((l) => l[0] === "+" || l[0] === "-");
+  return { text: `${out.slice(0, n).join("\n")}\n(cut here: ${left.length} more changed line${left.length === 1 ? "" : "s"})`, cut: true };
 }
+
+export const lineDiff = (before: string, after: string, maxChars = Infinity): string => cutDiff(before, after, maxChars).text;
 
 /** Lines added and removed over the whole page, and whether the change takes out a large part of it (the page shrinks by a third or more). */
 export function diffStats(before: string, after: string): { added: number; removed: number; largeDeletion: boolean } {

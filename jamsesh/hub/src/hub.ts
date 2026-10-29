@@ -121,6 +121,12 @@ export class Hub {
   net: Network;
   /** Open WebSocket connections from people's devices (not the host's own screen). */
   peopleOnline = 0;
+  /** The hub is saving its last state: nothing new is taken in (http.ts answers 503), so nothing arrives after the wiki's final capture. */
+  closing = false;
+  /** Work under way that may still add to the room: requests being answered, speech being transcribed, the brain's pass. Shutdown waits for it. */
+  private inflight = new Set<Promise<void>>();
+  /** How long shutdown waits for work in flight before sealing the store; anything later is refused. */
+  static SHUTDOWN_WAIT_MS = 10_000;
   uploadsDir: string;
 
   /** Every helper process the hub starts; stop() walks it. */
@@ -175,6 +181,7 @@ export class Hub {
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
+    this.audio.track = (work) => this.track(work);
     this.canvas = new Canvas(this.session, this.helpers);
     this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
     this.session.fonts = () => this.fonts.state();
@@ -212,7 +219,14 @@ export class Hub {
     if (!opts.dataDir && config.project) seedFromProject(config.home, config.project.slug, config.project.sessionId, this.session);
     // The project's wiki (SPEC 12.8): the fact list lives on as pages. The first session of a project folds its facts in.
     const wikiDir = opts.wikiDir ?? (!opts.dataDir && config.project ? join(projectsDir(config.home), config.project.slug) : join(dir, "project-wiki"));
-    this.wiki = new WikiService(this.session, wikiDir, this.session.sessionId, !opts.dataDir ? (config.project?.slug ?? "") : "");
+    const projectWiki = !opts.dataDir && config.project && !opts.wikiDir;
+    try {
+      this.wiki = new WikiService(this.session, wikiDir, this.session.sessionId, !opts.dataDir ? (config.project?.slug ?? "") : "", projectWiki ? projectsDir(config.home) : undefined);
+    } catch (e) {
+      // A project folder that is a link: the wiki lives in this session's own folder instead, and nothing is written through the link.
+      console.error("wiki:", e instanceof Error ? e.message : e);
+      this.wiki = new WikiService(this.session, join(dir, "project-wiki"), this.session.sessionId, "");
+    }
     this.wiki.attachmentBytes = (id) => {
       const rec = this.attachments.record(id);
       const bytes = rec ? this.attachments.bytes(id) : null;
@@ -220,6 +234,7 @@ export class Hub {
     };
     this.session.wikiAccept = (c, pages, by) => this.wiki.accept(c, pages, by);
     this.session.wikiClosed = (c) => this.wiki.closed(c);
+    this.session.wikiDismiss = (c, by) => this.wiki.dismissing(c, by);
     this.session.onFactSaved = (f) => void this.wiki.factSaved(f);
     try {
       // Raises the project's open proposals on this session's board, and closes any whose accept finished.
@@ -232,6 +247,12 @@ export class Hub {
       this.wiki.migrate(!opts.dataDir && config.project ? readProjectContext(config.home, config.project.slug) : null);
     } catch (e) {
       console.error("wiki migrate:", e instanceof Error ? e.message : e);
+    }
+    try {
+      // Pages changed by hand in the vault while the hub was off are filed as people's edits.
+      this.wiki.syncVault();
+    } catch (e) {
+      console.error("wiki sync:", e instanceof Error ? e.message : e);
     }
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
@@ -246,7 +267,11 @@ export class Hub {
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text, ev) => {
       this.brain.agentUpdated(agent, kind, text, ev);
-      this.wiki.agentUpdate(agent.name, kind, text, ev.workstreamId ? this.session.store.get("workstreams", ev.workstreamId)?.title : undefined);
+      try {
+        this.wiki.agentUpdate();
+      } catch (e) {
+        console.error("wiki:", e instanceof Error ? e.message : e);
+      }
     };
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
@@ -283,25 +308,68 @@ export class Hub {
     }
   }
 
+  /** Marks work as in flight until it settles (see `inflight`); returns an end to call when it is done. */
+  begin(): () => void {
+    let end!: () => void;
+    const work = new Promise<void>((res) => (end = res));
+    this.inflight.add(work);
+    return () => {
+      this.inflight.delete(work);
+      end();
+    };
+  }
+
+  track<T>(work: Promise<T>): Promise<T> {
+    return work.finally(this.begin());
+  }
+
+  /** Waits until nothing is in flight, including work that starts while waiting, for at most `ms`. False if something still runs. */
+  private async quiet(ms: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    while (this.inflight.size) {
+      const left = end - Date.now();
+      if (left <= 0) return false;
+      let timer!: ReturnType<typeof setTimeout>;
+      await Promise.race([Promise.allSettled([...this.inflight]), new Promise((res) => (timer = setTimeout(res, left)))]);
+      clearTimeout(timer);
+    }
+    return true;
+  }
+
   /**
-   * How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing.
-   * `wiki` is the last stretch of conversation going into the wiki's sources and, if the model answers in time, being read.
+   * How long each step of `shutdown` may take, after the wait for work in flight (SHUTDOWN_WAIT_MS). The Mac app waits
+   * longer than all of them together, plus the helpers' stop (host.rs `SHUTDOWN_WAIT`), before killing.
+   * `capture` is the wiki's final capture of the conversation; `wiki` is it being read in, if the model answers in time.
    */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, wiki: 25_000, network: 3000 };
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, capture: 5000, wiki: 12_000, network: 3000 };
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every save
    * finished: false when a save failed or ran out of time, which the hub's exit code reports (index.ts).
-   * The wiki step doesn't count: a source it didn't get to read stays unread, and the next session reads it.
+   * The wiki steps don't count: a source it didn't get to read stays unread, and the next session reads it.
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
+    // First of all, close every way in: requests that would add something are refused, and the brain takes no new pass.
+    this.closing = true;
+    this.brain.stop();
+    // Then what is already under way finishes: requests being answered, speech still waiting to be transcribed (now, not
+    // on its timer), the brain's pass. The local whisper stops only after it.
+    void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
+    void this.track(this.brain.idle());
+    if (!(await this.quiet(Hub.SHUTDOWN_WAIT_MS))) console.warn("Still working at shutdown: anything it adds now is refused.");
+    this.transcriber.stop();
     const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
+    // The conversation is sealed (a late event is refused, not missed), then its last stretch goes into the wiki's sources, on its own (it never
+    // waits behind a slow ingest); it is read in if the model answers in time, or at the next start.
+    this.store.seal("events");
+    await step(Promise.resolve().then(() => this.wiki.captureFinal()).catch((e) => console.error("wiki:", e instanceof Error ? e.message : e)), Hub.SHUTDOWN_MS.capture);
     await step(this.wiki.flush(), Hub.SHUTDOWN_MS.wiki);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
     if (!(await this.stop())) console.warn("a helper process was still running at shutdown");
+    this.store.seal("all");
     return saved && kept && closed;
   }
 

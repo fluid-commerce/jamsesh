@@ -4,6 +4,8 @@ import { type Category, CATEGORIES, backlinksOf, graph, isSourceId, linksOf, lis
 import type { Page } from "./files";
 import type { WikiService } from "./service";
 
+const LINKS_LISTED = 20;
+
 export interface WikiReply {
   status: number;
   body: unknown;
@@ -34,7 +36,8 @@ export function pageJson(w: WikiService, p: Page) {
 export async function wikiRoute(w: WikiService, method: string, path: string, url: URL, body: any, who: { name: string }): Promise<WikiReply | null> {
   if (path !== "/wiki" && !path.startsWith("/wiki/")) return null;
 
-  if (path === "/wiki/pages" && method === "GET") return ok({ ready: w.info().ready, project: w.project, pages: listPages(w.dir) });
+  // The index lists up to LINKS_LISTED links a page (a fully linked vault would be millions); a page's own route has every one.
+  if (path === "/wiki/pages" && method === "GET") return ok({ ready: w.info().ready, project: w.project, pages: listPages(w.dir).map((p) => ({ ...p, links: p.links.slice(0, LINKS_LISTED) })) });
   if (path === "/wiki/graph" && method === "GET") return ok(graph(w.dir));
   if (path === "/wiki/log" && method === "GET") return ok({ entries: readLog(w.dir, Math.min(200, Number(url.searchParams.get("limit")) || 100)) });
   if (path === "/wiki/search" && method === "GET") return ok({ results: searchPages(w.dir, url.searchParams.get("q") ?? "", 20) });
@@ -53,12 +56,24 @@ export async function wikiRoute(w: WikiService, method: string, path: string, ur
     return fail(r.error, r.status, r.current ? { current: pageJson(w, r.current) } : {});
   }
 
+  // The whole of a change a card shows part of (people only: an unaccepted proposal is for them to read).
+  m = path.match(/^\/wiki\/proposal\/([\w-]+)\/([^/]+)$/);
+  if (m && method === "GET") {
+    const d = w.fullDiff(m[1], m[2]);
+    return d ? ok(d) : fail("That proposal is gone.", 404);
+  }
+
   m = path.match(/^\/wiki\/source\/([^/]+)$/);
   if (m && method === "GET") {
     const s = isSourceId(m[1]) ? readSource(w.dir, m[1]) : null;
     return s ? ok({ id: s.id, title: s.title, kind: s.kind, ts: s.ts, by: s.by, text: s.text }) : fail("No such source.", 404);
   }
-  if (path === "/wiki/sources" && method === "GET") return ok({ sources: sourceIds(w.dir).slice(-200).reverse().map((id) => readSource(w.dir, id)).filter(Boolean).map((s) => ({ id: s!.id, title: s!.title, kind: s!.kind, ts: s!.ts, ingested: !w.pendingSources().includes(s!.id) })) });
+  if (path === "/wiki/sources" && method === "GET") {
+    const all = sourceIds(w.dir).slice(-200).reverse().map((id) => readSource(w.dir, id)).filter((x): x is NonNullable<typeof x> => !!x);
+    const state = w.sourceStates(all.map((x) => x.id));
+    // `ingested` is true only for a source an accepted or dismissed card (or an empty ingest) has settled; `state` also says "held" for one an open card is waiting on.
+    return ok({ sources: all.map((s) => ({ id: s.id, title: s.title, kind: s.kind, ts: s.ts, ingested: state[s.id] === "ingested", state: state[s.id] })) });
+  }
   if (path === "/wiki/sources" && method === "POST") {
     const title = typeof body?.title === "string" ? body.title : "";
     try {

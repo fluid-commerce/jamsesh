@@ -77,7 +77,7 @@ export class Transcriber {
   constructor(
     private session: Session,
     /** whisper-server and Parakeet are tracked here so stopping the hub finds them. */
-    private helpers: HelperRegistry = new HelperRegistry(),
+    helpers: HelperRegistry = new HelperRegistry(),
   ) {
     this.whisper = new LocalWhisper(helpers);
     this.parakeet = new Parakeet(helpers);
@@ -193,11 +193,10 @@ export class Transcriber {
     return now ? run : false;
   }
 
-  /** Stops the host's engines; whisper-server and Parakeet are tracked in the registry, so this resolves true only once their exits were seen. */
-  stop(): Promise<boolean> {
+  /** Stops the host's engines. The hub's registry is shared with the canvas, so reaping every helper is Hub.stop's job. */
+  stop() {
     this.whisper.stop();
     this.parakeet.stop();
-    return this.helpers.stopAll();
   }
 
   /** A client machine offers its own whisper server for the room. */

@@ -15,3 +15,6 @@ export const onWikiOpen = (fn: () => void) => {
   window.addEventListener(EVENT, fn);
   return () => window.removeEventListener(EVENT, fn);
 };
+
+/** A link in a page that the browser should follow itself (web and mail links); anything else stays inside the app. */
+export const followsNatively = (href: string | null | undefined) => /^(https?|mailto):/i.test(href ?? "");

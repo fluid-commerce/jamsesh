@@ -1459,7 +1459,7 @@ fn forget_voice_copies(dir: &std::path::Path) -> Vec<(PathBuf, std::io::Error)> 
 }
 
 #[cfg(test)]
-mod tests {
+mod voice_copy_tests {
     use super::*;
 
     fn folder(tag: &str) -> PathBuf {
