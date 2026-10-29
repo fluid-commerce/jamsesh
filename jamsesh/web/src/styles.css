@@ -3041,6 +3041,25 @@ html.in-app .app-header {
   cursor: zoom-out;
   margin: auto;
 }
+.wv-pins {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.wv-pin {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  margin: -12px 0 0 -12px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font: 700 11px var(--mono);
+  color: #14110a;
+  background: conic-gradient(from 200deg, hsl(0 88% 66%), hsl(60 88% 62%), hsl(130 80% 58%), hsl(200 90% 64%), hsl(280 80% 70%), hsl(340 88% 68%), hsl(0 88% 66%));
+  box-shadow: 0 0 0 2px rgba(12, 13, 15, 0.75), 0 6px 16px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
 .wv-media.live {
   border-radius: 12px;
 }

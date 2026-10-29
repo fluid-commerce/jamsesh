@@ -80,10 +80,10 @@ export function ExpandButton() {
 }
 
 /** A frame or screenshot, drawn at the size its box needs when the tile is expanded. */
-export function ArtImage({ art, full, onClick }: { art: Artifact; full: boolean; onClick?: () => void }) {
+export function ArtImage({ art, full, onClick, box }: { art: Artifact; full: boolean; onClick?: () => void; box?: boolean }) {
   const ref = useRef<HTMLImageElement>(null);
   const { src, onError } = useArtSrc(art, ref, full);
-  return <img ref={ref} src={src ?? undefined} alt={art.title} onClick={onClick} loading={full ? undefined : "lazy"} onError={full ? onError : undefined} />;
+  return <img ref={ref} src={src ?? undefined} alt={art.title} onClick={onClick} data-jam-box={box ? "" : undefined} loading={full ? undefined : "lazy"} onError={full ? onError : undefined} />;
 }
 
 // ---------- artifact tiles ----------

@@ -322,6 +322,7 @@ export class Hub {
   async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
     const s = this.session;
     const lines = await this.windowLines(w);
+    this.recordEnd(w.deviceId);
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);

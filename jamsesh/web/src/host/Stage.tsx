@@ -12,6 +12,7 @@ function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
 import { StageBar } from "../shared/StageControls";
+import { ScreenRecording } from "../shared/ScreenRecording";
 import { cast } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
@@ -68,7 +69,8 @@ export function Stage({ state, interactive, tilePins = true, bar }: { state: Hub
       body = <Board state={state} onPick={spotlight} />;
   }
   return (
-    <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
+    <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column", position: "relative" }}>
+      <ScreenRecording state={state} screen={screen} />
       {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} />}
       <TilePins.Provider value={tilePins}>
         <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
