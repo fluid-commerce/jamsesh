@@ -736,6 +736,22 @@ type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: 
 type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void; flush?: () => Promise<void> };
 
 const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+/** Whichever Record button is mounted registers here, so another screen (the picture viewer, which covers the header) can start and stop it too. */
+const recordControl = { toggle: null as null | (() => void) };
+const recordingNow = store(false);
+
+/** A Record button for places the header's isn't visible. */
+export function RecordHere() {
+  const live = recordingNow.use();
+  return (
+    <button type="button" className={`btn small rec-here ${live ? "live" : ""}`} onClick={() => recordControl.toggle?.()} aria-pressed={live} title={live ? "Stop and tidy your notes (R)" : "Record: talk and point, and it becomes notes (R)"}>
+      <span className="rec-dot" />
+      {live ? "Stop" : "Record"}
+      <kbd>R</kbd>
+    </button>
+  );
+}
+
 /**
  * Press `R` (or the button) to record: talk and point at what you're looking at, on your own screen or,
  * when you're driving it, the big screen. Stopping lists what you said as notes pinned to the spots you
@@ -860,6 +876,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   };
 
   const toggle = () => (recRef.current.phase === "live" ? void stop() : start());
+  recordControl.toggle = toggle;
+  useEffect(() => {
+    recordingNow.set(rec.phase === "live");
+  }, [rec.phase]);
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {

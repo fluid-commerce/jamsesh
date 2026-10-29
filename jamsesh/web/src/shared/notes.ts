@@ -33,5 +33,5 @@ const spot = (x: number, y: number) => {
 export function pinWords(n: RecordNote) {
   if (!n.pin) return null;
   const t = n.pin.target;
-  return `${t.label}, ${spot(n.pin.x, n.pin.y)}${t.page ? ` · ${t.page}` : ""}`;
+  return `${t.label}, ${spot(n.pin.x, n.pin.y)}${t.page ? ` · ${t.page}` : ""}${n.screenId ? " · big screen" : ""}`;
 }

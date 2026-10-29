@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ago, type Artifact, type HubState } from "../shared/hub";
+import { RecordHere } from "../shared/annotate";
 import { ArtImage, ScaledFrame } from "../shared/ui";
 import { CloseIcon } from "./mobile";
 import { keyAction, step } from "./viewerNav";
@@ -119,6 +120,7 @@ export function WorkViewer({ items, index, state, name, onIndex, onClose, onShow
           </span>
         )}
         <div className="wv-actions">
+          <RecordHere />
           {items.length > 1 && (
             <button className="btn small" onClick={() => onShow(items.slice(0, 6))}>
               All {Math.min(items.length, 6)} side by side

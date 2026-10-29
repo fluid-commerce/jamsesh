@@ -35,6 +35,8 @@ export function RainbowTrail({ feed, fixed = true, head = true }: { feed: { curr
     ro?.observe(c);
     if (fixed) addEventListener("resize", size);
 
+    // On a big screen the same trail would look thin from across the room.
+    const scale = () => (fixed ? 1 : Math.min(1.8, Math.max(1, w / 1200)));
     let raf = 0;
     let anchor = { x: -99, y: -99, at: 0 };
     let hue = 0;
@@ -42,14 +44,14 @@ export function RainbowTrail({ feed, fixed = true, head = true }: { feed: { curr
       raf = 0;
       const now = performance.now();
       ctx.clearRect(0, 0, w, h);
-      ctx.lineCap = "round";
+      ctx.lineCap = "butt";
       ctx.lineJoin = "round";
       const pieces = trail.pieces(now);
       // A soft wide pass first, then the bright core: a glow without a blur filter.
       for (const pass of [0, 1]) {
         for (const q of pieces) {
           ctx.globalAlpha = pass ? q.alpha : q.alpha * 0.22;
-          ctx.lineWidth = pass ? q.width : q.width * 2.8;
+          ctx.lineWidth = (pass ? q.width : q.width * 2.8) * scale();
           ctx.strokeStyle = `hsl(${q.hue} ${reduced ? 55 : 88}% ${pass ? 66 : 62}%)`;
           ctx.beginPath();
           ctx.moveTo(q.x0, q.y0);

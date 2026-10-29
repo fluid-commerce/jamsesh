@@ -15,7 +15,7 @@ export interface TrailStyle {
   hueSpan: number;
 }
 
-export const FULL: TrailStyle = { life: 1000, width: 6, alpha: 0.9, hueRate: 0.32, hueFrom: 0, hueSpan: 360 };
+export const FULL: TrailStyle = { life: 1000, width: 7, alpha: 0.95, hueRate: 0.32, hueFrom: 0, hueSpan: 360 };
 /** Reduced motion: shorter, thinner, fainter, and a calm band of colour instead of the whole spectrum. */
 export const CALM: TrailStyle = { life: 450, width: 3, alpha: 0.55, hueRate: 0.12, hueFrom: 190, hueSpan: 110 };
 
@@ -90,7 +90,7 @@ export class Trail {
     const p = this.pts;
     const look = (q: TrailPoint) => {
       const k = Math.min(1, Math.max(0, (now - q.at) / life));
-      const fade = (1 - k) * (1 - k) * (1 - 0.4 * k);
+      const fade = Math.pow(1 - k, 1.6) * (1 - 0.3 * k);
       return { hue: hueFrom + (((q.h % hueSpan) + hueSpan) % hueSpan), alpha: alpha * fade, width: Math.max(0.6, width * (1 - 0.85 * k)) };
     };
     const mid = (u: TrailPoint, v: TrailPoint) => ({ x: (u.x + v.x) / 2, y: (u.y + v.y) / 2 });

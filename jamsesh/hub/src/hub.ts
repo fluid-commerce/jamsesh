@@ -185,7 +185,8 @@ export class Hub {
     this.transcriber.stop();
     this.devproxy.stop();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
-    for (const r of this.recs.values()) clearInterval(r.keep);
+    for (const r of this.recs.values()) (clearInterval(r.keep), clearTimeout(r.cap));
+    clearInterval(this.recSweep);
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */
@@ -352,8 +353,13 @@ export class Hub {
 
   /** A recording runs this long at most; the screen's lock is kept fresh until then. */
   static RECORD_MAX_MS = 10 * 60_000;
-  private recs = new Map<string, { id: string; personId: string | null; screenId: string | null; tookLock: boolean; keep?: ReturnType<typeof setInterval> }>();
+  private recs = new Map<string, { id: string; personId: string | null; screenId: string | null; tookLock: boolean; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number }>();
   /** Which person each recording's notes were handed to, so another person's window can't send them. */
+  private recSweep = (() => {
+    const t = setInterval(() => this.sweepRecordings(), 15_000);
+    t.unref?.();
+    return t;
+  })();
   private noteOwners = new Map<string, string | null>();
   /** What a send already did, so a repeated send (a lost reply, a double click) does nothing twice. */
   private sentRecs = new Map<string, unknown>();
@@ -379,7 +385,9 @@ export class Hub {
     this.recordEnd(deviceId);
     const id = newId("rec");
     this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
-    const rec: { id: string; personId: string | null; screenId: string | null; tookLock: boolean; keep?: ReturnType<typeof setInterval> } = { id, personId: person?.id ?? null, screenId, tookLock };
+    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, personId: person?.id ?? null, screenId, tookLock, missed: 0 };
+    // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
+    (rec.cap = setTimeout(() => this.abandonRecording(deviceId, rec), Hub.RECORD_MAX_MS + 1000)).unref?.();
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
     if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
     this.recs.set(deviceId, rec);
@@ -387,11 +395,26 @@ export class Hub {
     return { ok: true, id };
   }
 
+  private abandonRecording(deviceId: string, only: unknown) {
+    if (this.recs.get(deviceId) !== only) return;
+    this.releasePrompt(deviceId);
+    this.recordEnd(deviceId);
+  }
+
+  /** Ends recordings whose window has been gone for two checks in a row (this runs every 15 s). */
+  sweepRecordings() {
+    for (const [deviceId, rec] of [...this.recs]) {
+      rec.missed = this.session.deviceOnline(deviceId) ? 0 : rec.missed + 1;
+      if (rec.missed >= 2) this.abandonRecording(deviceId, rec);
+    }
+  }
+
   /** Forgets a device's recording and, if it was the last on its screen and took the lock, gives the screen back. */
   private recordEnd(deviceId: string) {
     const rec = this.recs.get(deviceId);
     if (!rec) return;
     clearInterval(rec.keep);
+    clearTimeout(rec.cap);
     this.recs.delete(deviceId);
     this.session.setRecording(null, deviceId);
     if (!rec.screenId) return;

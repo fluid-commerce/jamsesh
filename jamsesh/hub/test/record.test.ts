@@ -384,3 +384,25 @@ test("a new Record on the same device replaces a recording whose Stop never came
   await r.hub.recordStop({ deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 }, 30_000);
+
+test("a recording whose window vanished ends on its own, and gives back the screen it locked; one still connected is left alone", async () => {
+  const r = room();
+  const t0 = Date.now();
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
+  expect(r.hub.recordStart("benLaptop", r.ben.id, t0).ok).toBe(true);
+  // Maya's window is gone; Ben's is still connected.
+  r.s.deviceOnline = (id) => id === "benLaptop";
+  r.hub.sweepRecordings();
+  expect(r.s.recordings().length).toBe(2);
+  r.hub.sweepRecordings();
+  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Ben"]);
+  expect(r.s.lockOf("main")).toBeNull();
+  // A blip that recovers resets the count.
+  r.s.deviceOnline = () => false;
+  r.hub.sweepRecordings();
+  r.s.deviceOnline = () => true;
+  r.hub.sweepRecordings();
+  r.s.deviceOnline = () => false;
+  r.hub.sweepRecordings();
+  expect(r.s.recordings().length).toBe(1);
+});

@@ -761,6 +761,30 @@ kbd.an-k {
   pointer-events: none;
   z-index: 2500;
 }
+.rec-here {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.rec-here .rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.rec-here.live {
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+.rec-here.live .rec-dot {
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+.rec-here kbd {
+  font: 500 10px var(--mono);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--panel-3);
+  color: var(--dim);
+}
 .rec-trail.inbox {
   position: absolute;
   width: 100%;

@@ -28,6 +28,7 @@ test("a spot reads in words", () => {
   expect(pinWords(note("a", "x", { pin: pin("a1", 0.1, 0.1) }))).toBe("Login, top left");
   expect(pinWords(note("a", "x", { pin: pin("a1", 0.5, 0.5) }))).toBe("Login, center");
   expect(pinWords(note("a", "x"))).toBeNull();
+  expect(pinWords(note("a", "x", { pin: pin("a1", 0.9, 0.1), screenId: "main" }))).toBe("Login, top right · big screen");
 });
 
 test("a send is told in words: who got how many, and what went to the brain", () => {
