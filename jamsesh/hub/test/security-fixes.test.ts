@@ -128,7 +128,6 @@ const AGENT_MAY = [
   "ANY /api/me",
   "ANY /api/pair/info",
   "ANY /api/state",
-  "GET /api/drive/online",
   "GET /api/history/events",
   "GET /api/paired",
   "GET /api/snapshots",

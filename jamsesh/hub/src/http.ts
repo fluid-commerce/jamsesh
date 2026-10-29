@@ -14,7 +14,7 @@ import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, DriveEvent, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; appId?: string; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; pairedId?: string | null; hostWindow?: boolean; driveWindow?: number; driveCount?: number; driveDenied?: number };
+type WsData = { deviceId: string | null; appId?: string; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; pairedId?: string | null; hostWindow?: boolean; driveDenied?: number };
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -207,11 +207,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
         if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
-        // A live Simulator or Mac app's frames (binary JPEGs). Agents have nothing to watch there.
+        // A live Simulator or Mac app's frames (binary JPEGs): for people's windows only, a paired one or
+        // the host's own. Agents have nothing to watch there, and loopback alone is any process on the host.
         const appWs = path.match(/^\/ws\/app\/([\w-]+)$/);
         if (appWs) {
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (device?.kind === "agent") return bad("That's for people.", 403);
+          if (!hostWindow && device?.kind !== "browser") return bad(local ? NOT_THE_HOST_WINDOW : "That's for people.", 403);
           if (!hub.live.get(appWs[1])) return bad("That app isn't live.", 404);
           if (srv.upgrade(req, { data: { deviceId: null, appId: appWs[1], pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
@@ -333,7 +334,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
   return server;
 }
 
+/** The most input events a person may send a second, across all their windows. */
 const DRIVE_PER_SECOND = 120;
+const driveRate = new Map<string, { since: number; n: number }>();
 const clamp01 = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null);
 const delta = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.min(5000, Math.max(-5000, v)) : 0);
 
@@ -361,8 +364,6 @@ export function cleanDrive(ev: any): DriveEvent | null {
 export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
   const s = hub.session;
   const now = Date.now();
-  if (!ws.data.driveWindow || now - ws.data.driveWindow >= 1000) ((ws.data.driveWindow = now), (ws.data.driveCount = 0));
-  if ((ws.data.driveCount = (ws.data.driveCount ?? 0) + 1) > DRIVE_PER_SECOND) return;
   const dev = hub.auth.get(ws.data.pairedId);
   const personId = dev ? (dev.kind === "browser" ? dev.personId : null) : ws.data.hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null;
   const screen = s.findScreen(typeof m.screen === "string" ? m.screen : undefined)?.id ?? "main";
@@ -373,6 +374,9 @@ export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
     ws.send(JSON.stringify({ type: "drive-denied", screen, why }));
   };
   if (!person) return deny("Pick who you are in this window first.");
+  const rate = driveRate.get(person.id);
+  if (!rate || now - rate.since >= 1000) driveRate.set(person.id, { since: now, n: 1 });
+  else if (++rate.n > DRIVE_PER_SECOND) return;
   if (!s.driversOf(screen).includes(person.id)) return deny("You aren't driving this screen.");
   const ev = cleanDrive(m.ev);
   if (ev) bus.send({ type: "drive", screen, personId: person.id, name: person.name, color: person.color, ev, t: now });
@@ -471,6 +475,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+  /** Refuses what's for people's windows (a paired one, or the host's own) to anyone else: agents, and other processes on the host. */
+  const notAPerson = () => (caller ? null : bad(paired?.kind === "agent" ? "That's for people; agents use their jam_ tools." : isLocal(ip) ? NOT_THE_HOST_WINDOW : "That's for people.", 403));
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
@@ -500,7 +506,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // names and counts in the state, never a font file (agents run on Macs, and a borrowed font stays off them).
   let fm = path.match(/^\/fonts\/([^/]{1,300})\/(\d{1,2})$/);
   if (fm && req.method === "GET") {
-    if (paired?.kind === "agent") return bad("Fonts are for people's canvases; agents don't get the files.", 403);
+    if (!caller) return paired?.kind === "agent" ? bad("Fonts are for people's canvases; agents don't get the files.", 403) : notAPerson()!;
     const key = (() => { try { return decodeURIComponent(fm[1]); } catch { return ""; } })();
     const data = hub.fonts.face(key, Number(fm[2]));
     // A copy, and never cached to disk: a borrowed font is not kept on anyone's Mac.
@@ -651,7 +657,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
   }
   // Driving the big screen (6.1): the lock's owner starts, passes control or drives together; `to` names the other person.
-  if (path === "/drive/online" && req.method === "GET") return json({ people: s.onlinePeople() });
+  if (path === "/drive/online" && req.method === "GET") return notAPerson() ?? json({ people: s.onlinePeople() });
   m = path.match(/^\/drive\/(start|stop|pass|together)$/);
   if (m && req.method === "POST") {
     const r = s.drive(m[1] as "start", screenOf(), actor().id, typeof body?.to === "string" ? body.to : typeof body?.who === "string" ? body.who : null);

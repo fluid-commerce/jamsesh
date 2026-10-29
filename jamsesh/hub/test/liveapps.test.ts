@@ -184,6 +184,10 @@ test("the frame socket: people only, and only for a live app", async () => {
   expect((await ws(`/ws/app/${appId}`, agentHeaders)).status).toBe(403);
   expect((await ws(`/ws/app/app-nope`, host())).status).toBe(404);
   expect((await ws(`/ws/app/${appId}`, { "x-forwarded-for": "9.9.9.9" })).status).toBe(401);
+  // Loopback alone isn't a person: another process on the host, or the host's window key guessed, gets no frames.
+  expect((await ws(`/ws/app/${appId}`, {})).status).toBe(403);
+  expect((await ws(`/ws/app/${appId}`, { cookie: "jam_window=" + "0".repeat(64) })).status).toBe(403);
+  expect((await ws(`/ws/app/${appId}`, { authorization: `Bearer ${agent.token}` })).status).toBe(403);
   // A real socket from the host's window gets binary frames.
   const sock = new WebSocket(`ws://127.0.0.1:${server.port}/ws/app/${appId}`, { headers: { ...host(), origin: base } } as any);
   sock.binaryType = "arraybuffer";

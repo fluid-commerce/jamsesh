@@ -361,6 +361,12 @@ test("over HTTP: Lee's canvas asks, Dana confirms and lends, Lee's canvas fetche
   expect(file.status).toBe(200);
   expect(file.headers.get("cache-control")).toBe("no-store");
   expect(fontFamilies(new Uint8Array(await file.arrayBuffer()))).toEqual(["Helvetica Neue"]);
+  // On the host, only its own windows get the file: not another process reaching loopback, nor an agent there.
+  const at = `${base}/api/fonts/${after.fonts.available[0].key.replace(/ /g, "%20")}/0`;
+  expect((await fetch(at)).status).toBe(403);
+  expect((await fetch(at, { headers: { authorization: `Bearer ${agent.token}` } })).status).toBe(403);
+  const window = await fetch(at, { headers: { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` } });
+  expect(window.status).toBe(200);
 });
 
 test("over HTTP: an agent can't ask, lend, decline, withdraw or download, with or without a person on its credential", async () => {

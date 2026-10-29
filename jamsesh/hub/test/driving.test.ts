@@ -173,13 +173,18 @@ test("a driver's input reaches every window as that person; strangers, agents, s
   off();
 });
 
-test("a window can send only so many events a second", () => {
-  const { s, hub, chey, cast, win, heard, off } = room();
-  const c = win(chey.id);
+test("a person can send only so many events a second, however many windows they open", () => {
+  const { s, hub, chey, felipe, cast, win, heard, off } = room();
+  const [a, b, c] = [win(chey.id), win(chey.id), win(chey.id)];
   cast(chey);
   s.drive("start", "main", chey.id);
-  for (let i = 0; i < 400; i++) driveFrom(c.ws, hub, move(i / 400, 0.5));
+  s.drive("together", "main", chey.id, felipe.id);
+  for (let i = 0; i < 400; i++) driveFrom([a, b, c][i % 3].ws, hub, move(i / 400, 0.5));
   expect(heard.length).toBe(120);
+  // Someone else driving together has a budget of their own.
+  const f = win(felipe.id);
+  for (let i = 0; i < 10; i++) driveFrom(f.ws, hub, move());
+  expect(heard.length).toBe(130);
   off();
 });
 
@@ -221,6 +226,16 @@ test("the http routes: the window's person is who acts; an agent's credential is
     expect((await post("/drive/together", { to: chey.id, personId: felipe.id })).status).toBe(403);
     expect((await post("/drive/stop", {})).status).toBe(200);
     expect(s.driversOf()).toEqual([felipe.id]);
+    // Who is online to pass to: people's windows only, not an agent or another process on the host.
+    const online = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${server.port}/api/drive/online`, { headers });
+    expect((await online({ authorization: `Bearer ${agent.token}` })).status).toBe(403);
+    expect((await online({})).status).toBe(403);
+    const remoteAgent = hub.auth.issue({ kind: "agent", label: "Agents", ip: "10.0.0.5" });
+    expect((await online({ authorization: `Bearer ${remoteAgent.token}`, "x-forwarded-for": "10.0.0.5" })).status).toBe(403);
+    const lap = hub.auth.issue({ kind: "browser", label: "Felipe's laptop", ip: "10.0.0.6", personId: felipe.id });
+    const seen = await online({ authorization: `Bearer ${lap.token}`, "x-forwarded-for": "10.0.0.6" });
+    expect(seen.status).toBe(200);
+    expect((await online({ cookie: cookie() })).status).toBe(200);
   } finally {
     server.stop(true);
   }
