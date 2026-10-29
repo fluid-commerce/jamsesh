@@ -1279,17 +1279,47 @@ test("a Stop sent again while the first is gathering changes nothing: speech bet
   r.at(base + 3000);
   let pending = 1;
   (r.hub as any).audio.pendingFor = () => pending;
-  const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "first" });
-  const first = stop();
+  const stop = (typed: string) => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed });
+  const first = stop("first words");
   await Bun.sleep(500);
-  // The duplicate arrives later by the hub's clock; the first close keeps its own time.
+  // The duplicate arrives later by the hub's clock, with other text; the first close keeps its own time and text.
   r.at(base + 4000);
-  const second = stop();
+  const second = stop("second words");
   line(r.hub, "said between the two", r.maya.id, "mayaLaptop", base + 3800);
   pending = 0;
   const [one, two] = await Promise.all([first, second]);
   expect(two).toEqual(one);
+  const text = one.ok ? one.notes.map((n) => n.text).join(" ") : "";
+  expect(text).toContain("first words");
+  expect(text).not.toContain("second words");
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("said between the two");
+}, 30_000);
+
+test("after a failed Stop, a line the reopened window gave up on (it went to the room) is not read into the retry's notes", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "kept for the recording", r.maya.id, "mayaLaptop", base + 500);
+  r.at(base + 3000);
+  const real = (r.hub as any).stopNotes.bind(r.hub);
+  let n = 0;
+  (r.hub as any).stopNotes = (...args: any[]) => (++n === 1 ? (() => { throw new Error("database is locked"); })() : real(...args));
+  const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  await expect(stop()).rejects.toThrow("locked");
+  // The restored window is left alone until its own timer gives up on it: a line said meanwhile reaches the room.
+  line(r.hub, "said while the window stood", r.maya.id, "mayaLaptop", base + 3100);
+  (r.hub as any).releasePrompt("mayaLaptop", (r.hub as any).promptMode.get("mayaLaptop"));
+  const texts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
+  expect(texts).toContain("said while the window stood");
+  expect(texts).toContain("kept for the recording");
+  r.at(base + 3500);
+  const done = await stop();
+  const notes = done.ok ? done.notes.map((x) => x.text).join(" ") : "";
+  // Both went to the room when the window gave up, so neither is also a note (no word twice).
+  expect(notes).not.toContain("said while the window stood");
+  expect(notes).not.toContain("kept for the recording");
 }, 30_000);
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
