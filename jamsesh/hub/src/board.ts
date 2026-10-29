@@ -121,7 +121,9 @@ export class Board {
     const fresh = sources.filter((x) => x.eventId == null || !match.sources.some((m) => m.eventId === x.eventId));
     // A line seen twice (the same event) isn't a repeat.
     if (!fresh.length && sources.some((x) => x.eventId != null)) return match;
-    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), updatedAt: this.stamp() };
+    // Said again, it is the room's ask once more: an "overruled" mark from an earlier line no longer stands.
+    const { overruled: _gone, ...live } = match;
+    const next = { ...live, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), updatedAt: this.stamp() };
     return this.s.store.put("triage", next);
   }
 
@@ -166,7 +168,9 @@ export class Board {
     const workstream = clean(p.workstream);
     const active = this.s.store.all("facts").filter((f) => f.status === "active");
     // A named replacement changes that fact however close the wording is, so it is never "already known".
-    const named = p.replaces ? active.find((f) => f.id === p.replaces) : undefined;
+    // Only when it is the same kind, workstream and platform: a "replace" across those is another fact, not a change to this one.
+    const named0 = p.replaces ? active.find((f) => f.id === p.replaces) : undefined;
+    const named = named0 && named0.kind === kind && sameName(named0.workstream, workstream) && sameScope(named0.text, text) ? named0 : undefined;
     // Already known, in other words: nothing for a person to decide. "Not option A" is not "option A" again.
     if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text, 0.55))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
@@ -399,6 +403,9 @@ export class Board {
     }
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
+    // Checked against the card as it will be saved (a matched card, a named fact, or a card edited just before): the
+    // new wording replaces a fact of its own kind, workstream and platform only.
+    if (old.kind !== r.card.kind || !sameName(old.workstream, r.card.workstream) || !sameScope(old.text, r.card.text)) return fail("That fact is another kind, workstream or platform than this card says. Add the card instead, or edit it to match.");
     if (!this.worded(c, r.card)) return fail("Write what the file says to keep first: Edit, then Replace.");
     // The old fact is retired only together with its replacement being saved.
     return this.commit(() => {

@@ -141,13 +141,19 @@ describe("4.2 banter is judged by topic", () => {
 
 describe("4.3 curation updates instead of restating", () => {
   const events = (r: ReturnType<typeof room>, n = 3) => Array.from({ length: n }, (_, i) => r.say(`line ${i}`));
+  /** A hold that records what curation hands the board. */
+  const hold = () => {
+    const h = { added: [] as { text: string; replaces?: string; workstream?: string }[], retired: [] as { id: string; status: string }[], add: (f: { text: string; workstream: string }, replaces?: string) => void h.added.push({ text: f.text, replaces, workstream: f.workstream }), retire: (f: { id: string }, status: string) => void h.retired.push({ id: f.id, status }) };
+    return h;
+  };
 
   test("an addition without a source event is not saved; one citing events outside the batch is not either", () => {
     const r = room();
     const evs = events(r);
     const c: Curation = { add: [{ kind: "decision", text: "Nav uses option B.", eventIds: [9999] }], ...noChange };
-    const res = applyCuration(r.s, c, evs);
-    expect(res.added).toHaveLength(0);
+    const h = hold();
+    const res = applyCuration(r.s, c, evs, h);
+    expect(h.added).toHaveLength(0);
     expect(res.dropped[0].why).toBe("no source event");
     r.hub.stop();
   });
@@ -156,8 +162,9 @@ describe("4.3 curation updates instead of restating", () => {
     const r = room();
     const evs = events(r);
     const add = (text: string): Curation["add"][number] => ({ kind: "fact", text, eventIds: [evs[0].id] });
-    const res = applyCuration(r.s, { add: [add("The sidebar collapse is implemented in commit 813f5c7452 on branch jonathan/nav."), add("The TV is flickering on the big screen."), add("The mic keeps cutting out when Jonathan talks."), add("The collab.join call failed again."), add("Brand orange is E8672C.")], ...noChange }, evs);
-    expect(res.added.map((f) => f.text)).toEqual(["Brand orange is E8672C."]);
+    const h = hold();
+    const res = applyCuration(r.s, { add: [add("The sidebar collapse is implemented in commit 813f5c7452 on branch jonathan/nav."), add("The TV is flickering on the big screen."), add("The mic keeps cutting out when Jonathan talks."), add("The collab.join call failed again."), add("Brand orange is E8672C.")], ...noChange }, evs, h);
+    expect(h.added.map((f) => f.text)).toEqual(["Brand orange is E8672C."]);
     expect(res.dropped).toHaveLength(4);
     r.hub.stop();
   });
@@ -166,8 +173,9 @@ describe("4.3 curation updates instead of restating", () => {
     const r = room();
     const evs = events(r);
     fact(r.s, "The sidebar collapses to an icon rail under 1024 pixels.", { kind: "requirement", sourceEventIds: [1] });
-    const res = applyCuration(r.s, { add: [{ kind: "requirement", text: "Under 1024 pixels the sidebar collapses to an icon rail.", eventIds: [evs[1].id] }], ...noChange }, evs);
-    expect(res.added).toHaveLength(0);
+    const h = hold();
+    const res = applyCuration(r.s, { add: [{ kind: "requirement", text: "Under 1024 pixels the sidebar collapses to an icon rail.", eventIds: [evs[1].id] }], ...noChange }, evs, h);
+    expect(h.added).toHaveLength(0);
     expect(res.merged).toHaveLength(1);
     const active = r.s.facts().filter((f) => f.status === "active");
     expect(active).toHaveLength(1);
@@ -179,12 +187,13 @@ describe("4.3 curation updates instead of restating", () => {
     const r = room();
     const evs = events(r);
     fact(r.s, "The icon rail is 64 pixels wide.", { kind: "requirement" });
-    const res = applyCuration(r.s, { add: [{ kind: "requirement", text: "The icon rail is 48 pixels wide.", eventIds: [evs[0].id] }], ...noChange }, evs);
-    expect(res.added).toHaveLength(1);
+    const h = hold();
+    applyCuration(r.s, { add: [{ kind: "requirement", text: "The icon rail is 48 pixels wide.", eventIds: [evs[0].id] }], ...noChange }, evs, h);
+    expect(h.added).toHaveLength(1);
     r.hub.stop();
   });
 
-  test("update, resolve and supersede keep the old sources and add the new ones; stale ids are ignored", () => {
+  test("an update, a resolve and a supersede change nothing on their own: they go to the hold; stale ids are ignored", () => {
     const r = room();
     const evs = events(r);
     fact(r.s, "Product grid is masonry.", { sourceEventIds: [1] });
@@ -192,10 +201,11 @@ describe("4.3 curation updates instead of restating", () => {
     fact(r.s, "Badge is a dot.", { sourceEventIds: [3] });
     const byText = (t: string) => r.s.store.all("facts").find((f) => f.text === t)!;
     const m = byText("Product grid is masonry."), tax = byText("Do we show prices with tax?"), bd = byText("Badge is a dot.");
-    applyCuration(r.s, { add: [], update: [{ id: bd.id, text: "Badge is a dot with a count.", reason: "detail", eventIds: [evs[0].id, 9999] }], resolve: [{ id: tax.id, reason: "answered", eventIds: [evs[1].id] }], supersede: [{ id: m.id, reason: "even grid", eventIds: [evs[2].id] }, { id: "fact_gone", reason: "x" }] }, evs);
-    expect(r.s.store.get("facts", bd.id)).toMatchObject({ text: "Badge is a dot with a count.", status: "active", sourceEventIds: [3, evs[0].id] });
-    expect(r.s.store.get("facts", tax.id)).toMatchObject({ status: "resolved", sourceEventIds: [2, evs[1].id] });
-    expect(r.s.store.get("facts", m.id)).toMatchObject({ status: "superseded", sourceEventIds: [1, evs[2].id] });
+    const h = hold();
+    applyCuration(r.s, { add: [], update: [{ id: bd.id, text: "Badge is a dot with a count.", reason: "detail", eventIds: [evs[0].id, 9999] }], resolve: [{ id: tax.id, reason: "answered", eventIds: [evs[1].id] }], supersede: [{ id: m.id, reason: "even grid", eventIds: [evs[2].id] }, { id: "fact_gone", reason: "x" }] }, evs, h);
+    expect(h.added).toEqual([{ text: "Badge is a dot with a count.", replaces: bd.id, workstream: "" }]);
+    expect(h.retired).toEqual([{ id: tax.id, status: "resolved" }, { id: m.id, status: "superseded" }]);
+    for (const f of [m, tax, bd]) expect(r.s.store.get("facts", f.id)).toMatchObject({ status: "active", text: f.text });
     r.hub.stop();
   });
 
@@ -203,8 +213,9 @@ describe("4.3 curation updates instead of restating", () => {
     const r = room();
     const evs = events(r);
     r.s.claim(r.jon.id, "Checkout", { quiet: true });
-    const res = applyCuration(r.s, { add: [{ kind: "fact", text: "Checkout dev server is at http://192.168.1.20:5100.", workstream: "checkout", eventIds: [evs[0].id] }, { kind: "fact", text: "Tokens live in theme/tokens.ts.", workstream: "Invented", eventIds: [evs[0].id] }], ...noChange }, evs);
-    expect(res.added.map((f) => f.workstream)).toEqual(["Checkout", ""]);
+    const h = hold();
+    applyCuration(r.s, { add: [{ kind: "fact", text: "Checkout dev server is at http://192.168.1.20:5100.", workstream: "checkout", eventIds: [evs[0].id] }, { kind: "fact", text: "Tokens live in theme/tokens.ts.", workstream: "Invented", eventIds: [evs[0].id] }], ...noChange }, evs, h);
+    expect(h.added.map((f) => f.workstream)).toEqual(["Checkout", ""]);
     r.hub.stop();
   });
 });
