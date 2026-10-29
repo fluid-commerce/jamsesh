@@ -283,8 +283,29 @@ set -euo pipefail
 main() {
 HUB=${shellWord(HUB)}
 TOKEN=${shellWord(token)}
+# Where a write to this path really lands, as a clean absolute path: a symlink is followed (one that leads
+# nowhere too, however many links and ".." it goes through), so the link itself stays a link.
+resolve() { perl -MCwd=abs_path -MFile::Basename=dirname,basename -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { my ($t, $n) = ($p, 0); while (-l $t && $n++ < 20) { my $l = readlink $t; $l = dirname($t) . "/" . $l unless $l =~ m{^/}; my $d = abs_path(dirname($l)); $t = (defined $d ? $d : dirname($l)) . "/" . basename($l) } my @o; for my $s (split m{/+}, $t) { next if $s eq "" || $s eq "."; if ($s eq "..") { pop @o } else { push @o, $s } } $r = "/" . join("/", @o) } print $r // $p' "$1"; }
+# Setup writes inside the person's home, however a link points. inhome checks the place; guard adds that
+# it is never an instruction file (CLAUDE.md, AGENTS.md) or a folder (moving a file onto one would put it inside).
+inhome() {
+  local real="$1" home
+  home="$(resolve "$HOME")"
+  case "$real" in "$HOME"/*|"$home"/*) ;; *) echo "JamSesh won't write $real: it is outside your home folder." >&2; return 1 ;; esac
+}
+guard() {
+  local real="$1" f
+  inhome "$real" || return 1
+  [ ! -d "$real" ] || { echo "JamSesh won't write $real: it is a folder." >&2; return 1; }
+  case "$(basename "$real" | tr 'A-Z' 'a-z')" in claude.md|agents.md) echo "JamSesh won't write $real: it is an instruction file." >&2; return 1 ;; esac
+  for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+    if [ -e "$f" ] && [ "$real" -ef "$f" ]; then echo "JamSesh won't write $real: it is an instruction file." >&2; return 1; fi
+  done
+}
 DIR="$HOME/.jamsesh"
-# JamSesh's folder holds credentials: only this person can open it, however it was made before.
+# JamSesh's folder holds credentials: only this person can open it, however it was made before. Where
+# it really is is checked first: a link out of the home folder would get the mode change and the lock.
+inhome "$(resolve "$DIR")" || exit 1
 mkdir -p "$DIR" && chmod 700 "$DIR"
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
@@ -324,21 +345,6 @@ mkdir "$J"
 sha() { perl -MDigest::SHA=sha256_hex -e 'if (-d $ARGV[0]) { print "folder" } elsif (open(my $f, "<:raw", $ARGV[0])) { local $/; print sha256_hex(<$f> // "") } else { print "absent" }' "$1"; }
 key_of() { printf '%s' "$1" | perl -MDigest::SHA=sha1_hex -e 'local $/; print sha1_hex(<STDIN>)'; }
 mode_of() { perl -e 'printf "%o", (stat $ARGV[0])[2] & 07777' "$1"; }
-# Where a write to this path really lands: a symlink is followed (one that leads nowhere too), so the
-# link itself stays a link.
-resolve() { perl -MCwd=abs_path -MFile::Basename=dirname -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { $r = readlink $p; $r = dirname($p) . "/" . $r unless $r =~ m{^/} } print $r // $p' "$1"; }
-# Setup writes inside the person's home and never into an instruction file (CLAUDE.md, AGENTS.md), however
-# a link points there. A folder in a file's place is refused too: moving a file onto it would put it inside.
-guard() {
-  local real="$1" f home
-  home="$(resolve "$HOME")"
-  case "$real" in "$HOME"/*|"$home"/*) ;; *) echo "JamSesh won't write $real: it is outside your home folder." >&2; return 1 ;; esac
-  [ ! -d "$real" ] || { echo "JamSesh won't write $real: it is a folder." >&2; return 1; }
-  case "$(basename "$real" | tr 'A-Z' 'a-z')" in claude.md|agents.md) echo "JamSesh won't write $real: it is an instruction file." >&2; return 1 ;; esac
-  for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
-    if [ -e "$f" ] && [ "$real" -ef "$f" ]; then echo "JamSesh won't write $real: it is an instruction file." >&2; return 1; fi
-  done
-}
 # The one way setup writes a file: safe_write <path> <mode | keep:mode>, content on standard input.
 # A new file is made beside the target (mktemp creates it exclusively and never follows a link), then moved over it.
 safe_write() {
@@ -400,12 +406,15 @@ for my $try (1 .. 5) {
 exit 1;
 MCPKEY
 }
+# Whether a jamsesh entry read from the config (JSON) holds everything setup registered.
+mcp_is_new() { [ -n "$1" ] && JAMSESH_GOT="$1" JAMSESH_WANT="$new_mcp" perl -MJSON::PP -e 'my ($g, $w) = map { eval { decode_json($ENV{$_}) } } qw(JAMSESH_GOT JAMSESH_WANT); exit 1 unless ref $g eq "HASH" && ref $w eq "HASH"; for (keys %$w) { exit 1 unless defined $g->{$_} && !ref $g->{$_} && $g->{$_} eq $w->{$_} } exit 0'; }
 CLAUDEJSON="$HOME/.claude.json"
 committed=0
 reason=""
 mcp_touched=0
 mcp_before=""
 mcp_ours=""
+new_mcp=""
 CLAUDE=""
 on_exit() {
   local rc=$? d real t cur before after bad="" foreign="" restored=1 mcp_result=none now
@@ -528,6 +537,9 @@ if [ -n "$CLAUDE" ]; then
   # claude mcp has no replace: the old entry has to go before the new one is added. So the old entry is
   # kept first and put back, key by key, if the new one can't be added. Nothing here puts a token on a
   # command line.
+  # The CLI writes Claude Code's config itself, so where that really is gets the same check as any
+  # write, before the CLI runs: a link at ~/.claude.json to an instruction file is refused up front.
+  guard "$(resolve "$CLAUDEJSON")" || exit 1
   cred="$DIR/mcp-headers.json"
   mcp_before="$(mcp_key get "$CLAUDEJSON" 2>/dev/null || true)"
   printf '%s' "$mcp_before" > "$SAVED/mcp_before.json"
@@ -542,8 +554,13 @@ if [ -n "$CLAUDE" ]; then
   new_mcp="$(JAMSESH_URL="$HUB/mcp" JAMSESH_HELPER="$helper" perl -MJSON::PP -e 'print JSON::PP->new->canonical->encode({ type => "http", url => $ENV{JAMSESH_URL}, ($ENV{JAMSESH_HELPER} ? (headersHelper => $ENV{JAMSESH_HELPER}) : ()) })')"
   mcp_touched=1
   "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
-  if ! "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null; then reason=mcp; exit 1; fi
-  mcp_ours="$(mcp_key get "$CLAUDEJSON" 2>/dev/null || true)"
+  add_rc=0
+  "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null || add_rc=$?
+  # The file is the truth, not the exit status: a CLI that wrote the entry and then failed has still put
+  # setup's entry there (the rollback must recognise it), and one that exited 0 may have written nothing.
+  now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null || true)"
+  if mcp_is_new "$now"; then mcp_ours="$now"; fi
+  if [ "$add_rc" != 0 ] || [ -z "$mcp_ours" ]; then reason=mcp; exit 1; fi
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   fetch launcher.md "$SAVED/launcher.md"
   safe_write "$HOME/.claude/skills/jamsesh/SKILL.md" 644 < "$SAVED/launcher.md"

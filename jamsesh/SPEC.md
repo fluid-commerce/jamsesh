@@ -276,7 +276,12 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   points there; writes a new temporary file beside the target (`mktemp`, created exclusively, mode 600),
   gives it its mode and moves it into place. Downloads and generated files go first to the run's private
   saved folder and are checked there. The only other writes are that scratch folder, the lock file
-  (refused if it is a link) and the one key-level edit of `~/.claude.json` below.
+  (refused if it is a link) and the one key-level edit of `~/.claude.json` below. Where a write really
+  lands (every link and `..` resolved) is checked against the home folder before `~/.jamsesh` is
+  chmodded or its lock opened, and the resolved `~/.claude.json` passes the same guard before the Claude
+  CLI runs, since the CLI writes that file itself. After the CLI's `add-json`, the file's user-scope
+  entry is read back and must hold what setup registered; an entry the CLI wrote before failing counts as
+  setup's, so the rollback puts the earlier one back.
 - **Setup is one transaction, kept as a journal**, and only one runs at a time: an `flock` on
   `~/.jamsesh/setup.lock` held as descriptor 9 for the whole run (the kernel drops it however the run
   ends; a second run waits `JAMSESH_LOCK_WAIT` seconds, default 10, then says another setup is

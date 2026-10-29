@@ -57,7 +57,7 @@ function sandbox() {
  */
 function stubCli(path: string, log: string, opts: { refuseAdd?: string; refuseRemove?: boolean; refuseGet?: boolean } = {}) {
   mkdirSync(join(path, ".."), { recursive: true });
-  const cfg = join(dirname(log), "home/.claude.json");
+  const cfg = "$HOME/.claude.json";
   if (opts.refuseAdd !== undefined) writeFileSync(`${log}.refuse-add`, opts.refuseAdd);
   if (opts.refuseRemove) writeFileSync(`${log}.refuse-remove`, "");
   if (opts.refuseGet) writeFileSync(`${log}.refuse-get`, "");
@@ -741,22 +741,115 @@ describe("agent setup script", () => {
     expect(readdirSync(join(dir, "client.env"))).toEqual([]);
   });
 
-  test("a ~/.claude.json that is a link to an instruction file is never written by the rollback", async () => {
+  test("a ~/.claude.json that is a link to an instruction file is refused before the Claude CLI runs, and the file is never changed", async () => {
     const box = sandbox();
     mkdirSync(join(box.home, ".claude"), { recursive: true });
-    // Contrived so that it parses: the point is that the rollback's one edit of that file passes the guard.
     const rules = join(box.home, ".claude/CLAUDE.md");
     writeFileSync(rules, "{}");
     symlinkSync(rules, join(box.home, ".claude.json"));
     stubCli(join(box.bin, "claude"), box.log);
-    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
     const r = await run(box);
     expect(r.code).not.toBe(0);
     expect(r.stderr).toContain("instruction file");
-    expect(r.stderr).toContain("couldn't put the jamsesh entry");
-    // What the CLI (the stub) wrote through the link is all that changed; setup's rollback didn't rewrite it.
-    expect(JSON.parse(readFileSync(rules, "utf8")).mcpServers.jamsesh.url).toBe(`${origin}/mcp`);
+    expect(readFileSync(rules, "utf8")).toBe("{}");
     expect(lstatSync(join(box.home, ".claude.json")).isSymbolicLink()).toBe(true);
+    // The CLI was never asked to remove or add anything.
+    expect(existsSync(box.log) ? readFileSync(box.log, "utf8") : "").not.toMatch(/mcp (remove|add-json)/);
+  });
+
+  test("a ~/.claude.json that is a link outside the home folder, or to a folder, is refused before the CLI runs", async () => {
+    for (const kind of ["outside", "folder"]) {
+      const box = sandbox();
+      const outside = mkdtempSync(join(tmpdir(), "jamsesh-outside-"));
+      writeFileSync(join(outside, "cfg.json"), "{}");
+      const dest = kind === "outside" ? join(outside, "cfg.json") : join(box.home, "a-folder");
+      if (kind === "folder") mkdirSync(dest);
+      symlinkSync(dest, join(box.home, ".claude.json"));
+      stubCli(join(box.bin, "claude"), box.log);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toMatch(/outside your home folder|it is a folder/);
+      expect(readFileSync(join(outside, "cfg.json"), "utf8")).toBe("{}");
+      expect(existsSync(box.log) ? readFileSync(box.log, "utf8") : "").not.toMatch(/mcp (remove|add-json)/);
+    }
+  });
+
+  test("a ~/.jamsesh that is a link out of the home folder gets no mode change and no lock", async () => {
+    for (const dangling of [false, true]) {
+      const box = sandbox();
+      stubCli(join(box.bin, "claude"), box.log);
+      const outside = join(mkdtempSync(join(tmpdir(), "jamsesh-outside-")), "elsewhere");
+      if (!dangling) {
+        mkdirSync(outside, { mode: 0o755 });
+        chmodSync(outside, 0o755);
+      }
+      symlinkSync(outside, join(box.home, ".jamsesh"));
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("outside your home folder");
+      if (dangling) expect(existsSync(outside)).toBe(false);
+      else {
+        expect(statSync(outside).mode & 0o777).toBe(0o755);
+        expect(readdirSync(outside)).toEqual([]);
+      }
+    }
+  });
+
+  test("a dangling link whose target climbs out of the home folder with .. is refused", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".claude/commands"), { recursive: true });
+    // From home/.claude/commands, ../../../escaped is next to the home folder, not inside it; written
+    // out unnormalised it still starts with the home path.
+    symlinkSync("../../../escaped", join(box.home, ".claude/commands/jamsesh.md"));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("outside your home folder");
+    expect(existsSync(join(dirname(box.home), "escaped"))).toBe(false);
+  });
+
+  test("a CLI that exits 0 without registering the entry fails the setup and puts the earlier entry back", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const entry = { type: "http", url: "http://old-host:4747/mcp" };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: entry } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("couldn't register its MCP server");
+    expect(r.stderr).not.toContain("Done");
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh).toEqual(entry);
+  });
+
+  test("a CLI that registers a different entry than asked fails the setup", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *add-json*) printf '{"mcpServers":{"jamsesh":{"type":"http","url":"http://wrong/mcp"}}}' > "$HOME/.claude.json" ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("changed by someone else");
+  });
+
+  test("a CLI that writes the new entry and then exits nonzero is rolled back to the earlier entry", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude-real"), box.log);
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\n"${join(box.bin, "claude-real")}" "$@"\ncase "$*" in *add-json*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    const entry = { type: "http", url: "http://old-host:4747/mcp" };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: entry, other: { type: "http", url: "http://o/mcp" } } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("the earlier one was put back");
+    const cfg = JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8"));
+    expect(cfg.mcpServers.jamsesh).toEqual(entry);
+    expect(cfg.mcpServers.other.url).toBe("http://o/mcp");
+  });
+
+  test("a CLI that writes a different entry and then exits nonzero is left as someone else's", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *add-json*) printf '{"mcpServers":{"jamsesh":{"type":"http","url":"http://theirs/mcp"}}}' > "$HOME/.claude.json"; exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("changed by someone else");
+    expect(JSON.parse(readFileSync(join(box.home, ".claude.json"), "utf8")).mcpServers.jamsesh.url).toBe("http://theirs/mcp");
   });
 
   test("a setup lock that is a link is refused before anything is written", async () => {
@@ -883,7 +976,8 @@ describe("agent setup script", () => {
     // A setup's transaction is open from the moment its saved folder is made (just after the lock) until it
     // is removed at the end. Every CLI call takes a moment and checks that its run's folder is the only one.
     const marker = (box: ReturnType<typeof sandbox>) => {
-      writeFileSync(join(box.bin, "claude"), `#!/bin/sh\nn="$(ls -d "$HOME"/.jamsesh/.saved.* 2>/dev/null | wc -l)"\n[ "$n" -eq 1 ] || echo "overlap $n" >> "${box.log}.overlap"\nsleep 0.1\nexit 0\n`, { mode: 0o755 });
+      stubCli(join(box.bin, "claude-real"), box.log);
+      writeFileSync(join(box.bin, "claude"), `#!/bin/sh\nn="$(ls -d "$HOME"/.jamsesh/.saved.* 2>/dev/null | wc -l)"\n[ "$n" -eq 1 ] || echo "overlap $n" >> "${box.log}.overlap"\nsleep 0.1\nexec "${join(box.bin, "claude-real")}" "$@"\n`, { mode: 0o755 });
     };
     for (let i = 0; i < 20; i++) {
       const box = sandbox();
