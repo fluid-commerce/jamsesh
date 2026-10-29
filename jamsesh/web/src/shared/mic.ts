@@ -203,7 +203,8 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
       hub.markUnauthorized();
       return "unauthorized";
     }
-    return res.status >= 500 || res.status === 408 || res.status === 429 ? "retry" : "drop";
+    // 404: this window's device isn't registered with the host yet (it is a moment after joining).
+    return res.status >= 500 || res.status === 404 || res.status === 408 || res.status === 429 ? "retry" : "drop";
   } catch {
     return "retry";
   } finally {
@@ -231,22 +232,6 @@ const BARGE_FRAMES = 8;
 /** True when a finished segment is the brain's own voice coming back, not a person. */
 export function isEchoSegment(level: number, noise: number, suppressing: boolean) {
   return suppressing && level < noise + BARGE_MARGIN_DB;
-}
-
-let holds = 0;
-/**
- * Keeps this laptop's microphone from sending speech while the caller does something that
- * must not be heard as room talk (reading the voice-enrollment sentence). Release is
- * delayed a moment so the last words, finishing after the caller stops, are still dropped.
- */
-export function holdMic() {
-  holds++;
-  let done = false;
-  return () => {
-    if (done) return;
-    done = true;
-    setTimeout(() => (holds = Math.max(0, holds - 1)), 1500);
-  };
 }
 
 export class Mic {
@@ -496,7 +481,6 @@ export class Mic {
     const t0 = this.segStart;
     const t1 = ts - trim * 20;
     if (this.segSpeechFrames < MIN_SPEECH_FRAMES) return;
-    if (holds > 0) return;
     const samples = new Float32Array(kept.length * FRAME);
     kept.forEach((k, i) => samples.set(k, i * FRAME));
     const levels = [...this.segLevels].sort((a, b) => a - b);

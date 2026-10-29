@@ -21,7 +21,7 @@ When your person says "connect to jamsesh" (or similar), connect without asking 
   then tell me again." Don't retry in a loop.
 - **There are no `jamsesh` tools at all.** This computer hasn't been set up. If your person has
   the JamSesh app, ask them to choose **Connect my agents** in its menu bar menu, then restart you.
-  Otherwise ask for the address and the 4-character code on the big screen, and fetch
+  Otherwise ask for the address and the 4-character code on the big screen (under the QR code; they can ask JamSesh "what's the code?" if it isn't up), and fetch
   `<address>/agent?c=<code>`; that page tells you how to set yourself up.
 - **The app won't open on macOS** ("can't be opened because Apple cannot check it"). The JamSesh
   app isn't notarized yet. Tell your person to right-click it and choose Open, or go to System

@@ -641,6 +641,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
         {e.data.noWords ? null : e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
         {e.kind === "speech" && Array.isArray(e.data.attachments) && <FeedAttachments list={e.data.attachments} />}
+        {(e.kind === "speech" || e.kind === "prompt") && <SourceTag source={e.data.source} brainName={state.settings.brainName} />}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
@@ -649,6 +650,13 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
       </span>
     </div>
   );
+}
+
+/** How a line reached the room: typed, said to JamSesh, or overheard (shown only on hover). */
+const SOURCE_LABEL = { typed: "typed", addressed: "to {brain}", overheard: "overheard" } as const;
+export function SourceTag({ source, brainName }: { source?: string; brainName: string }) {
+  const label = SOURCE_LABEL[source as keyof typeof SOURCE_LABEL];
+  return label ? <span className={`src ${source}`}>{label.replace("{brain}", brainName)}</span> : null;
 }
 
 /** "Jonathan's Codex joined from ~/fluid", with a way to take a wrong join out of the room. */
@@ -733,9 +741,13 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
           <div className="hint" style={{ color: "var(--warn)", maxWidth: 240 }} title={state.voiceprints.reason}>
             Voice matching is off on this host, so this renames the line but can't teach a voice.
             {state.voiceprints.reason && <div style={{ color: "var(--dim)", marginTop: 4 }}>{state.voiceprints.reason}</div>}
+            {state.voiceprints.fix && <div style={{ color: "var(--dim)", marginTop: 4 }}>{state.voiceprints.fix}</div>}
           </div>
         ) : (
-          <div className="hint">Who said this? JamSesh learns their voice.</div>
+          <div className="hint">
+            Who said this? JamSesh learns their voice.
+            {state.voiceprints?.neverUsed && <div style={{ color: "var(--warn)", marginTop: 4 }}>Voice matching hasn't named any of the last {state.voiceprints.lines} lines. Check the host's speaker model.</div>}
+          </div>
         )}
         {state.people.map((p) => (
           <button key={p.id} className="item" onClick={() => assign({ personId: p.id })}>

@@ -157,7 +157,7 @@ export class Brain {
     if (called) this.calledBy = null;
     // Prompts people type to their own agents mention JamSesh all the time; they aren't for the brain.
     if (called || (ev.kind !== "prompt" && addressesBrain(ev.text, name))) {
-      const marked = this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true } }) ?? { ...ev, data: { ...ev.data, direct: true } };
+      const marked = this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true, ...(ev.data?.typed ? {} : { source: "addressed" }) } }) ?? { ...ev, data: { ...ev.data, direct: true } };
       return void this.direct(marked);
     }
     this.pending.push(ev);

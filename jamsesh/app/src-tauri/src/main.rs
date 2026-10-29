@@ -10,6 +10,7 @@ mod perms;
 mod projects;
 mod proxy;
 mod screens;
+mod voiceprints;
 mod watchdog;
 
 use std::path::PathBuf;
@@ -239,7 +240,13 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
     Ok(())
 }
 
-async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>) -> Result<(), String> {
+/// The join code from a scanned QR code, as the connect page takes it: capitals and digits only.
+fn clean_code(code: Option<&str>) -> Option<String> {
+    let c: String = code?.to_uppercase().chars().filter(char::is_ascii_alphanumeric).collect();
+    matches!(c.len(), 4 | 8).then_some(c)
+}
+
+async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>, code: Option<&str>) -> Result<(), String> {
     // A typed name like team.duckdns.org is a remote host's HTTPS address; an IP or a .local name
     // is a host on this network.
     let raw = input.trim();
@@ -283,7 +290,11 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
         });
     })
     .await?;
-    let url = relay.window_url(if paired { "/client" } else { "/connect?next=%2Fclient" });
+    let connect = match clean_code(code) {
+        Some(c) => format!("/connect?next=%2Fclient&c={c}"),
+        None => "/connect?next=%2Fclient".to_string(),
+    };
+    let url = relay.window_url(if paired { "/client" } else { &connect });
     let needs_agents = paired && agents.is_none();
     inner.relay = Some(relay);
     inner.cfg.role = Some("join".into());
@@ -794,6 +805,11 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 }
 
 #[tauri::command]
+fn discovery_status(state: State<'_, Arc<App>>) -> discover::Status {
+    state.hosts.status()
+}
+
+#[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
     let _turn = state.switching.lock().await;
     let started = start_hosting(&app, &state, Launch::Lobby { new_project: false }).await;
@@ -870,9 +886,9 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
 }
 
 #[tauri::command]
-async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>) -> Result<(), String> {
+async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>, code: Option<String>) -> Result<(), String> {
     let _turn = state.switching.lock().await;
-    let joined = start_joining(&app, &state, &url, name).await;
+    let joined = start_joining(&app, &state, &url, name, code.as_deref()).await;
     rolled_back(&app, &state, joined).await
 }
 
@@ -955,6 +971,88 @@ fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
     }
 }
 
+/// The person this app's window is on the host it shows, as that host says (not as the page says), and
+/// only for the person's own window. `person_id` is who the page thinks it is: a page that's behind
+/// (someone else picked who they are) gets nothing.
+async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Result<(String, u16), String> {
+    if window.label() != "client" {
+        return Err("Only your own window keeps your voice.".into());
+    }
+    let port = {
+        let inner = state.inner.lock().await;
+        inner.hub.as_ref().map(|h| h.port).or(inner.relay.as_ref().map(|r| r.port))
+    };
+    let port = port.ok_or("Host or join a session first.")?;
+    let (status, me) = proxy::get_as_window(port, "/api/me").await?;
+    let (id, name) = voiceprints::person_of(&me).filter(|_| status.is_success()).ok_or("Pick who you are first.")?;
+    if id != person_id {
+        return Err("This window is someone else now.".into());
+    }
+    Ok((name, port))
+}
+
+/// The host the window shows: its id and its room's name (else its address), as the host says.
+async fn voice_host(state: &App, port: u16) -> Result<(String, String), String> {
+    let fallback = {
+        let inner = state.inner.lock().await;
+        inner.cfg.host_url.clone().unwrap_or_else(|| "this host".into()).replace("https://", "").replace("http://", "")
+    };
+    let (status, info) = proxy::get_as_window(port, "/api/pair/info").await?;
+    voiceprints::host_of(&info, &fallback).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())
+}
+
+/// The copy as this host's page may see it: without its samples until the person said Share to this host.
+#[tauri::command]
+async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
+    let (_, port) = voice_owner(&window, &state, &person_id).await?;
+    let (host_id, _) = voice_host(&state, port).await?;
+    Ok(voiceprints::for_page(voiceprints::load(&state.dir), &host_id))
+}
+
+/// The whole copy, to send to this host: asks the person the first time, in a native dialog.
+#[tauri::command]
+async fn voiceprint_share(
+    app: AppHandle,
+    window: tauri::Window,
+    state: State<'_, Arc<App>>,
+    person_id: String,
+) -> Result<Option<voiceprints::Copy>, String> {
+    let (name, port) = voice_owner(&window, &state, &person_id).await?;
+    let (host_id, room) = voice_host(&state, port).await?;
+    let question = voiceprints::question(&name, &room);
+    let ask = || async move {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .message(question)
+            .title("Share your voice")
+            .buttons(MessageDialogButtons::OkCancelCustom("Share".into(), "Not this room".into()))
+            .show(move |yes| {
+                let _ = tx.send(yes);
+            });
+        rx.await.unwrap_or(false)
+    };
+    voiceprints::share(&state.dir, &host_id, ask).await
+}
+
+#[tauri::command]
+async fn voiceprint_put(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, copy: voiceprints::Copy) -> Result<(), String> {
+    voice_owner(&window, &state, &person_id).await?;
+    voiceprints::put(&state.dir, copy)
+}
+
+#[tauri::command]
+async fn voiceprint_consent(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
+    voice_owner(&window, &state, &person_id).await?;
+    voiceprints::set_consent(&state.dir, on)
+}
+
+/// The person reset their voice on a host: the app's copy goes too, so it can't bring the old voice back.
+#[tauri::command]
+async fn voiceprint_forget(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<(), String> {
+    voice_owner(&window, &state, &person_id).await?;
+    voiceprints::forget(&state.dir)
+}
+
 /// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
 fn resume_launch(cfg: &Config) -> Launch {
     if cfg.lobby {
@@ -986,6 +1084,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_info,
             nearby_hosts,
+            discovery_status,
             host_here,
             open_project,
             join,
@@ -999,6 +1098,11 @@ fn main() {
             toggle_userless,
             local_fonts,
             heartbeat,
+            voiceprint_get,
+            voiceprint_put,
+            voiceprint_share,
+            voiceprint_consent,
+            voiceprint_forget,
             screens::screens_state,
             screens::screens_preview,
             screens::screens_save,
@@ -1035,7 +1139,7 @@ fn main() {
                     let _turn = state.switching.lock().await;
                     let r = match (cfg.role.as_deref(), cfg.host_url.clone()) {
                         (Some("host"), _) => start_hosting(&handle, &state, resume_launch(&cfg)).await,
-                        (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
+                        (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None, None).await,
                         _ => Err(String::new()),
                     };
                     // Say why on the start window instead of just showing it.
@@ -1087,6 +1191,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_join_or_invite_code_is_passed_to_the_connect_page() {
+        assert_eq!(clean_code(Some("ab3k")).as_deref(), Some("AB3K"));
+        assert_eq!(clean_code(Some("ABCD2345")).as_deref(), Some("ABCD2345"));
+        assert_eq!(clean_code(Some("AB&next=//evil")), None);
+        assert_eq!(clean_code(Some("AB3")), None);
+        assert_eq!(clean_code(None), None);
+    }
 
     #[test]
     fn only_the_hosts_own_projects_picker_opens_a_project() {

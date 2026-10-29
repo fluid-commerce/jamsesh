@@ -60,7 +60,7 @@ export function InviteButton({ compact }: { compact?: boolean }) {
           <div className="invite-note">
             {invite.source === "invite" && invite.expiresAt > 0 && `Works for about ${mins(invite.expiresAt - Date.now())} minutes.`}
             {invite.source === "code" && "This code changes every 30 seconds. Send it quickly, or ask the host for a longer invite."}
-            {invite.source === "address" && "Only the host can see the join code. Ask them for it."}
+            {invite.source === "address" && "Only the host can see the join code: it's on the big screen, under the QR code. Ask them for it."}
           </div>
           <button
             className="btn small"

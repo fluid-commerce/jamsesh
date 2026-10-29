@@ -131,6 +131,8 @@ test("U4: relabeling twice removes the voice sample from the first, wrong, perso
   hub.audio.assign(u.id, ben.id);
   hub.audio.assign(u.id, cam.id);
   expect(hub.audio.voiceprints.count(ben.id)).toBe(0);
-  expect(hub.audio.voiceprints.count(cam.id)).toBe(1);
+  // A correction counts as many automatic samples, but it is still the one sample.
+  expect(hub.audio.voiceprints.learnedFrom(cam.id).correction).toBe(1);
+  expect(hub.audio.voiceprints.count(cam.id)).toBe(10);
   hub.stop();
 }, 30000);

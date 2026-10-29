@@ -5,7 +5,8 @@ import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
-import { voiceprintStatus, learningNote } from "./audio/voiceprint";
+import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
+import { learningNote } from "./audio/voiceprint";
 import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
@@ -56,7 +57,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -69,7 +70,7 @@ function hostIdOf(hub: Hub) {
 /** Human-only paths whose personId is the person acted on, not the caller. */
 const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request|devices)$/;
 /** Settings only the host machine may change (SPEC 14, host-only). */
-const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled"] as const;
+const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled", "fastEngine"] as const;
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
@@ -167,7 +168,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
         const dev = devTarget(req, hub);
         if (dev) {
-          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
+          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code from the big screen, under the QR code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             const who = local ? null : anyToken(hub, req, url, ip);
             if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
@@ -253,7 +254,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if (!ok) {
           if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
-          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
+          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen, under the QR code.", 401);
         }
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
@@ -446,7 +447,7 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   const md = (t: string, status = 200) => new Response(t, { status, headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" } });
   if (!code) return md(agentIntro(origin));
   const r = hub.auth.pair({ code, kind: "agent", label: url.searchParams.get("name") ?? "Agent", ip });
-  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh screen right now, then fetch ${origin}/agent?c=<code> again.`, 403);
+  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh big screen (under the QR code) right now, then fetch ${origin}/agent?c=<code> again.`, 403);
   return md(agentGuide(origin, r.token));
 }
 
@@ -455,7 +456,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const path = url.pathname.slice("/api".length);
   // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
   const upload = path === "/attachments" && req.method === "POST";
-  const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE" ? await readBody(req) : null;
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
@@ -519,6 +520,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const q = url.searchParams;
     const deviceId = q.get("deviceId");
     if (!deviceId) return bad("deviceId is required");
+    // Only the window that owns a device sends its audio: a device's owner names the speaker and teaches
+    // their voiceprint, so another window's microphone can't be spoken through.
+    const dev = s.store.get("devices", deviceId);
+    if (!dev) return bad("Register this device first (POST /api/devices).", 404);
+    if (!caller || dev.pairedId !== caller) return bad("That device belongs to another window.", 403);
     // A timed-out upload is retried; the same segment from the same device only counts once.
     const segKey = `${deviceId}:${q.get("t0")}`;
     if (recentSegments.has(segKey) || segmentsInFlight.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
@@ -552,8 +558,42 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!p) return bad("no such person", 404);
     return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
   }
+  // A voice belongs to its person: only their own window or device reads, reads aloud, brings or forgets it.
+  const own = (id: string) => {
+    if (paired?.kind === "agent") return "That's for people; agents use their jam_ tools.";
+    if (isLocal(ip) && !hostWindow) return NOT_THE_HOST_WINDOW;
+    const me = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
+    return me && me === id ? null : "A voice is only for its own person to give.";
+  };
   m = path.match(/^\/people\/([\w-]+)\/voiceprint$/);
-  if (m && req.method === "DELETE") return (hub.audio.voiceprints.clear(m[1]), s.store.put("people", s.person(m[1])!), json({ ok: true }));
+  if (m) {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    if (!s.person(m[1])) return bad("no such person", 404);
+    if (req.method === "GET") return json(hub.voiceprintOf(m[1]));
+    if (req.method === "PUT") {
+      const r = hub.carryVoiceprint(m[1], body);
+      return r.ok ? json(r) : "reset" in r ? json({ error: r.reason, reset: true }, 409) : bad(r.reason);
+    }
+    if (req.method === "DELETE") return json(hub.resetVoice(m[1]));
+  }
+  if (path === "/voice/script" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people; agents use their jam_ tools.", 403) : json({ sentences: ENROL_SCRIPT, seconds: ENROL_SECONDS });
+  m = path.match(/^\/people\/([\w-]+)\/voice\/start$/);
+  if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    return (hub.audio.beginEnrolment(m[1]), json({ ok: true }));
+  }
+  // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
+  // whether anything was said aloud, which earns the grace for copies still on their way.
+  m = path.match(/^\/people\/([\w-]+)\/voice\/end$/);
+  if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    if (body?.read) hub.audio.endEnrolment(m[1]);
+    else hub.audio.cancelEnrolment(m[1]);
+    return json({ ok: true });
+  }
 
   m = path.match(/^\/utterances\/([\w-]+)\/assign$/);
   if (m && req.method === "POST") {
@@ -563,6 +603,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const { utterance, learning } = hub.audio.assign(m[1], personId);
     const person = s.person(personId)!;
     s.store.put("people", person);
+    hub.confirmLearning(person.name, learning);
     return json({ ...utterance, learning: { ...learning, message: learningNote(person.name, learning) } });
   }
 
@@ -640,9 +681,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/settings" && req.method === "POST") {
-    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control and the brain's on/off switch on the host itself.", 403);
+    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control, the faster engine and the brain's on/off switch on the host itself.", 403);
     s.updateSettings(body ?? {});
     hub.brain.refreshStatus();
+    if (body?.fastEngine !== undefined || body?.transcription !== undefined) void hub.transcriber.syncFastEngine();
     return json(s.settings());
   }
 
@@ -831,7 +873,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), whisperModel: hub.transcriber.whisper.status(), speechModel: hub.transcriber.parakeet.status(), vocabulary: hub.transcriber.vocabulary().map((v) => v.term), voiceprints: s.voiceprints(), problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
@@ -901,6 +943,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // ---- voice enrollment: a person reads a sentence so JamSesh knows their voice ----
   m = path.match(/^\/people\/([\w-]+)\/voice$/);
   if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
     return json(hub.enrollVoice(m[1], bytes));
   }

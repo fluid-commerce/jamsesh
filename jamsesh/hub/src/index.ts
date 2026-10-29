@@ -9,6 +9,8 @@ import { advertise, stopAdvertising } from "./bonjour";
 import { readWindowLinks } from "./auth";
 import { linkSecretFile } from "./projects";
 
+// The compiled hub is also the host's speech model process (audio/parakeet.ts); that never returns.
+if (process.argv[2] === "--stt-server") await (await import("./audio/stt-server")).runSttServer(process.argv[3] ?? "");
 const args = new Set(process.argv.slice(2));
 // A check of the bundled PDF reader: `jamsesh-hub --pdf-text <file>` prints what JamSesh's own reader (the worker,
 // not poppler) gets from it, so a release build can be tested without starting a session.

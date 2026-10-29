@@ -139,7 +139,7 @@ const AGENT_MAY = [
   "POST /api/upload",
 ];
 // One concrete path for each `path.match(...)` route in http.ts.
-const SAMPLES = ["/people/p_x", "/people/p_x/voiceprint", "/people/p_x/voice", "/people/p_x/photo", "/utterances/u_x/assign", "/directives/d_x", "/directives/d_x/reassign", "/shares/s_x", "/shares/s_x/decline", "/annotations/a_x", "/snapshots/s_x/notes.md", "/paired/dev_x", "/build-requests/br_x", "/stage/ready/rdy_x", "/show-requests/ask_x", "/history/events", "/agents/a_x/remove", "/removed-chats/rc_x/allow", "/hooks/prompt", "/hooks/joined", "/hooks/stop", "/hooks/tool", "/hooks/listen", "/triage/tri_x/send", "/attachments/att_x"];
+const SAMPLES = ["/people/p_x", "/people/p_x/voiceprint", "/people/p_x/voice", "/people/p_x/voice/start", "/people/p_x/voice/end", "/people/p_x/photo", "/utterances/u_x/assign", "/directives/d_x", "/directives/d_x/reassign", "/shares/s_x", "/shares/s_x/decline", "/annotations/a_x", "/snapshots/s_x/notes.md", "/paired/dev_x", "/build-requests/br_x", "/stage/ready/rdy_x", "/show-requests/ask_x", "/history/events", "/agents/a_x/remove", "/removed-chats/rc_x/allow", "/hooks/prompt", "/hooks/joined", "/hooks/stop", "/hooks/tool", "/hooks/listen", "/triage/tri_x/send", "/attachments/att_x"];
 
 test("the /api routes an agent's credential can call are exactly the reviewed list", async () => {
   const src = readFileSync(join(import.meta.dir, "../src/http.ts"), "utf8");

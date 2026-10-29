@@ -12,6 +12,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Host mode from the app alone (bundled hub, canvas, big screen, your window) | Tested live | Clean home folder, no checkout. Hub up in about 1.5 seconds. |
 | Join mode: pairing, name, live session, shared canvas, through the local relay | Tested live | Pairing and the canvas relay checked through the app's relay address. |
 | Hosts found on the local network (Bonjour) | Tested live | The host advertises; the app lists it. |
+| Join help: why no room was found, type the address, scan the big screen's QR code, and where the code is | Simulated | Reasons checked in Rust unit tests with made-up results; the QR scan checked in headless Chromium with a fake camera, in the app's start page (stubbed commands) and the browser pairing page. Not run in the real Mac app or on a network that blocks Bonjour. |
 | "Connect my agents" setup, then "connect to jamsesh" | Tested live | A real Claude Code joined with no address, code, or name; posted its repo card and claimed a workstream. |
 | Codex "connect to jamsesh" | Simulated | Setup writes Codex's MCP server, skill and prompt; not run with a real Codex session tonight. |
 | Permission setup window | Simulated | Rendered and laid out; the macOS prompts themselves weren't clicked through. |
@@ -84,7 +85,13 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 |---|---|---|
 | Multi-device grouping, lag, echo, degraded copies | Simulated | Real recorded voices, degraded and lagged in tests. |
 | Speaker ID when someone walks away from their laptop | Simulated | About 50 percent without a voice sample; better after "Teach JamSesh your voice". |
+| Join voice read; its calibration copies kept out of the transcript (5.3, 5.4) | Simulated | Four `say` voices on three fake laptops (Cam and Dee share the unowned one); the read heard by all three laptops leaves no line, ordinary talk beside it is kept. The modal is looked at in headless Chromium (desktop and phone width). Real voices and real mics not tried. |
+| Corrections that stick: a correction counts as ten samples, takes back what the wrong label taught, relabels earlier "Someone" lines, says "Learning Felipe's voice." (5.3) | Simulated | Tested on the voice sim and the popover; the spoken line goes through `speak()`, which tests keep silent. Not heard in a real room. |
+| Voiceprint travels: kept per person by the Mac app, per person and host in a browser, synced by version, only your own (5.3) | Simulated | Moved between two test hubs and identified by voice only; other person, agent, nobody, malformed, Float32-overflowing and repeated pushes tested over HTTP; a full 32-sample copy round-trips losslessly. Device side tested through `api()` with a stubbed network and a stubbed Tauri bridge; the app's per-person store and person check are Rust unit tests. The real Tauri commands in a running app (and a shared Mac switching people) not yet exercised. |
+| Voice matching off: the reason and the fix (5.3) | Simulated | Missing model and a broken model file checked in a child process. The live host's actual cause is still unread. |
+| One line shown once across laptops with clocks 1.5 s apart, late and mis-heard copies; typed / said / overheard on every line (5.4) | Simulated | Same sim: 187 extra lines before, 2 after, across 96 lines. |
 | A real room with real microphones | Not tested | |
+| Room vocabulary and correction pass for every engine; whisper.cpp default, Parakeet opt-in (5.2) | Simulated | Bake-off on 50 synthetic clips (macOS voices, noise, a second voice), after correction: whisper with the vocabulary prompt 4.7% word error and 96% of names; Parakeet with hotwords 5.2% and 97%. The opt-in, its download, the child process, crash and hub-exit handling, the cloud fallback and the correction's false positives are covered by `hub/test/transcription.test.ts`. whisper-server is built and bundled by `app/bundle-hub.sh` (checked with a bundle run and a Metal transcription on a spare port); its model's first-session download and the discovery order are tested with fakes. Not yet checked in a full Tauri release build or on a fresh Mac. Real room clips not yet run; they decide the default. |
 
 ## Agent briefing and live builds
 
