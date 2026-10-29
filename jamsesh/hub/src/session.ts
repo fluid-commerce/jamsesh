@@ -1840,7 +1840,7 @@ export class Session {
     });
   }
 
-  /** Sets the screen's return-to-board timer from the stage's saved deadline (none when it stays up). Returns the delay, for tests. */
+  /** Sets the screen's return-to-board timer from the stage's saved deadline (none when it stays up). */
   private armRevert(screen: string, st: Stage, minDelay = 0) {
     if (screen === "main") {
       if (this.stageRevert) clearTimeout(this.stageRevert);

@@ -16,9 +16,11 @@ import type { Agent, JamEvent, ShowRequest, Stage } from "../src/types";
 process.env.JAMSESH_SILENT = "1";
 const dir = mkdtempSync(join(tmpdir(), "jam-stage-"));
 const hubs: Hub[] = [];
+const sessions: Session[] = [];
 afterEach(() => {
   // Each test's hub (and its timers) ends with it, so nothing of one test publishes during the next.
   for (const h of hubs.splice(0)) h.stop();
+  for (const s of sessions.splice(0)) s.stop();
 });
 afterAll(() => {
   for (const h of hubs) h.stop();
@@ -1900,6 +1902,7 @@ test("real time: a restart resumes the saved deadline, a legacy stage without on
   try {
     const rdir = mkdtempSync(join(tmpdir(), "jam-realtime-"));
     const s1 = new Session(new Store(rdir));
+    sessions.push(s1);
     const a = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", image: "/renders/a.png" });
     const b = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "B", image: "/renders/b.png" });
     s1.setStage({ mode: "compare", items: [a.id, b.id] }, "Room brain", "main", { override: true });
@@ -1910,6 +1913,7 @@ test("real time: a restart resumes the saved deadline, a legacy stage without on
     s1.stop();
     (s1.store as any).db.close();
     const s2 = new Session(new Store(rdir));
+    sessions.push(s2);
     expect(s2.stage().mode).toBe("compare");
     expect(s2.stage().expanded).toBeUndefined();
     // About 1.8 s of the 2.5 s wait remain (cleanup didn't restart it): still up at 1.5 s, back on the board by 3 s.
@@ -1925,6 +1929,7 @@ test("real time: a restart resumes the saved deadline, a legacy stage without on
     (s2.store as any).db.close();
     const t1 = Date.now();
     const s3 = new Session(new Store(rdir));
+    sessions.push(s3);
     expect(s3.stage().expanded).toBeUndefined();
     await Bun.sleep(300);
     expect(s3.stage().mode).toBe("compare");
@@ -1934,14 +1939,17 @@ test("real time: a restart resumes the saved deadline, a legacy stage without on
     s3.setStage({ mode: "compare", items: [a.id] }, "Room brain", "main", { override: true });
     const real = s3.store.setSetting.bind(s3.store);
     let failed = 0;
-    (s3.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage" && failed++ < 1 && (v as any).mode === "board") throw new Error("disk full"); real(k, v); };
+    (s3.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage" && (v as any).mode === "board" && failed < 1) { failed++; throw new Error("disk full"); } real(k, v); };
     Session.STAGE_REVERT_MS = 200;
     s3.expandTile(a.id);
-    await Bun.sleep(1200);
+    // The first try (at 200 ms) throws; the stage is still up before the retry (150 ms later), then the board comes back.
+    await Bun.sleep(300);
+    expect(failed).toBe(1);
+    expect(s3.stage().mode).toBe("compare");
+    await Bun.sleep(700);
     (s3.store as any).setSetting = real;
-    expect(failed).toBeGreaterThan(0);
+    expect(failed).toBe(1);
     expect(s3.stage().mode).toBe("board");
-    s3.stop();
   } finally {
     console.error = err;
     [Session.STAGE_REVERT_MS, Session.REVERT_RETRY_MS] = prev;
