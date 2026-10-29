@@ -444,17 +444,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       // request can't make it someone else (only a person who was removed frees it to pick again), and its
       // devices are that person's. Owner-only answers rest on this.
       if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) {
-        // A person already on another laptop (or the host's own window) isn't claimed by a new pairing that names
-        // them: their voice and every owner-only answer follow the credential. The host removes the old pairing first.
-        const claimed = String(body.personId);
-        if (s.store.setting<string>("hostPersonId", "") === claimed || hub.auth.list().some((d) => d.kind === "browser" && !d.revoked && d.id !== paired.id && d.personId === claimed)) return bad("That person is already here on another laptop. Ask the host to remove the old one first.", 403);
-        hub.auth.update(paired.id, { personId: claimed });
+        const refused = becomePerson(hub, paired, String(body.personId));
+        if (refused) return bad(refused, 403);
       }
       if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
     }
     // The person using the host's own window: agents on the host Mac work for them.
     if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
+      setKeeper(hub, String(body.personId), "host");
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
     const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
@@ -490,17 +488,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     }
   }
 
-  if (path === "/people" && req.method === "POST") {
-    if (!body?.name?.trim()) return bad("name is required");
-    return json(s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined }));
-  }
-  let m = path.match(/^\/people\/([\w-]+)$/);
-  if (m && req.method === "DELETE") return (s.removePerson(m[1]), json({ ok: true }));
-  if (m && req.method === "PATCH") {
-    const p = s.person(m[1]);
-    if (!p) return bad("no such person", 404);
-    return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
-  }
   // A voice belongs to its person: only their own window or device reads, reads aloud, brings or forgets it.
   const own = (id: string) => {
     if (paired?.kind === "agent") return "That's for people; agents use their jam_ tools.";
@@ -508,6 +495,26 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const me = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
     return me && me === id ? null : "A voice is only for its own person to give.";
   };
+  if (path === "/people" && req.method === "POST") {
+    if (!body?.name?.trim()) return bad("name is required");
+    const known = new Set(s.people().map((p) => p.id));
+    const p = s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined });
+    // Someone new, made by this browser: it may become them without asking the host.
+    if (!known.has(p.id) && paired?.kind === "browser" && !paired.personId) setKeeper(hub, p.id, paired.id);
+    return json(p);
+  }
+  let m = path.match(/^\/people\/([\w-]+)$/);
+  // Removing a person erases their voiceprint: only the host or the person themselves.
+  if (m && req.method === "DELETE") {
+    const refused = hostWindow ? null : own(m[1]);
+    if (refused) return bad(refused === "A voice is only for its own person to give." ? "Only the host or that person can remove them." : refused, 403);
+    return (s.removePerson(m[1]), setKeeper(hub, m[1], null), json({ ok: true }));
+  }
+  if (m && req.method === "PATCH") {
+    const p = s.person(m[1]);
+    if (!p) return bad("no such person", 404);
+    return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
+  }
   m = path.match(/^\/people\/([\w-]+)\/voiceprint$/);
   if (m) {
     const refused = own(m[1]);
@@ -516,7 +523,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (req.method === "GET") return json(hub.voiceprintOf(m[1]));
     if (req.method === "PUT") {
       const r = hub.carryVoiceprint(m[1], body);
-      return r.ok ? json(r) : "reset" in r ? json({ error: r.reason, reset: true }, 409) : bad(r.reason);
+      return r.ok ? json(r) : "reset" in r ? json({ error: r.reason, reset: true, stale: r.stale }, 409) : bad(r.reason);
     }
     if (req.method === "DELETE") return json(hub.resetVoice(m[1]));
   }
@@ -881,6 +888,20 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can disconnect devices.", 403);
     return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
   }
+  // The host lets a laptop be the person it asked to be: the person's other laptops are disconnected, and
+  // their voice and owner-only answers follow this one from now on.
+  m = path.match(/^\/paired\/([\w-]+)\/allow$/);
+  if (m && req.method === "POST") {
+    if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can let a laptop in as someone.", 403);
+    const d = hub.auth.get(m[1]);
+    const personId = d?.kind === "browser" ? d.wants : null;
+    if (!d || !personId || !s.person(personId)) return bad("That laptop isn't asking to be anyone.", 404);
+    if (s.store.setting<string>("hostPersonId", "") === personId) return bad("That's the person using the host's own window.", 409);
+    for (const other of hub.auth.list()) if (other.kind === "browser" && other.id !== d.id && other.personId === personId) hub.auth.revoke(other.id);
+    hub.auth.update(d.id, { personId, wants: null });
+    setKeeper(hub, personId, d.id);
+    return json({ ok: true });
+  }
 
   // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.
   m = path.match(/^\/build-requests\/([\w-]+)$/);
@@ -1043,3 +1064,32 @@ export function cookie(req: Request, name: string) {
   return req.headers.get("cookie")?.match(new RegExp(`(?:^|; )${name}=([^;]+)`))?.[1] ?? null;
 }
 
+
+/** Which credential a person belongs to ("host" for the host's own window), set the first time someone becomes them. */
+function setKeeper(hub: Hub, personId: string, keeper: string | null) {
+  const all = { ...hub.session.store.setting<Record<string, string>>("personKeepers", {}) };
+  if (keeper) all[personId] = keeper;
+  else delete all[personId];
+  hub.session.store.setSetting("personKeepers", all);
+}
+
+/**
+ * The one rule for a browser becoming a person, since their voiceprint and every owner-only answer follow
+ * it. A browser is someone it made itself, or someone nobody has been yet who has no voice here; anyone
+ * else (on another laptop now, before, or the host's own window) only once the host lets it in. Returns
+ * why not, and then the host is asked.
+ */
+function becomePerson(hub: Hub, paired: PairedDevice, personId: string): string | null {
+  const s = hub.session;
+  const keeper = s.store.setting<Record<string, string>>("personKeepers", {})[personId];
+  const fresh = !keeper && !hub.auth.everHeld(personId) && s.store.setting<string>("hostPersonId", "") !== personId && hub.audio.voiceprints.count(personId) === 0;
+  if (keeper === paired.id || fresh) {
+    hub.auth.update(paired.id, { personId, wants: null });
+    setKeeper(hub, personId, paired.id);
+    return null;
+  }
+  const name = s.person(personId)?.name ?? "them";
+  hub.auth.update(paired.id, { wants: personId });
+  bus.send({ type: "toast", tone: "info", text: `${paired.label} wants to be ${name}`, detail: "Let them in from Settings, Connected devices." });
+  return `${name} is already known to this host. Ask the host to let this laptop in as ${name} (Settings, Connected devices).`;
+}
