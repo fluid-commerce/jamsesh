@@ -340,6 +340,10 @@ export interface TriageCard {
   overruled?: string;
   /** Every overrule of it: why, who, when, and the lines it came from. Never cleared; the same ask said again makes a new card. */
   vetoes?: { reason: string; by: string; at: number; eventIds: number[] }[];
+  /** The targets' names when they were chosen. */
+  targetNames?: Record<string, string>;
+  /** Agents a Send found gone or only watching (their names): nothing was sent; a person changes the agents with Edit. */
+  unavailable?: string[];
   /** This card asks again for a proposal that was overruled (that card's id), which keeps its veto. */
   renews?: string;
   sources: TriageSource[];
