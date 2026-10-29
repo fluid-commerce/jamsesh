@@ -97,11 +97,8 @@ export class Session {
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
     this.reconcileShares();
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
-    const st = this.stage();
-    if (this.revertsToBoard(st)) {
-      this.stageRevert = setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
-      this.stageRevert.unref?.();
-    }
+    this.rearmRevert("main");
+    for (const id of Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))) this.rearmRevert(id);
     // A lock whose owner left lets go without anyone asking.
     this.lockSweep = setInterval(() => this.sweepLocks(), 30_000);
     this.lockSweep.unref?.();
@@ -1536,7 +1533,14 @@ export class Session {
     const shape = live.map((x) => `${x.id}:${x.width}x${x.height}@${x.screenX},${x.screenY}x${x.dpr}`).sort().join("|");
     if (ids === this.liveScreens.ids && shape === this.liveScreens.shape) return;
     const idsChanged = ids !== this.liveScreens.ids;
+    const before = new Set(this.liveScreens.ids.split("|"));
     this.liveScreens = { ids, shape };
+    // A screen that just appeared or came back: what it saved is checked, and its return-to-board wait runs again.
+    for (const x of live) {
+      if (before.has(x.id) || x.id === "main") continue;
+      if (!this.screenReverts.has(x.id)) this.rearmRevert(x.id);
+    }
+    if (idsChanged) this.dropDeadExpanded();
     bus.changed("screens");
     if (idsChanged) bus.changed("stageTiles");
   }
@@ -1628,11 +1632,37 @@ export class Session {
 
   /** An expanded tile whose content is gone (its artifact was deleted) is collapsed, and the screens are told. */
   private dropDeadExpanded() {
-    for (const screen of ["main", ...this.screens().map((x) => x.id)]) {
+    // Every screen with a saved stage, connected or not: one that is unplugged keeps what it showed for when it returns.
+    for (const screen of new Set(["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {})), ...this.screens().map((x) => x.id)])) {
       const st = this.stage(screen);
       if (!st.expanded || this.stageTileKeys(screen).some((k) => k.key === st.expanded)) continue;
       const { expanded: _gone, ...rest } = st;
       this.atomically(() => this.commitStage(rest, screen));
+      // Cleaning up isn't someone looking at it: the return-to-board wait keeps its deadline.
+      this.rearmRevert(screen);
+    }
+  }
+
+  /** The return-to-board wait of a screen, from when its stage went up (a restart or a returning screen lost its timer). */
+  private rearmRevert(screen: string) {
+    const st = this.stage(screen);
+    const wait = Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now());
+    const fire = () => void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true });
+    if (screen === "main") {
+      if (this.stageRevert) clearTimeout(this.stageRevert);
+      this.stageRevert = null;
+      if (this.revertsToBoard(st)) {
+        this.stageRevert = setTimeout(fire, wait);
+        this.stageRevert.unref?.();
+      }
+      return;
+    }
+    clearTimeout(this.screenReverts.get(screen));
+    this.screenReverts.delete(screen);
+    if (this.revertsToBoard(st)) {
+      const t = setTimeout(fire, wait);
+      t.unref?.();
+      this.screenReverts.set(screen, t);
     }
   }
 

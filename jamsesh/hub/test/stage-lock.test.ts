@@ -1679,8 +1679,11 @@ test("an expand request is for the content that was clicked: a long parity key e
   }
 });
 
-test("Expand is a transaction like every stage write: a failed save leaves the revision, what clients were sent and other work's claims alone, on main and on an extra screen", () => {
+test("Expand is a transaction like every stage write: a failed save leaves the revision, what clients were sent and other work's claims alone, on main and on an extra screen", async () => {
+  await Bun.sleep(120); // what earlier tests left to send goes out first
   const { s } = room();
+  const oldResolver = bus.resolver;
+  bus.resolver = (k) => (s as any).resolve(k);
   const a = artifact(s, "A");
   const b = artifact(s, "B");
   const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
@@ -1688,6 +1691,7 @@ test("Expand is a transaction like every stage write: a failed save leaves the r
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   for (const screen of ["main", "screen-2"]) {
     s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", screen, { override: true });
+    await Bun.sleep(90);
     const rev = s.stageRev(screen);
     const claim = s.stageClaim();
     const sent: any[] = [];
@@ -1696,13 +1700,15 @@ test("Expand is a transaction like every stage write: a failed save leaves the r
     (s.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage" || k === "screenStages") throw new Error("disk full"); real(k, v); };
     expect(() => s.expandTile(a.id, screen)).toThrow("disk full");
     (s.store as any).setSetting = real;
+    await Bun.sleep(90);
     off();
-    expect(sent.filter((m) => m.type === "stage")).toEqual([]);
+    expect(sent.filter((m) => m.type === "stage" || (m.type === "patch" && (m.key === "screens" || m.key === "stageTiles")))).toEqual([]);
     expect(s.stageRev(screen)).toBe(rev);
     expect(s.stage(screen).expanded).toBeUndefined();
     // Other work's claim still holds.
     expect(s.setStage({ mode: "agents" }, "Room brain", screen, { claim })).toMatchObject({ applied: true });
   }
+  bus.resolver = oldResolver;
 });
 
 test("an expanded tile whose artifact is deleted is collapsed and published, and a screen's density change reaches clients with its value", async () => {
@@ -1718,7 +1724,6 @@ test("an expanded tile whose artifact is deleted is collapsed and published, and
   const off = bus.on((m: any) => msgs.push(m));
   try {
     s.store.remove("artifacts", b.id);
-    bus.changed("artifacts");
     await Bun.sleep(100);
     expect(s.stage().expanded).toBeUndefined();
     expect(msgs.some((m) => m.type === "stage" && m.stage.expanded === undefined)).toBe(true);
@@ -1776,5 +1781,42 @@ test("a spotlight or compare can't list the same artifact twice (its tiles could
     expect(s.setStage({ mode: "compare", items: [a.id, a.id] }, "Chey", "main", { override: true })).toMatchObject({ applied: false });
   } finally {
     console.error = err;
+  }
+});
+
+test("saved extra screens: a dead expansion is cleared at restart and when the screen returns, and the return-to-board wait runs again", async () => {
+  const prev = Session.STAGE_REVERT_MS;
+  Session.STAGE_REVERT_MS = 300;
+  try {
+    const dir2 = mkdtempSync(join(tmpdir(), "jam-extra-"));
+    const info = { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0, at: Date.now() };
+    const s1 = new Session(new Store(dir2));
+    const mk = (title: string) => s1.upsertArtifact({ kind: "screenshot", stage: "built", title, image: `/renders/${title}.png` });
+    const [a, b, c] = [mk("A"), mk("B"), mk("C")];
+    s1.reportScreen("screen-2", info);
+    s1.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", "screen-2", { override: true });
+    s1.expandTile(b.id, "screen-2");
+    s1.store.remove("artifacts", b.id);
+    s1.stop();
+    (s1.store as any).db.close();
+    // Restart: nothing has reported yet, but the saved stage is reconciled and its wait is armed.
+    const s2 = new Session(new Store(dir2));
+    expect(s2.stage("screen-2").expanded).toBeUndefined();
+    expect(s2.stage("screen-2").mode).toBe("compare");
+    await Bun.sleep(1500);
+    expect(s2.stage("screen-2").mode).toBe("board");
+    // Unplug, show something, lose an artifact, plug back in.
+    s2.reportScreen("screen-2", info);
+    s2.setStage({ mode: "compare", items: [a.id, c.id] }, "Chey", "screen-2", { override: true });
+    s2.expandTile(c.id, "screen-2");
+    s2.removeScreen("screen-2");
+    s2.store.remove("artifacts", c.id);
+    await Bun.sleep(100);
+    expect(s2.stage("screen-2").expanded).toBeUndefined();
+    s2.reportScreen("screen-2", { ...info, at: Date.now() });
+    expect(s2.stage("screen-2").expanded).toBeUndefined();
+    s2.stop();
+  } finally {
+    Session.STAGE_REVERT_MS = prev;
   }
 });
