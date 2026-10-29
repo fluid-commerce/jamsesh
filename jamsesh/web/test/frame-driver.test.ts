@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 
 (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/host", search: "" };
 (globalThis as any).navigator ??= { onLine: true };
-const { frameDriver, refreshFrameKey } = await import("../src/shared/drivetiles");
+const { frameDriver, keepFrameCurrent, refreshFrameKey } = await import("../src/shared/drivetiles");
 
 test("a frame gets events only once the key is in hand, to its own origin, with the key; a failed ask is made again", async () => {
   const asked: string[] = [];
@@ -31,8 +31,8 @@ test("a frame gets events only once the key is in hand, to its own origin, with 
     drive({ k: "key", key: "a", down: true }, "p1");
     expect(asked).toEqual(["/api/drive/frame-key", "/api/drive/frame-key"]);
     expect(posted).toEqual([
-      [{ jamDrive: { k: "move", lx: 0.25, ly: 0.5, x: 0.25, y: 0.5 }, key: "secret" }, "http://localhost:5173"],
-      [{ jamDrive: { k: "key", key: "a", down: true }, key: "secret" }, "http://localhost:5173"],
+      [{ jamDrive: { k: "move", lx: 0.25, ly: 0.5, x: 0.25, y: 0.5 }, key: "secret", who: "p1" }, "http://localhost:5173"],
+      [{ jamDrive: { k: "key", key: "a", down: true }, key: "secret", who: "p1" }, "http://localhost:5173"],
     ]);
     // A frame whose address isn't a URL gets nothing (never posted to "*").
     const bad = { src: "", contentWindow: { postMessage: () => posted.push(["bad", "*"]) } } as any;
@@ -43,8 +43,7 @@ test("a frame gets events only once the key is in hand, to its own origin, with 
   }
 });
 
-test("after a hub restart the new key is used, the frames are told to reload, and an unchanged key leaves them alone", async () => {
-  // (The key from the test above is still the page's: a page keeps its key for its lifetime.)
+test("after a hub restart a reconnect asks for the key whether or not one was fetched, and tells the caller what it got", async () => {
   let key = "secret";
   let up = true;
   const realFetch = globalThis.fetch;
@@ -57,18 +56,20 @@ test("after a hub restart the new key is used, the frames are told to reload, an
     const iframe = { src: "http://localhost:5173/app", contentWindow: { postMessage: (m: unknown) => posted.push(m) } } as any;
     const drive = frameDriver(iframe);
     const move = { k: "move" as const, lx: 0.1, ly: 0.2 };
+    // The exact case of a build nobody has driven yet: no event has fetched a key, and the ask still happens and returns it.
+    expect(await refreshFrameKey()).toBe("secret");
     drive(move, "p1");
     expect(posted.at(-1).key).toBe("secret");
-    // The connection came back to the same hub: nothing changes.
-    expect(await refreshFrameKey()).toBe(false);
-    // A new hub, a new key: events carry it and the caller reloads the frame.
+    // The connection came back to the same hub: same key, so the caller leaves the frame alone.
+    expect(await refreshFrameKey()).toBe("secret");
+    // A new hub, a new key: events carry it and the caller sees it differ.
     key = "two";
-    expect(await refreshFrameKey()).toBe(true);
+    expect(await refreshFrameKey()).toBe("two");
     drive(move, "p1");
     expect(posted.at(-1).key).toBe("two");
-    // The hub isn't answering yet: the caller reloads, and the next event asks again rather than sending a stale key.
+    // The hub isn't answering yet: null (the caller reloads), and the next event asks again rather than sending a stale key.
     up = false;
-    expect(await refreshFrameKey()).toBe(true);
+    expect(await refreshFrameKey()).toBeNull();
     const n = posted.length;
     drive(move, "p1");
     await Bun.sleep(5);
@@ -79,6 +80,72 @@ test("after a hub restart the new key is used, the frames are told to reload, an
     await Bun.sleep(5);
     drive(move, "p1");
     expect(posted.at(-1).key).toBe("three");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a frame loaded before any driving is reloaded when the hub restarted, and left alone when it didn't", async () => {
+  let key: string | null = "one";
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url === "/api/pair/info") return Response.json({ hostId: "h" });
+    return key ? Response.json({ key }) : new Response("no", { status: 502 });
+  }) as typeof fetch;
+  try {
+    let reconnect: () => void = () => {};
+    let reloads = 0;
+    // The frame is mounted and nothing has been driven: no event has fetched a key.
+    const stop = keepFrameCurrent(() => reloads++, (fn) => ((reconnect = fn), () => {}));
+    await Bun.sleep(10);
+    // Same hub: the key is unchanged, no reload.
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(0);
+    // A restarted hub: new key, one reload; a further reconnect to that same hub reloads nothing more.
+    key = "two";
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(1);
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(1);
+    // A hub that isn't answering: the page can't be trusted, it reloads; once the hub answers again it reloads onto the new script.
+    key = null;
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(2);
+    key = "three";
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(3);
+    // After the frame is gone, a reconnect does nothing.
+    stop();
+    key = "four";
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(3);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a frame mounted before the hub first answered learns the key at its first reconnect and reloads", async () => {
+  let key: string | null = null;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url === "/api/pair/info") return Response.json({ hostId: "h" });
+    return key ? Response.json({ key }) : new Response("no", { status: 502 });
+  }) as typeof fetch;
+  try {
+    let reconnect: () => void = () => {};
+    let reloads = 0;
+    keepFrameCurrent(() => reloads++, (fn) => ((reconnect = fn), () => {}));
+    await Bun.sleep(10);
+    key = "fresh";
+    reconnect();
+    await Bun.sleep(10);
+    expect(reloads).toBe(1);
   } finally {
     globalThis.fetch = realFetch;
   }

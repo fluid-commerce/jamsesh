@@ -48,6 +48,12 @@ interface Replay {
   down?: DriveTarget | null;
 }
 
+/** Tells the tiles a driver was over or pressing that they've gone: each lets go of any button or key it was holding for them. */
+function letGo(st: Replay | undefined, personId: string) {
+  for (const t of new Set([st?.down, st?.hover])) t?.handle({ k: "leave" }, personId);
+  if (st) st.down = st.hover = null;
+}
+
 export function DriveLayer({ screen, replay }: { screen: string; replay?: boolean }) {
   const layer = useRef<HTMLDivElement>(null);
   const els = useRef(new Map<string, HTMLDivElement>());
@@ -81,7 +87,13 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
   // Cursors of people who stopped driving (or lost the lock) go away with it.
   useEffect(() => {
     const live = new Set(drivingIds ? drivingIds.split(",") : []);
-    for (const id of [...shown.current.keys()]) if (!live.has(id)) (shown.current.delete(id), replays.current.delete(id));
+    for (const id of [...shown.current.keys()]) {
+      if (live.has(id)) continue;
+      // A driver who is out lets go of whatever they held, wherever it was pressed.
+      letGo(replays.current.get(id), id);
+      shown.current.delete(id);
+      replays.current.delete(id);
+    }
     setPeople((p) => (p.some((x) => !live.has(x.id)) ? p.filter((x) => live.has(x.id)) : p));
   }, [drivingIds]);
 
@@ -178,6 +190,7 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
     });
     return () => {
       off();
+      for (const [id, st] of replays.current) letGo(st, id);
       cancelAnimationFrame(raf.current);
       raf.current = 0;
     };

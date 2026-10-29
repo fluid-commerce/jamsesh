@@ -160,7 +160,13 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
     if (!el || app.status !== "live") return;
     const macApp = app.kind === "mac";
     const st = replay.current;
-    return registerDriveTarget(el, (ev: TileEvent, who: string) => replayTileEvent(st, ev, who, macApp, sendInOrder, KEYS, (x, y) => setRipple({ x, y, k: Date.now() })));
+    const handle = (ev: TileEvent, who: string) => replayTileEvent(st, ev, who, macApp, sendInOrder, KEYS, (x, y) => setRipple({ x, y, k: Date.now() }));
+    const off = registerDriveTarget(el, handle);
+    // The tile going away mid-press (or live ending) lets go of every button a driver held on it.
+    return () => {
+      off();
+      for (const who of [...st.keys()]) handle({ k: "leave" }, who);
+    };
   }, [app.id, app.status, app.kind]);
 
   const ratio = dims ? dims[0] / dims[1] : turned ? app.height / app.width : (app.width || 9) / (app.height || 19.5);

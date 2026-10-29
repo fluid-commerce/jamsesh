@@ -15,23 +15,36 @@ function withKey(): string | null {
 }
 
 /**
- * After the connection to the hub came back: asks again for the key. A restarted hub has a new one (and its proxy hands pages the
- * matching script, so they must be loaded again); resolves true when the key changed. Nothing to do if this screen never had one.
+ * Asks the hub for the frame key now, whether or not one was fetched before: a restarted hub has a new one, and the pages its proxy
+ * serves carry the matching script. Returns the key, or null when the hub didn't answer (or this screen gets none).
  */
-export async function refreshFrameKey(): Promise<boolean> {
-  if (!frameKey) return false;
-  const old = frameKey;
+export async function refreshFrameKey(): Promise<string | null> {
   try {
     const r = await api<{ key: string }>("/drive/frame-key");
-    if (typeof r?.key !== "string" || r.key === old) return false;
-    frameKey = r.key;
-    return true;
+    frameKey = typeof r?.key === "string" ? r.key : null;
   } catch {
-    // Unreachable for now: forget it, so the next event asks, and let the caller try again on the next reconnect.
     frameKey = null;
-    asking = null;
-    return true;
   }
+  asking = frameKey ? Promise.resolve() : null;
+  return frameKey;
+}
+
+/**
+ * Keeps a build's frame in step with the hub's key. The key the page was served under is remembered; a reconnect that finds a different
+ * one (a restarted hub), none, or that never knew one loads the page again, and the same key leaves it alone. Returns how to stop.
+ */
+export function keepFrameCurrent(reload: () => void, onReconnect: (fn: () => void) => () => void): () => void {
+  let loaded: string | null = null;
+  let live = true;
+  void refreshFrameKey().then((k) => live && (loaded = k));
+  const off = onReconnect(() =>
+    void refreshFrameKey().then((k) => {
+      if (!live || k === loaded) return;
+      loaded = k;
+      reload();
+    }),
+  );
+  return () => ((live = false), off());
 }
 
 /**
@@ -39,7 +52,7 @@ export async function refreshFrameKey(): Promise<boolean> {
  * to the frame's exact origin and with the session's key. Events before the key arrives are dropped.
  */
 export function frameDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
-  return (ev) => {
+  return (ev, who) => {
     const w = iframe.contentWindow;
     const key = withKey();
     if (!w || !key) return;
@@ -51,7 +64,7 @@ export function frameDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
     }
     const msg = ev.k === "key" || ev.k === "leave" ? ev : { ...ev, x: ev.lx, y: ev.ly };
     try {
-      w.postMessage({ jamDrive: msg, key }, origin);
+      w.postMessage({ jamDrive: msg, key, who }, origin);
     } catch {}
   };
 }
@@ -129,6 +142,9 @@ export function canvasDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
         dragAt = { fx: ev.lx, fy: ev.ly };
         void apply();
       }
+    } else if (ev.k === "leave") {
+      // The pointer left (or its driver did) mid-press: nothing is held.
+      drag = dragAt = null;
     } else if (ev.k === "up" && drag) {
       const was = drag;
       drag = dragAt = null;
