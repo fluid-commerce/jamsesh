@@ -104,14 +104,14 @@ export const carryAllowed = async (personId: string) => (await carryChoice(perso
 export const setCarryAllowed = (personId: string, on: boolean) => quiet(() => storeFor(personId).setConsent(on), undefined);
 export const localCopy = (personId: string) => quiet(() => storeFor(personId).get(), null);
 
-const fromHere = (c: Carried): Carried => ({ ...c, host: currentHostKey() || c.host });
+const tagged = (c: Carried, here: string): Carried => ({ ...c, host: here || c.host });
 
 /** Takes the host's copy of the person's voiceprint onto this device. */
-export async function pullCopy(personId: string): Promise<boolean> {
+export async function pullCopy(personId: string, here = currentHostKey()): Promise<boolean> {
   try {
     const c = await api<Carried>(`/people/${personId}/voiceprint`);
     if (!c?.samples?.length) return false;
-    await storeFor(personId).put(fromHere(c));
+    await storeFor(personId).put(tagged(c, here));
     return true;
   } catch {
     return false;
@@ -119,13 +119,13 @@ export async function pullCopy(personId: string): Promise<boolean> {
 }
 
 /** Offers this device's copy to the host, then keeps what the host holds now (its copy and its version). */
-export async function pushCopy(personId: string, copy?: Carried | null): Promise<boolean> {
+export async function pushCopy(personId: string, copy?: Carried | null, here = currentHostKey()): Promise<boolean> {
   const c = copy ?? (await localCopy(personId));
   if (!c) return false;
   try {
     const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples }, "PUT");
     if (!r?.ok) return false;
-    await pullCopy(personId);
+    await pullCopy(personId, here);
     return true;
   } catch {
     return false;
@@ -138,7 +138,7 @@ export async function pushCopy(personId: string, copy?: Carried | null): Promise
  * voiceprint: whichever learned something last wins, so a newer copy is never replaced by an older one. A
  * host that knows nothing gets the device's copy; a device with nothing takes the host's.
  */
-export async function syncVoiceprint(me: Pick<Person, "id">) {
+export async function syncVoiceprint(me: Pick<Person, "id">, here = currentHostKey()) {
   if (!(await carryAllowed(me.id))) return;
   const copy = await localCopy(me.id);
   let host: Carried;
@@ -148,13 +148,12 @@ export async function syncVoiceprint(me: Pick<Person, "id">) {
     return;
   }
   const hostHas = !!host?.samples?.length;
-  if (!copy) return void (hostHas && (await storeFor(me.id).put(fromHere(host))));
-  if (!hostHas) return void (await pushCopy(me.id, copy));
-  const here = currentHostKey();
+  if (!copy) return void (hostHas && (await storeFor(me.id).put(tagged(host, here))));
+  if (!hostHas) return void (await pushCopy(me.id, copy, here));
   if (here && copy.host === here) {
-    if (copy.version !== host.version) await storeFor(me.id).put(fromHere(host));
-  } else if ((copy.updatedAt ?? 0) > (host.updatedAt ?? 0)) await pushCopy(me.id, copy);
-  else await storeFor(me.id).put(fromHere(host));
+    if (copy.version !== host.version) await storeFor(me.id).put(tagged(host, here));
+  } else if ((copy.updatedAt ?? 0) > (host.updatedAt ?? 0)) await pushCopy(me.id, copy, here);
+  else await storeFor(me.id).put(tagged(host, here));
 }
 
 /**

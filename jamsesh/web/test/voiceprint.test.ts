@@ -3,11 +3,10 @@ import { beforeEach, expect, test } from "bun:test";
 
 const store = new Map<string, string>();
 (globalThis as any).localStorage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) };
-(globalThis as any).location = { origin: "http://10.0.0.2:4747" };
 
 const { beginRead, carryAllowed, carriesToOtherHosts, localCopy, pushCopy, pullCopy, setCarryAllowed, syncVoiceprint } = await import("../src/shared/voiceprint");
-const { setHostKey } = await import("../src/shared/identity");
-setHostKey("hostB");
+// This page is on host "hostB" (passed in, so the identity module's own state is left alone).
+const H = "hostB";
 
 const emb = (v: number) => new Array(256).fill(v);
 const copy = (over: Record<string, unknown> = {}) => ({ model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: emb(0.0625) }], ...over });
@@ -32,7 +31,7 @@ beforeEach(() => {
 test("nothing leaves the device until the person agrees, and the choice is that person's alone", async () => {
   expect(await carryAllowed("p1")).toBe(false);
   store.set(key("p1"), JSON.stringify(copy()));
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(calls).toHaveLength(0);
   await setCarryAllowed("p1", true);
   expect(await carryAllowed("p1")).toBe(true);
@@ -54,7 +53,7 @@ test("a host that doesn't know the voice gets the device's copy, embeddings only
   store.set(key("p1"), JSON.stringify(copy({ host: "hostA", version: "a1", updatedAt: 10 })));
   let pushed = false;
   reply = (m) => (m === "PUT" ? ((pushed = true), { status: 200, body: { ok: true } }) : { status: 200, body: pushed ? copy({ version: "b1", updatedAt: 20 }) : copy({ samples: [], version: "", updatedAt: 0 }) });
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(calls.map((c) => c.method)).toEqual(["GET", "PUT", "GET"]);
   expect(Object.keys(calls[1].body).sort()).toEqual(["dim", "model", "samples"]);
   expect(JSON.stringify(calls[1].body)).not.toMatch(/audio|wav|blob/i);
@@ -66,11 +65,11 @@ test("on the same host, a changed version replaces the copy and an unchanged one
   // Same number of samples, different ones: the version says so.
   store.set(key("p1"), JSON.stringify(copy({ host: "hostB", version: "b1", updatedAt: 10 })));
   reply = () => ({ status: 200, body: copy({ samples: [{ kind: "correction", embedding: emb(0.03) }], version: "b2", updatedAt: 30 }) });
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(calls.map((c) => c.method)).toEqual(["GET"]);
   expect((await localCopy("p1"))?.version).toBe("b2");
   calls = [];
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(calls.map((c) => c.method)).toEqual(["GET"]);
 });
 
@@ -79,7 +78,7 @@ test("a newer copy from another host is given to this host, never replaced by th
   const mine = copy({ samples: Array.from({ length: 32 }, (_, i) => ({ kind: "enrol", embedding: emb(i / 100) })), host: "hostA", version: "a9", updatedAt: 500 });
   store.set(key("p1"), JSON.stringify(mine));
   reply = (m) => (m === "PUT" ? { status: 200, body: { ok: true } } : { status: 200, body: copy({ version: "b1", updatedAt: 100 }) });
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(calls[1]).toMatchObject({ method: "PUT", path: "/people/p1/voiceprint" });
   expect(calls[1].body.samples).toHaveLength(32);
 });
@@ -88,7 +87,7 @@ test("an older copy from another host gives way to this host's newer one", async
   await setCarryAllowed("p1", true);
   store.set(key("p1"), JSON.stringify(copy({ host: "hostA", version: "a1", updatedAt: 50 })));
   reply = () => ({ status: 200, body: copy({ version: "b7", updatedAt: 900 }) });
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(calls.map((c) => c.method)).toEqual(["GET"]);
   expect(await localCopy("p1")).toMatchObject({ host: "hostB", version: "b7" });
 });
@@ -102,7 +101,7 @@ test("a refused or failed call changes nothing and never throws", async () => {
   (globalThis as any).fetch = async () => {
     throw new TypeError("network down");
   };
-  await syncVoiceprint({ id: "p1" });
+  await syncVoiceprint({ id: "p1" }, H);
   expect(await localCopy("p1")).toEqual(copy());
 });
 
@@ -131,7 +130,7 @@ test("in the Mac app the app keeps the copy, for the person the page says, and a
   expect(carriesToOtherHosts()).toBe(true);
   await setCarryAllowed("p1", true);
   reply = () => ({ status: 200, body: copy({ version: "b1", updatedAt: 5 }) });
-  expect(await pullCopy("p1")).toBe(true);
+  expect(await pullCopy("p1", H)).toBe(true);
   expect(kept.get("p1")?.copy).toMatchObject({ host: "hostB", version: "b1" });
   expect(store.size).toBe(0);
   // Asking for someone else's: refused by the app, so nothing at all.
