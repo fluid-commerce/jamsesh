@@ -220,7 +220,7 @@ Developers can run the host from a checkout without the app:
 | `jamsesh on` / `jamsesh off` | Turns this computer's agent hooks on or off. The MCP server stays registered. |
 | `jamsesh status` | Shows the local host's health and this computer's hub, name, and hook state. |
 | `jamsesh key` | Stores the gateway key in `~/.jamsesh/.env` (mode 600) after checking it against the gateway. |
-| `jamsesh new` | Says how to begin a new session (`jamsesh host --new-session`). Sessions live in projects now and nothing is archived by moving it. |
+| `jamsesh new` | The next host start (terminal or app) begins a new session in the current project, like `--new-session`; it leaves `~/.jamsesh/projects/.new-session`, which the hub removes when it uses it. Refuses while a host is running. Nothing is moved. |
 
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.

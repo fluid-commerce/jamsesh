@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
-import { createProject, defaultProject, findProject, migrateLegacy, openSession } from "./projects";
+import { createProject, defaultProject, findProject, migrateLegacy, openSession, takeNewSessionMark } from "./projects";
 
 const HOME = process.env.JAMSESH_HOME ?? join(homedir(), ".jamsesh");
 const REPO = resolve(import.meta.dir, "../../..");
@@ -128,7 +128,7 @@ export function enterProject() {
   const wanted = process.env.JAMSESH_PROJECT?.trim();
   const named = process.env.JAMSESH_NEW_PROJECT?.trim();
   const meta = named ? createProject(HOME, named) : wanted ? (findProject(HOME, wanted) ?? createProject(HOME, wanted)) : defaultProject(HOME);
-  const opened = openSession(HOME, meta.slug, { fresh: process.env.JAMSESH_NEW_SESSION === "1" });
+  const opened = openSession(HOME, meta.slug, { fresh: takeNewSessionMark(HOME) || process.env.JAMSESH_NEW_SESSION === "1" });
   config.project = { slug: meta.slug, name: meta.name, sessionId: opened.sessionId, resumed: opened.resumed };
   config.dataDir = opened.dir;
   mkdirSync(opened.dir, { recursive: true });

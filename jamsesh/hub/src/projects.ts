@@ -336,3 +336,27 @@ export function migrateLegacy(home: string): MigrationRecord[] {
 }
 
 const basenameOf = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+
+/**
+ * Where a terminal hub keeps its host-link secret: `<home>/host-link.secret`. Installs from before
+ * projects kept it in `<home>/host/`; when only that one exists it is copied to the new path (never
+ * moved, an older hub or app may still read it there).
+ */
+export function linkSecretFile(home: string): string {
+  const file = join(home, "host-link.secret");
+  const old = join(home, "host", "host-link.secret");
+  if (!existsSync(file) && existsSync(old)) {
+    try {
+      copyFileSync(old, file);
+    } catch {}
+  }
+  return file;
+}
+
+/** `jamsesh new` leaves this behind: the next hub start begins a new session, then removes it. */
+export function takeNewSessionMark(home: string): boolean {
+  const mark = join(projectsDir(home), ".new-session");
+  if (!existsSync(mark)) return false;
+  rmSync(mark, { force: true });
+  return true;
+}

@@ -7,6 +7,7 @@ import { Hub } from "./hub";
 import { startHttp } from "./http";
 import { advertise, stopAdvertising } from "./bonjour";
 import { readWindowLinks } from "./auth";
+import { linkSecretFile } from "./projects";
 
 const args = new Set(process.argv.slice(2));
 enterProject();
@@ -77,7 +78,7 @@ if (args.has("--open")) openBigScreen(hostLink);
  */
 function writeLinkSecret() {
   // Beside the projects, not in a session: `jamsesh host` finds it whichever session is running.
-  const file = join(process.env.JAMSESH_DATA ? config.dataDir : config.home, "host-link.secret");
+  const file = process.env.JAMSESH_DATA ? join(config.dataDir, "host-link.secret") : linkSecretFile(config.home);
   try {
     rmSync(file, { force: true });
     const secret = randomBytes(32).toString("hex");

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/store";
 import { projectsRoute } from "../src/projects-api";
-import { cleanName, createProject, defaultProject, findProject, isSlug, listProjects, listSessions, migrateLegacy, openSession, readProject, saveThumbnail, slugify, touchSession } from "../src/projects";
+import { linkSecretFile, takeNewSessionMark, cleanName, createProject, defaultProject, findProject, isSlug, listProjects, listSessions, migrateLegacy, openSession, readProject, saveThumbnail, slugify, touchSession } from "../src/projects";
 
 const homes: string[] = [];
 const tmp = () => {
@@ -190,5 +190,38 @@ describe("project routes", () => {
     const opened = (await (await call(home, "/api/projects/open", post({ name: "Billing" })))!.json()) as any;
     expect([opened.switched, opened.project.slug, opened.command]).toEqual([false, "billing", "jamsesh host --project billing"]);
     expect((await call(home, "/api/projects/open", post({ slug: "nope" })))!.status).toBe(404);
+  });
+});
+
+describe("compatibility", () => {
+  test("a host-link secret kept in host/ is copied to the new path and left where it was", () => {
+    const home = tmp();
+    mkdirSync(join(home, "host"));
+    writeFileSync(join(home, "host", "host-link.secret"), "x-jam-link-secret: old\n");
+    const file = linkSecretFile(home);
+    expect(file).toBe(join(home, "host-link.secret"));
+    expect(readFileSync(file, "utf8")).toBe("x-jam-link-secret: old\n");
+    expect(readFileSync(join(home, "host", "host-link.secret"), "utf8")).toBe("x-jam-link-secret: old\n");
+    writeFileSync(file, "new");
+    linkSecretFile(home);
+    expect(readFileSync(file, "utf8")).toBe("new");
+  });
+
+  test("jamsesh new leaves a mark that the next start uses once", () => {
+    const home = tmp();
+    expect(takeNewSessionMark(home)).toBe(false);
+    mkdirSync(join(home, "projects"));
+    writeFileSync(join(home, "projects", ".new-session"), "");
+    expect(takeNewSessionMark(home)).toBe(true);
+    expect(takeNewSessionMark(home)).toBe(false);
+  });
+
+  test("jamsesh new (the script) leaves the mark", () => {
+    const home = tmp();
+    mkdirSync(join(home, "host"));
+    writeFileSync(join(home, "host", "host-link.secret"), "x-jam-link-secret: old\n");
+    const run = (...a: string[]) => Bun.spawnSync(["bash", join(import.meta.dir, "../../bin/jamsesh"), ...a], { env: { ...process.env, JAMSESH_HOME: home, JAMSESH_PORT: "1" } });
+    expect(run("new").exitCode).toBe(0);
+    expect(existsSync(join(home, "projects", ".new-session"))).toBe(true);
   });
 });
