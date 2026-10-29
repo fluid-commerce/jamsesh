@@ -705,11 +705,22 @@ export class Session {
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
     const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
-    // Page back until enough are relevant: other workstreams' decisions can't crowd one out.
     const out: JamEvent[] = [];
+    if (opts.afterId != null) {
+      // Not handed over yet: the oldest first, so a burst of more than `limit` is delivered a page at a time and none is skipped.
+      let afterId = opts.afterId;
+      while (out.length < opts.limit) {
+        const page = this.store.recentEvents({ kinds: ["decision"], afterId, limit: 100, oldestFirst: true });
+        out.push(...page.filter(relevant));
+        if (page.length < 100) break;
+        afterId = page[page.length - 1].id;
+      }
+      return out.slice(0, opts.limit);
+    }
+    // The newest that matter: page back until enough are relevant, so other workstreams' can't crowd one out.
     let beforeId: number | undefined;
     while (out.length < opts.limit) {
-      const page = this.store.recentEvents({ kinds: ["decision"], afterId: opts.afterId, beforeId, limit: 100 });
+      const page = this.store.recentEvents({ kinds: ["decision"], beforeId, limit: 100 });
       out.unshift(...page.filter(relevant));
       if (page.length < 100) break;
       beforeId = page[0].id;

@@ -236,16 +236,18 @@ export class Store {
     return row ? rowToEvent(row) : undefined;
   }
 
-  recentEvents(opts: { limit?: number; since?: number; kinds?: EventKind[]; afterId?: number; beforeId?: number } = {}): JamEvent[] {
+  /** Events in id order: the newest `limit` of them, or with `oldestFirst` the oldest (for reading forward from `afterId`). */
+  recentEvents(opts: { limit?: number; since?: number; kinds?: EventKind[]; afterId?: number; beforeId?: number; oldestFirst?: boolean } = {}): JamEvent[] {
     const where: string[] = [];
     const args: any[] = [];
     if (opts.since) (where.push("ts >= ?"), args.push(opts.since));
     if (opts.afterId != null) (where.push("id > ?"), args.push(opts.afterId));
     if (opts.beforeId != null) (where.push("id < ?"), args.push(opts.beforeId));
     if (opts.kinds?.length) (where.push(`kind IN (${opts.kinds.map(() => "?").join(",")})`), args.push(...opts.kinds));
-    const sql = `SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`;
+    const sql = `SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id ${opts.oldestFirst ? "ASC" : "DESC"} LIMIT ?`;
     args.push(opts.limit ?? 100);
-    return (this.db.query(sql).all(...args) as any[]).map(rowToEvent).reverse();
+    const rows = (this.db.query(sql).all(...args) as any[]).map(rowToEvent);
+    return opts.oldestFirst ? rows : rows.reverse();
   }
 
   /** How many events there are (before an id, of some kinds), for "N more" counts. */
