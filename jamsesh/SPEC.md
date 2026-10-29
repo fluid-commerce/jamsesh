@@ -86,7 +86,7 @@ Numbers in this spec (thresholds, timeouts, ports) are the current defaults in t
 | Mac app shell: windows, menu bar, local relay, Keychain, discovery, permissions | Rust (Tauri) | Native capabilities the browser lacks; uses the system web view, so the app stays small |
 | Hub: brain, agent endpoint, pairing, networking, audio sorting, storage | TypeScript (Bun) | See [17.2](#172-why-the-hub-stays-typescript-inside-a-rust-tauri-app) |
 | Interface: big screen, client, connect, setup | TypeScript (React) | One interface for the Mac app, browsers, and phones |
-| Speech-to-text, voiceprints | C++ (whisper.cpp, sherpa-onnx) | Local inference [B28] |
+| Speech-to-text, voiceprints | C++ (sherpa-onnx with Parakeet, whisper.cpp) | Local inference [B28] |
 
 ## 3. Apps and roles
 
@@ -187,9 +187,9 @@ the client.
 - Carries the whole host runtime: the hub compiled to one program, the web app, the WebAssembly
   canvas, `figcraft-server` and `figcraft-cli`, the skill, the voiceprint library, and the
   speaker-embedding model, so the host Mac needs nothing else [B29]. Speech-to-text runs on the Mac
-  when whisper.cpp and a model are installed (`brew install whisper-cpp`); otherwise it goes
-  through the gateway, and the room sees a notice if neither is available [B28a]. The app doesn't
-  download a speech model itself.
+  with Parakeet (see [9.3](#93-transcription)): the first time a Mac hosts, it downloads the speech
+  model once (482 MB) and the room is heard through whisper.cpp or the gateway meanwhile. The room
+  sees a notice if no engine is available [B28a].
 - Advertises itself on the local network with Bonjour (`dns-sd -R <ComputerName> _jamsesh._tcp`,
   TXT `session=<name>` and `https=<public URL>` when remote access is on). The record carries no
   secret.
@@ -1113,19 +1113,48 @@ Every client window and the big screen capture audio; it's consolidated on the h
 
 ### 9.3 Transcription
 
-Transcription mode is `auto`, `local`, or `gateway` (**Settings > Transcription**). In `auto` the
-engines are tried least-busy first, local before remote [B28]:
+Transcription mode is `auto`, `local`, or `gateway` (**Settings > Transcription**). The host
+transcribes for everyone, desktop and browser alike, since every laptop's audio already comes to it.
+In `auto` the engines are tried least-busy first, then in this order [B28]:
 
-1. **Host whisper.cpp** (`whisper-server` on `127.0.0.1:8178`), using a model already on the Mac
-   (large-v3-turbo, quantized, which `install.sh` downloads; the app doesn't download one). The
-   prompt carries only the brain's name: people's names in the prompt made whisper invent lines
-   made of just those names in quiet stretches.
-2. **Client workers.** A JamSesh for Mac client with whisper.cpp offers itself as a transcription
+1. **Host Parakeet.** NVIDIA's Parakeet TDT 0.6B v2 (int8, CC-BY-4.0) through sherpa-onnx, the
+   library the app already ships for voiceprints. It won the bake-off
+   ([docs/transcription-bakeoff.md](docs/transcription-bakeoff.md)). The model isn't in the app: the
+   first time a Mac hosts, the hub downloads it (482 MB, from sherpa-onnx's GitHub release, checked
+   against a pinned SHA-256) into `~/.jamsesh/models/parakeet-tdt-0.6b-v2-int8`, and the room uses
+   the engines below meanwhile. It runs in its own process (the hub binary with `--stt-server`,
+   about 2 GB of memory) whose stdin is a pipe from the hub, so it ends with the hub however the
+   hub ends. English only: with another language, or `auto`, the whisper engines take over.
+   `JAMSESH_PARAKEET=0` turns it off; `JAMSESH_PARAKEET_DIR` points at a copy elsewhere.
+2. **Host whisper.cpp** (`whisper-server` on `127.0.0.1:8178`), using a model already on the Mac
+   (large-v3-turbo, quantized, which `install.sh` downloads).
+3. **Client workers.** A JamSesh for Mac client with whisper.cpp offers itself as a transcription
    worker to the host, which uses it when the host is busy [B28b].
-3. **The gateway** (`openai/gpt-transcribe`).
+4. **The gateway** (`openai/gpt-transcribe`), the fallback.
 
 Each request has 20 seconds. An engine that fails three times is skipped until it has a minute
-without failures. Transcription handles the languages the team speaks, not only English.
+without failures; a Parakeet process that exits leaves the pool and **Settings** says why.
+Transcription handles the languages the team speaks, not only English.
+
+**The room's vocabulary.** Every engine is biased toward the room's words: people's names, agents'
+names, the brain's names, active workstream titles, glossary terms, and the room's own list
+(**Settings > Transcription > Words to listen for**, the `vocabulary` setting, kept across
+sessions). A line in that list is a word ("FigCraft") or a word and how it gets misheard
+("Chey: Shay"). Parakeet gets the list as hotwords (score 2), whisper.cpp and the gateway as their
+prompt after the brain's name. Because primed engines repeat their words on near-silence, a line
+made of nothing but the room's words is dropped, as one made of names always was.
+
+**The correction pass** runs after every engine and fixes only the room's words: what the room
+listed as misheard ("Shay" becomes "Chey", possessives too), a name or coined word split or recased
+("jam sesh" becomes "JamSesh"), and a near-miss one edit away (two for eight letters or more) of a
+name or coined word at least six letters long ("Fitcraft" becomes "FigCraft"). It never rewrites an
+everyday word (the system word list decides; without one, only capitalized words are candidates),
+a word that is itself in the vocabulary, or a near-miss that's equally close to two entries. So
+"share" never becomes "Chey" and "password" stays "password" with Passport in the room.
+
+`GET /api/engines` reports the engines, the speech model's state (`ready`, `starting`,
+`downloading` with a percentage, `missing`, `failed` with the reason, or `off`), and the
+vocabulary.
 
 ### 9.4 Speaker identification
 
@@ -1416,7 +1445,7 @@ Pins are app-wide [A7a, A7c]:
 | Gateway | AI Gateway key, last error, model for each job | Host only |
 | Voice and host | Voice replies, voice, **Let the brain drive this Mac** | Host only |
 | Saved | Snapshots with downloads, **Save now**, restore, saved layouts | Anyone |
-| Transcription | Auto, local, or gateway; the engines and their health | Anyone |
+| Transcription | Auto, local, or gateway; the engines and their health; the speech model's state; words to listen for | Anyone |
 | People | Name, title, weight, voice samples, ask to share, reset voice, remove | Anyone |
 | Devices | Each mic, its level, and its owner | Anyone |
 | Remote access | Status and the setup wizard | Host only |
@@ -1626,9 +1655,9 @@ it.
 
 JamSesh uses the computers in the room [B28]:
 
-- **Host:** speech-to-text (whisper.cpp) and speaker embeddings (sherpa-onnx) run locally [B28a].
-  The speaker model ships with the app; the speech model comes from `brew install whisper-cpp`
-  or `install.sh`, and without one speech goes through the gateway.
+- **Host:** speech-to-text (Parakeet, or whisper.cpp) and speaker embeddings (sherpa-onnx) run
+  locally [B28a]. The speaker model ships with the app; Parakeet's model is downloaded on the first
+  host session (see [9.3](#93-transcription)), and without a local engine speech goes through the gateway.
 - **Clients:** a JamSesh for Mac client with spare capacity runs whisper.cpp and offers itself to
   the host as a transcription worker (`POST /api/workers`) [B28b].
 - **Brain:** the brain's language models run on the gateway, where the best model for each job is
@@ -1758,7 +1787,7 @@ in [`docs/spec-gaps.md`](docs/spec-gaps.md). Paths are under `jamsesh/` unless t
 | B25 | A gateway model parses directives and sends them to the agents handling that work | 8.3, 8.4 | `hub/src/brain/brain.ts` | Implemented |
 | B26 | Tested thoroughly and fully working | 16 | `hub/test/`, `web/test/`, `STATUS.md` | Partial |
 | B27 | Context is stored so an agent starting a new leg of work can refresh itself | 7.3, 7.4, 6.3 | `hub/src/brain/brain.ts`, `hub/src/mcp.ts`, `hub/src/hub.ts` | Implemented |
-| B28a | Local inference on the host | 9.3, 15 | `hub/src/audio/transcribe.ts`, `hub/src/audio/voiceprint.ts`, `app/bundle-hub.sh` | Partial |
+| B28a | Local inference on the host | 9.3, 15 | `hub/src/audio/transcribe.ts`, `hub/src/audio/parakeet.ts`, `hub/src/audio/stt-server.ts`, `hub/src/audio/vocabulary.ts`, `hub/src/audio/voiceprint.ts`, `app/bundle-hub.sh` | Partial |
 | B28b | Local inference on client machines | 9.3, 15 | `hub/src/http.ts` (`/api/workers` only) | Missing |
 | B29 | Installs on the Mac mini; everyone connects and it works | 3.2, 4 | `app/src-tauri/src/`, `app/bundle-hub.sh` | Implemented |
 | B30 | Agents check canvas mockups against the real design system, one to one | 6.7 | `skill/SKILL.md` | Implemented |

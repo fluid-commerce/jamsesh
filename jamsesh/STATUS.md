@@ -57,6 +57,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Multi-device grouping, lag, echo, degraded copies | Simulated | Real recorded voices, degraded and lagged in tests. |
 | Speaker ID when someone walks away from their laptop | Simulated | About 50 percent without a voice sample; better after "Teach JamSesh your voice". |
 | A real room with real microphones | Not tested | |
+| Host Parakeet with the room's vocabulary, correction pass (5.2) | Simulated | Bake-off on 50 synthetic clips (macOS voices, noise, a second voice): 5.6% word error and 97% of names after correction. The model download, the child process, crash and hub-exit handling, the cloud fallback and the correction's false positives are covered by `hub/test/transcription.test.ts`. Real room clips not yet run. |
 
 ## Agent briefing and live builds
 
