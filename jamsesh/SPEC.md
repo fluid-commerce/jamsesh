@@ -1307,8 +1307,11 @@ and click and type in apps it opened, to walk the room through a build [B44, B45
   `~/.jamsesh/previews/<repo>-<branch>` with the host's own git credentials. Branch names are
   restricted to `[\w./-]`.
 - The command runs in the background (20 minutes at most); one build per checkout at a time.
-- `open` is a path in the checkout, a URL, or `simulator:<path>.app`, which installs the app in the
-  Simulator and launches it [A29b].
+- `open` is a path inside the checkout (resolved with symlinks, so it can't leave it), an `http(s)`
+  URL without credentials, or `simulator:<path>.app`, which installs the app in the Simulator and
+  launches it [A29b]. It is checked when the request is filed and shown on the approval card, so
+  the person approves exactly what opens. Repository URLs, commands and `open` values that carry a
+  username, token or password are refused.
 - The room gets a toast when the build starts and when it opens or fails (with the exit code and
   the end of the output).
 

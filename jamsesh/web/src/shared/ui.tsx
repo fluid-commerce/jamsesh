@@ -430,8 +430,8 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const [away, setAway] = useState(false);
   // The newest line in the list when the reader scrolled away. While they are away nothing newer is added (the list never has a gap); it is counted for the pill, and returning resets to the latest window.
   const frozenAt = useRef(0);
-  // Ids of feed lines that came in while the reader was away, accumulated as they arrive (the live state holds only a recent window, so counting it afterwards would undercount a long absence).
-  const awayNew = useRef(new Set<number>());
+  // How many feed lines came in while the reader was away: a plain counter bumped by each new event as it arrives, with the highest id counted so far (the live state holds only a recent window).
+  const awayNew = useRef({ count: 0, upTo: 0 });
   // Bumped by every reset to the latest window (and on unmount): a history response from an older generation is dropped, so it can't put stale rows back or restore an old scroll position.
   const generation = useRef(new Generation());
   useEffect(() => () => void generation.current.bump(), []);
@@ -452,13 +452,18 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || ((older.done || everything) && !trimmed.current);
-  if (!following.current) for (const e of state?.events ?? []) if (e.id > frozenAt.current && wanted(e)) awayNew.current.add(e.id);
-  const fresh = following.current ? 0 : awayNew.current.size;
+  if (!following.current)
+    for (const e of [...(state?.events ?? [])].sort((a, b) => a.id - b.id))
+      if (e.id > awayNew.current.upTo) {
+        awayNew.current.upTo = e.id;
+        if (wanted(e)) awayNew.current.count++;
+      }
+  const fresh = following.current ? 0 : awayNew.current.count;
 
   /** Back at the bottom: drop everything and start again from the live state, a contiguous latest window that pages backward. */
   const resetToLatest = () => {
     seen.current.clear();
-    awayNew.current.clear();
+    awayNew.current = { count: 0, upTo: 0 };
     generation.current.bump();
     busy.current = false;
     trimmed.current = false;
@@ -477,7 +482,10 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM;
     if (atBottom !== following.current) {
       if (atBottom) resetToLatest();
-      else frozenAt.current = Math.max(0, ...seen.current.keys());
+      else {
+        frozenAt.current = Math.max(0, ...seen.current.keys());
+        awayNew.current = { count: 0, upTo: Math.max(frozenAt.current, ...(state?.events ?? []).map((e) => e.id)) }; // everything in the state so far was already shown
+      }
       following.current = atBottom;
       setAway(!atBottom);
     }

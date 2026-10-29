@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { config } from "../src/config";
-import { commandProblem, confine, groups, HostControl, openProblem, redactUrls, repoProblem, run } from "../src/hostctl";
+import { commandProblem, confine, groups, HostControl, openProblem, redactUrls, repoProblem, run, urlProblem } from "../src/hostctl";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-hostctl-"));
 const homeWas = config.home;
@@ -39,7 +39,7 @@ test("redactUrls hides the userinfo of any URL in a note", () => {
 
 test("run keeps only the tail of a command's output", async () => {
   const r = await run(["/bin/sh", "-c", "i=0; while [ $i -lt 4000 ]; do echo line-$i-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done; echo THE-END"], 20_000);
-  expect(r.code).toBe(0);
+  expect(r.status).toBe("ok");
   expect(r.out.length).toBeLessThanOrEqual(16_384);
   expect(r.out.endsWith("THE-END")).toBe(true);
 });
@@ -48,9 +48,9 @@ test("run stops a command that outlives its deadline: a failed finish, not 'stuc
   const t0 = Date.now();
   const r = await run(["/bin/sh", "-c", "trap '' TERM; sleep 30"], 300);
   expect(Date.now() - t0).toBeLessThan(6_000);
-  expect(r).toMatchObject({ code: -1 });
+  expect(r).toMatchObject({ status: "failed", code: -1 });
   expect(r.out).toContain("timed out");
-  expect(r.stuck).toBeUndefined();
+  expect(r.status).not.toBe("stuck");
 });
 
 /** Replaces Bun.spawn with a process whose group never empties, until `exit()`. */
@@ -78,7 +78,7 @@ test("a command's background child dies with it on a timeout (the whole process 
   const t0 = Date.now();
   const r = await run(["/bin/sh", "-c", `sleep 300 & echo $! > ${pidFile}; sleep 300`], 600);
   expect(r.out).toContain("timed out");
-  expect(r.stuck).toBeUndefined();
+  expect(r.status).not.toBe("stuck");
   expect(Date.now() - t0).toBeLessThan(8_000);
   const bg = Number(readFileSync(pidFile, "utf8").trim());
   const alive = (pid: number) => {
@@ -106,8 +106,8 @@ test("a command that exits 0 leaving a background child: the child is stopped to
   const t0 = Date.now();
   const pidFile2 = join(dir, "bg2.pid");
   const r = await run(["/bin/sh", "-c", `echo done-line; sleep 300 & echo $! > ${pidFile2}`], 20_000);
-  expect(r.code).toBe(0);
-  expect(r.stuck).toBeUndefined();
+  expect(r.status).toBe("ok");
+  expect(r.status).not.toBe("stuck");
   expect(r.out).toContain("done-line");
   expect(Date.now() - t0).toBeLessThan(5_000);
   const bg = Number(readFileSync(pidFile2, "utf8").trim());
@@ -148,11 +148,12 @@ test("a preview's lock frees only after what its build left behind is gone", asy
 test("run reports a command it couldn't stop as still running, with a way to see its exit", () =>
   withUnstoppable(async (signals, exit) => {
     const r = await run(["sleep", "1"], 100);
-    expect(r.stuck).toBe(true);
+    expect(r.status).toBe("stuck");
+    if (r.status !== "stuck") throw new Error("unreachable");
     expect(r.out).toContain("still running");
     expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
     let seen = false;
-    void r.gone!.then(() => (seen = true));
+    void r.gone.then(() => (seen = true));
     await Bun.sleep(20);
     expect(seen).toBe(false);
     exit();
@@ -252,3 +253,77 @@ test("request() refuses an open that carries credentials or escapes the checkout
   expect(typeof hc.request({ ...base, open: "../../etc/passwd" })).toBe("string");
   expect(typeof hc.request({ ...base, open: "build/App.app" })).toBe("object");
 });
+
+test("one URL check for commands, open and repos: control characters, whitespace, encodings and parsed credentials", () => {
+  for (const bad of [
+    "git clone https://tok\t@github.com/a/b", // a tab the URL parser drops
+    "git clone https://tok\n@github.com/a/b",
+    "curl https://user:pw@example.com",
+    "curl 'https://tok@example.com'",
+    "curl https://%74ok@example.com/", // %-encoded user, still before an @
+    "curl https://a%40b@example.com/",
+    "curl https://example.com\\@evil.example/ https://x@y.example/",
+    "wget ssh://deploy@host/a/b",
+    "curl https://@example.com",
+    "curl https://[::1",
+  ])
+    expect([bad, urlProblem(bad)]).toEqual([bad, expect.any(String)]);
+  for (const ok of ["make && curl https://example.com/path?x=1#frag", "git clone git@github.com:a/b.git", "echo hello\nmake\ttest", "open http://localhost:3000/a@b"])
+    expect([ok, urlProblem(ok)]).toEqual([ok, null]);
+  // single values: no whitespace or control characters at all
+  expect(urlProblem("https://example.com/a b", { single: true })).toContain("whitespace");
+  expect(urlProblem("https://example.com/\t", { single: true })).toContain("whitespace");
+  expect(urlProblem("ssh://git@github.com/a/b.git", { single: true, allowGitUser: true })).toBeNull();
+  expect(urlProblem("ssh://git:pw@github.com/a/b.git", { single: true, allowGitUser: true })).not.toBeNull();
+  expect(repoProblem("https://github.com/a/b\t.git")).not.toBeNull();
+  expect(openProblem("https://tok\t@example.com/")).not.toBeNull();
+  expect(commandProblem("git push https://tok\t@github.com/a/b")).not.toBeNull();
+});
+
+test("a preview step that can't be stopped (the open step) ends it there, reports it, and holds the lock until the group is gone", async () => {
+  const hc: any = Object.create(HostControl.prototype);
+  hc.builds = new Map();
+  hc.session = { settings: () => ({ hostControl: true }) };
+  const notes: string[] = [];
+  hc.log = (x: string) => void notes.push(x);
+  hc.onBuilt = (_l: string, ok: boolean, x: string) => void notes.push(`built:${ok}:${x}`);
+  const repo = "https://example.invalid/acme/stuckopen.git";
+  const slug = `stuckopen-${createHash("sha1").update(repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
+  const co = join(dir, "previews", slug);
+  mkdirSync(join(co, ".git"), { recursive: true });
+  writeFileSync(join(co, "app.html"), "x");
+  const real = Bun.spawn;
+  const realAlive = groups.alive;
+  const realSignal = groups.signal;
+  const ran: string[] = [];
+  let stuckAlive = true;
+  const empty = () => new ReadableStream<Uint8Array>({ start() {} });
+  const closed = () => new ReadableStream<Uint8Array>({ start: (c) => c.close() });
+  (Bun as any).spawn = (cmd: string[]) => {
+    const argv = cmd.slice(3);
+    ran.push(argv.join(" "));
+    return argv[0] === "open"
+      ? { pid: 999999, exited: new Promise<number>(() => {}), stdout: empty(), stderr: empty(), kill: () => {} }
+      : { pid: 111111, exited: Promise.resolve(0), stdout: closed(), stderr: closed(), kill: () => {} };
+  };
+  groups.alive = (g) => g === 999999 && stuckAlive;
+  groups.signal = () => {};
+  const was = HostControl.STEP_MS;
+  try {
+    HostControl.STEP_MS = 100;
+    hc.preview({ repo, command: "true", open: "app.html", by: "T" });
+    await Bun.sleep(3_000); // the open step times out and its group can't be emptied
+    expect(ran.some((c) => c.startsWith("open "))).toBe(true);
+    expect(notes.some((n) => n.startsWith("built:false:") && n.includes("still running a command that couldn't be stopped"))).toBe(true);
+    expect(notes.some((n) => n.includes("is built and open"))).toBe(false); // never reported as a success
+    expect(hc.builds.size).toBe(1); // locked
+    stuckAlive = false;
+    await Bun.sleep(900);
+    expect(hc.builds.size).toBe(0); // released once the group was seen empty
+  } finally {
+    HostControl.STEP_MS = was;
+    (Bun as any).spawn = real;
+    groups.alive = realAlive;
+    groups.signal = realSignal;
+  }
+}, 20_000);

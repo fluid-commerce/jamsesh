@@ -108,14 +108,19 @@ function collect(stream: ReadableStream<Uint8Array>, max = OUTPUT_TAIL) {
   return acc;
 }
 
-export type RunResult = {
-  code: number;
-  out: string;
-  /** The command timed out (or its pipes failed) and its process group could not be emptied: it may still be running. */
-  stuck?: boolean;
-  /** Resolves only when the whole process group was seen empty. Never rejects. */
-  gone?: Promise<void>;
-};
+/**
+ * How a command ended. `stuck` has no exit code on purpose: its process group could not be emptied,
+ * so it may still be running. A caller must handle that case (a missed one fails to compile), and the
+ * `gone` promise resolves only when the group is seen empty.
+ */
+function assertNever(x: never): never {
+  throw new Error(`unhandled ${JSON.stringify(x)}`);
+}
+
+export type RunResult =
+  | { status: "ok"; code: 0; out: string }
+  | { status: "failed"; code: number; out: string }
+  | { status: "stuck"; out: string; gone: Promise<void> };
 
 /**
  * Process-group checks, replaceable in tests. A command runs as the leader of its own group
@@ -161,52 +166,90 @@ export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Prom
   const p = Bun.spawn(["/usr/bin/perl", "-e", "use POSIX qw(setsid); setsid(); exec @ARGV or exit 127", ...cmd], { stdout: "pipe", stderr: "pipe", ...(cwd ? { cwd } : {}) });
   const out = collect(p.stdout);
   const err = collect(p.stderr);
-  const finished = (async () => {
-    const code = await p.exited;
-    // A background child that inherited the pipes keeps them open: after the command itself is done, give the output a moment, then stop reading.
-    await Promise.race([Promise.all([out.done, err.done]), Bun.sleep(500)]);
+  // The readers are cancelled on every way out of here (a background child can hold the pipes open).
+  const readers = () => {
     out.cancel();
     err.cancel();
-    return { code, out: (out.text.slice(-OUTPUT_TAIL) + (err.text ? `\n${err.text.slice(-OUTPUT_TAIL)}` : "")).trim().slice(-OUTPUT_TAIL) };
+  };
+  const text = () => (out.text.slice(-OUTPUT_TAIL) + (err.text ? `\n${err.text.slice(-OUTPUT_TAIL)}` : "")).trim().slice(-OUTPUT_TAIL);
+  const finished = (async () => {
+    const code = await p.exited;
+    // After the command itself is done, give the output a moment, then stop reading.
+    await Promise.race([Promise.all([out.done, err.done]), Bun.sleep(500)]);
+    return code;
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)));
   let why = "timed out";
+  let code: number | null = null;
   try {
-    const r = await Promise.race([finished, late]);
-    if (r) {
-      // The command itself finished; whatever it left running in its group is stopped too, and the run only counts as done once the group is empty.
-      if (await stopGroup(p.pid)) return r;
-      return { ...r, stuck: true, out: `${r.out}\n(still running, couldn't stop what it left behind)`.trim(), gone: waitGone(p.pid) };
-    }
+    code = await Promise.race([finished, late]);
   } catch (e) {
     why = `failed: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
     clearTimeout(timer);
   }
   finished.catch(() => {});
-  if (await stopGroup(p.pid)) {
+  // Finished or not, whatever is still in the command's group is stopped, and only an empty group counts as done.
+  const emptied = await stopGroup(p.pid);
+  readers();
+  if (!emptied) return { status: "stuck", out: `${code === null ? why : "finished"}; still running, couldn't stop it${text() ? `\n${text()}` : ""}`.trim(), gone: waitGone(p.pid) };
+  if (code === null) {
     p.kill();
-    return { code: -1, out: why };
+    return { status: "failed", code: -1, out: why };
   }
-  out.cancel();
-  err.cancel();
-  return { code: -1, out: `${why}; still running, couldn't stop it`, stuck: true, gone: waitGone(p.pid) };
+  return code === 0 ? { status: "ok", code: 0, out: text() } : { status: "failed", code, out: text() };
 }
 
-/** A remote a build may clone: https, ssh:// or git@, with no credentials in it (a token or user:password belongs in the host's git credential helper, not in room data or a process list). */
-export function repoProblem(repo: string): string | null {
-  if (typeof repo !== "string" || !/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(repo)) return "I need the repository's remote URL (https or git@) to build it.";
-  const authority = repo.startsWith("git@") ? repo.split(":")[0] : repo.replace(/^[a-z]+:\/\//, "").split("/")[0];
-  const at = authority.lastIndexOf("@");
-  const user = at >= 0 ? authority.slice(0, at) : "";
-  if (user && !(user === "git" && !repo.startsWith("https://"))) return "That repository URL has a username or token in it. Use the plain URL; the host's own git login does the authenticating.";
+/** For short helper commands (osascript, open, simctl) where only the exit code and text matter: a command that could not be stopped counts as failed, with that said. */
+export async function runShort(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<{ code: number; out: string }> {
+  const r = await run(cmd, timeoutMs, cwd);
+  return r.status === "stuck" ? { code: -1, out: r.out } : { code: r.code, out: r.out };
+}
+
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
+/**
+ * One check for every URL in text that is stored, shown to the room, logged or put in a process
+ * list: no username, token or password. Each `scheme://` token is cut at the first character that
+ * ends an authority, with tabs, newlines and other control characters removed the way a URL parser
+ * would, and parsed with the URL class; any `@` in the authority, or a parsed username or password,
+ * is refused, as is a URL that will not parse. `single` is for a value that must be one URL or path:
+ * it may not contain whitespace or control characters at all. `allowGitUser` lets an ssh remote
+ * keep the plain user `git`.
+ */
+export function urlProblem(text: string, o: { single?: boolean; allowGitUser?: boolean } = {}): string | null {
+  const creds = "That has a URL with a username or token in it. Leave the credentials out; the host's own git login does the authenticating.";
+  if (typeof text !== "string") return "That isn't valid.";
+  if (o.single && (/\s/.test(text) || CONTROL.test(text))) return "That has whitespace or control characters in it.";
+  for (const m of text.matchAll(/[a-z][a-z0-9+.-]*:\/\//gi)) {
+    const rest = text.slice(m.index! + m[0].length, m.index! + m[0].length + 2048).replace(/[\u0000-\u001f\u007f]/g, ""); // tabs, newlines and other control characters, which a URL parser drops
+    const authority = rest.split(/[/?#\\\s"'`<>|;()&]/)[0];
+    if (authority.includes("@")) {
+      const user = authority.slice(0, authority.lastIndexOf("@"));
+      if (!(o.allowGitUser && user === "git" && m[0].toLowerCase() === "ssh://")) return creds;
+      continue;
+    }
+    try {
+      const u = new URL(`${m[0]}${authority}`);
+      if (u.username || u.password) return creds;
+    } catch {
+      return "That has a URL that doesn't parse.";
+    }
+  }
   return null;
 }
 
-/** Command text that carries a URL with a username, token or password in it: refused, because command text is shown to the room, logged, and visible in the process list. */
+/** A remote a build may clone: https, ssh:// or git@, with no credentials in it. */
+export function repoProblem(repo: string): string | null {
+  if (typeof repo !== "string" || !/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(repo)) return "I need the repository's remote URL (https or git@) to build it.";
+  if (repo.startsWith("git@")) return (repo.split(":")[0].match(/@/g) ?? []).length === 1 ? null : "That repository URL has a username or token in it.";
+  return urlProblem(repo, { single: true, allowGitUser: true });
+}
+
+/** Command text that carries a URL with credentials: refused, because command text is shown to the room, logged, and visible in the process list. */
 export function commandProblem(command: string): string | null {
-  return /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]+@/i.test(command) ? "That command has a URL with a username or token in it. Leave the credentials out; the host's own git login does the authenticating." : null;
+  return urlProblem(command);
 }
 
 /**
@@ -216,8 +259,8 @@ export function commandProblem(command: string): string | null {
  */
 export function openProblem(open: string | undefined): string | null {
   if (open == null || open === "") return null;
-  if (typeof open !== "string" || open.length > 500 || /[\0\n\r]/.test(open)) return "The thing to open isn't valid.";
-  const leaky = commandProblem(open);
+  if (typeof open !== "string" || open.length > 500) return "The thing to open isn't valid.";
+  const leaky = urlProblem(open, { single: true });
   if (leaky) return leaky;
   const target = open.startsWith("simulator:") ? open.slice("simulator:".length) : open;
   if (/^https?:\/\//i.test(target)) return open.startsWith("simulator:") ? "A simulator build needs a path to an .app in the checkout." : null;
@@ -242,8 +285,8 @@ export function redactUrls(text: string): string {
   return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1***@");
 }
 
-const osa = (script: string) => run(["osascript", "-e", script]);
-const jxa = (script: string) => run(["osascript", "-l", "JavaScript", "-e", script]);
+const osa = (script: string) => runShort(["osascript", "-e", script]);
+const jxa = (script: string) => runShort(["osascript", "-l", "JavaScript", "-e", script]);
 
 /** "Accessibility" or "Automation" problems, worded as what to do about them. */
 function permissionHint(out: string) {
@@ -341,6 +384,8 @@ export class HostControl {
   /** Deadlines for fetching the code and for the approved build command. */
   static GIT_MS = 5 * 60_000;
   static BUILD_MS = 20 * 60_000;
+  /** Deadline for the short steps after a build (open, defaults, simctl launch). */
+  static STEP_MS = 30_000;
   /** The host's displays, refreshed in the background so the brain can read them any time. */
   displays: Display[] = [];
   bigScreen: BigScreen | null = null;
@@ -399,14 +444,14 @@ export class HostControl {
       switch (a.action) {
         case "open_app": {
           if (!a.app) return "Name the app.";
-          const r = await run(["open", "-a", a.app]);
+          const r = await runShort(["open", "-a", a.app]);
           if (r.code) return `Couldn't open ${a.app}: ${r.out}`;
           this.log(`Opened ${a.app} on the host.`);
           return `Opened ${a.app}.`;
         }
         case "open_url": {
           if (!a.url || !/^(https?|exp|exps):\/\//.test(a.url)) return "Give an http(s) or exp URL.";
-          const r = await run(a.app ? ["open", "-a", a.app, a.url] : ["open", a.url]);
+          const r = await runShort(a.app ? ["open", "-a", a.app, a.url] : ["open", a.url]);
           if (r.code) return `Couldn't open it: ${r.out}`;
           this.log(`Opened ${a.url} on the host.`);
           return `Opened ${a.url}.`;
@@ -427,7 +472,7 @@ export class HostControl {
           if (!a.app) return "Give the app's bundle id (for example com.apple.mobilesafari).";
           const sim = await this.pickSim(a.device);
           if (typeof sim === "string") return sim;
-          const r = await run(["xcrun", "simctl", "launch", sim.udid, a.app]);
+          const r = await runShort(["xcrun", "simctl", "launch", sim.udid, a.app]);
           return r.code ? `Couldn't launch ${a.app} in ${sim.name}: ${r.out.slice(0, 200)}` : `Launched ${a.app} in ${sim.name}.`;
         }
         case "screenshot":
@@ -441,8 +486,8 @@ export class HostControl {
           return "Shell commands run only after a person in the room approves them.";
         case "focus_jamsesh": {
           // The Mac app brings its big screen forward when it's reopened; without the app, a browser.
-          const app = await run(["open", "-b", "com.fluidcommerce.jamsesh"]);
-          if (app.code) await run(["open", `http://127.0.0.1:${new URL(this.session.hubUrl).port}/host`]);
+          const app = await runShort(["open", "-b", "com.fluidcommerce.jamsesh"]);
+          if (app.code) await runShort(["open", `http://127.0.0.1:${new URL(this.session.hubUrl).port}/host`]);
           return "JamSesh is in front.";
         }
         case "windows":
@@ -466,7 +511,7 @@ export class HostControl {
 
   /** The running process for an app name (or its bundle id), with how many real windows it has. */
   private async findProc(app: string, bundleId: string): Promise<{ name: string; windows: number } | null | "error"> {
-    const r = await run(["osascript", "-l", "JavaScript", "-e", FIND_PROC_JXA, app, bundleId]);
+    const r = await runShort(["osascript", "-l", "JavaScript", "-e", FIND_PROC_JXA, app, bundleId]);
     if (r.code) return "error";
     try {
       return JSON.parse(r.out);
@@ -493,7 +538,7 @@ export class HostControl {
     // process name often differs from the name it was opened by (Electron, Code).
     const bundles = await Promise.all(
       apps.map(async (app) => {
-        const [opened, id] = await Promise.all([run(["open", "-a", app]), osa(`id of app "${app.replace(/["\\]/g, "")}"`)]);
+        const [opened, id] = await Promise.all([runShort(["open", "-a", app]), osa(`id of app "${app.replace(/["\\]/g, "")}"`)]);
         return { opened: opened.code === 0, id: id.code ? "" : id.out.trim() };
       }),
     );
@@ -614,7 +659,17 @@ export class HostControl {
   private runShell(command: string, by: string): string {
     this.log(`Running on the host (approved by ${by}): ${redactUrls(command)}`);
     void run(["/bin/zsh", "-lc", command], 60_000)
-      .then((r) => this.log(r.stuck ? `Shell command is still running and couldn't be stopped: ${command}` : `Shell command finished with exit ${r.code}: ${command}${r.out.trim() ? `\n${r.out.slice(-600)}` : ""}`))
+      .then((r) => {
+        switch (r.status) {
+          case "stuck":
+            return this.log(`Shell command is still running and couldn't be stopped: ${redactUrls(command)}`);
+          case "ok":
+          case "failed":
+            return this.log(`Shell command finished with exit ${r.code}: ${redactUrls(command)}${r.out.trim() ? `\n${redactUrls(r.out.slice(-600))}` : ""}`);
+          default:
+            return assertNever(r);
+        }
+      })
       .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`));
     return `Running on the host: ${command}`;
   }
@@ -647,41 +702,74 @@ export class HostControl {
         this.log(`${o.by} started a preview build of ${label} on the host: ${redactUrls(o.command)}`);
         bus.send({ type: "toast", tone: "info", text: `Building ${label} on the host`, detail: redactUrls(o.command).slice(0, 80) });
         // Fetching the code is argv only (no shell, the URL is never in a command string); the approved build command is the only shell text.
-        const git = (args: string[], cwd?: string) => run(["git", ...args], HostControl.GIT_MS, cwd);
-        const fetched = existsSync(join(dir, ".git"))
-          ? await (async () => {
-              let r = await git(["fetch", "--quiet", "origin"], dir);
-              if (!r.code && branch) r = await git(["checkout", "--quiet", branch], dir);
-              if (!r.code && branch) r = await git(["reset", "--quiet", "--hard", `origin/${branch}`], dir);
-              if (!r.code && !branch) r = await git(["pull", "--quiet", "--ff-only"], dir);
+        // Every step goes through `step`: a command whose group could not be stopped ends the preview there (nothing after it runs),
+        // and the lock stays until that group is seen empty.
+        const stuck: { r: Extract<RunResult, { status: "stuck" }> | null } = { r: null };
+        const step = async (cmd: string[], ms: number, cwd?: string): Promise<{ code: number; out: string } | null> => {
+          const r = await run(cmd, ms, cwd);
+          switch (r.status) {
+            case "stuck":
+              stuck.r = r;
+              return null;
+            case "ok":
+            case "failed":
               return r;
-            })()
-          : await git(["clone", "--quiet", ...(branch ? ["--branch", branch] : []), "--", o.repo, dir]);
-        const r = fetched.code || fetched.stuck ? fetched : await run(["/bin/zsh", "-lc", o.command], HostControl.BUILD_MS, dir);
-        let result: string;
-        let ok = r.code === 0 && !r.stuck;
-        if (r.stuck) {
-          release = () => void r.gone?.then(() => this.builds.delete(slug));
-          result = `The ${label} build is still running and couldn't be stopped (${redactUrls(r.out.slice(-300))}). It stays locked until it exits.`;
-        } else if (r.code) {
-          result = `The ${label} build failed (exit ${r.code}): ${redactUrls(r.out.slice(-600))}`;
-        } else if (o.open?.startsWith("simulator:")) {
-          const app = confine(dir, o.open.slice("simulator:".length));
-          if (!app) throw new Error("the app to install is outside the checkout or missing");
-          await this.simulator();
-          const inst = await run(["xcrun", "simctl", "install", "booted", app], 120_000);
-          const id = (await run(["/usr/bin/defaults", "read", join(app, "Info"), "CFBundleIdentifier"])).out.trim();
-          const launch = inst.code ? inst : await run(["xcrun", "simctl", "launch", "booted", id]);
-          ok = !launch.code;
-          result = launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
-        } else if (o.open) {
-          const isUrl = /^https?:\/\//i.test(o.open);
-          const target = isUrl ? o.open : confine(dir, o.open);
-          const opened = target ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout or missing" };
-          ok = !opened.code;
-          result = opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
+            default:
+              return assertNever(r);
+          }
+        };
+        const git = (args: string[], cwd?: string) => step(["git", ...args], HostControl.GIT_MS, cwd);
+        let fetched: { code: number; out: string } | null;
+        if (existsSync(join(dir, ".git"))) {
+          fetched = await git(["fetch", "--quiet", "origin"], dir);
+          if (fetched && !fetched.code && branch) fetched = await git(["checkout", "--quiet", branch], dir);
+          if (fetched && !fetched.code && branch) fetched = await git(["reset", "--quiet", "--hard", `origin/${branch}`], dir);
+          if (fetched && !fetched.code && !branch) fetched = await git(["pull", "--quiet", "--ff-only"], dir);
         } else {
-          result = `${label} is built on the host (${dir}).`;
+          fetched = await git(["clone", "--quiet", ...(branch ? ["--branch", branch] : []), "--", o.repo, dir]);
+        }
+        const built = fetched && fetched.code === 0 ? await step(["/bin/zsh", "-lc", o.command], HostControl.BUILD_MS, dir) : fetched;
+        let result: string;
+        let ok = false;
+        const launched = async (): Promise<string> => {
+          if (o.open?.startsWith("simulator:")) {
+            const app = confine(dir, o.open.slice("simulator:".length));
+            if (!app) throw new Error("the app to install is outside the checkout or missing");
+            await this.simulator();
+            const inst = await step(["xcrun", "simctl", "install", "booted", app], 120_000);
+            if (!inst) return "";
+            if (inst.code) return `Built ${label}, but the Simulator couldn't run it: ${inst.out.slice(0, 300)}`;
+            const idr = await step(["/usr/bin/defaults", "read", join(app, "Info"), "CFBundleIdentifier"], HostControl.STEP_MS);
+            if (!idr) return "";
+            const launch = idr.code ? idr : await step(["xcrun", "simctl", "launch", "booted", idr.out.trim()], HostControl.STEP_MS);
+            if (!launch) return "";
+            ok = !launch.code;
+            return launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
+          }
+          if (o.open) {
+            const isUrl = /^https?:\/\//i.test(o.open);
+            const target = isUrl ? o.open : confine(dir, o.open);
+            if (!target) return `Built ${label}, but couldn't open ${o.open}: that path is outside the checkout or missing`;
+            const opened = await step(["open", target], HostControl.STEP_MS);
+            if (!opened) return "";
+            ok = !opened.code;
+            return opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
+          }
+          ok = true;
+          return `${label} is built on the host (${dir}).`;
+        };
+        if (!built) {
+          result = ""; // stuck: set below
+        } else if (built.code) {
+          result = `The ${label} build failed (exit ${built.code}): ${redactUrls(built.out.slice(-600))}`;
+        } else {
+          result = await launched();
+        }
+        if (stuck.r) {
+          const s2 = stuck.r;
+          ok = false;
+          release = () => void s2.gone.then(() => this.builds.delete(slug));
+          result = `The ${label} build is still running a command that couldn't be stopped (${redactUrls(s2.out.slice(-300))}). It stays locked until that exits.`;
         }
         result = redactUrls(result);
         this.log(result);
@@ -702,7 +790,7 @@ export class HostControl {
 
   /** The simulator to act on: the booted one that matches, else one that's booted for it. */
   private async pickSim(device?: string): Promise<{ udid: string; name: string } | string> {
-    const list = await run(["xcrun", "simctl", "list", "devices", "available", "-j"]);
+    const list = await runShort(["xcrun", "simctl", "list", "devices", "available", "-j"]);
     if (list.code) return `Xcode's simctl isn't available: ${list.out.slice(0, 200)}`;
     const devices = Object.values(JSON.parse(list.out).devices as Record<string, any[]>).flat();
     const want = (device ?? "iPhone").toLowerCase();
@@ -712,16 +800,16 @@ export class HostControl {
       devices.filter((d) => d.name.toLowerCase().includes(want)).pop() ??
       devices.find((d) => d.name.startsWith("iPhone"));
     if (!pick) return "No simulator device is installed.";
-    if (pick.state !== "Booted") await run(["xcrun", "simctl", "boot", pick.udid], 120_000);
+    if (pick.state !== "Booted") await runShort(["xcrun", "simctl", "boot", pick.udid], 120_000);
     return { udid: pick.udid, name: pick.name };
   }
 
   async simulator(device?: string, url?: string): Promise<string> {
     const pick = await this.pickSim(device);
     if (typeof pick === "string") return pick;
-    await run(["open", "-a", "Simulator"]);
+    await runShort(["open", "-a", "Simulator"]);
     if (url) {
-      const r = await run(["xcrun", "simctl", "openurl", pick.udid, url]);
+      const r = await runShort(["xcrun", "simctl", "openurl", pick.udid, url]);
       if (r.code) return `Booted ${pick.name}, but couldn't open ${url}: ${r.out}`;
     }
     this.log(`Simulator: ${pick.name}${url ? ` → ${url}` : ""}.`);
@@ -735,7 +823,7 @@ export class HostControl {
     const dir = join(config.home, "shots");
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `sim-${Date.now()}.png`);
-    const r = await run(["xcrun", "simctl", "io", pick.udid, "screenshot", "--type=png", file]);
+    const r = await runShort(["xcrun", "simctl", "io", pick.udid, "screenshot", "--type=png", file]);
     const size = pngSize(file);
     if (r.code || !size) return `Couldn't take a screenshot of ${pick.name}: ${r.out.slice(0, 200)}`;
     this.simShot = { udid: pick.udid, name: pick.name, px: size.width, py: size.height };
@@ -756,9 +844,9 @@ export class HostControl {
     const shot = this.simShot && this.simShot.udid === pick.udid ? this.simShot : null;
     if (!shot) return "Take a sim_screenshot first: taps are given in its pixels.";
     if (x! < 0 || y! < 0 || x2! < 0 || y2! < 0 || x! > shot.px || x2! > shot.px || y! > shot.py || y2! > shot.py) return `That point is outside the screenshot (${shot.px}×${shot.py}).`;
-    await run(["open", "-a", "Simulator"]);
+    await runShort(["open", "-a", "Simulator"]);
     await sleep(400);
-    const wins = await run(["osascript", "-l", "JavaScript", "-e", APP_WINDOWS_JXA, "Simulator"]);
+    const wins = await runShort(["osascript", "-l", "JavaScript", "-e", APP_WINDOWS_JXA, "Simulator"]);
     const list = wins.code ? [] : (JSON.parse(wins.out || "[]") as { x: number; y: number; width: number; height: number }[]);
     if (!list.length) return "The Simulator window isn't on screen. Call the simulator action first.";
     // iPads (and iPhones below ~1000 px wide) are 2x; the large iPhones are 3x.
@@ -768,7 +856,7 @@ export class HostControl {
     const at = (px: number, py: number) => [rect.x + (px / shot.px) * rect.width, rect.y + (py / shot.py) * rect.height];
     const [gx, gy] = at(x!, y!);
     const [gx2, gy2] = at(x2!, y2!);
-    const r = await run(["osascript", "-l", "JavaScript", "-e", MOUSE_JXA, String(gx), String(gy), String(gx2), String(gy2), String(Math.max(ms, 1))]);
+    const r = await runShort(["osascript", "-l", "JavaScript", "-e", MOUSE_JXA, String(gx), String(gy), String(gx2), String(gy2), String(Math.max(ms, 1))]);
     if (r.out.trim() === "noaccess") return "The host Mac hasn't allowed Accessibility for JamSesh yet, so it can't click: open JamSesh's menu bar menu > Set up this Mac.";
     if (r.code) return `Couldn't send the ${ms ? "swipe" : "tap"}: ${r.out.slice(0, 200)}`;
     this.log(`Simulator: ${ms ? "swiped" : "tapped"} on ${pick.name}.`);
@@ -780,7 +868,7 @@ export class HostControl {
     if (!text) return "Give the text to type.";
     if (text.length > 500) return "That's too much text to type at once.";
     if (app) {
-      await run(["open", "-a", app]);
+      await runShort(["open", "-a", app]);
       await sleep(400);
     }
     const r = await osa(`tell application "System Events" to keystroke ${JSON.stringify(text)}`);
@@ -792,10 +880,10 @@ export class HostControl {
   async click(x?: number, y?: number, app?: string): Promise<string> {
     if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return "Give x and y: a point on the host's screen, in points.";
     if (app) {
-      await run(["open", "-a", app]);
+      await runShort(["open", "-a", app]);
       await sleep(400);
     }
-    const r = await run(["osascript", "-l", "JavaScript", "-e", MOUSE_JXA, String(x), String(y), String(x), String(y), "1"]);
+    const r = await runShort(["osascript", "-l", "JavaScript", "-e", MOUSE_JXA, String(x), String(y), String(x), String(y), "1"]);
     if (r.out.trim() === "noaccess") return "The host Mac hasn't allowed Accessibility for JamSesh yet, so it can't click: open JamSesh's menu bar menu > Set up this Mac.";
     return r.code ? `Couldn't click: ${r.out.slice(0, 200)}` : `Clicked at ${Math.round(x)},${Math.round(y)}.`;
   }
@@ -808,13 +896,13 @@ export class HostControl {
     let args = ["screencapture", "-x", "-o", file];
     let what = "the host's screen";
     if (app) {
-      const wins = await run(["osascript", "-l", "JavaScript", "-e", APP_WINDOWS_JXA, app]);
+      const wins = await runShort(["osascript", "-l", "JavaScript", "-e", APP_WINDOWS_JXA, app]);
       const w = wins.code ? undefined : (JSON.parse(wins.out || "[]") as { id: number }[])[0];
       if (!w) return `${app} has no window on screen.`;
       args = ["screencapture", "-x", "-o", "-l", String(w.id), file];
       what = `${app}'s window`;
     }
-    const r = await run(args);
+    const r = await runShort(args);
     const size = pngSize(file);
     if (r.code || !size) return `Couldn't capture ${what}. The host Mac may not have allowed Screen Recording for JamSesh (System Settings > Privacy & Security): ${r.out.slice(0, 160)}`;
     this.onImage(file, app ? `${app} on the host` : "The host's screen");
