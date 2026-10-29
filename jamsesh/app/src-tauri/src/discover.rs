@@ -25,7 +25,12 @@ struct Entry {
     up: bool,
     /// Checks in a row it failed since it last answered.
     misses: u32,
+    /// The newest check whose answer was applied: an older check finishing later is stale and ignored.
+    checked: u64,
 }
+
+/// Numbers every check as it starts (checks overlap: the sweep, and one per Bonjour answer).
+static CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A listed host that fails this many checks in a row is hidden (one slow answer on a busy network
 /// isn't enough); an advertised host that has never answered isn't listed at all.
@@ -152,7 +157,8 @@ impl Hosts {
             // A renamed advert for the same address replaces the old one.
             m.retain(|k, e| e.found.url != found.url || *k == key);
             let up = m.get(&key).is_some_and(|e| e.up && e.found.url == found.url);
-            m.insert(key, Entry { found, up, misses: 0 });
+            let checked = m.get(&key).map_or(0, |e| e.checked);
+            m.insert(key, Entry { found, up, misses: 0, checked });
         }
     }
 
@@ -167,11 +173,14 @@ impl Hosts {
     fn check(&self, answers: impl Fn(&Found) -> bool) {
         let all: Vec<(String, Found)> = self.0.lock().map(|m| m.iter().map(|(k, e)| (k.clone(), e.found.clone())).collect()).unwrap_or_default();
         for (key, found) in all {
+            let n = CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let ok = answers(&found);
             if let Ok(mut m) = self.0.lock()
                 && let Some(e) = m.get_mut(&key)
                 && e.found.url == found.url
+                && n > e.checked
             {
+                e.checked = n;
                 if ok {
                     (e.up, e.misses) = (true, 0);
                 } else {
@@ -334,6 +343,43 @@ mod tests {
         hosts.check(|_| true);
         assert_eq!(hosts.list().len(), 1);
         hosts.withdraw("new");
+        assert!(hosts.list().is_empty());
+    }
+
+    #[test]
+    fn a_stale_check_finishing_late_cant_hide_a_host_a_newer_check_found() {
+        let hosts = Hosts::default();
+        hosts.advertise("a".into(), host("http://10.0.0.2:4747"));
+        // Two older checks start and hang (a slow network); then a newer one finds the host answering.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let mut release = Vec::new();
+        let mut old = Vec::new();
+        for _ in 0..2 {
+            let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+            let (slow, started) = (hosts.clone(), started_tx.clone());
+            old.push(std::thread::spawn(move || {
+                slow.check(|_| {
+                    started.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                    false
+                })
+            }));
+            started_rx.recv().unwrap();
+            release.push(go_tx);
+        }
+        hosts.check(|_| true);
+        assert_eq!(hosts.list().len(), 1);
+        // Both old checks now say "no answer": two misses would hide it, but they're stale.
+        for go in release {
+            go.send(()).unwrap();
+        }
+        for t in old {
+            t.join().unwrap();
+        }
+        assert_eq!(hosts.list().len(), 1);
+        // A newer check that fails twice still hides it.
+        hosts.check(|_| false);
+        hosts.check(|_| false);
         assert!(hosts.list().is_empty());
     }
 
