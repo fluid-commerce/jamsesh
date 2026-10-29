@@ -573,6 +573,11 @@ fn draw(p: &P, icon: Icon) {
             p.line(5.5, 4.0, 5.5, 12.0);
             p.line(10.5, 4.0, 10.5, 12.0);
         }
+        PanelLeft | PanelRight => {
+            p.rect(2.5, 3.5, 13.5, 12.5, 1.0);
+            let (x0, x1) = if icon == PanelLeft { (2.5, 6.5) } else { (9.5, 13.5) };
+            p.fill(&[(x0, 3.5), (x1, 3.5), (x1, 12.5), (x0, 12.5)]);
+        }
         Help => {
             p.circle(8.0, 8.0, 6.0);
             p.arc(8.0, 6.4, 2.0, PI * 1.05, TAU + 0.7);

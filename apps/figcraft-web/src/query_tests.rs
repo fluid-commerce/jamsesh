@@ -1,6 +1,6 @@
 //! `#join=`, `?control`, `?canvas` and `?name=` in the page's URL.
 
-use crate::query::{canvas, control, join_link, name};
+use crate::query::{canvas, control, join_link, name, panels};
 
 #[test]
 fn join_takes_the_rest_of_the_fragment() {
@@ -62,4 +62,13 @@ fn the_name_is_unescaped_and_bounded() {
     assert_eq!(name("?canvas"), None);
     assert_eq!(name("?username=x"), None, "only the whole entry name");
     assert_eq!(name(&format!("?name={}", "a".repeat(200))).map(|n| n.chars().count()), Some(64));
+}
+
+#[test]
+fn panels_is_its_own_entry() {
+    assert!(panels("?canvas&panels"));
+    assert!(panels("?panels=1&control"));
+    assert!(!panels("?canvas&control"));
+    assert!(!panels("?canvas&panelsx"), "only the whole entry name");
+    assert!(!panels(""));
 }

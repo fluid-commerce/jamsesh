@@ -194,6 +194,18 @@ fn region(s: &mut Session, step: i64) -> Result<Value> {
     ok()
 }
 
+fn canvas_panel(s: &mut Session, p: &Value) -> Result<Value> {
+    let left = match p.get("side").and_then(Value::as_str) {
+        Some("left") => true,
+        Some("right") => false,
+        _ => return Err(bad("view.canvasPanel", "`side` must be \"left\" or \"right\"")),
+    };
+    let (l, r) = &mut s.prefs.canvas_panels;
+    let on = boolean(p, "on").unwrap_or(!if left { *l } else { *r });
+    *(if left { l } else { r }) = on;
+    Ok(json!({"left": s.prefs.canvas_panels.0, "right": s.prefs.canvas_panels.1}))
+}
+
 fn pref(s: &mut Session, p: &Value, f: fn(&mut crate::Prefs) -> &mut bool) -> Result<Value> {
     let slot = f(&mut s.prefs);
     *slot = boolean(p, "on").unwrap_or(!*slot);
@@ -308,6 +320,13 @@ pub fn specs() -> Vec<CommandSpec> {
             s.request_ui("window.fullscreen", json!({"on": boolean(p, "on")}));
             ok()
         }),
+        spec!(
+            "view.canvasPanel",
+            "Slide a panel in or out of the canvas",
+            "{side (\"left\": layers, \"right\": properties), on?}  the room's canvas keeps its panels out of the way until asked",
+            false,
+            canvas_panel
+        ),
         spec!("view.layers", "Layers panel", "{}", false, |s, _| ui(s, "panel.layers")),
         spec!("view.assets", "Assets panel", "{}", false, |s, _| ui(s, "panel.assets")),
         spec!("view.design", "Design panel", "{}", false, |s, _| ui(s, "panel.design")),

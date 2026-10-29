@@ -102,6 +102,9 @@ pub struct Prefs {
     /// `widget:<plugin>`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recent_actions: Vec<String>,
+    /// Whether the layers (left) and properties (right) panels are slid in over a canvas-only
+    /// view (`view.canvasPanel`); the room's canvas starts with both out of the way.
+    pub canvas_panels: (bool, bool),
 }
 
 /// Recently run actions kept for the Actions palette (newest first).
@@ -140,6 +143,7 @@ impl Default for Prefs {
             home_order: "desc".into(),
             view: BTreeMap::new(),
             recent_actions: Vec::new(),
+            canvas_panels: (false, false),
         }
     }
 }

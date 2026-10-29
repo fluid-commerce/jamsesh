@@ -112,6 +112,10 @@ icons! {
     Home,
     Bell,
     Panels,
+    /// A window with its left strip set apart: the layers panel (the room canvas's button).
+    PanelLeft,
+    /// The same on the right: the properties panel.
+    PanelRight,
     Help,
     Dots,
     Mask,
