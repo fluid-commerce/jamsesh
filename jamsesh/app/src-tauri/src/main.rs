@@ -8,6 +8,7 @@ mod fonts;
 mod host;
 mod perms;
 mod proxy;
+mod screens;
 mod watchdog;
 
 use std::path::PathBuf;
@@ -60,12 +61,8 @@ struct Inner {
 
 struct App {
     inner: Mutex<Inner>,
-    /// The displays as last seen (positions and sizes); a change rearranges a user-less host's screens.
-    displays: std::sync::Mutex<String>,
-    /// Bumped by each request to rearrange the screens; only the latest one runs (see `schedule_arrange`).
-    arrange_gen: std::sync::atomic::AtomicU64,
-    /// Until when big-screen moves are the arrangement's own and don't trigger another one.
-    arranged_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// The displays as last seen, and the arrangement's own moves (see screens.rs).
+    screens: screens::Runtime,
     /// What the menu bar menu shows now; it's only rebuilt when this changes (an open menu stays open).
     tray_shown: std::sync::Mutex<String>,
     hosts: discover::Hosts,
@@ -146,181 +143,6 @@ fn close_start(app: &AppHandle) {
     }
 }
 
-/// The big screen goes full screen on the display that isn't this Mac's main one, when there is one.
-/// A big-screen window, full screen on one display (in the same Space, so app windows the brain
-/// arranges there can sit on top).
-fn big_window(app: &AppHandle, label: &str, url: &str, at: Option<tauri::PhysicalPosition<i32>>) -> Result<(), String> {
-    let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
-    let w = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
-        .devtools(devtools())
-        .title("JamSesh big screen")
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
-        // A window behind another keeps its microphone and timers (WebKit would otherwise throttle
-        // it, and the room mic would go quiet whenever someone's window covers the big screen).
-        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
-        .inner_size(1440.0, 900.0)
-        .build()
-        .map_err(|e| e.to_string())?;
-    if let Some(p) = at {
-        let _ = w.set_position(p);
-    }
-    let _ = w.set_simple_fullscreen(true);
-    Ok(())
-}
-
-/// User-less host: one big screen per display. The main display gets the main screen (header,
-/// join code, room feed); the others, left to right, are "screen-2", "screen-3", and so on. Runs
-/// again whenever the displays change or a big screen leaves its display: a screen already on its
-/// display stays as it is (no reload), one on the wrong display moves back, a missing one opens and
-/// one whose display is gone closes (and the hub hears so, see `screen_closed`).
-fn arrange_screens(app: &AppHandle, origin: &str) -> Result<(), String> {
-    let mut monitors = app.available_monitors().unwrap_or_default();
-    if monitors.is_empty() {
-        return Ok(());
-    }
-    let primary = app.primary_monitor().ok().flatten().map(|m| *m.position());
-    monitors.sort_by_key(|m| (Some(*m.position()) != primary, m.position().x, m.position().y));
-    let wanted: Vec<(String, String, tauri::PhysicalPosition<i32>)> = monitors
-        .iter()
-        .enumerate()
-        .map(|(i, m)| match i {
-            0 => ("bigscreen".to_string(), "/host".to_string(), *m.position()),
-            _ => (format!("bigscreen-{}", i + 1), format!("/host?screen=screen-{}", i + 1), *m.position()),
-        })
-        .collect();
-    // The moves below are this arrangement's own: they don't ask for another one.
-    if let Ok(mut until) = app.state::<Arc<App>>().arranged_until.lock() {
-        *until = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-    }
-    for (label, w) in app.webview_windows() {
-        if label.starts_with("bigscreen") && !wanted.iter().any(|(l, ..)| *l == label) {
-            let _ = w.close();
-        }
-    }
-    for (label, path, at) in wanted {
-        match app.get_webview_window(&label) {
-            Some(w) => {
-                if w.current_monitor().ok().flatten().map(|m| *m.position()) != Some(at) {
-                    let _ = w.set_simple_fullscreen(false);
-                    let _ = w.set_position(at);
-                    let _ = w.set_simple_fullscreen(true);
-                }
-            }
-            None => big_window(app, &label, &host::window_url(origin, &path), Some(at))?,
-        }
-    }
-    Ok(())
-}
-
-/// Rearranges a user-less host's screens shortly (once things settle: a display being plugged in
-/// or a window being moved fires many events).
-fn schedule_arrange(app: &AppHandle) {
-    let state = app.state::<Arc<App>>().inner().clone();
-    let generation = state.arrange_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        if state.arrange_gen.load(std::sync::atomic::Ordering::SeqCst) != generation {
-            return;
-        }
-        let origin = {
-            let inner = state.inner.lock().await;
-            if inner.cfg.role.as_deref() != Some("host") || !inner.cfg.userless {
-                return;
-            }
-            inner.hub.as_ref().map(|h| h.origin())
-        };
-        if let Some(origin) = origin {
-            let _ = arrange_screens(&app, &origin);
-        }
-    });
-}
-
-/// Checks the displays (from the menu bar's refresh loop) and rearranges when they changed.
-fn watch_displays(app: &AppHandle) {
-    let mut seen: Vec<String> = app.available_monitors().unwrap_or_default().iter().map(|m| format!("{:?}{:?}", m.position(), m.size())).collect();
-    seen.sort();
-    let primary = app.primary_monitor().ok().flatten().map(|m| *m.position());
-    let now = format!("{primary:?}|{}", seen.join(","));
-    let state = app.state::<Arc<App>>();
-    let changed = match state.displays.lock() {
-        Ok(mut last) if *last != now => {
-            let first = last.is_empty();
-            *last = now;
-            !first
-        }
-        _ => false,
-    };
-    if changed {
-        schedule_arrange(app);
-    }
-}
-
-/// A big-screen window moved: if it left its display, put the screens back in order.
-fn screen_moved(app: &AppHandle) {
-    let ours = app.state::<Arc<App>>().arranged_until.lock().ok().and_then(|u| *u).is_some_and(|until| std::time::Instant::now() < until);
-    if !ours {
-        schedule_arrange(app);
-    }
-}
-
-/// A user-less host's extra screen closed: tell the hub, so the brain stops sending it things.
-/// (Not when a window with the same label is open again by then.)
-fn screen_closed(app: &AppHandle, label: &str) {
-    let Some(n) = label.strip_prefix("bigscreen-") else { return };
-    let (app, label, screen) = (app.clone(), label.to_string(), format!("screen-{n}"));
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        if app.get_webview_window(&label).is_some() {
-            return;
-        }
-        let origin = app.state::<Arc<App>>().inner.lock().await.hub.as_ref().map(|h| h.origin());
-        if let Some(origin) = origin {
-            let body = serde_json::json!({ "screen": screen }).to_string();
-            let _ = proxy::send("DELETE", &origin, "/api/display", None, &body).await;
-        }
-    });
-}
-
-fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("bigscreen") {
-        if !next_display {
-            let _ = w.show();
-            let _ = w.set_focus();
-            return Ok(());
-        }
-        let _ = w.close();
-    }
-    let parsed: url::Url = host::window_url(origin, "/host").parse().map_err(|e: url::ParseError| e.to_string())?;
-    let w = WebviewWindowBuilder::new(app, "bigscreen", WebviewUrl::External(parsed))
-        .devtools(devtools())
-        .title("JamSesh big screen")
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(18.0, 30.0))
-        // A window behind another keeps its microphone and timers (WebKit would otherwise throttle
-        // it, and the room mic would go quiet whenever someone's window covers the big screen).
-        .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
-        .inner_size(1440.0, 900.0)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let monitors = w.available_monitors().unwrap_or_default();
-    if monitors.len() > 1 {
-        let primary = w.primary_monitor().ok().flatten().map(|m| *m.position());
-        let current = w.current_monitor().ok().flatten().map(|m| *m.position());
-        let others: Vec<_> = monitors.iter().filter(|m| Some(*m.position()) != primary).collect();
-        let pick = if next_display { monitors.iter().find(|m| Some(*m.position()) != current) } else { others.first().copied() };
-        if let Some(m) = pick {
-            let _ = w.set_position(*m.position());
-        }
-    }
-    // Full screen in the same Space, so app windows the brain arranges on this display can sit on top.
-    let _ = w.set_simple_fullscreen(true);
-    Ok(())
-}
-
 // ---- sessions ----
 
 async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
@@ -345,10 +167,8 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
     let setup_done = inner.cfg.host_setup_done;
     let userless = inner.cfg.userless;
     drop(inner);
-    if userless {
-        arrange_screens(app, &origin)?;
-    } else {
-        open_big_screen(app, &origin, false)?;
+    screens::arrange_and_offer(app, &origin).await?;
+    if !userless {
         open_window(app, "client", &host::window_url(&origin, "/client"), "JamSesh")?;
     }
     close_start(app);
@@ -669,10 +489,7 @@ async fn refresh_tray(app: &AppHandle) {
                 menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "muteroom", "Mute or unmute the room mic", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "bigscreen", "Show the big screen", true, None::<&str>)?)?;
-                // A user-less host has a big screen on every display already.
-                if !userless {
-                    menu.append(&MenuItem::with_id(app, "nextdisplay", "Move the big screen to the next display", true, None::<&str>)?)?;
-                }
+                menu.append(&MenuItem::with_id(app, "screens", "Screens…", true, None::<&str>)?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "agents", "Connect my agents", true, None::<&str>)?)?;
                 menu.append(&tauri::menu::CheckMenuItem::with_id(
@@ -718,10 +535,10 @@ fn on_menu(app: &AppHandle, id: &str) {
     let id = id.to_string();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<Arc<App>>().inner().clone();
-        let (role, hub_origin, relay, userless) = {
+        let (role, hub_origin, relay) = {
             let inner = state.inner.lock().await;
             let relay = inner.relay.as_ref().map(|r| r.window_url("/client"));
-            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.cfg.userless)
+            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay)
         };
         match id.as_str() {
             "open" => match (role.as_deref(), hub_origin, relay) {
@@ -729,12 +546,13 @@ fn on_menu(app: &AppHandle, id: &str) {
                 (Some("join"), _, Some(u)) => drop(open_window(&app, "client", &u, "JamSesh")),
                 _ => open_start(&app),
             },
-            "bigscreen" | "nextdisplay" => {
+            // Every screen keeps its own display, so only reopen what's missing.
+            "bigscreen" => {
                 if let Some(o) = hub_origin {
-                    // User-less: every display keeps its own screen, so only reopen what's missing.
-                    let _ = if userless { arrange_screens(&app, &o) } else { open_big_screen(&app, &o, id == "nextdisplay") };
+                    let _ = screens::arrange(&app, &o).await;
                 }
             }
+            "screens" => screens::open_setup(&app),
             "agents" => {
                 let result = set_up_agents(&app, &state).await;
                 let (kind, title, text) = match result {
@@ -767,8 +585,7 @@ fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "reopen" => match (role.as_deref(), hub_origin) {
-                (Some("host"), Some(o)) if userless => drop(arrange_screens(&app, &o)),
-                (Some("host"), Some(o)) => drop(open_big_screen(&app, &o, false)),
+                (Some("host"), Some(o)) => drop(screens::arrange(&app, &o).await),
                 _ => on_menu(&app, "open"),
             },
             "leave" => leave(&app, &state).await,
@@ -823,18 +640,14 @@ async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Opt
 /// (a big screen on every display).
 fn set_userless(app: &AppHandle, on: bool, origin: Option<&str>) {
     let Some(origin) = origin else { return };
+    // The displays' defaults differ (a user-less host also presents on the laptop's own display).
+    let (a, o) = (app.clone(), origin.to_string());
+    tauri::async_runtime::spawn(async move { drop(screens::arrange(&a, &o).await) });
     if on {
         if let Some(w) = app.get_webview_window("client") {
             let _ = w.close();
         }
-        let _ = arrange_screens(app, origin);
     } else {
-        for (label, w) in app.webview_windows() {
-            if label.starts_with("bigscreen") {
-                let _ = w.close();
-            }
-        }
-        let _ = open_big_screen(app, origin, false);
         let _ = open_window(app, "client", &host::window_url(origin, "/client"), "JamSesh");
     }
 }
@@ -917,8 +730,8 @@ fn main() {
                 return;
             }
             match event {
-                tauri::WindowEvent::Moved(_) => screen_moved(window.app_handle()),
-                tauri::WindowEvent::Destroyed => screen_closed(window.app_handle(), label),
+                tauri::WindowEvent::Moved(_) => screens::moved(window.app_handle()),
+                tauri::WindowEvent::Destroyed => screens::closed(window.app_handle(), label),
                 _ => {}
             }
         })
@@ -936,7 +749,12 @@ fn main() {
             get_userless,
             toggle_userless,
             local_fonts,
-            heartbeat
+            heartbeat,
+            screens::screens_state,
+            screens::screens_preview,
+            screens::screens_save,
+            screens::screens_identify,
+            screens::screens_close
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
@@ -946,9 +764,7 @@ fn main() {
                 hosts: discover::start(),
                 dir,
                 tray_shown: std::sync::Mutex::new(String::new()),
-                displays: std::sync::Mutex::new(String::new()),
-                arrange_gen: std::sync::atomic::AtomicU64::new(0),
-                arranged_until: std::sync::Mutex::new(None),
+                screens: Default::default(),
                 beats: Default::default(),
             });
             app.manage(state.clone());
@@ -983,7 +799,7 @@ fn main() {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     refresh_tray(&handle).await;
-                    watch_displays(&handle);
+                    screens::watch(&handle);
                     watchdog::tick(&handle, &state.beats, &state.dir, &mut last_tick);
                 }
             });

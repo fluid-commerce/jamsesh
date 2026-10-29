@@ -16,6 +16,11 @@ const COMMANDS: &[&str] = &[
     "toggle_userless",
     "local_fonts",
     "heartbeat",
+    "screens_state",
+    "screens_preview",
+    "screens_save",
+    "screens_identify",
+    "screens_close",
 ];
 
 fn main() {

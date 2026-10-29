@@ -128,26 +128,48 @@ the client.
   takes the first free one. It waits up to 60 seconds for `/healthz`. The hub in turn starts
   `figcraft-server` and, when installed, `whisper-server`. Quitting the app stops the hub
   (`SIGTERM`, then kill after 10 seconds), which stops its children.
-- Opens the **big screen** window at `/host`. With two or more displays it moves to the first
-  display that isn't the main one; with one it stays there. It uses same-Space full screen, so
-  app windows the brain arranges can sit on top of it [A29c]. The menu item **Move the big screen
-  to the next display** moves it.
+- Opens the **big screen** at `/host`, full screen in its own display (same-Space full screen, so
+  app windows the brain arranges can sit on top of it [A29c]). With one display it is there. With
+  two or more it follows the **Screens** setup (below).
 - Opens your own **client window** (`/client`), because the person at the host is usually a
   participant.
-- **User-less host** (**Use every display (nobody uses this Mac)** in the menu bar menu, saved with
-  the app): when nobody uses the host's desktop, every connected display becomes a presentation
-  surface. The app opens one big-screen window per display, each in same-Space full screen on its
-  own display, and no client window. The main display gets the main screen (`/host`, with the
-  header, join code, and room feed); every other display gets an extra screen
-  (`/host?screen=screen-2`, `screen-3`, and so on) that shows only its stage, edge to edge, with no
-  header, room mic, or side panels. Each screen has its own stage, reports its size, and reverts to
-  the board after 6 minutes like the main one (unless it shows a live share). The brain sees every screen by id with its
-  resolution, aspect ratio, and what it shows, and `show_on_screen`, `set_layout`, and
-  `build_custom_view` take a `screen` to put things on a specific one (see
+- **Screens** (3.4; `src-tauri/src/screens.rs`, `ui/screens.html`): the first time this Mac hosts with
+  more than one display it hasn't seen before, a **Screens** window opens (also **Screens…** in the
+  menu bar menu). It draws the displays where macOS arranges them, numbered left to right, and each is
+  marked **Main**, **Extra** or **Unused**; exactly one is main. **Identify** flashes each display's
+  number, large, on that display for 3 seconds. Screens are named by where they sit ("Left TV" and
+  "Right TV", "Top TV" and "Bottom TV", "Left TV", "Middle TV" and "Right TV"; more than three are
+  "Screen 1"...; a laptop's own display is "Laptop screen"), and the name can be typed over. The
+  choice is remembered per display set (keyed by each display's name, size and scale, not its
+  position), so the same TVs plugged in again keep it; an extra keeps its number ("screen-3") when
+  another is unplugged. Defaults before anyone chooses: with a laptop plus other displays, the
+  laptop's own display sits out (that is where its person works) and the leftmost other display is
+  main; with no laptop in the way, every display presents and the primary one is main.
+  The app opens one window per used display: main is `/host` (header, join code, room feed); each
+  extra is `/host?screen=screen-N`, showing only its stage, edge to edge, with no header, room mic or
+  side panels. Windows are built on their own display and placed in logical points (physical pixels
+  differ in scale between displays, which is why windows used to land wrong), then set to
+  same-Space full screen. Every 5 seconds the app checks the displays: one unplugged closes its
+  window (and the hub drops that screen); one plugged in (or the lid closed or opened) opens or
+  rearranges windows by the remembered or default setup; a window that leaves its display is put
+  back. A window already on its display is not reloaded. After arranging, the app tells the hub
+  each screen's id, name and role (`POST /api/screens/config`, local only).
+- **User-less host** (**Use every display (nobody uses this Mac)**, saved with the app): no client
+  window opens and the laptop's own display presents too (the defaults above, without the laptop sitting
+  out). Each screen has its own stage, reports its size, and reverts to the board after 6 minutes like
+  the main one (unless it shows a live share). The brain sees every screen by name and id with its
+  resolution, aspect ratio and what it shows; `show_on_screen`, `set_layout` and `build_custom_view`
+  take a `screen` (a name or an id: "the left TV" works; no screen is the main one) (see
   [10.1](#101-layout)).
+- **Put on screen**: the hub's state lists the room's screens (id, name, role, size, stage). With
+  two or more, a cast from someone's app (Work tab, tapping a tile) opens a picker with a live
+  thumbnail of each screen (its stage drawn at the screen's own size and scaled down) and its name; the
+  chosen screen gets the cast (`POST /api/stage` takes `screen`, an id or a name; none, or one that
+  isn't there, is the main screen). With one screen nothing is asked. Each stage carries its
+  `screenId`.
 - Keeps hosting from the menu bar when its windows are closed. The menu shows that it's hosting,
   the current join code (refreshed every 5 seconds), who's connected, and **Open my window**,
-  **Show the big screen**, **Move the big screen to the next display**, **Mute the room mic**,
+  **Show the big screen**, **Screens…**, **Mute the room mic**,
   **Connect my agents**, **Set up this Mac…**, **Set up remote access…**, **Stop hosting**, and
   **Quit JamSesh**.
 - If the app goes away without stopping the hub (a crash or Force Quit), the hub notices within 2

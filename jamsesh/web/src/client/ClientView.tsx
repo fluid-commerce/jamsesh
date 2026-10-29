@@ -9,6 +9,7 @@ import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share"
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
 import { Stage } from "../host/Stage";
+import { cast } from "./CastPicker";
 import { InviteButton } from "./Invite";
 import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
@@ -561,7 +562,7 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
     return [...map.entries()];
   }, [state.artifacts, filter]);
   const show = (items: Artifact[], title: string) =>
-    api("/stage", { mode: items.length > 1 ? "compare" : "spotlight", items: items.map((i) => i.id), title, pinned: false, by: "Someone in the room" });
+    cast({ mode: items.length > 1 ? "compare" : "spotlight", items: items.map((i) => i.id), title, pinned: false, by: "Someone in the room" });
   return (
     <div className="tab-pane scrollbars-thin">
       <div className="row between wrap-row" style={{ marginBottom: 16 }}>

@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "The start window (bundled page) may call the app's own commands.",
-  "windows": ["start", "setup"],
+  "windows": ["start", "setup", "screens"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -18,6 +18,11 @@
     "allow-relaunch",
     "allow-remote-setup",
     "allow-get-userless",
-    "allow-toggle-userless"
+    "allow-toggle-userless",
+    "allow-screens-state",
+    "allow-screens-preview",
+    "allow-screens-save",
+    "allow-screens-identify",
+    "allow-screens-close"
   ]
 }

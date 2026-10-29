@@ -14,6 +14,7 @@ import { pref } from "./shared/hub";
 import { registerServiceWorker } from "./shared/offline";
 import { ConnectionBanner } from "./shared/ConnectionBanner";
 import { ErrorBoundary } from "./shared/ErrorBoundary";
+import { CastHost } from "./client/CastPicker";
 import { BuildRequests } from "./shared/BuildRequests";
 import { startHeartbeat } from "./shared/heartbeat";
 
@@ -53,5 +54,6 @@ createRoot(document.getElementById("root")!).render(
       </ErrorBoundary>
     )}
     {!isConnect && !isSetup && !extraScreen && <BuildRequests big={isHost} />}
+    {!isConnect && !isSetup && !isHost && <CastHost />}
   </StrictMode>,
 );

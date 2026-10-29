@@ -514,7 +514,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/stage" && req.method === "POST") {
     const stage = body as Partial<Stage> & { mode: Stage["mode"] };
     if (!stage?.mode) return bad("mode is required");
-    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
+    // With several screens, the caller says which (an id or a name); no screen, or one that isn't there, is the main one.
+    const screen = s.findScreen(typeof body.screen === "string" ? body.screen : undefined)?.id ?? "main";
+    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room", screen));
   }
 
   // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
@@ -736,6 +738,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (screen === "main") hub.host.bigScreen = info;
     s.reportScreen(screen, info);
     return json({ ok: true });
+  }
+  // The host app names the room's screens ("Left TV") after setting them up.
+  if (path === "/screens/config" && req.method === "POST" && isLocal(ip)) {
+    s.configureScreens(Array.isArray(body?.screens) ? body.screens : []);
+    return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
   }
   // A user-less big-screen window closed: it stops being a place to put things (main always stays).
   if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
