@@ -70,3 +70,5 @@ ROUND 8: The seventh review (/tmp/claude-501/p3-review7.md, AGREE-WITH-CHANGES, 
 - Kept: viewerNav step() (used in 4 places in WorkViewer); the reviewer marked it optional.
 - Tests updated mechanically for setStage's required opts (claims). brain.scenarios.test.ts and the review-fixes voice-preview test hit their time limits before and after this change (live model/TTS), so they're environment-bound, not regressions.
 Not verified: no live room, real displays, or running Tauri app.
+
+STOPPED HERE (machine going offline): round 8 fixes committed in a722e478; review 8 (/tmp/claude-501/r3h.sh -> p3-review8.log) was killed before it finished, so there is no review 8 verdict. Next: rerun /tmp/claude-501/r3h.sh, then fix its findings as JamSesh 3.R8.
