@@ -200,9 +200,11 @@ export function AttachButton({ onFiles, disabled }: { onFiles: (f: File[]) => vo
 /** What's waiting to go: a thumbnail for pictures, a chip for files, with a way to take each back out (or try a failed one again). */
 export function AttachTray({ items, onRemove, onRetry }: { items: Pending[]; onRemove: (key: string) => void; onRetry?: (key: string) => void }) {
   if (!items.length) return null;
+  // Thumbnails stay together in one row, ahead of the file chips (each group keeps its order).
+  const ordered = [...items.filter((i) => i.preview), ...items.filter((i) => !i.preview)];
   return (
     <ul className="say-files" aria-label="Attached files">
-      {items.map((i) => (
+      {ordered.map((i) => (
         <li key={i.key} className={`say-file ${i.preview ? "pic" : ""} ${i.status}`} title={i.error ?? i.name}>
           {i.preview ? <img src={i.preview} alt={i.name} /> : <DocIcon />}
           {!i.preview && (
