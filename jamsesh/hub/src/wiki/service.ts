@@ -12,10 +12,10 @@ import { newId } from "../store";
 import type { ProjectContext } from "../carryover";
 import type { Session } from "../session";
 import type { JamEvent, TriageCard, WikiCardPayload, WikiChange } from "../types";
-import { diffStats, lineDiff } from "./diff";
+import { cutDiff, diffStats, lineDiff } from "./diff";
 import {
-  CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
-  listPages, parseFrontMatter, pageSlugs, readPage, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, vaultDir, writeAtomic, writePage, writeState,
+  CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
+  listPages, parseFrontMatter, pageSlugs, readPage, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, today, vaultDir, writeAtomic, writePage, writeState,
 } from "./files";
 
 const EVERY_MS = 15 * 60_000;
@@ -29,6 +29,11 @@ const MAX_EXISTING_CHARS = 60_000;
 /** One transcript source at most; a longer stretch becomes several, in order. */
 const TRANSCRIPT_MAX = 50_000;
 const EVENT_PAGE = 500;
+/** The card's diff per page is cut here; the whole change is one request away. */
+const CARD_DIFF_MAX = 6000;
+/** Past this many sources in raw/, the oldest read-in ones move to raw/archive/, down to ARCHIVE_TO. */
+const ARCHIVE_AT = 4800;
+const ARCHIVE_TO = 3000;
 
 export const ingestSchema = z.object({
   summary: z.string().describe("One sentence on what these sources changed in the wiki"),
@@ -106,6 +111,9 @@ export interface IngestResult {
   card: TriageCard | null;
   sources: string[];
   changes: number;
+  /** The sources that stay pending because the answer held more than could be written (see `Proposal.again`), and the pages to show whole next time. */
+  again?: string[];
+  needs?: string[];
 }
 
 /** A card's changes, kept in the project's folder (not the session's board) so a later session can still approve them. */
@@ -123,6 +131,8 @@ interface Proposal {
   /** The accept finished (pages written, logged, sources read): only closing the card is left. */
   done?: { applied: string[]; skipped: string[] };
   by?: string;
+  /** Sources this proposal can't settle (the model asked to change pages it wasn't shown whole): they stay pending when it closes. */
+  again?: string[];
 }
 
 /** The project folder as a real path, or an error when it is a link, or isn't directly inside `trusted`. Makes it when it isn't there yet. */
@@ -233,9 +243,22 @@ export class WikiService {
     for (const src of missing) appendLog(this.dir, ...sourceLog(src), src.ts, `src:${src.id}`);
   }
 
+  /**
+   * When raw/ is filling up, moves the oldest sources that are read in (and held by no card) into raw/archive/. They can
+   * still be opened and cited by id; they just stop counting toward the cap that would end automatic capture.
+   */
+  archiveOld(at = ARCHIVE_AT, keep = ARCHIVE_TO): number {
+    const ids = sourceIds(this.dir);
+    if (ids.length <= at) return 0;
+    const st = readState(this.dir);
+    const held = new Set(this.proposals().flatMap((p) => p.prop.sources));
+    const old = ids.filter((id) => st.ingested[id] && !held.has(id) && st.read?.[id] === undefined && id !== st.migrating);
+    return archiveSources(this.dir, old.slice(0, Math.max(0, ids.length - keep)));
+  }
+
   /** A document, link or agent report. Saved at once; the next ingest reads it. */
-  addSource(kind: SourceKind, title: string, text: string, by: string): Source {
-    const src = addSource(this.dir, { kind, title, text, by });
+  addSource(kind: SourceKind, title: string, text: string, by: string, at: { id?: string; now?: number } = {}): Source {
+    const src = addSource(this.dir, { kind, title, text, by, ...at });
     // The source is saved; a log line that can't be written doesn't undo that, and is written at the next chance.
     try {
       this.catchUpLog();
@@ -326,7 +349,8 @@ export class WikiService {
           const text = (e.data?.documentId ? this.s.store.get("documents", e.data.documentId)?.text : null) ?? e.text;
           const ws = e.workstreamId ? this.s.store.get("workstreams", e.workstreamId)?.title : undefined;
           try {
-            const src = this.addSource("agent", `${e.authorName} ${kind}: ${text.slice(0, 50)}`, `${e.authorName} reported (${kind})${ws ? ` on ${ws}` : ""} at ${new Date(e.ts).toTimeString().slice(0, 5)}:\n\n${text}`, e.authorName);
+            // Named by its event, so a pass that replays it (after a crash or a cursor that didn't save) finds the source already there.
+            const src = this.addSource("agent", `${e.authorName} ${kind}: ${text.slice(0, 50)}`, `${e.authorName} reported (${kind})${ws ? ` on ${ws}` : ""} at ${new Date(e.ts).toTimeString().slice(0, 5)}:\n\n${text}`, e.authorName, { id: `${today(e.ts)}_report-${hashOf(this.sessionId).slice(0, 6)}-${e.id}`, now: e.ts });
             out.push(src);
           } catch (err) {
             console.error(`wiki: couldn't save ${e.authorName}'s ${kind} report (${errText(err)}); it will be tried again.`);
@@ -477,6 +501,7 @@ export class WikiService {
       this.agentUpdate();
       try {
         this.catchUpLog();
+        this.archiveOld(); // only once every source has its log line
       } catch (e) {
         console.error("wiki:", errText(e));
       }
@@ -517,7 +542,8 @@ export class WikiService {
     }
     if (!batch.length) return null;
     const infos = listPages(this.dir);
-    const wanted = new Set<string>();
+    // Pages the last answer asked to change without having seen them whole come first, so they can't be crowded out again.
+    const wanted = new Set<string>((readState(this.dir).need ?? []).filter((slug) => infos.some((p) => p.slug === slug)));
     const hay = batch.map((b) => b.text.slice(0, 3000)).join(" ");
     for (const slug of linksOf(hay)) if (infos.some((p) => p.slug === slug)) wanted.add(slug);
     for (const w of this.s.store.all("workstreams")) {
@@ -551,8 +577,10 @@ export class WikiService {
     const out = await decide(input);
     if (!out) return null; // The sources stay pending: the next pass tries again.
     const result = this.propose(out, batch, "ingest", new Map(existing.map((p) => [p.slug, p.rev])), parts);
-    // Nothing worth proposing: these parts are read. Otherwise the card holds them until someone accepts or dismisses it.
-    if (!result.card) this.markRead(parts);
+    this.setNeed(new Set(existing.map((p) => p.slug)), result.needs ?? []);
+    // Nothing worth proposing: these parts are read, unless the answer asked for pages it wasn't shown (they stay pending
+    // and go in whole next time). Otherwise the card holds them until someone accepts or dismisses it.
+    if (!result.card) this.markRead(this.partsOf({ sources: [], changes: [], parts, again: result.again ?? [] }));
     else this.notify("ingest", [], "JamSesh"); // Page names stay on the people-only board until a person accepts them.
     return result;
   }
@@ -572,9 +600,20 @@ export class WikiService {
     writeState(this.dir, { ...st, read });
   }
 
-  /** The parts a proposal read; an older proposal (before parts) read its sources whole. */
+  /** The pages to show whole next time: those just shown are done with, those the answer wanted unseen are added. */
+  private setNeed(shown: Set<string>, wanted: string[]) {
+    const st = readState(this.dir);
+    const need = [...new Set([...(st.need ?? []).filter((s) => !shown.has(s)), ...wanted])];
+    if (need.join() === (st.need ?? []).join()) return;
+    if (need.length) st.need = need;
+    else delete st.need;
+    writeState(this.dir, st);
+  }
+
+  /** The parts a proposal read and can mark read; an older proposal (before parts) read its sources whole. Sources it couldn't settle (`again`) stay pending. */
   private partsOf(prop: Proposal) {
-    return prop.parts ?? prop.sources.map((id) => ({ id, to: Infinity, whole: 0 }));
+    const again = new Set(prop.again ?? []);
+    return (prop.parts ?? prop.sources.map((id) => ({ id, to: Infinity, whole: 0 }))).filter((p) => !again.has(p.id));
   }
 
   /**
@@ -586,13 +625,20 @@ export class WikiService {
     const changes: WikiChange[] = [];
     const prop: Proposal = { changes: [], sources: batch.map((b) => b.id), parts };
     const seen = new Set<string>();
+    // What the answer holds that can't be written because the model never saw that page whole: not lost, asked for again.
+    const unseen = new Set<string>();
+    const over = out.pages.length > MAX_PAGES_PER_INGEST;
     for (const p of out.pages.slice(0, MAX_PAGES_PER_INGEST)) {
       const slug = isPageSlug(p.slug) ? p.slug : slugifyTitle(p.title || p.slug);
       if (seen.has(slug)) continue;
       const body = cleanBody(p.markdown);
       if (!body || body.length > PAGE_MAX) continue;
       const cur = readPage(this.dir, slug);
-      if (cur && (cur.markdown.trim() === body || !shown.has(slug))) continue;
+      if (cur && cur.markdown.trim() === body) continue;
+      if (cur && !shown.has(slug)) {
+        unseen.add(slug);
+        continue;
+      }
       seen.add(slug);
       const category = categoryOf(p.type);
       const sources = [...new Set([...p.sources, ...batch.map((b) => b.id)])].filter((x) => known.has(x) && isSourceId(x)).slice(0, 12);
@@ -600,9 +646,14 @@ export class WikiService {
       const baseRev = shown.get(slug) ?? "";
       prop.changes.push({ slug, category, workstreams: p.workstreams.slice(0, 12), body, sources, baseRev });
       const before = cur?.markdown.trim() ?? "";
-      changes.push({ slug, title: p.title || cur?.title || slug, category, op: cur ? "update" : "create", diff: lineDiff(before, body), stale: (cur?.rev ?? "") !== baseRev, ...diffStats(before, body) });
+      const { text: diff, cut } = cutDiff(before, body, CARD_DIFF_MAX);
+      changes.push({ slug, title: p.title || cur?.title || slug, category, op: cur ? "update" : "create", diff, ...(cut ? { cut } : {}), stale: (cur?.rev ?? "") !== baseRev, ...diffStats(before, body) });
     }
-    if (!changes.length) return { card: null, sources: prop.sources, changes: 0 };
+    // Only a page that could be shown whole next time is worth another pass; one too big to show is let go.
+    const needs = [...unseen].filter((slug) => (readPage(this.dir, slug)?.markdown.length ?? Infinity) <= MAX_EXISTING_CHARS);
+    const again = needs.length || over ? batch.map((b) => b.id) : [];
+    if (!changes.length) return { card: null, sources: prop.sources, changes: 0, again, needs };
+    if (again.length) prop.again = again;
     const text = `Wiki: ${out.summary.trim().slice(0, 160) || `${changes.length} page${changes.length === 1 ? "" : "s"} to update`}`;
     const payload: WikiCardPayload = { kind, summary: text, changes };
     // The card and its proposal share one id, and the proposal is on disk first: no card is ever up without what it would
@@ -612,7 +663,7 @@ export class WikiService {
     this.saveProposal(id, { ...prop, card: payload });
     const card = this.s.board.proposeWiki(payload, "JamSesh", id);
     if (!card) this.dropProposal(id);
-    return { card, sources: prop.sources, changes: changes.length };
+    return { card, sources: prop.sources, changes: changes.length, again, needs };
   }
 
   private proposalFile(cardId: string, make = false) {
@@ -622,11 +673,6 @@ export class WikiService {
 
   private saveProposal(cardId: string, p: Proposal) {
     writeAtomic(this.proposalFile(cardId, true)!, JSON.stringify(p));
-  }
-
-  private moveProposal(from: string, to: string, p: Proposal) {
-    this.saveProposal(to, p);
-    this.dropProposal(from);
   }
 
   private dropProposal(cardId: string) {
@@ -666,6 +712,19 @@ export class WikiService {
   }
 
   /**
+   * Closes a card for good. Pages an accept wrote before it failed are on disk, so whichever way the card ends (a retry
+   * that finished, or a dismissal) they get the log line, index and commit an accept gives, before the proposal goes.
+   */
+  private settle(cardId: string, prop: Proposal, by: string) {
+    const written = (prop.applied ?? []).filter((slug) => prop.changes.some((c) => c.slug === slug));
+    if (written.length && !prop.done) {
+      this.finish(`${prop.card?.kind === "answer" ? "Filed an answer" : "Ingest"}: ${(prop.card?.summary ?? "").replace(/^Wiki: /, "")} (partly accepted, then closed by ${by})`, written, `accept:${prop.key ?? cardId}:${hashOf(written.join(","))}`);
+      this.notify("apply", written, by);
+    }
+    this.resolve(cardId, prop);
+  }
+
+  /**
    * A new session picks up the project's proposals: each one whose card isn't on this board is raised here again, with
    * the pages people have edited since marked stale. One without its card (an older format) is let go, so its sources
    * are read again.
@@ -682,20 +741,18 @@ export class WikiService {
       if (here?.status === "open") continue;
       if (here) {
         // Resolved on this board, but the clean-up didn't finish.
-        if (here.status === "added" || here.status === "dismissed") this.resolve(id, prop);
+        if (here.status === "added" || here.status === "dismissed") this.settle(id, prop, "JamSesh");
         continue;
       }
-      if (!prop.card) {
+      // A proposal with no card payload, or not named for a card (the format before cards and proposals shared an id), is let go: its sources are read again.
+      if (!prop.card || !id.startsWith("tri_")) {
         this.dropProposal(id);
         continue;
       }
       const base = new Map(prop.changes.map((c) => [c.slug, c.baseRev]));
       const done = new Set(prop.applied ?? []);
       const changes = prop.card.changes.map((c) => ({ ...c, stale: !done.has(c.slug) && (readPage(this.dir, c.slug)?.rev ?? "") !== (base.get(c.slug) ?? "") }));
-      // Under its own id when it has one (a card and its proposal are one thing); an older proposal named before its card existed gets a fresh id.
-      const keep = id.startsWith("tri_");
-      const card = this.s.board.proposeWiki({ ...prop.card, changes }, "JamSesh", keep ? id : undefined);
-      if (card && !keep) this.moveProposal(id, card.id, prop);
+      this.s.board.proposeWiki({ ...prop.card, changes }, "JamSesh", id);
     }
     // An open wiki card whose proposal is gone can't be accepted: it is closed, and its sources are read again by the next ingest.
     const held = new Set(this.proposals().map((p) => p.id));
@@ -706,8 +763,21 @@ export class WikiService {
   closed(card: TriageCard) {
     const prop = this.loadProposal(card.id);
     if (!prop) return;
-    if (card.status === "dismissed") this.resolve(card.id, prop);
-    else this.dropProposal(card.id);
+    if (card.status !== "dismissed") return void this.dropProposal(card.id);
+    try {
+      this.settle(card.id, prop, card.resolvedBy || "a person");
+    } catch (e) {
+      // The proposal stays: restore() finishes the clean-up at the next start.
+      console.error("wiki:", errText(e));
+    }
+  }
+
+  /** The whole change a card shows part of: the page now against the proposed text, with nothing cut. */
+  fullDiff(cardId: string, slug: string): { diff: string; added: number; removed: number } | null {
+    const c = this.loadProposal(cardId)?.changes.find((x) => x.slug === slug);
+    if (!c) return null;
+    const before = readPage(this.dir, slug)?.markdown.trim() ?? "";
+    return { diff: lineDiff(before, c.body), ...diffStats(before, c.body) };
   }
 
   private llmDecide(): Decider | null {
@@ -739,14 +809,16 @@ export class WikiService {
     if (prop.done) return prop.done; // finished before; only the card was left open
     const want = pages ? new Set(pages.map(String)) : null;
     const done = new Set(prop.applied ?? []);
-    const applied: string[] = [];
     const skipped: string[] = [];
+    // A page an earlier try wrote is on disk whatever is checked now: it is always part of the record of this accept.
+    const applied: string[] = prop.changes.filter((c) => done.has(c.slug)).map((c) => c.slug);
     for (const c of prop.changes) {
-      if (want && !want.has(c.slug)) continue;
+      if (done.has(c.slug) || (want && !want.has(c.slug))) continue;
       const cur = readPage(this.dir, c.slug);
-      // Written by an earlier try (recorded, or already on disk as proposed): counted, not written again.
-      if (done.has(c.slug) || (cur && cur.markdown.trim() === c.body.trim() && c.baseRev !== cur.rev)) {
+      // Already on disk as proposed (a write that landed but wasn't recorded): counted, not written again.
+      if (cur && cur.markdown.trim() === c.body.trim() && c.baseRev !== cur.rev) {
         applied.push(c.slug);
+        done.add(c.slug);
         continue;
       }
       if ((cur?.rev ?? "") !== c.baseRev) {

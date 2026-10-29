@@ -1712,9 +1712,14 @@ carries the proposal's key as an Obsidian `%%comment%%`). A finished accept is r
 closes; if the hub stops in between, the next start closes the card with what was recorded. People's own edits
 (`PUT /api/wiki/page/:slug`) apply directly. The proposal's full text, and the card as raised, are kept in the project's
 `.proposals/<card>.json`, not in the session: a new session raises every open proposal on its own board again (pages edited
-since marked `stale`). The diff names every removed line (past the cut they follow the cut; past that they are counted), and a
-change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff lines and says how many
-more there are, with a button that shows them all; the hub's notes about a cut diff always show. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,stale,added,removed,largeDeletion}], findings?, applied?, skipped?}`.
+since marked `stale`). The card's diff per page is cut at 6,000 characters, at a line, with a note of how many changed lines are left out and `cut: true`;
+`GET /api/wiki/proposal/:card/:slug` (people only) returns the whole change (`{diff, added, removed}`), and the card offers it as
+"Show the whole change". A change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff
+lines and says how many more there are, with a button that shows them all. Pages a failed accept already wrote stay part of its
+record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
+When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
+stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its
+source. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,cut?,stale,added,removed,largeDeletion}], findings?, applied?, skipped?}`.
 
 **Query and lint.** `POST /api/wiki/query {question, file?}` answers from the best-matching pages with `[[links]]`; a substantial
 answer with `file:true` raises an `answer` card that creates a page. Its source is unread until that card is resolved; if the
@@ -1746,7 +1751,10 @@ pulses pages that are written. `apply` (a card is accepted) and `edit` name the 
 **Durability.** A proposal and its card share one id (`tri_…`), the proposal file written first; on start a proposal without its card is
 raised again under that id, and an open wiki card without its proposal is closed (its sources are read again). Agent shipped and
 decision reports are read from the session's events by a cursor in `.wiki-state.json` that moves only past a written source. Every
-source gets one keyed log line (`%%src:<id>%%`), written again at the next change, pass or start if the first write failed. An event
+source except the room's transcript chunks (a line every 15 minutes would bury History) gets one keyed log line (`%%src:<id>%%`),
+written again at the next change, pass or start if the first write failed. An agent report's source is named by its event, so a
+replay finds it. When `raw/` passes 4,800 sources the oldest read-in ones move to `raw/archive/` (still readable and citable by id).
+`.wiki-state.json` is checked field by field when read; a wrong shape anywhere is treated as damaged. An event
 longer than one source is written in parts, with its offset in the state file. A damaged `.wiki-state.json` stops ingest (a copy is kept
 as `.wiki-state.json.damaged`) rather than restarting from nothing. The project folder must be a real folder directly inside the
 projects folder (never a link, never behind one); otherwise the session uses its own folder.

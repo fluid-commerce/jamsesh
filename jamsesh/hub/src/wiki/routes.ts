@@ -53,6 +53,13 @@ export async function wikiRoute(w: WikiService, method: string, path: string, ur
     return fail(r.error, r.status, r.current ? { current: pageJson(w, r.current) } : {});
   }
 
+  // The whole of a change a card shows part of (people only: an unaccepted proposal is for them to read).
+  m = path.match(/^\/wiki\/proposal\/([\w-]+)\/([^/]+)$/);
+  if (m && method === "GET") {
+    const d = w.fullDiff(m[1], m[2]);
+    return d ? ok(d) : fail("That proposal is gone.", 404);
+  }
+
   m = path.match(/^\/wiki\/source\/([^/]+)$/);
   if (m && method === "GET") {
     const s = isSourceId(m[1]) ? readSource(w.dir, m[1]) : null;

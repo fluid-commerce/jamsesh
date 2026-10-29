@@ -42,7 +42,12 @@ function ops(before: string, after: string): { ops: Op[]; aligned: boolean } {
   return { ops: [...out, ...tail], aligned: true };
 }
 
-export function lineDiff(before: string, after: string, maxChars = 6000): string {
+/**
+ * The change as a unified diff with a little context. Past `maxChars` it is cut at a line and says how many lines of
+ * the change are left out; `cut` tells the caller to offer the whole (call again without a limit). Nothing is ever
+ * dropped without being counted: the cut is at the end, never a choice of which lines to keep.
+ */
+export function cutDiff(before: string, after: string, maxChars = Infinity): { text: string; cut: boolean } {
   const { ops: all, aligned } = ops(before, after);
   const keep = new Array(all.length).fill(false);
   all.forEach((o, x) => {
@@ -57,22 +62,15 @@ export function lineDiff(before: string, after: string, maxChars = 6000): string
     out.push(`${o.k}${o.s}`);
   });
   const text = out.join("\n");
-  if (text.length <= maxChars) return text;
-  // Cut at a line, but the removed lines past the cut still follow: what a change takes away is what most needs a look.
-  const head = text.slice(0, Math.max(0, text.lastIndexOf("\n", maxChars)));
-  const shown = head.split("\n").filter((l) => l.startsWith("-")).length;
-  const rest = all.filter((o) => o.k === "-").slice(shown).map((o) => `-${o.s}`);
-  if (!rest.length) return `${head}\n(cut here)`;
-  const tail: string[] = [];
+  if (text.length <= maxChars) return { text, cut: false };
   let room = maxChars;
-  for (const l of rest) {
-    if (l.length + 1 > room) break;
-    tail.push(l);
-    room -= l.length + 1;
-  }
-  const more = rest.length - tail.length;
-  return `${head}\n(cut here; the rest of the lines it removes:)\n${tail.join("\n")}${more ? `\n(and ${more} more line${more === 1 ? "" : "s"} removed)` : ""}`;
+  let n = 0;
+  while (n < out.length && out[n].length + 1 <= room) room -= out[n++].length + 1;
+  const left = out.slice(n).filter((l) => l[0] === "+" || l[0] === "-");
+  return { text: `${out.slice(0, n).join("\n")}\n(cut here: ${left.length} more changed line${left.length === 1 ? "" : "s"})`, cut: true };
 }
+
+export const lineDiff = (before: string, after: string, maxChars = Infinity): string => cutDiff(before, after, maxChars).text;
 
 /** Lines added and removed over the whole page, and whether the change takes out a large part of it (the page shrinks by a third or more). */
 export function diffStats(before: string, after: string): { added: number; removed: number; largeDeletion: boolean } {

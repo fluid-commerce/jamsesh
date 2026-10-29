@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, gitAvailable, graph, initWiki, listPages, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
-import { diffStats, lineDiff } from "../src/wiki/diff";
+import { io, addSource, archiveSources, gitAvailable, graph, initWiki, listPages, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { WikiService, ingestPrompt, type Decider } from "../src/wiki/service";
 
 process.env.JAMSESH_SILENT = "1";
@@ -249,7 +249,7 @@ test("agents' shipped and decision updates become small sources; progress doesn'
   s.postUpdate(agent.id, "progress", "poking around");
   s.postUpdate(agent.id, "shipped", "Built the tab bar and checked focus order.");
   s.postUpdate(agent.id, "decision", "Use a filled active tab.");
-  const kinds = readdirSync(join(dir, "raw")).map((f) => readFileSync(join(dir, "raw", f), "utf8")).filter((t) => t.includes("kind: agent"));
+  const kinds = readdirSync(join(dir, "raw")).sort().map((f) => readFileSync(join(dir, "raw", f), "utf8")).filter((t) => t.includes("kind: agent"));
   expect(kinds).toHaveLength(2);
   expect(kinds[0]).toContain("Built the tab bar");
 });
@@ -556,8 +556,8 @@ test("an existing page is rewritten only when the model saw all of it", async ()
   expect(change.map((c) => c.slug)).toEqual(["checkout"]);
   // The card says plainly how much goes.
   expect(change[0]).toMatchObject({ removed: 600, largeDeletion: true });
-  expect(change[0].diff).toContain("the rest of the lines it removes");
-  expect(change[0].diff).toMatch(/\(and \d+ more lines removed\)$/);
+  expect(change[0]).toMatchObject({ cut: true });
+  expect(change[0].diff).toMatch(/\(cut here: \d+ more changed lines\)/);
   void s;
 });
 
@@ -579,11 +579,13 @@ test("the diff never hides what a change removes", () => {
   expect(d).toContain("too long to line up");
   expect(d).toContain("-line 899");
   expect(diffStats(before, after)).toMatchObject({ removed: 880, added: 0, largeDeletion: true });
-  const cut = lineDiff(Array.from({ length: 400 }, (_, i) => `a fairly long line of page text, number ${i}`).join("\n"), "# Short");
-  expect(cut).toContain("the rest of the lines it removes");
-  // Every removed line is either shown whole or counted, none dropped silently at the cut.
-  const listed = cut.split("\n").filter((l) => /^-a fairly long line of page text, number \d+$/.test(l)).length;
-  expect(listed + Number(cut.match(/\(and (\d+) more lines removed\)/)?.[1] ?? 0)).toBe(400);
+  const long = Array.from({ length: 400 }, (_, i) => `a fairly long line of page text, number ${i}`).join("\n");
+  const cut = cutDiff(long, "# Short", 6000);
+  expect(cut.cut).toBe(true);
+  // Every changed line is either shown or counted in the note, none dropped silently at the cut.
+  const listed = cut.text.split("\n").filter((l) => /^[-+]/.test(l)).length;
+  expect(listed + Number(cut.text.match(/\(cut here: (\d+) more changed lines\)/)?.[1] ?? 0)).toBe(401);
+  expect(cutDiff(long, "# Short").cut).toBe(false);
   expect(lineDiff("a\nb", "a").split("\n")).toEqual([" a", "-b"]);
   // A reworded line isn't a large deletion.
   expect(diffStats("# A\n\nOne.\nTwo.\nThree.", "# A\n\nOne, said better.\nTwo.\nThree.").largeDeletion).toBe(false);
@@ -1196,4 +1198,237 @@ test("the sources list tells a source an open card is holding from one that is i
   s.board.add(r!.card!.id, "Chey");
   expect(Object.values(w.sourceStates(Object.keys(id)))).toEqual(["ingested"]);
   void hub;
+});
+
+// ---------- round 5 ----------
+
+test("a big replacement shows the whole change on the card's request: the cut diff says so, and the route gives every line", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  try {
+    writePage(r.dir, "big-page", `# Big page\n\n${Array.from({ length: 701 }, (_, i) => `old-${i}`).join("\n")}`);
+    r.w.addSource("document", "Rewrite", "big page big rewrite", "Chey");
+    const body = Array.from({ length: 701 }, (_, i) => `new-${i}`).join("\n");
+    r.w.decide = (async () => ({ summary: "Rewrite", pages: [page("big-page", "Big page", "topic", body)] })) as Decider;
+    const card = (await r.w.tick())!.card!;
+    const ch = card.wiki!.changes[0];
+    expect(ch).toMatchObject({ added: 701, removed: 701, cut: true });
+    expect(ch.diff.length).toBeLessThan(6200);
+    const cookie = `jam_window=${r.hub.auth.windows.take(r.hub.auth.windows.mint())}`;
+    const call = (path: string, headers: Record<string, string> = {}) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { headers });
+    const res = await call(`/wiki/proposal/${card.id}/big-page`, { cookie });
+    expect(res.status).toBe(200);
+    const full = (await res.json()) as { diff: string; added: number; removed: number };
+    for (let i = 0; i < 701; i++) {
+      expect(full.diff).toContain(`+new-${i}\n`.replace(/\n$/, ""));
+      expect(full.diff).toContain(`-old-${i}`);
+    }
+    expect(full.diff.split("\n").filter((l) => l.startsWith("+new-"))).toHaveLength(701);
+    expect(full).toMatchObject({ added: 701, removed: 701 });
+    // A small change isn't cut, so there is nothing to ask for.
+    expect((await call(`/wiki/proposal/${card.id}/nope`, { cookie })).status).toBe(404);
+    expect((await call(`/wiki/proposal/tri_nothing/big-page`, { cookie })).status).toBe(404);
+    // Agents can't read a proposal at all.
+    const agent = r.hub.auth.issue({ kind: "agent", label: "Agents", ip: "9.9.9.9", ownerDeviceId: "host" });
+    expect((await call(`/wiki/proposal/${card.id}/big-page`, { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${agent.token}` })).status).toBe(403);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("pages a failed accept already wrote stay part of its record whatever is checked on the retry", async () => {
+  const { w, s, dir } = room();
+  w.addSource("document", "Three pages", "a b c", "Chey");
+  w.decide = (async () => ({ summary: "Three", pages: [page("p-one", "One", "topic", "1"), page("p-two", "Two", "topic", "2"), page("p-three", "Three", "topic", "3")] })) as Decider;
+  const id = (await w.tick())!.card!.id;
+  mkdirSync(join(dir, "wiki", "p-two.md")); // the second page can't be written
+  expect(s.board.add(id, "Chey")).toMatchObject({ ok: false, status: 500 });
+  expect(readPage(dir, "p-one")).not.toBeNull();
+  rmSync(join(dir, "wiki", "p-two.md"), { recursive: true });
+  // The person unchecks the page that already landed and accepts only the others.
+  expect(s.board.add(id, "Chey", { pages: ["p-two", "p-three"] } as any)).toMatchObject({ ok: true });
+  expect(s.board.get(id)!.wiki!.applied).toEqual(["p-one", "p-two", "p-three"]);
+  const log = readFileSync(join(dir, "log.md"), "utf8");
+  expect(log).toContain("[[p-one]]");
+  expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[p-one|One]]");
+  expect(w.pendingSources()).toEqual([]);
+});
+
+test("dismissing after a partial accept still logs and indexes the pages that were written, now or after a restart", async () => {
+  for (const crash of [false, true]) {
+    const { w, s, dir } = room();
+    w.addSource("document", "Two pages", "a b", "Chey");
+    w.decide = (async () => ({ summary: "Two", pages: [page("d-one", "One", "topic", "1"), page("d-two", "Two", "topic", "2")] })) as Decider;
+    const id = (await w.tick())!.card!.id;
+    mkdirSync(join(dir, "wiki", "d-two.md"));
+    expect(s.board.add(id, "Chey")).toMatchObject({ ok: false, status: 500 });
+    if (crash) {
+      // The log and index can't be written at the moment of dismissing.
+      renameSync(join(dir, "index.md"), join(dir, "index.bak"));
+      mkdirSync(join(dir, "index.md"));
+      writeFileSync(join(dir, "index.md", "x"), "x");
+      const err = console.error;
+      console.error = () => {};
+      try {
+        expect(s.board.dismiss(id, "Chey").ok).toBe(true);
+      } finally {
+        console.error = err;
+      }
+      expect(readdirSync(join(dir, ".proposals"))).toContain(`${id}.json`); // kept for the clean-up
+      rmSync(join(dir, "index.md"), { recursive: true });
+      renameSync(join(dir, "index.bak"), join(dir, "index.md"));
+      w.restore();
+    } else expect(s.board.dismiss(id, "Chey").ok).toBe(true);
+    expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("[[d-one]]");
+    expect(readFileSync(join(dir, "index.md"), "utf8")).toContain("[[d-one|One]]");
+    expect(existsSync(join(dir, ".proposals", `${id}.json`))).toBe(false);
+    expect(readPage(dir, "d-two")).toBeNull();
+    expect(w.pendingSources()).toEqual([]); // dismissed: read
+  }
+});
+
+test("an update to a page the model wasn't shown is asked for again, not dropped with its source", async () => {
+  const { w, s, dir } = room();
+  // Twelve pages that all match the source; only ten can go in.
+  for (let i = 0; i < 12; i++) writePage(dir, `crowd-${String(i).padStart(2, "0")}`, `# Crowd ${i}\n\nguest checkout rules number ${i}`);
+  w.addSource("document", "Note", "guest checkout rules changed for everyone", "Chey");
+  const shownOnce: string[][] = [];
+  w.decide = (async (input) => {
+    shownOnce.push(input.existing.map((p) => p.slug));
+    // The model rewrites every page it was given, and also page 11, which it never saw.
+    const pages = input.existing.map((p) => page(p.slug, p.slug, "topic", "rewritten"));
+    if (!input.existing.some((p) => p.slug === "crowd-11")) pages.push(page("crowd-11", "Crowd 11", "topic", "unseen update"));
+    return { summary: "Rules", pages };
+  }) as Decider;
+  const first = (await w.tick())!;
+  expect(shownOnce[0]).not.toContain("crowd-11");
+  expect(first.card).not.toBeNull();
+  expect(first.card!.wiki!.changes.map((c) => c.slug)).not.toContain("crowd-11");
+  expect(readState(dir).need).toContain("crowd-11");
+  // Accepting the card doesn't settle the source: it stays pending for another pass.
+  expect(s.board.add(first.card!.id, "Chey")).toMatchObject({ ok: true });
+  expect(w.pendingSources()).toHaveLength(1);
+  const second = (await w.tick())!;
+  expect(shownOnce[1][0]).toBe("crowd-11"); // first in line, so it can't be crowded out again
+  expect(second.card!.wiki!.changes.map((c) => c.slug)).toContain("crowd-11");
+  s.board.add(second.card!.id, "Chey");
+  expect(readPage(dir, "crowd-11")!.markdown).toContain("rewritten");
+  expect(readState(dir).need).toBeUndefined();
+  expect(w.pendingSources()).toEqual([]);
+});
+
+test("a source whose only proposed change is to an unseen page stays pending and is run again", async () => {
+  const { w, dir } = room();
+  for (let i = 0; i < 12; i++) writePage(dir, `seen-${String(i).padStart(2, "0")}`, `# Seen ${i}\n\nguest checkout rules number ${i}`);
+  w.addSource("document", "Note", "guest checkout rules changed", "Chey");
+  let calls = 0;
+  w.decide = (async (input) => {
+    calls++;
+    void input;
+    return { summary: "Only the last", pages: [page("seen-11", "Seen 11", "topic", "changed")] };
+  }) as Decider;
+  const r = (await w.tick())!;
+  expect(r.card).toBeNull();
+  expect(w.pendingSources()).toHaveLength(1);
+  expect(readState(dir).need).toEqual(["seen-11"]);
+  const again = (await w.tick())!;
+  expect(calls).toBe(2);
+  expect(again.card!.wiki!.changes.map((c) => c.slug)).toEqual(["seen-11"]);
+});
+
+test("a state file with the wrong shape anywhere fails closed and keeps a copy; a good one reads back", async () => {
+  const bad = [
+    '{"cursors":[],"ingested":[]}',
+    '{"queued":[null]}',
+    '{"queued":[{"kind":"zzz","title":"t","text":"x","by":"b"}]}',
+    '{"queued":{"a":1}}',
+    '{"cursors":{"s":"x"}}',
+    '{"read":{"a":-1}}',
+    '{"reports":{"s":null}}',
+    '{"partial":{"s":{"id":1}}}',
+    '{"ingested":{"a":1}}',
+    '{"ingested":{"a":{"at":"now"}}}',
+    '{"need":[1]}',
+    '{"migrated":"yes"}',
+    '{"migrating":7}',
+    "null",
+    '"text"',
+  ];
+  for (const text of bad) {
+    const { w, s, dir } = room();
+    s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "Something worth keeping for the wiki later on.", relevance: "work" });
+    writeFileSync(join(dir, ".wiki-state.json"), text);
+    expect(() => readState(dir)).toThrow("damaged");
+    expect(readFileSync(join(dir, ".wiki-state.json.damaged"), "utf8")).toBe(text);
+    await expect(w.tick()).rejects.toThrow("damaged");
+    expect(readFileSync(join(dir, ".wiki-state.json"), "utf8")).toBe(text);
+    expect(sourceIds(dir)).toEqual([]);
+  }
+  const { dir } = room();
+  const good = { ingested: { x: { at: 1, card: "tri_a" } }, cursors: { s: 4 }, migrated: true, migrating: "m", read: { x: 10 }, reports: { s: 2 }, partial: { s: { id: 3, off: 100 } }, queued: [{ kind: "document", title: "t", text: "x", by: "b" }], need: ["a-page"] };
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify(good));
+  expect(readState(dir)).toEqual(good as any);
+  writeFileSync(join(dir, ".wiki-state.json"), "{}");
+  expect(readState(dir)).toMatchObject({ ingested: {}, cursors: {}, migrated: false });
+});
+
+test("a report replayed after a crash or a cursor that didn't save is not filed twice", async () => {
+  const { w, s, agent, dir } = room();
+  s.postUpdate(agent.id, "shipped", "Built the share sheet.");
+  s.postUpdate(agent.id, "decision", "Sheets slide up from the bottom.");
+  const reports = () => sourceIds(dir).filter((id) => readSource(dir, id)!.kind === "agent");
+  expect(reports()).toHaveLength(2);
+  // A restart that finds no cursor (the save never landed) reads the events from the start again.
+  const st = readFileSync(join(dir, ".wiki-state.json"), "utf8");
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify({ ...JSON.parse(st), reports: {} }));
+  const again = new WikiService(s, dir, s.sessionId);
+  expect(again.agentUpdate()).toHaveLength(2); // seen again...
+  expect(reports()).toHaveLength(2); // ...and the same two sources
+  expect(readdirSync(join(dir, "raw")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  void w;
+});
+
+test("old read-in sources move to raw/archive when raw/ fills up, and can still be opened and cited; nothing waiting is moved", async () => {
+  const { w, s, dir } = room();
+  const ids = Array.from({ length: 12 }, (_, i) => w.addSource("document", `Doc number ${i}`, `text ${i}`, "Chey").id).sort();
+  const st = readState(dir);
+  for (const id of ids.slice(0, 8)) st.ingested[id] = { at: 1 }; // eight are read in; four still wait
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify(st));
+  expect(w.archiveOld(20, 5)).toBe(0); // not full yet
+  expect(w.archiveOld(10, 6)).toBe(6);
+  expect(sourceIds(dir)).toHaveLength(6);
+  expect(readdirSync(join(dir, "raw", "archive")).length).toBe(6);
+  // Archived ones read back by id, and the four waiting ones were never touched.
+  for (const id of ids.slice(0, 6)) expect(readSource(dir, id)!.text).toMatch(/^text \d+$/);
+  for (const id of ids.slice(8)) expect(sourceIds(dir)).toContain(id);
+  expect(w.pendingSources()).toEqual(ids.slice(8));
+  // A page citing an archived source still resolves it.
+  writePage(dir, "cites", "# Cites\n\nA claim.", { sources: [ids[0]] });
+  expect(readPage(dir, "cites")!.frontMatter.sources).toEqual([ids[0]]);
+  void s;
+});
+
+test("raw/archive that is a link is never written through", () => {
+  const d = join(root, `arc-${Math.random()}`);
+  initWiki(d);
+  const a = addSource(d, { kind: "document", title: "Old one", text: "old", by: "Chey" });
+  const outside = join(root, `outside-${Math.random()}`);
+  mkdirSync(outside);
+  symlinkSync(outside, join(d, "raw", "archive"));
+  expect(() => archiveSources(d, [a.id])).toThrow(/link/);
+  expect(readdirSync(outside)).toEqual([]);
+  expect(readSource(d, a.id)!.text).toBe("old");
+});
+
+test("a proposal left by the older pending-… format is let go on restart and its sources are read again", async () => {
+  const { w, s, dir } = room();
+  const src = w.addSource("document", "Note", "Pricing is annual.", "Chey");
+  mkdirSync(join(dir, ".proposals"), { recursive: true });
+  const card = { kind: "ingest", summary: "Wiki: Pricing", changes: [{ slug: "pricing", title: "Pricing", category: "topics", op: "create", diff: "+x", stale: false }] };
+  writeFileSync(join(dir, ".proposals", "pending-abc123.json"), JSON.stringify({ changes: [{ slug: "pricing", category: "topics", workstreams: [], body: "# Pricing\n\nAnnual.", sources: [src.id], baseRev: "" }], sources: [src.id], card }));
+  expect(w.pendingSources()).toEqual([]); // held
+  w.restore();
+  expect(existsSync(join(dir, ".proposals", "pending-abc123.json"))).toBe(false);
+  expect(s.board.open().filter((c) => c.type === "wiki")).toEqual([]);
+  expect(w.pendingSources()).toEqual([src.id]);
 });
