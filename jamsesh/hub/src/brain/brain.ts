@@ -300,38 +300,6 @@ export class Brain {
     });
   }
 
-  /** Someone started sharing a screen or camera: find it a place on the big screen. */
-  async placeShare(share: Share) {
-    const s = this.session;
-    if (this.stopped || !s.settings().brainEnabled) return;
-    const stage = s.stage();
-    if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
-      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
-      return;
-    }
-    const m = model(s, "presenter");
-    // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
-    s.rememberStageFor(share.id);
-    const fallback = () => {
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh");
-    };
-    if (!m) return fallback();
-    const pass = { effects: 0 };
-    try {
-      await generateText({
-        abortSignal: AbortSignal.timeout(45_000),
-        model: m,
-        system: this.system(),
-        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
-        tools: { set_layout: this.tools([], pass).set_layout },
-        stopWhen: isStepCount(2),
-      });
-      if (!pass.effects && !this.stopped) fallback();
-    } catch {
-      fallback();
-    }
-  }
-
   /** The system prompt: the router's rules, the brain's name, and what the room told it about itself. */
   system() {
     const { brainName, brainAliases, brainNotes } = this.session.settings();
@@ -690,7 +658,7 @@ export class Brain {
           const share = s.requestShare(p.id, kind, reason, "Room brain");
           if (!share) return refuse(`${p.name} has no JamSesh window open.`);
           if (share.status === "live") {
-            void this.placeShare(share);
+            s.placeShare(share);
             return `${p.name} is already sharing their ${kind}; it is going up on the big screen. Don't ask again.`;
           }
           return `Asked ${p.name}; it appears on screen when they accept.${asked ? " (An earlier request to them is still waiting; no second one was sent.)" : ""}`;

@@ -168,7 +168,7 @@ test("other workstreams' decisions can't crowd out an older relevant one, or mov
   const checkout = s.store.all("workstreams").find((w) => w.title === "Checkout")!;
   const add = (text: string, workstreamId: string | null) => s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, workstreamId, relevance: "work", data: {} });
   add("Nav goes in a sidebar", nav.id);
-  for (let i = 0; i < 250; i++) add(`Checkout rule ${i}`, checkout.id);
+  for (let i = 0; i < 2_100; i++) add(`Checkout rule ${i}`, checkout.id); // more than 20 pages of 100
   expect(s.roomDecisions(desktop.id, { limit: 10 }).map((e) => e.text)).toEqual(["Nav goes in a sidebar"]);
   // The prompt hook hands it over (and only then marks it seen).
   expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "next" }, "127.0.0.1"))).toContain("Nav goes in a sidebar");
