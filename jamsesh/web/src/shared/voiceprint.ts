@@ -1,17 +1,48 @@
-// Your voiceprint travels with you. This device keeps a copy of the numbers that describe your voice
+// Your voiceprint travels with you. The device keeps a copy of the numbers that describe your voice
 // (never a recording), and with your say-so offers them to each room you join, so a new host knows
-// you from the first line. The copy belongs to the browser or the Mac app's profile, not to a host.
+// you from the first line. In the Mac app the app keeps the copy for you on this Mac, so it goes to
+// every host you join. A browser's storage belongs to the host's address, so there it is for this host only.
 import { useEffect, useState } from "react";
 import { api } from "./hub";
+import { currentHostKey } from "./identity";
 import type { Person } from "./hub";
-
-const KEY = "jamsesh.voiceprint.v1";
-const CONSENT = "jamsesh.voiceCarry";
 
 export interface Carried {
   model: string;
   dim: number;
   samples: { kind: string; embedding: number[] }[];
+  /** The host's digest of the voiceprint when this copy was taken, and when it last learned something. */
+  version?: string;
+  updatedAt?: number;
+  /** The host this copy was taken from (its host key). */
+  host?: string;
+}
+
+/** Where one person's copy and their yes or no live. */
+interface CopyStore {
+  consent(): Promise<boolean | null>;
+  setConsent(on: boolean): Promise<void>;
+  get(): Promise<Carried | null>;
+  put(copy: Carried): Promise<void>;
+}
+
+interface Bridge {
+  invoke(cmd: string, args: Record<string, unknown>): Promise<unknown>;
+}
+const bridge = () => (globalThis as { __TAURI_INTERNALS__?: Bridge }).__TAURI_INTERNALS__;
+
+/**
+ * The Mac app keeps one copy per person under the Mac user's app data. It asks the host which person
+ * this window is and refuses a different one, so a shared app never hands one person's copy to another.
+ */
+function appStore(b: Bridge, personId: string): CopyStore {
+  const get = () => b.invoke("voiceprint_get", { personId }) as Promise<{ consent: boolean | null; copy: Carried | null }>;
+  return {
+    consent: async () => (await get()).consent,
+    setConsent: async (on) => void (await b.invoke("voiceprint_consent", { personId, on })),
+    get: async () => (await get()).copy,
+    put: async (copy) => void (await b.invoke("voiceprint_put", { personId, copy })),
+  };
 }
 
 function read<T>(key: string): T | null {
@@ -24,71 +55,116 @@ function read<T>(key: string): T | null {
 }
 function write(key: string, value: unknown) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(value));
   } catch {
     /* private window or full storage: the copy simply isn't kept */
   }
 }
 
-/** What this person said about bringing their voice to other rooms: yes, no, or nothing yet. */
-export const carryChoice = () => read<boolean>(CONSENT);
-/** Off until they say so. */
-export const carryAllowed = () => carryChoice() === true;
-export function setCarryAllowed(on: boolean) {
-  write(CONSENT, on);
-  if (!on) forgetCopy();
+/** A browser keeps a copy and a choice per person: two people on one browser never share either. */
+function browserStore(personId: string): CopyStore {
+  const copyKey = `jamsesh.voiceprint.v2::${personId}`;
+  const consentKey = `jamsesh.voiceCarry.v2::${personId}`;
+  // Copies from before they were kept per person could be anyone's: never use them.
+  write("jamsesh.voiceprint.v1", null);
+  write("jamsesh.voiceCarry", null);
+  return {
+    consent: async () => read<boolean>(consentKey),
+    setConsent: async (on) => {
+      write(consentKey, on);
+      if (!on) write(copyKey, null);
+    },
+    get: async () => read<Carried>(copyKey),
+    put: async (copy) => write(copyKey, copy),
+  };
 }
 
-export const localCopy = () => read<Carried>(KEY);
-export function forgetCopy() {
+/** Whether the copy goes with the person to other hosts (the Mac app) or stays for this host (a browser). */
+export const carriesToOtherHosts = () => !!bridge();
+
+const storeFor = (personId: string): CopyStore => {
+  const b = bridge();
+  return b ? appStore(b, personId) : browserStore(personId);
+};
+
+const quiet = async <T,>(p: () => Promise<T>, fallback: T): Promise<T> => {
   try {
-    localStorage.removeItem(KEY);
+    return await p();
   } catch {
-    /* nothing to remove */
+    return fallback;
   }
-}
+};
 
-/** Takes this device's copy from the host that has just learned more of the person's voice. */
+/** What this person said about keeping their voice: yes, no, or nothing yet. */
+export const carryChoice = (personId: string) => quiet(() => storeFor(personId).consent(), null);
+/** Off until they say so. */
+export const carryAllowed = async (personId: string) => (await carryChoice(personId)) === true;
+/** Saying no forgets the copy. */
+export const setCarryAllowed = (personId: string, on: boolean) => quiet(() => storeFor(personId).setConsent(on), undefined);
+export const localCopy = (personId: string) => quiet(() => storeFor(personId).get(), null);
+
+const fromHere = (c: Carried): Carried => ({ ...c, host: currentHostKey() || c.host });
+
+/** Takes the host's copy of the person's voiceprint onto this device. */
 export async function pullCopy(personId: string): Promise<boolean> {
   try {
     const c = await api<Carried>(`/people/${personId}/voiceprint`);
     if (!c?.samples?.length) return false;
-    write(KEY, c);
+    await storeFor(personId).put(fromHere(c));
     return true;
   } catch {
     return false;
   }
 }
 
-/** Offers this device's copy to the host the person has just joined. */
-export async function pushCopy(personId: string): Promise<boolean> {
-  const c = localCopy();
+/** Offers this device's copy to the host, then keeps what the host holds now (its copy and its version). */
+export async function pushCopy(personId: string, copy?: Carried | null): Promise<boolean> {
+  const c = copy ?? (await localCopy(personId));
   if (!c) return false;
   try {
-    const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, c, "PUT");
-    return !!r?.ok;
+    const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples }, "PUT");
+    if (!r?.ok) return false;
+    await pullCopy(personId);
+    return true;
   } catch {
     return false;
   }
 }
 
 /**
- * On joining: a host that doesn't know this voice gets the device's copy; a host that has learned
- * more than the copy holds gives its newer one back. Returns once the question is settled.
+ * On joining, settles which copy is newer. A copy taken from this same host is replaced when the host's
+ * version has changed (the device learns nothing by itself). A copy from another host and this host's own
+ * voiceprint: whichever learned something last wins, so a newer copy is never replaced by an older one. A
+ * host that knows nothing gets the device's copy; a device with nothing takes the host's.
  */
-export async function syncVoiceprint(me: Pick<Person, "id" | "voiceSamples">) {
-  if (!carryAllowed()) return;
-  const copy = localCopy();
-  if (!copy) {
-    if (me.voiceSamples > 0) await pullCopy(me.id);
+export async function syncVoiceprint(me: Pick<Person, "id">) {
+  if (!(await carryAllowed(me.id))) return;
+  const copy = await localCopy(me.id);
+  let host: Carried;
+  try {
+    host = await api<Carried>(`/people/${me.id}/voiceprint`);
+  } catch {
     return;
   }
-  if (me.voiceSamples === 0) await pushCopy(me.id);
-  else if (me.voiceSamples !== copy.samples.length) await pullCopy(me.id);
+  const hostHas = !!host?.samples?.length;
+  if (!copy) return void (hostHas && (await storeFor(me.id).put(fromHere(host))));
+  if (!hostHas) return void (await pushCopy(me.id, copy));
+  const here = currentHostKey();
+  if (here && copy.host === here) {
+    if (copy.version !== host.version) await storeFor(me.id).put(fromHere(host));
+  } else if ((copy.updatedAt ?? 0) > (host.updatedAt ?? 0)) await pushCopy(me.id, copy);
+  else await storeFor(me.id).put(fromHere(host));
 }
 
+/**
+ * Tells the host this person starts the join read, so the room's copies of it stay out of the transcript.
+ * Never queued for later: it throws when the host didn't take it, and then the read mustn't start.
+ */
+export const beginRead = (personId: string) => api(`/people/${personId}/voice/start`, {}, "POST", { queue: false });
+
 /** Runs the sync once per person on this host; `ready` is false until it has settled (so the join read isn't asked first). */
-export function useVoiceprintSync(me: Pick<Person, "id" | "voiceSamples"> | undefined) {
+export function useVoiceprintSync(me: Pick<Person, "id"> | undefined) {
   const [done, setDone] = useState<string | null>(null);
   const id = me?.id;
   useEffect(() => {
@@ -96,7 +172,7 @@ export function useVoiceprintSync(me: Pick<Person, "id" | "voiceSamples"> | unde
     let live = true;
     syncVoiceprint(me).finally(() => live && setDone(me.id));
     return () => void (live = false);
-    // Only a new person starts a sync; the sample count changing underneath it is the sync's own doing.
+    // Only a new person starts a sync.
   }, [id]);
   return !!me && done === me.id;
 }

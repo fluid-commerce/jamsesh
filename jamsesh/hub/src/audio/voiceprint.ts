@@ -102,12 +102,16 @@ export const WEIGHT: Record<VoiceKind, number> = { auto: 1, enrol: 3, correction
 /** The speaker model this host uses; carried voiceprints must come from the same one. */
 export const MODEL_ID = "wespeaker_en";
 export const EMBED_DIM = 256;
-const MAX_CARRIED = 32;
+export const MAX_CARRIED = 32;
 
 export interface Carried {
   model: string;
   dim: number;
   samples: { kind: VoiceKind; embedding: number[] }[];
+  /** A digest of every sample this host holds for the person: it changes whenever the voiceprint does. */
+  version?: string;
+  /** When this host last learned a sample for the person (ms), to tell which of two hosts' copies is newer. */
+  updatedAt?: number;
 }
 
 /** A voiceprint arriving from a person's device, checked before it goes anywhere near the store. */
@@ -121,9 +125,13 @@ export function parseCarried(body: unknown): { ok: true; samples: Float32Array[]
   for (const x of b.samples) {
     const e = x?.embedding;
     if (!Array.isArray(e) || e.length !== EMBED_DIM || e.some((n) => typeof n !== "number" || !Number.isFinite(n))) return { ok: false, reason: "A sample in that voiceprint is malformed." };
+    // Finite as JSON isn't finite as Float32 (1e100 becomes Infinity, and then NaN once normalized): check what is stored.
     const v = Float32Array.from(e);
+    if (!v.every(Number.isFinite)) return { ok: false, reason: "A sample in that voiceprint is malformed." };
     if (!v.some((n) => n !== 0)) return { ok: false, reason: "A sample in that voiceprint is empty." };
-    out.push(normalize(v));
+    const unit = normalize(v);
+    if (!unit.every(Number.isFinite) || Math.abs(Math.hypot(...unit) - 1) > 1e-3) return { ok: false, reason: "A sample in that voiceprint is malformed." };
+    out.push(unit);
   }
   return { ok: true, samples: out };
 }
@@ -219,14 +227,22 @@ export class Voiceprints {
     const trusted = mine.filter((x) => x.kind !== "auto");
     const autos = mine.filter((x) => x.kind === "auto").sort((a, b) => b.ts - a.ts);
     const pick = [...trusted.sort((a, b) => b.ts - a.ts), ...autos].slice(0, MAX_CARRIED);
-    return { model: MODEL_ID, dim: EMBED_DIM, samples: pick.map((x) => ({ kind: x.kind, embedding: [...x.embedding].map((n) => Math.round(n * 1e5) / 1e5) })) };
+    const version = mine.length ? Bun.hash(mine.map((x) => `${x.id}:${x.ts}:${x.kind}`).sort().join(",")).toString(36) : "";
+    const updatedAt = mine.reduce((t, x) => Math.max(t, x.ts), 0);
+    return { model: MODEL_ID, dim: EMBED_DIM, samples: pick.map((x) => ({ kind: x.kind, embedding: [...x.embedding].map((n) => Math.round(n * 1e5) / 1e5) })), version, updatedAt };
   }
 
-  /** Brings a person's voiceprint from their own device, replacing the copy they brought before. */
-  importCarried(personId: string, samples: Float32Array[]) {
+  /**
+   * Brings a person's voiceprint from their own device, replacing the copy they brought before. Samples this
+   * host already has (its own copy coming back from another host) aren't added twice. Returns how many were kept.
+   */
+  importCarried(personId: string, samples: Float32Array[]): number {
     this.store.clearVoiceKind(personId, "carried");
-    for (const e of samples) this.store.addVoiceSample(personId, e, "carried");
+    const own = this.store.voiceSamples().filter((x) => x.personId === personId && x.embedding.length === EMBED_DIM).map((x) => normalize(x.embedding));
+    const fresh = samples.filter((e) => !own.some((o) => cosine(o, e) > 0.9999));
+    for (const e of fresh) this.store.addVoiceSample(personId, e, "carried");
     this.reload();
+    return fresh.length;
   }
 
   /** Similarity of an embedding to every enrolled person, best first. */

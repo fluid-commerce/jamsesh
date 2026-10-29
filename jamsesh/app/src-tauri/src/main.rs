@@ -10,6 +10,7 @@ mod perms;
 mod projects;
 mod proxy;
 mod screens;
+mod voiceprints;
 mod watchdog;
 
 use std::path::PathBuf;
@@ -910,6 +911,44 @@ fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
     }
 }
 
+/// The person this app's window is on the host it shows, as that host says (not as the page says), and
+/// only for the person's own window. `person_id` is who the page thinks it is: a page that's behind
+/// (someone else picked who they are) gets nothing.
+async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Result<String, String> {
+    if window.label() != "client" {
+        return Err("Only your own window keeps your voice.".into());
+    }
+    let port = {
+        let inner = state.inner.lock().await;
+        inner.hub.as_ref().map(|h| h.port).or(inner.relay.as_ref().map(|r| r.port))
+    };
+    let port = port.ok_or("Host or join a session first.")?;
+    let (status, me) = proxy::get_as_window(port, "/api/me").await?;
+    let (id, name) = voiceprints::person_of(&me).filter(|_| status.is_success()).ok_or("Pick who you are first.")?;
+    if id != person_id {
+        return Err("This window is someone else now.".into());
+    }
+    Ok(name)
+}
+
+#[tauri::command]
+async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
+    let name = voice_owner(&window, &state, &person_id).await?;
+    Ok(voiceprints::load(&state.dir, &name))
+}
+
+#[tauri::command]
+async fn voiceprint_put(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, copy: voiceprints::Copy) -> Result<(), String> {
+    let name = voice_owner(&window, &state, &person_id).await?;
+    voiceprints::put(&state.dir, &name, copy)
+}
+
+#[tauri::command]
+async fn voiceprint_consent(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
+    let name = voice_owner(&window, &state, &person_id).await?;
+    voiceprints::set_consent(&state.dir, &name, on)
+}
+
 /// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
 fn resume_launch(cfg: &Config) -> Launch {
     if cfg.lobby {
@@ -955,6 +994,9 @@ fn main() {
             toggle_userless,
             local_fonts,
             heartbeat,
+            voiceprint_get,
+            voiceprint_put,
+            voiceprint_consent,
             screens::screens_state,
             screens::screens_preview,
             screens::screens_save,

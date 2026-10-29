@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { BARGE_MARGIN_DB, holdMic, isEchoSegment } from "../src/shared/mic";
+import { BARGE_MARGIN_DB, isEchoSegment } from "../src/shared/mic";
 
 test("the brain's echo is dropped, a close voice over it is not", () => {
   expect(isEchoSegment(-40, -60, true)).toBe(true);
@@ -7,8 +7,3 @@ test("the brain's echo is dropped, a close voice over it is not", () => {
   expect(isEchoSegment(-50, -60, false)).toBe(false);
 });
 
-test("holdMic can be released once", () => {
-  const release = holdMic();
-  release();
-  release();
-});

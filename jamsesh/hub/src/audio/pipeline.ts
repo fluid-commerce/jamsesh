@@ -330,15 +330,22 @@ export class AudioPipeline {
     if (w) w.until = Date.now() + ENROL_GRACE_MS;
   }
 
+  /**
+   * A copy of the read: it arrived while that person reads, follows the script's wording, and the
+   * reader's own laptop heard it loudest. Anyone else talking then, on any laptop, is still heard.
+   */
   private isCalibration(text: string, g: Group) {
     const now = Date.now();
+    const loudest = [...g.segments].sort((a, b) => speechDb(b) - speechDb(a))[0];
+    const owner = loudest && this.session.store.get("devices", loudest.deviceId)?.personId;
     for (const [id, w] of this.enrolling) {
       if (now > w.until + 60_000) this.enrolling.delete(id);
       // The line's own clock can be seconds off, so the window is judged by when it arrived.
-      else if (g.lastArrival >= w.since && g.lastArrival <= w.until && scriptShare(text) >= 0.6) return true;
+      else if (owner === id && g.lastArrival >= w.since && g.lastArrival <= w.until && scriptShare(text) >= 0.6) return true;
     }
     return false;
   }
+
 
   /**
    * The same words heard a moment apart in the same place by other laptops are one line, whatever the

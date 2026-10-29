@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "voiceprint",
+  "description": "A person's own window (the hub's or the relay's page at 127.0.0.1) may keep their voiceprint copy in the app. The app asks the host which person the window is and keeps one copy per person.",
+  "windows": ["client"],
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-voiceprint-get", "allow-voiceprint-put", "allow-voiceprint-consent"]
+}

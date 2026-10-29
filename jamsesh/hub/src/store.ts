@@ -329,8 +329,9 @@ export class Store {
   addVoiceSample(personId: string, embedding: Float32Array, kind: VoiceKind = "auto"): void {
     if (this.team) return this.team.addVoiceSample(personId, embedding, kind);
     this.db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)), kind);
-    // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24 each).
-    for (const [k, keep] of [["auto", 40], ["enrol", 24], ["correction", 24], ["carried", 24]] as const)
+    // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24
+    // each). A carried copy keeps everything a device may carry (32, MAX_CARRIED), so carrying it back loses nothing.
+    for (const [k, keep] of [["auto", 40], ["enrol", 24], ["correction", 24], ["carried", 32]] as const)
       this.db
         .query(
           `DELETE FROM voiceprints WHERE person_id = ? AND kind = ? AND rowid NOT IN

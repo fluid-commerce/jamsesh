@@ -388,9 +388,9 @@ export class Hub {
     if (!this.session.person(personId)) throw new Error("No such person.");
     const r = parseCarried(body);
     if (!r.ok) return r;
-    this.audio.voiceprints.importCarried(personId, r.samples);
+    const kept = this.audio.voiceprints.importCarried(personId, r.samples);
     this.session.store.put("people", this.session.person(personId)!);
-    return { ok: true as const, samples: r.samples.length };
+    return { ok: true as const, samples: kept };
   }
 
   /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */

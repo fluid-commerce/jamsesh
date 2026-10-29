@@ -5,8 +5,8 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ENROL_SCRIPT } from "../src/audio/enrol";
-import { embed, learningNote } from "../src/audio/voiceprint";
+import { ENROL_SCRIPT, scriptShare } from "../src/audio/enrol";
+import { embed, learningNote, parseCarried } from "../src/audio/voiceprint";
 import { decodeWav, encodeWav, resample } from "../src/audio/wav";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
@@ -49,12 +49,32 @@ sim("two people at once: one reads, the other keeps talking and is heard", async
   const room = makeRoom();
   const r = rng(3);
   const t = base();
-  room.pipeline.beginEnrolment(room.people.dee.id);
-  await play(room, line("dee", ENROL_SCRIPT[0], t), r);
+  room.pipeline.beginEnrolment(room.people.ben.id);
+  await play(room, line("ben", ENROL_SCRIPT[0], t), r);
   await play(room, line("cam", "Remind me which of these two layouts we agreed on last week for the portal.", t + 9000), r);
   // Cold room, so Cam's line is Someone's: the point is that it is there and the read is not.
   expect(ofRoom(room).map((u) => u.text)).toEqual(["Remind me which of these two layouts we agreed on last week for the portal."]);
 }, T);
+
+sim("while one person reads, others using the script's words, or reading it at their own laptop, are still heard", async () => {
+  const room = makeRoom();
+  const r = rng(4);
+  const t = base();
+  room.pipeline.beginEnrolment(room.people.ana.id);
+  const mixed = "I ask for the layout and the spacing on the big screen.";
+  await play(room, line("cam", mixed, t), r);
+  // Ben reads the script aloud at his own laptop while Ana is the one enrolling: that's Ben talking.
+  await play(room, line("ben", ENROL_SCRIPT[2], t + 9000), r);
+  expect(ofRoom(room).map((u) => u.text)).toEqual([mixed, ENROL_SCRIPT[2]]);
+}, T);
+
+test("the read is matched by the script's word order, not its vocabulary", () => {
+  expect(scriptShare(ENROL_SCRIPT[0])).toBe(1);
+  expect(scriptShare("this is my boys and this is how I sound while I work")).toBeGreaterThan(0.8);
+  expect(scriptShare("the colors, the spacing, and what I would change next. When I ask for something")).toBeGreaterThan(0.9);
+  expect(scriptShare("I ask for the layout and the spacing on the big screen")).toBeLessThan(0.6);
+  expect(scriptShare("this is it")).toBe(0);
+});
 
 const SKEWS = [
   { name: "laptop clocks a second and a half off", opts: { skew: { "lap-b": 1500, "lap-c": -1300 }, textNoise: true } },
@@ -248,7 +268,7 @@ sim("a voiceprint made on one host identifies its owner on another, and holds em
   const carried = hubA.voiceprintOf(anaA.id);
   expect(carried.samples.length).toBeGreaterThan(1);
   // Nothing but numbers: no audio, no names, no file.
-  expect(Object.keys(carried).sort()).toEqual(["dim", "model", "samples"]);
+  expect(Object.keys(carried).sort()).toEqual(["dim", "model", "samples", "updatedAt", "version"]);
   expect(carried.samples.every((s) => Object.keys(s).sort().join() === "embedding,kind" && s.embedding.length === 256)).toBe(true);
   // Host B has never heard her.
   const anaB = hubB.session.upsertPerson({ name: "Ana" });
@@ -284,6 +304,9 @@ sim("a carried voiceprint is checked: wrong model, wrong size, junk and too many
     { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map(() => "x") }] },
     { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map(() => 0) }] },
     { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map((_, i) => (i === 3 ? Infinity : 1)) }] },
+    // Finite in JSON, infinite as Float32.
+    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map(() => 1e100) }] },
+    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map((n, i) => (i === 0 ? 1e39 : n)) }] },
     { ...ok, samples: Array.from({ length: 40 }, () => ok.samples[0]) },
     null,
     "audio",
@@ -291,6 +314,41 @@ sim("a carried voiceprint is checked: wrong model, wrong size, junk and too many
   for (const b of bad) expect(hubB.carryVoiceprint(p.id, b)).toMatchObject({ ok: false });
   expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
 });
+
+test("a sample whose numbers overflow Float32 is refused, never stored as infinities", () => {
+  const r = parseCarried({ model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: new Array(256).fill(1e100) }] });
+  expect(r.ok).toBe(false);
+  const tiny = parseCarried({ model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: new Array(256).fill(0.0625) }] });
+  expect(tiny.ok && tiny.samples[0].every(Number.isFinite)).toBe(true);
+});
+
+test("a full voiceprint carried to another host and back loses nothing, and its version says when it changed", () => {
+  const full = hubA.session.upsertPerson({ name: "Full" });
+  const base = Array.from({ length: 256 }, (_, i) => Math.sin(i + 1));
+  // 32 distinct samples, the most a device carries.
+  const samples = Array.from({ length: 32 }, (_, k) => ({ kind: "enrol" as const, embedding: base.map((n, i) => (i === k ? n + 0.5 : n)) }));
+  const onB = hubB.session.upsertPerson({ name: "Full" });
+  expect(hubB.carryVoiceprint(onB.id, { model: "wespeaker_en", dim: 256, samples })).toMatchObject({ ok: true, samples: 32 });
+  const back = hubB.voiceprintOf(onB.id);
+  expect(back.samples).toHaveLength(32);
+  const sent = samples.map((x) => normalizeArr(x.embedding));
+  const which = (e: number[]) => sent.findIndex((x) => x.reduce((d, n, i) => d + n * e[i], 0) > 0.99999);
+  expect(new Set(back.samples.map((x) => which(x.embedding))).size).toBe(32);
+  expect(back.samples.every((x) => which(x.embedding) >= 0)).toBe(true);
+  // Same samples, same version; anything learned changes it.
+  expect(hubB.voiceprintOf(onB.id).version).toBe(back.version);
+  hubB.audio.voiceprints.add(onB.id, Float32Array.from(base), "correction");
+  expect(hubB.voiceprintOf(onB.id).version).not.toBe(back.version);
+  // Its own samples coming back from another host aren't counted twice: the correction stays one correction.
+  const own = hubB.voiceprintOf(onB.id);
+  expect(hubB.carryVoiceprint(onB.id, own)).toMatchObject({ ok: true, samples: 31 });
+  expect(hubB.audio.voiceprints.learnedFrom(onB.id)).toMatchObject({ correction: 1, carried: 31 });
+  expect(hubA.voiceprintOf(full.id)).toMatchObject({ samples: [], version: "", updatedAt: 0 });
+});
+const normalizeArr = (e: number[]) => {
+  const n = Math.hypot(...e);
+  return e.map((x) => x / n);
+};
 
 sim("only a person gives their own voiceprint: not another person, not an agent, not a window with no person", async () => {
   const ana = hubB.session.people().find((p) => p.name === "Ana")!;

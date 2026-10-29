@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Person } from "../shared/hub";
-import { encodeWav, holdMic } from "../shared/mic";
+import { encodeWav } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
 import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
-import { carryChoice, pullCopy, setCarryAllowed } from "../shared/voiceprint";
+import { beginRead, carriesToOtherHosts, carryChoice, pullCopy, setCarryAllowed } from "../shared/voiceprint";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
 export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person; brainName: string; onClose: () => void; micError?: string | null }) {
@@ -76,7 +76,13 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
   const [msg, setMsg] = useState("");
   const [secs, setSecs] = useState(0);
   const [script, setScript] = useState(FALLBACK_SCRIPT);
-  const [carry, setCarry] = useState(() => carryChoice() ?? true);
+  // Ticked unless this person said no before (the choice is theirs, not this device's).
+  const [carry, setCarry] = useState(true);
+  useEffect(() => {
+    let live = true;
+    carryChoice(me.id).then((c) => live && setCarry(c ?? true));
+    return () => void (live = false);
+  }, [me.id]);
   const rec = useRef<{ stop: () => void } | null>(null);
 
   useEffect(() => {
@@ -90,12 +96,16 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
 
   const start = async () => {
     if (blocked) return setState("error"), setMsg(blocked);
-    // Your own laptop's always-on mic hears you read this; keep it from sending it to the room.
-    const release = holdMic();
+    // Every laptop hears the read, yours loudest: the host keeps it out of the transcript while you read.
+    // If it can't, don't read, or the room would see it.
+    try {
+      await beginRead(me.id);
+    } catch (e) {
+      setState("error");
+      return setMsg(`The host couldn't get ready for your read, so nothing was recorded. ${e instanceof Error ? e.message : ""}`.trim());
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
-      // The room's other laptops hear this too; the host keeps what they heard out of the transcript.
-      await api(`/people/${me.id}/voice/start`, {}).catch(() => {});
       const chunks: Blob[] = [];
       const mr = new MediaRecorder(stream);
       mr.ondataavailable = (e) => chunks.push(e.data);
@@ -103,7 +113,6 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       const tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
       const auto = setTimeout(() => mr.state === "recording" && mr.stop(), 45_000);
       mr.onstop = async () => {
-        release();
         clearInterval(tick);
         clearTimeout(auto);
         stream.getTracks().forEach((t) => t.stop());
@@ -112,7 +121,7 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
           const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
           const r = await fetch(`/api/people/${me.id}/voice`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav }).then((x) => x.json());
           if (r.ok) {
-            setCarryAllowed(carry);
+            await setCarryAllowed(me.id, carry);
             if (carry) await pullCopy(me.id);
             setState("done");
             setMsg(`${brainName} knows your voice.`);
@@ -127,7 +136,6 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       setSecs(0);
       setState("recording");
     } catch (e) {
-      release();
       setState("error");
       setMsg(e instanceof Error ? e.message : String(e));
     }
@@ -156,13 +164,17 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
             setCarry(e.target.checked);
             // Already known on this host: the copy for your next room is taken now, or dropped now.
             if (state !== "recording") {
-              setCarryAllowed(e.target.checked);
-              if (e.target.checked && me.voiceSamples > 0) void pullCopy(me.id);
+              const on = e.target.checked;
+              void setCarryAllowed(me.id, on).then(() => on && me.voiceSamples > 0 && pullCopy(me.id));
             }
           }}
           style={{ marginTop: 2 }}
         />
-        <span>Keep my voice on this device and bring it to rooms I join. Only numbers that describe your voice, never a recording.</span>
+        <span>
+          {carriesToOtherHosts()
+            ? "Keep my voice in the JamSesh app on this Mac and bring it to rooms I join. Only numbers that describe your voice, never a recording."
+            : "Keep my voice in this browser for this host. Only numbers that describe your voice, never a recording. To bring it to other hosts, join with the JamSesh Mac app."}
+        </span>
       </label>
       <div className="row">
         {state === "recording" ? (

@@ -233,22 +233,6 @@ export function isEchoSegment(level: number, noise: number, suppressing: boolean
   return suppressing && level < noise + BARGE_MARGIN_DB;
 }
 
-let holds = 0;
-/**
- * Keeps this laptop's microphone from sending speech while the caller does something that
- * must not be heard as room talk (reading the voice-enrollment sentence). Release is
- * delayed a moment so the last words, finishing after the caller stops, are still dropped.
- */
-export function holdMic() {
-  holds++;
-  let done = false;
-  return () => {
-    if (done) return;
-    done = true;
-    setTimeout(() => (holds = Math.max(0, holds - 1)), 1500);
-  };
-}
-
 export class Mic {
   status: MicStatus = { on: false, level: -90, noise: -70, speaking: false, sent: 0, error: null, deviceLabel: "", buffered: audioBuffer.get().seconds };
   private ctx: AudioContext | null = null;
@@ -496,7 +480,6 @@ export class Mic {
     const t0 = this.segStart;
     const t1 = ts - trim * 20;
     if (this.segSpeechFrames < MIN_SPEECH_FRAMES) return;
-    if (holds > 0) return;
     const samples = new Float32Array(kept.length * FRAME);
     kept.forEach((k, i) => samples.set(k, i * FRAME));
     const levels = [...this.segLevels].sort((a, b) => a - b);
