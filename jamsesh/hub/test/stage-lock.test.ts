@@ -553,6 +553,10 @@ test("a paired window is the person it's bound to: another device naming the own
     expect((await as(felipes)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
     expect((await as(felipes)("/devices", { deviceId: "felipe-laptop", personId: chey.id })).status).toBe(200);
     expect(await me(felipes)).toBe(felipe.id);
+    // One model: the device belongs to Felipe's window, and that window's devices are Felipe's.
+    expect(s.store.get("devices", "felipe-laptop")?.personId).toBe(felipe.id);
+    // Chey's browser can't take over the device Felipe's window registered (Phase 1's window-owned devices).
+    expect((await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: chey.id })).status).toBe(403);
     expect((await as(felipes)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
     // The unbound browser naming Chey can't answer either.
     expect((await as(nobody)(`/show-requests/${req.id}`, { approve: true, personId: chey.id })).status).toBe(403);
