@@ -17,6 +17,34 @@ export const MAX_LENT_BYTES = 128 * 1024 * 1024;
 export const MAX_OPEN_BYTES = 96 * 1024 * 1024;
 export const MAX_FAMILIES = 48;
 const MAX_OPEN_PER_SCAN = 16;
+/** The most the catalogue, a family's details and a stylesheet may be: replies are read up to this and no further. */
+const MAX_CATALOGUE = 16 * 1024 * 1024;
+const MAX_META = 1024 * 1024;
+const MAX_CSS = 256 * 1024;
+
+/**
+ * A reply's body, read up to `max` bytes and no further: one that says it is larger is refused unread,
+ * and one that runs past the cap is cut off. Null when it is too large.
+ */
+export async function readUpTo(r: Response, max: number): Promise<Uint8Array | null> {
+  const said = Number(r.headers.get("content-length"));
+  if (!(max > 0) || (Number.isFinite(said) && said > max)) return void (await r.body?.cancel().catch(() => {})), null;
+  if (!r.body) return new Uint8Array(0);
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  const reader = r.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > max) return void (await reader.cancel().catch(() => {})), null;
+    parts.push(value);
+  }
+  const out = new Uint8Array(n);
+  let at = 0;
+  for (const p of parts) (out.set(p, at), (at += p.length));
+  return out;
+}
 const FETCH_MS = 20_000;
 /** Licences taken without asking anyone (Fontsource's SPDX ids). */
 export const OPEN_LICENSES = new Set(["OFL-1.1", "Apache-2.0"]);
@@ -227,16 +255,19 @@ export class FontService {
 
   // ---- open fonts ----
 
-  private async getJson(url: string): Promise<any> {
+  private async getText(url: string, max: number): Promise<string> {
     const r = await fetch(url, { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(FETCH_MS)]) });
     if (!r.ok) throw new Error(`${url}: ${r.status}`);
-    return r.json();
+    const body = await readUpTo(r, max);
+    if (!body) throw new Error(`${url}: over ${max} bytes`);
+    return new TextDecoder().decode(body);
   }
 
   /** Fontsource's list of families (once; it carries each family's licence). Null when it can't be reached. */
   private async load(): Promise<Map<string, CatalogueEntry> | null> {
     if (this.catalogue) return this.catalogue;
-    this.catalogueTry ??= this.getJson(`${this.api}/fonts`).then((list: any[]) => {
+    this.catalogueTry ??= this.getText(`${this.api}/fonts`, MAX_CATALOGUE).then((text) => {
+      const list: any[] = JSON.parse(text);
       const m = new Map<string, CatalogueEntry>();
       for (const f of Array.isArray(list) ? list : []) {
         if (typeof f?.id === "string" && typeof f?.family === "string") m.set(normalizeFamily(f.family), { id: f.id, family: f.family, license: String(f.license ?? ""), type: String(f.type ?? ""), styles: f.styles ?? [], weights: f.weights ?? [], defSubset: String(f.defSubset ?? "latin") });
@@ -287,15 +318,13 @@ export class FontService {
     if (!weights.length) weights.push([...have].sort((a, b) => Math.abs(a - 400) - Math.abs(b - 400))[0]);
     const italic = e.styles.includes("italic");
     const axis = italic ? `ital,wght@${[...weights.map((w) => `0,${w}`), ...weights.map((w) => `1,${w}`)].join(";")}` : `wght@${weights.join(";")}`;
-    const r = await fetch(`${this.googleCss}?family=${encodeURIComponent(e.family).replace(/%20/g, "+")}:${axis}`, { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(FETCH_MS)]) });
-    if (!r.ok) throw new Error(`stylesheet: ${r.status}`);
-    const css = await r.text();
+    const css = await this.getText(`${this.googleCss}?family=${encodeURIComponent(e.family).replace(/%20/g, "+")}:${axis}`, MAX_CSS);
     return [...new Set([...css.matchAll(/url\((https?:\/\/[^)\s]+)\)\s*format\('truetype'\)/g)].map((m) => m[1]))].filter((u) => u.startsWith(this.googleHost));
   }
 
   /** The same from Fontsource's CDN: Regular and Bold, upright and italic, from the default subset. */
   private async fontsourceUrls(e: CatalogueEntry): Promise<string[]> {
-    const meta = await this.getJson(`${this.api}/fonts/${encodeURIComponent(e.id)}`);
+    const meta = JSON.parse(await this.getText(`${this.api}/fonts/${encodeURIComponent(e.id)}`, MAX_META));
     const subset: string = meta?.defSubset ?? e.defSubset;
     const urls: string[] = [];
     for (const [w, style] of [["400", "normal"], ["700", "normal"], ["400", "italic"], ["700", "italic"]]) {
@@ -311,10 +340,14 @@ export class FontService {
     let total = 0;
     for (const url of urls.slice(0, 8)) {
       const r = await fetch(url, { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(FETCH_MS)]) });
-      if (!r.ok) continue;
-      const data = new Uint8Array(await r.arrayBuffer());
+      if (!r.ok) {
+        await r.body?.cancel().catch(() => {});
+        continue;
+      }
+      // Read no more than this face may be: the face cap, and what's left of the family's and the session's.
+      const data = await readUpTo(r, Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, MAX_OPEN_BYTES - this.openBytes() - total));
+      if (!data) break;
       total += data.length;
-      if (data.length > MAX_FACE || total > MAX_FAMILY_BYTES || this.openBytes() + total > MAX_OPEN_BYTES) break;
       if (fontFamilies(data)?.some((n) => normalizeFamily(n) === key)) faces.push({ data });
     }
     return faces;

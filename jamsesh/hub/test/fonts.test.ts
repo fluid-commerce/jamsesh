@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forbiddenCommand } from "../src/canvas/canvas";
-import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, MAX_FACE, MAX_FACES, normalizeFamily } from "../src/fonts";
+import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { FONT_BODY_MAX, startHttp } from "../src/http";
@@ -439,4 +439,60 @@ test("over HTTP: a lend body over the cap is refused before it is parsed, with o
   expect(sized.status).toBe(413);
   const chunked = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: as(danasMac), body: new ReadableStream({ start(c) { const bytes = new TextEncoder().encode(body); for (let i = 0; i < bytes.length; i += 1 << 20) c.enqueue(bytes.subarray(i, i + (1 << 20))); c.close(); } }), duplex: "half" } as any);
   expect([413, 431]).toContain(chunked.status); // Bun may answer a refused chunked upload itself
+});
+
+test("a reply is read only up to its cap: a large Content-Length is refused unread, an endless body is cut off", async () => {
+  // Says it is large: not one byte is pulled.
+  let pulled = 0;
+  const endless = () =>
+    new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled += 64 * 1024;
+        c.enqueue(new Uint8Array(64 * 1024));
+      },
+    });
+  expect(await readUpTo(new Response(endless(), { headers: { "content-length": String(MAX_FACE + 1) } }), MAX_FACE)).toBeNull();
+  expect(pulled).toBeLessThanOrEqual(64 * 1024); // at most the stream's own first read-ahead
+  // No length, and it never ends: reading stops just past the cap.
+  pulled = 0;
+  expect(await readUpTo(new Response(endless()), 1024 * 1024)).toBeNull();
+  expect(pulled).toBeLessThan(1024 * 1024 + 4 * 64 * 1024);
+  // Within the cap, the bytes come through whole; a cap already used up reads nothing.
+  expect(await readUpTo(new Response(new Uint8Array([1, 2, 3])), 3)).toEqual(new Uint8Array([1, 2, 3]));
+  expect(await readUpTo(new Response(new Uint8Array([1])), 0)).toBeNull();
+});
+
+test("an open font whose server sends a never-ending file is dropped, not held in memory", async () => {
+  let sent = 0;
+  const flood: ReturnType<typeof Bun.serve> = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req): Response {
+      const path = new URL(req.url).pathname;
+      if (path === "/v1/fonts") return Response.json([{ id: "flood", family: "Flood Sans", license: OFL, type: "other", styles: ["normal"], weights: [400], defSubset: "latin" }]);
+      if (path === "/v1/fonts/flood") return Response.json({ id: "flood", defSubset: "latin", variants: { "400": { normal: { latin: { url: { ttf: `http://127.0.0.1:${flood.port}/cdn/flood.ttf` } } } } } });
+      // Paced, so what was sent is what the hub asked for.
+      const body = new ReadableStream(
+        {
+          pull: async (c) => {
+            await Bun.sleep(1);
+            if (sent >= 64 * 1024 * 1024) return c.close();
+            c.enqueue(new Uint8Array(1 << 20));
+            sent += 1 << 20;
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(body);
+    },
+  });
+  try {
+    const fonts = new FontService(() => [], () => undefined, { api: `http://127.0.0.1:${flood.port}/v1`, cdn: `http://127.0.0.1:${flood.port}/cdn/`, googleCss: "", googleHost: "", offline: false });
+    expect(await fonts.resolveOpen("Flood Sans")).toBe(false);
+    expect(fonts.has("Flood Sans")).toBe(false);
+    // The hub stopped reading just past the face cap, well before the 64 MB the server would have sent.
+    expect(sent).toBeLessThan(MAX_FACE + 8 * (1 << 20));
+  } finally {
+    flood.stop(true);
+  }
 });
