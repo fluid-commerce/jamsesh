@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
+import { readPref } from "./identity";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
@@ -683,7 +684,7 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
             <span className="chip mono" style={{ flex: "none" }}>{ago(d.ts, now)}</span>
             <span className="ellipsis grow">{d.progress?.[agent.id] === "acked" ? "On it" : "Not picked up"}: {stripMd(d.text)}</span>
             {d.reassignOfferedAt && (
-              <button className="btn small" style={{ flex: "none" }} onClick={() => api(`/api/directives/${d.id}/reassign`, {}).catch(() => {})}>
+              <button className="btn small" style={{ flex: "none" }} onClick={() => api(`/api/directives/${d.id}/reassign`, { personId: readPref("personId") }).catch(() => {})}>
                 Reassign
               </button>
             )}

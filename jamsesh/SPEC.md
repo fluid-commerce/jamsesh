@@ -491,7 +491,8 @@ steps, and an idle agent goes back to its person and is woken when the room has 
 2. **Each prompt.** `UserPromptSubmit` delivers the same items alongside the person's prompt, and
    ends any waiting listener (the person is talking to the agent now).
 3. **Turn end.** `Stop` (`/api/hooks/stop`) keeps the agent working if work is waiting. Otherwise
-   the agent goes idle and **stops, back to its person**: it is no longer told to sit in `jam_wait`.
+   the agent goes idle and **stops, back to its person**: it is no longer told to sit in `jam_wait`
+   (unless its install predates the listener, see below).
 4. **Wake-up.** A second `Stop` hook, `hook.sh listen`, runs in the background (`asyncRewake`).
    It calls `/api/hooks/listen`, which the hub holds open (up to about 200 seconds, which the
    server's idle limit allows) until the room has something for that agent; the script calls again
@@ -514,9 +515,11 @@ over themselves.
 decisions use a per-agent "seen" mark the same way. Room-wide messages (to everyone) skip the
 sender and observers that opted out (6.3b).
 
-The hub rewrites nothing on the person's machine to do this, but an install made before this
-version has no `PostToolUse` or listener hook, so its agents only get the prompt and turn-end
-hooks until **Connect my agents** (or `/agent/setup.sh`) runs again.
+An install made before this version has no `PostToolUse` or listener hook. The hub remembers per
+agent whether either newer hook has ever reached it; until one has, `Stop` keeps the old behaviour
+and tells an idle Claude Code agent to call `jam_wait` (once per stop). **Connect my agents** (or
+`/agent/setup.sh`) installs the new hooks. A brand-new install's very first stop, before any tool
+call, gets the old nudge once.
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate

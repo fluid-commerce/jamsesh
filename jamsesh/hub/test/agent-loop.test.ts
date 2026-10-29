@@ -61,7 +61,8 @@ test("the agent's own inbox and wait calls aren't repeated by the tool hook", ()
 test("an idle agent returns to its person and is woken when the room has something", async () => {
   const { hub, s, reg } = room();
   const a = reg("Jonathan", "acme/desktop", "/d");
-  // No forced jam_wait any more: Stop lets the agent end its turn.
+  // With the newer hooks (the tool hook has run) Stop lets the agent end its turn: the listener wakes it.
+  hub.onTool({ agentId: a.id, tool_name: "Edit" }, "127.0.0.1");
   expect(hub.onStop({ agentId: a.id, last_assistant_message: "Header done." }, "127.0.0.1")).toEqual({});
   const woken = hub.onListen({ agentId: a.id }, "127.0.0.1");
   await Bun.sleep(30);
@@ -269,4 +270,29 @@ test("hook.sh listen holds in the background and exits 2 with the room's news", 
     server.stop(true);
     hub.devproxy.stop();
   }
+});
+
+test("an agent whose install predates the listener is still sent to jam_wait at Stop", () => {
+  const { hub, reg } = room();
+  const old = reg("Jonathan", "acme/desktop", "/d");
+  const stop: any = hub.onStop({ agentId: old.id, last_assistant_message: "Done." }, "127.0.0.1");
+  expect(stop.decision).toBe("block");
+  expect(stop.reason).toContain("jam_wait");
+  // Only once per stop, as before.
+  expect(hub.onStop({ agentId: old.id, stop_hook_active: true }, "127.0.0.1")).toEqual({});
+  // The first sign of the newer hooks switches it over, and it stays switched.
+  hub.onListen({ agentId: old.id }, "127.0.0.1", null, 1);
+  expect(hub.onStop({ agentId: old.id }, "127.0.0.1")).toEqual({});
+});
+
+test("reassigning records who did it", async () => {
+  const { hub, s, reg } = room();
+  const a = reg("Jonathan", "acme/desktop", "/d");
+  const b = reg("Chey", "acme/mobile", "/m");
+  const p = s.upsertPerson({ name: "Rae" });
+  const d = directive(s, "Build it", [a.id]);
+  const moved = s.reassignDirective(d.id, p.name)!;
+  expect(moved.requestedBy).toBe("Rae");
+  expect(moved.targets).toEqual([b.id]);
+  void hub;
 });

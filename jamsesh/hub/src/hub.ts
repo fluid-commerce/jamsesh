@@ -490,6 +490,15 @@ export class Hub {
     ];
   }
 
+  /** An agent whose machine has the newer hooks (PostToolUse, the listener) is woken by the listener; others still need the old "wait here" nudge at Stop. */
+  private newHooks(agentId: string) {
+    return this.store.setting<boolean>(`newHooks:${agentId}`, false);
+  }
+
+  private markNewHooks(agentId: string) {
+    if (!this.newHooks(agentId)) this.store.setSetting(`newHooks:${agentId}`, true);
+  }
+
   /** The last time a hook of each agent's reached us: tells a hooked Claude Code from a Codex that has none. */
   private hookSeen = new Map<string, number>();
   private listening = new Map<string, number>();
@@ -507,6 +516,7 @@ export class Hub {
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
     this.hookSeen.set(agent.id, Date.now());
+    this.markNewHooks(agent.id);
     const done = typeof agent.activity === "string" && agent.activity.startsWith("Done:");
     if (agent.status !== "working" || done) this.session.touchAgent(agent.id, { status: "working", ...(done ? { activity: "Working" } : {}) });
     else this.session.touchAgent(agent.id);
@@ -524,6 +534,7 @@ export class Hub {
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return "";
     this.hookSeen.set(agent.id, Date.now());
+    this.markNewHooks(agent.id);
     const mine = (this.listening.get(agent.id) ?? 0) + 1;
     this.listening.set(agent.id, mine);
     this.session.wake(agent.id); // a listener this one replaces ends now
@@ -564,6 +575,9 @@ export class Hub {
     if (!directives.length && !messages.length) {
       // Idle: the agent goes back to its person. The listener hook (see onListen) wakes it when the room has something.
       this.session.touchAgent(agent.id, { status: "idle" });
+      // An install from before the listener existed can't be woken: keep it waiting in jam_wait, once per stop.
+      if (!this.newHooks(agent.id) && !body.stop_hook_active && agent.harness === "claude-code" && agent.status !== "offline")
+        return { decision: "block", reason: "You're in a JamSesh session: call jam_wait to wait for the room's next directive. If your person is typing to you, stop and help them instead." };
       return {};
     }
     const reason = [
