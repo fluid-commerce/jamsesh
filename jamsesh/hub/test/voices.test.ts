@@ -79,7 +79,6 @@ test("the read is matched by the script's word order, not its vocabulary", () =>
 const SKEWS = [
   { name: "laptop clocks a second and a half off", opts: { skew: { "lap-b": 1500, "lap-c": -1300 } } },
   { name: "one laptop's copy arrives five seconds late", opts: { settleMs: 1000 } },
-  { name: "far laptops mishear a word", opts: { textNoise: true } },
 ];
 for (const c of SKEWS)
   sim(`the same line heard by three laptops shows once: ${c.name}`, async () => {
@@ -92,6 +91,20 @@ for (const c of SKEWS)
     expect(s.lost).toBe(0);
     expect(ofRoom(room)).toHaveLength(lines.length);
   }, T);
+
+// A far laptop that mishears a word is transcribed too (its copy is within 10 dB of the best, 5.R6) and its words
+// differ, so it is its own line: the design's known limit. What the room said is still all there, once in full.
+sim("a far laptop that mishears a word shows as a second line, and every line is still shown in full", async () => {
+  const room = makeRoom();
+  const lines = script(21, 3, base()).slice(0, 12);
+  const r = rng(5);
+  for (const l of lines) await play(room, l, r, { textNoise: true });
+  const s = score(room, lines);
+  expect(s.lost).toBe(0);
+  expect(s.dupes).toBeGreaterThan(0);
+  const shown = ofRoom(room).map((u) => u.text);
+  for (const l of lines) expect(shown).toContain(l.text);
+}, T);
 
 // Clocks too far off to group the copies by time, and a far laptop that lost a word: the words don't agree one by
 // one, so JamSesh can't be sure it's one line and keeps both rather than lose what someone said.

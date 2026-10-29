@@ -49,8 +49,15 @@ interface Group {
   timer: ReturnType<typeof setTimeout> | null;
   utteranceId: string | null;
   finalizedWith: string | null;
-  /** Set while the group is being transcribed, so a copy arriving now still joins it. */
-  busy: Promise<void> | null;
+  /**
+   * Everything that decides what its copies become runs here, one job after another (see run): its first
+   * transcription, then each copy that arrives after that. Nothing else reads or changes its copies meanwhile.
+   */
+  queue: Promise<void>;
+  /** Jobs queued or running. */
+  jobs: number;
+  /** Its line turned out to be another line's (mergeTwin): copies that reach it go on to that line's group. */
+  mergedInto?: Group;
   /** Copies from the room and from remote laptops never group: they are different rooms. */
   location: "room" | "remote";
   /** Its speaker's voice was reset since: nothing is learned from it. */
@@ -159,12 +166,12 @@ export class AudioPipeline {
 
   /** Utterances still waiting out their settle window or being transcribed. */
   get pending() {
-    return this.open.length + this.finalized.filter((g) => g.busy).length;
+    return this.open.length + this.finalized.filter((g) => g.jobs > 0).length;
   }
 
   /** Same, for lines this device heard (a record-to-prompt window waits on these). */
   pendingFor(deviceId: string) {
-    return this.open.filter((g) => g.segments.some((s) => s.deviceId === deviceId)).length + this.finalized.filter((g) => g.busy && g.segments.some((s) => s.deviceId === deviceId)).length;
+    return this.open.filter((g) => g.segments.some((s) => s.deviceId === deviceId)).length + this.finalized.filter((g) => g.jobs > 0 && g.segments.some((s) => s.deviceId === deviceId)).length;
   }
 
   deviceLag(deviceId: string) {
@@ -206,10 +213,8 @@ export class AudioPipeline {
     // A late copy of an utterance that is already out.
     const done = this.finalized.find((g) => near(g) && overlaps(g, seg));
     if (done) {
-      done.segments.push(seg);
       done.lastArrival = now;
-      if (done.busy) await done.busy;
-      await this.revisit(done, seg);
+      await this.run(done, () => this.admit(done, [seg]));
       return seg;
     }
     // A copy so late its group is gone (an offline buffer flushed) is transcribed like any other: lining
@@ -217,7 +222,7 @@ export class AudioPipeline {
     // mergeTwin drops it only when its words are that line's, from other laptops.
     let g = this.open.find((x) => near(x) && overlaps(x, seg));
     if (!g) {
-      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, busy: null, location };
+      g = { id: newId("grp"), segments: [], t0: seg.t0, t1: seg.t1, lastArrival: now, timer: null, utteranceId: null, finalizedWith: null, queue: Promise.resolve(), jobs: 0, location };
       this.open.push(g);
     }
     g.segments.push(seg);
@@ -234,7 +239,7 @@ export class AudioPipeline {
     g.timer = setTimeout(() => this.finalize(g).catch((e) => console.error("audio:", e)), Math.max(wait, 150));
   }
 
-  /** Waits for every open group to finish (tests). */
+  /** Waits for every open group and every queued job to finish (tests). */
   async flush() {
     const groups = [...this.open];
     // Stop every timer first: one that fires while an earlier group is transcribing
@@ -243,19 +248,44 @@ export class AudioPipeline {
       if (g.timer) clearTimeout(g.timer);
       g.timer = null;
     }
-    for (const g of groups) if (this.open.includes(g)) await this.finalize(g);
+    for (const g of groups) if (this.open.includes(g)) this.finalize(g);
+    while (this.work.size) await Promise.all([...this.work]);
   }
 
-  private async finalize(g: Group) {
+  /** Every job on any group, so flush can wait for all of them. */
+  private work = new Set<Promise<void>>();
+
+  /**
+   * THE ONE RULE FOR COPIES: every copy of speech becomes exactly one line, or joins exactly one line, and is
+   * never lost or counted twice, however late it comes. Enforced here: a group's copies are only decided inside
+   * its own queue, one job at a time, and a group gets its first job (its transcription) before any late copy can
+   * find it. A late copy is then decided by admit, the only way into a group that has been transcribed.
+   */
+  private run(g: Group, job: () => Promise<void>, after: Promise<void> = Promise.resolve()): Promise<void> {
+    g.jobs++;
+    const done: Promise<void> = Promise.all([g.queue, after])
+      .then(job)
+      .catch((e) => console.error("audio:", e))
+      .finally(() => {
+        g.jobs--;
+        this.work.delete(done);
+      });
+    g.queue = done;
+    this.work.add(done);
+    return done;
+  }
+
+  private finalize(g: Group): Promise<void> {
     this.open = this.open.filter((x) => x !== g);
     g.timer = null;
-    const parts = this.splitCrosstalk(g);
-    // Visible to late copies from now on, including while whisper is still working.
-    for (const part of parts) this.keep(part);
-    for (const part of parts) {
-      part.busy = this.emit(part).finally(() => (part.busy = null));
-      await part.busy;
+    // Each part's transcription is queued before the part is visible to late copies, so a late copy always
+    // waits for it. Parts are heard in order: each one's first job waits for the previous part's.
+    let previous: Promise<void> = Promise.resolve();
+    for (const part of this.splitCrosstalk(g)) {
+      previous = this.run(part, () => this.emit(part), previous);
+      this.keep(part);
     }
+    return previous;
   }
 
   /**
@@ -279,7 +309,7 @@ export class AudioPipeline {
   }
 
   private regroup(g: Group, segments: Segment[]): Group {
-    return { ...g, id: newId("grp"), busy: null, utteranceId: null, finalizedWith: null, segments, t0: Math.min(...segments.map((s) => s.t0)), t1: Math.max(...segments.map((s) => s.t1)) };
+    return { ...g, id: newId("grp"), queue: Promise.resolve(), jobs: 0, mergedInto: undefined, timer: null, utteranceId: null, finalizedWith: null, segments, t0: Math.min(...segments.map((s) => s.t0)), t1: Math.max(...segments.map((s) => s.t1)) };
   }
 
   /**
@@ -316,7 +346,7 @@ export class AudioPipeline {
     const apart = await this.differing(g, best, text);
     this.without(g, apart.flat());
     await this.show(g, best, text, engine);
-    for (const set of apart) await this.emitApart(g, set);
+    for (const set of apart) this.emitApart(g, set);
   }
 
   /** What a copy says. */
@@ -346,12 +376,15 @@ export class AudioPipeline {
     g.t1 = Math.max(...g.segments.map((s) => s.t1));
   }
 
-  /** Copies that said something else: their own line, from a group of their own. */
-  private async emitApart(g: Group, set: Segment[]) {
+  /**
+   * Copies that said something else: their own line, from a group of their own. Called from inside g's job after
+   * the copies left g, so each copy is in exactly one group. The new group's transcription is queued before it is
+   * visible; it isn't awaited here (a job never waits for another group's queue, so no two queues wait on each other).
+   */
+  private emitApart(g: Group, set: Segment[]) {
     const part: Group = { ...this.regroup(g, set), split: true };
+    this.run(part, () => this.emit(part));
     this.keep(part);
-    part.busy = this.emit(part).finally(() => (part.busy = null));
-    await part.busy;
   }
 
   private async show(g: Group, best: Segment, text: string, engine: string) {
@@ -450,13 +483,13 @@ export class AudioPipeline {
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
     // Its group is gone (a copy flushed late): the same words from another laptop then, so it isn't shown twice.
     if (!home) return true;
+    // The copies become late copies of that line, decided by its own queue; anything still sent to g follows them.
     this.finalized = this.finalized.filter((x) => x !== g);
-    home.segments.push(...g.segments);
-    home.t0 = Math.min(home.t0, g.t0);
-    home.t1 = Math.max(home.t1, g.t1);
+    g.mergedInto = home;
+    const moved = g.segments;
+    g.segments = [];
     home.lastArrival = Date.now();
-    if (home.busy) await home.busy;
-    await this.revisit(home, g.segments[0]);
+    this.run(home, () => this.admit(home, moved));
     return true;
   }
 
@@ -482,38 +515,67 @@ export class AudioPipeline {
   private keep(g: Group) {
     this.finalized.push(g);
     const cutoff = Date.now() - KEEP_FINAL_MS;
-    this.finalized = this.finalized.filter((x) => x.lastArrival > cutoff || x === g);
+    // A group with work still queued is never let go: a copy arriving then would start a second line for it.
+    this.finalized = this.finalized.filter((x) => x.lastArrival > cutoff || x.jobs > 0 || x === g);
   }
 
-  /** A late copy arrived. Re-run identification, and transcription if this copy is clearly better. */
-  private async revisit(g: Group, late: Segment) {
+  /** Copies that reach a group after its first transcription. Runs only as one of that group's jobs (see run). */
+  private async admit(g: Group, segs: Segment[]): Promise<void> {
+    if (g.mergedInto) {
+      const home = g.mergedInto;
+      this.run(home, () => this.admit(home, segs));
+      return;
+    }
+    for (const seg of segs) {
+      g.segments.push(seg);
+      g.t0 = Math.min(g.t0, seg.t0);
+      g.t1 = Math.max(g.t1, seg.t1);
+      g.lastArrival = Date.now();
+      await this.settle(g, seg);
+      if (g.mergedInto) return this.admit(g, segs.slice(segs.indexOf(seg) + 1));
+    }
+  }
+
+  /**
+   * What one late copy becomes. The same decision as for copies that came in time, made before anything about
+   * the line changes: a copy that could be someone else talking then (couldDiffer), or that is now the clearest
+   * copy, is transcribed first, and is its own line exactly when its words aren't the line's. Only a copy with the
+   * line's words can change the line (its speaker, and its wording when it's much cleaner).
+   */
+  private async settle(g: Group, late: Segment) {
     const u = g.utteranceId ? this.session.store.get("utterances", g.utteranceId) : undefined;
     const current = g.segments.find((s) => s.id === g.finalizedWith);
     const best = pickBest(g.segments);
     if (!u) {
-      if (!current || best !== current) {
-        // The first copy had no words in it; try the better one.
-        g.busy = this.emit(g).finally(() => (g.busy = null));
-        await g.busy;
+      // No line came from the copies before (no words, an echo, the join read). A clearer copy is tried as the
+      // group's best; otherwise a copy that could be someone else is heard on its own.
+      if (!current || best !== current) return this.emit(g);
+      if (!couldDiffer(late, current, g.segments)) return;
+      const before = current.heard ? plainText((await current.heard).text) : "";
+      const theirs = plainText((await this.words(late)).text);
+      if (theirs && theirs !== before) {
+        this.without(g, [late]);
+        this.emitApart(g, [late]);
       }
       return;
     }
-    // A late copy that could be someone else talking then is heard like the copies that came in time.
-    if (late !== best && current && couldDiffer(late, current, g.segments)) {
-      const theirs = plainText((await this.words(late)).text);
+    let text = u.text;
+    let engine = u.engine;
+    if (late === best || (current && couldDiffer(late, current, g.segments))) {
+      const r = await this.words(late);
+      const theirs = plainText(r.text);
       if (theirs && theirs !== plainText(u.text)) {
         this.without(g, [late]);
-        return this.emitApart(g, [late]);
+        this.emitApart(g, [late]);
+        return;
+      }
+      // The same words, much more clearly: its wording (case, punctuation) is the line's.
+      if (theirs && late === best && current && late.snr > current.snr + 6) {
+        ((text = r.text), (engine = r.engine));
+        g.finalizedWith = late.id;
       }
     }
     const guess = this.identify(g.segments, best, !g.split);
-    let text = u.text;
-    let engine = u.engine;
-    if (best === late && current && late.snr > current.snr + 6) {
-      const r = await this.words(late);
-      if (r.text) ((text = r.text), (engine = r.engine));
-      g.finalizedWith = late.id;
-    }
     // Read the line again after the wait: someone may have corrected the speaker meanwhile, and a
     // correction always wins over a late copy.
     const fresh = this.session.store.get("utterances", u.id) ?? u;

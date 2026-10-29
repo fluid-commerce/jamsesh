@@ -45,8 +45,11 @@ function room(laptops = ["lap-a", "lap-b", "lap-c", "lap-d"]) {
   session.touchDevice("lap-b", { personId: bob.id });
   const said = new Map<string, string>();
   const asked: string[] = [];
+  /** While set, every transcription waits for it (a slow whisper). */
+  const slow: { until: Promise<void> | null } = { until: null };
   const transcriber = {
     transcribe: async (wav: Uint8Array) => {
+      if (slow.until) await slow.until;
       const text = said.get(String(Bun.hash(wav))) ?? "";
       asked.push(text);
       return { text, engine: "stub" };
@@ -57,13 +60,19 @@ function room(laptops = ["lap-a", "lap-b", "lap-c", "lap-d"]) {
   const enroll = (pipeline as any).autoEnroll.bind(pipeline);
   (pipeline as any).autoEnroll = (guess: any, best: any, segs: any) => (taught.push(best.deviceId), enroll(guess, best, segs));
   /** One copy, heard by `deviceId` over the same span as every other copy, transcribed as `text`. */
-  const hear = async (deviceId: string, t0: number, samples: Float32Array, text: string) => {
+  const hear = async (deviceId: string, t0: number, samples: Float32Array, text: string, t1?: number) => {
     const wav = encodeWav({ sampleRate: RATE, samples });
     said.set(String(Bun.hash(wav)), text);
-    await pipeline.ingest({ deviceId, t0, t1: t0 + (samples.length / RATE) * 1000, wav });
+    await pipeline.ingest({ deviceId, t0, t1: t1 ?? t0 + (samples.length / RATE) * 1000, wav });
+  };
+  /** Holds every transcription until the returned function is called. */
+  const hold = () => {
+    let release = () => {};
+    slow.until = new Promise<void>((r) => (release = r));
+    return () => ((slow.until = null), release());
   };
   const lines = () => session.store.all("utterances").sort((a, b) => a.t0 - b.t0 || a.id.localeCompare(b.id));
-  return { pipeline, hear, lines, asked, taught, ana, bob };
+  return { pipeline, hear, hold, lines, asked, taught, ana, bob, session };
 }
 const t = () => Date.now() - 120_000;
 
@@ -164,4 +173,120 @@ test("a split line is named when a voice match names it", async () => {
   for (const g of (r.pipeline as any).open) for (const s of g.segments) s.embedding = s.deviceId === "lap-a" ? unit(1) : unit(4);
   await r.pipeline.flush();
   expect(r.lines().find((u) => u.deviceId === "lap-b")).toMatchObject({ personId: r.bob.id, speakerName: "Bob", method: "voice" });
+});
+
+// The one rule for copies: every copy becomes exactly one line or joins exactly one, never lost or counted twice,
+// however late it comes. Each path into AudioPipeline.admit (the only way into a transcribed group) is tested here.
+/** Every copy's device, across every line: each copy must appear exactly once. */
+const copies = (r: ReturnType<typeof room>) => r.lines().flatMap((u) => u.devices.map((d) => d.deviceId)).sort();
+
+test("a late copy that is cleaner than the line and says other words is its own line; the line keeps its words (office review 2)", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  // Ana, heard faintly at her own laptop; Bob, much clearer at his, arriving after Ana's line is out.
+  await r.hear("lap-a", t0, mix(31, [A(3), 0.25], [B(3), 0.05]), "Put the pricing page up.");
+  await r.pipeline.flush();
+  await r.hear("lap-b", t0, mix(32, [B(3), 1], [A(3), 0.08]), "I think the header is too tall.");
+  await r.pipeline.flush();
+  expect(r.lines().map((u) => u.text).sort()).toEqual(["I think the header is too tall.", "Put the pricing page up."]);
+  expect(copies(r)).toEqual(["lap-a", "lap-b"]);
+  expect(r.lines().find((u) => u.deviceId === "lap-b")).toMatchObject({ personId: null });
+});
+
+test("a late, much cleaner copy with the line's words joins it and only rewords it", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(33, [A(3), 0.25]), "put the pricing page up");
+  await r.pipeline.flush();
+  await r.hear("lap-b", t0, mix(34, [A(3), 1]), "Put the pricing page up.");
+  await r.pipeline.flush();
+  expect(r.lines().map((u) => u.text)).toEqual(["Put the pricing page up."]);
+  expect(copies(r)).toEqual(["lap-a", "lap-b"]);
+});
+
+test("a copy that arrives while its line is still being transcribed waits for it, then is decided once (office review 3)", async () => {
+  for (const [late, want] of [["I think the header is too tall.", 2], ["Put the pricing page up.", 1]] as const) {
+    const r = room(["lap-a", "lap-b"]);
+    const t0 = t();
+    await r.hear("lap-a", t0, mix(35, [A(3), 1], [B(3), 0.3]), "Put the pricing page up.");
+    const release = r.hold();
+    const flushed = r.pipeline.flush();
+    const arriving = r.hear("lap-b", t0, mix(36, [B(3), late.startsWith("Put") ? 0 : 1], [A(3), late.startsWith("Put") ? 0.6 : 0.3]), late);
+    await Bun.sleep(20);
+    expect(r.lines()).toHaveLength(0);
+    release();
+    await Promise.all([flushed, arriving]);
+    await r.pipeline.flush();
+    expect(r.lines()).toHaveLength(want);
+    expect(copies(r)).toEqual(["lap-a", "lap-b"]);
+  }
+});
+
+test("split crosstalk: a late copy of the second part during a slow first transcription is not shown twice (office review 3)", async () => {
+  const r = room(["lap-a", "lap-b", "lap-c", "lap-d"]);
+  const t0 = t();
+  // Bob starts 1.2 s after Ana. lap-c's copy of Ana, 0.6 s off, bridges them into one group; splitCrosstalk then
+  // splits Bob's shifted, clean copy into a second part.
+  await r.hear("lap-a", t0, mix(37, [A(3), 1]), "Put the pricing page up.");
+  await r.hear("lap-c", t0 + 600, mix(47, [A(3), 0.5]), "Put the pricing page up.");
+  await r.hear("lap-b", t0 + 1200, mix(38, [B(3), 0.8]), "I think the header is too tall.");
+  expect((r.pipeline as any).open).toHaveLength(1);
+  const release = r.hold();
+  const flushed = r.pipeline.flush();
+  await Bun.sleep(10);
+  // A fourth laptop's copy of Bob (it overlaps only Bob's part), arriving while Ana's part is still with whisper.
+  const arriving = r.hear("lap-d", t0 + 1700, mix(39, [B(3), 0.7]), "I think the header is too tall.");
+  await Bun.sleep(20);
+  release();
+  await Promise.all([flushed, arriving]);
+  await r.pipeline.flush();
+  expect(r.lines().map((u) => u.text)).toEqual(["Put the pricing page up.", "I think the header is too tall."]);
+  expect(copies(r)).toEqual(["lap-a", "lap-b", "lap-c", "lap-d"]);
+});
+
+test("a late third laptop's copy of a split line joins that line, not a third one", async () => {
+  const r = room(["lap-a", "lap-b", "lap-c"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(40, [A(3), 1], [B(3), 0.3]), "Put the pricing page up.");
+  await r.hear("lap-b", t0, mix(41, [B(3), 1], [A(3), 0.3]), "I think the header is too tall.");
+  await r.pipeline.flush();
+  await r.hear("lap-c", t0, mix(42, [B(3), 0.9], [A(3), 0.3]), "I think the header is too tall.");
+  await r.pipeline.flush();
+  expect(r.lines()).toHaveLength(2);
+  expect(r.lines().find((u) => u.text.startsWith("I think"))!.devices.map((d) => d.deviceId).sort()).toEqual(["lap-b", "lap-c"]);
+  expect(copies(r)).toEqual(["lap-a", "lap-b", "lap-c"]);
+});
+
+test("a late copy of a line that had no words, saying something, becomes a line; silence after it adds nothing", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(43, [A(3), 1]), "");
+  await r.pipeline.flush();
+  expect(r.lines()).toHaveLength(0);
+  await r.hear("lap-b", t0, mix(44, [B(3), 1], [A(3), 0.5]), "I think the header is too tall.");
+  await r.pipeline.flush();
+  expect(r.lines().map((u) => u.text)).toEqual(["I think the header is too tall."]);
+});
+
+test("a group still being transcribed is kept past the keep window, so a copy arriving then can't start a second line", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(45, [A(3), 1]), "Put the pricing page up.");
+  const release = r.hold();
+  const flushed = r.pipeline.flush();
+  await Bun.sleep(10);
+  // Every other group's arrival is long past the keep window.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 60_000;
+  try {
+    const arriving = r.hear("lap-b", t0, mix(46, [A(3), 0.7]), "Put the pricing page up.");
+    await Bun.sleep(20);
+    release();
+    await Promise.all([flushed, arriving]);
+    await r.pipeline.flush();
+  } finally {
+    Date.now = realNow;
+  }
+  expect(r.lines()).toHaveLength(1);
+  expect(copies(r)).toEqual(["lap-a", "lap-b"]);
 });
