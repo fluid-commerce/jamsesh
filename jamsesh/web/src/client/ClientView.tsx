@@ -10,7 +10,7 @@ import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share"
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
 import { Stage, expandTile, stageTiles } from "../host/Stage";
-import { cast } from "./CastPicker";
+import { cast, putOnScreen } from "./CastPicker";
 import { InviteButton } from "./Invite";
 import { WorkViewer } from "./WorkViewer";
 import { groupArtifacts, settle, type WorkFilter } from "./viewerNav";
@@ -212,7 +212,7 @@ function BigScreenChip({ stage }: { stage: StageState }) {
   return (
     <button
       className="chip big-screen-chip release"
-      onClick={() => api("/stage", { mode: "board", by: "Someone in the room" })}
+      onClick={() => void putOnScreen({ mode: "board", by: "Someone in the room" })}
       title={stage.pinned ? "Pinned. Click to put the big screen back on the board" : "Click to put the big screen back on the board"}
     >
       <span className="bsc-what ellipsis">On screen: {stage.title || stage.mode}</span>

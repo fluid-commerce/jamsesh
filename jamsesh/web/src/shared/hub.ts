@@ -363,9 +363,10 @@ export function useHub() {
 }
 
 /** Calls that must never wait in the outbox: they only make sense live. */
-// Not worth replaying later, or unsafe to: approvals must be live, and a screen size is only worth
-// reporting now.
-const NEVER_QUEUE = /^\/(audio|stage\/expand|pair|invite|hooks\/|agents\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
+// Not worth replaying later, or unsafe to: approvals and answers must be live, a screen size is only
+// worth reporting now, and a screen control (a cast, unlock, show, restore) replayed after reconnecting
+// could undo a later decision, such as clearing a newer lock.
+const NEVER_QUEUE = /^\/(audio|stage($|\/)|show-requests\/|pair|invite|hooks\/|agents\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {

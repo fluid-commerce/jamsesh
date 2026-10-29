@@ -2,18 +2,24 @@
 // of what each shows. With one screen nothing changes: the cast goes straight to it.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Stage } from "../host/Stage";
-import { api, hub, useHub, type HubState, type ScreenInfo, type Stage as StageState } from "../shared/hub";
+import { hub, useHub, type HubState, type ScreenInfo, type Stage as StageState } from "../shared/hub";
+import { stageAction } from "../shared/StageControls";
 
 type Request = { stage: Partial<StageState> & { mode: StageState["mode"] }; done: (picked: boolean) => void };
 let ask: ((r: Request) => void) | null = null;
+let tell: ((note: string) => void) | null = null;
+
+/** Sends a cast now (never later: see `stageAction`); a failure is said on screen. Resolves with whether it went up. */
+export async function putOnScreen(stage: Request["stage"] & { screen?: string }): Promise<boolean> {
+  const note = await stageAction("/stage", stage);
+  if (note) tell?.(note);
+  return !note;
+}
 
 /** Puts something on a big screen: the picker opens when there is a choice, otherwise it just goes. Resolves with whether it was put up. */
 export async function cast(stage: Request["stage"]): Promise<boolean> {
   const screens = hub.get().state?.screens ?? [];
-  if (screens.length < 2 || !ask) {
-    await api("/stage", stage);
-    return true;
-  }
+  if (screens.length < 2 || !ask) return putOnScreen(stage);
   return new Promise((done) => ask?.({ stage, done }));
 }
 
@@ -62,7 +68,7 @@ export function CastPicker({ state }: { state: HubState }) {
   };
   const screens = state.screens ?? [];
   const put = (sc: ScreenInfo) => {
-    void api("/stage", { ...req.stage, screen: sc.id });
+    void putOnScreen({ ...req.stage, screen: sc.id });
     close(true);
   };
   return (
@@ -94,5 +100,24 @@ export function CastPicker({ state }: { state: HubState }) {
 /** Mounted once in people's apps (not on a big screen). */
 export function CastHost() {
   const { state } = useHub();
-  return state ? <CastPicker state={state} /> : null;
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    tell = setNote;
+    return () => void (tell = null);
+  }, []);
+  useEffect(() => {
+    if (!note) return;
+    const t = setTimeout(() => setNote(""), 6000);
+    return () => clearTimeout(t);
+  }, [note]);
+  return (
+    <>
+      {state && <CastPicker state={state} />}
+      {note && (
+        <div className="cast-note" role="alert">
+          {note}
+        </div>
+      )}
+    </>
+  );
 }
