@@ -1044,14 +1044,17 @@ function originOf(req: Request, url: URL) {
   return `${proto}://${host}`;
 }
 
-/** A multipart upload (its body already read and bounded by the front door), parsed unless it is past `max`. */
+/** A multipart upload (its body already read and bounded by the front door), parsed once; `{ __tooBig }` when its files pass `max`. */
 export async function readCapped(req: Request, max: number): Promise<{ __form: FormData } | { __tooBig: true } | null> {
   const type = req.headers.get("content-type") ?? "";
   if (!type.includes("multipart/form-data") || !req.body) return null;
-  const bytes = await req.arrayBuffer();
-  if (bytes.byteLength > max) return { __tooBig: true };
+  // The front door set the exact length: past the cap, nothing is parsed.
+  if (Number(req.headers.get("content-length")) > max) return { __tooBig: true };
   try {
-    return { __form: await new Response(bytes, { headers: { "content-type": type } }).formData() };
+    const form = await req.formData();
+    let size = 0;
+    for (const v of form.values()) if (typeof v !== "string") size += (v as Blob).size;
+    return size > max ? { __tooBig: true } : { __form: form };
   } catch {
     return null;
   }

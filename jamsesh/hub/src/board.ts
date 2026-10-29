@@ -1,6 +1,7 @@
 // The Tasks board's triage (4.1): what JamSesh overhears, and the context agents report themselves, waits here
 // as cards for a person to send, add, edit, merge or dismiss. Things said to JamSesh on purpose skip this.
 // Cards never expire; the ones that have waited a while get a label and a spoken mention (brain.ts).
+import { MAX_PER_MESSAGE } from "./attachments";
 import { restates, sameScope, similar } from "./similarity";
 import type { Session } from "./session";
 import { newId } from "./store";
@@ -130,6 +131,12 @@ export class Board {
     return this.s.store.put("triage", next);
   }
 
+  /** Whether a repeat's files still fit on the card: what a card shows is what Send delivers, and a message carries at most six. */
+  private fits(match: TriageCard, attachments: TriageCard["attachments"] = []) {
+    const have = new Set((match.attachments ?? []).map((a) => a.id));
+    return have.size + (attachments ?? []).filter((a) => !have.has(a.id)).length <= MAX_PER_MESSAGE;
+  }
+
   /** An open card (or one dismissed a moment ago) that says the same thing for the same purpose: `extra` checks the purpose. */
   private match(type: TriageCard["type"], text: string, extra: (c: TriageCard) => boolean): TriageCard | undefined {
     const now = Date.now();
@@ -161,7 +168,8 @@ export class Board {
     // The same words for other agents, or another workstream, are another task.
     const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream);
     const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
-    if (same) return this.repeat(same, sources, p.attachments);
+    // Files past what one card can carry make another card.
+    if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments);
     // Asked again after the room overruled it: a new card, so the veto stays on the old one for people to see and decide.
     const vetoed = this.match("task", text, (c) => purpose(c) && !!c.overruled && c.status === "open");
     const now = this.stamp();
@@ -186,7 +194,7 @@ export class Board {
     if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const same = this.match("context", text, (c) => !c.retire && c.kind === kind && sameName(c.workstream, workstream) && (!named || c.conflictsWith === named.id));
-    if (same) return this.repeat(same, sources, p.attachments);
+    if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments);
     // A close fact that differs in its specifics (option A versus B, 16 versus 24 px) or says the opposite is the one this would replace.
     // Only a fact of the same kind and workstream: "48px in Mobile" doesn't replace "64px in Desktop".
     const conflict = named ?? active.find((f) => f.kind === kind && sameName(f.workstream, workstream) && sameScope(f.text, text) && similar(f.text, text) > 0.45 && !restates(f.text, text));
@@ -448,17 +456,17 @@ export class Board {
    * Overheard: the room wants a task stopped. The cancellation waits as a card (sending it cancels the task and
    * tells its agents); nothing an agent is doing changes until a person sends it.
    */
-  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"] }): TriageCard | null {
+  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"]; attachments?: TriageCard["attachments"] }): TriageCard | null {
     const d = p.directive;
     if (d.status === "done" || d.status === "cancelled") return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
     const open = this.open().find((c) => c.cancels === d.id && !c.overruled);
-    if (open) return this.repeat(open, sources);
+    if (open && this.fits(open, p.attachments)) return this.repeat(open, sources, p.attachments);
     const text = clean(p.reason) || "The room changed its mind";
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode: d.mode, targets: d.targets, kind: "fact", workstream: "", conflictsWith: null, cancels: d.id, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode: d.mode, targets: d.targets, kind: "fact", workstream: "", conflictsWith: null, cancels: d.id, ...(p.attachments?.length ? { attachments: p.attachments } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }

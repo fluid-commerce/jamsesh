@@ -162,6 +162,7 @@ export class Brain {
       return void this.direct(marked);
     }
     this.pending.push(ev);
+    if (this.quiescing) return void this.settle();
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flush(), TRIAGE_DEBOUNCE_MS);
   }
@@ -323,8 +324,10 @@ export class Brain {
    * Shutdown: stops the periodic producers, and hands everything that was only waiting on a timer (shipped news, the digest
    * after a decision, overheard lines) to the counted path now, so the drain sees it.
    */
+  private quiescing = false;
   quiesce() {
     if (this.stopped) return;
+    this.quiescing = true;
     clearInterval(this.digestTimer);
     clearInterval(this.nagTimer);
     if (this.shipTimer) {
@@ -665,7 +668,7 @@ export class Brain {
               return "That proposal is still waiting on the Tasks board; it's marked as overruled for a person to dismiss. Now propose the work the room wants instead.";
             }
             if (!d) return refuse("No directive or waiting proposal with that id.");
-            const proposed = s.board.proposeCancel({ directive: d, reason, by: requester, sourceEventIds: sourceIds, origin });
+            const proposed = s.board.proposeCancel({ directive: d, reason, by: requester, sourceEventIds: sourceIds, origin, attachments: fileRefs });
             return proposed ? `Proposed cancelling it on the Tasks board (card ${proposed.id}); it isn't cancelled until a person sends that. Now propose the work the room wants instead.` : refuse(`It's already ${d.status}.`);
           }
           // Asked directly: a proposal still waiting that the room has since overruled is dismissed, not sent.
@@ -743,8 +746,10 @@ export class Brain {
           });
           bus.send({ type: "toast", tone: "decision", text: "Decision", detail: i.text });
           // Decisions reach the curated knowledge (and every agent's context) right away.
-          if (this.decisionDigest) clearTimeout(this.decisionDigest);
-          this.decisionDigest = setTimeout(() => {
+          // Shutting down: work scheduled from here on starts now, in the count, instead of waiting on a timer.
+          if (this.quiescing) this.digest(true).catch(() => {});
+          else if (this.decisionDigest) clearTimeout(this.decisionDigest);
+          if (!this.quiescing) this.decisionDigest = setTimeout(() => {
             this.decisionDigest = null;
             this.digest(true).catch(() => {});
           }, 3000);
@@ -1318,6 +1323,7 @@ export class Brain {
     const same = this.shipped.find((b) => b.agent.id === agent.id);
     if (same) same.text = `${same.text} Then: ${text}`.slice(0, 600);
     else this.shipped.push({ agent, text });
+    if (this.quiescing) return void this.shippedBatch(this.shipped.splice(0));
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
       const batch = this.shipped.splice(0);

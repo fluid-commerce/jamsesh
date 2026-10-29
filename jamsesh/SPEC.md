@@ -1202,12 +1202,13 @@ agents' own reports; `acceptedEvent`), never overheard talk. Curation still read
 **Other workers' entry points** (so a feature that finds a task or a piece of context can use the board):
 
 ```ts
-session.proposeTask({ text, mode, targets, workstream?, by, origin?: "overheard" | "agent" | "document", sourceEventIds?, note? }): TriageCard | null
-session.proposeContext({ text, kind, workstream?, by, origin?, sourceEventIds?, replaces?, note? }): TriageCard | null
+session.proposeTask({ text, mode, targets, workstream?, by, origin?: "overheard" | "agent" | "document", sourceEventIds?, attachments?, note? }): TriageCard | null
+session.proposeContext({ text, kind, workstream?, by, origin?, sourceEventIds?, attachments?, replaces?, note? }): TriageCard | null
 session.board.rememberNow({ text, kind, workstream?, by, sourceEventIds? }): Fact | null   // on purpose: saved at once
 ```
 
-`note` is what the card shows as its source when there is no transcript line (a document with no request becomes a
+`attachments` are the files the proposal was made from; the card shows them, and a card carries at most six (a repeat
+that would pass that makes another card), so what a person reviews is what Send delivers. `note` is what the card shows as its source when there is no transcript line (a document with no request becomes a
 context card with `origin: "document"`). Both return `null` for empty text, and `proposeContext` returns `null` when
 a saved fact already says it. Repeats are folded in (below), so calling twice is safe.
 

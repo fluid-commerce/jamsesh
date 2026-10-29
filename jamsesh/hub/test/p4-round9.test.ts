@@ -573,13 +573,13 @@ test("a body that never finishes is dropped at the deadline, and bodies share a 
     READ_MS.small = 200;
     expect(await buffered(stalled("http://x/api/say"))).toMatchObject({ status: 408 });
     READ_MS.media = 1000;
-    // Three media reads fill the budget while they are arriving; a fourth is turned away at once.
-    const open = [1, 2, 3].map(() => buffered(stalled("http://x/api/audio")));
+    // Two media reads fill the budget while they are arriving; a third is turned away at once.
+    const open = [1, 2].map(() => buffered(stalled("http://x/api/audio")));
     await Bun.sleep(50);
     expect(await buffered(small())).toMatchObject({ status: 503 });
     expect((await Promise.all(open)).every((o) => "status" in o && o.status === 408)).toBe(true);
     // A body that arrived stays charged until its request is answered.
-    const held = [1, 2, 3].map(() => buffered(small()));
+    const held = [1, 2].map(() => buffered(small()));
     const got = await Promise.all(held);
     expect(got.every((g) => "req" in g)).toBe(true);
     expect(await buffered(small())).toMatchObject({ status: 503 });
@@ -632,3 +632,50 @@ test("cards made from a file carry the file: a task, a decision, and a repeat", 
   });
 });
 
+
+// ---------- round 19 ----------
+
+test("object-shaped text inside a page's content stream can't pass for an object", () => {
+  const real = "BT (VISIBLE) Tj ET";
+  const forged = "BT 3 Tr (\n8 0 obj\n<< /Type /Page /Contents 9 0 R >>\nendobj\n) Tj ET";
+  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R 5 0 R] >>\nendobj\n4 0 obj\n<< /Length ${real.length} >>\nstream\n${real}\nendstream\nendobj\n5 0 obj\n<< /Length ${forged.length} >>\nstream\n${forged}\nendstream\nendobj\n9 0 obj\n<< /Length 23 >>\nstream\nBT (ORPHAN) Tj ET      \nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF`;
+  expect(drawnText(new TextEncoder().encode(doc))).toBe("VISIBLE");
+});
+
+test("a card shows what Send delivers: cancellations carry their file, and files past six make another card", () => {
+  const r = room();
+  const att = (n: number) => ({ id: `att_${n}`, name: `f${n}.txt`, type: "text/plain", kind: "text" as const, size: 5 });
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const d = r.s.createDirective({ text: "Make the header", mode: "implement", targets: [agent.id], requestedBy: "Chey" });
+  const ev = r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: "see file", relevance: "work", data: { direct: true, attachments: [att(0)] } });
+  const cancel = r.s.board.proposeCancel({ directive: d, reason: "Scrap it", by: "Chey", sourceEventIds: [ev.id], attachments: [att(0)] })!;
+  expect(cancel.attachments).toEqual([att(0)]);
+  const say = (n: number) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: `line ${n}`, relevance: "work", data: {} }).id;
+  let card = r.s.proposeContext({ text: "Same words", kind: "fact", by: "Chey", attachments: [att(1)] })!;
+  for (let i = 2; i <= 6; i++) card = r.s.proposeContext({ text: "Same words", kind: "fact", by: "Felipe", attachments: [att(i)], sourceEventIds: [say(i)] })!;
+  expect(card.attachments).toHaveLength(6);
+  const seventh = r.s.proposeContext({ text: "Same words", kind: "fact", by: "Felipe", attachments: [att(7)], sourceEventIds: [say(7)] })!;
+  expect(seventh.id).not.toBe(card.id);
+  expect(seventh.attachments).toEqual([att(7)]);
+});
+
+test("work scheduled after shutdown has quiesced the brain starts at once, in the count", async () => {
+  const r = room();
+  const brain = r.hub.brain as any;
+  brain.quiesce();
+  const ran: string[] = [];
+  brain.digestRun = async () => void ran.push("digest");
+  brain.shippedBatch = (b: any[]) => void ran.push(`shipped ${b.length}`);
+  brain.shipWindowMs = 60_000;
+  brain.agentUpdated({ id: "a1", name: "A", platform: "desktop", repo: "x/y" }, "shipped", "Added the tabs screen across the app", { data: {} });
+  await Bun.sleep(20);
+  expect(brain.shipTimer).toBeNull();
+  expect(ran).toContain("shipped 1");
+  expect(await r.hub.shutdown()).toBe(true);
+});
+
+test("HEAD never renders: /renders/full is not a file read", async () => {
+  const { methodAllowed } = await import("../src/methods");
+  expect((await methodAllowed(new Request("http://x/renders/full/art_1.png", { method: "HEAD" })))?.status).toBe(405);
+  expect(await methodAllowed(new Request("http://x/renders/art_1.png", { method: "HEAD" }))).toBeNull();
+});

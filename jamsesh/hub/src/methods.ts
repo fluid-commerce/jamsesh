@@ -2,7 +2,7 @@
 // HEAD reads files and nothing else; OPTIONS (a preflight) is answered without reaching a route; anything else is refused.
 // Routes can therefore treat "not GET" as "acts" without a method of their own sneaking past a guard.
 
-const FILE_READ = /^\/(api\/attachments\/[\w-]+|renders\/.+|assets\/.+|icons\/.+|fonts\/.+)$/;
+const FILE_READ = /^\/(api\/attachments\/[\w-]+|renders\/(?!full\/).+|assets\/.+|icons\/.+|fonts\/.+)$/;
 
 /** A response when the method isn't allowed for this path; null to carry on. */
 export async function methodAllowed(req: Request): Promise<Response | null> {

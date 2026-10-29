@@ -24,14 +24,27 @@ const SHOW = new RegExp(String.raw`(${STR})\s*(?:Tj|')|(${STR})\s*"|\[((?:${STR}
 /** The same, and a text render mode setting (`3 Tr`). */
 const SHOW_OR_MODE = new RegExp(`${SHOW.source}|\\b(\\d)\\s+Tr\\b`, "g");
 
-/** The objects of a PDF by number: each one's text from "N G obj" to its "endobj". */
+/**
+ * The objects of a PDF by number, read in order: each one's text from "N G obj" to its "endobj". A stream with a direct /Length is
+ * stepped over by that length, so text inside a page's content that looks like an object ("5 0 obj", "endobj") is never taken for one.
+ */
 function objects(src: string): Map<number, { at: number; body: string }> {
   const out = new Map<number, { at: number; body: string }>();
-  for (const m of src.matchAll(/(?:^|[\s>])(\d+)\s+\d+\s+obj\b/g)) {
+  const marker = /(?:^|[\s>])(\d+)\s+\d+\s+obj\b/g;
+  for (let m = marker.exec(src); m; m = marker.exec(src)) {
     const at = (m.index ?? 0) + m[0].length;
-    const end = src.indexOf("endobj", at);
+    let end = -1;
+    const next = src.indexOf("endobj", at);
+    const head = /^\s*<<([\s\S]{0,400}?)>>\s*stream\r?\n/.exec(src.slice(at, next < 0 ? at + 1000 : Math.min(at + 1000, next)));
+    const len = head && /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(head[1])?.[1];
+    if (head && len !== undefined && len !== null) {
+      const dataEnd = at + head[0].length + Number(len);
+      if (/^\s*endstream/.test(src.slice(dataEnd, dataEnd + 20))) end = src.indexOf("endobj", dataEnd);
+    }
+    if (end < 0) end = src.indexOf("endobj", at);
     if (end < 0) continue;
     out.set(Number(m[1]), { at, body: src.slice(at, end) });
+    marker.lastIndex = end;
   }
   return out;
 }
@@ -69,7 +82,9 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
     const m = o && /^\s*<<([\s\S]{0,400}?)>>\s*stream\r?\n/.exec(o.body);
     if (!o || !m || size > limit) continue;
     const start = o.at + m[0].length;
-    const end = src.indexOf("endstream", start);
+    const declared = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(m[1])?.[1];
+    const stated = declared !== undefined ? start + Number(declared) : -1;
+    const end = stated > 0 && /^\s*endstream/.test(src.slice(stated, stated + 20)) ? stated : src.indexOf("endstream", start);
     if (end < 0) continue;
     let body = bytes.subarray(start, end);
     if (/\/FlateDecode/.test(m[1])) {

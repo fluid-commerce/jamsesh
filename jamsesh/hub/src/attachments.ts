@@ -203,9 +203,23 @@ export async function pdfText(path: string, max = 4000, poppler = true): Promise
     try {
       const run = Bun.spawn([tool, "-l", "20", "-enc", "UTF-8", "-q", path, "-"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
       const timer = setTimeout(() => run.kill(), 5000);
-      const out = await new Response(run.stdout).text();
+      // Read only as much as the result can use (UTF-8 is at most 4 bytes a character); then stop the process.
+      const cap = max * 4 + 1024;
+      const chunks: Uint8Array[] = [];
+      let got = 0;
+      const reader = run.stdout.getReader();
+      while (got < cap) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.length;
+      }
+      const capped = got >= cap;
+      if (capped) run.kill();
+      reader.cancel().catch(() => {});
       clearTimeout(timer);
-      if ((await run.exited) === 0 && tidy(out)) return tidy(out);
+      const out = new TextDecoder().decode(Buffer.concat(chunks).subarray(0, cap));
+      if (((await run.exited) === 0 || capped) && tidy(out)) return tidy(out);
     } catch {
       // Fall through to the built-in reader.
     }
