@@ -15,7 +15,7 @@ import type { JamEvent, TriageCard, WikiCardPayload, WikiChange } from "../types
 import { cutDiff, diffStats, lineDiff } from "./diff";
 import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
-  listPages, parseFrontMatter, pageSlugs, readPage, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, today, vaultDir, writeAtomic, writePage, writeState,
+  listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, today, vaultDir, writeAtomic, writePage, writeState,
 } from "./files";
 
 const EVERY_MS = 15 * 60_000;
@@ -118,12 +118,12 @@ export interface IngestResult {
 
 /** A card's changes, kept in the project's folder (not the session's board) so a later session can still approve them. */
 interface Proposal {
-  changes: { slug: string; category: Category; workstreams: string[]; body: string; sources: string[]; baseRev: string }[];
+  changes: { slug: string; category: Category; workstreams: string[]; body: string; sources: string[]; baseRev: string; /** The page as the model was shown it: the card's whole diff is made from this, whatever the page becomes. */ before?: string }[];
   sources: string[];
   /** The card as it was raised, to raise it again on a later session's board. */
   card?: WikiCardPayload;
-  /** The page an accept is writing right now: recorded before the write, so a crash in it is finished or rolled back from this. */
-  writing?: string;
+  /** The page an accept is writing right now, recorded before the write: the token the write puts in the page's front matter and the hash (rev) of its exact bytes. A crash in the write is finished or rolled back from this. */
+  writing?: { slug: string; token: string; rev: string };
   /** Pages an accept that didn't finish already wrote: a retry counts them and doesn't write them again. */
   applied?: string[];
   /** How far into each source this proposal read (a long source is read in parts). */
@@ -512,7 +512,23 @@ export class WikiService {
     });
   }
 
-  /** At the end of a session: the same, once more, keeping even a short last exchange, so nothing said last is lost. */
+  /**
+   * At the end of a session, first: puts the queue, the agents' reports and the whole transcript (even a short last
+   * exchange) into the sources, at once and on its own. It never waits for an ingest that may be in the middle of a slow
+   * model call: it only writes files, and nothing else here writes the state between its steps. The next start's ingest reads what it saved.
+   */
+  captureFinal(): Source[] {
+    this.drainQueue();
+    this.agentUpdate();
+    try {
+      this.catchUpLog();
+    } catch (e) {
+      console.error("wiki:", errText(e));
+    }
+    return this.captureTranscript(true);
+  }
+
+  /** After captureFinal: the same pass as every 15 minutes, once more, so what was just saved is ingested if the model answers in time. */
   flush() {
     return this.tick(true);
   }
@@ -646,8 +662,8 @@ export class WikiService {
       const sources = [...new Set([...p.sources, ...batch.map((b) => b.id)])].filter((x) => known.has(x) && isSourceId(x)).slice(0, 12);
       // The base is the revision the model was shown, not the page now: one edited during the call is stale, and skipped on accept.
       const baseRev = shown.get(slug) ?? "";
-      prop.changes.push({ slug, category, workstreams: p.workstreams.slice(0, 12), body, sources, baseRev });
       const before = cur?.markdown.trim() ?? "";
+      prop.changes.push({ slug, category, workstreams: p.workstreams.slice(0, 12), body, sources, baseRev, before });
       const { text: diff, cut } = cutDiff(before, body, CARD_DIFF_MAX);
       changes.push({ slug, title: p.title || cur?.title || slug, category, op: cur ? "update" : "create", diff, ...(cut ? { cut } : {}), stale: (cur?.rev ?? "") !== baseRev, ...diffStats(before, body) });
     }
@@ -733,9 +749,11 @@ export class WikiService {
    */
   private reconcile(cardId: string, prop: Proposal): Proposal {
     if (!prop.writing) return prop;
-    const c = prop.changes.find((x) => x.slug === prop.writing);
-    const landed = !!c && readPage(this.dir, c.slug)?.markdown.trim() === c.body.trim();
-    const next: Proposal = { ...prop, applied: landed ? [...new Set([...(prop.applied ?? []), c!.slug])] : prop.applied };
+    const w = prop.writing;
+    // Only this write's own token (or its exact bytes) proves it landed: a person's edit carries neither, whatever it says.
+    const page = prop.changes.some((x) => x.slug === w.slug) ? readPage(this.dir, w.slug) : null;
+    const landed = !!page && (page.frontMatter.write === w.token || page.rev === w.rev);
+    const next: Proposal = { ...prop, applied: landed ? [...new Set([...(prop.applied ?? []), w.slug])] : prop.applied };
     delete next.writing;
     this.saveProposal(cardId, next);
     return next;
@@ -803,7 +821,8 @@ export class WikiService {
   fullDiff(cardId: string, slug: string): { diff: string; added: number; removed: number } | null {
     const c = this.loadProposal(cardId)?.changes.find((x) => x.slug === slug);
     if (!c) return null;
-    const before = readPage(this.dir, slug)?.markdown.trim() ?? "";
+    // The diff stored with the proposal (against the page as proposed), so it can't disagree with the card after a later edit. An older proposal without it falls back to the page now.
+    const before = c.before ?? readPage(this.dir, slug)?.markdown.trim() ?? "";
     return { diff: lineDiff(before, c.body), ...diffStats(before, c.body) };
   }
 
@@ -843,20 +862,21 @@ export class WikiService {
     for (const c of prop.changes) {
       if (done.has(c.slug) || (want && !want.has(c.slug))) continue;
       const cur = readPage(this.dir, c.slug);
-      // Already on disk as proposed (a write that landed but wasn't recorded): counted, not written again.
-      if (cur && cur.markdown.trim() === c.body.trim() && c.baseRev !== cur.rev) {
-        applied.push(c.slug);
-        done.add(c.slug);
-        continue;
-      }
       if ((cur?.rev ?? "") !== c.baseRev) {
         skipped.push(c.slug);
         continue;
       }
       try {
-        // The intent is recorded before the write and the page after it: a crash between leaves a record that says which page to look at.
-        this.saveProposal(card.id, { ...prop, applied: [...done], writing: c.slug });
-        writePage(this.dir, c.slug, c.body, { category: c.category, workstreams: c.workstreams, sources: c.sources });
+        // The intent (the page, a token written into the file, and the hash of the exact bytes) is recorded before the write
+        // and the page after it: a crash between leaves a record that says which page to look at and how to know it landed.
+        const token = `${card.id}:${c.slug}`;
+        writePage(this.dir, c.slug, c.body, {
+          category: c.category,
+          workstreams: c.workstreams,
+          sources: c.sources,
+          write: token,
+          beforeWrite: (text) => this.saveProposal(card.id, { ...prop, applied: [...done], writing: { slug: c.slug, token, rev: revOf(text) } }),
+        });
         applied.push(c.slug);
         done.add(c.slug);
         this.saveProposal(card.id, { ...prop, applied: [...done] });
@@ -890,6 +910,12 @@ export class WikiService {
   /** A person's edit applies at once and is kept as a source, so the next ingest builds on it. `rev` guards against overwriting a newer page. */
   editPage(slug: string, body: string, opts: { rev?: string; by: string; title?: string; category?: Category }): { ok: true; page: Page } | { ok: false; error: string; status: number; current?: Page } {
     if (!isPageSlug(slug)) return { ok: false, error: "That isn't a page name.", status: 400 };
+    // A proposal write that landed and wasn't recorded is recorded now, while the page still carries its token: an edit can't hide it.
+    try {
+      for (const p of this.proposals()) if (p.prop.writing) this.reconcile(p.id, p.prop);
+    } catch (e) {
+      return { ok: false, error: errText(e), status: 500 };
+    }
     const cur = readPage(this.dir, slug);
     if (cur && opts.rev !== cur.rev) return { ok: false, error: "Someone changed this page since you opened it.", status: 409, current: cur };
     if (!cur && opts.rev) return { ok: false, error: "That page is gone.", status: 404 };

@@ -223,8 +223,9 @@ export class Hub {
   async shutdown() {
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);
-    // The last stretch of conversation goes into the wiki's sources, and is read in if the model answers in time.
-    await Promise.race([this.wiki.flush().catch(() => null), Bun.sleep(25_000)]);
+    // The last stretch of conversation goes into the wiki's sources first, on its own (it never waits behind a slow ingest); it is read in if the model answers in time, or at the next start.
+    await Promise.race([Promise.resolve().then(() => this.wiki.captureFinal()).catch((e) => console.error("wiki:", e instanceof Error ? e.message : e)), Bun.sleep(5000)]);
+    await Promise.race([this.wiki.flush().catch(() => null), Bun.sleep(15_000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
     this.stop();
   }

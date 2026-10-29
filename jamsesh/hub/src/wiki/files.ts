@@ -180,6 +180,8 @@ export interface FrontMatter {
   workstreams: string[];
   updated: string;
   sources: string[];
+  /** Set only on a page the maintainer wrote from an accepted proposal: names that write ("<card>:<slug>"). Any later write by writePage drops it, so a person's edit never carries it. */
+  write?: string;
 }
 
 export interface Page {
@@ -205,7 +207,7 @@ export interface PageInfo {
 }
 
 export const today = (now = Date.now()) => new Date(now).toISOString().slice(0, 10);
-const revOf = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
+export const revOf = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
 
 function list(v: string): string[] {
   const t = v.trim();
@@ -228,13 +230,14 @@ export function parseFrontMatter(text: string): { fm: Partial<FrontMatter>; body
     else if (kv[1] === "updated") fm.updated = kv[2].trim();
     else if (kv[1] === "workstreams") fm.workstreams = list(kv[2]);
     else if (kv[1] === "sources") fm.sources = list(kv[2]).filter(isSourceId);
+    else if (kv[1] === "write" && /^[\w:-]{1,120}$/.test(kv[2].trim())) fm.write = kv[2].trim();
   }
   return { fm, body: text.slice(m[0].length) };
 }
 
 export function serializePage(fm: FrontMatter, body: string): string {
   const arr = (a: string[]) => `[${a.map((x) => JSON.stringify(x)).join(", ")}]`;
-  return `---\ntype: ${fm.type}\nworkstreams: ${arr(fm.workstreams)}\nupdated: ${fm.updated}\nsources: ${arr(fm.sources)}\n---\n${body.replace(/^\n+/, "")}`;
+  return `---\ntype: ${fm.type}\nworkstreams: ${arr(fm.workstreams)}\nupdated: ${fm.updated}\nsources: ${arr(fm.sources)}\n${fm.write ? `write: ${fm.write}\n` : ""}---\n${body.replace(/^\n+/, "")}`;
 }
 
 export const categoryOf = (type: string): Category => TYPES[type] ?? "topics";
@@ -287,7 +290,7 @@ export function readPage(dir: string, slug: string): Page | null {
     slug,
     title: titleOf(body, slug),
     category: categoryOf(type),
-    frontMatter: { type, workstreams: fm.workstreams ?? [], updated: fm.updated ?? today(statSync(file).mtimeMs), sources: fm.sources ?? [] },
+    frontMatter: { type, workstreams: fm.workstreams ?? [], updated: fm.updated ?? today(statSync(file).mtimeMs), sources: fm.sources ?? [], ...(fm.write ? { write: fm.write } : {}) },
     markdown: body,
     rev: revOf(text),
     mtime: statSync(file).mtimeMs,
@@ -346,7 +349,7 @@ export interface WriteResult {
  * Writes a page. `body` is the Markdown after the front matter; the front matter is kept up to date
  * here (updated today, sources unioned) so every writer, a person or the maintainer, leaves a page the same way.
  */
-export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number } = {}): Page {
+export function writePage(dir: string, slug: string, body: string, opts: { category?: Category; workstreams?: string[]; sources?: string[]; now?: number; write?: string; beforeWrite?: (text: string) => void } = {}): Page {
   const file = pageFile(dir, slug, true)!;
   if (body.length > PAGE_MAX) throw new Error(`A page can hold ${PAGE_MAX.toLocaleString("en-US")} characters; split this one.`);
   const prior = readPage(dir, slug);
@@ -359,7 +362,10 @@ export function writePage(dir: string, slug: string, body: string, opts: { categ
     updated: today(opts.now),
     sources: [...new Set([...(prior?.frontMatter.sources ?? []), ...(opts.sources ?? [])].filter(isSourceId))].slice(-60),
   };
-  writeAtomic(file, serializePage(fm, body.replace(/\r\n/g, "\n")));
+  if (opts.write) fm.write = opts.write;
+  const text = serializePage(fm, body.replace(/\r\n/g, "\n"));
+  opts.beforeWrite?.(text); // the exact bytes, for a record made just before they land
+  writeAtomic(file, text);
   return readPage(dir, slug)!;
 }
 

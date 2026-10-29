@@ -1715,7 +1715,11 @@ closes; if the hub stops in between, the next start closes the card with what wa
 since marked `stale`). The card's diff per page is cut at 6,000 characters, at a line, with a note of how many changed lines are left out and `cut: true`;
 `GET /api/wiki/proposal/:card/:slug` (people only) returns the whole change (`{diff, added, removed}`), and the card offers it as
 "Show the whole change". A change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff
-lines and says how many more there are, with a button that shows them all. Pages a failed accept already wrote stay part of its
+lines and says how many more there are, with a button that shows them all. Before each page is written the proposal records the intent (page, a token, the hash of the exact bytes); the token is written into the
+page's front matter (`write: <card>:<slug>`) and dropped by any later write, so only the accept's own write proves it landed, never a
+person's identical edit; a person's edit reconciles any unrecorded write first. `GET /api/wiki/proposal/:card/:slug` serves the diff
+made from the page as proposed, stored with the proposal. At session end the transcript, agent reports and queue are saved to the
+sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. Pages a failed accept already wrote stay part of its
 record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
 When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
 stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its

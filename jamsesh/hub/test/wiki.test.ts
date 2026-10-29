@@ -1478,7 +1478,7 @@ test("a page that lands as the record fails to save is still recorded: a retry t
     const first = failRecordAfterPage(() => s.board.add(id, "Chey"));
     expect(first).toMatchObject({ ok: false, status: 500 });
     expect(readPage(dir, "r-one")).not.toBeNull();
-    expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).writing).toBe("r-one");
+    expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).writing.slug).toBe("r-one");
     if (how === "retry") {
       expect(s.board.add(id, "Chey", { pages: ["r-two"] } as any)).toMatchObject({ ok: true });
       expect(s.board.get(id)!.wiki!.applied).toEqual(["r-one", "r-two"]);
@@ -1497,9 +1497,17 @@ test("a write that never landed is rolled back from its record: nothing claims i
   w.addSource("document", "One page", "a", "Chey");
   w.decide = (async () => ({ summary: "One", pages: [page("rb-one", "One", "topic", "1")] })) as Decider;
   const id = (await w.tick())!.card!.id;
-  mkdirSync(join(dir, "wiki", "rb-one.md")); // the write fails
-  expect(s.board.add(id, "Chey")).toMatchObject({ ok: false });
-  expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).writing).toBe("rb-one");
+  const rename = io.rename;
+  io.rename = ((a: any, b: any) => {
+    if (String(b).includes("/wiki/")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" }); // the rename of the page itself fails
+    rename(a, b);
+  }) as typeof io.rename;
+  try {
+    expect(s.board.add(id, "Chey")).toMatchObject({ ok: false });
+  } finally {
+    io.rename = rename;
+  }
+  expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).writing.slug).toBe("rb-one");
   new WikiService(s, dir, s.sessionId).restore();
   const rec = JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8"));
   expect(rec.writing).toBeUndefined();
@@ -1538,4 +1546,78 @@ test("a person's edit keeps the whole change in its source, even one long line",
   expect(edit.text).toContain("a".repeat(30_000));
   expect(edit.text).toContain("b".repeat(30_000));
   expect(edit.text).not.toContain("cut here");
+});
+
+// ---------- round 7 ----------
+
+test("only a write's own token proves it landed: a person's identical edit is an edit, not the accept", async () => {
+  const { w, s, dir } = room();
+  w.addSource("document", "One page", "a", "Chey");
+  w.decide = (async () => ({ summary: "One", pages: [page("same-text", "Same", "decision", "Proposed words.")] })) as Decider;
+  const id = (await w.tick())!.card!.id;
+  // A person writes exactly what was proposed, before anyone accepts.
+  expect(w.editPage("same-text", "# Same\n\nProposed words.", { by: "Ana" }).ok).toBe(true);
+  expect(readFileSync(join(dir, "wiki", "same-text.md"), "utf8")).not.toContain("write:");
+  const r = s.board.add(id, "Chey");
+  expect(r).toMatchObject({ ok: false, status: 409 }); // the page changed since: skipped, never counted as the accept
+  expect(readPage(dir, "same-text")!.frontMatter.type).toBe("topic"); // the proposal's category was not applied by a guess
+  // And an intent that never reached the page is rolled back, not matched to the person's text.
+  const rec = JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8"));
+  writeFileSync(join(dir, ".proposals", `${id}.json`), JSON.stringify({ ...rec, writing: { slug: "same-text", token: `${id}:same-text`, rev: "0" } }));
+  new WikiService(s, dir, s.sessionId).restore();
+  expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).applied ?? []).toEqual([]);
+});
+
+test("a page the accept wrote carries its token until someone edits it; a later edit can't hide a write that wasn't recorded", async () => {
+  const { w, s, dir } = room();
+  w.addSource("document", "Two pages", "a b", "Chey");
+  w.decide = (async () => ({ summary: "Two", pages: [page("t-one", "One", "topic", "1"), page("t-two", "Two", "topic", "2")] })) as Decider;
+  const id = (await w.tick())!.card!.id;
+  const first = failRecordAfterPage(() => s.board.add(id, "Chey"));
+  expect(first).toMatchObject({ ok: false, status: 500 });
+  expect(readFileSync(join(dir, "wiki", "t-one.md"), "utf8")).toContain(`write: ${id}:t-one`);
+  // A person edits the page before anything reconciled the record.
+  const edited = w.editPage("t-one", "# One\n\nChanged by a person.", { by: "Ana", rev: readPage(dir, "t-one")!.rev });
+  expect(edited.ok).toBe(true);
+  expect(readFileSync(join(dir, "wiki", "t-one.md"), "utf8")).not.toContain("write:");
+  expect(JSON.parse(readFileSync(join(dir, ".proposals", `${id}.json`), "utf8")).applied).toEqual(["t-one"]);
+  expect(s.board.dismiss(id, "Chey").ok).toBe(true);
+  expect(readFileSync(join(dir, "log.md"), "utf8")).toMatch(/Ingest: .*\[\[t-one\]\]/);
+  expect(readPage(dir, "t-two")).toBeNull();
+});
+
+test("a card's whole change is the one stored with the proposal, whatever the page becomes", async () => {
+  const { w, dir } = room();
+  writePage(dir, "stay", "# Stay\n\nOne.\nTwo.\nThree.");
+  w.addSource("document", "Edit stay", "stay page", "Chey");
+  w.decide = (async () => ({ summary: "S", pages: [page("stay", "Stay", "topic", "One.\nTwo, better.\nThree.")] })) as Decider;
+  const card = (await w.tick())!.card!;
+  const before = w.fullDiff(card.id, "stay")!;
+  expect(before.diff).toContain("-Two.");
+  w.editPage("stay", "# Stay\n\nCompletely different now.", { by: "Ana", rev: readPage(dir, "stay")!.rev });
+  expect(w.fullDiff(card.id, "stay")).toEqual(before);
+});
+
+test("at the end of a session the transcript is saved at once, even while an ingest is in the middle of a slow model call", async () => {
+  const { w, s } = room();
+  w.addSource("document", "Early note", "something waiting to be read", "Chey");
+  let release!: () => void;
+  let entered!: () => void;
+  const inside = new Promise<void>((res) => (entered = res));
+  w.decide = (async () => {
+    entered();
+    await new Promise<void>((res) => (release = res));
+    return { summary: "none", pages: [] };
+  }) as Decider;
+  const slow = w.tick();
+  await inside; // the ingest holds the queue, waiting on the model
+  s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "Last word before we close: ship the share sheet Friday.", relevance: "work" });
+  const t0 = Date.now();
+  const saved = w.captureFinal();
+  expect(Date.now() - t0).toBeLessThan(1000);
+  expect(saved.map((x) => x.text).join("\n")).toContain("ship the share sheet Friday");
+  // Saved on disk now, not behind the ingest; a restart's ingest will read it.
+  expect(new WikiService(s, w.dir, s.sessionId).pendingSources().length).toBeGreaterThan(1);
+  release();
+  await slow;
 });
