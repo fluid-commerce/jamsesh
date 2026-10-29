@@ -787,18 +787,36 @@ relevance.
 
 The brain keeps context current so new legs of work start informed [B27, A16d]:
 
-- **Session brief.** At most every 75 seconds, and only after at least 6 new events (or when
-  forced, for example 3 seconds after a decision), the digest model rewrites a brief of 300 words
-  or fewer: goal, decisions (with who decided), in progress, open questions, people. Banter and
-  canvas noise are left out.
+- **Session brief (4.4).** At most every 75 seconds, and only after at least 6 new events (or when
+  forced), the digest model returns the parts only it can write: the goal (what the room is making
+  now, replaced when it no longer fits), the settled decisions, the open questions, and a glossary of
+  project words. The hub builds the rest from its own records each time the brief is read, so a new
+  dev server or owner shows up without a model pass: `GOAL`, `OWNERS` (workstream, agent, person),
+  `REPOS` (repository and branch per working agent), `LIVE` (dev servers that are up, with links),
+  `IN PROGRESS` (per workstream: items mocked and built, open tasks), `DECISIONS`, `OPEN QUESTIONS`,
+  `GLOSSARY`. The full brief is what `jam_context` and the session state carry. The join briefing
+  carries a separate excerpt of at most 600 characters (goal, owners, live builds, repositories,
+  what's in progress, glossary terms, in that order of priority; whole lines only). With no model
+  pass yet the brief still fills from state. Clear banter is left out; a doubtful line is passed
+  with a "maybe off-topic" label and the model decides.
 - **Workstream briefs.** Each active workstream gets a brief of 150 words or fewer.
-- **Curated facts.** The same pass maintains a list of facts, each a `decision`, `requirement`,
-  `constraint`, `preference`, `question`, or `fact`, with status `active`, `resolved`, or
-  `superseded`. Curation is sparse (most batches add zero to three items), never leaves two
-  contradicting active facts, updates a fact when its scope changes ("A on both" becomes "A on
-  mobile"), supersedes it when it's replaced, and resolves answered questions. A new fact is
-  dropped as a duplicate only when it matches an active fact of the same kind with the same
-  specifics; a changed decision (A to B, 16 px to 24 px, a new color) is never dropped.
+- **Curated facts (4.3).** The same pass maintains a list of knowledge, not a log. A fact is a
+  `decision`, `requirement`, `constraint`, `preference`, `question`, or `fact`, with status
+  `active`, `resolved`, or `superseded`, the workstream it is about (an existing title, chosen by
+  topic, not by who said it), and the ids of the events it came from. One topic is one fact:
+  a restatement, a repeated instruction or a later refinement updates the existing fact (new
+  detail, the new events added to its sources) instead of adding another. A replaced decision is
+  superseded in the same pass, answered questions are resolved, and no two active facts
+  contradict. Never recorded: what an agent shipped (commit ids, branch names, "implemented X"),
+  instructions typed to an agent, progress reports, banter, and JamSesh's own problems (the
+  microphone, transcription, speaker names, the TV, connection failures). A fact with no source
+  event in the batch is not saved. A new fact that matches an active one of the same kind with the
+  same specifics is merged into it; a changed decision (A to B, 16 px to 24 px, a new color) is
+  never merged.
+- **One function decides, one applies.** `Brain.decideCuration(events)` asks the model what should
+  change and writes nothing; `Brain.applyCuration(decision, events)` writes the facts and returns
+  what it added, merged and dropped. `Brain.curate` is both in a row. The Tasks board wraps the
+  first to turn new facts into proposed context cards.
 - A batch that fails to curate is retried on the next pass.
 
 ### 7.4 What agents read
@@ -860,19 +878,33 @@ off from the host. Brain status is **ready**, **thinking**, **off**, or **Add a 
 ### 8.3 Triage
 
 Every incoming line is triaged [A16a, B25]: transcribed room speech, typed room lines, and prompts
-typed to agents. Lines are batched for 1.4 seconds. The triage model gets the waiting builds, the
-online agents, the last 14 lines for context, and the new lines with each author's role, and
-returns for each line:
+typed to agents. Lines are batched for 1.4 seconds. The triage model gets the **project card**, the
+waiting builds, the online agents, the last 14 lines for context (with ids), and the new lines with
+each author's role. The card is a few hundred words kept current by the hub: the session goal, each
+active workstream with its owner and one line, the settled decisions, the glossary terms, and what
+is on each big screen (item ids, titles, who put it up, how long ago). For each line it returns:
 
-- **Relevance:** `banter`, `chatter`, `discussion`, or `work`.
+- **Topic (4.2):** `project` (about the thing being made or what's on a screen; a joke about the
+  product counts), `unrelated` (family, food, sports, errands), or `tool` (JamSesh itself: its mic,
+  transcript, speaker names, the TV), and whether the line is **joking**. Tone never changes the
+  topic.
+- **Relevance:** `banter`, `chatter`, `discussion`, or `work`. The hub applies the topic: only a line
+  that isn't about the project is `banter`; filler stays `chatter`; a casual project line is
+  `discussion`.
 - **Intent:** `none`, `directive`, `decision`, `present`, `question`, `introduce`, or `relabel`.
 - **Confidence**, and introductions (`name`, `role`) it heard.
+- **Reaction:** a quick reaction right after something went up ("this is cool", "love it") names the
+  screen item it belongs to. It's saved on that item (`reactions`) and on the line
+  (`data.reactionTo`) when the item is on a screen now or was posted in the last 10 minutes. Only
+  people's lines count, once per line, never banter.
+- **Rescue:** a later line ("actually that's a good idea") can promote an earlier line labeled
+  banter back to discussion.
 
-Triage is deliberately conservative. The team jokes around, and speech-to-text is messy. Sarcasm
+Triage is deliberately conservative about intent. The team jokes around, and speech-to-text is messy. Sarcasm
 and jokes are never directives. Musing ("I wonder if…") is discussion unless it ends in an ask. A
 request aimed at a person ("Felipe, can you grab lunch") isn't work. The batch is routed only when
 a line has a directive, decision, present, question, or relabel intent with confidence above 0.55.
-Banter is stored but never routed [A16b]. Introductions ("I'm Britt, I run product") add or update
+Banter is stored but never routed [A16b]. Banter the model is sure about (confidence 0.8 or more) is left out of the brief and of `jam_context`; a doubtful one stays, marked "(maybe off-topic)". Introductions ("I'm Britt, I run product") add or update
 people [B39].
 
 ### 8.4 Routing and intent
@@ -1065,7 +1097,9 @@ whole-word name or platform, else best affinity, skipping a request already sent
 minutes), "bring up" by matching artifact titles, the Join view for join phrases, voice approvals,
 and decisions ("let's go with B") that send an implement directive to the agent that made the
 chosen variant. Spoken to directly on rules, it acts, or says it's on simple rules and what it
-can't do; "talk less" and similar still become a behavior note.
+can't do; "talk less" and similar still become a behavior note. A casual word ("lol", "dude") marks
+a line as doubtful banter (confidence 0.5, so it stays in the brief and `jam_context`) only when the
+line uses none of the project's own words (glossary terms, workstream and screen names).
 
 Every gateway call has a time limit (15 seconds for triage, 45 for everything else). When a call
 fails, the brain falls back to the rules for that batch, shows a notice at most every five
@@ -1282,6 +1316,16 @@ stage, with the same title once "(built)", "v2" and similar marks are dropped, o
 ("Nav / A", "Nav / B") stay separate, and one agent can't replace another's item. The item keeps its
 id, so a screen showing it, a pin and the feed all follow the newest build; earlier builds are kept in
 the item's `versions` (up to 20). The tile's badge reads "v3 · 2 min ago" and opens the versions.
+
+**Filed on arrival (4.5).** The hub files every item itself, whatever the agent passes. Its workstream
+is the posting agent's active one (the one named like the item's group when the agent has several); a
+canvas frame with no agent is filed under the workstream named like its page; an agent that claims a
+workstream later has its earlier unfiled items filed under it. Titles are tidied as they arrive:
+spacing, the variant letter capitalised ("Nav/b: rail" is "Nav / B: rail"), and a trailing "(built)"
+dropped, since the stage already says it. A group takes the spelling an existing group already has
+("Mist Mobile rep mode" joins "Mist Mobile rep"; mode, page, screen, flow and view are ignored), or
+the workstream's title. Once an item has versions its title never changes, so later builds keep
+matching it.
 
 **History (3.6).** Every screen keeps the last 20 things it showed with who put them up (the board
 and the join view are not kept; neither are shares). Showing the same thing again moves it to the

@@ -11,9 +11,12 @@ import { describeError, model } from "./llm";
 import { chime, speak, type SpeechSource } from "./speech";
 import { newId } from "../store";
 import { brainNames, normName } from "../names";
-export { brainNames };
+export { brainNames, sameSpecifics };
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import { aspect, type HostControl } from "../hostctl";
+import { briefParts, buildBrief } from "../brief";
+import { confidentBanter, onScreens, projectCard, vocabulary } from "./card";
+import { applyCuration, decideCuration, sameSpecifics, similar, type Curation, type CurationResult } from "./curation";
 
 const TRIAGE_DEBOUNCE_MS = 1400;
 const DIGEST_EVERY_MS = 75_000;
@@ -22,11 +25,15 @@ const triageSchema = z.object({
   lines: z.array(
     z.object({
       id: z.number().describe("The event id of the line"),
+      topic: z.enum(["project", "unrelated", "tool"]).optional().describe("project: about the thing being made or what's on a screen (a joke about it counts). unrelated: not about the project (family, food, sports, weather). tool: about JamSesh itself (its mic, transcript, speaker names, screens)"),
+      joking: z.boolean().optional().describe("Whether the line is a joke or teasing. It never changes the topic"),
       relevance: z.enum(["banter", "chatter", "discussion", "work"]),
       intent: z
         .enum(["none", "directive", "decision", "present", "question", "introduce", "relabel"])
         .describe("What the line asks of the room or its agents"),
       confidence: z.number().min(0).max(1),
+      reactionTo: z.string().optional().describe("The id of the screen item, from the project card, this line is a quick reaction to ('this is cool', 'love it') right after it went up; leave out otherwise"),
+      rescues: z.array(z.number()).optional().describe("Ids of earlier lines this line shows were about the project after all ('actually that's a good idea')"),
     }),
   ),
   actionable: z.boolean().describe("True when the router should act on these lines now"),
@@ -162,15 +169,7 @@ export class Brain {
       this.decideByVoice(batch);
       const triage = await this.triage(batch);
       if (this.stopped) return;
-      for (const line of triage.lines) {
-        const i = batch.findIndex((e) => e.id === line.id);
-        const ev = batch[i];
-        if (!ev) continue;
-        // A question to the brain is addressed to it even without its name, so its answer is spoken.
-        const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
-        const updated = this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, ...(asked ? { direct: true } : {}) } });
-        if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, direct: true } };
-      }
+      this.applyTriage(batch, triage);
       for (const intro of triage.introductions) {
         if (intro.name) this.session.upsertPerson({ name: intro.name, role: intro.role || undefined });
       }
@@ -181,11 +180,35 @@ export class Brain {
     }
   }
 
+  /** Saves the triage's labels on the lines. A quick reaction to what's on a screen is also saved on that item. */
+  applyTriage(batch: JamEvent[], triage: Triage) {
+    const s = this.session;
+    const onScreen = new Set(onScreens(s).flatMap((x) => x.items.map((i) => i.id)));
+    for (const line of triage.lines) {
+      const i = batch.findIndex((e) => e.id === line.id);
+      const ev = batch[i];
+      if (!ev) continue;
+      // A question to the brain is addressed to it even without its name, so its answer is spoken.
+      const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
+      const art = line.reactionTo && ev.authorType === "person" && line.relevance !== "banter" ? s.store.get("artifacts", line.reactionTo) : undefined;
+      // Only about something up now or posted a few minutes ago.
+      const reacting = art && (onScreen.has(art.id) || Date.now() - art.updatedAt < 10 * 60_000) ? art : undefined;
+      const updated = s.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, topic: line.topic, ...(asked ? { direct: true } : {}), ...(reacting ? { reactionTo: reacting.id } : {}) } });
+      if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, direct: true } };
+      if (reacting) s.addReaction(reacting.id, updated ?? ev);
+      // A later line can show an earlier one was about the project all along.
+      for (const id of line.rescues ?? []) {
+        const early = s.store.event(id);
+        if (early?.relevance === "banter" && early.id < ev.id && line.relevance !== "banter") s.store.updateEvent(early.id, { relevance: "discussion", data: { rescuedBy: ev.id } });
+      }
+    }
+  }
+
   // ---------- triage ----------
 
   async triage(batch: JamEvent[]): Promise<Triage> {
     const m = this.live("triage");
-    if (!m) return ruleTriage(batch);
+    if (!m) return ruleTriage(batch, vocabulary(this.session));
     const recent = this.session.store
       .recentEvents({ kinds: ["speech", "prompt", "directive"], limit: 14 })
       .filter((e) => !batch.some((b) => b.id === e.id));
@@ -196,9 +219,10 @@ export class Brain {
       output: Output.object({ schema: triageSchema }),
       system: TRIAGE_SYSTEM,
       prompt: [
+        `The project:\n${projectCard(this.session)}`,
         ...(this.host.pendingRequests().length ? [`Waiting for the room's approval: ${this.host.pendingRequests().map((r) => `${r.agentName} asks to build ${shortRepo(r.repo)} on the host`).join("; ")}.`] : []),
         `Agents in the session: ${agents.map((a) => `${a.name} (${a.platform}, ${shortRepo(a.repo)}${a.focus ? `, ${a.focus}` : ""})`).join("; ") || "none yet"}.`,
-        `Earlier lines:\n${recent.map((e) => `- ${e.authorName}: ${e.text}`).join("\n") || "(none)"}`,
+        `Earlier lines:\n${recent.map((e) => `- [${e.id}] ${e.authorName}: ${e.text}`).join("\n") || "(none)"}`,
         `New lines to judge:\n${batch.map((e) => `[${e.id}] ${e.authorName}${roleOf(this.session, e)}: ${e.text}`).join("\n")}`,
       ].join("\n\n"),
     }).catch((e) => {
@@ -206,7 +230,7 @@ export class Brain {
       this.gatewayTrouble(e);
       return null;
     });
-    return result?.output ?? ruleTriage(batch);
+    return result?.output ? judged(result.output) : ruleTriage(batch, vocabulary(this.session));
   }
 
   // ---------- routing ----------
@@ -383,7 +407,7 @@ export class Brain {
     const updates = s.store.recentEvents({ kinds: ["update", "decision", "message", "artifact"], limit: 18 });
     const artifacts = s.artifacts().slice(0, 30);
     const stage = s.stage();
-    const digest = s.store.digest("session")?.text;
+    const digest = s.brief().full;
     const openPins = s.annotations().filter((a) => a.status === "open").slice(-12);
     const fmtAgent = (a: Agent) =>
       `- ${a.id}: ${a.name}, owner ${a.ownerName}, ${a.harness}, repo ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, platform ${a.platform}, status ${a.status}${a.focus ? `, focus: ${a.focus}` : ""}${a.activity ? `, doing: ${a.activity}` : ""}${s.isWaiting(a.id) ? " (idle, waiting for work)" : ""}`;
@@ -911,7 +935,7 @@ export class Brain {
     }
     const before = s.directives().length;
     const stage = JSON.stringify(s.stage());
-    const triage = ruleTriage([ev]);
+    const triage = ruleTriage([ev], vocabulary(s));
     this.ruleRoute([ev], triage);
     const refused = this.lockRefused;
     this.lockRefused = false;
@@ -1078,21 +1102,26 @@ export class Brain {
     const m = model(s, "digest");
     if (!m) return;
     this.lastDigestAt = Date.now();
+    // Clear banter stays out; a doubtful line goes in with its label and the model decides.
     const events = s.store
       .recentEvents({ afterId: prev?.throughEvent ?? 0, limit: 400 })
-      .filter((e) => e.relevance !== "banter" && e.kind !== "canvas");
+      .filter((e) => !confidentBanter(e) && e.kind !== "canvas");
     if (!events.length) return;
     try {
-      const { text } = await generateText({
+      const parts = briefParts(s);
+      const { output } = await generateText({
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
+        output: Output.object({ schema: briefSchema }),
         system: DIGEST_SYSTEM,
-        prompt: `Previous brief:\n${prev?.text ?? "(none, the session just started)"}\n\nPeople: ${s.people().map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ")}\nAgents: ${s.agents().map((a) => `${a.name} (${a.platform}, ${shortRepo(a.repo)})`).join(", ")}\n\nNew events:\n${events.map((e) => `- [${e.kind}] ${e.authorName}: ${e.text.slice(0, 400)}`).join("\n")}`,
+        prompt: `Previous brief parts:\n${parts ? JSON.stringify(parts) : "(none, the session just started)"}\n\nSession: ${s.settings().sessionName}\nWorkstreams: ${s.store.all("workstreams").filter((w) => w.status === "active").map((w) => w.title).join(", ") || "(none)"}\nPeople: ${s.people().map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ")}\nAgents: ${s.agents().map((a) => `${a.name} (${a.platform}, ${shortRepo(a.repo)})`).join(", ")}\n\nNew events:\n${events.map((e) => `- [${e.kind}${e.relevance === "banter" ? "/maybe off-topic" : ""}] ${e.authorName}: ${e.text.slice(0, 400)}`).join("\n")}`,
       });
+      if (!output) return;
       // Curate first: the brief only moves past these events once their facts are stored, so a
       // failed pass is retried next time instead of losing them.
       await this.curate(events);
-      s.store.setDigest("session", text.trim(), lastId);
+      s.store.setDigest("brief-parts", JSON.stringify(output), lastId);
+      s.store.setDigest("session", buildBrief(s).full, lastId);
       await this.workstreamBriefs(lastId);
     } catch (e) {
       console.error("digest:", describeError(e));
@@ -1104,55 +1133,19 @@ export class Brain {
    * requirements, constraints, preferences, open questions, facts), resolve what was
    * answered, and supersede what changed. Agents get the active set in jam_context.
    */
-  async curate(events: JamEvent[]) {
-    const s = this.session;
-    const m = model(s, "digest");
-    if (!m || !events.length) return;
-    const active = s.facts().filter((f) => f.status === "active");
-    const workstreams = s.store.all("workstreams").map((w) => w.title);
-    const { output } = await generateText({
-        abortSignal: AbortSignal.timeout(45_000),
-      model: m,
-      output: Output.object({ schema: curateSchema }),
-      system: CURATE_SYSTEM,
-      prompt: [
-        `People: ${s.people().map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ") || "(none)"}`,
-        `Workstreams: ${workstreams.join(", ") || "(none)"}`,
-        `Current knowledge (id: kind, workstream, text):\n${active.map((f) => `${f.id}: ${f.kind}, ${f.workstream || "general"}, ${f.text}`).join("\n") || "(empty)"}`,
-        `New events (id, kind, author, text):\n${events.map((e) => `[${e.id}] ${e.kind}${e.relevance ? `/${e.relevance}` : ""} ${e.authorName}: ${e.text.slice(0, 500)}`).join("\n")}`,
-      ].join("\n\n"),
-    });
-    if (!output) return;
-    const now = Date.now();
-    for (const u of output.update) {
-      const f = s.store.get("facts", u.id);
-      if (f && f.status === "active") s.store.put("facts", { ...f, text: u.text, note: u.reason, updatedAt: now });
-    }
-    for (const r of output.resolve) {
-      const f = s.store.get("facts", r.id);
-      if (f && f.status === "active") s.store.put("facts", { ...f, status: "resolved", note: r.reason, updatedAt: now });
-    }
-    for (const r of output.supersede) {
-      const f = s.store.get("facts", r.id);
-      if (f && f.status === "active") s.store.put("facts", { ...f, status: "superseded", note: r.reason, updatedAt: now });
-    }
-    for (const a of output.add) {
-      // Paraphrases of what's already known are duplicates, not new knowledge. Items that
-      // differ in their specifics (option A versus B, 16 versus 24 px) never are.
-      if ([...active, ...s.facts().filter((f) => f.status === "active")].some((f) => f.kind === a.kind && sameSpecifics(f.text, a.text) && similar(f.text, a.text) > 0.55)) continue;
-      s.store.put("facts", {
-        id: newId("fact"),
-        ts: now,
-        updatedAt: now,
-        kind: a.kind,
-        text: a.text,
-        workstream: a.workstream ?? "",
-        by: a.by ?? "",
-        status: "active",
-        note: "",
-        sourceEventIds: a.eventIds ?? [],
-      });
-    }
+  async curate(events: JamEvent[]): Promise<CurationResult | null> {
+    const decided = await this.decideCuration(events);
+    return decided ? this.applyCuration(decided, events) : null;
+  }
+
+  /** What curation would change, with nothing written (so a caller can review it first). */
+  decideCuration(events: JamEvent[]): Promise<Curation | null> {
+    return decideCuration(this.session, events);
+  }
+
+  /** Writes a curation's changes as facts. */
+  applyCuration(c: Curation, events: JamEvent[]): CurationResult {
+    return applyCuration(this.session, c, events);
   }
 
   private async workstreamBriefs(lastId: number) {
@@ -1264,26 +1257,10 @@ export function compareCaption(items: { variant: string; agentName?: string }[])
   return makers ? `${head}, from ${makers}` : head;
 }
 
-/** Variant letters, numbers and hex colors: the details that make two similar sentences different. */
-export function sameSpecifics(a: string, b: string) {
-  const specifics = (t: string) =>
-    new Set([...t.matchAll(/(?:\b(?:option|direction|variant|version)\s+([A-Z])\b)|\b([A-Z])\b(?=[:)\s,.])|(#[0-9a-f]{3,8})\b|\b(\d+(?:\.\d+)?)(?=px|pt|%|ms|\b)/gi)].map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4]).toLowerCase()));
-  const x = specifics(a);
-  const y = specifics(b);
-  return x.size === y.size && [...x].every((v) => y.has(v));
-}
-
 /** "three variants" and "five variants" are different asks: the counts, as digits or words, must agree. */
 function sameCounts(a: string, b: string) {
   const counts = (t: string) => (t.toLowerCase().match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|couple|pair)\b/g) ?? []).join();
   return counts(a) === counts(b);
-}
-
-function similar(a: string, b: string) {
-  const x = new Set(terms(a));
-  const y = new Set(terms(b));
-  const inter = [...x].filter((t) => y.has(t)).length;
-  return inter / Math.max(1, Math.min(x.size, y.size));
 }
 
 function roleOf(s: Session, e: JamEvent) {
@@ -1434,31 +1411,57 @@ function variantLetter(text: string) {
   return (text.match(/\b(?:direction|option|variant|version)\s+([a-z])\b/i)?.[1] ?? text.match(/\bgo(?:ing)? with\s+(?:option |direction |variant )?([A-Z])\b/)?.[1] ?? text.match(/\bgo(?:ing)? with\s+([a-z])\s*(?:[.,!?;]|$)/)?.[1])?.toUpperCase();
 }
 
-export function ruleTriage(batch: JamEvent[]): Triage {
+/**
+ * The model answers two questions, topic and joking. What a line is labeled follows from the topic alone: only a
+ * line that isn't about the project is banter, however casual it sounds.
+ */
+export function judged(t: Triage): Triage {
+  return {
+    ...t,
+    lines: t.lines.map((l) => {
+      // Filler is filler. Anything else that isn't about the project is banter; a reaction to a screen never is.
+      const relevance: Relevance = l.relevance === "chatter" && !l.reactionTo ? "chatter" : l.topic && l.topic !== "project" ? "banter" : l.relevance === "banter" || l.relevance === "chatter" ? "discussion" : l.relevance;
+      return { ...l, relevance };
+    }),
+  };
+}
+
+export function ruleTriage(batch: JamEvent[], vocab: Set<string> = new Set()): Triage {
   const lines = batch.map((e) => {
     const t = e.text.toLowerCase().trim();
     let intent: Triage["lines"][number]["intent"] = "none";
     let relevance: Relevance = "discussion";
-    if (!roomTalk(e)) return { id: e.id, relevance, intent, confidence: 0.5 };
+    if (!roomTalk(e)) return { id: e.id, topic: "project" as const, joking: false, relevance, intent, confidence: 0.5 };
     // In order: asking to see something (or how to join), a decision, then a request for work.
     if (JOIN_WORDS.test(t) || /\b(bring up|pull up|put up|show (me|us)|let'?s see|go back to the board)\b/.test(t)) intent = "present";
     else if (/\b(let'?s go with|we('re| are) going with|decided|i like (direction|option|variant) [a-z]\b|go with [a-z]\b)/.test(t)) intent = "decision";
     else if (looksLikeRequest(t)) intent = "directive";
-    if (/\b(haha|lol|lmao|dude|bro|shut up|your (mom|shirt|face))\b/.test(t) && intent === "none") relevance = "banter";
+    // Casual words alone don't make a line banter: one that uses the project's own words is about the project.
+    const aboutProject = (t.match(/[a-z][a-z0-9-]{3,}/g) ?? []).some((w) => vocab.has(w));
+    if (/\b(haha|lol|lmao|dude|bro|shut up|your (mom|shirt|face))\b/.test(t) && intent === "none" && !aboutProject) relevance = "banter";
     if (t.split(/\s+/).length < 3 && intent === "none") relevance = "chatter";
     if (intent !== "none") relevance = "work";
-    return { id: e.id, relevance, intent, confidence: intent === "none" ? 0.5 : 0.6 };
+    return { id: e.id, topic: relevance === "banter" ? ("unrelated" as const) : ("project" as const), joking: relevance === "banter", relevance, intent, confidence: intent === "none" ? 0.5 : 0.6 };
   });
   return { lines, actionable: lines.some((l) => l.intent !== "none"), introductions: [] };
 }
 
-const TRIAGE_SYSTEM = `You listen to a room of designers and developers working together with AI coding agents. They are friends and joke around a lot. Speech-to-text can be messy.
+const TRIAGE_SYSTEM = `You listen to a room of designers and developers working together with AI coding agents on one project. They are friends and joke around a lot. Speech-to-text can be messy. The message starts with a card for the project: its goal, workstreams, decisions, key terms, and what is on each screen right now and who put it up.
 
-For each new line decide:
-- relevance: "banter" (jokes, teasing, off-topic), "chatter" (filler, "yeah", "hmm"), "discussion" (talking about the work without asking for anything), "work" (asks for or decides something about the work).
-- intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change), "decision" (the team picks a direction: "let's go with B"; also a person approving or denying a host build that's waiting for approval: "approve", "yeah go ahead", "build it", "no, not now"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version", and also how to join: "what's the code?", "put the QR up", "how do I get on with my phone?"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "relabel" (someone says who said a previous line: "that was Felipe"), "none".
+For each new line answer two separate questions.
+1. topic: is the line about the project?
+- "project": about the thing being made, its workstreams, decisions, terms, or what is on a screen. A joke or tease about the product, a screen, or the work is still "project": "the checkout looks like a tax form lol" is feedback, often the most honest kind. Casual words, slang and laughter never make a line off-topic.
+- "unrelated": not about the project at all: family, food, sports, weather, a drive, weekend plans, personal errands.
+- "tool": about JamSesh itself, not the project: its microphone, transcript, speaker names, the TV flickering, the app connecting.
+2. joking: is the line a joke or teasing? This never changes the topic.
 
-Be conservative. Sarcasm and jokes are never directives ("let's just delete the whole app lol" is banter). Musing ("I wonder if...") is discussion unless it ends in an ask. A directive addressed to a person, not an agent ("Felipe, can you grab lunch"), is not work.
+Then:
+- relevance: "chatter" for pure filler with no content ("yeah", "hmm", "mm-hm", "okay let's keep going"), whatever the topic. Otherwise "banter" only when topic is not "project", or for a project line "discussion" (talking about the work, reacting to it, or giving feedback without asking for anything) or "work" (asks for or decides something about the work). A reaction to what is on a screen ("this is cool", "love it") is "discussion", not chatter.
+- intent: "directive" (asks the agents or the brain to do something: make variants, try an idea, build, fix, change; also an overheard "we should..." or "someone should..." about the work), "decision" (the team picks a direction: "let's go with B"; also a person approving or denying a host build that's waiting for approval: "approve", "yeah go ahead", "build it", "no, not now"), "present" (asks to see something on the big screen: "bring up the nav options", "show the mobile version", and also how to join: "what's the code?", "put the QR up", "how do I get on with my phone?"), "question" (asks the room brain a question), "introduce" (someone says their name or role), "relabel" (someone says who said a previous line: "that was Felipe"), "none".
+- reactionTo: when a line is a quick reaction to something just put on a screen ("this is cool", "love it", "that's really good", "this feels super good", "the left-hand nav is feeling good"), set it to the id of that item from the card, the one the line is most plausibly about. Leave it out for anything else.
+- rescues: when a line shows an earlier line (see Earlier lines) was about the project after all ("actually that's a pretty good idea"), list that line's id.
+
+Be conservative about intent. Sarcasm and jokes are never directives ("let's just delete the whole app lol" is not a request, but it is about the project). Musing ("I wonder if...") is discussion unless it ends in an ask. A directive addressed to a person, not an agent ("Felipe, can you grab lunch"), is not work. When you are unsure whether a line is about the project, say "project" with low confidence rather than "unrelated".
 Introductions: fill "introductions" whenever a name and what the person does come up, whether they say it themselves ("I'm Felipe, I run product") or someone else does ("this is Dana, she runs support"). Use the role they gave, and leave out anyone whose name was only mentioned in passing.
 Set actionable to true only when at least one line is a directive, decision, present, question, or relabel with confidence above 0.55.`;
 
@@ -1484,34 +1487,16 @@ How to route:
 - "That was Felipe" / "Britain said that" right after a line means fix_speaker on that line. It is not banter even if phrased casually.
 - Replies (say_to_room): only when someone addressed you. Use kind 'answer' for their question, 'problem' when you can't do it or a person must act. Don't confirm actions that show on the big screen or as a routed toast; silence plus the visible change is the confirmation. JamSesh decides whether a reply is spoken. Never more than two short sentences.`;
 
-const curateSchema = z.object({
-  add: z.array(
-    z.object({
-      kind: z.enum(["decision", "requirement", "constraint", "preference", "question", "fact"]),
-      text: z.string().describe("One self-contained sentence an engineer can act on, with specifics (names, values, screens)"),
-      workstream: z.string().optional().describe("Existing workstream title, or empty for session-wide"),
-      by: z.string().optional().describe("Who said or decided it"),
-      eventIds: z.array(z.number()).optional(),
-    }),
-  ),
-  update: z.array(z.object({ id: z.string(), text: z.string(), reason: z.string() })).describe("Knowledge that still holds but changed in scope or detail (rewrite it whole)"),
-  resolve: z.array(z.object({ id: z.string(), reason: z.string() })).describe("Questions answered or requirements met"),
-  supersede: z.array(z.object({ id: z.string(), reason: z.string() })).describe("Knowledge a newer event changed (for example the room switched from A to B)"),
+const briefSchema = z.object({
+  goal: z.string().describe("One line: what the room is making right now"),
+  decisions: z.array(z.string()).describe("Settled calls, newest last, each with who decided"),
+  questions: z.array(z.string()).describe("Questions still open"),
+  glossary: z.array(z.object({ term: z.string(), meaning: z.string() })).describe("Words and names of this project a newcomer would not know"),
 });
 
-const CURATE_SYSTEM = `You curate the shared knowledge of a live design-and-build session, so every agent works from the same, current facts. From the new events, record only what will still matter later:
-- decision: a direction the team chose ("Settings header uses option A, the big greeting"), with who decided.
-- requirement: something the result must do or include.
-- constraint: a limit (deadline, platform rule, "don't touch the API").
-- preference: how someone likes things (style, tone, "Felipe prefers fewer steps").
-- question: an open question nobody answered yet.
-- fact: useful project knowledge (token values, URLs of dev servers, where code lives).
-Ignore banter, chatter, greetings, and tool noise. Don't restate existing knowledge. When something changed, either update it (same item, new scope or detail, for example "A on both apps" becomes "A on mobile") or supersede it (replaced outright). Never leave two active items that contradict each other. Resolve questions that got answered. Be sparse: most batches add zero to three items.`;
-
-const DIGEST_SYSTEM = `You keep the running brief of a live design-and-build session, for agents that join late or start a new leg of work. Update the previous brief with the new events. Structure:
-GOAL: one line.
-DECISIONS: bullet list, newest last, with who decided.
-IN PROGRESS: who (agent) is on what, mocked or built.
-OPEN QUESTIONS: bullets.
-PEOPLE: name, role, what they care about.
-Drop banter. Keep it under 300 words. Plain text.`;
+const DIGEST_SYSTEM = `You keep the running brief of a live design-and-build session, for agents that join late or start a new leg of work. Update the previous brief with the new events and return its parts.
+- goal: what the room is working on now, judged from the workstreams and recent talk. Replace an older goal that no longer fits. One line.
+- decisions: the calls that are settled, newest last, with who made them. Drop one that a later call replaced.
+- questions: only what is still unanswered. Remove one that was answered.
+- glossary: project words (product names, internal terms, screen names) with a short meaning each. Keep earlier entries.
+Do not write who owns what, repositories, branches, builds or links: the hub adds those from its own records. Lines labeled banter are probably off-topic, but a line labeled banter that is about the project still counts. Plain text, short.`;

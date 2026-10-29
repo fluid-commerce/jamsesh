@@ -435,3 +435,53 @@ describe("speaking", () => {
     });
   }, T);
 });
+
+describe("banter is judged by topic, not tone (4.2)", () => {
+  const lineOf = (r: any, text: string) => r.hub.session.store.recentEvents({ kinds: ["speech"], limit: 50 }).find((e: any) => e.text === text);
+  const project = async (r: any) => {
+    r.hub.session.upsertArtifact({ kind: "frame", stage: "mockup", title: "Checkout / A: one page", agentId: r.agents.design.id });
+    r.hub.session.claim(r.agents.desktop.id, "Checkout", { quiet: true });
+  };
+
+  t("Felipe's real line about the left-hand nav is kept and saved as a reaction on the nav item", async () => {
+    await runScenario("banter: the left-hand nav line", [1], async (r) => {
+      r.stageNav();
+      r.say("jonathan", "ha okay who's getting more chips, I'm going to the kitchen");
+      r.say("chey", "lol dude you've been so quiet today");
+      r.say("felipe", "This is actually feeling really good, the left-hand nav here.");
+      r.say("jonathan", "Briton you want anything from the kitchen");
+      await r.settle();
+      const real = lineOf(r, "This is actually feeling really good, the left-hand nav here.");
+      expect(real.relevance).not.toBe("banter");
+      expect(real.relevance).not.toBe("chatter");
+      const reacted = [r.art.navA, r.art.navB].some((a) => (r.hub.session.store.get("artifacts", a.id)?.reactions ?? []).some((x: any) => x.eventId === real.id));
+      expect(reacted).toBe(true);
+      expect(lineOf(r, "ha okay who's getting more chips, I'm going to the kitchen").relevance).toBe("banter");
+      expect(r.newDirectives()).toHaveLength(0);
+    });
+  }, T);
+
+  t("a joke about the product is feedback, not banter", async () => {
+    await runScenario("banter: product jokes", [1], async (r) => {
+      await project(r);
+      r.say("jonathan", "lol the checkout looks like a tax form");
+      r.say("chey", "haha the pay button is so ugly, who picked that grey");
+      r.say("felipe", "my daughter got four points at school today for reading");
+      await r.settle();
+      expect(lineOf(r, "lol the checkout looks like a tax form").relevance).not.toBe("banter");
+      expect(lineOf(r, "haha the pay button is so ugly, who picked that grey").relevance).not.toBe("banter");
+      expect(lineOf(r, "my daughter got four points at school today for reading").relevance).toBe("banter");
+      expect(r.newDirectives()).toHaveLength(0);
+    });
+  }, T);
+
+  t("JamSesh's own trouble is kept out of the project's talk", async () => {
+    await runScenario("banter: the mic line", [1], async (r) => {
+      await project(r);
+      r.say("felipe", "the mic keeps cutting out when Jonathan talks");
+      await r.settle();
+      expect(["banter", "chatter"]).toContain(lineOf(r, "the mic keeps cutting out when Jonathan talks").relevance);
+      expect(r.newDirectives()).toHaveLength(0);
+    });
+  }, T);
+});

@@ -159,6 +159,15 @@ export interface Artifact {
   version?: number;
   /** The earlier builds, oldest first. They stay retrievable; only the newest shows. */
   versions?: ArtifactVersion[];
+  /** What people said about it right after it went up ("this is cool"), saved by the room brain (4.2). */
+  reactions?: ArtifactReaction[];
+}
+
+export interface ArtifactReaction {
+  by: string;
+  text: string;
+  at: number;
+  eventId: number;
 }
 
 /** One earlier build of an artifact. */
