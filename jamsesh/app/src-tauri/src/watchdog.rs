@@ -65,7 +65,12 @@ impl Beats {
     pub fn stalled(&mut self, now: Instant, visible: impl Fn(&str) -> bool) -> Vec<String> {
         let mut out = Vec::new();
         for (label, last) in self.seen.iter_mut() {
-            if now.duration_since(*last) < SILENCE || !visible(label) {
+            // A hidden page may be throttled: its silence starts counting when it is shown again.
+            if !visible(label) {
+                *last = now;
+                continue;
+            }
+            if now.duration_since(*last) < SILENCE {
                 continue;
             }
             let count = self.strikes.get(label).map_or(0, |s| s.count);
@@ -243,6 +248,17 @@ mod tests {
         assert!(b.stalled(secs(t0, 600), |_| false).is_empty());
         let mut none = Beats::default();
         assert!(none.stalled(secs(t0, 600), |_| true).is_empty());
+    }
+
+    #[test]
+    fn a_window_shown_again_gets_the_whole_silence_before_a_restart() {
+        let t0 = Instant::now();
+        let mut b = Beats::default();
+        b.beat("client", t0);
+        assert!(b.stalled(secs(t0, 600), |_| false).is_empty());
+        assert!(b.stalled(secs(t0, 601), |_| true).is_empty());
+        assert!(b.stalled(secs(t0, 614), |_| true).is_empty());
+        assert_eq!(b.stalled(secs(t0, 616), |_| true), vec!["client"]);
     }
 
     #[test]
