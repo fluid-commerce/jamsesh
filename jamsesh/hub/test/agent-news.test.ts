@@ -41,7 +41,7 @@ test("repeated ships from one agent in a window are considered once, and not aga
   expect(calls).toHaveLength(1);
   expect(calls[0]).toContain("new spacing");
   expect(calls[0]).toContain("spacing fix");
-  expect(calls[0]).toContain("call no_action");
+  expect(calls[0]).toContain("Call no_action only when nothing in it is something a person sees");
   s.postUpdate(desktop.id, "shipped", "Header: spacing fix again");
   await wait(80);
   expect(calls).toHaveLength(1);

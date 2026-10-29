@@ -929,7 +929,7 @@ export class Brain {
     void this.consider(
       `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
         `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
-        `Every agent can already read this in jam_context ("Recently shipped"); a directive lands in an inbox as work. Call coordinate_parity only for a user-visible feature or screen that people would expect on the other platforms too (or, when several platforms shipped, the same feature built on each), naming the feature and the platforms. Otherwise call no_action.`,
+        `Every agent can already read this in jam_context ("Recently shipped"); a directive lands in an inbox as work. Commits, refactors, fixes, tooling and changes marked as one platform's never reach you. So a user-visible feature or screen here is a parity question by default: call coordinate_parity naming the feature and the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). Call no_action only when nothing in it is something a person sees, or it plainly can't exist on the other platforms.`,
       "agent",
       this.parityTools(batch),
     );
