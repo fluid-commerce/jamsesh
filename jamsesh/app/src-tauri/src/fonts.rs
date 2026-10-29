@@ -50,12 +50,8 @@ pub fn files_for(db: &fontdb::Database, family: &str) -> Vec<PathBuf> {
         if !face.families.iter().any(|(name, _)| name.to_lowercase() == want) {
             continue;
         }
-        match &face.source {
-            fontdb::Source::File(path) => {
-                out.insert(path.clone());
-            }
-            #[allow(unreachable_patterns)]
-            _ => {}
+        if let fontdb::Source::File(path) = &face.source {
+            out.insert(path.clone());
         }
     }
     out.into_iter().collect()
@@ -145,6 +141,6 @@ mod tests {
         assert_eq!(read_files(many).len(), 1);
         let asked: Vec<String> = (0..100).map(|i| format!("Family {i}")).collect();
         assert!(local_fonts(&asked).is_empty());
-        assert!(MAX_FILE < MAX_TOTAL);
+        const { assert!(MAX_FILE < MAX_TOTAL) };
     }
 }
