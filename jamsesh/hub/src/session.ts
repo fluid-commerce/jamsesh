@@ -26,7 +26,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
+ BuildRequest, FontsState, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -173,6 +173,7 @@ export class Session {
 
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
+  fonts: () => FontsState = () => ({ available: [], wanted: [] });
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
   voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
 
@@ -194,6 +195,7 @@ export class Session {
       annotations: this.annotations(),
       facts: this.facts(),
       buildRequests: this.buildRequests(),
+      fonts: this.fonts(),
       screens: this.screens(),
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
@@ -283,6 +285,8 @@ export class Session {
         return { key, value: this.screens() };
       case "buildRequests":
         return { key, value: this.buildRequests() };
+      case "fonts":
+        return { key, value: this.fonts() };
       case "readyToShow":
         return { key, value: this.readyToShow() };
       case "showRequests":

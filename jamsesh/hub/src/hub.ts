@@ -21,6 +21,7 @@ import { newId, Store } from "./store";
 import type { Agent, Annotation, Artifact, BuildRequest, Platform, ShowRequest, Utterance } from "./types";
 import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
+import { FontService } from "./fonts";
 
 /** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
 export interface PointerMark {
@@ -80,6 +81,8 @@ export class Hub {
   /** Records the project this session belongs to (people, last used, thumbnail); idle without a project. */
   keeper: ProjectKeeper;
   auth: Auth;
+  /** The fonts canvases draw with this session: open ones fetched, others borrowed. Memory only. */
+  fonts: FontService;
   awake: KeepAwake;
   /** Reachability from anywhere (DuckDNS, certificates, router); team-level, so it survives sessions. */
   net: Network;
@@ -119,6 +122,11 @@ export class Hub {
     this.transcriber = new Transcriber(this.session);
     this.audio = new AudioPipeline(this.session, this.transcriber);
     this.canvas = new Canvas(this.session);
+    this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
+    this.session.fonts = () => this.fonts.state();
+    // The host's own canvas and its agents' participants draw frames too: they get the fonts as well.
+    this.canvas.fonts = () => this.fonts.all();
+    this.fonts.onFace = (_family, data) => void this.canvas.loadFont(data);
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
@@ -155,6 +163,8 @@ export class Hub {
     if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal().then((ok) => console.log(ok ? "whisper: local whisper.cpp ready" : "whisper: no local model, using the gateway")));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
+    // Agents already here (a restart) may have named fonts in their repo cards.
+    void this.fonts.scan().catch(() => {});
     this.autosave.start();
     this.keeper.start();
     setInterval(() => this.devproxy.refresh(), 30_000);
@@ -183,6 +193,7 @@ export class Hub {
     this.canvas.stop();
     this.transcriber.stop();
     this.devproxy.stop();
+    this.fonts.clear();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
   }
 

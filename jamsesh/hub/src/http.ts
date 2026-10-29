@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|fonts\/(want|lend|decline|withdraw)|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -422,6 +422,32 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (paired?.personId && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
   }
 
+  // Fonts for the canvases (SPEC 12.4). The bytes go to people's canvases only: an agent's credential gets
+  // names and counts in the state, never a font file (agents run on Macs, and a borrowed font stays off them).
+  let fm = path.match(/^\/fonts\/([^/]{1,300})\/(\d{1,2})$/);
+  if (fm && req.method === "GET") {
+    if (paired?.kind === "agent") return bad("Fonts are for people's canvases; agents don't get the files.", 403);
+    const key = (() => { try { return decodeURIComponent(fm[1]); } catch { return ""; } })();
+    const data = hub.fonts.face(key, Number(fm[2]));
+    // A copy, and never cached to disk: a borrowed font is not kept on anyone's Mac.
+    return data ? new Response(data.slice(), { headers: { "content-type": "font/ttf", "cache-control": "no-store" } }) : bad("No such font.", 404);
+  }
+  if (path.startsWith("/fonts/") && req.method === "POST") {
+    const personId = String(paired?.personId || (hostWindow ? s.store.setting<string>("hostPersonId", "") : "") || "");
+    const person = personId ? s.person(personId) : undefined;
+    if (path === "/fonts/want") {
+      await hub.fonts.want(person?.id ?? null, body?.families);
+      return json(s.fonts());
+    }
+    if (!person) return bad("Choose who you are first, so JamSesh knows whose font this is.", 403);
+    if (path === "/fonts/decline") return hub.fonts.decline(person.id, body?.family) ? json({ ok: true }) : json({ ok: true, nothing: true });
+    if (path === "/fonts/withdraw") return hub.fonts.withdraw(person.id, body?.family) ? json({ ok: true }) : bad("You aren't sharing that font.", 404);
+    if (path === "/fonts/lend") {
+      const r = hub.fonts.lend(person.id, body?.family, body?.files);
+      return r.ok ? json(r) : bad(r.error, r.status);
+    }
+  }
+
   if (path === "/me") {
     const personId = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
     return json({ onHost: isLocal(ip), device: paired && { id: paired.id, kind: paired.kind, label: paired.label }, person: personId ? s.person(personId) ?? null : null });
@@ -470,7 +496,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined }));
   }
   let m = path.match(/^\/people\/([\w-]+)$/);
-  if (m && req.method === "DELETE") return (s.removePerson(m[1]), json({ ok: true }));
+  if (m && req.method === "DELETE") return (s.removePerson(m[1]), hub.fonts.dropLender(m[1]), json({ ok: true }));
   if (m && req.method === "PATCH") {
     const p = s.person(m[1]);
     if (!p) return bad("no such person", 404);

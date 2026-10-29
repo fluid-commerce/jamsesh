@@ -73,6 +73,14 @@ fn lookup_files(families: &[String]) -> Vec<(String, Vec<PathBuf>)> {
     out
 }
 
+/// Which of `families` this Mac has installed (as asked), without reading any font: the page uses
+/// it to know whether it can offer to lend one. Same limits as [`local_fonts`].
+pub fn installed(families: &[String]) -> Vec<String> {
+    let mut wanted: Vec<String> = families.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty() && f.len() <= 200).collect();
+    wanted.truncate(MAX_FAMILIES);
+    lookup_files(&wanted).into_iter().filter(|(_, files)| !files.is_empty()).map(|(f, _)| f).collect()
+}
+
 /// The font files of the families this Mac has, read and base64-encoded: each file once, files
 /// over [`MAX_FILE`] skipped, and at most [`MAX_TOTAL`] in all. Families it doesn't have are left out.
 pub fn local_fonts(families: &[String]) -> Vec<LocalFont> {
@@ -121,6 +129,14 @@ mod tests {
         assert!(files.iter().all(|p| p.exists()));
         assert!(files_for(&db, "No Such Family 7f3a").is_empty());
         assert!(files_for(&db, "  ").is_empty());
+    }
+
+    #[test]
+    fn says_which_families_are_installed_without_reading_them() {
+        let asked: Vec<String> = ["Helvetica Neue", "No Such Family 7f3a", "  ", "HELVETICA NEUE"].map(String::from).to_vec();
+        assert_eq!(installed(&asked), vec!["Helvetica Neue".to_string(), "HELVETICA NEUE".to_string()]);
+        let many: Vec<String> = (0..MAX_FAMILIES + 10).map(|i| format!("No Such Family {i}")).collect();
+        assert!(installed(&many).is_empty());
     }
 
     #[test]

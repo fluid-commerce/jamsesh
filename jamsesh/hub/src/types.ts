@@ -412,6 +412,34 @@ export interface ScreenInfo {
   stage: Stage;
 }
 
+/** A font the room can draw with. Names and counts only: the bytes are served to canvases and never listed. */
+export interface FontInfo {
+  key: string;
+  family: string;
+  /** "open": an OFL or Apache font fetched for the repositories; "borrowed": lent by one person for the session. */
+  kind: "open" | "borrowed";
+  source: string;
+  license: string | null;
+  faces: number;
+  bytes: number;
+  lenderId?: string;
+  lender?: string;
+}
+
+/** A family some canvas shows in a substitute, and who has been asked. */
+export interface FontWant {
+  key: string;
+  family: string;
+  askedBy: string[];
+  declinedBy: string[];
+  since: number;
+}
+
+export interface FontsState {
+  available: FontInfo[];
+  wanted: FontWant[];
+}
+
 export interface HubState {
   session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
   settings: Settings;
@@ -429,6 +457,8 @@ export interface HubState {
   annotations: Annotation[];
   facts: Fact[];
   buildRequests: BuildRequest[];
+  /** The fonts canvases draw with, and the ones nobody has yet (SPEC 12.4). */
+  fonts: FontsState;
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];
   /** Agents' items waiting because a screen was locked (3.1). */

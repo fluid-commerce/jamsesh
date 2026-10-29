@@ -82,6 +82,14 @@ export const config = {
   envGatewayKey: process.env.AI_GATEWAY_API_KEY ?? envFile.AI_GATEWAY_API_KEY,
   /** Set JAMSESH_OFFLINE=1 in tests: the brain uses its rule-based fallback only. */
   offline: process.env.JAMSESH_OFFLINE === "1",
+  /** Where open fonts come from (Fontsource, which mirrors Google Fonts): its catalogue API, and the CDN its font files must be on. Tests point both at a stub. */
+  fontApi: process.env.JAMSESH_FONT_API ?? "https://api.fontsource.org/v1",
+  fontCdn: process.env.JAMSESH_FONT_CDN ?? "https://cdn.jsdelivr.net/fontsource/",
+  /** Google Fonts' stylesheet API and the host its font files must be on (the first place an open font is looked for; Fontsource is the second). */
+  fontGoogleCss: process.env.JAMSESH_FONT_GOOGLE_CSS ?? "https://fonts.googleapis.com/css2",
+  fontGoogleHost: process.env.JAMSESH_FONT_GOOGLE_HOST ?? "https://fonts.gstatic.com/",
+  /** Offline runs never reach the real font services (a test that sets its own font API still does). */
+  fontsOffline: process.env.JAMSESH_OFFLINE === "1" && !process.env.JAMSESH_FONT_API && !process.env.JAMSESH_FONT_GOOGLE_CSS,
   figcraftBin:
     firstExisting(
       process.env.JAMSESH_FIGCRAFT_BIN_DIR && join(process.env.JAMSESH_FIGCRAFT_BIN_DIR, "figcraft-cli"),

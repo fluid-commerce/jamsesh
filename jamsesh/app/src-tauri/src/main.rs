@@ -836,6 +836,13 @@ async fn local_fonts(families: Vec<String>) -> Vec<fonts::LocalFont> {
     tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
 }
 
+/// Which of `families` are installed on this Mac (names only; no font is read). The page offers
+/// to lend a font only if its Mac has it (fonts.rs).
+#[tauri::command]
+async fn has_fonts(families: Vec<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || fonts::installed(&families)).await.unwrap_or_default()
+}
+
 /// A page's heartbeat (web/src/shared/heartbeat.ts). The window is the one that made the call, so a
 /// page can only vouch for itself.
 #[tauri::command]
@@ -880,6 +887,7 @@ fn main() {
             get_userless,
             toggle_userless,
             local_fonts,
+            has_fonts,
             heartbeat,
             screens::screens_state,
             screens::screens_preview,

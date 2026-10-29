@@ -1439,11 +1439,20 @@ On a phone [A28c]:
 
 ### 12.1 Canvas-only mode
 
-The canvas is FigCraft in **canvas-only mode**: no layers panel, no Design panel, no menus, tab bar,
-or home screen [B2]. Artboards, connections, cursors, comments, and presence stay. A presence pill
+The canvas is FigCraft in **canvas-only mode**: no menus, tab bar, or home screen, and no layers or
+Design panel unless asked for (below) [B2]. Artboards, connections, cursors, comments, and presence stay. A presence pill
 and a zoom chip float over it. The mode is a flag in FigCraft's UI crate, so it works in the native
 app (`figcraft --jamsesh <link>`) and in the WebAssembly build (`/canvas/?canvas#join=<link>`) that
 JamSesh's windows embed [B1].
+
+**Panels on demand.** A person's canvas (`/canvas/?canvas&panels`) has two small buttons in its top
+corners: the left one slides FigCraft's layers panel in, the right one its Design (properties) panel.
+Both start out, only the page bar shows, and each slides over about 0.2 seconds (instantly with
+reduced motion). The panels start below a 48 px strip that holds the buttons, and beside the left
+button the page bar. What a person chose is kept in their browser (local storage, per person) and comes
+back after a reload or rejoin. The big screen's canvas leaves `&panels` off: no buttons, no panels.
+The buttons run the FigCraft command `view.canvasPanel {side: "left"|"right", on?}`, so the control
+channel and MCP can slide a panel too (it does nothing on a canvas without the buttons).
 
 The host runs `figcraft-server` on `127.0.0.1:47900` (or the next free port) and a headless host
 participant named after the brain that publishes the session's file. People reach the canvas
@@ -1480,6 +1489,52 @@ When to make a new page [A19b]:
 - Throwaway work goes on a `Scratch` page.
 - When the brain routes work that doesn't fit an existing workstream, it names a new workstream,
   and with it a new page; follow-ups to existing work stay on that work's page.
+
+### 12.4 Fonts
+
+A canvas draws text in the fonts its agents designed in. A person's canvas (FigCraft's WebAssembly
+build) can't see any computer's installed fonts, so the host serves them. A canvas fills what it lacks in this order, and
+never loads a font twice:
+
+1. **The room's fonts.** *Open fonts* (SIL OFL or Apache 2.0 only; the Ubuntu Font Licence is not taken
+   without asking) come from two places, with no question asked: the host reads each joined agent's
+   repo card (design system, stack, components, notes) for font names whenever a card is saved, checks
+   each name against Fontsource's catalogue (which lists every Google font and its licence), and fetches
+   Regular and Bold, upright and italic, from Google Fonts (`fonts.googleapis.com` stylesheet, files on
+   `fonts.gstatic.com`), falling back to Fontsource's CDN. A canvas that shows a font no card named gets
+   the same on demand. A download is kept only if it is a font file of that family within the size caps.
+   *Borrowed fonts* are the second kind, below.
+2. **This Mac's own fonts** (Mac app only; `local_fonts`), for that person's own canvas.
+3. **Ask the room.** What is still missing is reported to the host (`POST /api/fonts/want`). Open fonts
+   are fetched; anything else becomes a question to the people whose Macs might have it.
+
+**Borrowing.** A person's Mac app answers `has_fonts` (names only) for the families someone is waiting
+for. If it has one, their window shows a card: *Share <font> with <session name>?*, naming who is drawing
+in it, what sharing means (everyone's canvas uses it until the session ends; it's never saved on anyone's Mac), and
+that they should share it only if their licence allows. **I'm allowed to share it** reads the files
+(`local_fonts`) and sends them (`POST /api/fonts/lend`); **Don't share** is remembered for that person and
+that font, and the canvas keeps its marked substitute. The first person to confirm wins. A person who
+shared sees a row, *Sharing <font> until the session ends*, with **Stop sharing**. The Mac enforces nothing
+beyond the page's prompt: whoever hosts the session controls the page that asks (as with `local_fonts`).
+
+**Rules the host keeps.**
+- Fonts live in the hub's memory only. Nothing is written to a session folder, and a lent font is never
+  installed or saved. `GET /api/fonts/<key>/<n>` is `no-store`; font calls skip the offline outbox,
+  so a file is never queued in a browser's storage. A canvas holds a font in memory, like any
+  `text.loadFont`. Ending the session (`Hub.stop`) overwrites and drops every font and refuses any later
+  lend; a fetch in flight is aborted. A person who is removed from the room takes their lent fonts with
+  them; **Stop sharing** does the same on request (a canvas that already drew with it keeps it until it reloads).
+- Only people act: `want`, `lend`, `decline` and `withdraw` are human-only (an agent's credential gets
+  403 on them and on downloading a font file; agents see names and counts in the state). A person lends as
+  their own person; a lend must be for a font someone is waiting for, so a font can't be pushed
+  unasked. An agent's FigCraft tools refuse `text.loadFont` too.
+- Limits: 24 MB per file, 12 files and 32 MB per family, 128 MB lent and 96 MB open in all, 48 families
+  asked for. A file must be a TrueType/OpenType font or collection whose family name is the one asked
+  for; damaged, oversize, mislabelled and non-font files are refused with a plain reason.
+- The host's own FigCraft (and its agents' participants) load every font too, so renders and thumbnails
+  match what people see.
+- Open fonts need the host to reach the internet. Without it a font nobody has is asked of the room, like any other. Offline test runs skip the
+  fetch.
 
 ## 13. Host control and permissions
 
