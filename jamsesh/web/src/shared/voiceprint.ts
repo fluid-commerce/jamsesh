@@ -130,13 +130,18 @@ export const localCopy = (personId: string) => quiet(() => storeFor(personId).ge
 
 const tagged = (c: Carried, here: string): Carried => ({ ...c, host: here || c.host });
 
-/** Takes the host's copy of the person's voiceprint onto this device. */
+/** Takes the host's copy onto this device; throws when it couldn't be fetched or kept. False: the host has none. */
+async function takeHostCopy(personId: string, here: string): Promise<boolean> {
+  const c = await api<Carried>(`/people/${personId}/voiceprint`);
+  if (!c?.samples?.length) return false;
+  await storeFor(personId).put(tagged(c, here));
+  return true;
+}
+
+/** Takes the host's copy of the person's voiceprint onto this device, when it can (a best effort for the profile). */
 export async function pullCopy(personId: string, here = currentHostKey()): Promise<boolean> {
   try {
-    const c = await api<Carried>(`/people/${personId}/voiceprint`);
-    if (!c?.samples?.length) return false;
-    await storeFor(personId).put(tagged(c, here));
-    return true;
+    return await takeHostCopy(personId, here);
   } catch {
     return false;
   }
@@ -161,7 +166,8 @@ export async function pushCopy(personId: string, here = currentHostKey()): Promi
     return false;
   }
   if (!r?.ok) return false;
-  await pullCopy(personId, here);
+  // The host took it: the device keeps what the host holds now. If that fails the sync isn't done (it throws).
+  await takeHostCopy(personId, here);
   return true;
 }
 

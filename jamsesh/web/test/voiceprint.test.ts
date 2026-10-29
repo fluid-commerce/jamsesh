@@ -244,3 +244,16 @@ test("saving the choice or the copy can't fail quietly: a write the browser didn
   await expect(syncVoiceprint({ id: "p1" }, H)).rejects.toThrow("didn't keep");
   (globalThis as any).localStorage.setItem = set;
 });
+
+test("after the host takes the device's copy, a failed read-back leaves the sync unsettled instead of keeping the stale copy", async () => {
+  await setCarryAllowed("p1", true);
+  const mine = copy({ host: "hostA", version: "a1", updatedAt: 10 });
+  store.set(key("p1"), JSON.stringify(mine));
+  let gets = 0;
+  reply = (m) => (m === "PUT" ? { status: 200, body: { ok: true } } : ++gets === 1 ? { status: 200, body: copy({ samples: [], version: "", updatedAt: 0 }) } : { status: 503, body: { error: "busy" } });
+  await expect(syncVoiceprint({ id: "p1" }, H)).rejects.toThrow();
+  expect(calls.map((c) => c.method)).toEqual(["GET", "PUT", "GET"]);
+  expect(await localCopy("p1")).toEqual(mine);
+  // The profile's best-effort pull still just says no.
+  expect(await pullCopy("p1", H)).toBe(false);
+});
