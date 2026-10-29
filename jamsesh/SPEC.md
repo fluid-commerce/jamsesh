@@ -141,7 +141,7 @@ the client.
   header, join code, and room feed); every other display gets an extra screen
   (`/host?screen=screen-2`, `screen-3`, and so on) that shows only its stage, edge to edge, with no
   header, room mic, or side panels. Each screen has its own stage, reports its size, and reverts to
-  the board after 6 minutes like the main one. The brain sees every screen by id with its
+  the board after 6 minutes like the main one (unless it shows a live share). The brain sees every screen by id with its
   resolution, aspect ratio, and what it shows, and `show_on_screen`, `set_layout`, and
   `build_custom_view` take a `screen` to put things on a specific one (see
   [10.1](#101-layout)).
@@ -152,6 +152,16 @@ the client.
   **Quit JamSesh**.
 - If the app goes away without stopping the hub (a crash or Force Quit), the hub notices within 2
   seconds, saves a snapshot, and exits, so it never holds the port with no window.
+- **Restarts a window whose page hangs.** Each window's page calls the app's `heartbeat` command
+  every 3 seconds (the app takes the window from the call, not from the page). A window that is
+  shown, not minimized, and at least partly on screen, and that stays silent for 15 seconds, has its
+  WebKit page process stopped and the window reloaded (a plain reload does nothing to a page that is
+  spinning). A process shared by two windows is never stopped; those windows are only reloaded.
+  Repeats back off from 30 seconds up to 10 minutes, and the app logs each restart to
+  `logs/app.log` in its data folder. A window that never beats isn't watched.
+- **Web Inspector** is off unless `"devtools": true` is set in the app's `app.json` (or the app
+  starts with `JAMSESH_DEVTOOLS=1`); then right-click > Inspect Element works in its windows. It's
+  for finding out why a page froze.
 - Carries the whole host runtime: the hub compiled to one program, the web app, the WebAssembly
   canvas, `figcraft-server` and `figcraft-cli`, the skill, the voiceprint library, and the
   speaker-embedding model, so the host Mac needs nothing else [B29]. Speech-to-text runs on the Mac
@@ -443,13 +453,26 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
 | `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact. |
 | `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen. |
-| `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first. |
+| `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first; pages with `offset` and says how many more there are. |
+| `jam_directives` | List the session's directives (the context leaves the older ones out), newest first, by words or status; pages with `offset`. |
 | `jam_ask_room` | Post a question to the people in the room. |
 | `canvas_frames` | List the canvas's frames with who made each. |
 | `canvas_render` | Render a frame on the host (default 1600 px). |
 | `canvas_<tool>` | Every other FigCraft MCP tool, run as this agent's own participant on the live canvas (see [12.2](#122-agents-on-the-canvas)) [B3]. File, pointer, and keyboard tools are hidden. |
 
 The MCP server also offers the skill as the prompt `jamsesh`.
+
+The live state carries only the newest of long lists (60 directives, 120 artifacts, 200 utterances,
+the recent events) and says how many the session holds in all. Older ones are read with
+`GET /api/history/<events|utterances|directives|artifacts>?before=<cursor>&limit=50` (events also
+take `kinds=speech,prompt`); people and agents may both read it. `limit` is 1 to 200 and defaults to
+50 when it isn't a number.
+
+An agent's words reach the room brain by `jam_message` to its name, and by `decision`, `question`,
+`blocked`, and `shipped` updates. Because anyone's prompt can steer an agent, a brain pass started
+that way only coordinates and records: it can create directives, record decisions, ask or pair
+agents, and say something to the room. It can't drive the host, put HTML on a screen, ask for a
+share, rename itself, or save behavior notes.
 
 ### 6.3 How directives reach agents
 
@@ -468,7 +491,8 @@ target. Directives reach agents four ways [B14, B16]:
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate
-(message the other agents, then show parity), or answer.
+(message the other agents, then show parity), answer, or **note** (write something down or keep a
+record: pain points, a list, meeting notes; no code to build and nothing to draw on the canvas).
 
 People steer agents that misread something [B17] by prompting their own agent, by telling the
 room brain, or by sending a directive from the client.
@@ -639,7 +663,7 @@ it, and every model is a setting [B49]:
 | `router` | `anthropic/claude-sonnet-5.5` | Routing, direct requests, parity checks, every tool call |
 | `presenter` | `anthropic/claude-sonnet-5.5` | Placing a new screen share on the big screen |
 | `digest` | `google/gemini-3.5-flash` | Session brief, workstream briefs, fact curation |
-| `speech` | `openai/tts-1` (voice `nova`) | Speaking to the room [B46] |
+| `speech` | `microsoft/mai-voice-2.1` (the provider's default voice) | Speaking to the room [B46] |
 | `transcribe` | `openai/gpt-transcribe` | Transcription when no local engine is available |
 
 Only the host machine can change the key, the models, and host control. The brain can be turned
@@ -759,7 +783,8 @@ The brain shouldn't feel unresponsive, but it isn't a voice assistant that answe
   confirmation.
 - It speaks only to **answer** a question or report a **problem**, and only when the request came
   by voice or a recorded prompt. Typed requests and button presses get typed answers (a toast).
-  Confirmations are never spoken.
+  A short confirmation ("Sent to Felipe's agent.") is spoken too, but only for a spoken request;
+  nothing already visible on the screen is confirmed.
 - It waits at least 4 seconds between spoken replies, and speaks at most two sentences.
 - When the room has asked it to be quiet, it speaks only to answer.
 - It stops talking when someone talks over it: the big screen fades the voice out when the room
@@ -1069,6 +1094,10 @@ There are three ways to address the brain directly instead of talking in the roo
 - Type in the **Ask <name>** box (`Say to the room` switches it to a plain room line) [A8a].
 - Press **Record** (or `R`), talk while pointing, and press **Stop** [A8b, A9].
 
+The room can give the brain other names to answer to ("call it Computah"): the display name plus
+up to 8 **aliases** (`brainAliases`, 40 characters each, kept as trimmed, unique strings). Saying
+any of them addresses the brain, and the transcriber is primed with them so they're spelled right.
+
 ### 11.3 Record a prompt
 
 The mic is already recording. **Record** marks a window of it as a prompt for the brain [A8b]:
@@ -1115,8 +1144,18 @@ Pins are app-wide [A7a, A7c]:
 - The brain (`request_share`), or anyone from **Settings > People**, can ask you to share [A5a].
   Your window asks first: "<who> would like to see your screen", **Share** or **Not now**. A
   request lasts 2 minutes.
-- Shares are peer-to-peer video (screen up to 1920×1080 at 30 fps, camera 1280×720) that works on
-  the LAN and across the internet, through STUN and, when needed, a relay on the host.
+- Shares are peer-to-peer video that works on the LAN and across the internet, through STUN and,
+  when needed, a relay on the host. A screen is captured at up to 3840×2160 at 15 fps and sent to
+  the host at 14 Mbps; people's own windows get a scaled-down preview (about 1 Mbps). A camera is
+  1280×720.
+- **One share of a kind per person's device.** Starting a new screen share ends the earlier one
+  from that device and answers any request still waiting for it.
+- **A share must be on a big screen.** A new share has 60 seconds for the brain to place it; the
+  hub checks every 5 seconds after a stage change, and once at the end of that window if nothing
+  changed. A live share that no big screen shows then stops, and its sharer is told why ("wasn't
+  put on the big screen" if it never was, "left the big screen" if it was). A stage that shows a
+  live share never reverts to the board on its timer; the share's end gives the screen back what
+  it hid.
 
 ### 11.7 Profile and onboarding
 

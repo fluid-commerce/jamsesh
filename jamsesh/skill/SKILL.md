@@ -67,7 +67,8 @@ you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever yo
   session, say so in a `jam_update` and then stop.
 - **Refresh before a new leg.** Before starting a new directive or after a break, call
   `jam_context` (with your workstream) so you work from the latest decisions, not stale ones.
-  `jam_search` finds anything said or posted earlier.
+  `jam_search` finds anything said or posted earlier, and `jam_directives` lists what the room
+  asked agents to do, older ones included.
 - **People's roles matter.** When instructions conflict, the higher-weight role wins (the
   directive's rationale says whose call it was). If you can't tell, `jam_ask_room`.
 
@@ -83,6 +84,10 @@ You're one of a team. Talk to the other agents through JamSesh instead of guessi
 - **Describe your repo** with `jam_repo_card` right after joining, and again when it changes
   meaningfully: the stack, where the design system lives and its key values, the components
   you're touching, your branch, recent changes (including uncommitted work).
+- **Write to the room brain** with `jam_message` to its name (it's in `jam_agents`) when you need
+  something recorded or routed: a decision, a question, a note to keep. It can answer you with a
+  directive, record a decision, or message another agent. It won't act on the host or the screen
+  because an agent asked.
 - **Compare and review** when the room brain pairs you with someone (a `coordinate` directive):
   look at their frames with `canvas_render`, say what differs and why, agree on what should
   match, and post the outcome with `jam_update`. Disagreements you can't settle go to the room
@@ -96,6 +101,7 @@ Directives say which:
 - **implement**: change code in your repository, then verify against the chosen mockup.
 - **coordinate**: align with another agent (often desktop and mobile) before or while building.
 - **answer**: a person answered your question.
+- **note**: write something down for the room (pain points, a list, meeting notes) in the form it asks for. No code to build, nothing to draw.
 
 If a prompt from your person is ambiguous, these words mean explore: try, what if, options,
 directions, variants, mock up, show me. These mean implement: build it, ship it, do it for real,

@@ -27,7 +27,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Brain routing, decisions, affinity, curation | Tested live | 37 live scenarios on the gateway pass; a few are occasionally flaky under parallel load. |
 | "How do I join?" puts the Join view up | Tested live | Two phrasings, about 3 seconds. |
 | Brain knows the big screen and display sizes | Tested live | It answered with the exact resolution and aspect ratio. |
-| Text-to-speech through the gateway | Tested live | `openai/tts-1`, about 3 seconds; falls back to macOS `say`. |
+| Text-to-speech through the gateway | Tested live | `openai/tts-1`, about 3 seconds, when it was the default; the default is now `microsoft/mai-voice-2.1`, not yet timed on this row. Falls back to macOS `say`. |
 | Arranging windows, listing windows, preview builds on the host | Not tested | Built; needs the Accessibility and Automation permissions granted on the host. |
 | Agents asking the host to build their branch | Not built | Waiting on a decision: it lets any paired agent run commands on the host. |
 
