@@ -301,7 +301,8 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
-        return this.set({ state: m.state });
+        // Another room (this window outlived a relay restart into a new one): its event ids mean nothing here.
+        return this.set(s && s.session?.roomId !== m.state.session?.roomId ? { state: m.state, removed: [] } : { state: m.state });
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });
         return;

@@ -180,7 +180,7 @@ export class Session {
 
   state(): HubState {
     return {
-      session: { name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
+      session: { roomId: this.roomId(), name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),

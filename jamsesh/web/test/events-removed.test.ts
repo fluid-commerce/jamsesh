@@ -23,3 +23,16 @@ test("a purge of any size is listed in full, so an open feed forgets every line 
   (hub as any).handle({ type: "events-removed", ids: ids.slice(700) });
   expect(hub.get().removed).toEqual(ids);
 });
+
+test("a state from another room drops the old room's purge ids, so reused ids show", () => {
+  const state = (roomId: string, ids: number[]) => ({ session: { roomId }, events: ids.map((id) => ({ id })) });
+  (hub as any).snap = { ...(hub as any).snap, removed: [], state: state("room-a", [1, 2, 3]) };
+  (hub as any).handle({ type: "events-removed", ids: [2] });
+  // The same room re-announcing itself (a reconnect) keeps what it purged.
+  (hub as any).handle({ type: "state", state: state("room-a", [1, 3]) });
+  expect(hub.get().removed).toEqual([2]);
+  // A new room: event 2 there is a different line.
+  (hub as any).handle({ type: "state", state: state("room-b", [1, 2]) });
+  expect(hub.get().removed).toEqual([]);
+  expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([1, 2]);
+});

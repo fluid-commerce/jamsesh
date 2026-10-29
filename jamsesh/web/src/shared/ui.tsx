@@ -392,7 +392,12 @@ const NEAR_TOP = 160;
  * as the reader reaches the top. The big screens (`big`) always follow and keep a short tail.
  * The feed scrolls its own box (scrollTop), never its ancestors.
  */
-export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
+export function RoomFeed(props: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
+  // A different room starts a fresh feed: what was seen, loaded and scrolled belongs to the old one.
+  return <RoomFeedOf key={useHub().state?.session.roomId} {...props} />;
+}
+
+function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   const { state, removed } = useHub();
   const box = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
