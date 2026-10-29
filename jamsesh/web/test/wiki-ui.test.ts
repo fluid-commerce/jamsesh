@@ -166,8 +166,8 @@ test("a wiki card on the Tasks board: the checked pages are written through api(
   await api(`/triage/${card.id}/add`, { personId: person.id, pages: ["pricing"] });
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).toContain("pricing");
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
-  // Accepting twice says so instead of writing again.
-  await expect(api(`/triage/${card.id}/add`, { personId: person.id, pages: ["billing"] })).rejects.toBeTruthy();
+  // Accepting twice never writes again: the same person's retried click gets the first answer (4.1).
+  expect(await api<any>(`/triage/${card.id}/add`, { personId: person.id, pages: ["billing"] })).toMatchObject({ ok: true, card: { status: "added" } });
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
 });
 
