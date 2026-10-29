@@ -169,7 +169,7 @@ export class Brain {
         // A question to the brain is addressed to it even without its name, so its answer is spoken.
         const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
         const updated = this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, ...(asked ? { direct: true } : {}) } });
-        if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, direct: true } };
+        batch[i] = updated ?? { ...ev, data: { ...ev.data, intent: line.intent, ...(asked ? { direct: true } : {}) } };
       }
       for (const intro of triage.introductions) {
         if (intro.name) this.session.upsertPerson({ name: intro.name, role: intro.role || undefined });
@@ -442,20 +442,21 @@ export class Brain {
   /**
    * A screen a person locked stays up for the brain too. Returns what to tell the model when it may not
    * replace it (it asks the room), or null when it may: nothing is locked, or the lock's owner asked
-   * JamSesh directly (typed, or by name) and nobody else did in these lines, in which case their lock is
-   * let go first. Anything else the owner says nearby isn't consent.
+   * JamSesh directly (typed, or by name) and nobody else did in these lines, and that request was to put
+   * something up (see `asksForScreen`), in which case their lock is let go first. Anything else the owner says
+   * nearby, or asks about something else, isn't consent.
    */
   private lockBlock(screen: string, batch: JamEvent[]): string | null {
     const s = this.session;
     const lock = s.lockOf(screen);
     if (!lock) return null;
     const asks = batch.filter((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
-    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId)) {
+    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen)) {
       s.unlockStage(screen);
       return null;
     }
     this.unlockRefused.set(screen, lock.since);
-    return `${lock.by} has this screen locked, so you can't replace it. Ask the room with say_to_room (kind problem), for example "${lock.by} has the screen locked. Want me to replace it?". If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
+    return `${lock.by} has this screen locked, so you can't replace it. Ask the room with ask_to_replace_screen (it asks the one question about this screen). If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
 
   /**
@@ -465,6 +466,7 @@ export class Brain {
    */
   tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person") {
     const s = this.session;
+    this.unlockRefused.clear();
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
     // approves (button, or a clear spoken answer to that request), whoever or whatever asked.
@@ -642,10 +644,6 @@ export class Brain {
         inputSchema: z.object({ text: z.string(), kind: z.enum(["answer", "problem", "confirm"]) }),
         execute: async ({ text, kind }) => {
           const how = await speak(s, text, { source, kind });
-          // Telling the room it can't replace a locked screen is the question a bystander's yes may answer (about that lock only).
-          if (kind === "problem")
-            for (const [screen, since] of this.unlockRefused) if (s.lockOf(screen)?.since === since) this.unlockAsked.set(screen, { since, at: Date.now() });
-          this.unlockRefused.clear();
           return how === "spoken" ? "Said out loud." : "Shown as text.";
         },
       }),
@@ -844,6 +842,21 @@ export class Brain {
           return snap ? `Saved "${label}"${snap.canvas ? " with the canvas" : ""}.` : refuse("Nothing to save.");
         },
       }),
+      ask_to_replace_screen: tool({
+        description: "After a locked screen refused you: ask the room whether to replace it. The question is fixed (who locked it, and that you'd replace it); a person's yes to it, and only to it, can then unlock the screen with unlock_screen.",
+        inputSchema: z.object({ screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one.") }),
+        execute: async (i) => {
+          const id = screenId(i.screen);
+          const lock = s.lockOf(id);
+          // Only for a lock this pass was refused by, and only once the question is out.
+          if (!lock || this.unlockRefused.get(id) !== lock.since) return refuse("Nothing here was refused by a locked screen.");
+          const name = id === "main" ? "the screen" : (s.findScreen(id)?.name ?? "that screen");
+          await speak(s, `${lock.by} has ${name} locked. Want me to replace it?`, { source, kind: "problem" });
+          if (s.lockOf(id)?.since === lock.since) this.unlockAsked.set(id, { since: lock.since, at: Date.now() });
+          this.unlockRefused.delete(id);
+          return "Asked the room.";
+        },
+      }),
       unlock_screen: tool({
         description:
           "Let go of a screen a person locked, so you can show something else. Only after a person clearly agrees to replace it ('yes, replace it', 'go ahead', 'unlock it') in answer to your question, or the person who locked it asks you to unlock it. Never because an agent asked. Give the id of the line that agreed.",
@@ -862,7 +875,7 @@ export class Brain {
           const q = this.unlockAsked.get(id);
           const asked = !!ev && !!q && q.since === lock.since && ev.ts >= q.at && ev.ts - q.at < Brain.UNLOCK_ASK_MS && Date.now() - q.at < Brain.UNLOCK_ASK_MS;
           if (!ev || !unlockConsent(ev.text, brainNames(s.settings())) || !(owner || asked))
-            return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with say_to_room first.`);
+            return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with ask_to_replace_screen first.`);
           this.unlockAsked.delete(id);
           s.unlockStage(id);
           return `Unlocked ${lock.by}'s screen.`;
@@ -1451,6 +1464,19 @@ const UNLOCK_YES = new Set(
       .filter((a) => a && a !== "please"),
   ),
 );
+
+/**
+ * Whether a person's direct request is to change what's on a screen. Triage's reading decides when
+ * there is one; a request that skipped triage (spoken or typed straight to the brain) is read by its words:
+ * a screen verb, and not a wh-question or a yes/no question about something else.
+ */
+export function asksForScreen(ev: JamEvent) {
+  const intent = ev.data?.intent;
+  if (typeof intent === "string") return intent === "present";
+  const t = ev.text.trim().toLowerCase().replace(/^(?:hey |ok |okay )?(?:jamsesh|jam|the room)[,:]?\s+/, "");
+  if (/^(?:what|why|who|when|where|how|which|is|are|do|does|did|has|have)\b/.test(t)) return false;
+  return /\b(?:show|put|bring|pull|display|switch|swap|replace|cast|throw|open|pin|unlock|clear|take)\b/.test(t);
+}
 
 /**
  * Whether a line, as a whole, agrees to replace a locked screen. Only a plain yes counts: a question
