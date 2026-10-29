@@ -345,9 +345,25 @@ test("the board's routes: people act through the host window, agents and strange
     expect((await call("POST", `/triage/${next.id}/send`, { personId: r.chey.id }, { ...far, authorization: `Bearer ${laptop.token}` })).status).toBe(200);
     expect(r.s.board.get(next.id)).toMatchObject({ status: "sent", resolvedBy: "Felipe" });
 
+    // The live state: a person's copy carries the cards; an agent's, over HTTP and over the socket, never does.
+    expect((await (await call("GET", "/state", undefined)).json()).triage.length).toBeGreaterThan(0);
+    expect((await (await call("GET", "/state", undefined, { ...far, authorization: `Bearer ${remoteAgent.token}` })).json()).triage).toEqual([]);
+    const seen: any[] = [];
+    const sock = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=agent-sock`, { headers: { ...far, authorization: `Bearer ${remoteAgent.token}`, origin: `http://127.0.0.1:${server.port}` } } as any);
+    sock.onmessage = (m) => seen.push(JSON.parse(String(m.data)));
+    await new Promise((res) => (sock.onopen = res));
+    await Bun.sleep(100);
+    task(r, "Try a profile page with a big avatar", { targets: [r.desktop.id] });
+    r.s.board.rememberNow({ text: "Avatars are round", kind: "fact", by: "Chey" });
+    await Bun.sleep(200);
+    sock.close();
+    expect(seen.find((m) => m.type === "state")?.state.triage).toEqual([]);
+    expect(seen.some((m) => m.type === "patch" && m.key === "triage")).toBe(false);
+    expect(seen.some((m) => m.type === "patch" && m.key === "facts")).toBe(true);
+
     // The live state carries the board, and the changelog is readable.
     const state = await (await call("GET", "/state", undefined)).json();
-    expect(state.triage.every((x: any) => x.status !== "open")).toBe(true);
+    expect(state.triage.some((x: any) => x.status === "sent")).toBe(true);
     r.s.postUpdate(r.mobile.id, "shipped", "Tabs are in");
     expect((await (await call("GET", "/changelog", undefined)).json()).map((e: any) => e.text)).toEqual(["Tabs are in"]);
   } finally {

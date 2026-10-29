@@ -2,9 +2,10 @@
 // Working and Done as the agents report. Used by people's apps and by the host. Clicking a card opens what it produced.
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { cast } from "../client/CastPicker";
+import { WorkViewer } from "../client/WorkViewer";
 import { api, pref, setPref, type Agent, type Artifact, type Directive, type Fact, type HubState, type JamEvent, type TriageCard } from "./hub";
 import { agoWords } from "./StageControls";
-import { colorFor, useNow } from "./ui";
+import { colorFor, Reactions, useNow } from "./ui";
 import "./tasks.css";
 
 type ColId = "triage" | "waiting" | "working" | "done";
@@ -450,9 +451,12 @@ function DirectiveCardView({ d, col, state, now, show }: { d: Directive; col: Ex
 
 function Sheet({ state, open, personId, now, onClose }: { state: HubState; open: NonNullable<Open>; personId?: string; now: number; onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null);
+  // Producing something opens in the viewer (a full-size look on this screen); the big screen is its second step.
+  const [viewing, setViewing] = useState<string | null>(null);
   useEffect(() => {
     box.current?.focus();
-    const key = (e: globalThis.KeyboardEvent) => e.key === "Escape" && (e.stopPropagation(), onClose());
+    // The viewer, when open, takes Esc first.
+    const key = (e: globalThis.KeyboardEvent) => e.key === "Escape" && !document.querySelector(".wv") && (e.stopPropagation(), onClose());
     addEventListener("keydown", key, true);
     return () => removeEventListener("keydown", key, true);
   }, []);
@@ -509,7 +513,7 @@ function Sheet({ state, open, personId, now, onClose }: { state: HubState; open:
               {made && (made.artifacts.length > 0 || made.links.length > 0) ? (
                 <div className="tk-made">
                   {made.artifacts.map((a) => (
-                    <MadeItem key={a.id} a={a} />
+                    <MadeItem key={a.id} a={a} onOpen={() => setViewing(a.id)} />
                   ))}
                   {made.links.map((u) => (
                     <a key={u} className="tk-link" href={u} target="_blank" rel="noreferrer">
@@ -555,6 +559,17 @@ function Sheet({ state, open, personId, now, onClose }: { state: HubState; open:
           )}
         </div>
       </aside>
+      {made && viewing && made.artifacts.some((a) => a.id === viewing) && (
+        <WorkViewer
+          items={made.artifacts}
+          index={Math.max(0, made.artifacts.findIndex((a) => a.id === viewing))}
+          state={state}
+          name={state.people.find((p) => p.id === personId)?.name ?? "the host"}
+          onIndex={(i) => setViewing(made.artifacts[i]?.id ?? null)}
+          onClose={() => setViewing(null)}
+          onShow={(shown) => void cast({ mode: shown.length > 1 ? "compare" : "spotlight", items: shown.map((i) => i.id), title: shown[0].title, caption: `${state.people.find((p) => p.id === personId)?.name ?? "The host"} put this up`, pinned: false, by: state.people.find((p) => p.id === personId)?.name ?? "Host" } as any)}
+        />
+      )}
     </>
   );
 }
@@ -570,30 +585,29 @@ function ConflictBlock({ state, card }: { state: HubState; card: TriageCard }) {
   );
 }
 
-/** A frame or build the task produced: a picture to put on the big screen, or a link to open. */
-function MadeItem({ a }: { a: Artifact }) {
-  const [busy, setBusy] = useState(false);
-  const put = () => {
-    setBusy(true);
-    cast({ mode: "spotlight", items: [a.id], title: a.title, pinned: false, by: "Tasks" } as any).finally(() => setBusy(false));
-  };
+/** A frame or build the task produced: opens in the viewer; a build's link opens in its own tab. */
+function MadeItem({ a, onOpen }: { a: Artifact; onOpen: () => void }) {
+  const canOpen = !!a.image || a.kind === "devserver";
   return (
     <div className="tk-item">
-      {a.image ? <img src={a.image} alt="" loading="lazy" /> : <div className="tk-item-blank">{a.kind === "devserver" ? "Live build" : a.stage === "built" ? "Build" : "Mockup"}</div>}
+      <button className="tk-item-thumb" onClick={onOpen} disabled={!canOpen} aria-label={`Open ${a.title}`}>
+        {a.image ? <img src={a.image} alt="" loading="lazy" /> : <span className="tk-item-blank">{a.kind === "devserver" ? "Live build" : a.stage === "built" ? "Build" : "Mockup"}</span>}
+      </button>
       <div className="tk-item-info">
         <strong className="ellipsis">{a.title}</strong>
         <span className="row">
-          {a.image && (
-            <button className="btn small" disabled={busy} onClick={put}>
-              Show on the big screen
+          {canOpen && (
+            <button className="btn small" onClick={onOpen}>
+              Open
             </button>
           )}
           {a.url && (
             <a className="btn small" href={a.url} target="_blank" rel="noreferrer">
-              Open
+              Open link
             </a>
           )}
         </span>
+        <Reactions art={a} />
       </div>
     </div>
   );

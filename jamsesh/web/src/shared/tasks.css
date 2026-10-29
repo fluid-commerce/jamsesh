@@ -582,6 +582,14 @@
   gap: 12px;
   align-items: center;
 }
+.tk-item-thumb {
+  display: block;
+  padding: 0;
+  border-radius: var(--r-sm);
+}
+.tk-item-thumb:disabled {
+  cursor: default;
+}
 .tk-item img,
 .tk-item-blank {
   width: 112px;
@@ -706,4 +714,8 @@
   .tk-sheet {
     animation: none;
   }
+}
+
+.tk-item-info .reactions {
+  padding: 0;
 }

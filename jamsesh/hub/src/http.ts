@@ -69,6 +69,11 @@ export function sameOrigin(req: Request) {
 }
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
 
+/** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
+function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
+  return agent ? { ...state, triage: [] } : state;
+}
+
 function isLocal(ip: string) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
@@ -212,7 +217,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null } as any })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -257,7 +262,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         // Every open window counts, the host's own big screen included: the Mac stays awake for it.
         hub.peopleOnline++;
-        ws.send(JSON.stringify({ type: "state", state: s.state() } satisfies BusMessage));
+        // Agents don't see proposals nobody has accepted (4.1): no triage in their state, and no patches of it.
+        const agent = !!(ws.data as any).agent;
+        ws.send(JSON.stringify({ type: "state", state: forCaller(s.state(), agent) } satisfies BusMessage));
         const off = bus.on((msg) => {
           // Disconnected in Settings: this window's live session ends now, not at its next request.
           if ((msg as any).type === "revoked" && (msg as any).deviceId && (msg as any).deviceId === (ws.data as any).pairedId) return void ws.close(4401, "disconnected");
@@ -265,6 +272,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             const { embedding: _drop, ...data } = msg.event.data;
             msg = { ...msg, event: { ...msg.event, data } };
           }
+          if (agent && msg.type === "patch" && msg.key === "triage") return;
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;
@@ -401,7 +409,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
-  if (path === "/state") return json(s.state());
+  if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
   if (path === "/clock") return json({ now: Date.now() });
 
   // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt

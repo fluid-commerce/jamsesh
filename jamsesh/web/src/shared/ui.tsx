@@ -324,6 +324,24 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
   );
 }
 
+/** What people said about a piece of work right after it went up ("Felipe: this is cool"), kept quiet: the latest, and how many more. */
+export function Reactions({ art, all }: { art: Artifact; all?: boolean }) {
+  const list = art.reactions ?? [];
+  if (!list.length) return null;
+  const shown = all ? list.slice(-5) : list.slice(-1);
+  return (
+    <div className={`reactions ${all ? "all" : ""}`} aria-label="What people said about it">
+      {shown.map((r, i) => (
+        <span key={`${r.eventId}-${i}`} className="reaction" title={`${r.by}: ${r.text}`}>
+          <b>{r.by}</b>: {r.text}
+          <time className="mono">{ago(r.at)}</time>
+        </span>
+      ))}
+      {!all && list.length > 1 && <span className="reaction-more">+{list.length - 1}</span>}
+    </div>
+  );
+}
+
 export function ArtifactTile({
   art,
   state,
@@ -389,6 +407,7 @@ export function ArtifactTile({
           <ExpandButton />
         </span>
       </div>
+      <Reactions art={art} />
     </div>
   );
 }
