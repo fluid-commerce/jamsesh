@@ -91,6 +91,8 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
     };
     const onKey = (e: KeyboardEvent) => {
       if (!s.locked && !s.captured) return;
+      // Option+R is Record's key while typing goes to the big screen: it stays here and is never sent on.
+      if (e.altKey && e.code === "KeyR") return;
       if (e.key === "Escape" && !s.locked) {
         // Pointer Lock gives Esc to the browser; in the other mode it lets go.
         setCaptured(false);

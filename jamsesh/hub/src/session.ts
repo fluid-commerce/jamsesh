@@ -27,7 +27,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
+ BuildRequest, LiveApp, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -174,6 +174,8 @@ export class Session {
 
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
+  /** Live Simulator and Mac app tiles; LiveApps owns them. */
+  liveApps: () => LiveApp[] = () => [];
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
   voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
 
@@ -196,6 +198,7 @@ export class Session {
       recordings: this.recordings(),
       facts: this.facts(),
       buildRequests: this.buildRequests(),
+      liveApps: this.liveApps(),
       screens: this.screens(),
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
@@ -287,6 +290,8 @@ export class Session {
         return { key, value: this.screens() };
       case "buildRequests":
         return { key, value: this.buildRequests() };
+      case "liveApps":
+        return { key, value: this.liveApps() };
       case "readyToShow":
         return { key, value: this.readyToShow() };
       case "showRequests":
@@ -1387,6 +1392,7 @@ export class Session {
   private revertsToBoard(stage: Stage) {
     if (stage.pinned || stage.lock || stage.mode === "board" || stage.mode === "welcome") return false;
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && this.store.get("shares", t.shareId)?.status === "live")) return false;
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "app")) return false;
     return true;
   }
 
@@ -1462,6 +1468,8 @@ export class Session {
   }
 
   private commitStage(stage: Stage, screen: string) {
+    // A live app tile on this screen is driven by whoever the lock says drives.
+    bus.changed("liveApps");
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");

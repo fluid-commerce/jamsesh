@@ -1416,7 +1416,7 @@ any of them addresses the brain, and the transcriber is primed with them so they
 
 ### 11.3 Record: talk and point, and it becomes notes
 
-One feature, one name: **Record** (or `R`), on your own screen or, when you are driving it, the big
+One feature, one name: **Record** (`R`, or Option+R while your trackpad is captured, since typing then goes to the big screen), on your own screen or, when you are driving it, the big
 screen [A8b, A9]. The mic is already running; Record marks a window of it and watches the pointer.
 
 - **On your own screen.** Press **Record**, then look through a mockup, a build, the canvas, or the
@@ -1647,6 +1647,61 @@ says it out loud ("JamSesh wants to run … on the host. Approve or deny?"), and
 the same way, by voice or button. Asking for it isn't approval: the request still waits for an
 "approve" said after it was announced, so nothing someone said in passing, and nothing the model
 decides, can start a command.
+
+### 13.3a Live app tiles (6.3)
+
+An iPhone build in the iOS Simulator, or a Mac or Electron app, running on the host can stream into a
+tile, full resolution, and be driven from any person's own screen. The tile is `{ kind: "app", appId }`;
+the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps` in `liveapps.ts`).
+
+- **Starting one.** An approved build that opened a Simulator app or a `.app` starts a tile and puts it
+  on the main screen (a locked screen is left alone). A person can also start one for what's already
+  running: `POST /api/apps` `{ kind: "ios", device? }` or `{ kind: "mac", name }`, from the host's own
+  window only, with host control on. Starting a tile builds nothing, so the build approval flow
+  ([8.11](#811-build-approvals)) is unchanged: an unapproved, denied or expired request never opens one.
+  At most four tiles are live at once.
+- **Picture, iOS, two modes.** When the host has already granted Screen Recording (checked with `jamsesh-live
+  --check`, which never prompts) and the device's own Simulator window is open and unambiguous (title
+  "<device name> – <runtime>"), the helper captures that window, cropped to the screen, at 30 fps (`capture:
+  "window"`). Otherwise `capture: "screenshots"` and the tile's `hint` says what would enable the faster mode.
+  The tile shows which mode it is in. The window mode drops to screenshots while the screen is turned.
+  The screenshot mode is `simctl io <device> screenshot --type=jpeg`, three calls in flight, newest first, a
+  frame identical to the last dropped, running only while someone watches. `recordVideo` can't stream (its
+  file is finished only when it stops) and idb's MJPEG stream fails to start on macOS 26. Frames travel as
+  binary WebSocket messages on `/ws/app/<id>` (people only; a slow viewer skips frames).
+- **Picture, Mac.** `jamsesh-live` (`hub/native/jamsesh-live.swift`, compiled by the hub on first use into
+  `~/.jamsesh/bin`): ScreenCaptureKit on one window at its native pixel size, 30 frames a second, JPEG,
+  length-prefixed on stdout. Needs Screen Recording for the app that runs the hub.
+- **Taps, iOS.** idb's companion (`brew install facebook/fb/idb-companion`), one per tile on a unix socket in
+  the hub's folder, over gRPC (`idb.ts`). No Simulator window, no Accessibility. Without it people can
+  watch, switch Light/Dark, and nothing else (the tile says so). Touches don't land while the screen is
+  turned (checked on iOS 18.6), so taps wait for portrait.
+- **Taps, Mac.** The same helper posts CGEvents to the app's pid at points inside its window (the Mac's own
+  cursor never moves). Needs Accessibility; without it the tile is watch-only.
+- **Typing.** `{ t: "text", text }` and `{ t: "key", key: "return" | "delete" | "tab" | "escape" }` go through the
+  companion as HID key events on a US layout (shift pressed around capitals and symbols; characters outside
+  it are refused). A tile that has focus and is driven types with the keyboard. On a Mac app the helper posts
+  the characters and keys to the app.
+- **Brain.** `set_layout` accepts `{ kind: "app", ref }` (a live app's id, or part of its name or who started
+  it), and the brain's context lists the live apps.
+- **Controls (iOS).** Home, Rotate, Light/Dark. Appearance is `simctl ui appearance`; Home and Rotate go
+  through the companion. The device frame is a plain rounded rectangle drawn in CSS.
+- **Who is driving.** One controller per tile (`controller: { personId, name, since }`). `POST
+  /api/apps/<id>/control` `{ action: "take" | "release" | "pass", to? }`: taking a free tile works; taking
+  one someone holds is refused with their name unless it's the host's window or their hold lapsed (5
+  minutes with no input); only the holder (or the host) releases or passes, and `to` must be a person in the
+  room. `POST /api/apps/<id>/input` takes `tap`, `swipe`, `down|move|up`, `scroll`, `text`, `home`,
+  `rotate`, `appearance`, with `x` and `y` as 0..1 fractions of the screen; anyone but the controller gets
+  409 with the reason. Agents' credentials are refused on every `/api/apps` route and on the socket.
+- **On a locked big screen, the screen's drivers drive the tile** (10.6). A tile shown in a layout on a
+  locked screen has no controller of its own: `controller` shows the first driver, `drivers` lists them all and
+  `viaScreen` names the screen. Whoever drives the screen (the owner after **Drive**, whoever they **Pass control**
+  to, both with **Drive together**) may tap, type, press Home, rotate and switch appearance; anyone else, an
+  owner who hasn't started driving, and the tile's own take, release and pass are refused with the reason and the
+  way to do it on the screen. The big screen's window replays a driver's dart on the tile (`registerDriveTarget`)
+  and sends it with `as: <driver>`, which the hub honours only from the host's window and only for a driver of that
+  tile's screen. When the tile is shown anywhere else, or its screen is unlocked, the take, pass and release
+  above apply again. Agents and strangers are refused either way.
 
 ### 13.4 Displays
 

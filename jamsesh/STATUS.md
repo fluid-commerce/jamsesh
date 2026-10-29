@@ -32,6 +32,19 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Host starts at the picker; choosing a project opens its session in the same window | Not tested | Built and compiles; needs the app run on a Mac (the picker's `open_project` call only exists inside the app). |
 | Menu bar Projects submenu; switching ends the session cleanly, then opens the other | Not tested | Needs the app run on a Mac. |
 
+## Live app tiles (phase 6.3)
+
+| Capability | Status | Notes |
+|---|---|---|
+| iPhone Simulator streamed into a tile, device frame, Home, Rotate, Light/Dark, taps and swipes from the tile | Tested live | Real Simulator (iOS 18.6, a throwaway device), real idb companion, headless Chromium: a tap on the tile turned a test app green in about 160 ms; Dark, Home and Rotate checked in screenshots. About 8 frames a second at full resolution on a busy Mac (15 to 18 on an idle one). |
+| Typing into the Simulator (US layout, shift, Return, Delete) | Tested live | Through idb on a throwaway device into a text field: capitals, digits, symbols and Return arrived as typed. Mapping unit-tested. |
+| Window capture of the Simulator at 30 fps, and its fallback | Simulated | Selection logic and the fallbacks (no permission, no or two windows, helper dying, turned screen) tested with fake helpers. The real capture needs Screen Recording on a host (office checklist). |
+| Brain puts a live app tile on a layout | Simulated | Tested through the layout tool by id and by name. |
+| Taps while the screen is turned | Not working | The companion's touches don't land in landscape; the hub refuses them with a reason. Rotating and watching work. |
+| Control passing, agents refused, a person without control refused, a device that vanishes mid-stream | Simulated | `hub/test/liveapps.test.ts` with a fake `xcrun`, a fake companion and a fake Mac helper. |
+| Mac and Electron apps: capture and input | Not tested | The Swift helper compiles and refuses cleanly without Screen Recording; capture and CGEvent input need those permissions on a real host (office checklist). |
+| Idb companion missing | Simulated | The tile starts watch-only with the install line. Not tried on a Mac without it. |
+
 ## Room and brain
 
 | Capability | Status | Notes |
@@ -97,6 +110,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Note alignment (pauses, edges, splitting a long line, several drivers) | Simulated | Unit tests of the timing rules. Not tuned against real speech timing. |
 | Tidy then send through the web client's own `api()` | Simulated | Real hub over HTTP; a lost reply and a repeat send checked. |
 | Crop of the spot in a directive | Simulated | Made with macOS `sips` on the host; skipped elsewhere. Only for pictures, not the live canvas. |
+| Option+R toggles Record while the trackpad is captured (a bare R is typed into the big screen); R alone works when nothing is captured | Simulated | Key handling checked in the driving e2e; not pressed on a real Mac keyboard. |
 | Speech from a real mic into the notes | Not tested | Needs a room: real transcription timing against real pointer movement. |
 
 ## Phones and browsers
@@ -124,3 +138,9 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Router port mapping (NAT-PMP, UPnP) | Tested live | On this network's router. |
 | DuckDNS name and Let's Encrypt certificate | Not tested | Try with the staging certificate first. |
 | A real remote join over the internet | Not tested | |
+
+## Live apps under driving (6.3 with 6.1)
+
+| Capability | Status | Notes |
+|---|---|---|
+| A live app tile on a locked screen is driven by the screen's drivers; Pass control and Drive together carry over; elsewhere take, pass and release still apply | Simulated | Tested against the fake Simulator through the real routes (driver, co-driver, non-driver, agent, stranger, replay `as`). The dart replay onto a real Simulator tile has not been run on screen. |

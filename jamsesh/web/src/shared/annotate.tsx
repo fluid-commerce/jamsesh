@@ -893,8 +893,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (typing(e) || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
-      if (e.key === "r" || e.key === "R") toggle();
+      if (typing(e) || e.metaKey || e.ctrlKey || e.repeat) return;
+      // While the trackpad is captured, typing goes to the big screen, so a bare R would be typed there: Record answers to Option+R then.
+      // Option+R works any time; a bare R only when nothing is capturing the keyboard.
+      if (e.altKey ? e.code === "KeyR" : (e.key === "r" || e.key === "R") && !document.querySelector('.drive-surface[data-captured="1"]')) toggle();
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
@@ -950,7 +952,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
         className={`rec-btn ${live ? "live" : ""} ${rec.phase === "sending" ? "busy" : ""}`}
         onClick={toggle}
         aria-pressed={live}
-        title={live ? "Stop and tidy your notes (R)" : driving ? "Record the big screen: talk and point with your dart (R)" : `Talk and point; it becomes notes for ${brainName} and the agents (R)`}
+        title={live ? `Stop and tidy your notes (${driving ? "Option+R" : "R"})` : driving ? "Record the big screen: talk and point with your dart (Option+R, or R when your trackpad isn't captured)" : `Talk and point; it becomes notes for ${brainName} and the agents (R)`}
       >
         {rec.phase === "sending" ? <span className="rec-spin" /> : <span className="rec-dot" />}
         {live ? (
@@ -968,7 +970,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
         ) : (
           <>
             Record
-            <kbd>R</kbd>
+            <kbd>{driving ? "⌥R" : "R"}</kbd>
           </>
         )}
       </button>
