@@ -197,8 +197,8 @@ test("the owner's spoken yes or no answers the question; nobody else's words do"
   await call(agent, "jam_show", { mode: "spotlight", artifactIds: [a.id], title: "Checkout" });
   const req = asked[0];
   const t = req.at + 5_000;
-  expect(showVerdict([said(chey, "yes, show it", t)], req)).toEqual({ approve: true, by: "Chey" });
-  expect(showVerdict([said(chey, "Keep mine up.", t)], req)).toEqual({ approve: false, by: "Chey" });
+  expect(showVerdict([said(chey, "yes, show it", t)], req)).toMatchObject({ approve: true, by: "Chey" });
+  expect(showVerdict([said(chey, "Keep mine up.", t)], req)).toMatchObject({ approve: false, by: "Chey" });
   expect(showVerdict([said(chey, "JamSesh, keep mine up", t)], req)?.approve).toBe(false);
   expect(showVerdict([said(chey, "no", t)], req)?.approve).toBe(false);
   // Not the owner, not a whole answer, a question, before it was asked, a stale bare yes.
@@ -687,10 +687,13 @@ test("a bystander's yes counts only as the answer to the brain's question, about
   expect(await yesTo()).toContain("plainly says");
   // Asked: a yes said before the question doesn't answer it; one said too long after doesn't either.
   const before = Date.now() - 1000;
-  await t.ask_to_replace_screen.execute({});
+  const t1 = tools([said(felipe, "show the agents")]);
+  await t1.show_on_screen.execute({ mode: "agents" });
+  expect(await t1.ask_to_replace_screen.execute({})).toBe("Asked the room.");
   expect(await yesTo("yes, replace it", before)).toContain("plainly says");
-  const questions = (s as any).lockQuestions as Map<string, { since: number; at: number }>;
+  const questions = (s as any).lockQuestions as Map<string, { id: string; since: number; at: number }>;
   const asked = questions.get("main")!;
+  expect(asked.since).toBe(s.stage().lock!.since);
   questions.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
   expect(await yesTo("yes, replace it", Date.now() - 4 * 60_000 + 10)).toContain("plainly says");
   questions.set("main", asked);
@@ -833,20 +836,20 @@ test("releaseLock is the one gate: the owner, the host's windows for the host's 
   expect(s.releaseLock("main", { owner: null })).toBe(false);
   expect(s.releaseLock("main", { hostWindow: true })).toBe(false);
   // A yes with no question asked, or to a question about an earlier lock: no.
-  expect(s.releaseLock("main", { answeredAt: Date.now() })).toBe(false);
+  expect(s.releaseLock("main", { answeredAt: Date.now(), by: felipe.id })).toBe(false);
   s.askedAboutLock("main");
   await Bun.sleep(2);
   lockAs(chey);
-  expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(false);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1, by: felipe.id })).toBe(false);
   expect(s.stage().lock?.by).toBe("Chey");
   // Asked about this lock: a yes said before the question doesn't answer it; one after does, once.
   s.askedAboutLock("main");
-  expect(s.releaseLock("main", { answeredAt: Date.now() - 5_000 })).toBe(false);
-  expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(true);
+  expect(s.releaseLock("main", { answeredAt: Date.now() - 5_000, by: felipe.id })).toBe(false);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1, by: felipe.id })).toBe(true);
   expect(s.stage().lock).toBeUndefined();
   lockAs(chey);
   // The question was used up.
-  expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(false);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1, by: felipe.id })).toBe(false);
   // The owner always can.
   expect(s.releaseLock("main", { owner: chey.id })).toBe(true);
   // The host's window: a lock held by nobody in particular, or by the person at the host.
@@ -932,4 +935,97 @@ test("the brain refuses a screen that isn't there instead of changing the main o
     expect([name, String(await t[name].execute(args))]).toEqual([name, expect.stringContaining("no screen by that name")]);
   expect(s.stage().mode).toBe("spotlight");
   expect(s.stage().lock?.by).toBe("Chey");
+});
+
+// ---------- round 7: one answer settles one question; screens by exact name or a unique start ----------
+
+test("with two questions open for the same owner, a spoken yes settles neither and JamSesh asks which; the card still does", async () => {
+  const { hub, s, chey, reg, said } = room();
+  s.onShowRequest = () => {};
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const agent = reg("Felipe");
+  const [x, y] = [artifact(s, "Checkout", agent.id), artifact(s, "Pricing", agent.id)];
+  for (const screen of ["main", "screen-2"]) s.setStage({ mode: "spotlight", items: [x.id] }, "Chey", screen, { person: { id: chey.id, name: "Chey" } });
+  // Both of Chey's locks are old enough to ask about.
+  age(s, 6 * 60_000);
+  const side = s.stage("screen-2");
+  s.store.setSetting("screenStages", { "screen-2": { ...side, lock: { ...side.lock!, since: Date.now() - 6 * 60_000 } } });
+  const ask = (screen: string, art: typeof x, label: string) => s.askOwner(s.queueReady({ screen, agentId: agent.id, agentName: agent.name, label, stage: { mode: "spotlight", items: [art.id] } }))!;
+  const one = ask("main", y, "Pricing");
+  const two = ask("screen-2", y, "Pricing v2");
+  expect(s.openQuestionsFor(chey.id).map((q) => q.id)).toEqual([one.id, two.id]);
+  (hub.brain as any).decideByVoice([said(chey, "yes, show it")]);
+  expect(s.showRequests().filter((r) => r.status === "pending").map((r) => r.id)).toEqual([one.id, two.id]);
+  expect(s.stage().items).toEqual([x.id]);
+  expect(s.stage("screen-2").items).toEqual([x.id]);
+  const asked = s.store.recentEvents({ limit: 20 }).filter((e) => e.kind === "brain").map((e) => e.text);
+  expect(asked.some((t) => /which one\?/.test(t) && t.includes("Pricing") && t.includes("Pricing v2"))).toBe(true);
+  // The card names its question: that one is settled, and then her spoken yes has one question to answer, once.
+  expect(s.answerShowRequest(two.id, false, "Chey")?.status).toBe("denied");
+  const yes = said(chey, "yes, show it");
+  (hub.brain as any).decideByVoice([yes]);
+  expect(s.showRequests().find((r) => r.id === one.id)?.status).toBe("approved");
+  expect(s.stage().items).toEqual([y.id]);
+});
+
+test("one line answers one question: a lock question open too makes the owner's bare yes ambiguous, and a used line can't unlock", async () => {
+  const { hub, s, chey, felipe, reg, tools, said } = room();
+  s.onShowRequest = () => {};
+  (s as any).gatewayKey = () => "";
+  const agent = reg("Rae");
+  const mine = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  age(s, 6 * 60_000);
+  s.askOwner(s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "agents" } }));
+  const t = tools([said(felipe, "show the agents")]);
+  await t.show_on_screen.execute({ mode: "agents" });
+  expect(await t.ask_to_replace_screen.execute({})).toBe("Asked the room.");
+  // Chey now has two open: her show request and the room's lock question. Her yes says neither.
+  const hers = said(chey, "yes");
+  expect(String(await tools([hers]).unlock_screen.execute({ line: hers.id }))).toContain("more than one question open");
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Felipe has only the lock question: his yes answers it. A line that already answered a show request can't.
+  const felipes = said(felipe, "yes, replace it");
+  (hub.brain as any).usedLine(felipes.id);
+  expect(String(await tools([felipes]).unlock_screen.execute({ line: felipes.id }))).toContain("already answered");
+  const again = said(felipe, "yes, replace it");
+  expect(await tools([again]).unlock_screen.execute({ line: again.id })).toContain("Unlocked");
+  // Once: the question is gone.
+  expect(s.openQuestionsFor(felipe.id)).toEqual([]);
+});
+
+test("screens are found by id or whole name, or the one name a word starts; a stale id never lands on a lookalike, and two matches ask", async () => {
+  const { hub, s } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  s.reportScreen("screen-3", { ...info, screenX: 3840 });
+  s.store.setSetting("screenNames", { "screen-2": { name: "Left TV" }, "screen-3": { name: "Left monitor" } });
+  expect(s.screens().map((sc) => sc.name)).toEqual(["Main screen", "Left TV", "Left monitor"]);
+  expect(s.screenRef("screen-2")).toBe("screen-2");
+  expect(s.screenRef("the left tv")).toBe("screen-2");
+  expect(s.screenRef("Left TV!")).toBe("screen-2");
+  // A stale id, part of a name, or a name inside another word: nothing.
+  expect(s.screenRef("screen-20")).toBeNull();
+  expect(s.screenRef("screen")).toBeNull();
+  expect(s.screenRef("TV")).toBeNull();
+  expect(s.screenRef("lef")).toBeNull();
+  // "left" starts two names: ask which.
+  expect(s.screenOf("left")).toEqual({ error: "Which screen: Left TV or Left monitor?", choices: ["Left TV", "Left monitor"] });
+  // Over HTTP a stale id is 404, an ambiguous name 409 with the choices; the brain asks.
+  const brainSays = String(await (hub.brain as any).tools([], { effects: 0 }).show_on_screen.execute({ mode: "agents", screen: "left" }));
+  expect(brainSays).toContain('"left" could be Left TV or Left monitor. Ask the room which one.');
+  const server = (await import("../src/http")).startHttp(hub, 0);
+  try {
+    const post = (body: any) => fetch(`http://127.0.0.1:${server.port}/api/stage`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    expect((await post({ mode: "agents", screen: "screen-20" })).status).toBe(404);
+    const which = await post({ mode: "agents", screen: "left" });
+    expect(which.status).toBe(409);
+    expect(((await which.json()) as any).error).toBe("Which screen: Left TV or Left monitor?");
+    expect(s.stage("screen-2").mode).not.toBe("agents");
+  } finally {
+    server.stop(true);
+  }
 });

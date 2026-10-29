@@ -130,12 +130,27 @@ export class Brain {
       this.host.decide(req.id, v.approve, v.by, v.at);
       only ||= v.only;
     }
-    // The owner of a locked screen answering an agent's request to put something up.
-    for (const req of this.session.showRequests().filter((r) => r.status === "pending")) {
-      const v = showVerdict(batch, req, brainNames(this.session.settings()));
-      if (!v) continue;
-      this.session.answerShowRequest(req.id, v.approve, v.by);
+    // The owner of a locked screen answering an agent's request to put something up. Spoken, an answer settles a
+    // request only when it is the one question open for that owner; with two, it settles none and JamSesh asks which.
+    const s = this.session;
+    const unclear = new Set<string>();
+    for (const req of s.showRequests().filter((r) => r.status === "pending")) {
+      const v = showVerdict(batch, req, brainNames(s.settings()));
+      if (!v || this.answerLines.has(v.line)) continue;
       only = true;
+      if (s.openQuestionsFor(req.ownerId).length > 1) {
+        if (req.ownerId) unclear.add(req.ownerId);
+        continue;
+      }
+      // One answer, one question: the line can't go on to answer anything else (a lock question in this pass, say).
+      this.usedLine(v.line);
+      s.answerShowRequest(req.id, v.approve, v.by);
+    }
+    for (const owner of unclear) {
+      const open = s.openQuestionsFor(owner);
+      const where = (screen: string) => (screen === "main" ? "the main screen" : (s.findScreen(screen)?.name ?? "another screen"));
+      const which = open.map((q) => (q.kind === "show" ? `${q.label} on ${where(q.screen)}` : `replacing ${where(q.screen)}`)).join(", or ");
+      void speak(s, `${s.person(owner)?.name ?? "Sorry"}, which one? ${which}. Use the card for the one you mean.`, { source: speechSource(batch), kind: "problem" });
     }
     return only;
   }
@@ -328,8 +343,12 @@ export class Brain {
     // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
     s.rememberStageFor(share.id);
     // The owner's own share over their cast keeps their lock, and the cast comes back with it (SPEC 10.5).
+    // Decided now, applied maybe 45 s later: only onto the very screen and lock it was decided for (compare-and-set),
+    // only while the share is live and the brain runs. Anything newer (another cast, an unlock, the share ending) wins.
+    const rev = s.stageRev("main");
     const fallback = () => {
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined });
+      if (this.stopped || s.store.get("shares", share.id)?.status !== "live") return;
+      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined, ifRev: rev });
     };
     if (!m) return fallback();
     const pass = { effects: 0 };
@@ -430,6 +449,12 @@ export class Brain {
       .join("\n\n");
   }
 
+  /** Lines that already answered a question: a line answers one question, once. Recent ones are enough (lines are new each pass). */
+  private answerLines = new Set<number>();
+  private usedLine(id: number) {
+    this.answerLines.add(id);
+    for (const old of this.answerLines) if (this.answerLines.size > 500) this.answerLines.delete(old);
+  }
   /** Locked screens the brain was refused this pass (by lock `since`), until it asks the room about them (the question itself is the session's). */
   private unlockRefused = new Map<string, number>();
 
@@ -462,8 +487,13 @@ export class Brain {
     // Shell commands and builds on the host never run from here: they become requests a person
     // approves (button, or a clear spoken answer to that request), whoever or whatever asked.
     // A screen by id or by name ("the left TV") from Screens; none named is the main one, and one that isn't there is null.
-    const screenId = (ref?: string) => s.screenRef(ref);
-    const noScreen = () => refuse("There's no screen by that name now. Use an id from Screens, or leave it out for the main one.");
+    let asked: string | undefined;
+    const screenId = (ref?: string) => ((asked = ref), s.screenRef(ref));
+    // An ambiguous name is asked about, never guessed.
+    const noScreen = () => {
+      const r = s.screenOf(asked);
+      return refuse("choices" in r && r.choices ? `"${asked}" could be ${r.choices.join(" or ")}. Ask the room which one.` : "There's no screen by that name now. Use an id from Screens, or leave it out for the main one.");
+    };
     const source = speechSource(batch);
     const requester = batch[batch.length - 1]?.authorName ?? "JamSesh";
     const agentIds = () => new Set(s.agents().map((a) => a.id));
@@ -876,8 +906,12 @@ export class Brain {
           // bare "yes" too) counts only as the answer to the question asked about this lock, which the session checks.
           const said = ev ? unlockConsent(ev.text, brainNames(s.settings())) : null;
           const ownWords = said === "unlock" && !!ev?.data?.direct && !!ev.authorId;
-          if (!ev || !said || !s.releaseLock(id, ownWords ? { owner: ev.authorId! } : { answeredAt: ev.ts }))
+          if (ev && this.answerLines.has(ev.id)) return refuse("That line already answered another question.");
+          if (ev && said && !ownWords && s.openQuestionsFor(ev.authorId ?? null).length > 1)
+            return refuse(`${ev.authorName} has more than one question open, so that yes doesn't say which. Ask them which screen they meant, by name.`);
+          if (!ev || !said || !s.releaseLock(id, ownWords ? { owner: ev.authorId! } : { answeredAt: ev.ts, by: ev.authorId ?? null }))
             return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with ask_to_replace_screen first.`);
+          this.usedLine(ev.id);
           return `Unlocked ${lock.by}'s screen.`;
         },
       }),
@@ -1497,7 +1531,7 @@ export function unlockConsent(text: string, brainName: string | string[] = "JamS
  * Only the owner counts, only after the question was asked, and only a whole answer (not a sentence that
  * contains the words). A bare "yes" or "no" counts for 90 seconds after the question or when said to the brain.
  */
-export function showVerdict(batch: JamEvent[], req: { at: number; ownerId: string | null }, brainName: string | string[] = "JamSesh"): { approve: boolean; by: string } | null {
+export function showVerdict(batch: JamEvent[], req: { at: number; ownerId: string | null }, brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; line: number } | null {
   if (!req.ownerId) return null;
   for (const e of [...batch].reverse()) {
     if (e.authorType !== "person" || e.kind === "prompt" || e.authorId !== req.ownerId || e.ts < req.at) continue;
@@ -1506,7 +1540,7 @@ export function showVerdict(batch: JamEvent[], req: { at: number; ownerId: strin
     const casual = e.ts - req.at < 90_000 || addressesBrain(e.text, brainName);
     const yes = SHOW_YES.has(answer) || (casual && SHOW_YES_BARE.has(answer));
     const no = SHOW_NO.has(answer) || (casual && SHOW_NO_BARE.has(answer));
-    if (yes !== no) return { approve: yes, by: e.authorName };
+    if (yes !== no) return { approve: yes, by: e.authorName, line: e.id };
   }
   return null;
 }

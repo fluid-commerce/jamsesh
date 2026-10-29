@@ -1399,13 +1399,28 @@ export class Session {
     bus.changed("screens");
   }
 
-  /** A screen by its id or by what it's called ("left tv", "the Left TV"); undefined when nothing fits. */
+  /** A screen by its id or by what it's called ("left tv", "the Left TV"); undefined when nothing fits, or more than one does. */
   findScreen(ref?: string): ScreenInfo | undefined {
-    const want = (ref ?? "").toLowerCase().replace(/^the\s+/, "").trim();
-    if (!want) return undefined;
+    const m = this.screenMatch(ref);
+    return m && "screen" in m ? m.screen : undefined;
+  }
+
+  /**
+   * What a screen reference means: its id exactly, its name exactly (ignoring case, "the" and punctuation), or the start
+   * of exactly one screen's name in whole words ("left" for "Left TV"). Never a part of an id or of a word, so a stale
+   * "screen-20" can't land on "screen-2". Several screens starting that way: the names to ask between. Nothing: null.
+   */
+  screenMatch(ref?: string): { screen: ScreenInfo } | { choices: string[] } | null {
+    const plain = (x: string) => x.toLowerCase().replace(/^the\s+/, "").replace(/[^a-z0-9]+/g, " ").trim();
+    const raw = (ref ?? "").trim();
+    const want = plain(raw);
+    if (!want) return null;
     const all = this.screens();
-    const plain = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    return all.find((sc) => sc.id === want) ?? all.find((sc) => plain(sc.name) === plain(want)) ?? all.find((sc) => plain(sc.name).includes(plain(want)) || plain(want).includes(plain(sc.name)));
+    const exact = all.find((sc) => sc.id === raw) ?? all.find((sc) => plain(sc.name) === want);
+    if (exact) return { screen: exact };
+    const starts = all.filter((sc) => plain(sc.name).startsWith(`${want} `));
+    if (starts.length === 1) return { screen: starts[0] };
+    return starts.length ? { choices: starts.map((sc) => sc.name) } : null;
   }
 
   private screenReverts = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1533,6 +1548,7 @@ export class Session {
    */
   setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main", opts: StageOpts = {}) {
     const cur = this.stage(screen);
+    if (opts.ifRev !== undefined && opts.ifRev !== this.stageRev(screen)) return cur;
     if (!opts.person && !opts.override && this.lockOf(screen)) return cur;
     const now = Date.now();
     const quiet = next.mode === "board" || next.mode === "welcome";
@@ -1544,7 +1560,14 @@ export class Session {
     return stage;
   }
 
+  /** Counts every change to a screen's stage or its lock (cast, expand, unlock, lapse), in this process. */
+  private stageRevs = new Map<string, number>();
+  stageRev(screen = "main") {
+    return this.stageRevs.get(screen) ?? 0;
+  }
+
   private commitStage(stage: Stage, screen: string) {
+    this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
     bus.changed("stageTiles");
     if (screen !== "main") {
@@ -1614,13 +1637,29 @@ export class Session {
 
   /** A person's yes to the lock question counts this long after it was asked. */
   static UNLOCK_ASK_MS = 3 * 60_000;
-  /** The question JamSesh asked the room about replacing a screen's lock: which lock (its `since`), and when. */
-  private lockQuestions = new Map<string, { since: number; at: number }>();
+  /** The question JamSesh asked the room about replacing a screen's lock: its id, which lock (its `since`), and when. */
+  private lockQuestions = new Map<string, { id: string; since: number; at: number }>();
 
   /** JamSesh just asked the room whether to replace this screen's current lock (the brain's ask_to_replace_screen). */
   askedAboutLock(screen: string) {
     const lock = this.lockOf(screen);
-    if (lock) this.lockQuestions.set(screen, { since: lock.since, at: Date.now() });
+    if (lock) this.lockQuestions.set(screen, { id: newId("lq"), since: lock.since, at: Date.now() });
+  }
+
+  /**
+   * The open questions a person's plain answer could be meant for: show requests addressed to them (they own the lock),
+   * and lock questions put to the whole room (about a lock that hasn't changed, still in time). A spoken yes or no
+   * settles a question only when it is the only one open for that person; with two, it settles none.
+   */
+  openQuestionsFor(personId: string | null): ({ kind: "show"; id: string; screen: string; label: string } | { kind: "lock"; id: string; screen: string })[] {
+    const now = Date.now();
+    const shows = this.showRequests()
+      .filter((r) => r.status === "pending" && !!personId && r.ownerId === personId)
+      .map((r) => ({ kind: "show" as const, id: r.id, screen: r.screen, label: r.label }));
+    const locks = [...this.lockQuestions.entries()]
+      .filter(([screen, q]) => now - q.at < Session.UNLOCK_ASK_MS && this.lockOf(screen)?.since === q.since)
+      .map(([screen, q]) => ({ kind: "lock" as const, id: q.id, screen }));
+    return [...shows, ...locks];
   }
 
   /**
@@ -1628,19 +1667,25 @@ export class Session {
    * - `owner`: the lock's owner, by their own window's credential or in their own words to JamSesh.
    * - `hostWindow`: the host's own windows, which carry no person's credential, only for a lock held by no one in
    *   particular or by the person at the host. A name a host window sends doesn't count.
-   * - `answeredAt`: a person's yes to the question asked about this very lock (`askedAboutLock`), said after it and in time.
+   * - `answeredAt`: a person's yes to the question asked about this very lock (`askedAboutLock`), said after it and in time,
+   *   when that is the only question open for them (`openQuestionsFor`); used once.
    * Anything else leaves the lock as it is. Returns whether the screen is unlocked now.
    */
-  releaseLock(screen: string, consent: { owner: string | null } | { hostWindow: true } | { answeredAt: number }): boolean {
+  releaseLock(screen: string, consent: { owner: string | null } | { hostWindow: true } | { answeredAt: number; by: string | null }): boolean {
     const lock = this.lockOf(screen);
     if (!lock) return true;
     const q = this.lockQuestions.get(screen);
+    // An answer settles this lock's question only when it is the one question open for the person who said it.
+    const only = (by: string | null) => {
+      const open = this.openQuestionsFor(by);
+      return open.length === 1 && open[0].kind === "lock" && open[0].id === q?.id;
+    };
     const ok =
       "owner" in consent
         ? !!consent.owner && consent.owner === lock.personId
         : "hostWindow" in consent
           ? !lock.personId || lock.personId === this.store.setting<string>("hostPersonId", "")
-          : !!q && q.since === lock.since && consent.answeredAt >= q.at && consent.answeredAt - q.at < Session.UNLOCK_ASK_MS && Date.now() - q.at < Session.UNLOCK_ASK_MS;
+          : !!q && q.since === lock.since && consent.answeredAt >= q.at && consent.answeredAt - q.at < Session.UNLOCK_ASK_MS && Date.now() - q.at < Session.UNLOCK_ASK_MS && only(consent.by);
     if (!ok) return false;
     this.lockQuestions.delete(screen);
     this.dropLock(screen);
@@ -1649,8 +1694,17 @@ export class Session {
 
   /** The screen a caller means: none named is the main one; an id or a name that isn't there now is null, never some other screen. */
   screenRef(ref?: unknown): string | null {
-    if (ref === undefined || ref === null || ref === "" || ref === "main") return "main";
-    return typeof ref === "string" ? (this.findScreen(ref)?.id ?? null) : null;
+    const r = this.screenOf(ref);
+    return "id" in r ? r.id : null;
+  }
+
+  /** `screenRef`, saying why not: no such screen, or which ones the name could mean (to ask which). */
+  screenOf(ref?: unknown): { id: string } | { error: string; choices?: string[] } {
+    if (ref === undefined || ref === null || ref === "" || ref === "main") return { id: "main" };
+    const m = typeof ref === "string" ? this.screenMatch(ref) : null;
+    if (m && "screen" in m) return { id: m.screen.id };
+    if (m) return { error: `Which screen: ${m.choices.join(" or ")}?`, choices: m.choices };
+    return { error: "That screen isn't connected any more." };
   }
 
   /** The owner did something with their screen: it counts as activity. */
@@ -1823,6 +1877,8 @@ export interface StageOpts {
   noLock?: boolean;
   /** The new stage keeps this lock: the owner's own share over their cast, and that cast coming back when it ends. */
   keepLock?: StageLock;
+  /** Compare-and-set: only if the screen is still at this revision (`stageRev`), so work decided earlier never lands on a newer stage or lock. */
+  ifRev?: number;
 }
 
 /** A few words for a stage, for the history strip and the ready queue. */
