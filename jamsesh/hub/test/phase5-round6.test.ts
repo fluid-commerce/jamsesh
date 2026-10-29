@@ -139,7 +139,7 @@ voiced("a read started before Reset and finished after it teaches nothing; one s
   const p = hub.session.upsertPerson({ name: "Rae" });
   const rae = hub.auth.issue({ kind: "browser", label: "Rae's laptop", ip: "10.0.0.41" });
   expect((await call(rae.token, "POST", "/devices", { deviceId: "d-rae", personId: p.id })).status).toBe(200);
-  const first = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json();
+  const first = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, { seq: Bun.nanoseconds() })).json();
   const before = first.epoch;
   expect(before).toBe(hub.session.store.voiceEpoch());
   expect((await call(rae.token, "DELETE", `/people/${p.id}/voiceprint`)).status).toBe(200);
@@ -148,9 +148,9 @@ voiced("a read started before Reset and finished after it teaches nothing; one s
   expect(stale.reason).toContain("reset while you read");
   expect(count(p.id)).toBe(0);
   // No epoch at all (an old page) counts as before every reset.
-  const again = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json();
+  const again = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, { seq: Bun.nanoseconds() })).json();
   expect(await (await upload(rae.token, p.id, null, again.read)).json()).toMatchObject({ ok: false });
-  const second = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json();
+  const second = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, { seq: Bun.nanoseconds() })).json();
   const after = second.epoch;
   expect(after).toBe(before + 1);
   expect(await (await upload(rae.token, p.id, after, second.read)).json()).toMatchObject({ ok: true });

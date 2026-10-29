@@ -32,7 +32,7 @@ const unit = (seed: number) => {
 };
 /** What a window may do with a person's voice: start their join read, and reset it. */
 const voiceStatuses = async (token: string, personId: string) => [
-  (await call(token, "POST", `/people/${personId}/voice/start`, {})).status,
+  (await call(token, "POST", `/people/${personId}/voice/start`, { seq: Bun.nanoseconds() })).status,
   (await call(token, "DELETE", `/people/${personId}/voiceprint`)).status,
 ];
 
@@ -70,8 +70,8 @@ test("the host letting a laptop in moves the person: their other laptops are dis
   expect(hub.auth.get(old.device.id)).toBeNull();
   expect(hub.auth.get(fresh.device.id)).toMatchObject({ personId: kim.id, wants: null });
   expect((await call(fresh.token, "POST", "/devices", { deviceId: "d-kim-new", personId: kim.id })).status).toBe(200);
-  expect((await call(fresh.token, "POST", `/people/${kim.id}/voice/start`, {})).status).toBe(200);
-  expect((await call(old.token, "POST", `/people/${kim.id}/voice/start`, {})).status).not.toBe(200);
+  expect((await call(fresh.token, "POST", `/people/${kim.id}/voice/start`, { seq: Bun.nanoseconds() })).status).toBe(200);
+  expect((await call(old.token, "POST", `/people/${kim.id}/voice/start`, { seq: Bun.nanoseconds() })).status).not.toBe(200);
   // Not the person at the host's own window, though.
   const hostP = hub.session.upsertPerson({ name: "Hosty" });
   hub.session.store.setSetting("hostPersonId", hostP.id);

@@ -536,8 +536,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (refused) return bad(refused, 403);
     // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
     // Its id goes with its end and its recording: only this read is closed or taken by them.
-    const seq = Number(body?.seq);
-    const read = hub.audio.beginEnrolment(m[1], Number.isFinite(seq) ? seq : 0);
+    // The window's place in its own order of starts (`seq`); a credential's starts are fenced per credential.
+    const read = hub.audio.beginEnrolment(m[1], { window: hostWindow ? "host" : paired?.id ?? "local", seq: Number(body?.seq) });
     if (!read) return bad("A newer read has already started.", 409);
     return json({ ok: true, epoch: s.store.voiceEpoch(), read });
   }

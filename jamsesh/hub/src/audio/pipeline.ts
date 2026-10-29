@@ -140,7 +140,12 @@ export class AudioPipeline {
   private candidates = new Map<string, Heard[][]>();
   voiceprints: Voiceprints;
   /** People reading the join sentence right now: what the room's laptops hear of it is not conversation. */
-  private enrolling = new Map<string, { since: number; until: number; read: string; open: boolean; seq: number }>();
+  private enrolling = new Map<string, { since: number; until: number; read: string; open: boolean }>();
+  /**
+   * The highest read-start order each window has used for each person ("person|window"). Kept after its read
+   * closes, is cancelled or runs out, so a delayed older start is never taken later.
+   */
+  private readFence = new Map<string, number>();
   /** How lines have been labelled since the host started (a host that never uses the voice should say so). */
   stats = { lines: 0, voice: 0, someone: 0 };
   /** Called with each new or updated room line. */
@@ -445,14 +450,18 @@ export class AudioPipeline {
    * A person starts reading the join sentence. Returns the read's id: its end and its recording name it, and
    * only the person's latest read is open, so an earlier read's late end or upload can't touch a newer one.
    */
-  beginEnrolment(personId: string, seq = 0): string | null {
+  beginEnrolment(personId: string, order?: { window: string; seq: number }): string | null {
     const now = Date.now();
-    // `seq`: the order the page began its reads in. A start that reaches the host after a later-begun read's
-    // start (requests overtaking each other) is refused: it can't replace the newer read.
-    const cur = this.enrolling.get(personId);
-    if (cur && cur.seq > seq && now <= cur.until) return null;
+    // `order`: which window began the read and its place in that window's order. A start that isn't later than
+    // every start that window already made for this person (requests overtaking each other, a replay) is refused,
+    // whether or not that newer read is still open. In-process callers pass none.
+    if (order) {
+      const key = `${personId}|${order.window}`;
+      if (!Number.isFinite(order.seq) || order.seq <= (this.readFence.get(key) ?? -Infinity)) return null;
+      this.readFence.set(key, order.seq);
+    }
     const read = newId("read");
-    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS, read, open: true, seq });
+    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS, read, open: true });
     return read;
   }
 
@@ -784,7 +793,8 @@ export class AudioPipeline {
 
   /** A line's voice and when it was heard. A line kept from before heard-times were (no heardAt) counts as heard long ago. */
   private voiceOf(u: Utterance): { embedding: Float32Array | null; heardAt: number; reason: string } {
-    const g = this.finalized.find((x) => x.utteranceId === u.id);
+    // An adopted group's copies came later and never named the speaker: the line's own sample is its event's.
+    const g = this.finalized.find((x) => x.utteranceId === u.id && !x.adopted);
     if (g?.forgotten) return { embedding: null, heardAt: 0, reason: "that voice was reset after the line" };
     if (g) {
       const usable = g.segments.filter((s) => s.clipped <= MAX_CLIPPED);
@@ -844,7 +854,7 @@ export class AudioPipeline {
 
   /** The embedding of an utterance's best copy and when it was heard, kept with its event so labels work after restarts. */
   voiceFor(utteranceId: string): { embedding: number[] | null; heardAt?: number } {
-    const g = [...this.finalized, ...this.open].find((x) => x.utteranceId === utteranceId);
+    const g = [...this.finalized, ...this.open].find((x) => x.utteranceId === utteranceId && !x.adopted);
     if (!g) return { embedding: null };
     const best = pickBest(g.segments);
     if (best.embedding === undefined) best.embedding = embed(best.pcm);

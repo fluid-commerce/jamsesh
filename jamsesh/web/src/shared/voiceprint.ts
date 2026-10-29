@@ -61,7 +61,7 @@ export const beginRead = (personId: string) => api<{ epoch: number; read: string
 
 let lastSeq = 0;
 /** The order this page begins reads in (always increasing), so the host never lets an older start replace a newer read. */
-export const nextReadSeq = () => (lastSeq = Math.max(Date.now(), lastSeq + 1));
+const nextReadSeq = () => (lastSeq = Math.max(Date.now(), lastSeq + 1));
 
 /**
  * The read stopped without the host getting it (no microphone, a failed upload): the host stops keeping

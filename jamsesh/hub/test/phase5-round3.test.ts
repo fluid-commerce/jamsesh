@@ -36,9 +36,9 @@ test("a newly paired browser can't claim a person who is already on another lapt
   expect(claim.status).toBe(403);
   expect(hub.auth.get(stranger.device.id)?.personId).toBeNull();
   expect((await call(stranger.token, "DELETE", `/people/${victim.id}/voiceprint`)).status).toBe(403);
-  expect((await call(stranger.token, "POST", `/people/${victim.id}/voice/start`, {})).status).toBe(403);
+  expect((await call(stranger.token, "POST", `/people/${victim.id}/voice/start`, { seq: Bun.nanoseconds() })).status).toBe(403);
   // The owner still can.
-  expect((await call(owner.token, "POST", `/people/${victim.id}/voice/start`, {})).status).toBe(200);
+  expect((await call(owner.token, "POST", `/people/${victim.id}/voice/start`, { seq: Bun.nanoseconds() })).status).toBe(200);
 });
 
 test("nor the person using the host's own window; a person nobody holds can be claimed once", async () => {

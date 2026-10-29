@@ -82,7 +82,7 @@ test("an earlier read's late end can't close a newer read, and a recording is ta
   const ren = browser("Ren's laptop");
   expect((await call(ren.token, "POST", "/devices", { deviceId: "d-ren", personId: p.id })).status).toBe(200);
   const window = () => (hub.audio as any).enrolling.get(p.id) as { read: string; open: boolean; until: number } | undefined;
-  const start = async () => (await (await call(ren.token, "POST", `/people/${p.id}/voice/start`, {})).json()).read as string;
+  const start = async () => (await (await call(ren.token, "POST", `/people/${p.id}/voice/start`, { seq: Bun.nanoseconds() })).json()).read as string;
   const end = (id: unknown, read: boolean) => call(ren.token, "POST", `/people/${p.id}/voice/end`, { read, id });
   const upload = (read: string | null) =>
     fetch(`${base}/api/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}${read === null ? "" : `&read=${read}`}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${ren.token}` }, body: encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }) as unknown as BodyInit }).then((r) => r.json());
@@ -133,4 +133,28 @@ test("an older start that reaches the host after a newer one can't replace it; i
   // A later start (a newer page order) is taken as usual; so is one after the old read's window ran out.
   const later = await call(oda.token, "POST", `/people/${p.id}/voice/start`, { seq: 3000 });
   expect(later.status).toBe(200);
+});
+
+test("the start-order fence outlives the newer read: an older or equal start after it closed, was cancelled or ran out is refused", async () => {
+  const p = hub.session.upsertPerson({ name: "Ude" });
+  const ude = browser("Ude's laptop");
+  expect((await call(ude.token, "POST", "/devices", { deviceId: "d-ude", personId: p.id })).status).toBe(200);
+  const start = (seq: unknown, token = ude.token) => call(token, "POST", `/people/${p.id}/voice/start`, { seq });
+  const r2000 = await start(2000);
+  expect(r2000.status).toBe(200);
+  const read = (await r2000.json()).read;
+  // Cancelled (no microphone): the window is gone, the fence stays.
+  expect((await call(ude.token, "POST", `/people/${p.id}/voice/end`, { read: false, id: read })).status).toBe(200);
+  expect((hub.audio as any).enrolling.get(p.id)).toBeUndefined();
+  for (const seq of [1000, 2000, undefined, "x", null]) expect([seq, (await start(seq)).status]).toEqual([seq, 409]);
+  // Run out: still fenced.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 10 * 60_000;
+  try {
+    expect((await start(1500)).status).toBe(409);
+  } finally {
+    Date.now = realNow;
+  }
+  // Later in the page's order: taken.
+  expect((await start(2001)).status).toBe(200);
 });

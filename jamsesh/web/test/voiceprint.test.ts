@@ -1,7 +1,7 @@
 import "fake-indexeddb/auto";
 import { beforeEach, expect, test } from "bun:test";
 
-const { beginRead, endRead, forgetDeviceCopies, deviceCopiesProblem, nextReadSeq } = await import("../src/shared/voiceprint");
+const { beginRead, endRead, forgetDeviceCopies, deviceCopiesProblem } = await import("../src/shared/voiceprint");
 const { VoiceRead } = await import("../src/shared/voiceRead");
 let calls: { method: string; path: string; body: any }[] = [];
 let reply: (method: string, path: string) => { status: number; body: unknown } = () => ({ status: 200, body: { ok: true } });
@@ -258,9 +258,8 @@ test("a read closed and a new one started at once: each end names its own read, 
 test("a page's reads go to the host in the order it began them: each start carries a larger seq", async () => {
   const seqs: number[] = [];
   (globalThis as any).fetch = async (_url: string, init: RequestInit = {}) => (seqs.push(JSON.parse(String(init.body)).seq), new Response('{"ok":true,"epoch":0,"read":"r"}'));
+  // Started in the same millisecond, in a burst: still strictly increasing (the host refuses an older or equal one).
+  await Promise.all([beginRead("p1"), beginRead("p1"), beginRead("p1")]);
   await beginRead("p1");
-  await beginRead("p1");
-  const n = nextReadSeq();
-  expect(seqs[1]).toBeGreaterThan(seqs[0]);
-  expect(n).toBeGreaterThan(seqs[1]);
+  for (let i = 1; i < seqs.length; i++) expect(seqs[i]).toBeGreaterThan(seqs[i - 1]);
 });
