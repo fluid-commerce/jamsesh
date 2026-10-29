@@ -1163,7 +1163,10 @@ Every client window and the big screen capture audio; it's consolidated on the h
   300 ms of lead-in, ends after 700 ms of silence or at 14 seconds, and is dropped if it has less
   than 400 ms of speech.
 - Each segment goes to the host as WAV with its device, host-clock start and end, level, and
-  noise floor. Segments that end while the brain is speaking are dropped, so it doesn't transcribe
+  noise floor. The device must be one the calling window registered (`POST /api/devices`, which
+  binds it to that window): a device's owner names the speaker and teaches their voiceprint, so no
+  window can send audio as another's microphone (403), and an unregistered device gets 404, which
+  the window retries until its registration lands. Segments that end while the brain is speaking are dropped, so it doesn't transcribe
   itself.
 - **Clock sync.** Each device measures its offset from the host clock (six pings at connect, then
   every minute; the lowest round trip wins) and stamps segments in host time [B33].
@@ -1187,19 +1190,29 @@ Every client window and the big screen capture audio; it's consolidated on the h
   best copy becomes its own line.
 - **One line, once.** Copies whose clocks disagree by a second or more (a laptop with a drifting
   clock, a late upload) can't be grouped by time. A new line is therefore also checked against the
-  lines already shown in the same place: if it starts within 3 seconds of one, has 75 percent of the
-  same words, is at least four words long, came from other laptops than that line's, and its voice
-  isn't plainly another person's (voice embeddings under 0.6 cosine apart; same voice on two
-  microphones is 0.7 to 0.9), it is that line heard again. Its copies join the line already shown,
-  which is relabelled from every copy. Otherwise it is its own line: someone repeating what another
-  said is two lines, and a line whose match is too old to join is shown, never dropped.
+  lines already shown in the same place, and is that line heard again only on positive evidence:
+  it starts within 3 seconds of it, came only from other laptops than that line's, and either
+  - both copies have a voice embedding and they agree (cosine 0.6 or more; one voice on two
+    microphones is 0.7 to 0.9, two voices saying the same words about 0.4 to 0.55) and the words
+    mostly match (75 percent, four words or more), or
+  - there's no voice to compare (voice matching off, or a line under 0.8 seconds such as "Looks
+    good") and the words are exactly the same.
+
+  Its copies join the line already shown, which is relabelled from every copy. Otherwise it is its
+  own line: someone repeating what another said is two lines, and related sentences ("Make it blue
+  now." and "Make it blue now after lunch.") stay two. A copy so late its line can no longer be
+  joined (an offline buffer flushed) is transcribed like any other; lining up in time with a shown
+  line never drops it, and only exactly the same words from other laptops do.
 - **The join read stays out.** While someone reads the join sentences (from **Start reading** until
   25 seconds after it ends, 90 seconds at most), a line is dropped when the reader's own laptop heard
   it loudest and most of its words follow the script in order (runs of three or more script words),
   so a calibration read never appears in the transcript or reaches the brain, while someone else
   talking then, even with the script's words, is heard. The reader's laptop keeps sending during the
   read for this. If the host can't start keeping the read out, the read doesn't start and the
-  profile says why.
+  profile says why. The window closes as soon as the read is over however it ended: the host takes
+  or refuses the recording (25 seconds' grace for copies on their way), or the page says it stopped
+  (`POST /api/people/:id/voice/end`, `read: false` when the microphone never started, which closes
+  it at once), including when the recording couldn't be decoded or uploaded.
 - **Where a line came from.** Every speech line records `data.source`: `typed` (typed in the room's
   box or to an agent), `addressed` (said to JamSesh, or a recorded prompt) or `overheard`. The feed
   shows it quietly after the line (`typed`, `to JamSesh`; `overheard` only when the line is hovered).
@@ -1216,7 +1229,8 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    through sherpa-onnx, the library the app already ships for voiceprints. Turning it on downloads
    the model once (from sherpa-onnx's GitHub release, checked against a pinned SHA-256) into
    `~/.jamsesh/models/parakeet-tdt-0.6b-v2-int8`, with progress in Settings, while the engines below
-   carry the room; once it's ready it goes first. Turning it off stops it (and a download in
+   carry the room; once it's ready it goes first. Turning it off and on again while it's still
+   starting starts it again once the stopped start has wound down. Turning it off stops it (and a download in
    progress). It runs in its own process (the hub binary with `--stt-server`) whose stdin is a pipe
    from the hub, so it ends with the hub however the hub ends. English only: with another language,
    or `auto`, the whisper engines take over. `JAMSESH_PARAKEET=0` keeps it off;
@@ -1230,7 +1244,12 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    and one that dies later leaves the pool.
    - **Server:** the app bundles `whisper-server` from whisper.cpp v1.8.4, built by
      `app/build-whisper.sh` for arm64 with Metal (shaders embedded, ggml static, system libraries
-     only), which checks the tag is still the pinned commit; `bundle-hub.sh` copies it from `~/.jamsesh/bin` like the FigCraft binaries. Found in
+     only), which checks the tag is still the pinned commit and stamps the binary with that commit
+     and its SHA-256 (`whisper-server.build`). `build-whisper.sh --check` verifies a binary against
+     its stamp: `install.sh` rebuilds one that fails, and `bundle-hub.sh` rebuilds it then refuses to
+     bundle anything that still isn't the pinned build. The speaker model is pinned the same way
+     (`wespeaker_en_voxceleb_resnet34_LM.onnx`, by SHA-256): `install.sh` replaces a different file,
+     `bundle-hub.sh` refuses it. Found in
      order: `JAMSESH_WHISPER_SERVER`, the app bundle, `~/.jamsesh/bin`, then Homebrew's.
    - **Model:** ggml-large-v3-turbo-q5_0 (574 MB, MIT). Found in order: `JAMSESH_WHISPER_MODEL`,
      `~/.jamsesh/models`, then `~/.cache/whisper-cpp` (large-v3-turbo, then medium.en, base.en).
@@ -1335,18 +1354,21 @@ read ("Read again") and says what the voiceprint was learned from.
 
 **Voiceprints travel with the person, in the Mac app.** A copy of the person's voiceprint is kept
 for them: embeddings only (256 numbers per sample, up to 32, tagged with the model name), never audio.
-- **In the Mac app** the app keeps it, through its own commands, under the Mac user's app data, one
-  file per person with that person's own yes or no. A person is known across hosts by the name they
-  go by (person ids are each host's own). The app asks the host which person its window is (`/api/me`
-  as the host answers the app's window), never the page, and refuses a page that says it's someone
-  else, so a Mac shared by several people never hands one person's copy or choice to another. Only
-  the person's own window (`client`) may ask. This copy goes to every host the person joins, but
-  only with their say-so: the first time it would go to a host it hasn't gone to before, the app
-  asks in a native dialog, "Share Chey's voice with <room>? It's numbers that describe your voice,
-  never a recording.", with **Share** and **Not this room**. The answer is kept per person and per
-  host id (the `hostId` in `/api/pair/info`, not the address), so each host is asked once; unticking
-  the checkbox forgets the answers too. Until a Share, the host's page sees the copy's version and
-  dates but none of its samples.
+- **In the Mac app** the app keeps one copy, for the app's own person: its "me" profile, made with a
+  local random id the first time they say yes, under the Mac user's app data, with their yes or no.
+  It is never chosen by a name a host gives. **One person per copy of the app:** several people
+  sharing one Mac app (one Mac user account) is out of scope; each person uses their own Mac, or
+  their own account on it. The app checks with the host which person its window is (`/api/me` as
+  the host answers the app's window) and refuses a page that says it's someone else; only the
+  window (`client`) may ask. The copy goes to every host the person joins, but only with their
+  say-so: the first time it would go to a host it hasn't gone to before, the app asks in a native
+  dialog, "Share Chey's voice with <room>? It's numbers that describe your voice, never a
+  recording.", with **Share** and **Not this room**. The answer is kept per host id (the `hostId`
+  in `/api/pair/info`, not the address), so each host is asked once; unticking the checkbox forgets
+  the answers too. Until a Share, the host's page sees the copy's version and dates but none of its
+  samples. The choice, the copy and the answers change under one lock, each write through its own
+  temporary file, so a "no" and a copy arriving together can't undo each other; a save that fails
+  says so and the checkbox goes back.
 - **In a browser** the copy and the choice are kept per person in the browser's storage, which
   belongs to the host's address: they are for this host only (they bring the voice back if the host
   forgets it). The checkbox says so and points to the Mac app for other hosts.
@@ -1371,6 +1393,14 @@ voiceprint: another person's device, an agent's credential (even one acting for 
 window with no person get 403. The host checks the model name, the 256-number size, that every
 number is finite (also once stored as 32-bit floats and normalized: 1e100 is refused), that no
 sample is all zeros, and at most 32 samples.
+
+**Reset** (the person's own row in **Settings > People**, shown only to that person, the one the
+host lets delete it) forgets their voice on this host everywhere it could come back from: their
+samples; the voice embeddings kept with their lines in this session's history (so correcting an old
+line to them teaches nothing); lines of theirs still held in memory; and the device's copy (the
+browser's, or the Mac app's through `voiceprint_forget`, keeping the yes or no). The host remembers
+when (`voiceResetAt`) and refuses any carried copy made before then (409), and a device whose copy
+is refused that way deletes it, so another of the person's devices can't bring the old voice back.
 
 **Why voice matching might be off.** `voiceprintStatus()` (in `/api/engines` and the state the
 screens read) says `ok`, `missing-model`, `missing-library` or `load-failed`, with a `reason` and a `fix`
@@ -1858,6 +1888,12 @@ JamSesh uses the computers in the room [B28]:
   available [B49]. Without a gateway, the brain runs on rules (see [8.13](#813-when-the-gateway-isnt-available)).
 
 ## 16. Testing
+
+`bun run test` (`scripts/test-all.sh`) runs every suite: the hub, the web app, and the Mac app
+(`cargo test`), or the ones named (`scripts/test-all.sh web tauri`). It says first what will skip on
+that machine: the simulated rooms need macOS voices (`/usr/bin/say`) and the speaker model, and the
+end-to-end Parakeet test needs `JAMSESH_TEST_PARAKEET_DIR`. `hub/test/dedupe.test.ts` covers
+merging and dropping lines with no speaker model and synthetic audio, so it runs anywhere.
 
 - **Room audio** [A1, A2] (`hub/test/audio.bench.test.ts`): real recorded human voices
   (LibriSpeech), rendered per device with different gain, noise beds, muffling, reverb, mic EQ,
