@@ -13,12 +13,12 @@ rm -rf "$OUT" && mkdir -p "$OUT"/{hub,bin,skill,models,node_modules}
 (cd web && bunx vite build >/dev/null) && cp -R web/dist "$OUT/web"
 cp -R "$JAM/web-canvas" "$OUT/canvas"
 cp skill/SKILL.md "$OUT/skill/"
-# whisper.cpp's server (MIT, see NOTICE), built once into the same folder as the FigCraft binaries.
-# Only the pinned whisper-server build ships: a binary that isn't it (no stamp, another commit, changed
-# since) is rebuilt, and the bundle stops if even that isn't it.
-app/build-whisper.sh --check "$JAM/bin" || app/build-whisper.sh "$JAM/bin"
-app/build-whisper.sh --check "$JAM/bin" || { echo "whisper-server in $JAM/bin isn't the pinned build" >&2; exit 1; }
-for b in figcraft-server figcraft-cli whisper-server; do cp "$JAM/bin/$b" "$OUT/bin/"; done
+# whisper.cpp's server (MIT, see NOTICE). The shipped binary is always built here, from the pinned
+# commit, straight into the bundle: a stamp beside a binary can be written by anyone, so no binary
+# found on this machine is bundled on the strength of one.
+app/build-whisper.sh "$OUT/bin"
+rm -f "$OUT/bin/whisper-server.build"
+for b in figcraft-server figcraft-cli; do cp "$JAM/bin/$b" "$OUT/bin/"; done
 cp -R node_modules/sherpa-onnx-node "node_modules/sherpa-onnx-darwin-$(uname -m | sed 's/x86_64/x64/')" "$OUT/node_modules/"
 # The speaker model ships only as the pinned file (the same pin as install.sh).
 WESPEAKER_SHA256=e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012

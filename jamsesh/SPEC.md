@@ -1245,9 +1245,10 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    - **Server:** the app bundles `whisper-server` from whisper.cpp v1.8.4, built by
      `app/build-whisper.sh` for arm64 with Metal (shaders embedded, ggml static, system libraries
      only), which checks the tag is still the pinned commit and stamps the binary with that commit
-     and its SHA-256 (`whisper-server.build`). `build-whisper.sh --check` verifies a binary against
-     its stamp: `install.sh` rebuilds one that fails, and `bundle-hub.sh` rebuilds it then refuses to
-     bundle anything that still isn't the pinned build. The speaker model is pinned the same way
+     and its SHA-256 (`whisper-server.build`). `build-whisper.sh --check` compares a binary with
+     its stamp so `install.sh` rebuilds a stale or damaged one (it is not proof of origin: a stamp can be
+     rewritten). `bundle-hub.sh` therefore never bundles an existing binary: it builds from the pinned
+     commit straight into the bundle every time. The speaker model is pinned the same way
      (`wespeaker_en_voxceleb_resnet34_LM.onnx`, by SHA-256): `install.sh` replaces a different file,
      `bundle-hub.sh` refuses it. Found in
      order: `JAMSESH_WHISPER_SERVER`, the app bundle, `~/.jamsesh/bin`, then Homebrew's.

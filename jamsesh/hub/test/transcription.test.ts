@@ -675,12 +675,20 @@ test("only the pinned whisper-server build and speaker model are installed or bu
   expect(check()).toBe(1);
   writeFileSync(stamp, `tag=v1.8.4\ncommit=0000000000000000000000000000000000000000\nsha256=${sha()}\n`);
   expect(check()).toBe(1);
+  // A substituted binary with a matching rewritten stamp passes --check: that is why packaging doesn't use it.
+  writeFileSync(bin, "#!/bin/sh\necho substituted\n");
+  writeFileSync(stamp, `tag=v1.8.4\ncommit=${commit}\nsha256=${sha()}\n`);
+  expect(check()).toBe(0);
   // install.sh and bundle-hub.sh check the same speaker-model pin, and bundling refuses a file that isn't it.
   const install = readFileSync(join(import.meta.dir, "../../install.sh"), "utf8");
   const bundle = readFileSync(join(import.meta.dir, "../../app/bundle-hub.sh"), "utf8");
   const pin = install.match(/^WESPEAKER_SHA256=(\w+)$/m)![1];
   expect(bundle).toContain(`WESPEAKER_SHA256=${pin}`);
-  expect(bundle).toMatch(/build-whisper\.sh --check "\$JAM\/bin" \|\| \{ echo/);
+  // The shipped whisper-server is built from the pinned commit into the bundle; a stamped binary found on
+  // the machine (whose stamp anyone can rewrite) is never copied in.
+  expect(bundle).toMatch(/^app\/build-whisper\.sh "\$OUT\/bin"$/m);
+  expect(bundle).not.toMatch(/--check/);
+  expect(bundle).not.toMatch(/for b in [^\n]*whisper-server/);
   expect(bundle).toMatch(/!= "\$WESPEAKER_SHA256" \]; then[\s\S]*?exit 1/);
 });
 
