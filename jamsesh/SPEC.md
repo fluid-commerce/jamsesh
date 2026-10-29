@@ -1207,7 +1207,8 @@ Every client window and the big screen capture audio; it's consolidated on the h
   late copy can find it, every late copy goes through one admit step, and a group with work queued is
   never let go. A copy so late its line's group was let go (after 15 s) can't change who said it, since
   the line's other copies are gone: it adds its device to the line, and its group then stands for
-  the line so still later copies join it as well. Cost: with four laptops,
+  the line so still later copies join it as well. Its copies are never the line's voice sample (a
+  correction teaches the line's own sample, kept with its event, or nothing after a Reset). Cost: with four laptops,
   whisper runs once per line before; now once per copy within 10 dB, which is 2 for laptops spread
   across a room (6 dB apart) and 4 around one table (2 to 3 dB apart). Known limit: a quieter copy
   whisper hears slightly differently ("cup" for "up") shows as a second line.
@@ -1245,9 +1246,9 @@ Every client window and the big screen capture audio; it's consolidated on the h
   or refuses the recording (25 seconds' grace for copies on their way), or the page says it stopped
   (`POST /api/people/:id/voice/end`, `read: false` when the microphone never started, which closes
   it at once), including when the recording couldn't be decoded or uploaded. Each read has an id
-  (`read`, from `voice/start`, which carries `seq`, the order the page began its reads in: a start
-  that reaches the host after a later-begun read's start is refused with 409, so it can't replace
-  it); its end (`id`) and its recording (`?read=`) name it, and only the
+  (`read`, from `voice/start`, which carries `seq`, the order the page began its reads in: the host
+  keeps, per person and per window, the highest `seq` it took, also after that read closed, was
+  cancelled or ran out, and refuses an older, equal or missing one with 409); its end (`id`) and its recording (`?read=`) name it, and only the
   person's latest open read is closed or taken, so an earlier read's late end or upload can't touch a
   newer one. Closing the profile mid-read stops the microphone, closes the read on the host, then
   aborts the upload; a recording that arrives after its read was closed isn't taken. One the host
