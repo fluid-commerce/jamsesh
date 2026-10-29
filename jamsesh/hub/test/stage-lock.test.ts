@@ -1255,3 +1255,31 @@ test("approving a show request is one write: when the item can't go up, the appr
   expect(s.showReady(item.id, { claim })).toBeNull();
   expect(s.readyToShow().some((r) => r.id === item.id)).toBe(true);
 });
+
+test("approving a queued item whose artifact was deleted meanwhile expires the question and keeps the owner's lock", () => {
+  const { s, chey, reg } = room();
+  const a = artifact(s, "Checkout");
+  const gone = artifact(s, "Doomed");
+  const agent = reg("Felipe");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [gone.id] } });
+  s.onShowRequest = () => {};
+  age(s, 6 * 60_000);
+  const req = s.askOwner(item)!;
+  s.store.remove("artifacts", gone.id);
+  s.answerShowRequest(req.id, true, "Chey");
+  expect(s.showRequests().find((r) => r.id === req.id)?.status).toBe("expired");
+  expect(s.stage().items).toEqual([a.id]);
+  expect(s.stage().lock?.personId).toBe(chey.id);
+});
+
+test("an artifact a screen shows stays in the state payload however many newer ones arrive; stored stages are the schema's clean copy", () => {
+  const { s, chey } = room();
+  const old = artifact(s, "Old");
+  s.setStage({ mode: "spotlight", items: [old.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  for (let i = 0; i < 130; i++) artifact(s, `New ${i}`);
+  expect(s.state().artifacts.some((x) => x.id === old.id)).toBe(true);
+  expect(s.state().artifacts.length).toBeLessThanOrEqual(121);
+  s.store.setSetting("stage", { ...s.stage(), junk: "x".repeat(10) });
+  expect((s.stage() as any).junk).toBeUndefined();
+});

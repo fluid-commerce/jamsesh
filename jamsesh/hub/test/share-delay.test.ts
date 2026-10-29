@@ -395,3 +395,18 @@ test("a failed BEGIN leaves the store usable: the next atomic write still opens 
   expect(() => st.atomic(() => { st.setSetting("probe", "half"); throw new Error("boom"); })).toThrow("boom");
   expect(st.setting("probe", "none")).toBe("none");
 });
+
+test("an owner who unlocks during their own pinned share doesn't get the pin back when the share ends", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], pinned: true }, "Felipe", "main", { person: { id: r.felipe.id, name: "Felipe" } });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().lock?.by).toBe("Felipe");
+  r.s.releaseLock("main", { owner: r.felipe.id });
+  r.s.endShare(sh.id);
+  expect(r.s.stage().mode).toBe("spotlight");
+  expect(r.s.stage().pinned).toBe(false);
+  expect(r.s.stage().pinnedById).toBeUndefined();
+  expect((r.s as any).stageRevert).not.toBeNull();
+});

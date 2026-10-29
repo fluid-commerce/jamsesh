@@ -180,6 +180,22 @@ export class Session {
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
   voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
 
+  /** The newest artifacts, plus any a screen is showing however old: a screen's tiles must always resolve. */
+  private stateArtifacts() {
+    const all = this.artifacts();
+    const recent = all.slice(0, 120);
+    const shown = new Set<string>();
+    for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) {
+      const st = this.stage(screen);
+      for (const id of st.items) shown.add(id);
+      for (const c of st.columns ?? []) for (const id of c.items) shown.add(id);
+      for (const tl of st.layout?.tiles ?? []) if (tl.kind === "artifact") shown.add(tl.artifactId);
+    }
+    if (!shown.size) return recent;
+    const have = new Set(recent.map((a) => a.id));
+    return [...recent, ...all.slice(120).filter((a) => shown.has(a.id) && !have.has(a.id))];
+  }
+
   state(): HubState {
     return {
       session: { name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
@@ -189,7 +205,7 @@ export class Session {
       agents: this.agents().map(publicAgent),
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
       directives: this.directives().slice(0, 60),
-      artifacts: this.artifacts().slice(0, 120),
+      artifacts: this.stateArtifacts(),
       devservers: this.store.all("devservers"),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
       utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200),
@@ -262,7 +278,7 @@ export class Session {
       case "directives":
         return { key, value: this.directives().slice(0, 60) };
       case "artifacts":
-        return { key, value: this.artifacts().slice(0, 120) };
+        return { key, value: this.stateArtifacts() };
       case "devservers":
         return { key, value: this.store.all("devservers") };
       case "utterances":
@@ -1291,7 +1307,9 @@ export class Session {
         const back = !tiles.length && prior && !(prior.mode === "layout" && prior.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? prior : null;
         // A lock still held when the share ends stays with what comes back (the owner's share over their own cast, SPEC 10.5).
         // One its owner let go of during the share stays gone.
-        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
+        // The pin comes back only with the lock that held it: an owner who unlocked during the share released the pin with it.
+        const restored = back && !st.lock ? { ...back, pinned: false, pinnedById: undefined } : back;
+        this.setStage(tiles.length ? { ...st, layout: { tiles } } : restored ? restored : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
       }
     }
   }
@@ -1543,7 +1561,7 @@ export class Session {
       return undefined;
     }
     this.badStageLogged.delete(screen);
-    return { title: "", caption: "", items: [], pinned: false, since: Date.now(), by: "JamSesh", ...(raw as Partial<Stage>) } as Stage;
+    return { title: "", caption: "", items: [], pinned: false, since: Date.now(), by: "JamSesh", ...r.stage } as Stage;
   }
 
   /** How long a brought-up screen stays before the board comes back (tests shorten it). */
@@ -1905,11 +1923,29 @@ export class Session {
     }
   }
 
+  /** Whether a queued stage still has something to draw (its artifacts may have been deleted while it waited). */
+  private renderable(st: Partial<Stage> & { mode: Stage["mode"] }): boolean {
+    const known = new Set(this.artifacts().map((a) => a.id));
+    const has = (ids: string[] | undefined) => (ids ?? []).some((i) => known.has(i));
+    switch (st.mode) {
+      case "spotlight":
+      case "compare":
+        return has(st.items);
+      case "parity":
+        return has(st.items) || (st.columns ?? []).some((c) => has(c.items));
+      case "layout":
+        return (st.layout?.tiles ?? []).some((t) => t.kind !== "artifact" || known.has(t.artifactId));
+      default:
+        return true;
+    }
+  }
+
   /** `showReady` inside a transaction: the item leaves the queue only if the stage really changed, else NotShown undoes it all. */
   private showReadyIn(id: string, who: ShowWho): Stage {
     const item = this.readyToShow().find((r) => r.id === id);
     if (!item) throw new NotShown();
     if ("claim" in who && !this.claimHolds(who.claim, item.screen)) throw new NotShown();
+    if (!this.renderable(item.stage)) throw new NotShown();
     this.dismissReady(id);
     const before = this.stageRev(item.screen);
     const stage = this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
