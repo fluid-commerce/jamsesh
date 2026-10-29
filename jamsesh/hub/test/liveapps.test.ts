@@ -456,3 +456,35 @@ test("on a locked big screen the screen's drivers drive the tile, like anything 
   s.unlockStage("main");
   expect(((await (await post(`/apps/${again.id}/control`, { action: "take" }, samHeaders)).json()) as any).result).toContain("driving");
 });
+
+test("a Mac helper captures only while someone watches: paused at the start and at the last viewer leaving, resumed at the first arriving", async () => {
+  const fake = join(dir, "fake-live-pause");
+  const log = join(dir, "pause-input");
+  writeFileSync(
+    fake,
+    `#!/bin/bash
+[ "$1" = "--apps" ] && { echo '[{"pid":41,"bundle":"com.example.fake","name":"Fake App"}]'; exit 0; }
+echo '{"event":"window","w":800,"h":600}' >&2
+while read -r line; do echo "$line" >> "${log}"; done
+`,
+  );
+  chmodSync(fake, 0o755);
+  const r = await hub.live.startMac({ name: "Fake App" }, "Maya", [fake]);
+  if (typeof r === "string") throw new Error(r);
+  const lines = async () => {
+    await Bun.sleep(300);
+    return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l).t) : [];
+  };
+  expect(await lines()).toEqual(["pause"]);
+  const a = hub.live.subscribe(r.id, () => {})!;
+  const b = hub.live.subscribe(r.id, () => {})!;
+  expect(await lines()).toEqual(["pause", "resume"]);
+  a();
+  expect(await lines()).toEqual(["pause", "resume"]);
+  b();
+  b();
+  expect(await lines()).toEqual(["pause", "resume", "pause"]);
+  hub.live.stopAll();
+  // A tile that is gone takes no more commands.
+  expect(hub.live.subscribe(r.id, () => {})).toBeNull();
+});

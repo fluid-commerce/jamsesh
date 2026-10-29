@@ -8,7 +8,7 @@
 //                                             stream; --window picks one window, --crop is a rectangle in points inside it
 //   stdout  frames: 4-byte big-endian length, then a JPEG
 //   stderr  one JSON line per event: {"event":"window","w":..,"h":..} {"event":"error","code":"screen|accessibility|nowindow","text":".."}
-//   stdin   one JSON line per input: {"t":"tap|down|move|up|scroll|text","x":0..1,"y":0..1,"dx":..,"dy":..,"text":".."}
+//   stdin   {"t":"pause"} / {"t":"resume"} stop and restart the frames (nobody is watching); one JSON line per input: {"t":"tap|down|move|up|scroll|text","x":0..1,"y":0..1,"dx":..,"dy":..,"text":".."}
 //           or {"t":"key","key":"return|delete|tab"}. x and y are fractions of the window. The Mac's own cursor never moves.
 //
 // Needs Screen Recording (to see the window) and Accessibility (to send input) for whatever
@@ -167,8 +167,24 @@ func mouse(_ type: CGEventType, _ p: CGPoint, _ pid: pid_t) {
   CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.postToPid(pid)
 }
 
+/// While nobody watches the tile the hub says "pause": frames are dropped before they are encoded, "resume" starts them again.
+var paused = false
+let pauseLock = NSLock()
+func setPaused(_ on: Bool) {
+  pauseLock.lock()
+  paused = on
+  pauseLock.unlock()
+}
+func isPaused() -> Bool {
+  pauseLock.lock()
+  defer { pauseLock.unlock() }
+  return paused
+}
+
 func handle(_ line: String) {
-  guard canInput, let d = line.data(using: .utf8), let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any], let t = m["t"] as? String else { return }
+  guard let d = line.data(using: .utf8), let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any], let t = m["t"] as? String else { return }
+  if t == "pause" || t == "resume" { return setPaused(t == "pause") }
+  guard canInput else { return }
   let fx = (m["x"] as? Double) ?? 0.5
   let fy = (m["y"] as? Double) ?? 0.5
   switch t {
@@ -224,7 +240,7 @@ final class Output: NSObject, SCStreamOutput, SCStreamDelegate {
   let ci = CIContext()
   var last = Date.distantPast
   func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-    guard type == .screen, sb.isValid, let px = CMSampleBufferGetImageBuffer(sb) else { return }
+    guard !isPaused(), type == .screen, sb.isValid, let px = CMSampleBufferGetImageBuffer(sb) else { return }
     if let a = (CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
       let raw = a[.status] as? Int, SCFrameStatus(rawValue: raw) != .complete { return }
     let img = CIImage(cvPixelBuffer: px)

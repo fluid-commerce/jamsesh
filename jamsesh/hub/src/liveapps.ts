@@ -56,6 +56,8 @@ interface Live {
   companion?: NonNullable<ReturnType<LiveApps["companionFor"]>>;
   // Mac
   proc?: ReturnType<typeof Bun.spawn>;
+  /** The helper was told to pause: nobody is watching, so it encodes nothing. */
+  paused?: boolean;
 }
 
 async function run(cmd: string[], timeoutMs = 15_000): Promise<{ code: number; out: string }> {
@@ -219,6 +221,7 @@ export class LiveApps {
       return why;
     }
     this.log(`${by} put ${appName} (Mac app) on a live tile.`);
+    this.watching(live);
     return { ...live.info };
   }
 
@@ -370,16 +373,27 @@ export class LiveApps {
     }
   }
 
-  /** A viewer's frames. The newest one goes out at once; the capture runs only while someone watches. */
+  /** A viewer's frames. The newest one goes out at once; the capture runs only while someone watches (a Mac helper is paused with no viewer). */
   subscribe(id: string, fn: Sub): (() => void) | null {
     const live = this.apps.get(id);
     if (!live || live.info.status !== "live") return null;
     live.subs.add(fn);
     if (live.latest) fn(live.latest);
     if (live.info.kind === "ios" && !live.proc) void this.pump(live);
+    this.watching(live);
     return () => {
       live.subs.delete(fn);
+      this.watching(live);
     };
+  }
+
+  /** A Mac helper captures only while someone watches: it is paused at the last viewer leaving and resumed at the first arriving. */
+  private watching(live: Live) {
+    if (live.info.kind !== "mac" || !live.proc || live.info.status !== "live") return;
+    const want = live.subs.size === 0;
+    if (!!live.paused === want) return;
+    live.paused = want;
+    this.macSend(live, { t: want ? "pause" : "resume" });
   }
 
   /** Simulator frames: a few `simctl screenshot` calls in flight at once, newest first, duplicates dropped. */
