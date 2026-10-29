@@ -399,7 +399,15 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
 async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
-  const body = req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE" ? await readBody(req) : null;
+  let body: any = null;
+  // A body that didn't arrive whole (the connection dropped, a broken form) stops the request: nothing runs.
+  if (req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE") {
+    try {
+      body = await readBody(req);
+    } catch {
+      return new Response(JSON.stringify({ error: "The request didn't arrive whole. Try again." }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+  }
   // The credential is read again after the body arrived: one disconnected (or changed) while its request was
   // on its way acts as it is now, never as it was when the request began.
   const paired = pairedAtStart ? hub.auth.get(pairedAtStart.id) : null;
@@ -691,10 +699,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
-    const f = form?.get("file");
-    if (!(f instanceof Blob)) return bad("send the image as form field 'file'");
+    const bytes: Uint8Array | undefined = body?.__files?.file;
+    if (!bytes) return bad("send the image as form field 'file'");
     const agent = s.agent(String(form!.get("agent") ?? "")) ?? null;
-    const art = await hub.saveUpload(agent, new Uint8Array(await f.arrayBuffer()), {
+    const art = await hub.saveUpload(agent, bytes, {
       title: String(form!.get("title") ?? "Screenshot"),
       stage: form!.get("stage") === "mockup" ? "mockup" : "built",
       note: String(form!.get("note") ?? ""),
@@ -831,7 +839,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   // ---- profile photos ----
   m = path.match(/^\/people\/([\w-]+)\/photo$/);
   if (m && req.method === "POST") {
-    const bytes: Uint8Array = body?.__raw ?? (body?.__form?.get("file") instanceof Blob ? new Uint8Array(await (body.__form.get("file") as Blob).arrayBuffer()) : new Uint8Array());
+    const bytes: Uint8Array = body?.__raw ?? body?.__files?.file ?? new Uint8Array();
     return json(await hub.savePhoto(m[1], bytes));
   }
 
@@ -1024,9 +1032,23 @@ function originOf(req: Request, url: URL) {
  */
 async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) return req.json().catch(() => ({}));
-  if (type.includes("multipart/form-data")) return { __form: await req.formData().catch(() => new FormData()) };
-  const raw = new Uint8Array(await req.arrayBuffer().catch(() => new ArrayBuffer(0)));
+  // Reading fails (throws) when the body didn't arrive whole; api() then stops the request.
+  if (type.includes("application/json")) {
+    const text = await req.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {};
+    }
+  }
+  if (type.includes("multipart/form-data")) {
+    const form = await req.formData();
+    // A form's files are read into memory here too, so no route awaits bytes after the credential check.
+    const files: Record<string, Uint8Array> = {};
+    for (const [k, v] of form.entries() as Iterable<[string, unknown]>) if (v instanceof Blob && !(k in files)) files[k] = new Uint8Array(await v.arrayBuffer());
+    return { __form: form, __files: files };
+  }
+  const raw = new Uint8Array(await req.arrayBuffer());
   return raw.length ? { __raw: raw } : null;
 }
 

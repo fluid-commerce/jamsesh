@@ -194,9 +194,10 @@ test("a request whose credential is disconnected while its body is on its way ac
  * A request whose headers reach the host while its body is held. `reached` resolves once the host has checked its
  * credential (an observable point on the server, not a sleep); `send` delivers the body.
  */
-function holdBody(token: string, path: string, headers: Record<string, string>) {
+function holdBody(token: string, path: string, headers: Record<string, string>, method = "POST") {
   let send!: (body: string | Uint8Array) => void;
-  const body = new ReadableStream<Uint8Array>({ start: (c) => void (send = (b) => (c.enqueue(typeof b === "string" ? new TextEncoder().encode(b) : b), c.close())) });
+  let ctl!: ReadableStreamDefaultController<Uint8Array>;
+  const body = new ReadableStream<Uint8Array>({ start: (c) => void ((ctl = c), (send = (b) => (c.enqueue(typeof b === "string" ? new TextEncoder().encode(b) : b), c.close()))) });
   const check = hub.auth.check.bind(hub.auth);
   let seen!: () => void;
   const reached = new Promise<void>((r) => (seen = r));
@@ -205,8 +206,10 @@ function holdBody(token: string, path: string, headers: Record<string, string>) 
     if (t === token) ((hub.auth.check = check), seen());
     return d;
   }) as typeof hub.auth.check;
-  const response = fetch(`${base}/api${path}`, { method: "POST", headers: { ...remote, ...headers, authorization: `Bearer ${token}` }, body, duplex: "half" } as RequestInit);
-  return { reached, response, send };
+  // Only the content type given (none when none is): `remote`'s JSON type isn't inherited.
+  const sent = { "x-forwarded-for": remote["x-forwarded-for"], ...headers, authorization: `Bearer ${token}` };
+  const response = fetch(`${base}/api${path}`, { method, headers: sent, body, duplex: "half" } as RequestInit);
+  return { reached, response, send, sent, fail: () => ctl.error(new Error("connection dropped")) };
 }
 
 test("audio whose laptop is disconnected while its body is on its way is never heard, whatever its content type", async () => {
@@ -226,6 +229,7 @@ test("audio whose laptop is disconnected while its body is on its way is never h
       let rechecked = false;
       hub.auth.get = ((id: string | null | undefined) => (id === lap.device.id && (rechecked = true), get(id))) as typeof hub.auth.get;
       const h = holdBody(lap.token, `/audio?deviceId=${dev}&t0=${t0}&t1=${t0 + 3000}&epoch=0`, type);
+      expect(Object.keys(h.sent).filter((k) => k.toLowerCase() === "content-type")).toEqual(Object.keys(type));
       await h.reached;
       // Let the host run everything it can without the body (a few turns of its event loop).
       for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
@@ -295,4 +299,46 @@ test.skipIf(!voiceprintStatus().available)("a correction or Reset after a late c
   } finally {
     hub.audio.voiceprints.add = add as any;
   }
+});
+
+test("a photo or upload whose laptop is disconnected while its form is on its way saves nothing", async () => {
+  for (const path of ["photo", "upload"] as const) {
+    const p = hub.session.upsertPerson({ name: `Pia ${path}` });
+    const lap = browser("Pia's laptop");
+    expect((await call(lap.token, "POST", "/devices", { deviceId: `d-pia-${path}`, personId: p.id })).status).toBe(200);
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(2048).fill(9)], { type: "image/png" }), "a.png");
+    const encoded = new Response(form);
+    const bytes = new Uint8Array(await encoded.arrayBuffer());
+    let saved = 0;
+    const photo = hub.savePhoto.bind(hub);
+    const upload = hub.saveUpload.bind(hub);
+    (hub as any).savePhoto = async (...a: any[]) => (saved++, photo(...(a as [any, any])));
+    (hub as any).saveUpload = async (...a: any[]) => (saved++, upload(...(a as [any, any, any])));
+    try {
+      const h = holdBody(lap.token, path === "photo" ? `/people/${p.id}/photo` : "/upload", { "content-type": encoded.headers.get("content-type")! });
+      await h.reached;
+      hub.auth.revoke(lap.device.id);
+      h.send(bytes);
+      expect([path, (await h.response).status]).toEqual([path, 401]);
+      expect(saved).toBe(0);
+    } finally {
+      (hub as any).savePhoto = photo;
+      (hub as any).saveUpload = upload;
+    }
+  }
+});
+
+test("a request whose body doesn't arrive whole runs nothing: an interrupted Reset resets no voice", async () => {
+  const p = hub.session.upsertPerson({ name: "Cy" });
+  const lap = browser("Cy's laptop");
+  expect((await call(lap.token, "POST", "/devices", { deviceId: "d-cy", personId: p.id })).status).toBe(200);
+  const before = hub.session.store.voiceResetAt(p.id);
+  const h = holdBody(lap.token, `/people/${p.id}/voiceprint`, { "content-type": "application/octet-stream" }, "DELETE");
+  await h.reached;
+  h.fail();
+  const r = await h.response.catch(() => null);
+  if (r) expect(r.status).toBe(400);
+  await Bun.sleep(0);
+  expect(hub.session.store.voiceResetAt(p.id)).toBe(before);
 });
