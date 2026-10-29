@@ -21,14 +21,16 @@ const lineDelta = (e: WheelEvent) => (e.deltaMode === 1 ? 16 : e.deltaMode === 2
 
 export function DriveSurface({ screen = "main" }: { screen?: string }) {
   const box = useRef<HTMLDivElement>(null);
-  const [captured, setCaptured] = useState(false);
+  const [captured, setCapturedState] = useState(false);
   const [note, setNote] = useState("");
-  const st = useRef({ x: 0.5, y: 0.5, locked: false, drive: null as DriveHandle | null, pending: false, moves: 0 });
+  // Captured is read by event handlers that outlive a render, so it lives in the ref and the state only paints it.
+  const st = useRef({ x: 0.5, y: 0.5, locked: false, captured: false, drive: null as DriveHandle | null, pending: false });
 
   useEffect(() => {
     const el = box.current;
     if (!el) return;
     const s = st.current;
+    const setCaptured = (v: boolean) => ((s.captured = v), setCapturedState(v));
     let gone = false;
     let raf = 0;
     startDriving(screen).then(
@@ -56,10 +58,10 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
         const r = el.getBoundingClientRect();
         const p = travel(s, e.movementX, e.movementY, r.width, r.height);
         setPos(p.x, p.y);
-      } else if (captured) at(e);
+      } else if (s.captured) at(e);
     };
     const onDown = (e: PointerEvent) => {
-      if (!s.locked && !captured) {
+      if (!s.locked && !s.captured) {
         // First click captures the trackpad; it doesn't click through.
         el.focus();
         if (e.pointerType === "mouse" && typeof el.requestPointerLock === "function") {
@@ -77,18 +79,18 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
       e.preventDefault();
     };
     const onUp = (e: PointerEvent) => {
-      if (!s.locked && !captured) return;
+      if (!s.locked && !s.captured) return;
       flushMove();
       send({ k: "up", x: s.x, y: s.y, b: e.button, n: Math.max(1, e.detail) });
     };
     const onWheel = (e: WheelEvent) => {
-      if (!s.locked && !captured) return;
+      if (!s.locked && !s.captured) return;
       e.preventDefault();
       const k = lineDelta(e);
       send({ k: "wheel", x: s.x, y: s.y, dx: e.deltaX * k, dy: e.deltaY * k, ...(e.ctrlKey ? { ctrl: true } : {}) });
     };
     const onKey = (e: KeyboardEvent) => {
-      if (!s.locked && !captured) return;
+      if (!s.locked && !s.captured) return;
       if (e.key === "Escape" && !s.locked) {
         // Pointer Lock gives Esc to the browser; in the other mode it lets go.
         setCaptured(false);
@@ -134,7 +136,7 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
       if (document.pointerLockElement === el) document.exitPointerLock();
       s.drive?.send({ k: "leave" });
     };
-  }, [screen, captured]);
+  }, [screen]);
 
   return (
     <div ref={box} className={`drive-surface ${captured ? "captured" : ""}`} tabIndex={0} role="application" aria-label="Trackpad for the big screen" data-captured={captured ? "1" : "0"}>

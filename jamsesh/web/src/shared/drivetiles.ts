@@ -1,6 +1,6 @@
 // How the tiles the big screen already has take a driver's input (SPEC 10.6): a live build's frame gets the event posted into it
 // (the dev proxy's script replays it there), and the canvas takes pan, zoom and select through FigCraft's own commands.
-import { canvasHit, pageAt, readView, type CanvasView } from "./pointer";
+import { pageAt, readView, type CanvasView } from "./pointer";
 import type { DriveTarget, TileEvent } from "./driving";
 
 /** A frame from the dev proxy: post the event in, in fractions of the frame (the page script turns them into its own pixels). */
@@ -39,22 +39,27 @@ export function canvasDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
   let drag: { fx: number; fy: number; view: CanvasView | null; moved: boolean } | null = null;
   let dragAt: { fx: number; fy: number } | null = null;
 
+  const pending = () => !!((drag?.view && dragAt) || wheel.dx || wheel.dy || wheel.zoom !== 1);
+
+  // One pass at a time; input that arrives while FigCraft is answering is applied in the next pass, so a fast trackpad never queues up.
   const apply = async () => {
     if (busy) return;
     busy = true;
     try {
-      const f = figcraft(iframe);
-      // A drag asks for the page point it grabbed to stay under the cursor; a wheel moves the view by what it scrolled.
-      if (drag?.view && dragAt && f) {
-        const v = drag.view;
-        const [at, was] = [dragAt, drag];
-        await f.execute("view.set", { cx: v.cx - ((at.fx - was.fx) * v.vw) / v.zoom, cy: v.cy - ((at.fy - was.fy) * v.vh) / v.zoom });
-      }
-      const w = wheel;
-      if ((w.dx || w.dy || w.zoom !== 1) && f) {
-        wheel = { dx: 0, dy: 0, zoom: 1, fx: w.fx, fy: w.fy };
-        const v = await readView(iframe);
-        if (v) {
+      for (let i = 0; i < 100 && pending(); i++) {
+        const f = figcraft(iframe);
+        if (!f) break;
+        // A drag keeps the page point it grabbed under the cursor; a wheel moves the view by what it scrolled.
+        if (drag?.view && dragAt) {
+          const [v, at, was] = [drag.view, dragAt, drag];
+          dragAt = null;
+          await f.execute("view.set", { cx: v.cx - ((at.fx - was.fx) * v.vw) / v.zoom, cy: v.cy - ((at.fy - was.fy) * v.vh) / v.zoom });
+        }
+        const w = wheel;
+        if (w.dx || w.dy || w.zoom !== 1) {
+          wheel = { dx: 0, dy: 0, zoom: 1, fx: w.fx, fy: w.fy };
+          const v = await readView(iframe);
+          if (!v) continue;
           const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v.zoom * w.zoom));
           const under = pageAt(v, w.fx, w.fy);
           // Zooming keeps the page point under the cursor where it was; panning moves the centre by the scrolled distance.
@@ -67,7 +72,6 @@ export function canvasDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
     } finally {
       busy = false;
     }
-    if (wheel.dx || wheel.dy || wheel.zoom !== 1 || (drag?.moved && dragAt)) void apply();
   };
 
   return (ev: TileEvent) => {
@@ -92,13 +96,14 @@ export function canvasDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
       const was = drag;
       drag = dragAt = null;
       if (was.moved) return;
-      // A click: select the frame or layer under the cursor (nothing under it clears the selection).
-      void canvasHit(iframe, ev.lx, ev.ly, was.view).then((hit) => {
-        const f = figcraft(iframe);
-        if (!f) return;
-        const ids = hit?.nodeId ? [Number.isFinite(Number(hit.nodeId)) ? Number(hit.nodeId) : hit.nodeId] : [];
-        void (ids.length ? f.execute("select.set", { ids }) : f.execute("select.none", {})).catch(() => {});
-      });
+      // A click goes to FigCraft as a real pointer click at that page point, so it selects what a click selects (frames, groups, shift
+      // aside); a second click of a double is FigCraft's own double-click.
+      const kind = ev.n === 2 ? "double" : "click";
+      void (async () => {
+        const v = was.view ?? (await readView(iframe));
+        const f = (iframe.contentWindow as any)?.figcraft as { request(m: string, p?: unknown): Promise<unknown> } | undefined;
+        if (v && f) await f.request("ui.pointer", { kind, ...pageAt(v, ev.lx, ev.ly) }).catch(() => {});
+      })();
     }
   };
 }

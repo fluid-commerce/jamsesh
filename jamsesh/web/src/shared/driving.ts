@@ -53,6 +53,11 @@ export function driverState(screen = "main", state: HubState | null = hub.get().
   };
 }
 
+/** Whether anyone is driving any screen right now. */
+export function anyoneDriving(state: HubState | null = hub.get().state): boolean {
+  return !!state?.stage.lock?.drivers?.length || !!state?.screens?.some((s) => s.stage.lock?.drivers?.length);
+}
+
 export function useDriverState(screen = "main"): DriverState {
   const { state } = useHub();
   return driverState(screen, state);
@@ -140,5 +145,7 @@ export function targetAt(within: Element, x: number, y: number): DriveTarget | n
 
 /** Register an element for the lifetime of a component. */
 export function useDriveTarget(el: HTMLElement | null | undefined, handle: DriveTarget["handle"] | null) {
-  useEffect(() => (el && handle ? registerDriveTarget(el, handle) : undefined), [el, handle]);
+  useEffect(() => {
+    if (el && handle) return registerDriveTarget(el, handle);
+  }, [el, handle]);
 }

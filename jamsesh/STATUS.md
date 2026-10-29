@@ -77,6 +77,17 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | A rebuilt screen is one item with versions; "v3 · 2 min ago" badge opens the earlier builds; the screen swaps in place | Simulated | Uploads through the same path as `jam_post_image`; badge and version viewer checked in a screenshot. |
 | What each screen showed is kept; tapping the strip or "bring back what Jonathan had up" restores it | Simulated | Strip checked in the client window. The brain's tool is tested without a model; not tried with the live gateway. |
 
+## Driving the big screen (6.1)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Drive, Pass control, Drive together; agents, non-owners, stale drivers refused | Simulated | Real hub, a host window and paired driver windows in headless Chromium; unit tests for every refusal. |
+| Your named dart on the big screen, gliding, over a live build and over the canvas | Simulated | Seen in screenshots; geometry and tag style from FigCraft's `live.rs`. Not compared side by side with a live FigCraft cursor (the headless canvas never drew a peer's cursor). |
+| Click, scroll and type in a proxied live build | Simulated | Clicks, wheel (box and page), typing, Backspace, link navigation land. Hover styles (`:hover`) don't apply to synthetic events. |
+| Canvas: wheel pans, pinch zooms, drag pans, click selects | Simulated | Against a real figcraft-server; click uses FigCraft's own `ui.pointer`. Typing on the canvas isn't driven. |
+| Trackpad with Pointer Lock (relative motion) | Not tested for real | Headless Chromium refuses Pointer Lock; the relative path ran against a stand-in. Needs the Mac app (WKWebView may lack Pointer Lock; it then falls back to mapping over the mirror). |
+| Real trackpad feel, latency over Wi-Fi | Not tested | Loopback latency was under 1 ms; about 55 moves a second. |
+
 ## Phones and browsers
 
 | Capability | Status | Notes |

@@ -338,7 +338,7 @@ export function cleanDrive(ev: any): DriveEvent | null {
  * A driver's input from their window's WebSocket (6.1). The person is whoever this window is paired as (or the host's own window),
  * never what the message says; agents have no window here. Anyone not driving this screen is dropped, with a note once a second.
  */
-function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
+export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
   const s = hub.session;
   const now = Date.now();
   if (!ws.data.driveWindow || now - ws.data.driveWindow >= 1000) ((ws.data.driveWindow = now), (ws.data.driveCount = 0));

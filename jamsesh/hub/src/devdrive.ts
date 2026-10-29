@@ -6,7 +6,8 @@ import { createHash } from "node:crypto";
 
 export const DRIVE_SCRIPT = `(function(){
 if(window.__jamDrive||window.parent===window)return;window.__jamDrive=1;
-function ok(o){try{var h=new URL(o).hostname,l=location.hostname;return h===l||l.slice(-h.length-1)==='.'+h}catch(e){return false}}
+function lo(h){return /^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/.test(h)?'loopback':h}
+function ok(o){try{var h=lo(new URL(o).hostname),l=lo(location.hostname);return h===l||l.slice(-h.length-1)==='.'+h}catch(e){return false}}
 var over=null,downEl=null,btns=0;
 function pt(e){var x=e.x*innerWidth,y=e.y*innerHeight;return{x:x,y:y,el:document.elementFromPoint(x,y)||document.body}}
 function opts(p,b,extra){var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:p.x,clientY:p.y,screenX:p.x,screenY:p.y,button:b||0,buttons:btns,pointerId:1,pointerType:'mouse',isPrimary:true};for(var k in extra)o[k]=extra[k];return o}
