@@ -124,7 +124,9 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   }
   bus.send({ type: "speak", audio: null, mime: "", text: words });
   const mac = process.platform === "darwin";
-  if (mac && process.env.JAMSESH_SILENT !== "1") {
+  // Tests never talk out loud: bun test sets NODE_ENV=test, and hubs they spawn inherit it.
+  const silent = process.env.JAMSESH_SILENT === "1" || process.env.NODE_ENV === "test";
+  if (mac && !silent) {
     Bun.spawn(["say", words], { stdout: "ignore", stderr: "ignore" });
   }
   // Said in a worse voice than the room chose: tell them why, once in a while.
