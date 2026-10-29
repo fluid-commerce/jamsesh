@@ -205,7 +205,8 @@ refactors, fixes and tooling never coordinate. (That needs the brain online. If 
 1. `jam_message` the other agent: does the feature exist on your side, and does it match? Say
    what has to differ for the platform.
 2. Build only if you both confirm a gap; then post its screenshot. Otherwise `jam_ack` it done
-   with what you found.
+   with what you found. It closes only that way, after the other agent has replied (a `jam_update`
+   never closes it); if nobody answers, `jam_ack` it cancelled and say why.
 3. Compare both renders. Fix inconsistencies that aren't deliberate platform differences.
 4. `jam_show` with mode `parity` and columns for each platform, then `jam_update` with `shipped`
    naming both sides.
