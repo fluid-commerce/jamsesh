@@ -750,7 +750,7 @@ function modeHint(mode: Directive["mode"]) {
     case "implement":
       return "Implement in your repository. Run the dev server (jam_devserver), screenshot the build at the mockup's size, compare with canvas_render of the mockup, fix differences, then post the screenshot and jam_update shipped.";
     case "coordinate":
-      return "Align with the named agents through jam_message. Agree on the behavior, implement your side, post renders, and compare side by side with jam_show parity.";
+      return "Compare with the named agents through jam_message: what each of you has, and what should match. Change code only for a gap you both confirm, then post renders and compare side by side with jam_show parity.";
     case "note":
       return "Write it down where the room said (or a notes file in your repo if it didn't). No code changes beyond that, no canvas, no dev server.";
     case "answer":

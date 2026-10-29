@@ -897,7 +897,7 @@ export class Brain {
     void this.consider(
       `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
         `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
-        `Every agent can already read this in jam_context ("Recently shipped"); a directive lands in an inbox as work. Commits, refactors, fixes, tooling and changes marked as one platform's never reach you. So a user-visible feature or screen here is a parity question by default: call coordinate_parity naming the feature and the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). Call no_action only when nothing in it is something a person sees, or it plainly can't exist on the other platforms.`,
+        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. coordinate_parity sends a parity check, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it when the shipper's text names something a person sees (a screen, control, flow or visible behavior), saying what that is in 'seen', with the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). When the text names nothing a person sees, call no_action.`,
       "agent",
       this.parityTools(batch),
     );
@@ -909,13 +909,15 @@ export class Brain {
     const open = (id: string) => s.directives().some((d) => d.mode === "coordinate" && d.targets.includes(id) && d.status !== "done" && d.status !== "cancelled" && Date.now() - d.ts < 10 * 60_000);
     return {
       coordinate_parity: tool({
-        description: "Ask the shipping agents and the apps on the named platforms to align one user-visible feature. Each gets one 'coordinate' directive.",
+        description: "Send a parity check about one user-visible feature: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
           feature: z.string().describe("The user-visible feature or screen, as a person would name it"),
+          seen: z.string().describe("What a person sees of it, from the shipper's text (a screen, control, flow or visible behavior)"),
           shippedBy: z.array(z.string()).describe("Ids from 'Shipped just now' of the agents that shipped it"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
-        execute: async ({ feature, shippedBy, platforms }) => {
+        execute: async ({ feature, seen, shippedBy, platforms }) => {
+          if (!seen.trim()) return refuse("The shipped text names nothing a person sees: call no_action.");
           const shippers = batch.map((b) => b.agent).filter((a) => shippedBy.includes(a.id));
           if (!shippers.length) return refuse("Name the shipping agents by id from 'Shipped just now'.");
           const made = new Set(shippers.map((a) => a.platform));
@@ -929,8 +931,8 @@ export class Brain {
             const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
             s.createDirective({
               text: shippers.includes(a)
-                ? `${feature}: you shipped it on ${a.platform}. ${mates} should match it. Answer their questions with jam_message and post a render of yours so the platforms stay consistent, apart from deliberate platform differences.`
-                : `${feature} shipped on ${[...made].join(" and ")} by ${by}. Check whether the ${a.platform} app has it and matches. If it belongs here and is missing or different, build it adapted to ${a.platform}, aligning with ${mates} through jam_message and posting renders.`,
+                ? `Parity check, not a build task: you shipped ${feature} on ${a.platform} (${seen.trim()}). ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
+                : `Parity check, not a build task: ${by} shipped ${feature} on ${[...made].join(" and ")} (${seen.trim()}). Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
               mode: "coordinate",
               targets: [a.id],
               requestedBy: "JamSesh",
@@ -938,7 +940,7 @@ export class Brain {
             });
             sent.push(a.name);
           }
-          return sent.length ? `Asked ${sent.join(", ")} to align.` : "Each of them already has an open coordinate directive.";
+          return sent.length ? `Sent ${sent.join(", ")} a parity check.` : "Each of them already has an open coordinate directive.";
         },
       }),
       no_action: tool({ description: "Nothing for other platforms to do.", inputSchema: z.object({ reason: z.string() }), execute: async () => "ok" }),
@@ -1355,6 +1357,7 @@ How to route:
 - Decide between EXPLORE and IMPLEMENT. "Try", "what if", "show me options", "mock up", "let's see a few directions" = explore: the agent makes variants on the shared canvas, named "<Workstream> / <Letter>: <short description>". "Let's do it", "build it", "ship B", "implement that", "do it for real", "in the app" = implement: the agent changes code in its repository, runs its dev server, and checks the build against the chosen mockup.
 - NOTE is a third kind of work: "write that down", "log these pain points", "keep a record of", "add that to the doc/notes". Send mode 'note' (not implement) with the content to record and where it goes if the room said; the agent writes it and does not build, run a dev server or draw on the canvas.
 - Keep similar work with the agent that already has its context. Check "Agent work history" and "Best matches": a follow-up, tweak, or new variant of something an agent already worked on goes to that agent, even if another agent is idle. Never split one request between agents in the same repository; JamSesh keeps only the one with the most related history. Fan a request out only when it spans different repositories or platforms. Give genuinely new work to the agent whose repository it belongs in, preferring one with fewer unfinished directives.
+- A 'coordinate' directive about something an agent shipped is a check, not build work: the other platform's agent compares (does this exist on our side, and does it match?), agrees with the shipper through jam_message, and builds only if both confirm a gap. Shipped news that names nothing a person sees gets no directive.
 - Agents work as a team. When two agents touch related work (the same feature on desktop and mobile, a component and the screen that uses it, a design system and the apps), use pair_agents so they compare and align instead of diverging. When variants from several agents land on the same theme, pair them to review each other's work before the room decides. Use ask_agent when you need a fact only an agent knows (what's in its repo) to route well.
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.
 - When people disagree, weigh by role weight (higher wins) and say whose call it was in the rationale. Don't silently drop the other view: mention it.
