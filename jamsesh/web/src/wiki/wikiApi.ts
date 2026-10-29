@@ -1,6 +1,6 @@
 // The wiki's routes, through the same api() helper every button uses. People only: an agent's credential gets 403.
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, hub } from "../shared/hub";
+import { api, hub, type WikiMeta } from "../shared/hub";
 import { asCategory, type LogEntry, type PageMeta, type RawGraph, type SearchHit, type SourceText, type WikiPage } from "./types";
 import { pulses } from "./pulse";
 import { shapeGraph, type Graph } from "./graph";
@@ -32,7 +32,7 @@ export const wikiApi = {
   log: async (): Promise<LogEntry[]> => (await api<{ entries: LogEntry[] }>("/wiki/log", undefined, undefined, NOW)).entries ?? [],
   source: (id: string): Promise<SourceText> => api(`/wiki/source/${enc(id)}`, undefined, undefined, NOW),
   /** The whole of a change a wiki card shows part of. */
-  fullChange: (cardId: string, slug: string): Promise<{ diff: string; added: number; removed: number }> => api(`/wiki/proposal/${enc(cardId)}/${enc(slug)}`, undefined, undefined, NOW),
+  fullChange: (cardId: string, slug: string): Promise<{ diff: string; added: number; removed: number; meta?: WikiMeta }> => api(`/wiki/proposal/${enc(cardId)}/${enc(slug)}`, undefined, undefined, NOW),
   addSource: (body: { title?: string; text?: string; url?: string; attachment?: string }) => api<{ ok: boolean; source: { id: string } }>("/wiki/sources", body, "POST", NOW),
 };
 

@@ -323,8 +323,13 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           sockets.get(ws.data.deviceId)?.delete(ws);
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
-            s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
-            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id);
+            // A window closing while the room shuts down finds the store sealed: nothing left to tidy.
+            try {
+              s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
+              for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id);
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException)?.code !== "ESEALED") throw e;
+            }
           }
         }
       },

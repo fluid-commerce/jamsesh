@@ -265,11 +265,14 @@ export class Hub {
     // First of all, close every way in: requests that would add something are refused, and the brain takes no new pass.
     this.closing = true;
     this.brain.stop();
-    // Then what is already under way finishes: requests being answered, speech still waiting to be transcribed (now, not
-    // on its timer), the brain's pass. The local whisper stops only after it.
+    // Then what is already under way finishes, in this order: requests being answered (an upload still sending its body adds speech
+    // when it lands), then the speech waiting to be transcribed (now, not on its timer) and the brain's pass. The local whisper
+    // stops only after all of it. One deadline covers the lot.
+    const until = Date.now() + Hub.SHUTDOWN_WAIT_MS;
+    const admitted = await this.quiet(until - Date.now());
     void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
     void this.track(this.brain.idle());
-    if (!(await this.quiet(Hub.SHUTDOWN_WAIT_MS))) console.warn("Still working at shutdown: anything it adds now is refused.");
+    if (!(await this.quiet(until - Date.now())) || !admitted) console.warn("Still working at shutdown: anything it adds now is refused.");
     this.transcriber.stop();
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);

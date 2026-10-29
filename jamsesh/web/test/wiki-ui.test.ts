@@ -10,9 +10,9 @@ import { api } from "../src/shared/hub";
 import { wikiApi } from "../src/wiki/wikiApi";
 import { shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
-import { onRefresh, saveRev } from "../src/wiki/draft";
+import { mayLeave, onRefresh, saveRev } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
-import { diffView } from "../src/wiki/WikiCard";
+import { diffView, metaLine } from "../src/wiki/WikiCard";
 import { cutDiff, lineDiff } from "../../hub/src/wiki/diff";
 import { listPages, readPage, readState, writeState } from "../../hub/src/wiki/files";
 import { bus } from "../../hub/src/bus";
@@ -283,4 +283,23 @@ test("a card's cut change is fetched whole through the client's api(): every add
   expect(diffView(full.diff, true).lines.filter((l) => l.startsWith("+new-"))).toHaveLength(701);
   expect(full).toMatchObject({ added: 701, removed: 701 });
   await expect(wikiApi.fullChange(card.id, "nope")).rejects.toBeTruthy();
+});
+
+test("leaving a page with unsaved text asks first; a clean page, or a yes, lets go", () => {
+  let asked = 0;
+  const no = () => (asked++, false);
+  const yes = () => (asked++, true);
+  expect(mayLeave(false, no)).toBe(true);
+  expect(asked).toBe(0);
+  expect(mayLeave(true, no)).toBe(false);
+  expect(mayLeave(true, yes)).toBe(true);
+  expect(asked).toBe(2);
+});
+
+test("the card says how a page is filed, as far as the change alters it", () => {
+  expect(metaLine(undefined)).toBe("");
+  expect(metaLine({ from: { category: "topics", workstreams: [] }, to: { category: "topics", workstreams: [] } })).toBe("");
+  expect(metaLine({ from: { category: "topics", workstreams: [] }, to: { category: "decisions", workstreams: ["billing"] } })).toBe("Filed under Decisions (was Topics). Workstreams: billing (was none).");
+  expect(metaLine({ from: { category: "topics", workstreams: ["a"] }, to: { category: "topics", workstreams: [] } })).toBe("Workstreams: none (was a).");
+  expect(metaLine({ to: { category: "people", workstreams: ["x", "y"] } })).toBe("Filed under People. Workstreams: x, y.");
 });

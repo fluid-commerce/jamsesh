@@ -11,7 +11,7 @@ import { bus } from "../bus";
 import { newId } from "../store";
 import type { ProjectContext } from "../carryover";
 import type { Session } from "../session";
-import type { JamEvent, TriageCard, WikiCardPayload, WikiChange } from "../types";
+import type { JamEvent, TriageCard, WikiCardPayload, WikiChange, WikiMeta } from "../types";
 import { cutDiff, diffStats, lineDiff } from "./diff";
 import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
@@ -118,7 +118,7 @@ export interface IngestResult {
 
 /** A card's changes, kept in the project's folder (not the session's board) so a later session can still approve them. */
 interface Proposal {
-  changes: { slug: string; category: Category; workstreams: string[]; body: string; sources: string[]; baseRev: string; /** The page as the model was shown it: the card's whole diff is made from this, whatever the page becomes. */ before?: string }[];
+  changes: { slug: string; category: Category; workstreams: string[]; body: string; sources: string[]; baseRev: string; /** The page as the model was shown it: the card's whole diff is made from this, whatever the page becomes. */ before?: string; /** How the page was filed when it was proposed. */ beforeMeta?: { category: Category; workstreams: string[] } }[];
   sources: string[];
   /** The card as it was raised, to raise it again on a later session's board. */
   card?: WikiCardPayload;
@@ -141,9 +141,12 @@ interface Proposal {
 export function projectRoot(dir: string, trusted?: string): string {
   const path = resolve(dir);
   const refuse = () => new Error(`The wiki folder ${path} is a link or sits behind one; JamSesh won't use it.`);
+  // The parent is checked against `trusted` before anything is made: a path outside it is refused, not created.
+  const root = trusted && resolve(trusted);
+  if (root && dirname(path) !== root) throw refuse();
   mkdirSync(dirname(path), { recursive: true });
   const parent = realpathSync(dirname(path));
-  if (trusted && parent !== realpathSync(trusted.startsWith("/") ? trusted : resolve(trusted))) throw refuse();
+  if (root && parent !== realpathSync(root)) throw refuse();
   try {
     if (lstatSync(path).isSymbolicLink()) throw refuse();
   } catch (e) {
@@ -568,10 +571,10 @@ export class WikiService {
   }
 
   /** Records a page as the wiki knows it and closes the intent that wrote it. Throws when the state can't be saved: nothing carries on as if it had been. */
-  private markSeen(p: { slug: string; rev: string; mtime: number }) {
+  private markSeen(p: { slug: string; rev: string }) {
     const st = readState(this.dir);
     if (st.own?.slug === p.slug) delete st.own;
-    if (st.seen) st.seen[p.slug] = { mtime: Math.floor(p.mtime), rev: p.rev };
+    if (st.seen) st.seen[p.slug] = { rev: p.rev };
     writeState(this.dir, st);
   }
 
@@ -580,7 +583,7 @@ export class WikiService {
     if (!st.own) return st;
     const { own, ...rest } = st;
     const page = readPage(this.dir, own.slug);
-    return page && page.rev === own.rev && rest.seen ? { ...rest, seen: { ...rest.seen, [page.slug]: { mtime: Math.floor(page.mtime), rev: page.rev } } } : rest;
+    return page && page.rev === own.rev && rest.seen ? { ...rest, seen: { ...rest.seen, [page.slug]: { rev: page.rev } } } : rest;
   }
 
   /** A hand change the last pass was filing when it stopped: if its source is there it was filed and is recorded now; if not, it is found again. */
@@ -590,7 +593,7 @@ export class WikiService {
     if (!readSource(this.dir, filing.id) || !rest.seen) return rest;
     const seen = { ...rest.seen };
     if (filing.rev.startsWith("gone-")) delete seen[filing.slug];
-    else seen[filing.slug] = { mtime: Math.floor(readPage(this.dir, filing.slug)?.mtime ?? 0), rev: filing.rev };
+    else seen[filing.slug] = { rev: filing.rev };
     return { ...rest, seen };
   }
 
@@ -635,15 +638,14 @@ export class WikiService {
         here.add(page.slug);
         const known = base[page.slug];
         if (known?.rev === page.rev) continue;
-        const mtime = Math.floor(info.mtime);
         if (first) {
-          base[page.slug] = { mtime, rev: page.rev };
+          base[page.slug] = { rev: page.rev };
           continue;
         }
         this.fileHandChange(page.slug, page.rev, `Edit to ${page.title} (${page.slug})`, `Someone ${known ? "changed" : "wrote"} the page "${page.slug}" by hand in the vault. It now reads:\n\n${page.markdown.trim()}`, (seen) => {
-          seen[page.slug] = { mtime, rev: page.rev };
+          seen[page.slug] = { rev: page.rev };
         });
-        base[page.slug] = { mtime, rev: page.rev };
+        base[page.slug] = { rev: page.rev };
         touched.push(page.slug);
       }
       if (first) writeState(this.dir, { ...readState(this.dir), seen: base });
@@ -822,9 +824,11 @@ export class WikiService {
       const baseRev = shown.get(slug)?.rev ?? "";
       // The text the model was shown, so the diff says what its answer changes even if the page moved on during the call.
       const before = shown.get(slug)?.markdown.trim() ?? cur?.markdown.trim() ?? "";
-      prop.changes.push({ slug, category, workstreams: p.workstreams.slice(0, 12), body, sources, baseRev, before });
+      const workstreams = p.workstreams.slice(0, 12);
+      const beforeMeta = cur ? { category: cur.category, workstreams: cur.frontMatter.workstreams } : undefined;
+      prop.changes.push({ slug, category, workstreams, body, sources, baseRev, before, ...(beforeMeta ? { beforeMeta } : {}) });
       const { text: diff, cut } = cutDiff(before, body, CARD_DIFF_MAX);
-      changes.push({ slug, title: p.title || cur?.title || slug, category, op: cur ? "update" : "create", diff, ...(cut ? { cut } : {}), stale: (cur?.rev ?? "") !== baseRev, ...diffStats(before, body) });
+      changes.push({ slug, title: p.title || cur?.title || slug, category, op: cur ? "update" : "create", diff, ...(cut ? { cut } : {}), stale: (cur?.rev ?? "") !== baseRev, ...diffStats(before, body), meta: { ...(beforeMeta ? { from: beforeMeta } : {}), to: { category, workstreams } } });
     }
     // Only a page that could be shown whole next time is worth another pass; one too big to show is let go.
     const needs = [...unseen].filter((slug) => (readPage(this.dir, slug)?.markdown.length ?? Infinity) <= MAX_EXISTING_CHARS);
@@ -979,12 +983,14 @@ export class WikiService {
   }
 
   /** The whole change a card shows part of: the page now against the proposed text, with nothing cut. */
-  fullDiff(cardId: string, slug: string): { diff: string; added: number; removed: number } | null {
+  fullDiff(cardId: string, slug: string): { diff: string; added: number; removed: number; meta: WikiMeta } | null {
     const c = this.loadProposal(cardId)?.changes.find((x) => x.slug === slug);
     if (!c) return null;
     // The diff stored with the proposal (against the page as proposed), so it can't disagree with the card after a later edit. An older proposal without it falls back to the page now.
-    const before = c.before ?? readPage(this.dir, slug)?.markdown.trim() ?? "";
-    return { diff: lineDiff(before, c.body), ...diffStats(before, c.body) };
+    const cur = readPage(this.dir, slug);
+    const before = c.before ?? cur?.markdown.trim() ?? "";
+    const from = c.beforeMeta ?? (cur ? { category: cur.category, workstreams: cur.frontMatter.workstreams } : undefined);
+    return { diff: lineDiff(before, c.body), ...diffStats(before, c.body), meta: { ...(from ? { from } : {}), to: { category: c.category, workstreams: c.workstreams } } };
   }
 
   private llmDecide(): Decider | null {

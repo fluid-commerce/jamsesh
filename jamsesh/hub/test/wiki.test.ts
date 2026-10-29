@@ -10,7 +10,7 @@ import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
 import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
-import { WikiService, ingestPrompt, type Decider } from "../src/wiki/service";
+import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
 import { encodeWav } from "../src/audio/wav";
 
 process.env.JAMSESH_SILENT = "1";
@@ -37,7 +37,7 @@ function room() {
 /** Pages a test put in the vault with writePage are the wiki's own: recorded as known, so they aren't taken for hand edits. */
 const adopt = (dir: string) => {
   const st = readState(dir);
-  st.seen = Object.fromEntries(listPages(dir).map((i) => [i.slug, { mtime: Math.floor(i.mtime), rev: readPage(dir, i.slug)!.rev }]));
+  st.seen = Object.fromEntries(listPages(dir).map((i) => [i.slug, { rev: readPage(dir, i.slug)!.rev }]));
   writeState(dir, st);
 };
 
@@ -1831,7 +1831,6 @@ test("a hand edit that keeps the page's file time is still filed", () => {
   const { atime, mtime } = statSync(file);
   writeFileSync(file, readFileSync(file, "utf8").replace("Before.", "After, same time."));
   utimesSync(file, atime, mtime);
-  expect(Math.floor(statSync(file).mtimeMs)).toBe(readState(dir).seen!["kept-time"]!.mtime);
   expect(w.syncVault()).toEqual(["kept-time"]);
   expect(handEdits(dir).filter((e) => e.text.includes("After, same time."))).toHaveLength(1);
   expect(w.syncVault()).toEqual([]);
@@ -2054,6 +2053,106 @@ test("past shutdown's wait the store is sealed: a late request is refused with 5
     expect(() => r.s.store.put("people", { ...r.chey })).toThrow("closed"); // the team store too
   } finally {
     Hub.SHUTDOWN_WAIT_MS = wait;
+    server.stop(true);
+  }
+}, 30_000);
+
+test("the card and the full change say how a page is filed: a metadata-only change is not an empty approval", async () => {
+  const { w, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  w.addSource("document", "Pricing", "We decided pricing: two tiers.", "Chey");
+  w.decide = (async () => ({ summary: "Pricing is a decision", pages: [{ ...page("pricing", "Pricing", "decision", "Two tiers."), workstreams: ["billing"] }] })) as Decider;
+  const card = (await w.tick())!.card!;
+  const c = card.wiki!.changes[0]!;
+  expect(c.diff.split("\n").some((l) => l.startsWith("+") || l.startsWith("-"))).toBe(false); // the text is the same
+  expect(c.meta).toEqual({ from: { category: "topics", workstreams: [] }, to: { category: "decisions", workstreams: ["billing"] } });
+  expect(w.fullDiff(card.id, "pricing")!.meta).toEqual(c.meta!);
+  // A page that moved on before the full change is asked for still shows how it was filed when proposed.
+  writePage(dir, "pricing", "# Pricing\n\nThree tiers.", { category: "topics", workstreams: ["other"] });
+  expect(w.fullDiff(card.id, "pricing")!.meta.from).toEqual({ category: "topics", workstreams: [] });
+});
+
+test("a state file from before the file time was dropped is read, and saved without it", () => {
+  const { dir } = room();
+  const st = JSON.parse(readFileSync(join(dir, ".wiki-state.json"), "utf8"));
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify({ ...st, seen: { old: { mtime: 5, rev: "abc" } } }));
+  expect(readState(dir).seen).toEqual({ old: { rev: "abc" } });
+  writeFileSync(join(dir, ".wiki-state.json"), JSON.stringify({ ...st, seen: { bad: { mtime: -1, rev: "abc" } } }));
+  expect(() => readState(dir)).toThrow();
+});
+
+test("the project folder is checked against the projects folder before anything is made", () => {
+  const base = join(root, `trust-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(base);
+  const trusted = join(base, "projects");
+  mkdirSync(trusted);
+  const elsewhere = join(base, "elsewhere", "deeper");
+  expect(() => projectRoot(join(elsewhere, "proj"), trusted)).toThrow("link");
+  expect(existsSync(join(base, "elsewhere"))).toBe(false); // refused, not created
+  expect(() => projectRoot(join(trusted, "nested", "proj"), trusted)).toThrow("link");
+  expect(existsSync(join(trusted, "nested"))).toBe(false);
+  expect(projectRoot(join(trusted, "proj"), trusted)).toBe(realpathSync(join(trusted, "proj")));
+});
+
+/** A raw POST whose body is held back, as `heldPost` but for bytes. */
+async function heldBytes(port: number, path: string, type: string, body: Uint8Array, cookie: string) {
+  const sock = connect(port, "127.0.0.1");
+  await new Promise((res) => sock.once("connect", res));
+  let got = "";
+  sock.on("data", (d) => (got += d));
+  const closed = new Promise((res) => sock.once("close", res));
+  sock.write(Buffer.concat([Buffer.from(`POST ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: ${type}\r\nCookie: ${cookie}\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`), Buffer.from(body.slice(0, 100))]));
+  await Bun.sleep(150);
+  return {
+    async finish() {
+      sock.write(Buffer.from(body.slice(100)));
+      await closed;
+      return Number(got.split(" ")[1]);
+    },
+  };
+}
+
+test("shutdown waits for an audio upload still sending: its speech is transcribed and lands before the final capture", async () => {
+  const { hub, s, chey, dir } = room();
+  const server = startHttp(hub, 0);
+  try {
+    s.touchDevice("cheyLaptop", { personId: chey.id, location: "room", micOn: true });
+    (hub.transcriber as any).transcribe = async () => ({ text: "words from the slow upload", engine: "fake" });
+    const cookie = `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
+    const t = Date.now() - 3000;
+    const held = await heldBytes(server.port!, `/api/audio?deviceId=cheyLaptop&t0=${t}&t1=${t + 2000}&level=-25&noise=-55`, "audio/wav", tone(2), cookie);
+    const done = hub.shutdown();
+    const state = flag(done);
+    await Bun.sleep(200);
+    expect(state.done).toBe(false); // waiting on the upload
+    expect(await held.finish()).toBe(200);
+    await done;
+    expect(s.store.eventsAfter(0).some((e) => e.text.includes("slow upload"))).toBe(true);
+    expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).toContain("slow upload");
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("a window closing after the store is sealed is let go without an error", async () => {
+  const { hub } = room();
+  const server = startHttp(hub, 0);
+  const errors: unknown[] = [];
+  const catcher = (e: unknown) => void errors.push(e);
+  process.on("uncaughtException", catcher);
+  try {
+    const agent = hub.auth.issue({ kind: "agent", label: "Agents", ip: "9.9.9.9", ownerDeviceId: "host" });
+    const sock = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=closing-sock`, { headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${agent.token}`, origin: `http://127.0.0.1:${server.port}` } } as any);
+    await new Promise((res) => (sock.onopen = res));
+    await hub.shutdown(); // the store is sealed; the server is still up
+    const closed = new Promise((res) => (sock.onclose = res));
+    sock.close();
+    await closed;
+    await Bun.sleep(150);
+    expect(errors).toEqual([]);
+  } finally {
+    process.off("uncaughtException", catcher);
     server.stop(true);
   }
 }, 30_000);

@@ -584,8 +584,8 @@ export interface WikiState {
   queued?: { kind: SourceKind; title: string; text: string; by: string }[];
   /** Existing pages the model asked to change without having been shown them whole: the next ingest shows these first. */
   need?: string[];
-  /** Each page as the wiki last knew it (file time and hash): a page that differs was changed by hand in the vault. Absent until the first look, which only records. */
-  seen?: Record<string, { mtime: number; rev: string }>;
+  /** Each page as the wiki last knew it (its hash): a page that differs was changed by hand in the vault. Absent until the first look, which only records. */
+  seen?: Record<string, { rev: string }>;
   /** The wiki's own page write in progress (the page and the hash of the bytes it will hold), recorded before the write so a crash can't make it look like a hand edit. */
   own?: { slug: string; rev: string };
   /** The hand change being filed as a source (page, hash, the source's id), recorded before filing so a retry files nothing twice. */
@@ -616,7 +616,9 @@ function parseState(j: unknown): WikiState {
   const partial = recOf(j.partial, (x): x is { id: number; off: number } => isRec(x) && isNat(x.id) && isNat(x.off));
   const queued = j.queued;
   if (queued !== undefined && !(Array.isArray(queued) && queued.every((q) => isRec(q) && KINDS.includes(q.kind as string) && typeof q.title === "string" && typeof q.text === "string" && typeof q.by === "string"))) throw new Error("bad queue");
-  const seen = recOf(j.seen, (x): x is { mtime: number; rev: string } => isRec(x) && isNat(x.mtime) && typeof x.rev === "string");
+  // A state written before the file time was dropped still carries it: read, then left out.
+  const seenRaw = recOf(j.seen, (x): x is { rev: string } => isRec(x) && typeof x.rev === "string" && (x.mtime === undefined || isNat(x.mtime)));
+  const seen = seenRaw && Object.fromEntries(Object.entries(seenRaw).map(([k, v]) => [k, { rev: v.rev }]));
   const pair = <T extends object>(v: unknown, ok: (x: Record<string, unknown>) => boolean): T | undefined => {
     if (v === undefined) return undefined;
     if (!isRec(v) || !ok(v)) throw new Error("bad shape");

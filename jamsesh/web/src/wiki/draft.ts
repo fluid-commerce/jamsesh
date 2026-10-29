@@ -11,3 +11,7 @@ export function onRefresh(editing: boolean, base: string, latest: WikiPage): { p
 
 /** The revision a save is checked against: the one the edit began from, or the newer page's once the person chose to save over it. */
 export const saveRev = (base: string, theirs: WikiPage | null, overTheirs: boolean): string | undefined => (overTheirs && theirs ? theirs.rev : base) || undefined;
+
+/** Leaving a page with unsaved text asks first; `ask` is the confirm. Every way off a page goes through this. */
+export const mayLeave = (dirty: boolean, ask: () => boolean): boolean => !dirty || ask();
+export const DISCARD = "Throw away your changes?";

@@ -6,7 +6,7 @@ import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
-import { onRefresh, saveRev } from "./draft";
+import { DISCARD, mayLeave, onRefresh, saveRev } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -32,22 +32,28 @@ export function WikiView({ big }: { big?: boolean }) {
   const search = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
 
+  // Whether the open page holds text not yet saved (PageView says). Every way off the page asks first.
+  const dirty = useRef(false);
+  const setDirty = useCallback((d: boolean) => void (dirty.current = d), []);
+  const leave = useCallback(() => mayLeave(dirty.current, () => confirm(DISCARD)), []);
   const go = useCallback(
     (next: Open) => {
+      if (!leave()) return;
       setTrail((t) => [...t.slice(-30), open]);
       setOpen(next);
       setListOnPhone(false);
     },
-    [open],
+    [open, leave],
   );
   const back = useCallback(() => {
+    if (!leave()) return;
     setTrail((t) => {
       const prev = t[t.length - 1];
       if (prev) setOpen(prev);
       else setListOnPhone(true);
       return t.slice(0, -1);
     });
-  }, []);
+  }, [leave]);
   const openPage = useCallback((slug: string) => go({ kind: "page", slug }), [go]);
 
   useEffect(() => {
@@ -109,6 +115,7 @@ export function WikiView({ big }: { big?: boolean }) {
               phone={phone}
               onOpen={openPage}
               onBack={trail.length ? back : undefined}
+              onDirty={setDirty}
               onSource={(id, at) => setDialog({ kind: "source", id, at })}
               onHistory={() => setDialog({ kind: "history", slug: open.slug })}
             />
@@ -274,7 +281,7 @@ function GraphPane({ wiki, phone, onOpen }: { wiki: WikiData; phone: boolean; on
   );
 }
 
-function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHistory }: { slug: string; wiki: WikiData; pageSet: Set<string>; phone: boolean; onOpen: (s: string) => void; onBack?: () => void; onSource: (id: string, at: string | null) => void; onHistory: () => void }) {
+function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onDirty, onSource, onHistory }: { slug: string; wiki: WikiData; pageSet: Set<string>; phone: boolean; onOpen: (s: string) => void; onBack?: () => void; onDirty: (dirty: boolean) => void; onSource: (id: string, at: string | null) => void; onHistory: () => void }) {
   const [page, setPage] = useState<WikiPage | null>(null);
   const [err, setErr] = useState<{ status?: number; message: string } | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
@@ -287,6 +294,11 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   const draft = useRef({ editing, base });
   draft.current = { editing, base };
   const begin = (text: string, rev: string) => (setEditing(text), setBase(rev), setConflict(null));
+  const unsaved = editing !== null && editing !== page?.markdown;
+  useEffect(() => {
+    onDirty(unsaved);
+    return () => onDirty(false);
+  }, [unsaved, onDirty]);
 
   useEffect(() => {
     let live = true;
@@ -313,7 +325,6 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
     if (a.classList.contains("wl")) {
       e.preventDefault();
       const s = a.getAttribute("data-slug") ?? "";
-      if (a.classList.contains("missing")) return void (setEditing(null), onOpen(s));
       onOpen(s);
     } else if (a.classList.contains("cite")) {
       e.preventDefault();
@@ -617,6 +628,8 @@ function HistoryDialog({ slug, pages, onClose, onOpen }: { slug: string | null; 
   );
 }
 
+const SOURCE_LINES = 4000;
+
 function SourceDialog({ id, at, onClose }: { id: string; at: string | null; onClose: () => void }) {
   const [src, setSrc] = useState<SourceText | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -624,14 +637,16 @@ function SourceDialog({ id, at, onClose }: { id: string; at: string | null; onCl
   useEffect(() => {
     wikiApi.source(id).then(setSrc, (e) => setErr(e?.status === 404 ? "This source is no longer in the project." : pretty(e, "Couldn't open the source.")));
   }, [id]);
-  const lines = useMemo(() => (src?.text ?? "").split("\n").slice(0, 4000), [src]);
+  const every = useMemo(() => (src?.text ?? "").split("\n"), [src]);
+  const [more, setMore] = useState(false);
   // A transcript line starts "[14:32] Name: …"; the cited moment is the first line at or after the time given.
   const hit = useMemo(() => {
     if (!at) return -1;
     const want = at.length === 4 ? `0${at}` : at;
-    const exact = lines.findIndex((l) => l.startsWith(`[${at}`) || l.startsWith(`[${want}`));
-    return exact;
-  }, [lines, at]);
+    return every.findIndex((l) => l.startsWith(`[${at}`) || l.startsWith(`[${want}`));
+  }, [every, at]);
+  // A long source shows its first stretch; a cited moment further on opens the rest on its own.
+  const lines = more || hit >= SOURCE_LINES ? every : every.slice(0, SOURCE_LINES);
   useEffect(() => {
     mark.current?.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [src, hit]);
@@ -645,6 +660,11 @@ function SourceDialog({ id, at, onClose }: { id: string; at: string | null; onCl
               <div key={i} className={i === hit ? "hit" : ""} ref={i === hit ? (el) => void (mark.current = el) : undefined}>{l || " "}</div>
             ))}
           </div>
+          {lines.length < every.length && (
+            <p className="wk-quiet">
+              Showing the first {lines.length} of {every.length} lines. <button className="btn ghost small" onClick={() => setMore(true)}>Show the rest</button>
+            </p>
+          )}
           {at && hit < 0 && <p className="wk-quiet">The moment at {at} isn't marked in this source.</p>}
         </>
       )}

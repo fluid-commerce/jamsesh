@@ -891,9 +891,14 @@ button.wk-chip:hover:not(:disabled) {
   padding: 0 8px;
 }
 .wk-card-op,
+.wk-card-meta,
 .wk-card-stale {
   font-size: 11.5px;
   color: var(--dim);
+}
+.wk-card-meta {
+  flex-basis: 100%;
+  padding-left: 24px;
 }
 .wk-card-stale {
   flex-basis: 100%;

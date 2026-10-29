@@ -1729,9 +1729,9 @@ is a change. Before a pass writes anything, every cursor and offset in the state
 made from the page as proposed, stored with the proposal. At session end the transcript, agent reports and queue are saved to the
 sources first and on their own (5 s budget), never behind an ingest; the ingest then gets 15 s. From the first moment of shutdown the hub answers every request that would add something with 503 and
 the brain takes no new pass; what is already under way (requests being answered, body and all; speech still waiting, transcribed at
-once; the brain's pass) finishes first, for up to 10 s, and only then is the local whisper stopped. The store's events are then sealed
+once; the brain's pass) finishes first, for up to 10 s in total (requests first, so an upload still sending its body is in before the speech is flushed), and only then is the local whisper stopped. The store's events are then sealed
 before that capture (everything is sealed once the hub has stopped): a write past it throws `ESEALED`, which a request answers with
-503, so nothing lands after the capture unseen. Pages a failed accept already wrote stay part of its
+503, so nothing lands after the capture unseen; a window closing after the seal is let go quietly. A card shows how each page is filed (category, workstreams) before and after, in the card and in the whole change, and the page view asks before leaving unsaved text. Pages a failed accept already wrote stay part of its
 record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
 When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
 stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its

@@ -1,7 +1,7 @@
 // A wiki update waiting on the Tasks board: one card per ingest, with each page's change to look at and a
 // toggle for it. Accepting writes the checked pages; the rest are dropped.
 import { useState } from "react";
-import { api, type HubState, type TriageCard, type WikiChange } from "../shared/hub";
+import { api, type HubState, type TriageCard, type WikiChange, type WikiMeta } from "../shared/hub";
 import { asCategory, CATEGORY_COLOR, CATEGORY_LABEL } from "./types";
 import { wikiApi } from "./wikiApi";
 import "./wiki.css";
@@ -50,6 +50,7 @@ export function WikiCardView({ card, index, personId, now }: { card: TriageCard;
                 <span className="wk-card-t">{c.title}</span>
                 <span className="wk-card-op">{c.op === "create" ? "New" : "Changed"}</span>
               </label>
+              {metaLine(c.meta) && <span className="wk-card-meta">{metaLine(c.meta)}</span>}
               {c.stale && <span className="wk-card-stale">Someone edited this since. It will be skipped.</span>}
               {c.largeDeletion && !c.stale && <span className="wk-card-stale">Takes out {c.removed} lines of this page. Look at the changes before adding it.</span>}
               <button className="btn ghost small" aria-expanded={open === c.slug} onClick={() => setOpen(open === c.slug ? null : c.slug)}>
@@ -91,6 +92,23 @@ export function WikiCardView({ card, index, personId, now }: { card: TriageCard;
 
 const SHOWN = 400;
 
+const listOf = (w: string[]) => (w.length ? w.join(", ") : "none");
+
+/** How the page is filed, as far as this change alters it: "Filed under Decisions (was Topics). Workstreams: billing (was none)." Empty when nothing about the filing changes. */
+export function metaLine(m?: WikiMeta): string {
+  if (!m) return "";
+  const label = (c: string) => CATEGORY_LABEL[asCategory(c)];
+  const parts: string[] = [];
+  if (!m.from) {
+    parts.push(`Filed under ${label(m.to.category)}`);
+    if (m.to.workstreams.length) parts.push(`Workstreams: ${listOf(m.to.workstreams)}`);
+  } else {
+    if (m.from.category !== m.to.category) parts.push(`Filed under ${label(m.to.category)} (was ${label(m.from.category)})`);
+    if (m.from.workstreams.join("\n") !== m.to.workstreams.join("\n")) parts.push(`Workstreams: ${listOf(m.to.workstreams)} (was ${listOf(m.from.workstreams)})`);
+  }
+  return parts.length ? `${parts.join(". ")}.` : "";
+}
+
 /**
  * What the diff box shows: the first SHOWN lines until the person asks for the rest, never fewer without saying so.
  * The hub's own notes ("(cut here…)") always show, whatever is folded away.
@@ -106,12 +124,15 @@ function Diff({ c, cardId }: { c: WikiChange; cardId: string }) {
   const [all, setAll] = useState(false);
   // A change the hub cut short is fetched whole when asked for: the card never asks anyone to approve text it can't show.
   const [full, setFull] = useState<string | null>(null);
+  const [meta, setMeta] = useState<WikiMeta | undefined>(c.meta);
   const [state, setState] = useState<"" | "loading" | "failed">("");
   const v = diffView(full ?? c.diff, all);
   const load = async () => {
     setState("loading");
     try {
-      setFull((await wikiApi.fullChange(cardId, c.slug)).diff);
+      const r = await wikiApi.fullChange(cardId, c.slug);
+      setFull(r.diff);
+      setMeta(r.meta);
       setAll(true);
       setState("");
     } catch {
@@ -120,6 +141,8 @@ function Diff({ c, cardId }: { c: WikiChange; cardId: string }) {
   };
   return (
     <div className="wk-diff-wrap">
+      {metaLine(meta) && <p className="wk-diff-more">{metaLine(meta)}</p>}
+      {!c.diff.trim() && !full && <p className="wk-diff-more">The text of the page doesn't change.</p>}
       <pre className="wk-diff scrollbars-thin" tabIndex={0} aria-label={`Changes to ${c.title}`}>
         {v.lines.map((l, i) => (
           <span key={i} className={l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : /^\(/.test(l) ? "note" : ""}>

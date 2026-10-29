@@ -344,6 +344,13 @@ export interface WikiChange {
   removed?: number;
   /** The change takes out a large part of the page: the card says so. */
   largeDeletion?: boolean;
+  /** How the page is filed, before (absent for a new page) and after: accepting writes this too, so an approver sees it. */
+  meta?: WikiMeta;
+}
+
+export interface WikiMeta {
+  from?: { category: string; workstreams: string[] };
+  to: { category: string; workstreams: string[] };
 }
 
 export interface WikiCardPayload {
