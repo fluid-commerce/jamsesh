@@ -198,10 +198,8 @@ export class Brain {
   private exclusive<T>(fn: () => Promise<T>): Promise<T | undefined> {
     const guarded = () => (this.stopped ? Promise.resolve(undefined) : fn());
     // Counted when queued, not when it starts: every pass is accounted for from the moment it is accepted.
-    this.active++;
-    const run = this.queue.then(guarded, guarded);
+    const run = this.counted(() => this.queue.then(guarded, guarded));
     this.queue = run.catch(() => {});
-    void run.then(() => this.active--, () => this.active--);
     return run;
   }
 
@@ -309,13 +307,12 @@ export class Brain {
   /** Someone spoke to the brain directly (its name, Ask, or a recorded prompt). Always acts or answers. */
   /** Anything the brain is working on is counted here, from the moment it is accepted: shutdown waits for the count to reach zero. */
   private active = 0;
-  private async counted<T>(fn: () => Promise<T>): Promise<T> {
+  private counted<T>(fn: () => Promise<T>): Promise<T> {
     this.active++;
-    try {
-      return await fn();
-    } finally {
-      this.active--;
-    }
+    const done = () => void this.active--;
+    const work = fn();
+    work.then(done, done);
+    return work;
   }
 
   /** What the brain still owes: passes queued or running, direct requests, and overheard lines waiting for their pass. */
@@ -487,7 +484,11 @@ export class Brain {
   }
 
   /** Something happened outside the room that may need coordination, such as a shipped change. */
-  async consider(note: string, from: "person" | "agent" = "agent", tools?: Record<string, any>) {
+  consider(note: string, from: "person" | "agent" = "agent", tools?: Record<string, any>) {
+    return this.counted(() => this.considerRun(note, from, tools));
+  }
+
+  private async considerRun(note: string, from: "person" | "agent", tools?: Record<string, any>) {
     const m = model(this.session, "router");
     if (this.stopped || !m || !this.session.settings().brainEnabled) return;
     try {
@@ -1383,7 +1384,11 @@ export class Brain {
 
   // ---------- digests ----------
 
-  async digest(force = false) {
+  digest(force = false) {
+    return this.counted(() => this.digestRun(force));
+  }
+
+  private async digestRun(force: boolean) {
     const s = this.session;
     if (this.stopped || !s.settings().brainEnabled) return;
     if (!force && (Date.now() - this.lastDigestAt < DIGEST_EVERY_MS || Date.now() < this.digestRetryAt)) return;

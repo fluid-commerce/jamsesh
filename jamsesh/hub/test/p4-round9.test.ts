@@ -279,3 +279,55 @@ test("a canvas that was running and can't be copied makes the final save fail; n
   const ok = await none.hub.autosave.save("end", {});
   expect(ok?.canvasFailed).toBeUndefined();
 });
+
+// ---------- round 13 ----------
+
+test("shutdown waits for an agent-update pass and a digest held mid-call, and counts them from launch", async () => {
+  const r = room();
+  const brain = r.hub.brain as any;
+  let done = 0;
+  brain.considerRun = async () => {
+    await Bun.sleep(200);
+    done++;
+  };
+  brain.digestRun = async () => {
+    await Bun.sleep(250);
+    done++;
+  };
+  void brain.consider("a shipped change");
+  void brain.digest(true);
+  expect(brain.busy()).toEqual(["the brain's requests"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(done).toBe(2);
+});
+
+test("revoking a loopback browser credential closes its open socket", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const person = r.hub.auth.issue({ kind: "browser", label: "A laptop", ip: "127.0.0.1", personId: r.chey.id });
+    const base = `http://127.0.0.1:${server.port}`;
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws?device=d1`, { headers: { authorization: `Bearer ${person.token}`, origin: base } } as any);
+    await new Promise((res) => (ws.onopen = res as any));
+    const closed = new Promise<number>((res) => (ws.onclose = (e) => res(e.code)));
+    r.hub.auth.revoke(person.device.id);
+    expect(await Promise.race([closed, Bun.sleep(1500).then(() => -1)])).toBe(4401);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the final snapshot is taken even when only a card or fact changed (no event, no frame), and after a save already running", async () => {
+  const r = room();
+  await r.hub.autosave.save("first", {});
+  expect(await r.hub.autosave.save("idle", { onlyIfChanged: true })).toBeNull();
+  r.s.board.rememberNow({ text: "A requirement accepted after the snapshot", kind: "requirement", by: "Chey" });
+  expect(await r.hub.autosave.save("periodic", { onlyIfChanged: true })).not.toBeNull();
+  const first = r.hub.autosave.save("slow", {});
+  const final = await r.hub.autosave.save("end of session", { final: true });
+  expect(final).not.toBeNull();
+  await first;
+  const ctx = JSON.parse(readFileSync(join(final!.dir, "context.json"), "utf8"));
+  expect(JSON.stringify(ctx.facts)).toContain("A requirement accepted");
+});

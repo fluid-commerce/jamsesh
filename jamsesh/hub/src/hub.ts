@@ -192,7 +192,7 @@ export class Hub {
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
     const docs = !unfinished.length && !this.documentLost;
     // A snapshot whose canvas copy failed is not a final save.
-    const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
+    const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     this.stop();

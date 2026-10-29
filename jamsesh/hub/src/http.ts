@@ -237,7 +237,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: !seesAll } as any })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: (device ?? loopbackCredential)?.id ?? device?.id ?? null, agent: !seesAll } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });

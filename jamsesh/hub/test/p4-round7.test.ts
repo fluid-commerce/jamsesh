@@ -84,11 +84,11 @@ test("a new session of a project whose database is damaged is seeded from the re
   expect(seedFromProject(p.home, p.slug, "B", b.s)).toBe(2);
   expect(b.s.facts().map((f) => f.text)).toEqual(["Use 8px grid"]);
   expect(contextFile(p.home, p.slug)).toEndWith("context-1.db");
-  // With the export unreadable as well, recovery has nothing to restore from: nothing is seeded, and that is logged.
+  // With the export unreadable as well, recovery has nothing to restore from: the start fails loudly rather than seeding an empty session.
   damage(p);
   writeFileSync(contextExport(p.home, p.slug), "{ broken");
   const c = room();
-  expect(seedFromProject(p.home, p.slug, "C", c.s)).toBe(0);
+  expect(() => seedFromProject(p.home, p.slug, "C", c.s)).toThrow();
 });
 
 // ---------- 3. only an applied change counts as saved ----------

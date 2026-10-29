@@ -24,7 +24,7 @@ export interface SnapshotInfo {
 export class Autosave {
   dir: string;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private lastEventId = -1;
+  private lastRev = -1;
   private lastCanvasKey = "";
   private saving: Promise<SnapshotInfo | null> | null = null;
 
@@ -51,13 +51,18 @@ export class Autosave {
       .join("|");
   }
 
-  async save(label = "", opts: { onlyIfChanged?: boolean } = {}): Promise<SnapshotInfo | null> {
-    if (this.saving) return this.saving;
+  async save(label = "", opts: { onlyIfChanged?: boolean; final?: boolean } = {}): Promise<SnapshotInfo | null> {
+    if (this.saving) {
+      if (!opts.final) return this.saving;
+      // The final snapshot runs after any save already under way, and is never skipped.
+      await this.saving.catch(() => {});
+    }
     const run = async () => {
       const s = this.hub.session;
-      const lastEvent = s.store.lastEventId();
+      // Any write to the session's data (cards and facts included, which add no event) counts as a change.
+      const rev = s.store.rev;
       const canvasKey = this.canvasKey();
-      if (opts.onlyIfChanged && lastEvent === this.lastEventId && canvasKey === this.lastCanvasKey) return null;
+      if (opts.onlyIfChanged && !opts.final && rev === this.lastRev && canvasKey === this.lastCanvasKey) return null;
       const at = Date.now();
       const stamp = new Date(at).toISOString().replace(/[:T]/g, "-").slice(0, 16);
       const slug = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
@@ -90,7 +95,7 @@ export class Autosave {
       };
       writeFileSync(join(dir, "context.json"), JSON.stringify(context, null, 2));
       writeFileSync(join(dir, "notes.md"), notes(context));
-      this.lastEventId = lastEvent;
+      this.lastRev = rev;
       this.lastCanvasKey = canvasKey;
       this.prune();
       // No copy from a canvas that was running is a failure too (its host is gone), not just a thrown error.

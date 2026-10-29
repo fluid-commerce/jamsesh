@@ -160,7 +160,11 @@ export class Store {
     return this.map(c).get(id);
   }
 
+  /** Counts every write to the session's data: a later value means something changed, whatever kind of change it was. */
+  rev = 0;
+
   put<K extends CollectionName>(c: K, doc: Collections[K] & { id: string }, broadcast = true): Collections[K] {
+    this.rev++;
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.put(c, doc, broadcast);
     this.remember(c, doc.id);
     this.map(c).set(doc.id, doc);
@@ -178,6 +182,7 @@ export class Store {
   }
 
   remove(c: CollectionName, id: string): void {
+    this.rev++;
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.remove(c, id);
     this.remember(c, id);
     this.map(c).delete(id);
@@ -206,6 +211,7 @@ export class Store {
   }
 
   setSetting(key: string, value: unknown): void {
+    this.rev++;
     if (this.team && TEAM_SETTINGS.has(key)) return this.team.setSetting(key, value);
     this.db.query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, JSON.stringify(value));
   }
@@ -223,6 +229,7 @@ export class Store {
     data?: Record<string, any>;
     ts?: number;
   }): JamEvent {
+    this.rev++;
     const ts = e.ts ?? Date.now();
     const row = this.db
       .query(
@@ -257,6 +264,7 @@ export class Store {
   }
 
   updateEvent(id: number, fields: Partial<Pick<JamEvent, "text" | "relevance" | "workstreamId" | "authorId" | "authorName" | "data">>) {
+    this.rev++;
     const cur = this.event(id);
     if (!cur) return;
     const next = { ...cur, ...fields, data: { ...cur.data, ...(fields.data ?? {}) } };
@@ -351,6 +359,7 @@ export class Store {
   }
 
   setDigest(scope: string, text: string, throughEvent: number) {
+    this.rev++;
     this.db
       .query("INSERT OR REPLACE INTO digests (scope, text, updated, through_event) VALUES (?, ?, ?, ?)")
       .run(scope, text, Date.now(), throughEvent);
