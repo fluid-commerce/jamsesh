@@ -312,6 +312,33 @@ export class Mic {
     return this.starting;
   }
 
+  private leases = 0;
+  private lentOn = false;
+  private muteTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The mic for something that needs it listening (a recording). A mic that was off is switched on and, when the last borrower lets go,
+   * switched off again a moment later (so the last words get through); a borrower that comes in that moment keeps it on. A mic the
+   * person had on stays on. The mic itself holds all of this, so no screen that unmounts can leave it open or mute someone else's use.
+   * Null when it can't be switched on. `release` may be called more than once.
+   */
+  async lend(): Promise<{ release: () => void; turnedOn: boolean } | null> {
+    if (this.muteTimer) (clearTimeout(this.muteTimer), (this.muteTimer = null));
+    const wasOn = this.status.on;
+    if (!wasOn && !(await this.ensureOn())) return null;
+    if (!wasOn) this.lentOn = true;
+    this.leases++;
+    let given = false;
+    return {
+      turnedOn: this.lentOn,
+      release: () => {
+        if (given) return;
+        given = true;
+        if (--this.leases > 0 || !this.lentOn) return;
+        this.muteTimer = setTimeout(() => ((this.muteTimer = null), (this.lentOn = false), this.leases === 0 && this.stop()), 1600);
+      },
+    };
+  }
+
   /** Turns the mic on if it is off; false (with the reason on status.error) when it can't be. */
   async ensureOn() {
     try {

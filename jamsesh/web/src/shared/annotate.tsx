@@ -734,7 +734,7 @@ type RecResult = { ok: boolean; title: string; text: string; pills: string[]; no
 type StopReply = { ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[] };
 type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null };
 /** The laptop mic, as far as recording needs it. */
-type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void; flush?: () => Promise<void> };
+type MicLike = { status: { on: boolean; error: string | null }; lend: () => Promise<{ release: () => void; turnedOn: boolean } | null>; flush?: () => Promise<void> };
 
 /**
  * Recordings a Record button let go of when it unmounted or the page closed. The hub is told with a keepalive cancel; if that never
@@ -822,25 +822,22 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   const pendingToken = useRef<string | null>(null);
   /** The recording this button owns, from the hub's answer to Start until the hub says it ended: kept through Stop so a leave can hand it over. */
   const held = useRef<{ id: string; token: string } | null>(null);
-  /** The mute that follows a recording, a moment later; a recording that starts in that moment takes the mic over instead. */
-  const micTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const micRef = useRef(mic);
-  micRef.current = mic;
-  const unmuted = useRef(false);
+  /** The mic this recording borrowed (the mic itself switches it off again a moment after the last borrower lets go). */
+  const lease = useRef<{ release: () => void; turnedOn: boolean } | null>(null);
+  const giveBackMic = () => (lease.current?.release(), (lease.current = null));
   const start = async () => {
     if (recRef.current.phase !== "idle" || starting.current || review) return;
     starting.current = true;
     const token = newRecordToken();
     pendingToken.current = token;
     try {
-      if (micTimer.current) (clearTimeout(micTimer.current), (micTimer.current = null), (unmuted.current = true));
-      // Recording while muted would capture nothing: switch the mic on for the recording, or say why it can't be.
-      if (mic && !mic.status.on && !typed.current) {
-        const ok = await mic.ensureOn();
+      // Recording while muted would capture nothing: borrow the mic for the recording, or say why it can't be.
+      if (mic && !typed.current) {
+        const got = await mic.lend();
         // The page went away while the permission prompt was open: the mic it asked for isn't wanted.
-        if (!alive.current) return void (ok && mic.stop());
-        if (!ok) return fail(mic.status.error ? `Your mic is off and wouldn't turn on: ${mic.status.error}` : "Your mic is off, so there's nothing to record. Unmute it and try again.");
-        unmuted.current = true;
+        if (!alive.current) return void got?.release();
+        if (!got) return fail(mic.status.error ? `Your mic is off and wouldn't turn on: ${mic.status.error}` : "Your mic is off, so there's nothing to record. Unmute it and try again.");
+        lease.current = got;
       }
       const t0 = hub.now();
       const screen = drivenScreen(hub.get().state, who.current);
@@ -851,12 +848,12 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
         if (!started?.id) throw new Error("Couldn't start recording.");
         id = started.id;
       } catch (e) {
-        if (unmuted.current) (unmuted.current = false, mic?.stop());
+        giveBackMic();
         return fail(e instanceof Error ? e.message : screen ? "Couldn't record the big screen." : "Couldn't start recording.");
       }
       // The page went away while the hub was answering: nothing is left to stop this recording, so it is handed back to the hub.
       if (!alive.current) {
-        if (unmuted.current) (unmuted.current = false, mic?.stop());
+        giveBackMic();
         letGo(token, id);
         return;
       }
@@ -922,17 +919,14 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       held.current = null;
       const res: StopReply = closed.result ?? { ok: false, reason: "That recording ended before its notes could be read." };
       if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
-      else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
+      else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: lease.current?.turnedOn ? "Your mic was muted, so it was on only for this recording." : undefined });
     } catch (e) {
       fail(e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't finish that recording.");
     }
     pointerCache.current = null;
     setRec({ phase: "idle" });
-    if (unmuted.current) {
-      // Back to muted, once the last words have been through the mic.
-      unmuted.current = false;
-      micTimer.current = setTimeout(() => ((micTimer.current = null), mic?.stop()), 1600);
-    }
+    // Back to muted if the recording switched the mic on: the mic waits a moment for the last words.
+    giveBackMic();
   };
 
   const send = async () => {
@@ -985,7 +979,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     // Leaving: the recording (or a Start still in flight) is handed to the hub with a keepalive cancel by its token, then asked after.
     const letGoNow = () => {
       const own = held.current;
-      const todo = leaveActions(own, pendingToken.current, unmuted.current);
+      const todo = leaveActions(own, pendingToken.current, !!lease.current);
       if (own) {
         held.current = null;
         recRef.current = { phase: "idle" };
@@ -994,7 +988,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       }
       if (todo.cancel) letGo(todo.cancel.token, todo.cancel.orphanId);
       // A recording that switched the mic on gives it back, so a layout change doesn't leave it open.
-      if (todo.restoreMic) (unmuted.current = false, micRef.current?.stop());
+      if (todo.restoreMic) (lease.current?.release(), (lease.current = null));
     };
     alive.current = true;
     window.addEventListener("pagehide", letGoNow);

@@ -984,7 +984,8 @@ test("a cancel while a Stop is in flight ends the recording at once, and it stay
   expect((r.hub as any).recs.get("mayaLaptop").state).toBe("ending");
   r.hub.recordCancel("mayaLaptop", tok);
   expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
-  expect(await failed).toContain("database is locked");
+  // The read failed after the cancel had already ended it: that is "ended", not an error to retry.
+  expect(await failed).toBe("ok");
   expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
   expect(r.s.recordings().length).toBe(0);
 });
@@ -1162,6 +1163,69 @@ test("the older ID-less prompt close, if its prompt can't be written, leaves its
   expect((await close()).ok).toBe(true);
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
 }, 30_000);
+
+test("a close overtaken by a cancel gives everything it held to the room, even when its read of the words fails, and text typed with it too", async () => {
+  for (const readFails of [false, true]) {
+    const r = room();
+    const base = Date.now() - 20_000;
+    r.at(base);
+    const tok = "rt_kkkkkkkkkkkkkkkk";
+    const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+    if (!a.ok) throw new Error("start");
+    line(r.hub, "move the menu up", r.maya.id, "mayaLaptop", base + 500);
+    r.at(base + 3000);
+    const real = (r.hub as any).windowLines.bind(r.hub);
+    (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(150), readFails ? Promise.reject(new Error("read failed")) : real(...args));
+    const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "and the footer too" });
+    r.hub.recordCancel("mayaLaptop", tok, "host");
+    expect(await stopping).toMatchObject({ ok: false, status: 409 });
+    const texts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
+    expect(texts.some((t) => t.includes("move the menu up"))).toBe(true);
+    expect(texts).toContain("and the footer too");
+    expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).some((e) => e.data.recorded)).toBe(false);
+  }
+}, 60_000);
+
+test("a typed-only close overtaken by a cancel still gives its text to the room", async () => {
+  const r = room();
+  const tok = "rt_llllllllllllllll";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  const real = (r.hub as any).windowLines.bind(r.hub);
+  (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(150), real(...args));
+  const closing = r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bluer" });
+  r.hub.recordCancel("mayaLaptop", tok, "host");
+  expect(await closing).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("make it bluer");
+});
+
+test("the older ID-less close, failing to write, keeps its first end time for the retry; a newer Start ends the retry and the words go to the room", async () => {
+  const r = room();
+  const base = Date.now() - 30_000;
+  r.hub.promptStart("mayaLaptop", base);
+  line(r.hub, "first thing said", r.maya.id, "mayaLaptop", base + 500);
+  const real = r.s.store.addEvent.bind(r.s.store);
+  let failed = false;
+  (r.s.store as any).addEvent = (e: any) => (failed ? real(e) : e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
+  const close = () => r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
+  await expect(close()).rejects.toThrow("locked");
+  // Said after the first close's end time: not part of the retry.
+  line(r.hub, "said after", r.maya.id, "mayaLaptop", Date.now() + 5000);
+  const again = await close();
+  expect(again.ok).toBe(true);
+  expect(again.text).toContain("first thing said");
+  expect(again.text).not.toContain("said after");
+  // A second failure followed by a newer Start: the retry is refused, the first words reach the room.
+  const r2 = room();
+  r2.hub.promptStart("mayaLaptop", Date.now() - 5000);
+  line(r2.hub, "kept words", r2.maya.id, "mayaLaptop", Date.now() - 4000);
+  const real2 = r2.s.store.addEvent.bind(r2.s.store);
+  let f2 = false;
+  (r2.s.store as any).addEvent = (e: any) => (e.data?.recorded && !f2 ? ((f2 = true), (() => { throw new Error("database is locked"); })()) : real2(e));
+  await expect(r2.hub.promptWindow({ deviceId: "mayaLaptop", personId: r2.maya.id, pointer: [] })).rejects.toThrow("locked");
+  expect(r2.hub.recordStart("mayaLaptop", r2.maya.id).ok).toBe(true);
+  expect(r2.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("kept words");
+}, 60_000);
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
