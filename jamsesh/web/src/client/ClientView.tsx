@@ -18,7 +18,7 @@ import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
-import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
+import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, RecordScope, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
@@ -27,6 +27,14 @@ const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 type Tab = "canvas" | "screen" | "work" | "pins" | "agents";
 
 export function ClientView() {
+  return (
+    <RecordScope>
+      <ClientViewBody />
+    </RecordScope>
+  );
+}
+
+function ClientViewBody() {
   const { state, connected } = useHub();
   const [personId, setPersonId] = useState(pref("personId"));
   const [tab, setTab] = useState<Tab>((pref("tab") as Tab) || "canvas");

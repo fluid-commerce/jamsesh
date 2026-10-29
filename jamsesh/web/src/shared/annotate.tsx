@@ -3,7 +3,7 @@
 // Wiring (see the report): every tile root carries `data-jam-target='{"kind","ref","label"}'` and
 // `position: relative`; drop <PinLayer/> inside it. Pins post to /api/annotations, the panel bundles
 // them to the room brain, RecordPrompt turns speech plus pointer movement into one prompt.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import "./annotate.css";
 import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, type QueuedResult } from "./hub";
@@ -739,15 +739,25 @@ const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms 
 /** The big screen this person is driving right now, or null. */
 const drivenScreen = (state: HubState | null, me: string) => (state ? ["main", ...(state.screens ?? []).map((x) => x.id)].find((id) => driverState(id, state, me).me.driving) ?? null : null);
 
-/** Whichever Record button is mounted registers here, so another screen (the picture viewer, which covers the header) can start and stop it too. */
-const recordControl = { toggle: null as null | (() => void) };
-const recordingNow = store(false);
+/**
+ * The Record button that is mounted tells the page's scope how to toggle and whether it is recording, so another screen (the picture
+ * viewer, which covers the header) can start and stop it too. The scope belongs to the page that provides it, and a button that unmounts takes itself out.
+ */
+type RecordScopeValue = { toggle: { current: null | (() => void) }; live: ReturnType<typeof store<boolean>> };
+const newScope = (): RecordScopeValue => ({ toggle: { current: null }, live: store(false) });
+const RecordCtx = createContext<RecordScopeValue>(newScope());
+
+export function RecordScope({ children }: { children: ReactNode }) {
+  const [scope] = useState(newScope);
+  return <RecordCtx.Provider value={scope}>{children}</RecordCtx.Provider>;
+}
 
 /** A Record button for places the header's isn't visible. */
 export function RecordHere() {
-  const live = recordingNow.use();
+  const scope = useContext(RecordCtx);
+  const live = scope.live.use();
   return (
-    <button type="button" className={`btn small rec-here ${live ? "live" : ""}`} onClick={() => recordControl.toggle?.()} aria-pressed={live} title={live ? "Stop and tidy your notes (R)" : "Record: talk and point, and it becomes notes (R)"}>
+    <button type="button" className={`btn small rec-here ${live ? "live" : ""}`} onClick={() => scope.toggle.current?.()} aria-pressed={live} title={live ? "Stop and tidy your notes (R)" : "Record: talk and point, and it becomes notes (R)"}>
       <span className="rec-dot" />
       {live ? "Stop" : "Record"}
       <kbd>R</kbd>
@@ -886,10 +896,20 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   };
 
   const toggle = () => (recRef.current.phase === "live" ? void stop() : start());
-  recordControl.toggle = toggle;
+  const scope = useContext(RecordCtx);
+  const mine = useRef(toggle);
+  scope.toggle.current = mine.current = toggle;
   useEffect(() => {
-    recordingNow.set(rec.phase === "live");
-  }, [rec.phase]);
+    scope.live.set(rec.phase === "live");
+  }, [rec.phase, scope]);
+  // Unmounted: the page's other Record button must not reach this one's state.
+  useEffect(
+    () => () => {
+      if (scope.toggle.current === mine.current) scope.toggle.current = null;
+      scope.live.set(false);
+    },
+    [scope],
+  );
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {

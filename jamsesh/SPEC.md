@@ -1494,7 +1494,7 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   only when the last recording on the screen ends, and only if Record took it. While any recording
   runs, the screen's lock is kept fresh (`touchLock`, which keeps `drivers`, so a refresh never cuts anyone off).
 - **The rainbow trail.** While recording, a trail follows the pointer (on the big screen, the dart)
-  and fades out behind it over about a second. The spectrum runs along the path by distance travelled,
+  and fades out behind it over about a second. The spectrum runs along the trail by age (the point under the pointer to where the stroke has mostly faded, or its start if shorter),
   with the whole spectrum (red at the head to violet at the tail) shown across every stroke however short, drifting slowly; it is drawn on a canvas overlay at display rate, and
   runs only while something is fading (an idle recording costs nothing). With reduced motion it is
   shorter (under half a second), thinner and fainter, in a calm band of colour. On the big screen the
