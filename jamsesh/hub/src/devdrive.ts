@@ -1,13 +1,21 @@
 // What the dev proxy adds to the pages it forwards, so the person driving the big screen (SPEC 10.6) can click,
 // scroll and type in a live build. The big screen can't reach into a page on another port, so it posts
-// {jamDrive: event} to the frame and this script replays it as DOM events there. It only listens to the page
-// that framed it, and only when that page is on the same host name (the dev port's own host, or the hub's).
+// {jamDrive: event, key} to the frame and this script replays it as DOM events there: only from the host's
+// big screen (its exact origin) with the session's frame key, never from another page that frames the build.
 import { createHash } from "node:crypto";
 
-export const DRIVE_SCRIPT = `(function(){
+/**
+ * The script the dev proxy puts first in every page it serves (6.1), which replays a driver's clicks, scrolls and
+ * typing. It takes input only from the host's own big screen: messages from exactly `hostOrigin` (scheme, host and
+ * port) that carry the session's frame key, whose SHA-256 is `keyHash` (the page, which anyone who can load it can
+ * read, holds only the hash). The big screen sends only the events the hub passed on from a screen's drivers.
+ */
+export function driveScript(hostOrigin: string, keyHash: string): string {
+  return `(function(){
 if(window.__jamDrive||window.parent===window)return;window.__jamDrive=1;
-function lo(h){return /^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/.test(h)?'loopback':h}
-function ok(o){try{var h=lo(new URL(o).hostname),l=lo(location.hostname);return h===l||l.slice(-h.length-1)==='.'+h}catch(e){return false}}
+var O=${JSON.stringify(hostOrigin)},H=${JSON.stringify(keyHash)},good=null,q=Promise.resolve();
+function hex(d){return [].map.call(new Uint8Array(d),function(b){return('0'+b.toString(16)).slice(-2)}).join('')}
+function trusted(k){if(good!==null)return k===good;if(!window.crypto||!crypto.subtle)return false;return crypto.subtle.digest('SHA-256',new TextEncoder().encode(k)).then(function(d){if(hex(d)!==H)return false;good=k;return true})}
 var over=null,downEl=null,btns=0;
 function pt(e){var x=e.x*innerWidth,y=e.y*innerHeight;return{x:x,y:y,el:document.elementFromPoint(x,y)||document.body}}
 function opts(p,b,extra){var o={bubbles:true,cancelable:true,composed:true,view:window,clientX:p.x,clientY:p.y,screenX:p.x,screenY:p.y,button:b||0,buttons:btns,pointerId:1,pointerType:'mouse',isPrimary:true};for(var k in extra)o[k]=extra[k];return o}
@@ -34,38 +42,62 @@ var step={ArrowDown:[0,48],ArrowUp:[0,-48],PageDown:[0,innerHeight*.9],PageUp:[0
 if(step)scroller(t,step[0],step[1]).scrollBy({left:step[0],top:step[1],behavior:'instant'});
 if(e.key==='Home'||e.key==='End')(document.scrollingElement||document.documentElement).scrollTo({top:e.key==='Home'?0:1e9,behavior:'instant'});
 }
-addEventListener('message',function(m){
-if(m.source!==parent||!ok(m.origin)||!m.data||!m.data.jamDrive)return;
-var e=m.data.jamDrive;if(e.k==='key')return key(e);
+function apply(e){
+if(e.k==='key')return key(e);
 if(e.k==='leave'){if(over){fire(over,'mouseout',opts({x:0,y:0}));over=null}return}
 var p=pt(e);
 if(e.k==='move'){hover(p);fire(p.el,'pointermove',opts(p));fire(p.el,'mousemove',opts(p))}
 else if(e.k==='down'){hover(p);btns|=1<<(e.b||0);downEl=p.el;fire(p.el,'pointerdown',opts(p,e.b));var d=fire(p.el,'mousedown',opts(p,e.b,{detail:e.n||1}));var f=focusable(p.el);if(!d.defaultPrevented){if(f){f.focus();if(editable(f)&&f.setSelectionRange&&!f.selectionStart&&f.value)f.setSelectionRange(f.value.length,f.value.length)}else if(document.activeElement&&document.activeElement.blur)document.activeElement.blur()}}
 else if(e.k==='up'){btns&=~(1<<(e.b||0));fire(p.el,'pointerup',opts(p,e.b));fire(p.el,'mouseup',opts(p,e.b,{detail:e.n||1}));if(downEl&&(downEl===p.el||downEl.contains(p.el)||p.el.contains(downEl))){var t=downEl.contains(p.el)?downEl:p.el;if(!e.b)fire(t,'click',opts(p,0,{detail:e.n||1}));else if(e.b===2)fire(t,'contextmenu',opts(p,2));if(e.n===2&&!e.b)fire(t,'dblclick',opts(p,0,{detail:2}))}downEl=null}
 else if(e.k==='wheel'){hover(p);var w=new WheelEvent('wheel',opts(p,0,{deltaX:e.dx||0,deltaY:e.dy||0,deltaMode:0,ctrlKey:!!e.ctrl}));p.el.dispatchEvent(w);if(!w.defaultPrevented&&!e.ctrl)scroller(p.el,e.dx,e.dy).scrollBy({left:e.dx||0,top:e.dy||0,behavior:'instant'})}
+}
+addEventListener('message',function(m){
+if(m.source!==parent||m.origin!==O||!m.data||!m.data.jamDrive||typeof m.data.key!=='string')return;
+var e=m.data.jamDrive,k=m.data.key;
+q=q.then(function(){return trusted(k)}).then(function(ok){if(ok)apply(e)}).catch(function(){});
 });
-try{parent.postMessage({jamDriveReady:1},'*')}catch(e){}
+try{parent.postMessage({jamDriveReady:1},O)}catch(e){}
 })();`;
-
-/** Hash of the script, for a page whose Content-Security-Policy would otherwise stop it. */
-const HASH = `'sha256-${createHash("sha256").update(DRIVE_SCRIPT).digest("base64")}'`;
-
-/** The page with the driving script as its first script (nothing else changes), or the page as it was if it isn't an HTML document. */
-export function withDriveScript(html: string): string {
-  const tag = `<script>${DRIVE_SCRIPT}</script>`;
-  const head = html.match(/<head[^>]*>/i);
-  if (head?.index !== undefined) return html.slice(0, head.index + head[0].length) + tag + html.slice(head.index + head[0].length);
-  const doctype = html.match(/^\s*<!doctype[^>]*>/i);
-  return doctype ? doctype[0] + tag + html.slice(doctype[0].length) : tag + html;
 }
 
-/** A Content-Security-Policy that also lets the driving script run: the hash joins script-src (or default-src when there's none). */
-export function allowDriveScript(csp: string): string {
-  const parts = csp.split(";").map((p) => p.trim()).filter(Boolean);
-  const pick = parts.findIndex((p) => /^script-src\s/i.test(p)) >= 0 ? /^script-src\s/i : /^default-src\s/i;
-  const i = parts.findIndex((p) => pick.test(p));
-  if (i < 0) return csp;
-  if (/'unsafe-inline'/.test(parts[i]) && !/'(nonce|sha\d+)-/.test(parts[i])) return csp;
-  parts[i] = `${parts[i]} ${HASH}`;
-  return parts.join("; ");
+/** The value a Content-Security-Policy names a script by. */
+export const scriptHash = (script: string) => `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
+
+const META_CSP = /<meta\b[^>]*http-equiv\s*=\s*["']?content-security-policy/i;
+
+/**
+ * The page with the driving script as its first script (nothing else changes). It goes in before any
+ * `<meta http-equiv="Content-Security-Policy">`, which applies only to what follows it; the page's header
+ * policy is widened by its hash instead (`allowDriveScript`).
+ */
+export function withDriveScript(html: string, script: string): string {
+  const tag = `<script>${script}</script>`;
+  const at = (i: number) => html.slice(0, i) + tag + html.slice(i);
+  const head = html.match(/<head\b[^>]*>/i);
+  const meta = html.match(META_CSP);
+  if (meta?.index !== undefined && (head?.index === undefined || meta.index < head.index + head[0].length)) return at(meta.index);
+  if (head?.index !== undefined) return at(head.index + head[0].length);
+  const doctype = html.match(/^\s*<!doctype[^>]*>/i);
+  return doctype ? at(doctype[0].length) : tag + html;
+}
+
+/**
+ * A Content-Security-Policy header that also lets the driving script (`hash`) run. An inline script is governed by
+ * script-src-elem, else script-src, else default-src: the hash joins each of those the policy has (the first two),
+ * or default-src when it has neither. A directive that already allows inline scripts is left alone (a hash would
+ * turn its 'unsafe-inline' off). Several policies (a comma-joined header) are each widened.
+ */
+export function allowDriveScript(csp: string, hash: string): string {
+  return csp
+    .split(",")
+    .map((policy) => {
+      const parts = policy.split(";").map((p) => p.trim()).filter(Boolean);
+      const named = (re: RegExp) => parts.findIndex((p) => re.test(p));
+      const elem = named(/^script-src-elem(\s|$)/i);
+      const src = named(/^script-src(\s|$)/i);
+      const which = elem >= 0 || src >= 0 ? [elem, src].filter((i) => i >= 0) : [named(/^default-src(\s|$)/i)].filter((i) => i >= 0);
+      for (const i of which) if (!/'unsafe-inline'/i.test(parts[i]) || /'(nonce|sha\d+)-/i.test(parts[i])) parts[i] = `${parts[i]} ${hash}`;
+      return parts.join("; ");
+    })
+    .join(", ");
 }

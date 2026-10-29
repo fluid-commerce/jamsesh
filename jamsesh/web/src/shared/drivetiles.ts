@@ -1,20 +1,35 @@
-// How the tiles the big screen already has take a driver's input (SPEC 10.6): a live build's frame gets the event posted into it
-// (the dev proxy's script replays it there), and the canvas takes pan, zoom and select through FigCraft's own commands.
 import { pageAt, readView, type CanvasView } from "./pointer";
+import { api } from "./hub";
 import type { DriveTarget, TileEvent } from "./driving";
 
-/** A frame from the dev proxy: post the event in, in fractions of the frame (the page script turns them into its own pixels). */
+/** The session's frame key (only the host's big screen gets one): a build's frame takes input only with it. */
+let frameKey: string | null = null;
+let asking: Promise<unknown> | null = null;
+function withKey(): string | null {
+  asking ??= api<{ key: string }>("/drive/frame-key")
+    .then((r) => (frameKey = typeof r?.key === "string" ? r.key : null))
+    .catch(() => (asking = null));
+  return frameKey;
+}
+
+/**
+ * A frame from the dev proxy: post the event in, in fractions of the frame (the page script turns them into its own pixels),
+ * to the frame's exact origin and with the session's key. Events before the key arrives are dropped.
+ */
 export function frameDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
   return (ev) => {
     const w = iframe.contentWindow;
-    if (!w) return;
-    let origin = "*";
+    const key = withKey();
+    if (!w || !key) return;
+    let origin: string;
     try {
       origin = new URL(iframe.src).origin;
-    } catch {}
+    } catch {
+      return;
+    }
     const msg = ev.k === "key" || ev.k === "leave" ? ev : { ...ev, x: ev.lx, y: ev.ly };
     try {
-      w.postMessage({ jamDrive: msg }, origin);
+      w.postMessage({ jamDrive: msg, key }, origin);
     } catch {}
   };
 }

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { cleanDrive, driveFrom, startHttp } from "../src/http";
-import { allowDriveScript, withDriveScript } from "../src/devdrive";
+import { allowDriveScript, driveScript, scriptHash, withDriveScript } from "../src/devdrive";
+import { createHash } from "node:crypto";
 import type { BusMessage } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -241,12 +242,109 @@ test("the http routes: the window's person is who acts; an agent's credential is
   }
 });
 
-test("the dev proxy's script goes first in a page, and a strict Content-Security-Policy gets its hash", () => {
-  expect(withDriveScript("<!doctype html><html><head><title>x</title></head><body></body></html>")).toMatch(/<head><script>\(function\(\)\{[\s\S]*<\/script><title>/);
-  expect(withDriveScript("<div>bare</div>").startsWith("<script>")).toBe(true);
-  expect(withDriveScript("<!DOCTYPE html><p>x</p>")).toMatch(/^<!DOCTYPE html><script>/);
-  expect(allowDriveScript("default-src 'self'; img-src *")).toMatch(/^default-src 'self' 'sha256-[A-Za-z0-9+/=]+'; img-src \*$/);
-  expect(allowDriveScript("script-src 'self'; default-src 'none'")).toMatch(/^script-src 'self' 'sha256-/);
-  expect(allowDriveScript("img-src *")).toBe("img-src *");
-  expect(allowDriveScript("script-src 'unsafe-inline'")).toBe("script-src 'unsafe-inline'");
+const KEY = "k".repeat(48);
+const KEY_HASH = createHash("sha256").update(KEY).digest("hex");
+const HOST = "http://127.0.0.1:4790";
+const SCRIPT = driveScript(HOST, KEY_HASH);
+const HASH = scriptHash(SCRIPT);
+
+test("the dev proxy's script goes first in a page, before any meta Content-Security-Policy", () => {
+  const tag = `<script>${SCRIPT}</script>`;
+  expect(withDriveScript("<!doctype html><html><head><title>x</title></head><body></body></html>", SCRIPT)).toBe(`<!doctype html><html><head>${tag}<title>x</title></head><body></body></html>`);
+  expect(withDriveScript("<div>bare</div>", SCRIPT).startsWith("<script>")).toBe(true);
+  expect(withDriveScript("<!DOCTYPE html><p>x</p>", SCRIPT)).toBe(`<!DOCTYPE html>${tag}<p>x</p>`);
+  // A meta policy inside the head comes after the script, as does one before the head (or with no head at all).
+  const inHead = `<head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'self'"></head>`;
+  expect(withDriveScript(inHead, SCRIPT).indexOf(tag)).toBeLessThan(withDriveScript(inHead, SCRIPT).indexOf("http-equiv"));
+  const before = `<!doctype html><meta http-equiv=content-security-policy content="script-src 'none'"><head><title>x</title></head>`;
+  expect(withDriveScript(before, SCRIPT)).toBe(`<!doctype html>${tag}<meta http-equiv=content-security-policy content="script-src 'none'"><head><title>x</title></head>`);
+  const noHead = `<META HTTP-EQUIV="Content-Security-Policy" CONTENT="default-src 'none'"><p>x</p>`;
+  expect(withDriveScript(noHead, SCRIPT).startsWith(tag)).toBe(true);
+});
+
+test("a header Content-Security-Policy gets the script's hash wherever inline scripts are decided", () => {
+  expect(allowDriveScript("default-src 'self'; img-src *", HASH)).toBe(`default-src 'self' ${HASH}; img-src *`);
+  expect(allowDriveScript("script-src 'self'; default-src 'none'", HASH)).toBe(`script-src 'self' ${HASH}; default-src 'none'`);
+  // script-src-elem decides inline <script> elements when it is there: it gets the hash, and so does script-src.
+  expect(allowDriveScript("script-src-elem 'self'", HASH)).toBe(`script-src-elem 'self' ${HASH}`);
+  expect(allowDriveScript("script-src 'self'; script-src-elem 'self' https://cdn.example", HASH)).toBe(`script-src 'self' ${HASH}; script-src-elem 'self' https://cdn.example ${HASH}`);
+  // Nothing about scripts: nothing to widen. Inline already allowed: left as it is (a hash would switch that off).
+  expect(allowDriveScript("img-src *", HASH)).toBe("img-src *");
+  expect(allowDriveScript("script-src 'unsafe-inline'", HASH)).toBe("script-src 'unsafe-inline'");
+  expect(allowDriveScript("script-src 'unsafe-inline' 'nonce-abc'", HASH)).toBe(`script-src 'unsafe-inline' 'nonce-abc' ${HASH}`);
+  // Two policies in one header (two headers joined): each one is widened.
+  expect(allowDriveScript("script-src 'self', default-src 'none'", HASH)).toBe(`script-src 'self' ${HASH}, default-src 'none' ${HASH}`);
+});
+
+/** Runs the page script in a stand-in frame and returns how to post to it, and the keys it replayed. */
+function frame() {
+  const listeners: ((m: any) => void)[] = [];
+  const replayed: string[] = [];
+  const parent = { postMessage: () => {} };
+  const win: any = {
+    parent,
+    addEventListener: (type: string, fn: (m: any) => void) => type === "message" && listeners.push(fn),
+    crypto: globalThis.crypto,
+    TextEncoder,
+    Promise,
+    innerWidth: 800,
+    innerHeight: 600,
+  };
+  win.window = win;
+  win.document = { activeElement: null, body: { dispatchEvent: (e: any) => (replayed.push(e.key), false) } };
+  win.KeyboardEvent = class {
+    constructor(
+      readonly type: string,
+      o: object,
+    ) {
+      Object.assign(this, o);
+    }
+  };
+  new Function(...Object.keys(win), SCRIPT)(...Object.values(win));
+  const post = async (data: unknown, origin = HOST, source: unknown = parent) => {
+    for (const l of listeners) l({ data, origin, source });
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  return { post, replayed };
+}
+
+const keyEv = (key: string) => ({ k: "key", key, down: true });
+
+test("a build's frame replays input only from the host's big screen, with the session's key", async () => {
+  const f = frame();
+  // Another page on the same machine (any other port, or localhost for 127.0.0.1) is ignored, key or not.
+  await f.post({ jamDrive: keyEv("a"), key: KEY }, "http://127.0.0.1:5173");
+  await f.post({ jamDrive: keyEv("b"), key: KEY }, "http://localhost:4790");
+  await f.post({ jamDrive: keyEv("c"), key: KEY }, "https://127.0.0.1:4790");
+  // The big screen's origin without the key, with a wrong one, or from a window that isn't the parent.
+  await f.post({ jamDrive: keyEv("d") });
+  await f.post({ jamDrive: keyEv("e"), key: "x".repeat(48) });
+  await f.post({ jamDrive: keyEv("f"), key: KEY }, HOST, {});
+  expect(f.replayed).toEqual([]);
+  // The real thing, in order, including events sent while the key is still being checked.
+  void f.post({ jamDrive: keyEv("g"), key: KEY });
+  await f.post({ jamDrive: keyEv("h"), key: KEY });
+  await f.post({ jamDrive: keyEv("i"), key: "nope" });
+  expect(f.replayed).toEqual(["g", "h"]);
+  // The page itself holds only the key's hash.
+  expect(SCRIPT).toContain(KEY_HASH);
+  expect(SCRIPT).not.toContain(KEY);
+});
+
+test("the big screen's frame key: the host's own windows only", async () => {
+  const { hub } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const get = (headers: Record<string, string>) => fetch(`http://127.0.0.1:${server.port}/api/drive/frame-key`, { headers });
+    const ok = await get({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as any).key).toBe(hub.devproxy.frameKey);
+    expect((await get({})).status).toBe(403);
+    const lap = hub.auth.issue({ kind: "browser", label: "A laptop", ip: "10.0.0.6", personId: hub.session.people()[0].id });
+    expect((await get({ authorization: `Bearer ${lap.token}`, "x-forwarded-for": "10.0.0.6" })).status).toBe(403);
+    const agent = hub.auth.issue({ kind: "agent", label: "Agents", ip: "10.0.0.5" });
+    expect((await get({ authorization: `Bearer ${agent.token}`, "x-forwarded-for": "10.0.0.5" })).status).toBe(403);
+  } finally {
+    server.stop(true);
+  }
 });

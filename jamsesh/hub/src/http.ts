@@ -330,7 +330,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       },
     },
   });
-  if (server.port) hub.devproxy.reserve(server.port);
+  if (server.port) {
+    hub.devproxy.reserve(server.port);
+    // The big screen is a host window, on 127.0.0.1 at this port: the only page a build's frame takes input from.
+    hub.devproxy.hostPage(`http://127.0.0.1:${server.port}`);
+  }
   return server;
 }
 
@@ -657,6 +661,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
   }
   // Driving the big screen (6.1): the lock's owner starts, passes control or drives together; `to` names the other person.
+  // The big screen's key for the builds it frames (devdrive.ts): the host's own windows only.
+  if (path === "/drive/frame-key" && req.method === "GET") return hostWindow ? json({ key: hub.devproxy.frameKey }) : bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host's big screen drives builds.", 403);
   if (path === "/drive/online" && req.method === "GET") return notAPerson() ?? json({ people: s.onlinePeople() });
   m = path.match(/^\/drive\/(start|stop|pass|together)$/);
   if (m && req.method === "POST") {
