@@ -925,6 +925,18 @@ button.wk-chip:hover:not(:disabled) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.wk-diff-wrap {
+  flex-basis: 100%;
+  min-width: 0;
+}
+.wk-diff .note,
+.wk-diff-more {
+  color: var(--directive);
+}
+.wk-diff-more {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
 .wk-diff .add {
   color: var(--built);
 }

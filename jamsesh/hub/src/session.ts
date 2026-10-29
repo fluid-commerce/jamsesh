@@ -77,8 +77,10 @@ export class Session {
   onTriage: ((c: TriageCard) => void) | null = null;
   /** Set by the hub: writes a wiki card's checked pages when a person accepts it (12.8). */
   wikiAccept: ((c: TriageCard, pages: string[] | undefined, by: string) => { applied: string[]; skipped: string[] } | { error: string; status: number }) | null = null;
-  /** Set by the hub: a wiki card was dismissed, so its sources count as read. */
-  wikiDismiss: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: a wiki card was closed (added or dismissed), for the wiki to finish with its proposal. */
+  wikiClosed: ((c: TriageCard) => void) | null = null;
+  /** Set by the hub: a fact was saved in the session, for the wiki to file as a source. */
+  onFactSaved: ((f: Fact) => void) | null = null;
   /** The Tasks board's triage: proposals wait here until a person acts. */
   readonly board = new Board(this);
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;

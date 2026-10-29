@@ -9,7 +9,7 @@
 // Everything here takes the project folder as an argument and touches only that folder: page names are
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -121,12 +121,15 @@ export function initWiki(dir: string): void {
   }
 }
 
+/** The file writes the vault makes, in one place so tests can make them fail part way. */
+export const io = { write: writeFileSync, rename: renameSync, link: linkSync };
+
 /** Writes beside the file, then renames over it: a reader sees the old text or the new, never half of either. */
 function writeAtomic(file: string, text: string) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 7)}.tmp`;
   try {
-    writeFileSync(tmp, text, { flag: "wx" });
-    renameSync(tmp, file);
+    io.write(tmp, text, { flag: "wx" });
+    io.rename(tmp, file);
   } catch (e) {
     rmSync(tmp, { force: true });
     throw e;
@@ -373,10 +376,17 @@ export function rebuildIndex(dir: string): void {
   writeAtomic(join(dir, "index.md"), out.join("\n"));
 }
 
-export function appendLog(dir: string, text: string, pages: string[] = [], now = Date.now()): void {
+/**
+ * Adds a line to log.md. With `key` (a card and its pages) the line is added once: a retried accept doesn't log twice.
+ * The key rides along as an Obsidian comment (%%…%%), which Obsidian doesn't show.
+ */
+export function appendLog(dir: string, text: string, pages: string[] = [], now = Date.now(), key?: string): void {
   const file = join(dir, "log.md");
-  const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}\n`;
-  writeAtomic(file, (readPlain(file) ?? "# Log\n\n") + line);
+  const cur = readPlain(file) ?? "# Log\n\n";
+  const mark = key ? ` %%${key.replace(/[^\w:,-]/g, "")}%%` : "";
+  if (mark && cur.includes(mark)) return;
+  const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
+  writeAtomic(file, cur + line);
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {
@@ -392,7 +402,7 @@ export function readLog(dir: string, limit = 100): { ts: number; text: string; p
     if (!m) continue;
     const ts = Date.parse(`${m[1]}T${m[2]}:00Z`);
     const pages = linksOf(m[3]);
-    out.push({ ts, text: m[3].replace(/\s*\[\[[^\]]+\]\]/g, "").trim(), pages });
+    out.push({ ts, text: m[3].replace(/\s*%%[^%]*%%/g, "").replace(/\s*\[\[[^\]]+\]\]/g, "").trim(), pages });
   }
   return out.slice(-limit).reverse();
 }
@@ -444,17 +454,25 @@ export function addSource(dir: string, s: { kind: SourceKind; title: string; tex
   const title = s.title.replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled";
   const text = s.text.length > SOURCE_MAX ? `${s.text.slice(0, SOURCE_MAX)}\n\n[Cut here: the source was longer than ${SOURCE_MAX.toLocaleString("en-US")} characters.]` : s.text;
   const stem = `${today(now)}_${slugifyTitle(title).slice(0, 50)}`;
-  for (let n = 1; n < 200; n++) {
-    const id = n === 1 ? stem : `${stem}-${n}`;
-    const header = `---\nkind: ${s.kind}\ntitle: ${JSON.stringify(title)}\nby: ${JSON.stringify(s.by.slice(0, 80))}\nts: ${now}\n---\n`;
-    try {
-      writeFileSync(join(raw, `${id}.md`), header + text, { flag: "wx" });
-      return { id, title, kind: s.kind, ts: now, by: s.by, text };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+  const header = `---\nkind: ${s.kind}\ntitle: ${JSON.stringify(title)}\nby: ${JSON.stringify(s.by.slice(0, 80))}\nts: ${now}\n---\n`;
+  // Written whole to a temp file first (never listed as a source), then linked to its name, which fails rather than
+  // replace a source already there: a source is either all there or not there at all.
+  const tmp = join(raw, `.${stem}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`);
+  try {
+    io.write(tmp, header + text, { flag: "wx" });
+    for (let n = 1; n < 200; n++) {
+      const id = n === 1 ? stem : `${stem}-${n}`;
+      try {
+        io.link(tmp, join(raw, `${id}.md`));
+        return { id, title, kind: s.kind, ts: now, by: s.by, text };
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      }
     }
+    throw new Error("Couldn't name that source.");
+  } finally {
+    rmSync(tmp, { force: true });
   }
-  throw new Error("Couldn't name that source.");
 }
 
 export function readSource(dir: string, id: string): Source | null {
@@ -496,6 +514,10 @@ export interface WikiState {
   migrated?: boolean;
   /** The source a first-use migration works from until it finishes, so a retry reuses it. */
   migrating?: string;
+  /** A long source read in parts: how many characters of it are handled so far. */
+  read?: Record<string, number>;
+  /** Sources that couldn't be written when they came in (an agent's shipped or decision report, a saved fact), to try again. */
+  queued?: { kind: SourceKind; title: string; text: string; by: string }[];
 }
 
 const stateFile = (dir: string) => join(dir, ".wiki-state.json");
@@ -505,7 +527,7 @@ export function readState(dir: string): WikiState {
   const text = readPlain(stateFile(dir));
   try {
     const j = JSON.parse(text ?? "{}") as Partial<WikiState>;
-    return { ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {}, cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {}, migrated: !!j.migrated, ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}) };
+    return { ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {}, cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {}, migrated: !!j.migrated, ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}), ...(j.read && typeof j.read === "object" ? { read: j.read } : {}), ...(Array.isArray(j.queued) ? { queued: j.queued } : {}) };
   } catch {
     return { ingested: {}, cursors: {} };
   }

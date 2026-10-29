@@ -1690,10 +1690,13 @@ A page has front matter `type` (person, workstream, feature, decision, requireme
 **Feeding it.** Sources come from the transcript (every 15 minutes and at session end: non-banter speech, typed prompts, decisions
 and agents' questions; read forward from a per-session cursor that moves only after the source is written, a long stretch split
 into sources of 50,000 characters, a thin stretch kept for the next pass, and at session end whatever is left), documents (**Add to wiki**, `POST /api/wiki/sources`; `jam_source_add` for agents, 30 an hour), agents'
-`shipped` and `decision` updates (small `agent` sources), and people's page edits (`edit` sources holding the diff). An ingest
+`shipped` and `decision` updates (small `agent` sources; one that can't be written is logged, kept in `.wiki-state.json` and
+written at the next pass, by this session or the next), facts saved in the session (below), and people's page edits (`edit` sources holding the diff). An ingest
 reads up to 8 sources (60,000 characters) with the index and the pages they touch, using the **router** model, and proposes up to
-15 whole pages. The pages it touches go to the model whole (up to 60,000 characters in all), and it may only replace an existing
-page it was given whole; a proposal for any other existing page is dropped. The maintainer's rules are fixed in code; sources,
+15 whole pages. A source longer than 60,000 characters is read in parts, each from where the last ended (`read` offsets in the
+state); it counts as read only once its end has been. The pages it touches go to the model whole (up to 60,000 characters in all), and it may only replace an existing
+page it was given whole; a proposal for any other existing page is dropped. A proposal's base revision is the one the model
+was shown, so a page a person edits during the model call is stale on the card and skipped on accept. The maintainer's rules are fixed in code; people, workstreams, the index, sources,
 pages and the vault's `WIKI.md` reach the model as data inside tags named with a random word per call, which nothing in the data
 can close. The model can only return wiki pages (a schema), so it cannot assign work or change settings. With no model the
 sources wait, and lint says so. A source is read (`ingested`) once its card is accepted or dismissed, or when an ingest finds
@@ -1704,19 +1707,25 @@ nothing in it worth a page; until then the open card holds it, so it isn't propo
 writes the checked pages; unchecked ones are dropped. A page a person edited since the proposal (revision no longer matches) is
 skipped and listed in `card.wiki.skipped`; if every checked page is stale the answer is 409. Each page is written whole (a temp
 file, then a rename) and recorded in the proposal as it lands; a write that fails, or a log or index that can't be written, is a
-500 that keeps the card open, and accepting again finishes without writing a page twice. People's own edits
+500 that keeps the card open, and accepting again finishes without writing a page twice or logging twice (the log line
+carries the proposal's key as an Obsidian `%%comment%%`). A finished accept is recorded in the proposal before the card
+closes; if the hub stops in between, the next start closes the card with what was recorded. People's own edits
 (`PUT /api/wiki/page/:slug`) apply directly. The proposal's full text, and the card as raised, are kept in the project's
 `.proposals/<card>.json`, not in the session: a new session raises every open proposal on its own board again (pages edited
 since marked `stale`). The diff names every removed line (past the cut they follow the cut; past that they are counted), and a
-change that shrinks a page by a third or more is flagged on the card. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,stale,added,removed,largeDeletion}], findings?, applied?, skipped?}`.
+change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff lines and says how many
+more there are, with a button that shows them all; the hub's notes about a cut diff always show. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,stale,added,removed,largeDeletion}], findings?, applied?, skipped?}`.
 
 **Query and lint.** `POST /api/wiki/query {question, file?}` answers from the best-matching pages with `[[links]]`; a substantial
-answer with `file:true` raises an `answer` card that creates a page. `POST /api/wiki/lint` finds orphans, broken links, pages not
+answer with `file:true` raises an `answer` card that creates a page. Its source is unread until that card is resolved; if the
+card can't be raised, an ingest reads it. `POST /api/wiki/lint` finds orphans, broken links, pages not
 updated in 45 days, sources not yet ingested and (with a model) contradictions and stale claims, and raises one `lint` card of
 findings (one open at a time; a changed result replaces it).
 
 **Hub API** (people only; an agent credential gets 403). Writes are people-only routes (`HUMAN_ONLY`): on the host only its own
 windows (the window key), elsewhere a paired device with its person; the writer is that person, never a `personId` in the body.
+A window with no person picked, the host's included, gets 403 "Pick who you are in this window first" for any wiki write,
+and for accepting or dismissing a wiki card.
 
 | Route | Answer |
 |---|---|
@@ -1739,11 +1748,14 @@ briefing kept under 6,000 characters (about 1,500 tokens); what doesn't fit is n
 
 **Safety.** Page names are slugs (`[a-z0-9-]`, 64 characters), so no path can leave `wiki/`. `wiki/`, `raw/` and `.proposals/`
 must be real folders in the project folder (resolved to its real path) and the vault's own files plain files: a link anywhere
-on the way is refused, never followed. Writes are atomic, refuse symlinks and are capped (40,000 characters a page, 1,500 pages, 200,000 characters and 6,000 files of sources). Sources are
+on the way is refused, never followed. Writes are atomic (a page: temp file and rename; a source: temp file linked to a name that must be new), refuse symlinks and are capped (40,000 characters a page, 1,500 pages, 200,000 characters and 6,000 files of sources). Sources are
 created exclusively and never rewritten. Model output is cleaned of front matter and only ever lands in `wiki/`.
 
-**The fact list.** The brain's periodic curation pass no longer runs in a hub (the ingest replaces it; direct "remember this" still
-saves a fact). The first time a project has a wiki, its `context.json` and the session's active facts become pages
+**The fact list.** The brain's periodic curation pass no longer runs in a hub (the ingest replaces it). The session's fact store
+stays as the live, in-session layer: "remember this" and context cards added on the board save a fact that agents get in their
+briefing at once, before any wiki card is approved, and that the curator can retire. Every fact saved (made, added, merged or
+replacing another) is also filed into the wiki as a source, so it reaches the pages through the same approval cards; the
+agent briefing reads both (the session's settled points, then the wiki section). The first time a project has a wiki, its `context.json` and the session's active facts become pages
 (`decisions`, `requirements`, `open-questions`, `project-brief`, one page per workstream), without a model, with a source holding the
 original text. It only creates: a page already there is left alone, and if a person wrote it the source stays unread so the next
 ingest proposes the merge on a card. It is marked done last; an interrupted run starts again from the same source.

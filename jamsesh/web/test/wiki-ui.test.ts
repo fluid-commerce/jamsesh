@@ -12,6 +12,8 @@ import { shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
 import { onRefresh, saveRev } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
+import { diffView } from "../src/wiki/WikiCard";
+import { lineDiff } from "../../hub/src/wiki/diff";
 import { bus } from "../../hub/src/bus";
 import type { Decider } from "../../hub/src/wiki/service";
 
@@ -22,6 +24,8 @@ const hub = new Hub({ canvas: false, whisper: false, dataDir: dir, wikiDir });
 const server = startHttp(hub, 0);
 const seeded = seedWiki(wikiDir, 40);
 const agent = hub.auth.issue({ kind: "agent", label: "Agents on Mac", ip: "10.0.0.5", ownerDeviceId: "host" });
+// The host's window has picked who is using it: every wiki change names a person.
+hub.session.store.setSetting("hostPersonId", hub.session.upsertPerson({ name: "Chey" }).id);
 
 const realFetch = globalThis.fetch;
 let window = "";
@@ -239,4 +243,23 @@ test("the Work tab finds settled pages by category, with or without the list pag
   const both = settled([meta("decisions", "decisions", 1), meta("use-passkeys", "decisions", 2)], { decisions: 3 });
   expect(both).toEqual([{ label: "Decisions", count: 4, unit: "decisions", open: "decisions", latest: "use-passkeys" }]);
   expect(settled([], {})).toEqual([]);
+});
+
+test("a card's diff never hides lines silently: past 400 it says how many more and opens them all, with the hub's own notes", () => {
+  const before = Array.from({ length: 700 }, (_, i) => `r${i}`).join("\n");
+  const diff = lineDiff(before, "r0");
+  const folded = diffView(diff, false);
+  expect(folded.lines).toHaveLength(400);
+  expect(folded.hidden).toBeGreaterThan(0);
+  expect(folded.lines.join("\n")).not.toContain("-r699");
+  const open = diffView(diff, true);
+  expect(open.hidden).toBe(0);
+  expect(open.lines).toContain("-r699");
+  // When the hub had to cut, its note is in what shows, folded or not.
+  const big = lineDiff(Array.from({ length: 2000 }, (_, i) => `a removed line of page text ${i}`).join("\n"), "# x");
+  const shown = diffView(big, false);
+  expect([...shown.lines, ...shown.notes].join("\n")).toMatch(/\(and \d+ more lines removed\)/);
+  // A note past the fold is carried up into view.
+  const late = [...Array.from({ length: 450 }, (_, i) => `-l${i}`), "(and 9 more lines removed)"].join("\n");
+  expect(diffView(late, false).notes).toEqual(["(and 9 more lines removed)"]);
 });

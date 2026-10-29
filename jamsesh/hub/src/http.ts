@@ -656,8 +656,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // Who writes is who is signed in: a paired person's own device, or the host's window as its person. Never a
     // personId in the body, which any caller could fill in (HUMAN_ONLY above already refused other loopback callers).
     const p = paired ? (paired.personId ? s.person(paired.personId) : undefined) : hostWindow ? s.person(s.store.setting<string>("hostPersonId", "")) : undefined;
-    if (req.method !== "GET" && !p && !hostWindow) return bad("Pick who you are in this window first.", 403);
-    const who = { id: p?.id ?? null, name: p?.name ?? "the host" };
+    // Every change to the wiki names a person, the host's own window included.
+    if (req.method !== "GET" && !p) return bad("Pick who you are in this window first.", 403);
+    const who = { id: p?.id ?? null, name: p?.name ?? "Someone" };
     const r = await wikiRoute(hub.wiki, req.method, path, url, body, who);
     if (r) return Response.json(r.body, { status: r.status, headers: { "cache-control": "no-store" } });
   }
@@ -673,7 +674,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   m = path.match(/^\/triage\/([\w-]+)(?:\/(send|add|merge|replace|dismiss))?$/);
   if (m && req.method !== "GET") {
     const who = actor();
-    if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
+    // A wiki card writes pages under the name of whoever accepts it, so it needs a person even in the host's window.
+    if (!who.id && (!hostWindow || s.board.get(m[1])?.type === "wiki")) return bad("Pick who you are in this window first.", 403);
     const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind, pages: body?.pages };
     const verb = m[2];
     const r = !verb

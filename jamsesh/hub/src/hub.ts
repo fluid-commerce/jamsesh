@@ -154,7 +154,14 @@ export class Hub {
       return rec && bytes ? { name: rec.name, type: rec.kind, bytes } : null;
     };
     this.session.wikiAccept = (c, pages, by) => this.wiki.accept(c, pages, by);
-    this.session.wikiDismiss = (c) => this.wiki.dismissed(c);
+    this.session.wikiClosed = (c) => this.wiki.closed(c);
+    this.session.onFactSaved = (f) => void this.wiki.factSaved(f);
+    try {
+      // Raises the project's open proposals on this session's board, and closes any whose accept finished.
+      this.wiki.restore();
+    } catch (e) {
+      console.error("wiki restore:", e instanceof Error ? e.message : e);
+    }
     this.brain.curateInDigest = false;
     try {
       this.wiki.migrate(!opts.dataDir && config.project ? readProjectContext(config.home, config.project.slug) : null);

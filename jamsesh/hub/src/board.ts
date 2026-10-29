@@ -233,7 +233,13 @@ export class Board {
     const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
     if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && sameSpecifics(f.text, text) && similar(f.text, text) > 0.55)) return null;
     const now = Date.now();
-    return this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] });
+    return this.saved(this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] }));
+  }
+
+  /** A fact saved in the session is also filed into the project wiki, which holds what outlasts the session (12.8). */
+  private saved(f: Fact): Fact {
+    this.s.onFactSaved?.(f);
+    return f;
   }
 
   // ---- acting on a card ----
@@ -332,13 +338,15 @@ export class Board {
       const r = this.s.wikiAccept?.(c, pages, by);
       if (!r) return fail("The wiki isn't available here.", 503);
       if ("error" in r) return fail(r.error, r.status);
-      return { ok: true, card: this.done(c, "added", by, { wiki: { ...c.wiki!, applied: r.applied, skipped: r.skipped } }), factId: "" };
+      const card = this.done(c, "added", by, { wiki: { ...c.wiki!, applied: r.applied, skipped: r.skipped } });
+      this.s.wikiClosed?.(card);
+      return { ok: true, card, factId: "" };
     }
     if (c.type !== "context") return fail("That's a task card: send it instead.");
     if (c.retire) return fail("That card retires a saved fact: use Retire, or dismiss it.");
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
-    const fact = this.s.store.put("facts", this.newFact(r.card));
+    const fact = this.saved(this.s.store.put("facts", this.newFact(r.card)));
     this.announceDecision(r.card, by);
     return { ok: true, card: this.done(r.card, "added", by, { factId: fact.id }), factId: fact.id };
   }
@@ -359,7 +367,7 @@ export class Board {
     const joined = text !== undefined ? clean(text) : clean(`${f.text.replace(/[.\s]+$/, "")}. ${c.text}`);
     if (!joined) return fail("The wording can't be empty.");
     const ids = [...new Set([...f.sourceEventIds, ...c.sources.map((x) => x.eventId).filter((x): x is number => x != null)])];
-    this.s.store.put("facts", { ...f, text: joined, sourceEventIds: ids, note: `Merged with a proposal from ${c.by}`, updatedAt: Date.now() });
+    this.saved(this.s.store.put("facts", { ...f, text: joined, sourceEventIds: ids, note: `Merged with a proposal from ${c.by}`, updatedAt: Date.now() }));
     return { ok: true, card: this.done(c, "merged", by, { factId: f.id }), factId: f.id };
   }
 
@@ -377,7 +385,7 @@ export class Board {
     const r = this.edited(c, e, by);
     if (!r.ok) return r;
     this.s.store.put("facts", { ...old, status: "superseded", note: `Replaced by ${by} from the Tasks board`, updatedAt: Date.now() });
-    const fact = this.s.store.put("facts", this.newFact(r.card));
+    const fact = this.saved(this.s.store.put("facts", this.newFact(r.card)));
     this.announceDecision(r.card, by);
     return { ok: true, card: this.done(r.card, "replaced", by, { factId: fact.id }), factId: fact.id };
   }
@@ -387,7 +395,7 @@ export class Board {
     if ("ok" in c) return c;
     const card = this.done(c, "dismissed", by);
     // A wiki card's sources are read once a person has said no to it.
-    if (c.type === "wiki") this.s.wikiDismiss?.(c);
+    if (c.type === "wiki") this.s.wikiClosed?.(card);
     return { ok: true, card };
   }
 

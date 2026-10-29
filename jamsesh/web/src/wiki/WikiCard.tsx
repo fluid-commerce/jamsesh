@@ -88,16 +88,42 @@ export function WikiCardView({ card, index, personId, now }: { card: TriageCard;
   );
 }
 
+const SHOWN = 400;
+
+/**
+ * What the diff box shows: the first SHOWN lines until the person asks for the rest, never fewer without saying so.
+ * The hub's own notes ("(cut here…)", "(and N more lines removed)") always show, whatever is folded away.
+ */
+export function diffView(diff: string, all: boolean): { lines: string[]; hidden: number; notes: string[] } {
+  const every = diff.split("\n");
+  const isNote = (l: string) => /^\((cut here|and \d+ more line|too long to line up)/.test(l);
+  const lines = all ? every : every.slice(0, SHOWN);
+  return { lines, hidden: every.length - lines.length, notes: all ? [] : every.slice(SHOWN).filter(isNote) };
+}
+
 function Diff({ c }: { c: WikiChange }) {
-  const lines = c.diff.split("\n").slice(0, 400);
+  const [all, setAll] = useState(false);
+  const v = diffView(c.diff, all);
   return (
-    <pre className="wk-diff scrollbars-thin" tabIndex={0} aria-label={`Changes to ${c.title}`}>
-      {lines.map((l, i) => (
-        <span key={i} className={l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : ""}>
-          {l || " "}
-          {"\n"}
-        </span>
-      ))}
-    </pre>
+    <div className="wk-diff-wrap">
+      <pre className="wk-diff scrollbars-thin" tabIndex={0} aria-label={`Changes to ${c.title}`}>
+        {v.lines.map((l, i) => (
+          <span key={i} className={l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : /^\(/.test(l) ? "note" : ""}>
+            {l || " "}
+            {"\n"}
+          </span>
+        ))}
+      </pre>
+      {v.hidden > 0 && (
+        <p className="wk-diff-more">
+          {v.notes.map((n) => (
+            <span key={n}>{n} </span>
+          ))}
+          <button className="btn ghost small" onClick={() => setAll(true)}>
+            Show the other {v.hidden} lines
+          </button>
+        </p>
+      )}
+    </div>
   );
 }
