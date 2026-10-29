@@ -270,8 +270,8 @@ function counts(db: Database) {
 
 /**
  * Brings the old sessions into projects. Nothing is moved or deleted: each old directory is copied
- * into projects/<name>/sessions/ (the database through a private copy and VACUUM INTO, so the
- * original is never opened), counted against the copy, and left where it was. Sessions with the same
+ * into projects/<name>/sessions/ (the database as one consistent snapshot read with VACUUM INTO on a
+ * read-only connection, see `snapshot`), counted against the copy, and left where it was. Sessions with the same
  * name become one project. projects/.migration.json records each source; one copied and verified is
  * done, and any other is tried again at the next start. A copy is built under a hidden name and only
  * takes its real one once verified, so a failed or cut-off copy never shows as a session.
@@ -316,6 +316,21 @@ function takeMigrationLock(path: string, waitMs: number): () => void {
   };
 }
 
+/**
+ * One consistent copy of a session's database, even while its hub still writes: SQLite's own VACUUM INTO, run as one
+ * read transaction on a read-only connection, so it holds exactly what was committed at one moment, the WAL included.
+ * Never a copy of the files: a checkpoint between copying the database and its WAL would lose committed rows. Read-only,
+ * the original is never written (its write-ahead index is shared with any live hub, as every reader's is).
+ */
+function snapshot(db: string, to: string) {
+  const source = new Database(db, { readonly: true });
+  try {
+    source.exec(`VACUUM INTO '${to.replace(/'/g, "''")}'`);
+  } finally {
+    source.close();
+  }
+}
+
 function migrateNow(home: string): MigrationRecord[] {
   const root = projectsDir(home);
   const marker = join(root, MIGRATION_FILE);
@@ -336,7 +351,7 @@ function migrateNow(home: string): MigrationRecord[] {
     let project: ProjectMeta | null = null;
     let staging = "";
     try {
-      for (const f of ["jamsesh.db", "jamsesh.db-wal", "jamsesh.db-shm"]) if (existsSync(join(src, f))) copyFileSync(join(src, f), join(scratch, f));
+      snapshot(join(src, "jamsesh.db"), join(scratch, "jamsesh.db"));
       const work = new Database(join(scratch, "jamsesh.db"));
       try {
         const setting = (key: string) => {

@@ -315,6 +315,35 @@ describe("migration from the single-session layout", () => {
     expect(migrateLegacy(home, 300).filter((r) => r.verified).length).toBe(3);
   }, 30_000);
 
+  test("a session its hub is still writing, with rows only in the WAL and checkpoints mid-copy, comes over whole", async () => {
+    const home = tmp();
+    legacy(join(home, "host"), "Passport", ["Chey"], noon);
+    const store = join(import.meta.dir, "..", "src", "store.ts");
+    // The live hub: 50 committed rows left in the WAL, then a write and a full checkpoint every few milliseconds.
+    const code = `const { Store } = await import(${JSON.stringify(store)}); const st = new Store(${JSON.stringify(join(home, "host"))});
+      st.db.exec("PRAGMA wal_autocheckpoint = 0");
+      for (let i = 0; i < 50; i++) st.addEvent({ kind: "speech", authorType: "person", authorName: "Chey", text: "wal " + i });
+      console.log("ready");
+      setInterval(() => { st.addEvent({ kind: "speech", authorType: "person", authorName: "Chey", text: "more" }); st.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); }, 3);`;
+    const writer = Bun.spawn(["bun", "-e", code], { stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+    try {
+      const reader = writer.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready");
+      reader.releaseLock();
+      const records = migrateLegacy(home);
+      expect(records.map((r) => r.verified)).toEqual([true]);
+      const copy = new Database(join(records[0].to, "jamsesh.db"), { readonly: true });
+      // Every row committed before the migration began (the WAL-only ones too), and a sound database.
+      expect((copy.query("SELECT COUNT(*) AS n FROM events").get() as any).n).toBeGreaterThanOrEqual(51);
+      expect((copy.query("SELECT COUNT(*) AS n FROM events WHERE text LIKE 'wal %'").get() as any).n).toBe(50);
+      expect((copy.query("PRAGMA integrity_check").get() as any).integrity_check).toBe("ok");
+      copy.close();
+    } finally {
+      writer.kill();
+      await writer.exited;
+    }
+  }, 30_000);
+
   test("a copy cut off part way never counts as a session", () => {
     const home = tmp();
     const meta = createProject(home, "Passport");
