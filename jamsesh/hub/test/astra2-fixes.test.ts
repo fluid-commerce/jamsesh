@@ -173,7 +173,7 @@ test("A10: revoking a device closes its dev sockets and its token stops at once"
   proxy.sockets.delete(other);
 });
 
-test("a closed big-screen window stops being a screen at once; main stays, and only the host can say so", async () => {
+test("a closed big-screen window stops being a screen at once, main too until it reports again, and only the host can say so", async () => {
   // The host's own big-screen windows carry the window key; any other process on the host doesn't.
   const win = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
   const json = { "content-type": "application/json" };
@@ -190,6 +190,13 @@ test("a closed big-screen window stops being a screen at once; main stays, and o
   expect(ids()).toContain("screen-2");
   expect((await del("screen-2")).status).toBe(200);
   expect(ids()).not.toContain("screen-2");
-  await del("main");
+  // Main counts only while its window reports (1.R5); its stage is kept for when it does again.
+  hub.session.setStage({ mode: "agents" }, "Room brain");
+  expect((await del("main", {})).status).toBe(403);
   expect(ids()).toContain("main");
+  await del("main");
+  expect(ids()).not.toContain("main");
+  await report("main");
+  expect(ids()).toContain("main");
+  expect(hub.session.stage().mode).toBe("agents");
 });
