@@ -1369,7 +1369,7 @@ an agent's credential is refused, and an agent has no person to hold a lock.
 the driver's window sends `{type:"drive", screen, ev}` and the hub, if that window's person is in
 `drivers`, checks it and sends `{type:"drive", screen, personId, name, color, ev, t}` to every window.
 Windows that are not drivers are dropped silently and get `{type:"drive-denied", screen, why}` once
-a second at most. Events are capped at 120 per second per person.
+a second at most. Events are capped at 120 per second per person, across all of that person's windows.
 
 `ev` is one of (all positions are fractions 0..1 of the screen's stage area, so any window size works):
 
@@ -1387,15 +1387,20 @@ are (0,0), (3.5,15.5), (7.5,8.5), (15.5,4) in the person's colour with a 1.5 px 
 tag at (+12,+16): 11 px semibold, 6 x 3 padding, 4 px corners, black or white text by luminance
 (`0.299 R + 0.587 G + 0.114 B > 170` is black). It glides: each frame the shown position moves
 `1 - exp(-dt * 20)` of the way to the reported one (dt capped at 0.1 s) and snaps within half a
-pixel. With Reduce Motion it jumps. On a big screen the dart and tag are scaled up by `driveScale` (the window's width over 960, so 2x on a 1920-wide screen, between 1x and 3x) with the tip fixed and proportions unchanged; mirrors in apps stay at 1x. While anyone drives, FigCraft's own collaborator cursors on the big screen's canvas are hidden (FigCraft can only hide all of them), so each person has one cursor. An owner who re-casts while driving keeps driving the new stage; anyone handed control is cut off. `GET /api/drive/online` lists who is here, and Pass control greys out the rest.
+pixel. With Reduce Motion it jumps. On a big screen the dart and tag are scaled up by `driveScale` (the window's width over 960, so 2x on a 1920-wide screen, between 1x and 3x) with the tip fixed and proportions unchanged; mirrors in apps stay at 1x. While anyone drives, FigCraft's own collaborator cursors on the big screen's canvas are hidden (FigCraft can only hide all of them), so each person has one cursor. An owner who re-casts while driving keeps driving the new stage; anyone handed control is cut off. `GET /api/drive/online` (people's windows only) lists who is here, and Pass control greys out the rest.
 
 **Replaying input** (host window only; windows that only mirror the stage draw cursors but replay
 nothing). The layer finds the tile under the cursor and hands it the event in the tile's local
 coordinates:
 
-- Live builds: the dev proxy adds a small script to the HTML it forwards. It accepts input messages
-  from the host's page (same host name only) and dispatches mouse events at the point, scrolls the
-  nearest scrollable parent for wheel, and types into the focused field.
+- Live builds: the dev proxy adds a small script to the HTML it forwards, before any meta
+  Content-Security-Policy (a header policy gets the script's hash in `script-src-elem` and `script-src`, or
+  `default-src` when it has neither). It takes input only from its parent page at exactly the host's big-screen
+  origin (`http://127.0.0.1:<hub port>`; scheme, host and port) carrying the session's frame key, which the
+  big screen gets from `GET /api/drive/frame-key` (the host's own windows only); the page holds only the key's
+  SHA-256. The big screen passes on only the events the hub sent it from a screen's drivers. The script
+  dispatches mouse events at the point, scrolls the nearest scrollable parent for wheel, and types into the
+  focused field.
 - The canvas: wheel pans, ctrl-wheel zooms, a click selects the frame or layer under the cursor
   through FigCraft's own commands (`view.set`, `select.set`).
 - Anything else: a tile registers itself with `registerDriveTarget(el, handler)` and gets
@@ -1407,7 +1412,8 @@ stage mirror into a trackpad: with Pointer Lock the trackpad's relative motion m
 (the dart stays where it was left when the finger lifts, and the macOS pointer acceleration applies);
 where Pointer Lock is unavailable (WKWebView, phones) the pointer's position over the mirror maps
 straight to the stage. Esc releases the capture; **Stop driving** ends it. Keys go to the big screen
-only while the trackpad is captured, so typing elsewhere in the app is never sent by mistake.
+only while the trackpad is captured and has the keyboard itself; clicking or tabbing to another field lets go,
+so typing elsewhere in the app is never sent by mistake.
 
 **Client API** (`web/src/shared/driving.ts`, used by 6.2's recorder and 6.3's tiles):
 
@@ -1512,10 +1518,15 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   it can't be made). An item's owner is the agent that made the artifact or frame (a canvas note finds
   its frame by node id, a build by its dev server URL); observers own nothing. Notes on nothing an
   agent owns, or on nothing at all, go to the room brain as one prompt, and the sender is told how
-  many went where. A repeated send (a lost reply, a double click) does nothing twice: the hub keeps
-  the result by recording id and each pin by its note id.
+  many went where. A repeated send (a lost reply, a double click, two at once) does nothing twice: the hub
+  reserves the send by recording id before any work starts, and keeps each pin by its note id. A recording
+  id is the hub's own (from Record or Stop); an id it didn't issue is refused (404). A crop's file name is
+  the hub's own too, and the picture is read from the renders folder and written to its uploads folder only
+  (paths resolved through links).
 - **Who can.** People only: the three routes are human-only (an agent's credential is refused), a
-  window acts as its own person, another person can't stop your recording or send your notes, and a
+  window acts as its own person, records only on its own device (the device must be one that window
+  registered; another window's device id is refused), notes are sent only from the window and by the person
+  they were handed to, another person can't stop or replace your recording, and a
   big screen refuses someone who isn't driving it. A recording whose Stop never comes ends on its own
   at 10 minutes, or about 30 seconds after its window disconnects, and gives back any lock it took.
   If the page closes mid-recording, what was said goes to the brain as one prompt, as it always did
@@ -1790,14 +1801,21 @@ the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps`
   The screenshot mode is `simctl io <device> screenshot --type=jpeg`, three calls in flight, newest first, a
   frame identical to the last dropped, running only while someone watches. `recordVideo` can't stream (its
   file is finished only when it stops) and idb's MJPEG stream fails to start on macOS 26. Frames travel as
-  binary WebSocket messages on `/ws/app/<id>` (people only; a slow viewer skips frames).
+  binary WebSocket messages on `/ws/app/<id>` (people's windows only: a paired person or the host's own
+  window, never an agent or another process on the host; a slow viewer skips frames).
 - **Picture, Mac.** `jamsesh-live` (`hub/native/jamsesh-live.swift`, compiled by the hub on first use into
   `~/.jamsesh/bin`): ScreenCaptureKit on one window at its native pixel size, 30 frames a second, JPEG,
-  length-prefixed on stdout. Needs Screen Recording for the app that runs the hub.
+  length-prefixed on stdout. Needs Screen Recording for the app that runs the hub. The app is named by its
+  bundle id: the one the host opened, or the one running app whose name is exactly the one given (`--apps`
+  lists them; none, or two with that name, is refused). Only that app's processes' windows count (never an
+  app whose name merely contains it); the helper follows the one window it picked, checking its window id,
+  owner pid and bundle id four times a second, and ends when the window closes, leaves the screen or
+  changes hands. The Simulator is `com.apple.iphonesimulator` the same way.
 - **Taps, iOS.** idb's companion (`brew install facebook/fb/idb-companion`), one per tile on a unix socket in
   the hub's folder, over gRPC (`idb.ts`). No Simulator window, no Accessibility. Without it people can
   watch, switch Light/Dark, and nothing else (the tile says so). Touches don't land while the screen is
-  turned (checked on iOS 18.6), so taps wait for portrait.
+  turned (checked on iOS 18.6), so taps wait for portrait. A call is done only when the companion answers
+  (HTTP 200) with gRPC status 0; one cut off before it says (the companion crashed mid-tap) is a failure.
 - **Taps, Mac.** The same helper posts CGEvents to the app's pid at points inside its window (the Mac's own
   cursor never moves). Needs Accessibility; without it the tile is watch-only.
 - **Typing.** `{ t: "text", text }` and `{ t: "key", key: "return" | "delete" | "tab" | "escape" }` go through the
