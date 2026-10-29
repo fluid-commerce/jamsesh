@@ -2,11 +2,12 @@
 // command that can't be stopped is reported as still running (and keeps the preview locked), and
 // output is kept as a tail.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { config } from "../src/config";
-import { commandProblem, groups, HostControl, redactUrls, repoProblem, run } from "../src/hostctl";
+import { commandProblem, confine, groups, HostControl, openProblem, redactUrls, repoProblem, run } from "../src/hostctl";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-hostctl-"));
 const homeWas = config.home;
@@ -92,17 +93,57 @@ test("a command's background child dies with it on a timeout (the whole process 
   expect(alive(bg)).toBe(false);
 });
 
-test("a command that exits leaving a background child holding its pipes still returns promptly with its output", async () => {
+const isAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  return !Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)]).stdout.toString().trim().startsWith("Z");
+};
+
+test("a command that exits 0 leaving a background child: the child is stopped too, and the run is done only then", async () => {
   const t0 = Date.now();
   const pidFile2 = join(dir, "bg2.pid");
-  const r = await run(["/bin/sh", "-c", `echo done-line; sleep 200 & echo $! > ${pidFile2}`], 20_000);
+  const r = await run(["/bin/sh", "-c", `echo done-line; sleep 300 & echo $! > ${pidFile2}`], 20_000);
   expect(r.code).toBe(0);
+  expect(r.stuck).toBeUndefined();
   expect(r.out).toContain("done-line");
   expect(Date.now() - t0).toBeLessThan(5_000);
-  try {
-    process.kill(Number(readFileSync(pidFile2, "utf8").trim()), "SIGKILL"); // the leftover (a normal finish leaves it alone)
-  } catch {}
+  const bg = Number(readFileSync(pidFile2, "utf8").trim());
+  expect(isAlive(bg)).toBe(false); // gone by the time run returned (the group was seen empty)
 });
+
+test("a preview's lock frees only after what its build left behind is gone", async () => {
+  const hc: any = Object.create(HostControl.prototype);
+  hc.builds = new Map();
+  hc.session = { settings: () => ({ hostControl: true }) };
+  hc.log = () => {};
+  const done = new Promise<string>((r) => (hc.onBuilt = (_l: string, _ok: boolean, t: string) => r(t)));
+  const pidFile3 = join(dir, "bg3.pid");
+  // The checkout already exists, with a local bare repo as its origin, so the fetch works offline.
+  const bare = join(dir, "remote.git");
+  const work = join(dir, "work");
+  const sh = (...c: string[]) => Bun.spawnSync(c);
+  sh("git", "init", "-q", "--bare", bare);
+  sh("git", "init", "-q", work);
+  sh("git", "-C", work, "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+  sh("git", "-C", work, "push", "-q", bare, "HEAD:refs/heads/main");
+  const repo = "https://example.invalid/acme/lockapp.git";
+  const slug = `lockapp-main-${createHash("sha1").update(repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
+  const co = join(dir, "previews", slug);
+  mkdirSync(co, { recursive: true });
+  sh("git", "init", "-q", co);
+  sh("git", "-C", co, "remote", "add", "origin", bare);
+  hc.preview({ repo, branch: "main", command: `sleep 300 & echo $! > ${pidFile3}`, by: "T" });
+  expect(hc.builds.size).toBe(1);
+  const text = await done;
+  expect(text).toContain("is built on the host");
+  const bg = Number(readFileSync(pidFile3, "utf8").trim());
+  expect(isAlive(bg)).toBe(false); // gone before the room is told it finished
+  await Bun.sleep(30);
+  expect(hc.builds.size).toBe(0);
+}, 40_000);
 
 test("run reports a command it couldn't stop as still running, with a way to see its exit", () =>
   withUnstoppable(async (signals, exit) => {
@@ -181,4 +222,33 @@ test("a preview that throws before its work starts can't strand the lock", async
   hc.preview({ repo: "https://github.com/acme/other.git", command: "make", by: "T" });
   await Bun.sleep(100);
   expect(hc.builds.size).toBe(0);
+});
+
+test("what a build opens: no credentialed URL, no scheme but http(s), and only paths inside the checkout", () => {
+  for (const ok of [undefined, "", "build/App.app", "simulator:build/App.app", "https://localhost:3000/", "docs/index.html"]) expect([ok, openProblem(ok)]).toEqual([ok, null]);
+  for (const bad of ["https://tok@example.com/", "https://u:p@example.com/", "file:///etc/passwd", "x-apple.systempreferences:", "/etc/passwd", "~/secret", "../../etc/passwd", "a/../../b", "-a Calculator", "simulator:/Applications/X.app", "simulator:../x.app", "simulator:https://example.com", "a\0b"])
+    expect([bad, openProblem(bad)]).toEqual([bad, expect.any(String)]);
+});
+
+test("a symlink inside the checkout can't lead outside it", () => {
+  const co = join(dir, "checkout");
+  mkdirSync(join(co, "build"), { recursive: true });
+  writeFileSync(join(co, "build", "ok.txt"), "x");
+  writeFileSync(join(dir, "outside.txt"), "x");
+  symlinkSync(join(dir, "outside.txt"), join(co, "build", "link.txt"));
+  symlinkSync(dir, join(co, "up"));
+  expect(confine(co, "build/ok.txt")).toBe(join(realpathSync(co), "build", "ok.txt"));
+  expect(confine(co, "build/link.txt")).toBeNull();
+  expect(confine(co, "up/outside.txt")).toBeNull();
+  expect(confine(co, "missing")).toBeNull();
+});
+
+test("request() refuses an open that carries credentials or escapes the checkout, so the card never shows one", () => {
+  const hc: any = Object.create(HostControl.prototype);
+  hc.requests = new Map();
+  hc.onRequest = () => {};
+  const base = { agentId: "a", agentName: "A", ownerName: "J", repo: "https://github.com/a/b.git", branch: "", command: "make" };
+  expect(typeof hc.request({ ...base, open: "https://tok@example.com/" })).toBe("string");
+  expect(typeof hc.request({ ...base, open: "../../etc/passwd" })).toBe("string");
+  expect(typeof hc.request({ ...base, open: "build/App.app" })).toBe("object");
 });

@@ -15,7 +15,7 @@ JamSesh is one Mac app that either hosts a session or joins one. The Mac that dr
 screen (usually a Mac mini) hosts; everyone else joins.
 
 1. Download
-   [JamSesh.dmg](https://github.com/fluid-commerce/jamsesh/releases/download/jamsesh-latest/JamSesh.dmg)
+   [JamSesh.dmg](https://github.com/fluid-commerce/jamsesh/releases/latest/download/JamSesh.dmg)
    (Macs with Apple Silicon), open it, and drag JamSesh to Applications. Every change to `main`
    rebuilds it, so the same link always has the newest version; to update, quit JamSesh and
    replace it. The app isn't notarized yet, so the first time macOS refuses to open it: open

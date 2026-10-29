@@ -43,6 +43,11 @@ function Card({ r }: { r: BuildRequest }) {
         )}
       </div>
       <code className="build-request-cmd">{r.command}</code>
+      {r.open && r.kind !== "shell" && (
+        <div className="build-request-open">
+          Then opens <code>{r.open}</code>
+        </div>
+      )}
       {err && <div className="build-request-err" role="alert">{err}</div>}
       <div className="build-request-foot">
         <span className="build-request-say">

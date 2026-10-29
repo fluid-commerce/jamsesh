@@ -1,9 +1,10 @@
 name: JamSesh release
 
 # Builds the JamSesh Mac app on every change to main that reaches it, and replaces the
-# "jamsesh-latest" release with it, so people download the newest build instead of building it.
+# new "jamsesh-<version>" release marked latest (older JamSesh releases are removed after it is up),
+# so people download the newest build instead of building it.
 # The download link stays the same:
-#   https://github.com/fluid-commerce/jamsesh/releases/download/jamsesh-latest/JamSesh.dmg
+#   https://github.com/fluid-commerce/jamsesh/releases/latest/download/JamSesh.dmg
 # Apple Silicon only, signed ad hoc (no Apple Developer ID yet): the first open needs
 # System Settings > Privacy & Security > Open Anyway.
 on:

@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
 (globalThis as any).navigator ??= {};
 
-const { historyCursor, capFeed, feedAdmits } = await import("../src/shared/ui");
+const { historyCursor, capFeed, feedAdmits, Generation } = await import("../src/shared/ui");
 
 test("history pages from the oldest event the window has, even when the feed shows none of them", () => {
   // The state's window: only canvas and system events, none the feed shows.
@@ -37,4 +37,23 @@ test("while the reader is away nothing newer than the line they left is added, s
   for (let id = 61; id <= 110; id++) if (feedAdmits(true, 100, id)) list.set(id, 1);
   const ids = [...list.keys()];
   expect(ids[ids.length - 1] - ids[0] + 1).toBe(ids.length); // contiguous, ends at the newest
+});
+
+test("a history response asked for before a reset to the latest window is dropped", async () => {
+  const gen = new Generation();
+  const seen = new Map<number, string>([[200, "latest"]]);
+  const ask = (rows: number[], delay: number) => {
+    const asked = gen.n;
+    return new Promise<void>((r) =>
+      setTimeout(() => {
+        if (!gen.stale(asked)) for (const id of rows) seen.set(id, "history");
+        r();
+      }, delay),
+    );
+  };
+  const slow = ask([10, 11], 30); // in flight...
+  gen.bump(); // ...when Latest resets the feed
+  const fresh = ask([150, 151], 1);
+  await Promise.all([slow, fresh]);
+  expect([...seen.keys()].sort((a, b) => a - b)).toEqual([150, 151, 200]);
 });

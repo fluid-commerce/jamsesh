@@ -2,7 +2,7 @@
 // drive the iOS Simulator, and run shell commands. Only the brain on the host can
 // use this; client agents never reach it.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bus } from "./bus";
 import { config } from "./config";
@@ -95,10 +95,13 @@ const OUTPUT_TAIL = 16_384;
 /** Reads a stream into a rolling tail; `done` settles when the stream ends (or fails). */
 function collect(stream: ReadableStream<Uint8Array>, max = OUTPUT_TAIL) {
   const dec = new TextDecoder();
-  const acc = { text: "", done: Promise.resolve() };
+  const reader = stream.getReader();
+  const acc = { text: "", done: Promise.resolve(), /** Stops reading (a background child may still hold the pipe open). */ cancel: () => void reader.cancel().catch(() => {}) };
   acc.done = (async () => {
-    for await (const chunk of stream) {
-      acc.text += dec.decode(chunk, { stream: true });
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      acc.text += dec.decode(value, { stream: true });
       if (acc.text.length > max * 2) acc.text = acc.text.slice(-max);
     }
   })().catch(() => {});
@@ -141,10 +144,16 @@ async function groupEmpty(pgid: number, ms: number): Promise<boolean> {
 
 /** TERM to the whole group, then KILL after the grace. True only when the group was seen empty. */
 async function stopGroup(pgid: number, graceMs = 1_000): Promise<boolean> {
+  if (!groups.alive(pgid)) return true;
   groups.signal(pgid, "SIGTERM");
   if (await groupEmpty(pgid, graceMs)) return true;
   groups.signal(pgid, "SIGKILL");
   return groupEmpty(pgid, graceMs);
+}
+
+/** Resolves once the group is seen empty (never rejects, never resolves while it is alive). */
+async function waitGone(pgid: number): Promise<void> {
+  while (groups.alive(pgid)) await Bun.sleep(500);
 }
 
 /** Runs argv (no shell) as its own process group with a deadline. Every wait is bounded; a group that can't be emptied is reported as stuck, never as a finished failure. */
@@ -156,6 +165,8 @@ export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Prom
     const code = await p.exited;
     // A background child that inherited the pipes keeps them open: after the command itself is done, give the output a moment, then stop reading.
     await Promise.race([Promise.all([out.done, err.done]), Bun.sleep(500)]);
+    out.cancel();
+    err.cancel();
     return { code, out: (out.text.slice(-OUTPUT_TAIL) + (err.text ? `\n${err.text.slice(-OUTPUT_TAIL)}` : "")).trim().slice(-OUTPUT_TAIL) };
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -163,7 +174,11 @@ export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Prom
   let why = "timed out";
   try {
     const r = await Promise.race([finished, late]);
-    if (r) return r;
+    if (r) {
+      // The command itself finished; whatever it left running in its group is stopped too, and the run only counts as done once the group is empty.
+      if (await stopGroup(p.pid)) return r;
+      return { ...r, stuck: true, out: `${r.out}\n(still running, couldn't stop what it left behind)`.trim(), gone: waitGone(p.pid) };
+    }
   } catch (e) {
     why = `failed: ${e instanceof Error ? e.message : String(e)}`;
   } finally {
@@ -174,10 +189,9 @@ export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Prom
     p.kill();
     return { code: -1, out: why };
   }
-  const gone = (async () => {
-    while (groups.alive(p.pid)) await Bun.sleep(500);
-  })();
-  return { code: -1, out: `${why}; still running, couldn't stop it`, stuck: true, gone };
+  out.cancel();
+  err.cancel();
+  return { code: -1, out: `${why}; still running, couldn't stop it`, stuck: true, gone: waitGone(p.pid) };
 }
 
 /** A remote a build may clone: https, ssh:// or git@, with no credentials in it (a token or user:password belongs in the host's git credential helper, not in room data or a process list). */
@@ -193,6 +207,34 @@ export function repoProblem(repo: string): string | null {
 /** Command text that carries a URL with a username, token or password in it: refused, because command text is shown to the room, logged, and visible in the process list. */
 export function commandProblem(command: string): string | null {
   return /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@]+@/i.test(command) ? "That command has a URL with a username or token in it. Leave the credentials out; the host's own git login does the authenticating." : null;
+}
+
+/**
+ * What a build may open when it finishes: nothing, an http(s) URL without credentials, a path inside
+ * the checkout, or "simulator:<path inside the checkout>". Checked when the request is filed (so the
+ * approval card shows exactly what will open) and again, with the real path, when it is used.
+ */
+export function openProblem(open: string | undefined): string | null {
+  if (open == null || open === "") return null;
+  if (typeof open !== "string" || open.length > 500 || /[\0\n\r]/.test(open)) return "The thing to open isn't valid.";
+  const leaky = commandProblem(open);
+  if (leaky) return leaky;
+  const target = open.startsWith("simulator:") ? open.slice("simulator:".length) : open;
+  if (/^https?:\/\//i.test(target)) return open.startsWith("simulator:") ? "A simulator build needs a path to an .app in the checkout." : null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return "I can only open an http(s) address or a path in the checkout.";
+  if (target.startsWith("/") || target.startsWith("~") || target.startsWith("-") || target.split(/[\\/]/).includes("..")) return "The thing to open must be a path inside the checkout.";
+  return null;
+}
+
+/** The real path of `rel` inside `dir` (symlinks resolved), or null when it is missing or escapes the checkout. */
+export function confine(dir: string, rel: string): string | null {
+  try {
+    const root = realpathSync(dir);
+    const real = realpathSync(resolve(root, rel));
+    return real === root || real.startsWith(`${root}/`) ? real : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Any URL's credentials removed, for anything the room can see. */
@@ -519,7 +561,7 @@ export class HostControl {
     const bad = repoProblem(r.repo);
     if (bad) return bad.startsWith("That") ? bad : "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
     if (!r.command.trim()) return "Give the build command.";
-    const leaky = commandProblem(r.command);
+    const leaky = commandProblem(r.command) ?? openProblem(r.open);
     if (leaky) return leaky;
     return this.file(r);
   }
@@ -585,7 +627,7 @@ export class HostControl {
    */
   preview(o: { repo: string; branch?: string; command: string; open?: string; by: string }): string {
     if (!this.session.settings().hostControl) return "Host control is turned off in Settings.";
-    const bad = repoProblem(o.repo) ?? commandProblem(o.command);
+    const bad = repoProblem(o.repo) ?? commandProblem(o.command) ?? openProblem(o.open);
     if (bad) return bad;
     const name = o.repo.replace(/\.git$/, "").split(/[/:]/).pop() || "repo";
     const branch = o.branch?.trim() || "";
@@ -624,17 +666,18 @@ export class HostControl {
         } else if (r.code) {
           result = `The ${label} build failed (exit ${r.code}): ${redactUrls(r.out.slice(-600))}`;
         } else if (o.open?.startsWith("simulator:")) {
-          const app = resolve(dir, o.open.slice("simulator:".length));
+          const app = confine(dir, o.open.slice("simulator:".length));
+          if (!app) throw new Error("the app to install is outside the checkout or missing");
           await this.simulator();
           const inst = await run(["xcrun", "simctl", "install", "booted", app], 120_000);
           const id = (await run(["/usr/bin/defaults", "read", join(app, "Info"), "CFBundleIdentifier"])).out.trim();
           const launch = inst.code ? inst : await run(["xcrun", "simctl", "launch", "booted", id]);
-          ok = !launch.code && app.startsWith(`${dir}/`);
+          ok = !launch.code;
           result = launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
         } else if (o.open) {
-          const target = /^https?:\/\//.test(o.open) ? o.open : resolve(dir, o.open);
-          const inside = /^https?:\/\//.test(o.open) || target.startsWith(`${dir}/`);
-          const opened = inside ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout" };
+          const isUrl = /^https?:\/\//i.test(o.open);
+          const target = isUrl ? o.open : confine(dir, o.open);
+          const opened = target ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout or missing" };
           ok = !opened.code;
           result = opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
         } else {

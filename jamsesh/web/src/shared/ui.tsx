@@ -409,6 +409,17 @@ export function feedAdmits(following: boolean, frozenAt: number, id: number): bo
   return following || id <= frozenAt;
 }
 
+/** A counter a response checks against: each reset bumps it, and an answer asked for under an older number is dropped. */
+export class Generation {
+  n = 0;
+  bump() {
+    return ++this.n;
+  }
+  stale(asked: number) {
+    return asked !== this.n;
+  }
+}
+
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   const { state } = useHub();
   const box = useRef<HTMLDivElement>(null);
@@ -419,6 +430,11 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const [away, setAway] = useState(false);
   // The newest line in the list when the reader scrolled away. While they are away nothing newer is added (the list never has a gap); it is counted for the pill, and returning resets to the latest window.
   const frozenAt = useRef(0);
+  // Ids of feed lines that came in while the reader was away, accumulated as they arrive (the live state holds only a recent window, so counting it afterwards would undercount a long absence).
+  const awayNew = useRef(new Set<number>());
+  // Bumped by every reset to the latest window (and on unmount): a history response from an older generation is dropped, so it can't put stale rows back or restore an old scroll position.
+  const generation = useRef(new Generation());
+  useEffect(() => () => void generation.current.bump(), []);
   // Where the box was before older lines went in above, to hold the reader's place.
   const holdPlace = useRef<{ height: number; top: number } | null>(null);
   const busy = useRef(false);
@@ -436,11 +452,15 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || ((older.done || everything) && !trimmed.current);
-  const fresh = following.current ? 0 : (state?.events ?? []).filter((e) => e.id > frozenAt.current && wanted(e)).length;
+  if (!following.current) for (const e of state?.events ?? []) if (e.id > frozenAt.current && wanted(e)) awayNew.current.add(e.id);
+  const fresh = following.current ? 0 : awayNew.current.size;
 
   /** Back at the bottom: drop everything and start again from the live state, a contiguous latest window that pages backward. */
   const resetToLatest = () => {
     seen.current.clear();
+    awayNew.current.clear();
+    generation.current.bump();
+    busy.current = false;
     trimmed.current = false;
     holdPlace.current = null;
     setOlder({ loading: false, failed: false, done: false, more: null });
@@ -468,18 +488,20 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
     const el = box.current;
     if (!el || exhausted || busy.current || holdPlace.current || first == null) return;
     busy.current = true;
+    const gen = generation.current.n;
     setOlder((o) => ({ ...o, loading: true, failed: false }));
     try {
       const kinds = [...FEED_KINDS].join(",");
       const r = await api<{ items: JamEvent[]; more: number }>(`/history/events?before=${first}&limit=60&kinds=${kinds}`);
+      if (generation.current.stale(gen)) return; // the feed was reset to the latest window meanwhile: this answer is for the old one
       holdPlace.current = { height: el.scrollHeight, top: el.scrollTop };
       for (const e of r.items) seen.current.set(e.id, e);
       if (r.more === 0 || r.items.length === 0) trimmed.current = false; // the start of history is back in memory
       setOlder({ loading: false, failed: false, done: r.more === 0 || r.items.length === 0, more: r.more });
     } catch {
-      setOlder((o) => ({ ...o, loading: false, failed: true }));
+      if (!generation.current.stale(gen)) setOlder((o) => ({ ...o, loading: false, failed: true }));
     } finally {
-      busy.current = false;
+      if (!generation.current.stale(gen)) busy.current = false;
     }
   };
 
