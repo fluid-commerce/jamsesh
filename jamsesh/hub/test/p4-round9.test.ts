@@ -798,7 +798,7 @@ test("a cancellation sent from the board reaches its agents with the files the c
   const card = r.s.board.proposeCancel({ directive: d, reason: "Scrap it", by: "Chey", sourceEventIds: [ev.id], attachments: [att] })!;
   expect(r.s.board.send(card.id, "Chey").ok).toBe(true);
   const msg = r.s.store.recentEvents({ kinds: ["message"], limit: 10 }).find((e) => e.data.directiveId === d.id)!;
-  expect(msg.text).toContain(`/api/attachments/${att.id}`);
+  expect(msg.text).toContain(att.name); // the links are made at delivery, from the agent's own address
   expect(msg.data.attachments).toEqual([att]);
   const src = readFileSync(join(import.meta.dir, "../src/mcp.ts"), "utf8");
   expect(src).not.toContain("Bearer $JAMSESH_TOKEN");
@@ -810,7 +810,7 @@ test("a title changed in one session isn't put back by another session's later s
   const b = room();
   a.s.upsertPerson({ name: "Chey", role: "Designer" });
   expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
-  expect(readProjectContext(dir, p.slug)!.people).toEqual([{ name: "Chey", role: "Designer" }]);
+  expect(readProjectContext(dir, p.slug)!.people).toMatchObject([{ name: "Chey", role: "Designer" }]);
   // B joins later, sees "Designer", changes it, and saves.
   const { seedFromProject: seed } = require("../src/carryover");
   b.s.upsertPerson({ name: "Chey" });
@@ -820,5 +820,67 @@ test("a title changed in one session isn't put back by another session's later s
   // A saves again (a fact changed), with the old title still in its copy: the title stays B's.
   a.s.board.rememberNow({ text: "A later call", kind: "decision", by: "Chey" });
   expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
-  expect(readProjectContext(dir, p.slug)!.people).toEqual([{ name: "Chey", role: "Design lead" }]);
+  expect(readProjectContext(dir, p.slug)!.people).toMatchObject([{ name: "Chey", role: "Design lead" }]);
+});
+
+
+// ---------- round 22 ----------
+
+test("competing title edits: the one saved first stands, in either save order, and a session takes the winning title", () => {
+  for (const firstIsA of [true, false]) {
+    const p = createProject(dir, `Titles ${firstIsA}`);
+    const seedRoom = room();
+    seedRoom.s.upsertPerson({ name: "Chey", role: "Designer" });
+    expect(saveProjectContext(dir, p.slug, "S", seedRoom.s)).toBe("written");
+    const a = room();
+    const b = room();
+    for (const x of [a, b]) {
+      x.s.upsertPerson({ name: "Chey" });
+      seedFromProject(dir, p.slug, "x", x.s);
+      expect(x.s.personByName("Chey")!.role).toBe("Designer");
+    }
+    a.s.upsertPerson({ name: "Chey", role: "Art director" });
+    b.s.upsertPerson({ name: "Chey", role: "Design lead" });
+    const [first, second] = firstIsA ? [a, b] : [b, a];
+    const winner = first === a ? "Art director" : "Design lead";
+    expect(saveProjectContext(dir, p.slug, "first", first.s)).toBe("written");
+    expect(saveProjectContext(dir, p.slug, "second", second.s)).toBe("written");
+    expect(readProjectContext(dir, p.slug)!.people).toMatchObject([{ name: "Chey", role: winner }]);
+    expect(second.s.personByName("Chey")!.role).toBe(winner);
+  }
+});
+
+test("a session started with its own title takes the project's, not the other way round", () => {
+  const p = createProject(dir, "Titles seed");
+  const base = room();
+  base.s.upsertPerson({ name: "Chey", role: "Design lead" });
+  expect(saveProjectContext(dir, p.slug, "S", base.s)).toBe("written");
+  const old = room();
+  old.s.upsertPerson({ name: "Chey", role: "Designer" });
+  seedFromProject(dir, p.slug, "old", old.s);
+  expect(old.s.personByName("Chey")!.role).toBe("Design lead");
+  old.s.board.rememberNow({ text: "A call", kind: "decision", by: "Chey" });
+  expect(saveProjectContext(dir, p.slug, "old", old.s)).toBe("written");
+  expect(readProjectContext(dir, p.slug)!.people).toMatchObject([{ name: "Chey", role: "Design lead" }]);
+});
+
+test("a reassigned task keeps its reviewed files even when their lines are gone", () => {
+  const r = room();
+  const att = { id: "att_r1", name: "spec.txt", type: "text/plain", kind: "text" as const, size: 5 };
+  const one = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m1", platform: "desktop" }).agent;
+  const two = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "acme/web2", cwd: "/y", machine: "m2", platform: "desktop" }).agent;
+  const d = r.s.createDirective({ text: "Build from the spec", mode: "implement", targets: [one.id], requestedBy: "Chey", sourceEventIds: [], attachments: [att] });
+  const moved = r.s.reassignDirective(d.id, "Chey", two.id);
+  expect(moved && "attachments" in moved ? moved.attachments : undefined).toEqual([att]);
+});
+
+test("file links in an agent's inbox use the address that agent connected by, a cancellation's included", () => {
+  const r = room();
+  const att = { id: "att_u1", name: "scrap.txt", type: "text/plain", kind: "text" as const, size: 5 };
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const d = r.s.createDirective({ text: "Make the header", mode: "implement", targets: [agent.id], requestedBy: "Chey", attachments: [att] });
+  r.s.cancelDirective(d, "Scrap it.", [att]);
+  const out = (r.hub.mcp as any).inboxText(agent, true, "https://room.example.net");
+  expect(out).toContain(`https://room.example.net/api/attachments/${att.id}`);
+  expect(out).not.toContain(r.s.hubUrl + "/api/attachments");
 });

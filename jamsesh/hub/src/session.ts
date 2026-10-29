@@ -842,7 +842,7 @@ export class Session {
     }
     const left = this.store.get("directives", id);
     if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
-    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
+    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds, attachments: d.attachments ?? [] });
   }
 
   // ---- directives ----
@@ -942,7 +942,7 @@ export class Session {
   /** Cancels an open directive and tells each of its agents to stop, and why. */
   cancelDirective(d: Directive, reason: string, attachments: AttachmentRef[] = []) {
     // The files the cancelling card showed go with the message, with where to fetch each (an agent's inbox prints only text).
-    const files = attachments.length ? `\nFiles with this: ${attachments.map((a) => `${a.name} (${a.type}) ${this.hubUrl}/api/attachments/${a.id}`).join("; ")}` : "";
+    const files = attachments.length ? `\nFiles with this: ${attachments.map((a) => a.name).join(", ")} (links follow in your inbox).` : "";
     this.setDirective(d.id, { status: "cancelled", progress: Object.fromEntries(d.targets.map((t) => [t, "cancelled" as const])) });
     for (const t of d.targets) {
       this.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Cancelled: "${d.text.slice(0, 120)}". ${reason} Stop that work; a new directive follows if there's something else to do.${files}`, relevance: "work", data: { to: t, directiveId: d.id, ...(attachments.length ? { attachments } : {}) } });

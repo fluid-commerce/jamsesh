@@ -461,7 +461,7 @@ export class McpEndpoint {
         return text(`You are ${now.name}, working for ${now.ownerName}${s.person(now.ownerId)?.role ? ` (${s.person(now.ownerId)!.role})` : ""}.`);
       }
       case "jam_context":
-        return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10));
+        return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10, ctx.origin));
       case "jam_search": {
         this.requireAgent(ctx);
         const limit = Math.min(60, Math.max(1, Number(args.limit) || 20));
@@ -486,7 +486,7 @@ export class McpEndpoint {
         return text(`You own "${workstream.title}".${workstream.brief ? `\n\nBrief so far:\n${workstream.brief}` : ""}`);
       }
       case "jam_inbox":
-        return text(this.inboxText(this.requireAgent(ctx)));
+        return text(this.inboxText(this.requireAgent(ctx), true, ctx.origin));
       case "jam_wait": {
         const agent = this.requireAgent(ctx);
         const secs = Math.max(5, Math.min(230, Number(args.seconds ?? 200)));
@@ -498,7 +498,7 @@ export class McpEndpoint {
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
         this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
-        const out = this.inboxText(agent, true);
+        const out = this.inboxText(agent, true, ctx.origin);
         const idle = out.startsWith("Nothing new.");
         s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
         return text(out);
@@ -650,7 +650,7 @@ export class McpEndpoint {
         const want = String(args.status ?? "").toLowerCase();
         const all = s.directives().filter((d) => (!q.length || q.every((w) => `${d.text} ${d.result ?? ""}`.toLowerCase().includes(w))) && (!want || (want === "open" ? d.status !== "done" && d.status !== "cancelled" : d.status === want)));
         const { shown, more } = pageOf(all, args);
-        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id), s.hubUrl)).join("\n") + more || "No directives yet.");
+        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id), ctx.origin ?? s.hubUrl)).join("\n") + more || "No directives yet.");
       }
       case "jam_ask_room": {
         const agent = this.requireAgent(ctx);
@@ -725,7 +725,7 @@ export class McpEndpoint {
       "",
       `## Session brief\n${brief || "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
       ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
-      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300) + attachmentLine(d, s.hubUrl)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
+      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300) + attachmentLine(d, origin)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
       this.unreadLine(agent),
       "",
       "## Fetch more when you need it",
@@ -754,7 +754,7 @@ export class McpEndpoint {
       `Reconnected to "${this.hub.session.settings().sessionName}" as ${agent.name} (agent id ${agent.id}); your workstreams and directives are as you left them.`,
       `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H @"$HOME/.jamsesh/auth.header" "${origin}/api/upload"`,
       "",
-      this.inboxText(agent, false),
+      this.inboxText(agent, false, origin),
       "",
       `Call jam_context if you need the room's latest; otherwise carry on. ${idleHint(agent)}`,
       "If this is a new conversation and you don't have the JamSesh skill yet, read it first: the MCP prompt 'jamsesh', or GET /skill.md.",
@@ -780,7 +780,7 @@ export class McpEndpoint {
     ].join("\n");
   }
 
-  context(agent: Agent, workstream?: string, minutes = 10) {
+  context(agent: Agent, workstream?: string, minutes = 10, origin = this.hub.session.hubUrl) {
     const s = this.hub.session;
     const brief = s.brief().full;
     const ws = workstream
@@ -810,8 +810,8 @@ export class McpEndpoint {
       ws ? `## Workstream: ${ws.title}\n${ws.brief || "(no brief yet)"}` : "",
       knowledge(s, ws?.title),
       `## Decisions as said in the room\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
-      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s), s.hubUrl)).join("\n") || "(none: check jam_inbox for new ones)"}`,
-      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s), s.hubUrl)).join("\n") || "(none)"}`,
+      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s), origin)).join("\n") || "(none: check jam_inbox for new ones)"}`,
+      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s), origin)).join("\n") || "(none)"}`,
       `## Room, last ${minutes} min (clear banter filtered; lines marked maybe off-topic are doubtful)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
       `## Recently shipped by other agents (information, nothing for you to do unless a directive says so)\n${shippedLines.join("\n") || "(nothing yet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
@@ -820,7 +820,7 @@ export class McpEndpoint {
       .join("\n\n");
   }
 
-  inboxText(agent: Agent, mark = true) {
+  inboxText(agent: Agent, mark = true, origin = this.hub.session.hubUrl) {
     const s = this.hub.session;
     const { directives, messages } = s.inbox(agent.id, mark);
     if (!directives.length && !messages.length) {
@@ -831,13 +831,13 @@ export class McpEndpoint {
     const out: string[] = [];
     for (const d of directives) {
       out.push(
-        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${attachmentLine(d, s.hubUrl)}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
+        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${attachmentLine(d, origin)}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
     for (const m of messages) {
       if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}), then continue.`);
       else if (m.data.answerTo) out.push(`ANSWER from ${m.authorName} (to your question ${m.data.answerTo}): ${m.text}`);
-      else out.push(`MESSAGE from ${m.authorName}: ${m.text}`);
+      else out.push(`MESSAGE from ${m.authorName}: ${m.text}${messageFiles(m, origin)}`);
     }
     return out.join("\n\n");
   }
@@ -914,6 +914,12 @@ export function clip(s: string, n: number) {
 
 function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined, base = "") {
   return `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => agent(t)?.name ?? t).join(", ")}: ${d.text}${attachmentLine(d, base)}`;
+}
+
+/** The files that came with a message (a cancellation's): where to fetch each, from the address this agent reaches the hub by. */
+function messageFiles(m: JamEvent, base: string) {
+  const list = (m.data.attachments ?? []) as { id: string; name: string; type: string }[];
+  return list.length ? `\n  files (fetch with your credential, for example curl -H @"$HOME/.jamsesh/auth.header"): ${list.map((a) => `${a.name} (${a.type}) ${base}/api/attachments/${a.id}`).join("; ")}` : "";
 }
 
 /** The files that came with a task: where to fetch each one with your credential. */

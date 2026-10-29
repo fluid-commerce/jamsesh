@@ -46,7 +46,7 @@ test("a session's settled context is saved for the project and exported as JSON"
   expect(ctx).toMatchObject({ version: 1, fromSession: a.id, goal: "Ship the Passport nav.", glossary: [{ term: "Passport", meaning: "the sign-in" }], brief: expect.stringContaining("GOAL: Ship the Passport nav.") });
   expect(ctx.facts.map((f: any) => f.text)).toEqual(["Left-hand nav, not top tabs"]);
   expect(ctx.workstreams.map((w: any) => w.title)).toEqual(["Nav"]);
-  expect(ctx.people).toEqual([{ name: "Chey", role: "Design lead" }]);
+  expect(ctx.people).toEqual([{ name: "Chey", role: "Design lead", version: 1 }]);
 });
 
 test("the next session starts from it, every carried item marked with its source session", () => {

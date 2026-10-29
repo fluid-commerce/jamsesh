@@ -38,7 +38,7 @@ export interface ProjectContext {
   /** Every active fact, with its project id and version: none is left out for size. */
   facts: { id: string; version: number; kind: Fact["kind"]; text: string; workstream: string; by: string; note: string; ts: number; session: string }[];
   workstreams: { id: string; version: number; title: string; brief: string; status: Workstream["status"]; session: string }[];
-  people: { name: string; role: string }[];
+  people: { name: string; role: string; version: number }[];
   /** Every row as stored, tombstones and versions included: the export is a full copy, and recovery restores it exactly. */
   rows: { items: ItemRow[]; meta: MetaRow[] };
 }
@@ -56,7 +56,8 @@ export interface ContextChanges {
   workstreams: WsChange[];
   /** The session's own brief, when it has one, and when it last changed. */
   brief: { changedAt: number; brief: string; goal: string; glossary: { term: string; meaning: string }[] } | null;
-  people: { name: string; role: string }[];
+  /** Titles this session changed, each with the version it saw (null for one it set first). */
+  people: { name: string; role: string; base: number | null }[];
 }
 
 export type CommitOutcome = "written" | "skipped" | "failed";
@@ -66,6 +67,9 @@ export interface CommitResult {
   applied: Map<string, number>;
   /** A change not applied, with the row that stands: a tombstone, or a later edit made without seeing this one. */
   superseded: Map<string, ItemRow>;
+  /** Titles written (the version now) and titles another session changed first (the one that stands). */
+  peopleApplied?: Map<string, number>;
+  peopleLost?: Map<string, { role: string; version: number }>;
   /** The save committed but the export didn't (it is written again by the next save), or why nothing was written. */
   reason?: string;
   committed?: boolean;
@@ -87,7 +91,7 @@ const changesSchema = z.object({
   facts: z.array(factRow.extend({ id: text(200).min(1), base: version.nullable(), changedAt: when, status: FACT_STATUS })),
   workstreams: z.array(wsRow.extend({ id: text(200).min(1), base: version.nullable(), changedAt: when, status: WS_STATUS })),
   brief: briefRow.extend({ changedAt: when }).nullable(),
-  people: z.array(z.object({ name: text(200).min(1), role: text(200).min(1) })),
+  people: z.array(z.object({ name: text(200).min(1), role: text(200).min(1), base: version.nullable() })),
 });
 
 const dirOf = (home: string, slug: string) => join(projectsDir(home), slug);
@@ -263,7 +267,7 @@ function readAll(db: Database): ProjectContext {
   const meta = db.query("SELECT key, value, changed_at, session FROM meta ORDER BY key").all() as MetaRow[];
   const b = meta.find((m) => m.key === "brief");
   const brief = b ? briefRow.parse(JSON.parse(b.value)) : { brief: "", goal: "", glossary: [] };
-  const people = meta.filter((m) => m.key.startsWith("person:")).map((m) => ({ name: m.key.slice(7), role: text(200).parse(m.value) }));
+  const people = meta.filter((m) => m.key.startsWith("person:")).map((m) => ({ name: m.key.slice(7), role: text(200).parse(m.value), version: Number(meta.find((v) => v.key === `personver:${m.key.slice(7)}`)?.value ?? 1) || 1 }));
   for (const m of meta) updatedAt = Math.max(updatedAt, m.changed_at);
   const generation = genOf(meta.find((m) => m.key === "generation")?.value ?? "0");
   facts.sort((x, y) => x.ts - y.ts);
@@ -377,7 +381,7 @@ export function snapshotContext(s: Session, sessionId: string): ContextChanges {
     // The brief is the brain's own summary, not an accepted item: it is cut to the reader's limits.
     brief: hasBrief(s) ? { changedAt, brief: buildBrief(s).full.slice(0, 40_000), goal: goalOf(s).slice(0, 2000), glossary: glossaryOf(s).filter((g) => g.term.trim()).slice(0, 300).map((g) => ({ term: g.term.slice(0, 200), meaning: g.meaning.slice(0, 2000) })) } : null,
     // Only a title this session set or changed since it last saw the project's: an unchanged one would carry a stale copy over a newer edit.
-    people: s.people().filter((p) => p.role.trim() && p.name.trim() && bases[`person:${p.name.slice(0, 200)}`]?.sig !== p.role.slice(0, 200)).map((p) => ({ name: p.name.slice(0, 200), role: p.role.slice(0, 200) })),
+    people: s.people().filter((p) => p.role.trim() && p.name.trim() && bases[`person:${p.name.slice(0, 200)}`]?.sig !== p.role.slice(0, 200)).map((p) => ({ name: p.name.slice(0, 200), role: p.role.slice(0, 200), base: bases[`person:${p.name.slice(0, 200)}`]?.v ?? null })),
   };
 }
 
@@ -389,13 +393,22 @@ export function snapshotContext(s: Session, sessionId: string): ContextChanges {
  */
 export function saveProjectContext(home: string, slug: string, sessionId: string, s: Session, waitMs?: number): CommitOutcome {
   const ch = snapshotContext(s, sessionId);
-  const result: CommitResult = { applied: new Map(), superseded: new Map() };
+  const result: CommitResult = { applied: new Map(), superseded: new Map(), peopleApplied: new Map(), peopleLost: new Map() };
   const out = commitChanges(home, slug, ch, { waitMs, result });
   if (!result.committed) return out;
   const bases = { ...basesOf(s) };
   for (const f of ch.facts) if (result.applied.has(f.id)) bases[f.id] = { v: result.applied.get(f.id)!, sig: factSig(f) };
   for (const w of ch.workstreams) if (result.applied.has(w.id)) bases[w.id] = { v: result.applied.get(w.id)!, sig: wsSig(w) };
-  for (const p of ch.people) bases[`person:${p.name}`] = { v: 0, sig: p.role };
+  for (const p of ch.people) {
+    const v = result.peopleApplied?.get(p.name);
+    if (v !== undefined) bases[`person:${p.name}`] = { v, sig: p.role };
+  }
+  // A title another session changed first stands: this session takes it.
+  for (const [name, win] of result.peopleLost ?? []) {
+    const person = s.personByName(name);
+    if (person) s.store.put("people", { ...person, role: win.role }, false);
+    bases[`person:${name}`] = { v: win.version, sig: win.role };
+  }
   const now = Date.now();
   for (const [id, row] of result.superseded) {
     const data = JSON.parse(row.data);
@@ -502,7 +515,22 @@ function apply(db: Database, ch: ContextChanges, result: CommitResult) {
     if (!row || row.session === ch.session || later({ changedAt: ch.brief.changedAt, session: ch.session }, row)) meta.run("brief", JSON.stringify({ brief: ch.brief.brief, goal: ch.brief.goal, glossary: ch.brief.glossary }), ch.brief.changedAt, ch.session);
   }
   const now = Date.now();
-  for (const p of ch.people) meta.run(`person:${p.name}`, p.role, now, ch.session);
+  // A title is versioned like a fact: a change made on the version this session saw applies; one made without seeing a newer
+  // change doesn't overwrite it (that session's title stands, and this one takes it).
+  for (const p of ch.people) {
+    const cur = db.query("SELECT value FROM meta WHERE key = ?").get(`person:${p.name}`) as { value: string } | null;
+    const ver = db.query("SELECT value FROM meta WHERE key = ?").get(`personver:${p.name}`) as { value: string } | null;
+    const curV = cur ? Number(ver?.value ?? 1) || 1 : 0;
+    if (cur && cur.value === p.role) {
+      result.peopleApplied?.set(p.name, curV);
+    } else if (!cur || p.base === curV) {
+      meta.run(`person:${p.name}`, p.role, now, ch.session);
+      meta.run(`personver:${p.name}`, String(curV + 1), now, ch.session);
+      result.peopleApplied?.set(p.name, curV + 1);
+    } else {
+      result.peopleLost?.set(p.name, { role: cur.value, version: curV });
+    }
+  }
   const gen = genOf((db.query("SELECT value FROM meta WHERE key = 'generation'").get() as { value: string } | null)?.value ?? "0");
   meta.run("generation", String(gen + 1), now, ch.session);
 }
@@ -587,9 +615,10 @@ export function seedFromProject(home: string, slug: string, sessionId: string, s
   }
   for (const p of ctx.people) {
     // What this session saw for the title: only a different one later is its own change to save.
-    bases[`person:${p.name}`] = { v: 0, sig: p.role };
+    bases[`person:${p.name}`] = { v: p.version, sig: p.role };
     const person = s.personByName(p.name);
-    if (person && !person.role && p.role) s.store.put("people", { ...person, role: p.role }, false);
+    // The session starts with the project's title, whatever it held before.
+    if (person && p.role && person.role !== p.role) s.store.put("people", { ...person, role: p.role }, false);
   }
   s.store.setSetting("carryBase", bases);
   s.store.setSetting("carried", { fromSession: ctx.fromSession, at: now, brief: ctx.brief, goal: ctx.goal, glossary: ctx.glossary, items: n });
