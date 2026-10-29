@@ -1,5 +1,5 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
@@ -68,6 +68,8 @@ export interface HubOptions {
 }
 
 const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)>/;
+
+type RecordSendResult = { ok: true; sent: { agentId: string; agentName: string; notes: number; directiveId: string }[]; brain: number; pins: string[] } | { ok: false; reason: string; status?: number };
 
 export class Hub {
   store: Store;
@@ -396,23 +398,35 @@ export class Hub {
 
   /** A recording runs this long at most; the screen's lock is kept fresh until then. */
   static RECORD_MAX_MS = 10 * 60_000;
-  private recs = new Map<string, { id: string; personId: string | null; screenId: string | null; tookLock: boolean; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number }>();
-  /** Which person each recording's notes were handed to, so another person's window can't send them. */
+  /**
+   * Recording laptops. `lock` is the screen lock this recording took (its owner and `since`), so only
+   * that lock is given back: never one someone took after it.
+   */
+  private recs = new Map<string, { id: string; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number }>();
   private recSweep = (() => {
     const t = setInterval(() => this.sweepRecordings(), 15_000);
     t.unref?.();
     return t;
   })();
-  private noteOwners = new Map<string, string | null>();
-  /** What a send already did, so a repeated send (a lost reply, a double click) does nothing twice. */
-  private sentRecs = new Map<string, unknown>();
+  /** Whose each stopped recording's notes are: the window (`caller`) and person they were handed to. Only those can send them. */
+  private noteOwners = new Map<string, { caller: string; personId: string | null }>();
+  /** Each send, from its first moment: a repeated send (a lost reply, a double click) gets the same answer and does nothing twice. */
+  private sentRecs = new Map<string, Promise<RecordSendResult>>();
 
-  /** Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last recording there ends. */
+  /**
+   * Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last
+   * recording there ends. A device's earlier recording whose Stop never came ends first, but only the same person's: the caller has
+   * already shown the device is its window's.
+   */
   recordStart(deviceId: string, personId: string | null, t0: number, screen?: string | null): { ok: true; id: string } | { ok: false; reason: string; status: number } {
     const s = this.session;
     const person = s.person(personId);
+    const earlier = this.recs.get(deviceId);
+    if (earlier?.personId && earlier.personId !== person?.id) return { ok: false, reason: "Someone else is recording in this window.", status: 409 };
+    // Ended before the lock is looked at, so giving back its lock can't release the one this recording relies on.
+    this.recordEnd(deviceId);
     let screenId: string | null = null;
-    let tookLock = false;
+    let lockTaken: { personId?: string | null; since: number } | null = null;
     if (screen) {
       const sc = screen === "main" ? { id: "main" } : s.findScreen(screen);
       if (!sc) return { ok: false, reason: "That screen isn't connected.", status: 404 };
@@ -421,17 +435,17 @@ export class Hub {
       const lock = s.lockOf(screenId);
       if (!lock) {
         s.holdScreen(screenId, person);
-        tookLock = true;
+        const held = s.lockOf(screenId);
+        lockTaken = held ? { personId: held.personId, since: held.since } : null;
       } else if (!s.driversOf(screenId).includes(person.id)) {
         // Recording a screen is driving it: its owner starts driving again, anyone else must have been given control.
         if (lock.personId !== person.id) return { ok: false, reason: `${lock.by} is driving the big screen. Ask them to pass control or drive together first.`, status: 409 };
         s.drive("start", screenId, person.id);
       }
     }
-    this.recordEnd(deviceId);
     const id = newId("rec");
     this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
-    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, personId: person?.id ?? null, screenId, tookLock, missed: 0 };
+    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0 };
     // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
     (rec.cap = setTimeout(() => this.abandonRecording(deviceId, rec), Hub.RECORD_MAX_MS + 1000)).unref?.();
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
@@ -463,15 +477,17 @@ export class Hub {
     clearTimeout(rec.cap);
     this.recs.delete(deviceId);
     this.session.setRecording(null, deviceId);
-    if (!rec.screenId) return;
+    if (!rec.screenId || !rec.lock) return;
     const others = [...this.recs.values()].filter((r) => r.screenId === rec.screenId);
-    if (rec.tookLock && !others.length) this.session.unlockStage(rec.screenId);
     // Whoever is left inherits the duty of letting go.
-    else if (rec.tookLock && others.length) others[0].tookLock = true;
+    if (others[0]) return void (others[0].lock ??= rec.lock);
+    // Only the lock this recording took: not a later one (the owner cast again, or someone took the free screen after a release).
+    const cur = this.session.lockOf(rec.screenId);
+    if (cur && cur.since === rec.lock.since && cur.personId === rec.lock.personId) this.session.unlockStage(rec.screenId);
   }
 
   /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
-  async recordStop(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
+  async recordStop(w: { deviceId: string; caller: string; personId: string | null; t0: number; t1: number; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
     const s = this.session;
     const rec = this.recs.get(w.deviceId);
     if (rec && rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
@@ -489,18 +505,21 @@ export class Hub {
       n.ownerName = owner ? s.agent(owner)?.name ?? null : null;
     }
     const recordingId = rec?.id ?? newId("rec");
-    this.noteOwners.set(recordingId, person?.id ?? null);
+    this.noteOwners.set(recordingId, { caller: w.caller, personId: person?.id ?? null });
     if (this.noteOwners.size > 200) this.noteOwners.delete(this.noteOwners.keys().next().value!);
     return { ok: true, recordingId, notes };
   }
 
   /** A picture of the spot: a slice of the item's image around the pin, made with the system's own image tool. Null when it can't be. */
-  private async cropFor(art: Artifact | undefined, pin: NotePin, tag: string): Promise<string | null> {
+  private async cropFor(art: Artifact | undefined, pin: NotePin): Promise<string | null> {
     if (!art?.image || process.platform !== "darwin") return null;
     try {
       const rel = normalize(decodeURIComponent(art.image.replace(/^\/renders\//, "").split("?")[0]));
       if (rel.startsWith("..") || rel.includes(`${sep}..`)) return null;
-      const src = join(this.canvas.rendersDir, rel);
+      // Both ends resolved through any links: the picture is read from the renders and written to the uploads, nowhere else.
+      const renders = realpathSync(this.canvas.rendersDir);
+      const src = realpathSync(join(renders, rel));
+      if (!src.startsWith(renders + sep)) return null;
       const f = Bun.file(src);
       if (!(await f.exists())) return null;
       const size = imageSize(await f.bytes());
@@ -509,9 +528,11 @@ export class Hub {
       const h = Math.min(size.height, Math.max(180, Math.round(size.height * 0.35)));
       const left = Math.max(0, Math.min(size.width - w, Math.round(pin.x * size.width - w / 2)));
       const top = Math.max(0, Math.min(size.height - h, Math.round(pin.y * size.height - h / 2)));
-      const name = `crop-${tag}.png`;
+      // The file's name is the hub's own, never anything a caller sent.
+      const name = `${newId("crop")}.png`;
       mkdirSync(this.uploadsDir, { recursive: true });
-      const p = Bun.spawn(["sips", "-s", "format", "png", "-c", String(h), String(w), "--cropOffset", String(top), String(left), src, "--out", join(this.uploadsDir, name)], { stdout: "ignore", stderr: "ignore" });
+      const out = join(realpathSync(this.uploadsDir), name);
+      const p = Bun.spawn(["sips", "-s", "format", "png", "-c", String(h), String(w), "--cropOffset", String(top), String(left), src, "--out", out], { stdout: "ignore", stderr: "ignore" });
       return (await p.exited) === 0 ? `/renders/uploads/${name}` : null;
     } catch {
       return null;
@@ -522,14 +543,28 @@ export class Hub {
    * The tidied notes go out: each one becomes a pin on its item, and the notes for each agent's builds
    * and frames go to that agent as one directive. Notes on nothing an agent owns go to the room brain.
    */
-  async recordSend(w: { personId: string | null; recordingId: string; notes: RecordNote[] }) {
-    const s = this.session;
-    const person = s.person(w.personId);
-    if (!person) return { ok: false as const, reason: "Pick who you are before sending notes.", status: 403 };
-    const known = this.noteOwners.get(w.recordingId);
-    if (known && known !== person.id) return { ok: false as const, reason: "Those notes belong to someone else.", status: 403 };
+  recordSend(w: { caller: string; personId: string | null; recordingId: string; notes: RecordNote[] }): Promise<RecordSendResult> {
+    const person = this.session.person(w.personId);
+    if (!person) return Promise.resolve({ ok: false, reason: "Pick who you are before sending notes.", status: 403 });
+    // Only a recording this hub stopped, sent from the window it was stopped in, by the person it was handed to.
+    const owner = this.noteOwners.get(w.recordingId);
+    if (!owner) return Promise.resolve({ ok: false, reason: "That recording isn't one of this session's. Record again.", status: 404 });
+    if (owner.caller !== w.caller || (owner.personId && owner.personId !== person.id)) return Promise.resolve({ ok: false, reason: "Those notes belong to someone else.", status: 403 });
+    // Reserved before anything waits, so two sends at once share one.
     const done = this.sentRecs.get(w.recordingId);
-    if (done) return done as { ok: true };
+    if (done) return done;
+    const sending = this.sendNotes(person, w.recordingId, w.notes).then((r) => {
+      if (!r.ok) this.sentRecs.delete(w.recordingId); // nothing went out: a corrected send may follow
+      return r;
+    });
+    this.sentRecs.set(w.recordingId, sending);
+    if (this.sentRecs.size > 200) this.sentRecs.delete(this.sentRecs.keys().next().value!);
+    return sending;
+  }
+
+  private async sendNotes(person: { id: string; name: string }, recordingId: string, raw: RecordNote[]): Promise<RecordSendResult> {
+    const s = this.session;
+    const w = { recordingId, notes: raw };
     const clamp = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
     const notes: RecordNote[] = (Array.isArray(w.notes) ? w.notes : [])
       .slice(0, 80)
@@ -543,7 +578,7 @@ export class Hub {
         pin: n?.pin?.target?.kind && typeof n.pin.target.ref === "string" ? { ...n.pin, x: clamp(n.pin.x), y: clamp(n.pin.y) } : null,
       }))
       .filter((n) => n.text);
-    if (!notes.length) return { ok: false as const, reason: "There are no notes to send." };
+    if (!notes.length) return { ok: false, reason: "There are no notes to send." };
 
     const pins: Annotation[] = [];
     const byAgent = new Map<string, { n: RecordNote; crop: string | null }[]>();
@@ -551,7 +586,7 @@ export class Hub {
     for (const n of notes) {
       const owner = ownerOf(s, n.pin?.target);
       let crop: string | null = null;
-      if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin, `${w.recordingId}-${notes.indexOf(n)}`);
+      if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin);
       if (n.pin) {
         const have = s.store.all("annotations").find((a) => a.recordingId === w.recordingId && a.noteId === n.id);
         const ann = have ?? s.addAnnotation({ personId: person.id, target: n.pin.target, x: n.pin.x, y: n.pin.y, text: n.text, source: "pin", scroll: n.pin.scroll ?? null, screenId: n.screenId ?? null, recordingId: w.recordingId, noteId: n.id, crop });
@@ -589,10 +624,7 @@ export class Hub {
       this.brain.direct(ev, "These notes were pinned to things no agent owns (or to nothing). Decide who should handle each, send one directive per agent quoting the note and where it was pinned, and say so if there is no one.");
     }
     for (const a of pins) s.store.patch("annotations", a.id, { status: "sent" });
-    const result = { ok: true as const, sent, brain: loose.length, pins: pins.map((p) => p.id) };
-    this.sentRecs.set(w.recordingId, result);
-    if (this.sentRecs.size > 200) this.sentRecs.delete(this.sentRecs.keys().next().value!);
-    return result;
+    return { ok: true, sent, brain: loose.length, pins: pins.map((p) => p.id) };
   }
 
   /** All open annotations (or the given ones) go to the brain as one prompt. */

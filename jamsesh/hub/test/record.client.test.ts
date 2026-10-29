@@ -41,7 +41,8 @@ client.deviceId = "mayaLaptop";
 
 const s = hub.session;
 const maya = s.upsertPerson({ name: "Maya" });
-s.touchDevice("mayaLaptop", { personId: maya.id, location: "room", micOn: true });
+// The window says which device it is, as the app does on load; that device is then this window's own.
+await api("/devices", { deviceId: "mayaLaptop", label: "Maya's laptop", personId: maya.id, micOn: true, location: "room" });
 const atlas = s.registerAgent({ ownerName: "Ben", harness: "claude-code", repo: "acme/web", cwd: "/w", machine: "m1", platform: "desktop" }).agent;
 const login = s.upsertArtifact({ kind: "screenshot", stage: "built", title: "Login", agentId: atlas.id, image: "/renders/login.png" });
 const sketch = s.upsertArtifact({ kind: "screenshot", stage: "built", title: "Sketch", agentId: null, image: "/renders/sketch.png" });

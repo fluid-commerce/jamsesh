@@ -880,20 +880,27 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // ---- Record: talk and point, review the notes, send them to the agents that own the work ----
-  if (path === "/record/start" && req.method === "POST") {
-    if (!body?.deviceId) return bad("deviceId is required");
-    const r = hub.recordStart(String(body.deviceId), body.personId ?? null, Number(body.t0) || Date.now(), typeof body.screen === "string" ? body.screen : null);
-    return r.ok ? json(r) : bad(r.reason, r.status);
-  }
-  if (path === "/record/stop" && req.method === "POST") {
-    if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
-    const r = await hub.recordStop({ deviceId: String(body.deviceId), personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
-    return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
-  }
-  if (path === "/record/send" && req.method === "POST") {
-    if (!body?.recordingId || !Array.isArray(body?.notes)) return bad("recordingId and notes are required");
-    const r = await hub.recordSend({ personId: body.personId ?? null, recordingId: String(body.recordingId), notes: body.notes });
-    return r.ok ? json(r) : "status" in r && r.status ? bad(r.reason, r.status) : json(r);
+  // A recording is on the caller's own window's device, and its notes go out only from that window.
+  if (path.startsWith("/record/") && req.method === "POST") {
+    if (!caller) return notAPerson()!;
+    const ownDevice = (id: unknown) => typeof id === "string" && s.store.get("devices", id)?.pairedId === caller;
+    if (path === "/record/start") {
+      if (!body?.deviceId) return bad("deviceId is required");
+      if (!ownDevice(body.deviceId)) return bad("Record from your own window.", 403);
+      const r = hub.recordStart(String(body.deviceId), actor().id, Number(body.t0) || Date.now(), typeof body.screen === "string" ? body.screen : null);
+      return r.ok ? json(r) : bad(r.reason, r.status);
+    }
+    if (path === "/record/stop") {
+      if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+      if (!ownDevice(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
+      const r = await hub.recordStop({ deviceId: String(body.deviceId), caller, personId: actor().id, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
+      return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
+    }
+    if (path === "/record/send") {
+      if (!body?.recordingId || !Array.isArray(body?.notes)) return bad("recordingId and notes are required");
+      const r = await hub.recordSend({ caller, personId: actor().id, recordingId: String(body.recordingId), notes: body.notes });
+      return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
+    }
   }
 
   // ---- snapshots ----
