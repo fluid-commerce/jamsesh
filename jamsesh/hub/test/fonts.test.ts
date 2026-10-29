@@ -4,13 +4,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forbiddenCommand } from "../src/canvas/canvas";
-import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
+import { cardText, decodeBase64, FontService, MAX_TICKETS, MAX_TICKETS_PER_CALLER, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
-import { FONT_BODY_MAX, startHttp } from "../src/http";
+import { FONT_BODY_MAX, readBody, startHttp, TOO_LARGE } from "../src/http";
 import type { Agent } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -106,6 +108,8 @@ const catalogue = [
   { id: "lookalike", family: "Lookalike", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
   { id: "broken", family: "Broken Sans", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
   { id: "huge", family: "Huge Display", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
+  { id: "fira-test", family: "Fira Test", license: OFL, type: "google", styles: ["normal"], weights: [400, 700], defSubset: "latin" },
+  { id: "plex-test", family: "Plex Test", license: OFL, type: "google", styles: ["normal"], weights: [400, 700], defSubset: "latin" },
   { id: "elsewhere", family: "Elsewhere", license: OFL, type: "google", styles: ["normal"], weights: [400], defSubset: "latin" },
 ];
 beforeAll(() => {
@@ -153,7 +157,7 @@ beforeAll(() => {
 afterAll(() => stub.stop(true));
 
 const agentWith = (designSystem: string, status: Agent["status"] = "working"): Agent => ({ id: "a1", status, card: { stack: "React", designSystem, components: "", branch: "main", recentChanges: "", notes: "", updatedAt: 1 } }) as Agent;
-const service = (agents: Agent[] = [], opts: { offline?: boolean } = {}) => new FontService(() => agents, (id) => ({ p1: "Dana", p2: "Lee" })[id], { api, cdn, ...google, offline: opts.offline ?? false });
+const service = (agents: Agent[] = [], opts: { offline?: boolean; maxOpen?: number } = {}) => new FontService(() => agents, (id) => ({ p1: "Dana", p2: "Lee" })[id], { api, cdn, ...google, offline: opts.offline ?? false, maxOpen: opts.maxOpen });
 
 // ---------- open fonts ----------
 
@@ -452,8 +456,9 @@ test("over HTTP: the host's own window lends with the window key the Mac app sha
   expect((await fetch(`${base}/api/fonts/lend-ticket`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ family: "Optima" }) })).status).toBe(403);
 });
 
-test("a lend ticket is good once, for two minutes, for its window, person and family", () => {
+test("a lend ticket is good once, for two minutes, for its window, person and family", async () => {
   const fonts = service();
+  await fonts.want("p1", ["Gotham", "Avenir"]);
   const t = fonts.lendTicket("dev_a", "p1", "Gotham", 1000)!;
   expect(fonts.redeemTicket(t, "dev_a", "p1", "GOTHAM ", 1000 + 60_000)).toBe(true);
   expect(fonts.redeemTicket(t, "dev_a", "p1", "Gotham", 1000)).toBe(false);
@@ -491,8 +496,9 @@ test("over HTTP: a damaged lend, a lend nobody asked for and a repeated lend are
 });
 
 test("over HTTP: the person leaving takes their fonts; the session ending ends the loan and refuses new ones", async () => {
+  // Only the host or the person themselves removes someone (5.R6): Dana leaves from her own Mac.
   expect(hub.fonts.has("Avenir")).toBe(true);
-  const rm = await fetch(`${base}/api/people/${dana.id}`, { method: "DELETE", headers: { ...remote, "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${leesLaptop.token}` } });
+  const rm = await fetch(`${base}/api/people/${dana.id}`, { method: "DELETE", headers: { ...remote, "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${danasMac.token}` } });
   expect(rm.status).toBe(200);
   expect(hub.fonts.has("Avenir")).toBe(false);
   await post("want", leesLaptop, { families: ["Frutiger"] });
@@ -518,6 +524,37 @@ test("over HTTP: a lend body over the cap is refused before it is parsed, with o
   expect(sized.status).toBe(413);
   const chunked = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: as(danasMac), body: new ReadableStream({ start(c) { const bytes = new TextEncoder().encode(body); for (let i = 0; i < bytes.length; i += 1 << 20) c.enqueue(bytes.subarray(i, i + (1 << 20))); c.close(); } }), duplex: "half" } as any);
   expect([413, 431]).toContain(chunked.status); // Bun may answer a refused chunked upload itself
+});
+
+test("every kind of request body is counted against the cap as it streams: chunked multipart, raw bytes and JSON alike", async () => {
+  const big = new Uint8Array(FONT_BODY_MAX + (1 << 20));
+  const boundary = "----jamtest";
+  const head = new TextEncoder().encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="f.ttf"\r\nContent-Type: font/ttf\r\n\r\n`);
+  const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+  const multipart = new Uint8Array(head.length + big.length + tail.length);
+  multipart.set(head);
+  multipart.set(big, head.length);
+  multipart.set(tail, head.length + big.length);
+  let pulled = 0;
+  // No Content-Length (as when chunked), and the reader is told how much was taken.
+  const streamOf = (bytes: Uint8Array) =>
+    new ReadableStream<Uint8Array>({
+      pull(c) {
+        const next = bytes.subarray(pulled, pulled + (1 << 20));
+        pulled += next.length;
+        next.length ? c.enqueue(next) : c.close();
+      },
+    });
+  for (const [type, bytes] of [["multipart/form-data; boundary=" + boundary, multipart], ["application/octet-stream", big], ["application/json", big], ["image/png", big], ["audio/wav", big]] as const) {
+    pulled = 0;
+    const req = new Request("http://x/api/fonts/lend", { method: "POST", headers: { "content-type": type }, body: streamOf(bytes), duplex: "half" } as any);
+    expect(await readBody(req, FONT_BODY_MAX)).toBe(TOO_LARGE);
+    // It stopped reading just past the cap, not at the end of the body.
+    expect(pulled).toBeLessThanOrEqual(FONT_BODY_MAX + 4 * (1 << 20));
+  }
+  // Within the cap each kind is still read whole.
+  const ok = await readBody(new Request("http://x/", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: new Uint8Array([1, 2, 3]) }), FONT_BODY_MAX);
+  expect(ok.__raw).toEqual(new Uint8Array([1, 2, 3]));
 });
 
 test("a reply is read only up to its cap: a large Content-Length is refused unread, an endless body is cut off", async () => {
@@ -573,5 +610,104 @@ test("an open font whose server sends a never-ending file is dropped, not held i
     expect(sent).toBeLessThan(MAX_FACE + 8 * (1 << 20));
   } finally {
     flood.stop(true);
+  }
+});
+
+test("families fetched at the same time share the room's allowance: together they never hold more than the cap", async () => {
+  const one = makeFont("Roboto Slab").length;
+  // Room for three faces. Three families (two faces each from Google's stylesheet) start at once and each would take the whole remainder if it were not spoken for.
+  const fonts = service([], { maxOpen: one * 3 + 20 });
+  const got = await Promise.all(["Roboto Slab", "Fira Test", "Plex Test"].map((f) => fonts.resolveOpen(f)));
+  const bytes = fonts.state().available.reduce((n: number, f: any) => n + f.bytes, 0);
+  expect(got.some(Boolean)).toBe(true);
+  expect(bytes).toBeGreaterThan(0);
+  expect(bytes).toBeLessThanOrEqual(one * 3 + 20);
+  // Nothing stays reserved afterwards: the allowance is all spent on faces actually held.
+  expect((fonts as any).reserved).toBe(0);
+  fonts.clear();
+});
+
+test("one window can't use up every lend ticket; its oldest is replaced and the others' stay good", async () => {
+  const fonts = service();
+  await fonts.want("p1", Array.from({ length: MAX_TICKETS_PER_CALLER + 5 }, (_, i) => `Font ${i}`).concat("Gotham"));
+  const mine = Array.from({ length: MAX_TICKETS_PER_CALLER + 5 }, (_, i) => fonts.lendTicket("dev_a", "p1", `Font ${i}`, 1000)!);
+  expect(mine.every(Boolean)).toBe(true);
+  expect(fonts.redeemTicket(mine[0], "dev_a", "p1", "Font 0", 1000)).toBe(false);
+  expect(fonts.redeemTicket(mine[mine.length - 1], "dev_a", "p1", `Font ${mine.length - 1}`, 1000)).toBe(true);
+  expect(fonts.lendTicket("dev_b", "p2", "Gotham", 1000)).toBeTruthy();
+});
+
+test("lend tickets are only for fonts the room is waiting for, and a full pool drops its oldest rather than refuse the next lender", async () => {
+  const fonts = service();
+  await fonts.want("p1", ["Gotham"]);
+  // Nobody asked for these: no ticket, however many windows ask.
+  for (let i = 0; i < 150; i++) expect(fonts.lendTicket(`dev_${i}`, "p1", `Nobody Wants ${i}`, 1000)).toBeNull();
+  expect((fonts as any).tickets.size).toBe(0);
+  // Many windows asking for the wanted font fill the pool: the oldest goes, the newest always gets a ticket.
+  const issued = Array.from({ length: MAX_TICKETS + 20 }, (_, i) => fonts.lendTicket(`dev_${i}`, `p${i}`, "Gotham", 1000)!);
+  expect(issued.every(Boolean)).toBe(true);
+  expect((fonts as any).tickets.size).toBe(MAX_TICKETS);
+  expect(fonts.redeemTicket(issued[0], "dev_0", "p0", "Gotham", 1000)).toBe(false);
+  const last = issued.length - 1;
+  expect(fonts.redeemTicket(issued[last], `dev_${last}`, `p${last}`, "Gotham", 1000)).toBe(true);
+  fonts.clear();
+});
+
+test("downloads that all start reading at the same moment still can't hold more than the room's cap", async () => {
+  const one = makeFont("Gate Sans A").length;
+  // Three families, one face each. Each file's headers (with its length) and first bytes go out at once and the rest waits until all
+  // three requests are in, so all three are mid-read together with nothing yet held.
+  const fams = ["Gate Sans A", "Gate Sans B", "Gate Sans C"];
+  const idOf = (f: string) => f.toLowerCase().replace(/ /g, "-");
+  let arrived = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((r) => (open = r));
+  const server = createServer((req, res) => {
+    const path = req.url ?? "";
+    const json = (o: unknown) => (res.writeHead(200, { "content-type": "application/json" }), res.end(JSON.stringify(o)));
+    if (path === "/v1/fonts") return json(fams.map((f) => ({ id: idOf(f), family: f, license: OFL, type: "other", styles: ["normal"], weights: [400], defSubset: "latin" })));
+    const id = path.split("/").pop()!;
+    if (path.startsWith("/v1/fonts/")) return json({ id, defSubset: "latin", variants: { "400": { normal: { latin: { url: { ttf: `http://127.0.0.1:${(server.address() as AddressInfo).port}/cdn/${id}.ttf` } } } } } });
+    const bytes = makeFont(fams.find((f) => idOf(f) === id.replace(".ttf", ""))!);
+    res.writeHead(200, { "content-length": String(bytes.length) });
+    res.write(bytes.subarray(0, 10));
+    if (++arrived === 3) setTimeout(open, 150); // long enough for all three clients to have their headers and be reading
+    void gate.then(() => res.end(bytes.subarray(10)));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    // Room for two of the three.
+    const fonts = new FontService(() => [], () => undefined, { api: `http://127.0.0.1:${port}/v1`, cdn: `http://127.0.0.1:${port}/cdn/`, googleCss: "", googleHost: "", offline: false, maxOpen: one * 2 + 20 });
+    const got = await Promise.all(fams.map((f) => fonts.resolveOpen(f)));
+    expect(arrived).toBe(3);
+    expect(got.filter(Boolean).length).toBe(2);
+    const bytes = fonts.state().available.reduce((n: number, f: any) => n + f.bytes, 0);
+    expect(bytes).toBeLessThanOrEqual(one * 2 + 20);
+    expect((fonts as any).reserved).toBe(0);
+    fonts.clear();
+  } finally {
+    server.close();
+  }
+});
+
+test("a server that says a file is small but sends more is cut off at what it said, and its reservation is returned", async () => {
+  const liar: ReturnType<typeof Bun.serve> = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(req) {
+      const path = new URL(req.url).pathname;
+      if (path === "/v1/fonts") return Response.json([{ id: "liar", family: "Liar Sans", license: OFL, type: "other", styles: ["normal"], weights: [400], defSubset: "latin" }]);
+      if (path === "/v1/fonts/liar") return Response.json({ id: "liar", defSubset: "latin", variants: { "400": { normal: { latin: { url: { ttf: `http://127.0.0.1:${liar.port}/cdn/liar.ttf` } } } } } });
+      return new Response(new Uint8Array(4 << 20), { headers: { "content-length": "100" } });
+    },
+  });
+  try {
+    const fonts = new FontService(() => [], () => undefined, { api: `http://127.0.0.1:${liar.port}/v1`, cdn: `http://127.0.0.1:${liar.port}/cdn/`, googleCss: "", googleHost: "", offline: false });
+    expect(await fonts.resolveOpen("Liar Sans")).toBe(false);
+    expect((fonts as any).reserved).toBe(0);
+    fonts.clear();
+  } finally {
+    liar.stop(true);
   }
 });

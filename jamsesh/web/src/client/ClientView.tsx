@@ -23,7 +23,7 @@ import { WikiView } from "../wiki/WikiView";
 import { SettledLinks } from "../wiki/SettledLinks";
 import { onWikiOpen } from "../wiki/nav";
 import { AttachButton, AttachTray, composerState, filesFrom, hasFiles, useAttachments } from "../shared/attach";
-import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
+import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, RecordScope, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
@@ -32,6 +32,14 @@ const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 type Tab = "canvas" | "screen" | "work" | "wiki" | "tasks" | "pins" | "agents";
 
 export function ClientView() {
+  return (
+    <RecordScope>
+      <ClientViewBody />
+    </RecordScope>
+  );
+}
+
+function ClientViewBody() {
   const { state, connected } = useHub();
   const [personId, setPersonId] = useState(pref("personId"));
   const [tab, setTab] = useState<Tab>((pref("tab") as Tab) || "canvas");

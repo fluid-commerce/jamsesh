@@ -56,7 +56,9 @@ const say = (text: string, t0: number) => {
 
 test("record, stop, tidy (edit, join, delete), send, and a lost reply is safe to repeat", async () => {
   const t0 = Date.now() - 9000;
-  await api("/record/start", { deviceId: "mayaLaptop", personId: maya.id, t0 }, undefined, { queue: false });
+  let now: number | null = t0;
+  hub.clock = () => now ?? Date.now();
+  const started = await api<{ id: string }>("/record/start", { deviceId: "mayaLaptop", personId: maya.id, t0 }, undefined, { queue: false });
   say("the sign in button is tiny", t0 + 500);
   say("and it needs more padding", t0 + 2500);
   say("this one is scribbly", t0 + 5000);
@@ -66,7 +68,8 @@ test("record, stop, tidy (edit, join, delete), send, and a lost reply is safe to
     { t: t0 + 600, kind: "click", x: 0.5, y: 0.8, target: tgt(login) },
     { t: t0 + 5100, kind: "dwell", x: 0.3, y: 0.3, dur: 900, target: tgt(sketch) },
   ];
-  const res = await api<{ ok: boolean; recordingId: string; notes: RecordNote[] }>("/record/stop", { deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 8500, pointer }, undefined, { queue: false, timeoutMs: 15_000 });
+  now = t0 + 8500;
+  const res = await api<{ ok: boolean; recordingId: string; notes: RecordNote[] }>("/record/stop", { deviceId: "mayaLaptop", recordingId: started.id, personId: maya.id, t1: t0 + 8500, pointer }, undefined, { queue: false, timeoutMs: 15_000 });
   expect(res.ok).toBe(true);
   expect(res.notes.map((x) => x.text)).toEqual(["the sign in button is tiny", "and it needs more padding", "this one is scribbly", "scratch that"]);
   expect(res.notes[0].ownerName).toBe(atlas.name);

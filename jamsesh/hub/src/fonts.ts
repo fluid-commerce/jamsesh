@@ -15,6 +15,8 @@ export const MAX_FACE = 24 * 1024 * 1024;
 export const MAX_FACES = 12;
 export const MAX_FAMILY_BYTES = 32 * 1024 * 1024;
 export const MAX_LENT_BYTES = 128 * 1024 * 1024;
+export const MAX_TICKETS_PER_CALLER = 8;
+export const MAX_TICKETS = 100;
 export const MAX_OPEN_BYTES = 96 * 1024 * 1024;
 export const MAX_FAMILIES = 48;
 const MAX_OPEN_PER_SCAN = 16;
@@ -215,18 +217,22 @@ export class FontService {
   private googleCss: string;
   private googleHost: string;
   private offline: boolean;
+  private maxOpen: number;
+  /** Bytes read by downloads still in flight: they count against the room cap before they are held. */
+  private reserved = 0;
 
   /** `opts`: where open fonts come from and whether to skip the network (the config's, unless a test says otherwise). */
   constructor(
     private agents: () => Agent[],
     private personName: (id: string) => string | undefined,
-    opts: { api?: string; cdn?: string; googleCss?: string; googleHost?: string; offline?: boolean } = {},
+    opts: { api?: string; cdn?: string; googleCss?: string; googleHost?: string; offline?: boolean; maxOpen?: number } = {},
   ) {
     this.api = opts.api ?? config.fontApi;
     this.cdn = opts.cdn ?? config.fontCdn;
     this.googleCss = opts.googleCss ?? config.fontGoogleCss;
     this.googleHost = opts.googleHost ?? config.fontGoogleHost;
     this.offline = opts.offline ?? config.fontsOffline;
+    this.maxOpen = opts.maxOpen ?? MAX_OPEN_BYTES;
   }
 
   // ---- what the room sees (names and counts; never the bytes) ----
@@ -338,7 +344,7 @@ export class FontService {
   }
 
   /** Downloads each url: a face is kept only if it is a font of this family within the caps. */
-  private async download(urls: string[], key: string): Promise<Face[]> {
+  private async download(urls: string[], key: string, claim: { n: number }): Promise<Face[]> {
     const faces: Face[] = [];
     let total = 0;
     for (const url of urls.slice(0, 8)) {
@@ -347,8 +353,27 @@ export class FontService {
         await r.body?.cancel().catch(() => {});
         continue;
       }
-      // Read no more than this face may be: the face cap, and what's left of the family's and the session's.
-      const data = await readUpTo(r, Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, MAX_OPEN_BYTES - this.openBytes() - total));
+      // Read no more than this face may be, and speak for that much of the room's allowance before the first byte is read: the
+      // face cap, what's left of the family's, and what the room has left after the fonts held and everything other downloads
+      // have already spoken for (`reserved`). The reservation shrinks to what was read; it is never taken after the await.
+      const room = Math.min(MAX_FACE, MAX_FAMILY_BYTES - total, this.maxOpen - this.openBytes() - this.reserved);
+      // A server that says how long the file is is held to that: a short file speaks for no more than it is.
+      const said = Number(r.headers.get("content-length") ?? NaN);
+      if (room <= 0 || (Number.isFinite(said) && said > room)) {
+        await r.body?.cancel().catch(() => {});
+        break;
+      }
+      const reserve = Number.isFinite(said) && said >= 0 ? said : room;
+      this.reserved += reserve;
+      claim.n += reserve;
+      let data: Uint8Array | null = null;
+      try {
+        data = await readUpTo(r, reserve);
+      } finally {
+        const used = data?.length ?? 0;
+        this.reserved -= reserve - used;
+        claim.n -= reserve - used;
+      }
       if (!data) break;
       total += data.length;
       if (fontFamilies(data)?.some((n) => normalizeFamily(n) === key)) faces.push({ data });
@@ -357,6 +382,7 @@ export class FontService {
   }
 
   private async fetchOpen(key: string): Promise<boolean> {
+    const claim = { n: 0 };
     try {
       const cat = await this.load();
       const e = cat?.get(key);
@@ -364,11 +390,14 @@ export class FontService {
       let faces: Face[] = [];
       let source = "Fontsource";
       if (e.type === "google") {
-        faces = await this.download(await this.googleUrls(e).catch(() => []), key).catch(() => []);
+        faces = await this.download(await this.googleUrls(e).catch(() => []), key, claim).catch(() => []);
         source = "Google Fonts";
       }
       if (!faces.length) {
-        faces = await this.download(await this.fontsourceUrls(e), key);
+        // Nothing was kept from the first source: its bytes are no longer spoken for.
+        this.reserved -= claim.n;
+        claim.n = 0;
+        faces = await this.download(await this.fontsourceUrls(e), key, claim);
         source = e.type === "google" ? "Google Fonts via Fontsource" : "Fontsource";
       }
       if (!faces.length || this.closed) return false;
@@ -380,6 +409,9 @@ export class FontService {
     } catch (err) {
       if (!this.closed) console.warn(`[fonts] couldn't fetch ${key}: ${(err as Error)?.message ?? err}`);
       return false;
+    } finally {
+      // Held now (counted by openBytes) or dropped: either way the reservation is over.
+      this.reserved -= claim.n;
     }
   }
 
@@ -496,10 +528,18 @@ export class FontService {
    */
   lendTicket(caller: string, personId: string, family: unknown, now = Date.now()): string | null {
     if (this.closed || typeof family !== "string" || !family.trim() || family.length > 200) return null;
+    // Only for a font the room is waiting for, or one just lent (a retry after a lost answer): a lend of any other is refused anyway,
+    // so the pool can't fill with tickets for nothing.
+    const key = normalizeFamily(family);
+    if (!this.wanted.has(key) && this.held.get(key)?.kind !== "borrowed") return null;
     for (const [t, v] of this.tickets) if (v.until < now) this.tickets.delete(t);
-    if (this.tickets.size >= 100) return null;
+    // One window can't use up the pool: past its share, its oldest ticket is replaced.
+    const mine = [...this.tickets].filter(([, v]) => v.caller === caller);
+    if (mine.length >= MAX_TICKETS_PER_CALLER) this.tickets.delete(mine[0][0]);
+    // A full pool drops the oldest ticket of all, so a new request is never the one that waits.
+    while (this.tickets.size >= MAX_TICKETS) this.tickets.delete(this.tickets.keys().next().value!);
     const ticket = randomBytes(16).toString("hex");
-    this.tickets.set(ticket, { caller, personId, key: normalizeFamily(family), until: now + 2 * 60_000 });
+    this.tickets.set(ticket, { caller, personId, key, until: now + 2 * 60_000 });
     return ticket;
   }
 

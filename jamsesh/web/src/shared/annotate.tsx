@@ -3,7 +3,7 @@
 // Wiring (see the report): every tile root carries `data-jam-target='{"kind","ref","label"}'` and
 // `position: relative`; drop <PinLayer/> inside it. Pins post to /api/annotations, the panel bundles
 // them to the room brain, RecordPrompt turns speech plus pointer movement into one prompt.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import "./annotate.css";
 import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, type QueuedResult } from "./hub";
@@ -729,7 +729,7 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
 
 // ---------- Record: talk and point, and it becomes notes (6.2) ----------
 
-type RecState = { phase: "idle" } | { phase: "live"; t0: number; screen: string | null } | { phase: "sending" };
+type RecState = { phase: "idle" } | { phase: "live"; t0: number; id: string; screen: string | null } | { phase: "sending" };
 type RecResult = { ok: boolean; title: string; text: string; pills: string[]; note?: string; out?: boolean };
 type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null };
 /** The laptop mic, as far as recording needs it. */
@@ -739,15 +739,25 @@ const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms 
 /** The big screen this person is driving right now, or null. */
 const drivenScreen = (state: HubState | null, me: string) => (state ? ["main", ...(state.screens ?? []).map((x) => x.id)].find((id) => driverState(id, state, me).me.driving) ?? null : null);
 
-/** Whichever Record button is mounted registers here, so another screen (the picture viewer, which covers the header) can start and stop it too. */
-const recordControl = { toggle: null as null | (() => void) };
-const recordingNow = store(false);
+/**
+ * The Record button that is mounted tells the page's scope how to toggle and whether it is recording, so another screen (the picture
+ * viewer, which covers the header) can start and stop it too. The scope belongs to the page that provides it, and a button that unmounts takes itself out.
+ */
+type RecordScopeValue = { toggle: { current: null | (() => void) }; live: ReturnType<typeof store<boolean>> };
+const newScope = (): RecordScopeValue => ({ toggle: { current: null }, live: store(false) });
+const RecordCtx = createContext<RecordScopeValue>(newScope());
+
+export function RecordScope({ children }: { children: ReactNode }) {
+  const [scope] = useState(newScope);
+  return <RecordCtx.Provider value={scope}>{children}</RecordCtx.Provider>;
+}
 
 /** A Record button for places the header's isn't visible. */
 export function RecordHere() {
-  const live = recordingNow.use();
+  const scope = useContext(RecordCtx);
+  const live = scope.live.use();
   return (
-    <button type="button" className={`btn small rec-here ${live ? "live" : ""}`} onClick={() => recordControl.toggle?.()} aria-pressed={live} title={live ? "Stop and tidy your notes (R)" : "Record: talk and point, and it becomes notes (R)"}>
+    <button type="button" className={`btn small rec-here ${live ? "live" : ""}`} onClick={() => scope.toggle.current?.()} aria-pressed={live} title={live ? "Stop and tidy your notes (R)" : "Record: talk and point, and it becomes notes (R)"}>
       <span className="rec-dot" />
       {live ? "Stop" : "Record"}
       <kbd>R</kbd>
@@ -802,16 +812,15 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       }
       const t0 = hub.now();
       const screen = drivenScreen(hub.get().state, who.current);
-      // The big screen answers first: it only records for someone driving it, and locks it while it does.
-      if (screen) {
-        try {
-          await api("/record/start", { deviceId: hub.deviceId, personId, t0, screen }, undefined, { queue: false });
-        } catch (e) {
-          if (unmuted.current) (unmuted.current = false, mic?.stop());
-          return fail(e instanceof Error ? e.message : "Couldn't record the big screen.");
-        }
-      } else {
-        api("/record/start", { deviceId: hub.deviceId, personId, t0 }, undefined, { queue: false }).catch(() => {});
+      // The hub answers first, with the recording's id: Record is live only once the hub has one, and Stop names it.
+      let id: string;
+      try {
+        const started = await api<{ id?: string }>("/record/start", { deviceId: hub.deviceId, personId, ...(screen ? { screen } : {}) }, undefined, { queue: false });
+        if (!started?.id) throw new Error("Couldn't start recording.");
+        id = started.id;
+      } catch (e) {
+        if (unmuted.current) (unmuted.current = false, mic?.stop());
+        return fail(e instanceof Error ? e.message : screen ? "Couldn't record the big screen." : "Couldn't start recording.");
       }
       const r = (recorder.current = new PointerRecorder());
       if (screen) {
@@ -829,7 +838,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       }
       setResult(null);
       setNow(Date.now());
-      setRec({ phase: "live", t0, screen });
+      setRec({ phase: "live", t0, id, screen });
     } finally {
       starting.current = false;
     }
@@ -850,7 +859,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
       const res = await api<{ ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[]; queued?: boolean }>(
         "/record/stop",
-        { deviceId: hub.deviceId, personId, t0: cur.t0, t1, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
+        { deviceId: hub.deviceId, personId, recordingId: cur.id, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
         undefined,
         { queue: false, timeoutMs: 15_000 },
       );
@@ -886,10 +895,20 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   };
 
   const toggle = () => (recRef.current.phase === "live" ? void stop() : start());
-  recordControl.toggle = toggle;
+  const scope = useContext(RecordCtx);
+  const mine = useRef(toggle);
+  scope.toggle.current = mine.current = toggle;
   useEffect(() => {
-    recordingNow.set(rec.phase === "live");
-  }, [rec.phase]);
+    scope.live.set(rec.phase === "live");
+  }, [rec.phase, scope]);
+  // Unmounted: the page's other Record button must not reach this one's state.
+  useEffect(
+    () => () => {
+      if (scope.toggle.current === mine.current) scope.toggle.current = null;
+      scope.live.set(false);
+    },
+    [scope],
+  );
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
@@ -913,7 +932,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       recRef.current = { phase: "idle" };
       offDart.current?.();
       const send = (pointer: PointerMark[]) => {
-        const body = { deviceId: hub.deviceId, personId: who.current, t0: cur.t0, t1: hub.now(), pointer, ...(typed.current ? { text: typed.current } : {}) };
+        const body = { deviceId: hub.deviceId, personId: who.current, recordingId: cur.id, pointer, ...(typed.current ? { text: typed.current } : {}) };
         if (unloading) {
           fetch("/api/prompt-window", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
         } else {

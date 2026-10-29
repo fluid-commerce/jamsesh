@@ -30,6 +30,8 @@ const WORKERS = 3;
 const MAX_APPS = 4;
 /** Control lapses after this long without input, so a person who walked away doesn't hold a tile. */
 export const CONTROL_IDLE_MS = 5 * 60_000;
+/** A Mac button held down with nothing arriving for this long is let go: the hub gives back every press it relayed. */
+export const PRESS_IDLE_MS = 4000;
 
 export type Who = { personId: string | null; name: string; host: boolean };
 export type Input =
@@ -56,6 +58,10 @@ interface Live {
   companion?: NonNullable<ReturnType<LiveApps["companionFor"]>>;
   // Mac
   proc?: ReturnType<typeof Bun.spawn>;
+  /** The helper was told to pause: nobody is watching, so it encodes nothing. */
+  paused?: boolean;
+  /** A mouse button the helper was told is down: where, and whose press. The hub lets it go if the press can't finish (control changed, the tile ended, input went quiet). */
+  held?: { x: number; y: number; by: string; timer: ReturnType<typeof setTimeout> };
 }
 
 async function run(cmd: string[], timeoutMs = 15_000): Promise<{ code: number; out: string }> {
@@ -114,6 +120,8 @@ export class LiveApps {
   constructor(private session: Session) {}
 
   /** The locked big screen showing this tile, with who drives it; the hub fills this in. Null when it is shown nowhere locked. */
+  /** How long a held button may sit still before it is let go (a field so tests can shorten it). */
+  pressIdleMs = PRESS_IDLE_MS;
   screenFor: (appId: string) => { screen: string; owner: string; since: number; drivers: { personId: string; name: string }[] } | null = () => null;
 
   list(): LiveApp[] {
@@ -219,6 +227,7 @@ export class LiveApps {
       return why;
     }
     this.log(`${by} put ${appName} (Mac app) on a live tile.`);
+    this.watching(live);
     return { ...live.info };
   }
 
@@ -296,7 +305,7 @@ export class LiveApps {
             if (live.info.kind === "ios") continue;
             if (m.event === "window" && finite(m.w, m.h)) this.update(live, { width: m.w, height: m.h });
             else if (m.event === "error" && m.code === "accessibility") this.update(live, { canTap: false, note: String(m.text).slice(0, 200) });
-            else if (m.event === "error") this.update(live, { status: "gone", note: String(m.text).slice(0, 200) });
+            else if (m.event === "error") this.end(live, String(m.text).slice(0, 200));
           } catch {}
         }
       }
@@ -329,6 +338,8 @@ export class LiveApps {
   }
 
   private update(live: Live, patch: Partial<LiveApp>) {
+    // Whoever held a button when control changed hands doesn't hold it any more.
+    if ("controller" in patch) this.releaseHeld(live);
     live.info = { ...live.info, ...patch };
     this.changed();
   }
@@ -336,11 +347,20 @@ export class LiveApps {
   /** Ends a tile: viewers see it as gone, then it's removed. */
   private end(live: Live, note: string) {
     if (live.info.status === "gone") return;
+    const wasHeld = !!live.held;
+    this.releaseHeld(live);
     live.info = { ...live.info, status: "gone", canTap: false, controller: null, note };
     live.companion?.stop();
-    try {
-      live.proc?.kill();
-    } catch {}
+    const proc = live.proc;
+    // A button just let go needs a moment to reach the app before the helper goes.
+    const grace = wasHeld ? 400 : 0;
+    const kill = () => {
+      try {
+        proc?.kill();
+      } catch {}
+    };
+    if (grace) setTimeout(kill, grace).unref?.();
+    else kill();
     this.changed();
     this.log(`${live.info.name} is no longer live: ${note}`);
     setTimeout(() => {
@@ -370,16 +390,27 @@ export class LiveApps {
     }
   }
 
-  /** A viewer's frames. The newest one goes out at once; the capture runs only while someone watches. */
+  /** A viewer's frames. The newest one goes out at once; the capture runs only while someone watches (a Mac helper is paused with no viewer). */
   subscribe(id: string, fn: Sub): (() => void) | null {
     const live = this.apps.get(id);
     if (!live || live.info.status !== "live") return null;
     live.subs.add(fn);
     if (live.latest) fn(live.latest);
     if (live.info.kind === "ios" && !live.proc) void this.pump(live);
+    this.watching(live);
     return () => {
       live.subs.delete(fn);
+      this.watching(live);
     };
+  }
+
+  /** A Mac helper captures only while someone watches: it is paused at the last viewer leaving and resumed at the first arriving. */
+  private watching(live: Live) {
+    if (live.info.kind !== "mac" || !live.proc || live.info.status !== "live") return;
+    const want = live.subs.size === 0;
+    if (!!live.paused === want) return;
+    live.paused = want;
+    this.macWrite(live, { t: want ? "pause" : "resume" });
   }
 
   /** Simulator frames: a few `simctl screenshot` calls in flight at once, newest first, duplicates dropped. */
@@ -482,7 +513,7 @@ export class LiveApps {
     if (sc) {
       if (!who.personId || !sc.drivers.some((d) => d.personId === who.personId)) return sc.drivers.length ? `${sc.drivers.map((d) => d.name).join(" and ")} ${sc.drivers.length > 1 ? "are" : "is"} driving the screen. Ask ${sc.owner} to pass control or drive together.` : `${sc.owner} holds this screen: start driving it first.`;
       live.lastActive = Date.now();
-      return live.info.kind === "ios" ? this.iosInput(live, ev) : this.macInput(live, ev);
+      return live.info.kind === "ios" ? this.iosInput(live, ev) : this.macInput(live, ev, who);
     }
     const cur = live.info.controller;
     if (!cur || cur.personId === null || cur.personId !== who.personId) return cur ? `${cur.name} is driving. Ask them to pass control to you.` : "Take control first.";
@@ -491,7 +522,7 @@ export class LiveApps {
       return "Control lapsed after a few idle minutes. Take control again.";
     }
     live.lastActive = Date.now();
-    return live.info.kind === "ios" ? this.iosInput(live, ev) : this.macInput(live, ev);
+    return live.info.kind === "ios" ? this.iosInput(live, ev) : this.macInput(live, ev, who);
   }
 
   private async iosInput(live: Live, ev: Input): Promise<string | null> {
@@ -543,7 +574,10 @@ export class LiveApps {
     }
   }
 
-  private macInput(live: Live, ev: Input): string | null {
+  private macInput(live: Live, ev: Input, who: Who): string | null {
+    const by = who.personId ?? "host";
+    // A press belongs to the person who made it: another driver's input (the screen's drivers changed) lets it go first.
+    if (live.held && live.held.by !== by) this.releaseHeld(live);
     if (!live.info.canTap) return live.info.note ?? "Input isn't allowed for this app.";
     if (ev.t === "home" || ev.t === "rotate" || ev.t === "appearance") return "That control is for iPhone tiles.";
     let line: Record<string, unknown>;
@@ -552,17 +586,33 @@ export class LiveApps {
       // A drag: down at the start, a few moves, up at the end.
       const steps = 8;
       const pts = Array.from({ length: steps + 1 }, (_, i) => ({ x: unit(ev.x + ((ev.x2 - ev.x) * i) / steps), y: unit(ev.y + ((ev.y2 - ev.y) * i) / steps) }));
-      for (const [i, p] of pts.entries()) if (!this.macSend(live, { t: i === 0 ? "down" : i === steps ? "up" : "move", ...p })) return "The app isn't taking input.";
+      for (const [i, p] of pts.entries()) if (!this.macSend(live, { t: i === 0 ? "down" : i === steps ? "up" : "move", ...p }, by)) return "The app isn't taking input.";
       return null;
     }
     if (ev.t === "text") line = { t: "text", text: String(ev.text).slice(0, 200) };
     else if (ev.t === "key") line = { t: "key", key: ev.key };
     else if (["tap", "down", "move", "up", "scroll"].includes(ev.t) && "x" in ev && finite(ev.x, ev.y)) line = { ...ev, x: unit(ev.x), y: unit(ev.y) };
     else return "That input isn't valid.";
-    return this.macSend(live, line) ? null : "The app isn't taking input.";
+    return this.macSend(live, line, by) ? null : "The app isn't taking input.";
   }
 
-  private macSend(live: Live, msg: Record<string, unknown>) {
+  /** Every line to a Mac helper goes through here, so the hub always knows whether a button is down. */
+  private macSend(live: Live, msg: Record<string, unknown>, by: string) {
+    if (!this.macWrite(live, msg)) return false;
+    const [x, y] = [Number(msg.x), Number(msg.y)];
+    if (msg.t === "down" || (msg.t === "move" && live.held)) {
+      if (live.held) clearTimeout(live.held.timer);
+      const timer = setTimeout(() => this.releaseHeld(live), this.pressIdleMs);
+      timer.unref?.();
+      live.held = { x: Number.isFinite(x) ? x : live.held?.x ?? 0.5, y: Number.isFinite(y) ? y : live.held?.y ?? 0.5, by: msg.t === "down" ? by : live.held?.by ?? by, timer };
+    } else if ((msg.t === "up" || msg.t === "tap") && live.held) {
+      clearTimeout(live.held.timer);
+      live.held = undefined;
+    }
+    return true;
+  }
+
+  private macWrite(live: Live, msg: Record<string, unknown>) {
     try {
       const sink = live.proc?.stdin as unknown as { write(s: string): unknown; flush?(): unknown } | undefined;
       sink?.write(`${JSON.stringify(msg)}\n`);
@@ -571,6 +621,24 @@ export class LiveApps {
     } catch {
       return false;
     }
+  }
+
+  /** A held button whose person is no longer the one driving its tile (the screen's drivers or the tile's controller changed) comes up. */
+  syncHeld() {
+    for (const live of this.apps.values()) {
+      if (!live.held) continue;
+      const allowed = this.screenDriverIds(live.info.id) ?? (live.info.controller?.personId ? [live.info.controller.personId] : []);
+      if (!allowed.includes(live.held.by)) this.releaseHeld(live);
+    }
+  }
+
+  /** Lets go of a button the hub relayed as down, where it last was. */
+  private releaseHeld(live: Live) {
+    const h = live.held;
+    if (!h) return;
+    clearTimeout(h.timer);
+    live.held = undefined;
+    this.macWrite(live, { t: "up", x: h.x, y: h.y });
   }
 
   /** Cleans leftovers from a crashed run (frame folders of tiles that no longer exist). */

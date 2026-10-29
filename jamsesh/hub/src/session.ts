@@ -1928,8 +1928,16 @@ export class Session {
     return !claim || (claim.revs.get(screen) ?? 0) === this.stageRev(screen);
   }
 
+  /** Called after any screen's stage, lock or drivers change (live app tiles let go of presses whose driver is out). */
+  onStageCommit?: () => void;
+
   private commitStage(stage: Stage, screen: string) {
     this.stageRevs.set(screen, this.stageRev(screen) + 1);
+    this.storeStage(stage, screen);
+    this.onStageCommit?.();
+  }
+
+  private storeStage(stage: Stage, screen: string) {
     this.expireAsksFor(screen, stage.lock);
     // A live app tile on this screen is driven by whoever the lock says drives.
     bus.changed("liveApps");

@@ -348,3 +348,93 @@ test("the big screen's frame key: the host's own windows only", async () => {
     server.stop(true);
   }
 });
+
+/** A stand-in frame that records every mouse and keyboard event the page script fires, and lets the test run the page's own timers. */
+function pressFrame() {
+  const listeners: ((m: any) => void)[] = [];
+  const fired: string[] = [];
+  const timers: (() => void)[] = [];
+  const parent = { postMessage: () => {} };
+  const body: any = {
+    tagName: "BODY",
+    isContentEditable: false,
+    dispatchEvent: (e: any) => (fired.push(e.type === "keyup" || e.type === "keydown" ? `${e.type} ${e.key}` : `${e.type} b${e.button} buttons${e.buttons}`), false),
+    contains: () => true,
+    closest: () => null,
+  };
+  const win: any = {
+    parent,
+    addEventListener: (type: string, fn: (m: any) => void) => type === "message" && listeners.push(fn),
+    crypto: globalThis.crypto,
+    TextEncoder,
+    Promise,
+    innerWidth: 800,
+    innerHeight: 600,
+    setTimeout: (fn: () => void) => timers.push(fn),
+    clearTimeout: () => {},
+    getComputedStyle: () => ({ overflowX: "visible", overflowY: "visible" }),
+  };
+  win.window = win;
+  win.document = { activeElement: null, body, documentElement: body, elementFromPoint: () => body };
+  class Ev {
+    type: string;
+    constructor(type: string, o: object) {
+      this.type = type;
+      Object.assign(this, o);
+    }
+  }
+  win.KeyboardEvent = Ev;
+  win.MouseEvent = Ev;
+  new Function(...Object.keys(win), SCRIPT)(...Object.values(win));
+  const post = async (jamDrive: unknown, who = "p1") => {
+    for (const l of listeners) l({ data: { jamDrive, key: KEY, who }, origin: HOST, source: parent });
+    await new Promise((r) => setTimeout(r, 15));
+  };
+  return { post, fired, timers };
+}
+
+test("a build's frame lets go of a held button and held keys when the driver leaves, per driver, and by itself when input goes quiet", async () => {
+  const f = pressFrame();
+  await f.post({ k: "down", x: 0.5, y: 0.5, b: 0 });
+  await f.post({ k: "key", key: "Shift", code: "ShiftLeft", down: true, mods: { shift: true } });
+  f.fired.length = 0;
+  // Leaving mid-press (blur, pointer-lock loss, the driver removed) ends the press and the key: up events, no click.
+  await f.post({ k: "leave" });
+  expect(f.fired).toContain("pointerup b0 buttons0");
+  expect(f.fired).toContain("mouseup b0 buttons0");
+  expect(f.fired).toContain("keyup Shift");
+  expect(f.fired.some((e) => e.startsWith("click"))).toBe(false);
+  // Every button the hub lets through (0 to 4, back and forward included) is let go, not only the first three.
+  for (const b of [1, 2, 3, 4]) await f.post({ k: "down", x: 0.5, y: 0.5, b });
+  f.fired.length = 0;
+  await f.post({ k: "leave" });
+  for (const b of [1, 2, 3, 4]) expect(f.fired.some((e) => e.startsWith(`mouseup b${b} `))).toBe(true);
+  // A second leave has nothing left to release.
+  f.fired.length = 0;
+  await f.post({ k: "leave" });
+  expect(f.fired.filter((e) => e.startsWith("mouseup") || e.startsWith("keyup"))).toEqual([]);
+
+  // One driver leaving doesn't let go of another's press.
+  await f.post({ k: "down", x: 0.2, y: 0.2, b: 0 }, "alice");
+  await f.post({ k: "down", x: 0.7, y: 0.7, b: 0 }, "bob");
+  f.fired.length = 0;
+  await f.post({ k: "leave" }, "alice");
+  expect(f.fired.filter((e) => e.startsWith("mouseup")).length).toBe(1);
+  f.fired.length = 0;
+  await f.post({ k: "up", x: 0.7, y: 0.7, b: 0 }, "bob");
+  expect(f.fired.some((e) => e.startsWith("mouseup"))).toBe(true);
+
+  // Input that goes quiet with a press held: the page's own timer lets go.
+  await f.post({ k: "down", x: 0.4, y: 0.4, b: 2 });
+  await f.post({ k: "key", key: "a", code: "KeyA", down: true });
+  f.fired.length = 0;
+  f.timers.at(-1)!();
+  expect(f.fired).toContain("mouseup b2 buttons0");
+  expect(f.fired).toContain("keyup a");
+  // A key that came up on its own is not released again.
+  await f.post({ k: "key", key: "b", code: "KeyB", down: true });
+  await f.post({ k: "key", key: "b", code: "KeyB", down: false });
+  f.fired.length = 0;
+  await f.post({ k: "leave" });
+  expect(f.fired.filter((e) => e.startsWith("keyup"))).toEqual([]);
+});

@@ -4,14 +4,63 @@ import { pageAt, readView, type CanvasView } from "./pointer";
 import { api } from "./hub";
 import type { DriveTarget, TileEvent } from "./driving";
 
-/** The session's frame key (only the host's big screen gets one): a build's frame takes input only with it. */
+/**
+ * The session's frame key (only the host's big screen gets one): a build's frame takes input only with it. Every ask is numbered and
+ * an answer is kept only if no later ask has been answered already, so a slow old answer can never put an old key back.
+ */
 let frameKey: string | null = null;
 let asking: Promise<unknown> | null = null;
+let issued = 0;
+let applied = 0;
+function ask(): Promise<void> {
+  const seq = ++issued;
+  const keep = (key: string | null) => {
+    if (seq < applied) return;
+    applied = seq;
+    frameKey = key;
+  };
+  return api<{ key: string }>("/drive/frame-key").then(
+    (r) => keep(typeof r?.key === "string" ? r.key : null),
+    () => keep(null),
+  );
+}
 function withKey(): string | null {
-  asking ??= api<{ key: string }>("/drive/frame-key")
-    .then((r) => (frameKey = typeof r?.key === "string" ? r.key : null))
-    .catch(() => (asking = null));
+  asking ??= ask().then(() => {
+    if (!frameKey) asking = null;
+  });
   return frameKey;
+}
+
+/**
+ * Asks the hub for the frame key now, whether or not one was fetched before: a restarted hub has a new one, and the pages its proxy
+ * serves carry the matching script. Returns the key held once the answer is in (the newest answer, if several overlapped), or null
+ * when the hub didn't answer (or this screen gets none).
+ */
+export async function refreshFrameKey(): Promise<string | null> {
+  const mine = ask();
+  asking = mine.then(() => {
+    if (!frameKey) asking = null;
+  });
+  await mine;
+  return frameKey;
+}
+
+/**
+ * Keeps a build's frame in step with the hub's key. The key the page was served under is remembered; a reconnect that finds a different
+ * one (a restarted hub), none, or that never knew one loads the page again, and the same key leaves it alone. Returns how to stop.
+ */
+export function keepFrameCurrent(reload: () => void, onReconnect: (fn: () => void) => () => void): () => void {
+  let loaded: string | null = null;
+  let live = true;
+  void refreshFrameKey().then((k) => live && (loaded = k));
+  const off = onReconnect(() =>
+    void refreshFrameKey().then((k) => {
+      if (!live || k === loaded) return;
+      loaded = k;
+      reload();
+    }),
+  );
+  return () => ((live = false), off());
 }
 
 /**
@@ -19,7 +68,7 @@ function withKey(): string | null {
  * to the frame's exact origin and with the session's key. Events before the key arrives are dropped.
  */
 export function frameDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
-  return (ev) => {
+  return (ev, who) => {
     const w = iframe.contentWindow;
     const key = withKey();
     if (!w || !key) return;
@@ -31,7 +80,7 @@ export function frameDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
     }
     const msg = ev.k === "key" || ev.k === "leave" ? ev : { ...ev, x: ev.lx, y: ev.ly };
     try {
-      w.postMessage({ jamDrive: msg, key }, origin);
+      w.postMessage({ jamDrive: msg, key, who }, origin);
     } catch {}
   };
 }
@@ -109,6 +158,9 @@ export function canvasDriver(iframe: HTMLIFrameElement): DriveTarget["handle"] {
         dragAt = { fx: ev.lx, fy: ev.ly };
         void apply();
       }
+    } else if (ev.k === "leave") {
+      // The pointer left (or its driver did) mid-press: nothing is held.
+      drag = dragAt = null;
     } else if (ev.k === "up" && drag) {
       const was = drag;
       drag = dragAt = null;

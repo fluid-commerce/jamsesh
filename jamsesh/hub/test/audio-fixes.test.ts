@@ -49,7 +49,7 @@ test("U2: Stop answers within the spec's 7 s even when transcription never finis
   hub.promptStart("mayaLaptop", t0);
   (hub.audio as any).pendingFor = () => 1;
   const began = Date.now();
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 2000, pointer: [], typed: "show the footer" });
+  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [], typed: "show the footer" });
   expect(Date.now() - began).toBeLessThan(8000);
   expect(r.ok).toBe(true);
   hub.stop();
@@ -60,7 +60,7 @@ test("U3: relabeling a recorded prompt changes its speaker but not its text", as
   const t0 = Date.now() - 6000;
   hub.promptStart("mayaLaptop", t0);
   const u = line(hub, "make it blue", maya.id, t0 + 500);
-  const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 3000, pointer: [] });
+  const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [] });
   expect(s.store.event(r.eventId)?.authorName).toBe("Maya");
   hub.audio.assign(u.id, ben.id, { host: true, personId: null });
   const ev = s.store.event(r.eventId)!;
@@ -76,7 +76,7 @@ test("U5: lines past the window cap are not also in the prompt", async () => {
   hub.promptStart("mayaLaptop", t0);
   line(hub, "first part", maya.id, t0 + 1000);
   line(hub, "and then the footer", maya.id, t0 + 3 * 60_000 - 1000 - 60_000 + 61_000);
-  const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 3.5 * 60_000, pointer: [] });
+  const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [] });
   expect(r.text).toBe("first part");
   hub.stop();
 }, 12000);
@@ -85,7 +85,7 @@ test("R13: a window ending after a newer one started leaves the newer one open",
   const { hub, s, maya } = room();
   const t0 = Date.now() - 4000;
   hub.promptStart("mayaLaptop", t0);
-  const first = hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 1000, pointer: [], typed: "one" });
+  const first = hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [], typed: "one" });
   hub.promptStart("mayaLaptop", Date.now());
   await first;
   const second = Date.now() + 500;

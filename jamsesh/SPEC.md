@@ -1922,7 +1922,8 @@ coordinates:
   big screen gets from `GET /api/drive/frame-key` (the host's own windows only); the page holds only the key's
   SHA-256. The big screen passes on only the events the hub sent it from a screen's drivers. The script
   dispatches mouse events at the point, scrolls the nearest scrollable parent for wheel, and types into the
-  focused field.
+  focused field. It keeps what it replayed per driver: when a driver leaves (blur, pointer-lock loss, removed, the tile unmounting), it
+  lets go of any button and key still held for them, and it lets go of everything after 8 seconds without input.
 - The canvas: wheel pans, ctrl-wheel zooms, a click selects the frame or layer under the cursor
   through FigCraft's own commands (`view.set`, `select.set`).
 - Anything else: a tile registers itself with `registerDriveTarget(el, handler)` and gets
@@ -2010,7 +2011,7 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
 - **On your own screen.** Press **Record**, then look through a mockup, a build, the canvas, or the
   picture viewer (the Work tab's viewer has its own **Record** button, since it covers the header) and
   talk. Nothing on the big screen changes. Start marks the time in host time and tells the host
-  (`POST /api/record/start`); lines from that device in the window are held instead of being triaged
+  (`POST /api/record/start`), which answers with the recording's `id`; Record shows as live only once it has one. Lines from that device in the window are held instead of being triaged
   one by one.
 - **On the big screen.** When you are driving a screen (6.1 puts a dart on it), **Record** records the
   dart instead of your own pointer, and locks the screen for as long as it runs. A free screen's lock
@@ -2020,13 +2021,19 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   only when the last recording on the screen ends, and only if Record took it. While any recording
   runs, the screen's lock is kept fresh (`touchLock`, which keeps `drivers`, so a refresh never cuts anyone off).
 - **The rainbow trail.** While recording, a trail follows the pointer (on the big screen, the dart)
-  and fades out behind it over about a second. The spectrum runs along the path by distance travelled,
+  and fades out behind it over about a second. The spectrum runs along the trail by age (the point under the pointer to where the stroke has mostly faded, or its start if shorter),
   with the whole spectrum (red at the head to violet at the tail) shown across every stroke however short, drifting slowly; it is drawn on a canvas overlay at display rate, and
   runs only while something is fading (an idle recording costs nothing). With reduced motion it is
   shorter (under half a second), thinner and fainter, in a calm band of colour. On the big screen the
   overlay also shows a chip, "Recording · <name>", and every recording driver has their own trail.
   Model: `web/src/shared/trailmodel.ts`; drawing: `trail.tsx`; big screen: `ScreenRecording.tsx`.
-- **What it produces.** Stop (`POST /api/record/stop`) waits up to 7 seconds for the last words, then
+- **What it produces.** Stop (`POST /api/record/stop`) names the recording it ends (`recordingId`, from Start) The window runs from the
+  hub's clock at Start to the hub's clock when Stop arrives: a time sent by the caller is never used, and pointer moments outside it
+  (with a second of slack) are dropped. Closing a prompt window (`POST /api/prompt-window`) works the same way, by recording id; an id
+  that is no longer the device's current recording closes nothing. The older `POST /api/prompt-window/start` is refused (409, nothing changes)
+  while a recording runs on that device. A line belongs to the recording it began in: it began at or after Start and before Stop, with
+  300 ms more for the recording being stopped (a last word still in transcription), never past the Start of the next recording on the
+  same device, so no line is in two recordings. A line that began before Start is ordinary speech. A Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
   returns **notes**, one per thing said, each pinned to the spot being pointed at while it was said.
   Nothing is sent yet. A note keeps the item, the position in it, the page of a build, the scroll
   position, the canvas frame or node id and canvas point, the big screen it was on, and who said it.
@@ -2045,7 +2052,9 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   its frame by node id, a build by its dev server URL); observers own nothing. Notes on nothing an
   agent owns, or on nothing at all, go to the room brain as one prompt, and the sender is told how
   many went where. A repeated send (a lost reply, a double click, two at once) does nothing twice: the hub
-  reserves the send by recording id before any work starts, and keeps each pin by its note id. A recording
+  reserves the send by recording id before any work starts, and keeps each pin by its note id. The right to send a recording's notes
+  and the receipt of its send are one record, so they are kept and dropped together: the hub keeps the last 200 stopped recordings, and
+  a send for one it no longer keeps is refused (404), never sent a second time. A recording
   id is the hub's own (from Record or Stop); an id it didn't issue is refused (404). A crop's file name is
   the hub's own too, and the picture is read from the renders folder and written to its uploads folder only
   (paths resolved through links).
@@ -2238,7 +2247,8 @@ person and family) and posts the files with an HMAC-SHA256 signature over the ti
 (`POST /api/fonts/lend`). The key is one no page can read: the window key the app shares with the hub it
 started, or, for a host joined through the relay, the SHA-256 of the window's own credential (the relay adds
 the credential; the hub keeps only its hash). The hub refuses a lend without a valid, unused ticket and
-signature, so lent fonts come from that dialog and nowhere else.
+signature, so lent fonts come from that dialog and nowhere else. Tickets are given only for a font the room is waiting for (or just
+lent, for a retry), at most 8 per window and 100 in all; a full pool drops its oldest ticket.
 
 **Rules the host keeps.**
 - Fonts live in the hub's memory only. Nothing is written to a session folder, and a lent font is never
@@ -2255,7 +2265,8 @@ signature, so lent fonts come from that dialog and nowhere else.
 - A lend request body is read at most 45 MB (413 past it, before parsing). An open font's download is
   refused from its Content-Length when that is over the cap, and is otherwise read only up to the cap
   (the catalogue, a family's details and a stylesheet too).
-- Limits: 24 MB per file, 12 files and 32 MB per family, 128 MB lent and 96 MB open in all, 48 families
+- Limits: 24 MB per file, 12 files and 32 MB per family, 128 MB lent and 96 MB open in all (a download speaks for its allowance, by the
+  file's stated length or else the room's whole remainder, before it reads, so downloads at the same time cannot together pass it), 48 families
   asked for. A file must be a TrueType/OpenType font or collection whose family name is the one asked
   for; damaged, oversize, mislabelled and non-font files are refused with a plain reason.
 - The host's own FigCraft (and its agents' participants) load every font too, so renders and thumbnails
@@ -2586,6 +2597,16 @@ the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps`
   and sends it with `as: <driver>`, which the hub honours only from the host's window and only for a driver of that
   tile's screen. When the tile is shown anywhere else, or its screen is unlocked, the take, pass and release
   above apply again. Agents and strangers are refused either way.
+- **A Mac button is never left down.** Every line to a Mac helper goes through one place in the hub, which knows whether a
+  button is down, where and for whom. It lets go (an `up` at the last position) when control changes hands (also when a locked screen's drivers or lock change), the tile ends, another
+  person's input arrives, or the button has seen no input for 4 seconds. The helper does the same on its own at 6 seconds, when the
+  hub closes its input, and on SIGTERM. For a Mac app the helper captures the frontmost window of the app (not the largest), keeps its stream alive in a global (a stream held
+  only by its starting task sent one frame), and treats a window that is minimized, hidden or on another Space as *away*: input is dropped
+  and the stream is kept, and the tile only ends when the window is gone. Mouse and scroll events reach AppKit only with window field 51
+  and the window-relative point set; this relies on an **undocumented CGEvent field** and a patch to the event's data, found on a real
+  Mac, and must be rechecked on each macOS release.
+  The page also sends its own `up` on pointer cancel, capture loss and leaving the tile, so
+  a drag ends promptly; the hub is what guarantees it.
 
 ### 13.4 Displays
 

@@ -4,6 +4,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { api, type LiveApp, type Person } from "./hub";
 import { registerDriveTarget, type TileEvent } from "./driving";
 import { ExpandCtx } from "./ui";
+import { inOrder, replayTileEvent, type Press } from "./tileinput";
 import "./liveapp.css";
 
 let mine: string | null = null;
@@ -33,7 +34,7 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
   const driving = !!me && (onScreen ? !!app.drivers?.some((d) => d.personId === me) : app.controller?.personId === me);
   const turned = app.orientation === "landscape-left";
   const KEYS: Record<string, string> = { Enter: "return", Backspace: "delete", Tab: "tab", Escape: "escape" };
-  const down = useRef<{ x: number; y: number; px: number; py: number; t: number; moved: boolean; at: number } | null>(null);
+  const down = useRef<{ x: number; y: number; px: number; py: number; t: number; moved: boolean; at: number; lx?: number; ly?: number } | null>(null);
 
   // Frames in. The newest wins: a frame that arrives while one is still decoding replaces the waiting one.
   useEffect(() => {
@@ -95,6 +96,7 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
       (r) => setMsg(r.ok ? "" : (r.error ?? "")),
       (e) => setMsg(e?.message ?? "That didn't go through."),
     );
+  const sendInOrder = useRef(inOrder((body, as) => send(body, as))).current;
   const control = (action: "take" | "release" | "pass", to?: string) => api<{ result: string }>(`/apps/${app.id}/control`, { action, to }, "POST", { queue: false }).then((r) => setMsg(/driving|released|already/i.test(r.result) ? "" : r.result), (e) => setMsg(e?.message ?? ""));
 
   const at = (e: React.PointerEvent | React.WheelEvent) => {
@@ -108,21 +110,28 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
     if (!driving || !p) return;
     (e.target as Element).setPointerCapture?.(e.pointerId);
     down.current = { ...p, px: e.clientX, py: e.clientY, t: Date.now(), moved: false, at: 0 };
-    if (mac) void send({ t: "down", ...p });
+    if (mac) sendInOrder({ t: "down", ...p });
   };
   const onMove = (e: React.PointerEvent) => {
     const d = down.current;
     if (!d) return;
     if (Math.hypot(e.clientX - d.px, e.clientY - d.py) > TAP_SLOP) d.moved = true;
     const p = at(e);
-    if (mac && p && Date.now() - d.at > 40) (d.at = Date.now()), void send({ t: "move", ...p });
+    if (p) (d.lx = p.x), (d.ly = p.y);
+    if (mac && p && Date.now() - d.at > 40) (d.at = Date.now()), sendInOrder({ t: "move", ...p });
+  };
+  // The press ended without a release here (the pointer was cancelled, or capture was lost): a Mac button never stays down.
+  const onLost = () => {
+    const d = down.current;
+    down.current = null;
+    if (d && mac) sendInOrder({ t: "up", x: d.lx ?? d.x, y: d.ly ?? d.y });
   };
   const onUp = (e: React.PointerEvent) => {
     const d = down.current;
     down.current = null;
     const p = at(e);
+    if (d && mac) return void sendInOrder(d.moved && p ? { t: "up", ...p } : { t: "up", x: d.moved ? (d.lx ?? d.x) : d.x, y: d.moved ? (d.ly ?? d.y) : d.y });
     if (!d || !p) return;
-    if (mac) return void send(d.moved ? { t: "up", ...p } : { t: "up", x: d.x, y: d.y });
     if (d.moved) void send({ t: "swipe", x: d.x, y: d.y, x2: p.x, y2: p.y, ms: Date.now() - d.t });
     else {
       void send({ t: "tap", ...p });
@@ -145,37 +154,19 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
   };
 
   // A driver's dart over this tile on the big screen (6.1 replays it in that window) becomes the same taps and keys a person's own pointer makes.
-  const replay = useRef<Map<string, { x: number; y: number; t: number; moved: boolean; at: number }>>(new Map());
+  const replay = useRef<Map<string, Press>>(new Map());
   useEffect(() => {
     const el = canvas.current;
     if (!el || app.status !== "live") return;
     const macApp = app.kind === "mac";
-    return registerDriveTarget(el, (ev: TileEvent, who: string) => {
-      const st = replay.current;
-      if (ev.k === "key") {
-        if (!ev.down) return;
-        const named = KEYS[ev.key];
-        if (named) void send({ t: "key", key: named }, who);
-        else if (ev.key.length === 1 && !ev.mods?.meta && !ev.mods?.ctrl) void send({ t: "text", text: ev.key }, who);
-        return;
-      }
-      if (ev.k === "leave") return void st.delete(who);
-      const p = { x: clamp01(ev.lx), y: clamp01(ev.ly) };
-      if (ev.k === "wheel") return void (macApp && send({ t: "scroll", ...p, dx: -ev.dx, dy: -ev.dy }, who));
-      const d = st.get(who);
-      if (ev.k === "down") {
-        st.set(who, { ...p, t: Date.now(), moved: false, at: 0 });
-        if (macApp) void send({ t: "down", ...p }, who);
-      } else if (ev.k === "move" && d) {
-        if (Math.hypot(p.x - d.x, p.y - d.y) > 0.02) d.moved = true;
-        if (macApp && Date.now() - d.at > 40) (d.at = Date.now()), void send({ t: "move", ...p }, who);
-      } else if (ev.k === "up" && d) {
-        st.delete(who);
-        if (macApp) void send(d.moved ? { t: "up", ...p } : { t: "up", x: d.x, y: d.y }, who);
-        else if (d.moved) void send({ t: "swipe", x: d.x, y: d.y, x2: p.x, y2: p.y, ms: Date.now() - d.t }, who);
-        else (void send({ t: "tap", ...p }, who), setRipple({ x: p.x, y: p.y, k: Date.now() }));
-      }
-    });
+    const st = replay.current;
+    const handle = (ev: TileEvent, who: string) => replayTileEvent(st, ev, who, macApp, sendInOrder, KEYS, (x, y) => setRipple({ x, y, k: Date.now() }));
+    const off = registerDriveTarget(el, handle);
+    // The tile going away mid-press (or live ending) lets go of every button a driver held on it.
+    return () => {
+      off();
+      for (const who of [...st.keys()]) handle({ k: "leave" }, who);
+    };
   }, [app.id, app.status, app.kind]);
 
   const ratio = dims ? dims[0] / dims[1] : turned ? app.height / app.width : (app.width || 9) / (app.height || 19.5);
@@ -187,7 +178,7 @@ export function LiveAppView({ app, people }: { app: LiveApp; people: Person[] })
     <div className="liveapp">
       <div className={`liveapp-stage ${app.kind}`}>
         <div className={`liveapp-device ${app.kind} ${driving ? "driving" : ""}`} style={{ ["--r" as string]: ratio }}>
-          <canvas ref={canvas} className="liveapp-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={() => (down.current = null)} onWheel={onWheel} onKeyDown={onKey} tabIndex={driving ? 0 : -1} style={{ touchAction: driving ? "none" : "auto", cursor: driving ? "pointer" : "default" }} />
+          <canvas ref={canvas} className="liveapp-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onLost} onLostPointerCapture={onLost} onWheel={onWheel} onKeyDown={onKey} tabIndex={driving ? 0 : -1} style={{ touchAction: driving ? "none" : "auto", cursor: driving ? "pointer" : "default" }} />
           {ripple && <span key={ripple.k} className="liveapp-tap" style={{ left: `${ripple.x * 100}%`, top: `${ripple.y * 100}%` }} />}
           {!live && <div className="liveapp-wait">Connecting to {app.name}…</div>}
         </div>

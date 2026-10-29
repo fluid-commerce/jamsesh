@@ -53,7 +53,7 @@ test("a recorded prompt holds only the recorder's words; others keep flowing as 
   line(hub, "put the nav on the big screen", maya.id, "mayaLaptop", t0 + 500);
   line(hub, "I think the footer is wrong", ben.id, "benLaptop", t0 + 2200);
   line(hub, "and make it blue", maya.id, "mayaLaptop", t0 + 4000);
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 5500, pointer: [] });
+  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [] });
   expect(r.ok).toBe(true);
   expect((r as any).text).toBe("put the nav on the big screen and make it blue");
   const speech = s.store.recentEvents({ kinds: ["speech"], limit: 20 });
@@ -69,7 +69,7 @@ test("a line the recording laptop heard but nobody it owns said is not the recor
   hub.promptStart("mayaLaptop", t0);
   // Ben is loudest at his own laptop, and Maya's laptop also heard him.
   line(hub, "we should ship friday", ben.id, "benLaptop", t0 + 1000);
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 5500, pointer: [], typed: "show the footer" });
+  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [], typed: "show the footer" });
   expect((r as any).text).toBe("show the footer");
   hub.stop();
 });
@@ -119,7 +119,7 @@ test("words transcribed after the window answered reach the feed as room speech,
   hub.promptStart("mayaLaptop", t0);
   line(hub, "put the nav up", maya.id, "mayaLaptop", t0 + 500);
   (hub as any).audio.pendingFor = () => 1;
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 2000, pointer: [] });
+  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [] });
   expect((r as any).text).toBe("put the nav up");
   // The last words finish after the window closed.
   line(hub, "and make it blue", maya.id, "mayaLaptop", t0 + 1800);
