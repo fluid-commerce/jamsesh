@@ -79,7 +79,31 @@ struct App {
     /// Heartbeats from the windows' pages (see watchdog.rs).
     beats: Arc<std::sync::Mutex<watchdog::Beats>>,
     /// Held for the whole of a change of session (hosting, a project switch, joining, leaving), so two never overlap.
-    switching: Mutex<()>,
+    switching: Turns,
+}
+
+/// The one-at-a-time lock on changing session. Once Quit takes its turn the lock is never given up,
+/// so a switch queued behind it gets `None` and does nothing while the app exits.
+struct Turns {
+    lock: Mutex<()>,
+    quitting: std::sync::atomic::AtomicBool,
+}
+
+impl Turns {
+    fn new() -> Self {
+        Turns { lock: Mutex::new(()), quitting: false.into() }
+    }
+    /// Waits for its turn; `None` if the app is quitting.
+    async fn lock(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        let turn = self.lock.lock().await;
+        (!self.quitting.load(std::sync::atomic::Ordering::SeqCst)).then_some(turn)
+    }
+    /// Takes a turn that stops everyone after it.
+    async fn quit(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        let turn = self.lock.lock().await;
+        self.quitting.store(true, std::sync::atomic::Ordering::SeqCst);
+        turn
+    }
 }
 
 /// Whether windows get Web Inspector; set once at launch from the saved config or the environment.
@@ -396,7 +420,7 @@ fn open_setup(app: &AppHandle) {
 
 /// Stop hosting or leave: waits its turn behind any project switch, hosting or joining under way.
 async fn leave(app: &AppHandle, state: &App) {
-    let _turn = state.switching.lock().await;
+    let Some(_turn) = state.switching.lock().await else { return };
     leave_now(app, state).await;
 }
 
@@ -735,12 +759,11 @@ fn on_menu(app: &AppHandle, id: &str) {
             },
             "leave" => leave(&app, &state).await,
             id if id == "projects-all" || id == "project-new" || id.starts_with("project:") => projects_menu_action(&app, &state, id).await,
-            // The session saves first (after any switch under way), and a save that didn't finish is said before quitting.
+            // The session saves first (after any switch under way). The turn is held to the end: a switch
+            // queued behind Quit never starts a session, and the exit waits for the acknowledged stop.
             "quit" => {
-                let hub = {
-                    let _turn = state.switching.lock().await;
-                    state.inner.lock().await.hub.take()
-                };
+                let _turn = state.switching.quit().await;
+                let hub = state.inner.lock().await.hub.take();
                 let stopped = match hub {
                     Some(mut h) => tauri::async_runtime::spawn_blocking(move || h.stop()).await.unwrap_or_else(|e| Err(e.to_string())),
                     None => Ok(()),
@@ -754,6 +777,7 @@ fn on_menu(app: &AppHandle, id: &str) {
                             .title("The session didn't finish saving")
                             .kind(MessageDialogKind::Warning)
                             .show(move |_| handle.exit(0));
+                        std::future::pending::<()>().await;
                     }
                 }
             }
@@ -795,7 +819,7 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 
 #[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
-    let _turn = state.switching.lock().await;
+    let Some(_turn) = state.switching.lock().await else { return Ok(()) };
     let started = start_hosting(&app, &state, Launch::Lobby { new_project: false }).await;
     rolled_back(&app, &state, started).await
 }
@@ -836,7 +860,7 @@ async fn open_project(
 async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<(), String> {
     // One transition at a time (switches, hosting, joining, leaving), from stopping the old hub to
     // cleaning up after a failed start: so the hub here is always this switch's own.
-    let _turn = state.switching.lock().await;
+    let Some(_turn) = state.switching.lock().await else { return Ok(()) };
     let (hub, relay, mirrors) = {
         let mut inner = state.inner.lock().await;
         inner.cfg.lobby = false;
@@ -871,7 +895,7 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
 
 #[tauri::command]
 async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>) -> Result<(), String> {
-    let _turn = state.switching.lock().await;
+    let Some(_turn) = state.switching.lock().await else { return Ok(()) };
     let joined = start_joining(&app, &state, &url, name).await;
     rolled_back(&app, &state, joined).await
 }
@@ -1015,7 +1039,7 @@ fn main() {
                 tray_shown: std::sync::Mutex::new(String::new()),
                 screens: Default::default(),
                 beats: Default::default(),
-                switching: Mutex::new(()),
+                switching: Turns::new(),
             });
             app.manage(state.clone());
             DEVTOOLS.store(cfg.devtools || std::env::var_os("JAMSESH_DEVTOOLS").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
@@ -1032,7 +1056,7 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let resumed = {
-                    let _turn = state.switching.lock().await;
+                    let Some(_turn) = state.switching.lock().await else { return };
                     let r = match (cfg.role.as_deref(), cfg.host_url.clone()) {
                         (Some("host"), _) => start_hosting(&handle, &state, resume_launch(&cfg)).await,
                         (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
@@ -1103,6 +1127,24 @@ mod tests {
         assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/client"), Some("host"), hub));
         assert!(!picker_may_open("client", &at("http://localhost:4801/projects"), Some("host"), hub));
         assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/projects"), None, None));
+    }
+
+    #[tokio::test]
+    async fn nothing_starts_a_session_once_quit_has_its_turn() {
+        let turns = Turns::new();
+        // A switch is mid-flight; Quit queues behind it, then a second switch queues behind Quit.
+        let first = turns.lock().await.unwrap();
+        let quit = turns.quit();
+        let late = turns.lock();
+        tokio::pin!(quit, late);
+        drop(first);
+        let held = (&mut quit).await;
+        // The late switch waits while Quit holds its turn...
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut late).await.is_err());
+        drop(held);
+        // ...and is refused once Quit lets go, never getting a turn to start a hub in.
+        assert!((&mut late).await.is_none());
+        assert!(turns.lock().await.is_none());
     }
 
     #[test]
