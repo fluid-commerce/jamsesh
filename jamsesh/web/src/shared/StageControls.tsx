@@ -52,9 +52,12 @@ export function StageBar({ state, screen = state.stage.screenId ?? "main" }: { s
         {lock && (
           <span className="stage-lock">
             <Lock /> Locked by <b>{lock.by}</b>
-            <button className="btn small" onClick={() => act("/stage/unlock", { screen })} title={lock.personId && lock.personId === me ? "Let the room's agents and the brain change this screen again" : `Let go of ${lock.by}'s hold on this screen`}>
-              Unlock
-            </button>
+            {/* Only the owner unlocks (the hub checks); a lock held by no one in particular is the host's to let go. */}
+            {(!lock.personId || lock.personId === me) && (
+              <button className="btn small" onClick={() => act("/stage/unlock", { screen })} title="Let the room's agents and the brain change this screen again">
+                Unlock
+              </button>
+            )}
           </span>
         )}
         {ready.length > 0 && (

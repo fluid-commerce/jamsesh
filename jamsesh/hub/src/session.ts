@@ -1574,7 +1574,7 @@ export class Session {
     const lock = this.stage(screen).lock;
     if (!lock) return null;
     if (this.lockLapsed(lock)) {
-      this.unlockStage(screen);
+      this.dropLock(screen);
       return null;
     }
     return lock;
@@ -1594,12 +1594,53 @@ export class Session {
     return windows.every((d) => !this.deviceOnline(d.id) && now - d.lastSeen > Session.LOCK_GONE_MS);
   }
 
-  /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. */
-  unlockStage(screen = "main") {
+  /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. Only lapsing and `releaseLock` call it. */
+  private dropLock(screen: string) {
     const cur = this.stage(screen);
     if (!cur.lock) return;
     const { lock: _drop, ...rest } = cur;
     this.commitStage(rest, screen);
+  }
+
+  /** A person's yes to the lock question counts this long after it was asked. */
+  static UNLOCK_ASK_MS = 3 * 60_000;
+  /** The question JamSesh asked the room about replacing a screen's lock: which lock (its `since`), and when. */
+  private lockQuestions = new Map<string, { since: number; at: number }>();
+
+  /** JamSesh just asked the room whether to replace this screen's current lock (the brain's ask_to_replace_screen). */
+  askedAboutLock(screen: string) {
+    const lock = this.lockOf(screen);
+    if (lock) this.lockQuestions.set(screen, { since: lock.since, at: Date.now() });
+  }
+
+  /**
+   * The one way a lock is let go on purpose (lapsing is the other), for every caller: Unlock, the brain, anything later.
+   * - `owner`: the lock's owner, by their own window's credential or in their own words to JamSesh.
+   * - `hostWindow`: the host's own windows, which carry no person's credential, only for a lock held by no one in
+   *   particular or by the person at the host. A name a host window sends doesn't count.
+   * - `answeredAt`: a person's yes to the question asked about this very lock (`askedAboutLock`), said after it and in time.
+   * Anything else leaves the lock as it is. Returns whether the screen is unlocked now.
+   */
+  releaseLock(screen: string, consent: { owner: string | null } | { hostWindow: true } | { answeredAt: number }): boolean {
+    const lock = this.lockOf(screen);
+    if (!lock) return true;
+    const q = this.lockQuestions.get(screen);
+    const ok =
+      "owner" in consent
+        ? !!consent.owner && consent.owner === lock.personId
+        : "hostWindow" in consent
+          ? !lock.personId || lock.personId === this.store.setting<string>("hostPersonId", "")
+          : !!q && q.since === lock.since && consent.answeredAt >= q.at && consent.answeredAt - q.at < Session.UNLOCK_ASK_MS && Date.now() - q.at < Session.UNLOCK_ASK_MS;
+    if (!ok) return false;
+    this.lockQuestions.delete(screen);
+    this.dropLock(screen);
+    return true;
+  }
+
+  /** The screen a caller means: none named is the main one; an id or a name that isn't there now is null, never some other screen. */
+  screenRef(ref?: unknown): string | null {
+    if (ref === undefined || ref === null || ref === "" || ref === "main") return "main";
+    return typeof ref === "string" ? (this.findScreen(ref)?.id ?? null) : null;
   }
 
   /** The owner did something with their screen: it counts as activity. */

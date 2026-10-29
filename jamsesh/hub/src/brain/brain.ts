@@ -430,14 +430,8 @@ export class Brain {
       .join("\n\n");
   }
 
-  /**
-   * Locked screens the brain was refused (by lock `since`), until it asks the room about them; then the
-   * question it asked, per screen. A bystander's plain "yes" answers only that question: about that very
-   * lock, said after it and within `UNLOCK_ASK_MS`.
-   */
+  /** Locked screens the brain was refused this pass (by lock `since`), until it asks the room about them (the question itself is the session's). */
   private unlockRefused = new Map<string, number>();
-  private unlockAsked = new Map<string, { since: number; at: number }>();
-  static UNLOCK_ASK_MS = 3 * 60_000;
 
   /**
    * A screen a person locked stays up for the brain too. Returns what to tell the model when it may not
@@ -451,10 +445,7 @@ export class Brain {
     const lock = s.lockOf(screen);
     if (!lock) return null;
     const asks = batch.filter((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
-    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen)) {
-      s.unlockStage(screen);
-      return null;
-    }
+    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen) && s.releaseLock(screen, { owner: lock.personId })) return null;
     this.unlockRefused.set(screen, lock.since);
     return `${lock.by} has this screen locked, so you can't replace it. Ask the room with ask_to_replace_screen (it asks the one question about this screen). If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
@@ -470,8 +461,9 @@ export class Brain {
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
     // approves (button, or a clear spoken answer to that request), whoever or whatever asked.
-    // A screen by id or by name ("the left TV") from Screens, or the main one.
-    const screenId = (ref?: string) => s.findScreen(ref)?.id ?? "main";
+    // A screen by id or by name ("the left TV") from Screens; none named is the main one, and one that isn't there is null.
+    const screenId = (ref?: string) => s.screenRef(ref);
+    const noScreen = () => refuse("There's no screen by that name now. Use an id from Screens, or leave it out for the main one.");
     const source = speechSource(batch);
     const requester = batch[batch.length - 1]?.authorName ?? "JamSesh";
     const agentIds = () => new Set(s.agents().map((a) => a.id));
@@ -573,7 +565,9 @@ export class Brain {
           const known = artifactIds();
           const items = (i.artifactIds ?? []).filter((a) => known.has(a));
           if ((i.mode === "spotlight" || i.mode === "compare") && !items.length) return refuse("Those artifact ids don't exist. Use ids from the Recent artifacts list, or search_artifacts.");
-          const held = this.lockBlock(screenId(i.screen), batch);
+          const screen = screenId(i.screen);
+          if (!screen) return noScreen();
+          const held = this.lockBlock(screen, batch);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
           s.setStage(
@@ -588,7 +582,7 @@ export class Brain {
               page: i.mode === "canvas" ? i.page ?? null : null,
             },
             "Room brain",
-            screenId(i.screen),
+            screen,
             castBy,
           );
           return "On screen.";
@@ -603,7 +597,9 @@ export class Brain {
           screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
         }),
         execute: async (i) => {
-          const r = s.expandWhich({ artifactId: i.artifactId, position: i.position }, screenId(i.screen));
+          const screen = screenId(i.screen);
+          if (!screen) return noScreen();
+          const r = s.expandWhich({ artifactId: i.artifactId, position: i.position }, screen);
           if (!r.ok) return refuse(r.error);
           this.lastRoomStageAt = Date.now();
           return r.stage.expanded ? "Expanded." : "Back to all tiles.";
@@ -632,9 +628,11 @@ export class Brain {
           screen: z.string().optional().describe("Which big screen, by its name or id from Screens (\"Left TV\", \"screen-2\"). Leave out for the main one, or when the room didn't name one."),
         }),
         execute: async (i) => {
-          const held = this.lockBlock(screenId(i.screen), batch);
+          const screen = screenId(i.screen);
+          if (!screen) return noScreen();
+          const held = this.lockBlock(screen, batch);
           if (held) return refuse(held);
-          s.setStage({ mode: "custom", title: i.title, html: i.html, pinned: false }, "Room brain", screenId(i.screen), castBy);
+          s.setStage({ mode: "custom", title: i.title, html: i.html, pinned: false }, "Room brain", screen, castBy);
           return "Showing the custom view.";
         },
       }),
@@ -750,10 +748,12 @@ export class Brain {
           }
           if (!tiles.length) return refuse("None of those tiles resolved. Use artifact ids, share ids and agent ids from the lists, dev server URLs from 'Dev servers on the host', or full public URLs.");
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
-          const held = this.lockBlock(screenId(i.screen), batch);
+          const screen = screenId(i.screen);
+          if (!screen) return noScreen();
+          const held = this.lockBlock(screen, batch);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain", screenId(i.screen), castBy);
+          s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain", screen, castBy);
           return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out (local URLs must be registered dev servers). If the room asked for something that isn't available, tell them briefly.` : ""}`;
         },
       }),
@@ -847,12 +847,13 @@ export class Brain {
         inputSchema: z.object({ screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one.") }),
         execute: async (i) => {
           const id = screenId(i.screen);
+          if (!id) return noScreen();
           const lock = s.lockOf(id);
           // Only for a lock this pass was refused by, and only once the question is out.
           if (!lock || this.unlockRefused.get(id) !== lock.since) return refuse("Nothing here was refused by a locked screen.");
           const name = id === "main" ? "the screen" : (s.findScreen(id)?.name ?? "that screen");
           await speak(s, `${lock.by} has ${name} locked. Want me to replace it?`, { source, kind: "problem" });
-          if (s.lockOf(id)?.since === lock.since) this.unlockAsked.set(id, { since: lock.since, at: Date.now() });
+          if (s.lockOf(id)?.since === lock.since) s.askedAboutLock(id);
           this.unlockRefused.delete(id);
           return "Asked the room.";
         },
@@ -866,18 +867,17 @@ export class Brain {
         }),
         execute: async (i) => {
           const id = screenId(i.screen);
+          if (!id) return noScreen();
           const lock = s.lockOf(id);
           if (!lock) return "It isn't locked.";
           const ev = batch.find((e) => e.id === i.line && e.authorType === "person" && e.kind !== "prompt");
           // The words decide, not the model: a whole, plain yes ("yes, replace it"), never "don't unlock it" or "should I unlock it?".
-          // The owner may ask for it directly; anyone else's yes counts only as the answer to the question just asked about this screen.
-          const owner = !!ev && !!lock.personId && ev.authorId === lock.personId && !!ev.data?.direct;
-          const q = this.unlockAsked.get(id);
-          const asked = !!ev && !!q && q.since === lock.since && ev.ts >= q.at && ev.ts - q.at < Brain.UNLOCK_ASK_MS && Date.now() - q.at < Brain.UNLOCK_ASK_MS;
-          if (!ev || !unlockConsent(ev.text, brainNames(s.settings())) || !(owner || asked))
+          // The owner saying to unlock or replace it, to JamSesh directly, is their own request; any other yes (the owner's
+          // bare "yes" too) counts only as the answer to the question asked about this lock, which the session checks.
+          const said = ev ? unlockConsent(ev.text, brainNames(s.settings())) : null;
+          const ownWords = said === "unlock" && !!ev?.data?.direct && !!ev.authorId;
+          if (!ev || !said || !s.releaseLock(id, ownWords ? { owner: ev.authorId! } : { answeredAt: ev.ts }))
             return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with ask_to_replace_screen first.`);
-          this.unlockAsked.delete(id);
-          s.unlockStage(id);
           return `Unlocked ${lock.by}'s screen.`;
         },
       }),
@@ -900,6 +900,7 @@ export class Brain {
         inputSchema: z.object({ by: z.string().optional().describe("A person's name"), screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one.") }),
         execute: async ({ by, screen }) => {
           const id = screenId(screen);
+          if (!id) return noScreen();
           const entry = by ? s.historyBy(by, id) : s.previousScreens(id)[0];
           if (!entry) return refuse(by ? `Nothing ${by} had up is in the history.` : "There's no earlier screen in the history.");
           const held = this.lockBlock(id, batch);
@@ -988,7 +989,7 @@ export class Brain {
         this.lockRefused = true;
         continue;
       }
-      if (held) s.unlockStage("main");
+      if (held) s.releaseLock("main", { owner: ev.authorId });
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
         s.setStage({ mode: "join", title: "", items: [] }, "Room brain");
         continue;
@@ -1481,10 +1482,14 @@ export function asksForScreen(ev: JamEvent) {
 /**
  * Whether a line, as a whole, agrees to replace a locked screen. Only a plain yes counts: a question
  * ("should I unlock it?"), a negation ("no, don't unlock it") or a mixed answer ("yes, keep mine up") doesn't.
+ * "unlock" when the words themselves say to unlock or replace the screen, "yes" when they only agree.
  */
-export function unlockConsent(text: string, brainName: string | string[] = "JamSesh") {
-  if (/\?\s*$/.test(text.trim())) return false;
-  return UNLOCK_YES.has(answerOf(text, brainName));
+export function unlockConsent(text: string, brainName: string | string[] = "JamSesh"): "unlock" | "yes" | null {
+  if (/\?\s*$/.test(text.trim())) return null;
+  const answer = answerOf(text, brainName);
+  if (!UNLOCK_YES.has(answer)) return null;
+  // "unlock it", "replace mine", "take it down" say what to do with the screen; "yes", "go ahead", "show it" only agree to something.
+  return /\b(?:unlock|replace|take it)\b/.test(answer) ? "unlock" : "yes";
 }
 
 /**

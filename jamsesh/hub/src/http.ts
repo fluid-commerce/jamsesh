@@ -544,23 +544,33 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const p = id ? s.person(id) : undefined;
     return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
   };
-  // With several screens, the caller says which (an id or a name); none, or one that isn't there, is the main one.
-  const screenOf = () => s.findScreen(typeof body?.screen === "string" ? body.screen : undefined)?.id ?? "main";
+  // With several screens, the caller says which (an id or a name). None named is the main one; one that isn't there now
+  // (a display unplugged since the control was drawn) is an error, never some other screen.
+  const screenOf = () => s.screenRef(body?.screen);
+  const NO_SCREEN = "That screen isn't connected any more.";
 
   if (path === "/stage" && req.method === "POST") {
     const stage = body as Partial<Stage> & { mode: Stage["mode"] };
     if (!stage?.mode) return bad("mode is required");
     const who = actor();
     const screen = screenOf();
+    if (!screen) return bad(NO_SCREEN, 404);
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
   }
+  // Only the lock's owner unlocks it: their window's credential, never a name in the body. The host's own windows carry no
+  // person's credential; they may unlock a lock held by no one in particular or by the person at the host (Session.releaseLock).
   if (path === "/stage/unlock" && req.method === "POST") {
-    s.unlockStage(screenOf());
-    return json(s.stage(screenOf()));
+    const screen = screenOf();
+    if (!screen) return bad(NO_SCREEN, 404);
+    const lock = s.lockOf(screen);
+    const consent = paired ? { owner: paired.personId ?? null } : hostWindow ? { hostWindow: true as const } : { owner: null };
+    if (lock && !s.releaseLock(screen, consent)) return bad(`Only ${lock.by} can unlock this screen.`, 403);
+    return json(s.stage(screen));
   }
   if (path === "/stage/restore" && req.method === "POST") {
     const who = actor();
     const screen = screenOf();
+    if (!screen) return bad(NO_SCREEN, 404);
     const lock = s.lockOf(screen);
     if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
     const stage = s.restoreHistory(String(body?.id ?? ""), screen, who);
@@ -589,8 +599,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (paired?.kind === "agent") return bad("Agents use jam_show; expanding a tile is for people.", 403);
     if (body?.tile !== null && (typeof body?.tile !== "string" || !body.tile.trim())) return bad("tile must be a tile key, or null to collapse");
     const tile: string | null = body.tile === null ? null : body.tile.trim();
-    const screen = typeof body?.screen === "string" && body.screen ? body.screen : "main";
-    if (screen !== "main" && !s.screens().some((sc) => sc.id === screen)) return bad("no such screen", 404);
+    const screen = screenOf();
+    if (!screen) return bad(NO_SCREEN, 404);
     if (tile !== null && !s.stageTileKeys(screen).some((t) => t.key === tile)) return bad("That isn't on the screen right now.", 404);
     return json(s.expandTile(tile, screen));
   }

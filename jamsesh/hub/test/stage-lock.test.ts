@@ -60,7 +60,7 @@ test("a person's cast is locked; unlocking leaves it up and ends the lock", () =
   s.setStage({ mode: "board" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   expect(s.stage().lock).toBeUndefined();
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  s.unlockStage();
+  (s as any).dropLock("main");
   expect(s.stage().mode).toBe("spotlight");
   expect(s.stage().lock).toBeUndefined();
 });
@@ -89,7 +89,7 @@ test("a locked screen doesn't revert to the board on the timer; unlocking starts
     s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
     await Bun.sleep(150);
     expect(s.stage().mode).toBe("spotlight");
-    s.unlockStage();
+    (s as any).dropLock("main");
     await Bun.sleep(150);
     expect(s.stage().mode).toBe("board");
   } finally {
@@ -267,7 +267,7 @@ test("a finished variant set waits in the queue while a screen is locked", () =>
   expect(s.stage().items).toEqual([mine.id]);
   expect(s.readyToShow().map((r) => r.label)).toEqual(["Compare Nav"]);
   // Unlocked, the same landing shows the comparison.
-  s.unlockStage();
+  (s as any).dropLock("main");
   hub.brain.artifactsLanded(arts);
   expect(s.stage().mode).toBe("compare");
 });
@@ -299,9 +299,14 @@ test("the http routes: /stage locks for the window's person, restore and unlock 
     await post("/stage", { mode: "spotlight", items: [b.id], personId: felipe.id });
     expect(s.stage().lock?.by).toBe("Felipe");
     const earlier = s.stageHistory().main.find((e) => e.by === "Chey")!;
-    // Chey taps it in the strip while Felipe holds the screen: held off. Felipe unlocks, then Chey can.
+    // Chey taps it in the strip while Felipe holds the screen: held off. The host's window can't let go of Felipe's lock
+    // (naming Felipe doesn't make it his); his own window can, then Chey can.
     expect((await post("/stage/restore", { id: earlier.id, personId: chey.id })).status).toBe(409);
-    expect((await post("/stage/unlock", {})).status).toBe(200);
+    expect((await post("/stage/unlock", { personId: felipe.id })).status).toBe(403);
+    expect(s.stage().lock?.by).toBe("Felipe");
+    const felipes = hub.auth.issue({ kind: "browser", label: "Felipe's laptop", ip: "127.0.0.1", personId: felipe.id });
+    const asFelipe = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.8", authorization: `Bearer ${felipes.token}` }, body: JSON.stringify(body) });
+    expect((await asFelipe("/stage/unlock", {})).status).toBe(200);
     expect((await post("/stage/restore", { id: earlier.id, personId: chey.id })).status).toBe(200);
     expect(s.stage().items).toEqual([a.id]);
     expect(s.stage().lock?.by).toBe("Chey");
@@ -394,7 +399,7 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   s.setStage({ mode: "compare", items: [a.id, b.id], title: "Cmp" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
   expect(s.historyBy("felipe")?.label).toBe("Checkout");
   const hit = s.historyBy("Felipe")!;
-  s.unlockStage();
+  (s as any).dropLock("main");
   const back = s.restoreHistory(hit.id, "main", undefined, "Room brain")!;
   expect(back.mode).toBe("spotlight");
   expect(back.by).toBe("Room brain");
@@ -410,7 +415,7 @@ test("the brain brings back what a person had up, and says so when nothing match
   const b = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   s.setStage({ mode: "spotlight", items: [b.id], title: "Pricing" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
-  s.unlockStage();
+  (s as any).dropLock("main");
   const t = tools();
   expect(await t.restore_screen.execute({ by: "Chey" })).toContain("Brought back Checkout");
   expect(s.stage().items).toEqual([a.id]);
@@ -432,16 +437,16 @@ test("a direct request to JamSesh is a person's cast and locks to them; overhear
   expect(await tools([direct(chey, "JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
   expect(s.stage().lock).toMatchObject({ by: "Chey", personId: chey.id });
   expect(s.stage().by).toBe("Room brain");
-  s.unlockStage();
+  (s as any).dropLock("main");
   await tools([direct(felipe, "put up a custom view")]).build_custom_view.execute({ title: "x", html: "<p>x</p>" });
   expect(s.stage().lock?.by).toBe("Felipe");
-  s.unlockStage();
+  (s as any).dropLock("main");
   s.saveLayout("review");
   s.setStage({ mode: "agents" }, "Room brain");
   await tools([direct(chey, "bring back the review layout")]).show_saved_layout.execute({ name: "review" });
   expect(s.stage().mode).toBe("custom");
   expect(s.stage().lock?.by).toBe("Chey");
-  s.unlockStage();
+  (s as any).dropLock("main");
   // Overheard, or the brain acting alone: no lock.
   await tools([said(felipe, "show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] });
   expect(s.stage().items).toEqual([a.id]);
@@ -663,12 +668,11 @@ test("unlock_screen takes only a whole plain yes: negations, questions and mixed
 });
 
 test("a bystander's yes counts only as the answer to the brain's question, about that lock; the owner may ask to unlock directly", async () => {
-  const { hub, s, chey, felipe, tools, said } = room();
+  const { s, chey, felipe, tools, said } = room();
   const mine = artifact(s, "Pricing");
   const cast = () => s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   cast();
   (s as any).gatewayKey = () => "";
-  const brain = hub.brain as any;
   const yesTo = async (text = "yes, replace it", ts = Date.now()) => {
     const line = said(felipe, text, ts);
     return String(await tools([line]).unlock_screen.execute({ line: line.id }));
@@ -683,10 +687,11 @@ test("a bystander's yes counts only as the answer to the brain's question, about
   const before = Date.now() - 1000;
   await t.ask_to_replace_screen.execute({});
   expect(await yesTo("yes, replace it", before)).toContain("plainly says");
-  const asked = brain.unlockAsked.get("main");
-  brain.unlockAsked.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
+  const questions = (s as any).lockQuestions as Map<string, { since: number; at: number }>;
+  const asked = questions.get("main")!;
+  questions.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
   expect(await yesTo("yes, replace it", Date.now() - 4 * 60_000 + 10)).toContain("plainly says");
-  brain.unlockAsked.set("main", asked);
+  questions.set("main", asked);
   // The lock changed since the question (Chey cast again): the question was about the old lock.
   cast();
   expect(await yesTo()).toContain("plainly says");
@@ -727,7 +732,7 @@ test("a show request answers only the lock it asked about: a later cast or an un
     s.dismissReady(first.item.id);
     const second = ask();
     expect(second.req.ownerId).toBe(felipe.id);
-    s.unlockStage();
+    (s as any).dropLock("main");
     s.setStage({ mode: "spotlight", items: [a.id], title: "Felipe again" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
     const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
     expect((await post(`/show-requests/${second.req.id}`, { approve: true })).status).toBeGreaterThanOrEqual(404);
@@ -765,7 +770,7 @@ test("the owner's own share keeps their lock, and their cast comes back locked w
   // Let go of during the share: what comes back is unlocked.
   const again = s.startShare("felipe-laptop", "screen");
   await hub.brain.placeShare(again);
-  s.unlockStage();
+  (s as any).dropLock("main");
   s.endShare(again.id);
   expect(s.stage().title).toBe("Felipe's cast");
   expect(s.stage().lock).toBeUndefined();
@@ -812,4 +817,115 @@ test("the owner's unrelated direct question doesn't clear their lock, but a requ
   expect(await show(direct("JamSesh, show the checkout"))).toBe("On screen.");
   cast();
   expect(await show(direct("JamSesh, anything on pricing?", { intent: "present" }))).toBe("On screen.");
+});
+
+// ---------- round 6: one consent gate for every unlock, and no stale screen targets ----------
+
+test("releaseLock is the one gate: the owner, the host's windows for the host's or nobody's lock, or a timely answer to the question", () => {
+  const { s, chey, felipe } = room();
+  const a = artifact(s, "Checkout");
+  const lockAs = (p: { id: string | null; name: string }) => s.setStage({ mode: "spotlight", items: [a.id] }, p.name, "main", { person: p });
+  lockAs(chey);
+  // Someone else, nobody, or the host's window for a guest's lock: no.
+  expect(s.releaseLock("main", { owner: felipe.id })).toBe(false);
+  expect(s.releaseLock("main", { owner: null })).toBe(false);
+  expect(s.releaseLock("main", { hostWindow: true })).toBe(false);
+  // A yes with no question asked, or to a question about an earlier lock: no.
+  expect(s.releaseLock("main", { answeredAt: Date.now() })).toBe(false);
+  s.askedAboutLock("main");
+  lockAs(chey);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(false);
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Asked about this lock: a yes said before the question doesn't answer it; one after does, once.
+  s.askedAboutLock("main");
+  expect(s.releaseLock("main", { answeredAt: Date.now() - 5_000 })).toBe(false);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(true);
+  expect(s.stage().lock).toBeUndefined();
+  lockAs(chey);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1 })).toBe(false);
+  // The owner always can.
+  expect(s.releaseLock("main", { owner: chey.id })).toBe(true);
+  // The host's window: a lock held by nobody in particular, or by the person at the host.
+  lockAs({ id: null, name: "Host" });
+  expect(s.releaseLock("main", { hostWindow: true })).toBe(true);
+  s.store.setSetting("hostPersonId", chey.id);
+  lockAs(chey);
+  expect(s.releaseLock("main", { hostWindow: true })).toBe(true);
+});
+
+test("/stage/unlock: only the owner's own window, or the host's window for the host's own lock; a stale screen id is refused", async () => {
+  const { hub, s, chey, felipe } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const a = artifact(s, "Checkout");
+    const as = (who: { id: string }) => hub.auth.issue({ kind: "browser", label: "laptop", ip: "10.0.0.9", personId: who.id }).token;
+    const [cheys, felipes] = [as(chey), as(felipe)];
+    const post = (path: string, body: any, headers: Record<string, string>) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    const remote = (token: string) => ({ "x-forwarded-for": "10.0.0.9", authorization: `Bearer ${token}` });
+    const host = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    // Felipe's window, with or without Chey's name in the body; the host's window naming Chey: no.
+    const refused = await post("/stage/unlock", { personId: chey.id }, remote(felipes));
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as any).error).toBe("Only Chey can unlock this screen.");
+    expect((await post("/stage/unlock", { personId: chey.id }, host())).status).toBe(403);
+    expect(s.stage().lock?.by).toBe("Chey");
+    // A screen that's gone: refused, and main isn't touched in its place.
+    for (const [path, body] of [["/stage/unlock", {}], ["/stage", { mode: "agents" }], ["/stage/restore", { id: "x" }], ["/stage/expand", { tile: null }]] as const) {
+      const r = await post(path, { ...body, screen: "screen-unplugged" }, remote(cheys));
+      expect([path, r.status]).toEqual([path, 404]);
+    }
+    expect(s.stage().mode).toBe("spotlight");
+    expect(s.stage().lock?.by).toBe("Chey");
+    // Chey's own window: yes. Leaving out the screen means the main one.
+    expect((await post("/stage/unlock", {}, remote(cheys))).status).toBe(200);
+    expect(s.stage().lock).toBeUndefined();
+    // The person at the host locks from the host's window, and the host's window lets go of it.
+    s.store.setSetting("hostPersonId", chey.id);
+    expect((await post("/stage", { mode: "spotlight", items: [a.id] }, host())).status).toBe(200);
+    expect(s.stage().lock?.personId).toBe(chey.id);
+    expect((await post("/stage/unlock", {}, host())).status).toBe(200);
+    expect(s.stage().lock).toBeUndefined();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the owner's bare yes to something else doesn't unlock; their yes to the lock question, or saying to unlock it, does", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const a = artifact(s, "Pricing");
+  const cast = () => s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  cast();
+  (s as any).gatewayKey = () => "";
+  const direct = (text: string) => ({ ...said(chey, text), data: { direct: true } }) as JamEvent;
+  // Chey answers some other question of JamSesh's with "yes" (and "go ahead", "show it"): the model cites it, nothing unlocks.
+  for (const text of ["yes", "JamSesh, go ahead", "sure, do it", "show it"]) {
+    const line = direct(text);
+    expect([text, String(await tools([line]).unlock_screen.execute({ line: line.id }))]).toEqual([text, expect.stringContaining("plainly says")]);
+  }
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Asked about her lock, her bare yes answers it.
+  const t = tools([said(felipe, "show the agents")]);
+  await t.show_on_screen.execute({ mode: "agents" });
+  await t.ask_to_replace_screen.execute({});
+  const yes = direct("yes");
+  expect(await tools([yes]).unlock_screen.execute({ line: yes.id })).toContain("Unlocked");
+  // With no question, her own words to unlock it do; overheard (not said to JamSesh), they don't.
+  cast();
+  const overheard = said(chey, "unlock it");
+  expect(String(await tools([overheard]).unlock_screen.execute({ line: overheard.id }))).toContain("plainly says");
+  const own = direct("replace mine");
+  expect(await tools([own]).unlock_screen.execute({ line: own.id })).toContain("Unlocked");
+});
+
+test("the brain refuses a screen that isn't there instead of changing the main one", async () => {
+  const { s, chey, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const own = { ...said(chey, "JamSesh, show the agents on the left TV"), data: { direct: true } } as JamEvent;
+  const t = tools([own]);
+  for (const [name, args] of [["show_on_screen", { mode: "agents", screen: "Left TV" }], ["build_custom_view", { title: "x", html: "<p>x</p>", screen: "Left TV" }], ["expand_tile", { position: 1, screen: "Left TV" }], ["restore_screen", { screen: "Left TV" }], ["ask_to_replace_screen", { screen: "Left TV" }], ["unlock_screen", { line: own.id, screen: "Left TV" }]] as const)
+    expect([name, String(await t[name].execute(args))]).toEqual([name, expect.stringContaining("no screen by that name")]);
+  expect(s.stage().mode).toBe("spotlight");
+  expect(s.stage().lock?.by).toBe("Chey");
 });

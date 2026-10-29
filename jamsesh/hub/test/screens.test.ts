@@ -70,14 +70,14 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     await post("/stage", { mode: "spotlight", title: "to the right", by: "Maya", screen: "right tv" });
     expect(s.stage("screen-2").title).toBe("to the right");
     expect(s.stage().title).not.toBe("to the right");
-    // No screen, or one that isn't there: the main screen.
+    // No screen named: the main one. One that isn't there is refused, never put on the main screen instead.
     await post("/stage", { mode: "spotlight", title: "default", by: "Maya" });
-    await post("/stage", { mode: "spotlight", title: "nowhere", by: "Maya", screen: "kitchen" });
-    expect(s.stage().title).toBe("nowhere");
+    expect((await post("/stage", { mode: "spotlight", title: "nowhere", by: "Maya", screen: "kitchen" })).status).toBe(404);
+    expect(s.stage().title).toBe("default");
     expect(s.stage("screen-2").title).toBe("to the right");
     // The brain: "put it on the left TV".
-    s.unlockStage(); // Maya's casts above locked the screens she cast to
-    s.unlockStage("screen-2");
+    (s as any).dropLock("main"); // Maya's casts above locked the screens she cast to
+    (s as any).dropLock("screen-2");
     const tools = hub.brain.tools([], { effects: 0 });
     await (tools as any).show_on_screen.execute({ mode: "agents", screen: "the Left TV" }, { toolCallId: "t", messages: [] });
     expect(s.stage().mode).toBe("agents");
