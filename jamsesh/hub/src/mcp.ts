@@ -434,9 +434,7 @@ export class McpEndpoint {
           branch: args.branch,
           cwd: args.cwd,
           machine,
-          // Claude Code's hooks know the chat by its session id, which the SessionStart note hands the
-          // agent. Without one (Codex has no hooks) the MCP connection is the chat.
-          chatId,
+          chatId, // see above
           platform: args.platform,
           focus: args.focus,
           name: args.name,
