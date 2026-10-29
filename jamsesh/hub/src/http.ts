@@ -99,6 +99,163 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 
   const PUBLIC_FILES = /^\/(assets\/|icons\/|fonts\/|favicon\.svg$|manifest\.webmanifest$|sw\.js$)/;
 
+  const respond = async (req: Request, srv: import("bun").Server<WsData>): Promise<Response | undefined> => {
+    const url = new URL(req.url);
+    const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
+    // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
+    // Mac app's relay (which carries agents' traffic) all mark their requests.
+    const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
+    const ip = relayed && isLocal(peer) ? "relayed" : peer;
+    const path = url.pathname;
+    const local = isLocal(ip);
+    // On the host, loopback alone isn't a person (every process here reaches it): the host's own
+    // windows also carry the hub's window key (SPEC 14, HostWindows in auth.ts).
+    const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
+    // DNS rebinding: a web page can't reach the host under a name of its own choosing.
+    if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
+    // Saving the session for the last time: reading still works, but nothing is added (a message arriving now would miss the final save).
+    // One that came in before is in flight until it is answered, body and all: shutdown waits for it (Hub.begin).
+    const writes = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" && !path.endsWith("/healthz");
+    if (hub.closing && writes) return bad(CLOSING, 503);
+    const done = writes ? hub.begin() : null;
+    try {
+      // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
+      if (path.endsWith("/healthz")) return new Response("ok");
+      // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
+      const dev = devTarget(req, hub);
+      if (dev) {
+        if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
+        if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const who = local ? null : anyToken(hub, req, url, ip);
+          if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
+        }
+        return proxyHttp(req, url, dev);
+      }
+      // The host's own windows are trusted without a token, so a page on another site can't post as them.
+      if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
+      // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
+      // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
+      // which tiles open as localhost:<port>.
+      if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub.auth.windows, req, url);
+      // A new host link for `jamsesh host` on a hub that's already running (a terminal-started hub
+      // only): the caller proves it's this Mac's user by the secret in a mode-600 file of the hub's.
+      if (path === "/api/host-link" && local && req.method === "POST") {
+        const given = req.headers.get("x-jam-link-secret") ?? "";
+        const secret = hub.auth.windows.linkSecret;
+        if (!secret || !hub.auth.windows.matchesSecret(given)) return bad("Not allowed.", 403);
+        return json({ url: `http://127.0.0.1:${url.port || config.port}/host-window?once=${hub.auth.windows.mint()}&next=%2Fhost` });
+      }
+      // Remote-access setup is only for someone at the host.
+      if (local && path.startsWith("/api/net/")) {
+        // A JSON body only: a form or text post from another site can't change remote access.
+        if (req.method !== "GET" && !(req.headers.get("content-type") ?? "").includes("application/json")) return bad("Send JSON.", 415);
+        if (req.method !== "GET" && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
+        const r = await hub.net.routes(req, url);
+        if (r) return r;
+      }
+      // The Projects picker's data: the host's own windows only (project names and who came).
+      if (path.startsWith("/api/projects")) {
+        const r = await projectsRoute(req, url, { local, hostWindow });
+        if (r) return r;
+      }
+      if (path === "/api/pair" && req.method === "POST") return pairRoute(hub, req, url, ip);
+      // The Mac app's credential for agents on that Mac: separate from the person's window, so
+      // nothing an agent sends can approve a build or speak as a person.
+      if (path === "/api/pair/agents" && req.method === "POST") {
+        // On the host only the app (it holds the window key) issues the host's agents credential:
+        // anyone else on loopback could otherwise revoke the live one and take its place.
+        if (local && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
+        const owner = local ? null : hub.auth.check(tokenOf(req, url), ip);
+        if (!local && owner?.kind !== "browser") return bad("Pair this Mac first.", 401);
+        const who = owner?.personId ? s.person(owner.personId)?.name : undefined;
+        const personId = owner ? owner.personId : s.store.setting<string>("hostPersonId", "") || null;
+        // One live credential per window: the app issues a new one on every launch.
+        hub.auth.revokeAgentsOf(owner?.id ?? "host");
+        const r = hub.auth.issue({ kind: "agent", label: `${who ? `${who}'s agents` : "Agents"} on ${owner?.label.split(" · ")[0] ?? "the host"}`, personId, ip, ownerDeviceId: owner?.id ?? "host" });
+        return json({ token: r.token, deviceId: r.device.id });
+      }
+      // The code pairs a person's window, so only the host's own windows read it (not any process on the host).
+      if (path === "/api/pair/code") return hostWindow ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad(local ? NOT_THE_HOST_WINDOW : "Only the host shows the code.", 403);
+      if (path === "/api/pair/info") {
+        // A stable id for this host, so a window that reaches several hosts at one address (the Mac
+        // app's relay) keeps each host's identity and unsent changes apart.
+        return json({ name: s.settings().sessionName, brainName: s.settings().brainName, hostId: hostIdOf(hub) });
+      }
+      if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
+      if (path === "/collab" || path.startsWith("/collab/")) {
+        // The canvas server checks its own link tokens; JamSesh also requires a current pairing, so
+        // a disconnected device can't come back with a link it kept.
+        const who = local ? null : hub.auth.check(tokenOf(req, url), ip);
+        if (!local && !who) return bad("This device isn't paired with this JamSesh host.", 401);
+        if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname.replace(/^\/collab/, "") || "/"}${url.search}`, pairedId: who?.id ?? null } as any })) return undefined as any;
+        return bad("expected a WebSocket");
+      }
+
+      const device = local ? null : hub.auth.check(tokenOf(req, url), ip);
+      const ok = local || !!device;
+
+      if (path === "/") {
+        if (local) return Response.redirect("/host", 302);
+        if (!wantsHtml(req)) return new Response(agentIntro(originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+        return Response.redirect(ok ? "/client" : "/connect", 302);
+      }
+      // The QR code's link, fed to Claude Code or Codex instead of a browser: the agent's guide.
+      if (path === "/connect" && url.searchParams.get("c") && !wantsHtml(req) && req.headers.get("sec-fetch-mode") !== "navigate") return agentRoute(hub, req, url, ip);
+      if (PUBLIC_FILES.test(path) || path === "/connect") return webApp(path);
+      // The Mac app, for people joining from a browser. It holds no secrets.
+      if (path === "/download/mac") {
+        const dmg = [join(config.home, "JamSesh.dmg"), join(config.repo, "jamsesh", "app", "dist", "JamSesh.dmg")].find((f) => existsSync(f));
+        if (!dmg) return new Response("The host doesn't have the Mac app to share yet.", { status: 404 });
+        return new Response(Bun.file(dmg), { headers: { "content-type": "application/x-apple-diskimage", "content-disposition": 'attachment; filename="JamSesh.dmg"' } });
+      }
+      if (!ok) {
+        if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
+        return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
+      }
+      if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
+
+      if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+      if (path === "/ws") {
+        // A page on another site can't open the live session (and read the room) from a browser.
+        if (!sameOrigin(req)) return bad("Not from this site.", 403);
+        if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
+        return bad("expected a WebSocket");
+      }
+      if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+      if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
+      if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
+      if (path === "/agent/setup.sh") {
+        // From the Mac app: agents talk to the app's relay on this computer, which adds the
+        // Mac's credentials, so the script carries no token and survives switching hosts.
+        const relay = Number(url.searchParams.get("relay"));
+        const script = Number.isInteger(relay) && relay > 1023 && relay < 65536 ? joinScript(hub, `http://127.0.0.1:${relay}`, "") : joinScript(hub, originOf(req, url), tokenOf(req, url) ?? "");
+        return new Response(script, { headers: { "content-type": "text/x-shellscript" } });
+      }
+      if (path.startsWith("/api/")) {
+        // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
+        const meant = req.headers.get("x-jam-host");
+        if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
+        return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
+      }
+      // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
+      const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
+      if (full) return fullRender(hub, full[1], Number(url.searchParams.get("size")));
+      if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
+      if (path === "/canvas" || path.startsWith("/canvas/")) {
+        if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
+        const rel = path.replace(/^\/canvas\/?/, "") || "index.html";
+        return file(join(config.canvasDist, rel), config.canvasDist, true);
+      }
+      return webApp(path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code === "ESEALED") return bad(CLOSING, 503); // past shutdown's wait: refused, not lost silently
+      console.error("http:", path, e);
+      return bad(e instanceof Error ? e.message : String(e), 500);
+    } finally {
+      done?.();
+    }
+  };
+
   const server = Bun.serve<WsData, any>({
     port,
     hostname: "0.0.0.0",
@@ -106,160 +263,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     idleTimeout: 255,
     maxRequestBodySize: 64 * 1024 * 1024,
     async fetch(req, srv) {
-      const url = new URL(req.url);
-      const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
-      // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
-      // Mac app's relay (which carries agents' traffic) all mark their requests.
-      const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
-      const ip = relayed && isLocal(peer) ? "relayed" : peer;
-      const path = url.pathname;
-      const local = isLocal(ip);
-      // On the host, loopback alone isn't a person (every process here reaches it): the host's own
-      // windows also carry the hub's window key (SPEC 14, HostWindows in auth.ts).
-      const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
-      // DNS rebinding: a web page can't reach the host under a name of its own choosing.
-      if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
-      // Saving the session for the last time: reading still works, but nothing is added (a message arriving now would miss the final save).
-      // One that came in before is in flight until it is answered, body and all: shutdown waits for it (Hub.begin).
-      const writes = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" && !path.endsWith("/healthz");
-      if (hub.closing && writes) return bad(CLOSING, 503);
-      const done = writes ? hub.begin() : null;
-      try {
-        // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
-        if (path.endsWith("/healthz")) return new Response("ok");
-        // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
-        const dev = devTarget(req, hub);
-        if (dev) {
-          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
-          if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-            const who = local ? null : anyToken(hub, req, url, ip);
-            if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
-          }
-          return proxyHttp(req, url, dev);
-        }
-        // The host's own windows are trusted without a token, so a page on another site can't post as them.
-        if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
-        // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
-        // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
-        // which tiles open as localhost:<port>.
-        if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub.auth.windows, req, url);
-        // A new host link for `jamsesh host` on a hub that's already running (a terminal-started hub
-        // only): the caller proves it's this Mac's user by the secret in a mode-600 file of the hub's.
-        if (path === "/api/host-link" && local && req.method === "POST") {
-          const given = req.headers.get("x-jam-link-secret") ?? "";
-          const secret = hub.auth.windows.linkSecret;
-          if (!secret || !hub.auth.windows.matchesSecret(given)) return bad("Not allowed.", 403);
-          return json({ url: `http://127.0.0.1:${url.port || config.port}/host-window?once=${hub.auth.windows.mint()}&next=%2Fhost` });
-        }
-        // Remote-access setup is only for someone at the host.
-        if (local && path.startsWith("/api/net/")) {
-          // A JSON body only: a form or text post from another site can't change remote access.
-          if (req.method !== "GET" && !(req.headers.get("content-type") ?? "").includes("application/json")) return bad("Send JSON.", 415);
-          if (req.method !== "GET" && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
-          const r = await hub.net.routes(req, url);
-          if (r) return r;
-        }
-        // The Projects picker's data: the host's own windows only (project names and who came).
-        if (path.startsWith("/api/projects")) {
-          const r = await projectsRoute(req, url, { local, hostWindow });
-          if (r) return r;
-        }
-        if (path === "/api/pair" && req.method === "POST") return pairRoute(hub, req, url, ip);
-        // The Mac app's credential for agents on that Mac: separate from the person's window, so
-        // nothing an agent sends can approve a build or speak as a person.
-        if (path === "/api/pair/agents" && req.method === "POST") {
-          // On the host only the app (it holds the window key) issues the host's agents credential:
-          // anyone else on loopback could otherwise revoke the live one and take its place.
-          if (local && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
-          const owner = local ? null : hub.auth.check(tokenOf(req, url), ip);
-          if (!local && owner?.kind !== "browser") return bad("Pair this Mac first.", 401);
-          const who = owner?.personId ? s.person(owner.personId)?.name : undefined;
-          const personId = owner ? owner.personId : s.store.setting<string>("hostPersonId", "") || null;
-          // One live credential per window: the app issues a new one on every launch.
-          hub.auth.revokeAgentsOf(owner?.id ?? "host");
-          const r = hub.auth.issue({ kind: "agent", label: `${who ? `${who}'s agents` : "Agents"} on ${owner?.label.split(" · ")[0] ?? "the host"}`, personId, ip, ownerDeviceId: owner?.id ?? "host" });
-          return json({ token: r.token, deviceId: r.device.id });
-        }
-        // The code pairs a person's window, so only the host's own windows read it (not any process on the host).
-        if (path === "/api/pair/code") return hostWindow ? json({ ...hub.auth.current(), addresses: s.addresses() }) : bad(local ? NOT_THE_HOST_WINDOW : "Only the host shows the code.", 403);
-        if (path === "/api/pair/info") {
-          // A stable id for this host, so a window that reaches several hosts at one address (the Mac
-          // app's relay) keeps each host's identity and unsent changes apart.
-          return json({ name: s.settings().sessionName, brainName: s.settings().brainName, hostId: hostIdOf(hub) });
-        }
-        if (path === "/agent" || path === "/agent.md") return agentRoute(hub, req, url, ip);
-        if (path === "/collab" || path.startsWith("/collab/")) {
-          // The canvas server checks its own link tokens; JamSesh also requires a current pairing, so
-          // a disconnected device can't come back with a link it kept.
-          const who = local ? null : hub.auth.check(tokenOf(req, url), ip);
-          if (!local && !who) return bad("This device isn't paired with this JamSesh host.", 401);
-          if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname.replace(/^\/collab/, "") || "/"}${url.search}`, pairedId: who?.id ?? null } as any })) return undefined as any;
-          return bad("expected a WebSocket");
-        }
-
-        const device = local ? null : hub.auth.check(tokenOf(req, url), ip);
-        const ok = local || !!device;
-
-        if (path === "/") {
-          if (local) return Response.redirect("/host", 302);
-          if (!wantsHtml(req)) return new Response(agentIntro(originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
-          return Response.redirect(ok ? "/client" : "/connect", 302);
-        }
-        // The QR code's link, fed to Claude Code or Codex instead of a browser: the agent's guide.
-        if (path === "/connect" && url.searchParams.get("c") && !wantsHtml(req) && req.headers.get("sec-fetch-mode") !== "navigate") return agentRoute(hub, req, url, ip);
-        if (PUBLIC_FILES.test(path) || path === "/connect") return webApp(path);
-        // The Mac app, for people joining from a browser. It holds no secrets.
-        if (path === "/download/mac") {
-          const dmg = [join(config.home, "JamSesh.dmg"), join(config.repo, "jamsesh", "app", "dist", "JamSesh.dmg")].find((f) => existsSync(f));
-          if (!dmg) return new Response("The host doesn't have the Mac app to share yet.", { status: 404 });
-          return new Response(Bun.file(dmg), { headers: { "content-type": "application/x-apple-diskimage", "content-disposition": 'attachment; filename="JamSesh.dmg"' } });
-        }
-        if (!ok) {
-          if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
-          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
-        }
-        if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
-
-        if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
-        if (path === "/ws") {
-          // A page on another site can't open the live session (and read the room) from a browser.
-          if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
-          return bad("expected a WebSocket");
-        }
-        if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
-        if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
-        if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
-        if (path === "/agent/setup.sh") {
-          // From the Mac app: agents talk to the app's relay on this computer, which adds the
-          // Mac's credentials, so the script carries no token and survives switching hosts.
-          const relay = Number(url.searchParams.get("relay"));
-          const script = Number.isInteger(relay) && relay > 1023 && relay < 65536 ? joinScript(hub, `http://127.0.0.1:${relay}`, "") : joinScript(hub, originOf(req, url), tokenOf(req, url) ?? "");
-          return new Response(script, { headers: { "content-type": "text/x-shellscript" } });
-        }
-        if (path.startsWith("/api/")) {
-          // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
-          const meant = req.headers.get("x-jam-host");
-          if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
-          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
-        }
-        // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
-        const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
-        if (full) return fullRender(hub, full[1], Number(url.searchParams.get("size")));
-        if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
-        if (path === "/canvas" || path.startsWith("/canvas/")) {
-          if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
-          const rel = path.replace(/^\/canvas\/?/, "") || "index.html";
-          return file(join(config.canvasDist, rel), config.canvasDist, true);
-        }
-        return webApp(path);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException)?.code === "ESEALED") return bad(CLOSING, 503); // past shutdown's wait: refused, not lost silently
-        console.error("http:", path, e);
-        return bad(e instanceof Error ? e.message : String(e), 500);
-      } finally {
-        done?.();
-      }
+      const res = await respond(req, srv);
+      // A write answered after the room stopped was dropped by the store (it cannot be part of the saved session): say so, don't say 200.
+      if (res && hub.session.store.closed && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad(CLOSING, 503);
+      return res;
     },
     websocket: {
       idleTimeout: 120,

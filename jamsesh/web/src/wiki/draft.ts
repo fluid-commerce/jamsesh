@@ -19,12 +19,14 @@ export const saveRev = (base: string, theirs: WikiPage | null, overTheirs: boole
  */
 const held = new Map<string, { text: string; base: string; n: number }>();
 let armed = false;
+/** Edit numbers come from one counter that only goes up (never reset by Cancel, a save or a new draft), so a save's number can match no other draft. */
+let edits = 0;
 
 export const drafts = {
   hold(slug: string, text: string, base: string) {
     // Each change of text is one more edit; a save remembers which edit it sent.
     const was = held.get(slug);
-    held.set(slug, { text, base, n: was && was.text === text ? was.n : (was?.n ?? 0) + 1 });
+    held.set(slug, { text, base, n: was && was.text === text ? was.n : ++edits });
     if (!armed && typeof window !== "undefined") {
       armed = true;
       window.addEventListener("beforeunload", (e) => void (held.size && e.preventDefault()));
@@ -55,6 +57,3 @@ export const restore = (slug: string): { editing: string | null; base: string } 
 
 /** Called by PageView whenever its editor text changes: a text is held, null (saved or cancelled) drops it. Unmounting calls nothing. */
 export const track = (slug: string, editing: string | null, base: string) => (editing === null ? drafts.drop(slug) : drafts.hold(slug, editing, base));
-
-/** The page to show once a fetch lands: the fetched one unless a refresh left the open one alone; a reopened draft with no page yet gets the fetched one too. */
-export const pageAfterLoad = (cur: WikiPage | null, latest: WikiPage, r: { page?: WikiPage }): WikiPage => r.page ?? cur ?? latest;

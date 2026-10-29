@@ -2049,9 +2049,24 @@ test("past shutdown's wait the store is sealed: a late request is refused with 5
     await r.hub.shutdown(); // gives up on the request after its wait
     expect(await held.finish()).toBe(503);
     expect(r.s.store.eventsAfter(0).some((e) => e.text.includes("Too late"))).toBe(false);
-    expect(() => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "after", relevance: "work" })).toThrow("closed");
-    expect(() => r.s.store.setSetting("x", 1)).toThrow("closed");
-    expect(() => r.s.store.put("people", { ...r.chey })).toThrow("closed"); // the team store too
+    // Once the room has stopped, every write path drops the write with a warning and never throws (a late timer or job cannot fail or corrupt).
+    const warn = console.warn;
+    const warned: string[] = [];
+    console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
+    try {
+      const count = r.s.store.eventsAfter(0).length;
+      expect(() => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "after", relevance: "work" })).not.toThrow();
+      expect(() => r.s.store.setSetting("x", 1)).not.toThrow();
+      expect(() => r.s.store.put("people", { ...r.chey, name: "Dropped" })).not.toThrow(); // the team store too
+      expect(() => r.s.store.setDigest("room", "late", 1)).not.toThrow();
+      expect(() => r.s.store.remove("people", r.chey.id)).not.toThrow();
+      expect(r.s.store.eventsAfter(0).length).toBe(count);
+      expect(r.s.store.setting("x", "unset")).toBe("unset");
+      expect(r.s.store.get("people", r.chey.id)?.name).toBe("Chey");
+      expect(warned.join("\n")).toContain("dropped");
+    } finally {
+      console.warn = warn;
+    }
   } finally {
     Hub.SHUTDOWN_WAIT_MS = wait;
     server.stop(true);
@@ -2313,6 +2328,40 @@ test("closing a room ends its timers first: a pending stage revert never fires p
     expect(fired).toBe(0);
     expect(errors).toEqual([]);
   } finally {
+    process.off("uncaughtException", catcher);
+    process.off("unhandledRejection", catcher);
+  }
+}, 30_000);
+
+test("a callback already awaiting I/O when the room closes writes into nothing: dropped with a warning, no unhandled rejection", async () => {
+  const { hub, s } = room();
+  const errors: unknown[] = [];
+  const catcher = (e: unknown) => void errors.push(e);
+  process.on("uncaughtException", catcher);
+  process.on("unhandledRejection", catcher);
+  const warn = console.warn;
+  const warned: string[] = [];
+  console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
+  try {
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    let wrote = false;
+    hub.session.timers.after(async () => {
+      await gate; // a refresh waiting on the network
+      s.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: "late refresh" });
+      s.store.patch("devservers", "x", { up: false } as any);
+      wrote = true;
+    }, 1);
+    await Bun.sleep(30);
+    await hub.shutdown();
+    release();
+    await Bun.sleep(60);
+    expect(wrote).toBe(true);
+    expect(s.store.eventsAfter(0).some((e) => e.text === "late refresh")).toBe(false);
+    expect(errors).toEqual([]);
+    expect(warned.join("\n")).toContain("dropped");
+  } finally {
+    console.warn = warn;
     process.off("uncaughtException", catcher);
     process.off("unhandledRejection", catcher);
   }

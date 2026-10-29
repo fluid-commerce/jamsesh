@@ -519,7 +519,14 @@ export class HostControl {
       this.log(result);
       this.onBuilt(label, ok, result);
       bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
-    })();
+    })().catch((e) => {
+      // A background job never ends as an unhandled rejection: the room is told it failed, and a log that finds the room closed is dropped.
+      this.builds.delete(slug);
+      console.error("[host] preview build:", e instanceof Error ? e.message : e);
+      try {
+        this.log(`The ${label} build stopped: ${e instanceof Error ? e.message : e}`);
+      } catch {}
+    });
     return `Building ${label} on the host. It opens when the build finishes, and the room sees a note either way.`;
   }
 

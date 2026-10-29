@@ -437,8 +437,9 @@ export class Canvas {
     else a[k]++;
     this.session.touchAgent(agent.id, { status: "working", activity: "Designing on the canvas" });
     if (!a.timer) {
-      a.timer = setTimeout(() => {
-        const cur = this.activity.get(agent.id)!;
+      a.timer = this.session.timers.after(() => {
+        const cur = this.activity.get(agent.id);
+        if (!cur) return;
         this.activity.delete(agent.id);
         const parts = [cur.created && `${cur.created} new layer${cur.created > 1 ? "s" : ""}`, cur.edited && `${cur.edited} edit${cur.edited > 1 ? "s" : ""}`].filter(Boolean);
         if (parts.length) {

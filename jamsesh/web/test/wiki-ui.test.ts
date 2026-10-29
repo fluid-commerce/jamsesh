@@ -332,6 +332,17 @@ test("store level: a save answered after the view unmounted applies the same rul
   track("q2", null, "r5");
 });
 
+test("store level: edit numbers never repeat, across Cancel, a save and a new draft: an old save's answer cannot clear a new draft", () => {
+  track("r", "one", "r1");
+  const old = drafts.edit("r");
+  track("r", null, "r1"); // Cancel
+  track("r", "a fresh draft", "r1");
+  expect(drafts.edit("r")).not.toBe(old);
+  expect(drafts.saved("r", old, "r2")).toBe(false); // the old save answers late: the fresh draft stays
+  expect(restore("r").editing).toBe("a fresh draft");
+  track("r", null, "r2");
+});
+
 test("store level: the same text tracked again is not a new edit", () => {
   track("same", "abc", "r1");
   const n = drafts.edit("same");

@@ -6,7 +6,7 @@ import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
-import { drafts, onRefresh, pageAfterLoad, restore, saveRev, track } from "./draft";
+import { drafts, onRefresh, restore, saveRev, track } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -281,6 +281,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   const [err, setErr] = useState<{ status?: number; message: string } | null>(null);
   const [editing, setEditing] = useState<string | null>(() => restore(slug).editing);
   const [saving, setSaving] = useState(false);
+  const inFlight = useRef(false);
   const [conflict, setConflict] = useState<WikiPage | null>(null);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   // The revision the open edit started from. A refresh never changes it (draft.ts).
@@ -301,7 +302,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
         if (!live) return;
         const r = onRefresh(draft.current.editing !== null, draft.current.base, p);
         // A page reopened into a held draft still loads: the draft decides what the editor shows, never whether there is a page.
-        setPage((cur) => pageAfterLoad(cur, p, r));
+        setPage((cur) => r.page ?? cur ?? p); // a refresh that left the open page alone keeps it; a view reopened into a draft has none yet, so it gets this one
         if (r.theirs) setConflict(r.theirs);
         setErr(null);
       },
@@ -333,13 +334,14 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   };
 
   const save = async (keepMine = false) => {
-    if (editing === null) return;
+    if (editing === null || inFlight.current) return; // one save at a time, whichever way it was asked for (button or keyboard)
+    inFlight.current = true;
     const sent = drafts.edit(slug); // which edit this save carries; typing while it is out is a later one
     setSaving(true);
     setSaveErr(null);
     try {
       const r = await wikiApi.save(slug, { markdown: editing, rev: saveRev(base, conflict, keepMine) });
-      if ("conflict" in r) return void (setConflict(r.conflict), setSaving(false));
+      if ("conflict" in r) return void (setConflict(r.conflict), (inFlight.current = false), setSaving(false));
       setPage(r.page);
       setConflict(null);
       // Settled in the store, so it holds whether or not this view is still on screen.
@@ -349,6 +351,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
     } catch (e) {
       setSaveErr(pretty(e, "Couldn't save. Your edit is still here."));
     }
+    inFlight.current = false;
     setSaving(false);
   };
 
