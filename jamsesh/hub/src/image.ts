@@ -56,7 +56,8 @@ function rowBytes(width: number, colorType: number, depth: number) {
 
 /**
  * Every chunk inside the file with a matching CRC, IHDR first, IEND last and at the very end, and image data that
- * decompresses to exactly the pixels the header promises (for an interlaced image: decompresses at all).
+ * decompresses to exactly the rows the header promises (all seven Adam7 passes when interlaced), each with a valid
+ * filter byte.
  */
 function checkPng(b: Uint8Array): CheckedImage | string {
   const v = new DataView(b.buffer, b.byteOffset, b.byteLength);

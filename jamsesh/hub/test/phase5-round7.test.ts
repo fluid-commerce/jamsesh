@@ -498,8 +498,10 @@ test("an image with no picture in it (a PNG without image data, a JPEG without a
   const jpeg = new Uint8Array(await Bun.file(new URL("./fixtures/tiny.jpg", import.meta.url)).arrayBuffer());
   expect((await post(lap.token, `/people/${p.id}/photo`, jpeg, { "content-type": "image/jpeg" })).status).toBe(200);
   expect((await post(agentCred.token, "/upload", formOf(jpeg, { agent: ag.id }))).status).toBe(200);
-  // A valid interlaced PNG is taken too.
+  // Valid interlaced PNGs are taken too: 4x4 (passes 2 and 3 empty) and 8x8, where all seven passes hold rows.
   expect((await post(lap.token, `/people/${p.id}/photo`, goodInterlaced, { "content-type": "image/png" })).status).toBe(200);
+  expect(adam7(8, 8).length).toBe(8 * 8 + 15);
+  expect((await post(lap.token, `/people/${p.id}/photo`, png(8, 8, adam7(8, 8), 1), { "content-type": "image/png" })).status).toBe(200);
 });
 
 test("a form that arrived whole but is broken is a 400 (the sender's error), not a 408 to retry", async () => {
