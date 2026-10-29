@@ -210,3 +210,23 @@ test("a re-registration whose bind fails leaves the earlier record and its liste
     one.stop(true);
   }
 });
+
+test("a listener that can't bind (the port is really taken) leaves the earlier listener serving", async () => {
+  const { hub, agent } = room();
+  const one = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("one") });
+  const squatter = Bun.serve({ port: 0, hostname: "0.0.0.0", fetch: () => new Response("squatter") });
+  try {
+    const d1 = await hub.devproxy.register({ agentId: agent.id, name: "Web", target: `127.0.0.1:${one.port}` });
+    const local = d1.url.replace(/^http:\/\/[^:]+/, "http://127.0.0.1");
+    // The same registration asks to move onto a port someone else holds.
+    await expect((hub.devproxy as any).listen({ ...d1, hostPort: squatter.port })).rejects.toThrow();
+    expect(await (await fetch(local)).text()).toBe("one");
+    expect(await (await fetch(`http://127.0.0.1:${squatter.port}`)).text()).toBe("squatter");
+    // And the old listener is still the one that is tracked, so it can still be closed.
+    hub.devproxy.close(d1.id);
+    await expect(fetch(local)).rejects.toThrow();
+  } finally {
+    one.stop(true);
+    squatter.stop(true);
+  }
+});
