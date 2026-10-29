@@ -65,6 +65,8 @@ export class Network {
 
   // ---- config (token lives in a 0600 file; it is never returned by status()) ----
   private readConfig(): NetConfig | null {
+    // A test build beside the real app never reads a saved remote-access setup, so it can't turn it on.
+    if (config.isolated) return null;
     try {
       const c = JSON.parse(readFileSync(this.cfgPath, "utf8"));
       return { domain: c.domain, token: c.token, externalPort: c.externalPort ?? 443, internalPort: c.internalPort ?? 4443, enabled: !!c.enabled, staging: !!c.staging };
@@ -88,6 +90,7 @@ export class Network {
 
   // ---- lifecycle ----
   async start() {
+    if (config.isolated) return;
     const d = this.domain();
     if (!this.cfg?.enabled || !d) return;
     this.stopUpdater?.();
@@ -242,10 +245,10 @@ export class Network {
     const p = url.pathname.slice("/api/net/".length);
     if (req.method === "GET" && p === "status") return json(this.status());
     if (req.method !== "POST") return json({ error: "not found" }, 404);
+    // Remote access forwards a router port to this Mac and keeps a DuckDNS name: the real host's job, not a test build's.
+    if (config.isolated) return json({ error: "Remote access is off in a test build." }, 409);
     const body: any = await req.json().catch(() => ({}));
     if (p === "config") {
-      // Remote access forwards a router port to this Mac and keeps a DuckDNS name: the real host's job, not a test build's.
-      if (config.isolated) return json({ error: "Remote access is off in a test build." }, 409);
       const d = parseDomain(body.domain);
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);

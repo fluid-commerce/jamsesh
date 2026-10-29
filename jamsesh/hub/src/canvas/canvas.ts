@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config";
+import { REAL_PORTS } from "../isolate";
 import type { Session } from "../session";
 import type { Agent, Platform } from "../types";
 import { HelperRegistry, stopHelper, withParentWatch } from "../children";
@@ -91,6 +92,11 @@ export class Canvas {
     const saved = this.session.store.setting<number>("figcraftPort", 0);
     const candidates = [...new Set([saved, config.figcraftPort, ...Array.from({ length: 30 }, (_, i) => config.figcraftPort + 1 + i)])].filter(Boolean);
     for (const p of candidates) {
+      // An isolated hub only ever takes a free port that isn't the real app's, and never adopts a server already listening.
+      if (config.isolated) {
+        if (!REAL_PORTS.includes(p) && portFree(p)) return p;
+        continue;
+      }
       if (await healthy(`http://127.0.0.1:${p}`) && p === saved) return p; // our server from before
       if (portFree(p)) return p;
     }

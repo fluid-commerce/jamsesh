@@ -695,6 +695,11 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
         {e.kind === "speech" && Array.isArray(e.data.attachments) && <FeedAttachments list={e.data.attachments} />}
         {(e.kind === "speech" || e.kind === "prompt") && <SourceTag source={e.data.source} brainName={state.settings.brainName} />}
+        {e.kind === "brain" && e.data.shownNotSpoken && (
+          <span className="tag" title="Shown, not spoken" style={{ color: "var(--faint)", marginLeft: 8 }}>
+            Shown, not spoken
+          </span>
+        )}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
@@ -1143,7 +1148,20 @@ function Countdown({ at, attempt }: { at: number | null; attempt: number }) {
 
 const figcraftIn = (iframe: HTMLIFrameElement | null) => (iframe?.contentWindow as any)?.figcraft as { execute: (c: string, p?: unknown) => Promise<any> } | undefined;
 
-export function CanvasFrame({ kind, name, title, follow, page, panels }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string; panels?: boolean }) {
+type CanvasFrameProps = { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string; panels?: boolean };
+
+/** The live canvas. A silent room doesn't load it: it is a page in a frame, and nothing in a frame can be muted from here. */
+export function CanvasFrame(p: CanvasFrameProps) {
+  return useSilent() ? (
+    <div style={{ position: "relative", height: "100%" }}>
+      <QuietFrame url="" title={p.title} bare />
+    </div>
+  ) : (
+    <LiveCanvas {...p} />
+  );
+}
+
+function LiveCanvas({ kind, name, title, follow, page, panels }: CanvasFrameProps) {
   const frame = useRef<HTMLIFrameElement>(null);
   // Follow a participant (by name): the canvas shows what they're looking at. A reload or reconnect gives them
   // a new client id, so this keeps checking and follows the new one.

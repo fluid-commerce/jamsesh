@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
+import { freePort, isolateEnv, isolatedPort, REAL_PORTS } from "./isolate";
 import { createProject, defaultProject, findProject, migrateLegacy, openSession, takeNewSessionMark } from "./projects";
 
 const HOME = process.env.JAMSESH_HOME ?? join(homedir(), ".jamsesh");
@@ -58,22 +59,17 @@ export function lanAddress(): string {
 }
 
 /**
- * A test build beside the real app (the Mac app sets JAMSESH_ISOLATED=1 whenever JAMSESH_APP_DATA is set).
- * An isolated hub shares nothing with the real one: every port comes from the environment (a missing one is
- * an error, not the real app's default), and it reads no other app's speech helper or model cache.
+ * A test build beside the real app (the Mac app sets JAMSESH_ISOLATED=1 and JAMSESH_APP_DATA). Everything then comes
+ * from JAMSESH_APP_DATA alone (see isolate.ts): inherited location variables are dropped, the home is
+ * <app data>/home, and the ports the hub opens are its own (the one it is given, and OS-assigned ones).
  */
 const isolated = process.env.JAMSESH_ISOLATED === "1";
-/** The ports the real app and its hub use (the defaults below, the app's relay, the hub's alternates, whisper, live builds). */
-export const REAL_PORTS = [4790, 4747, 4848, 4949, 4443, 8178, 47900, 5100, 5101, 5102, 5103, 5104];
+if (isolated) isolateEnv(process.env);
+export { REAL_PORTS };
 export function ownPort(name: string, fallback: number, env: Record<string, string | undefined> = process.env, isolatedHub = isolated): number {
   const v = env[name];
-  if (v === undefined || v === "") {
-    if (isolatedHub) throw new Error(`${name} must be set for an isolated hub (JAMSESH_ISOLATED=1): the default port belongs to the real app.`);
-    return fallback;
-  }
-  const n = Number(v);
-  if (isolatedHub && REAL_PORTS.includes(n)) throw new Error(`${name}=${v} is the real app's port; an isolated hub must use its own.`);
-  return n;
+  if (isolatedHub) return isolatedPort(name, v);
+  return v === undefined || v === "" ? fallback : Number(v);
 }
 
 const envFile = readEnvFile(join(HOME, ".env"));
@@ -95,8 +91,8 @@ export const config = {
   lobby: process.env.JAMSESH_LOBBY === "1",
   isolated,
   port: ownPort("JAMSESH_PORT", 4747),
-  figcraftPort: ownPort("JAMSESH_FIGCRAFT_PORT", 47900),
-  devPortStart: ownPort("JAMSESH_DEV_PORT_START", 5100),
+  figcraftPort: isolated ? freePort() : ownPort("JAMSESH_FIGCRAFT_PORT", 47900),
+  devPortStart: isolated ? freePort() : ownPort("JAMSESH_DEV_PORT_START", 5100),
   /** The address clients use to reach this host. */
   publicHost: process.env.JAMSESH_PUBLIC_HOST ?? lanAddress(),
   envGatewayKey: process.env.AI_GATEWAY_API_KEY ?? envFile.AI_GATEWAY_API_KEY,

@@ -25,8 +25,31 @@ export function useSilent() {
  */
 export function clip(mime: string, audio: string, make: (src: string) => HTMLAudioElement = (src) => new Audio(src)) {
   if (!soundAllowed()) return null;
-  return make(`data:${mime};base64,${audio}`);
+  const a = make(`data:${mime};base64,${audio}`);
+  clips.add(a);
+  return a;
 }
+
+/** Clips made and not yet stopped, so a room that turns silent (a reconnect to a silent hub) can stop them. */
+const clips = new Set<{ pause(): void }>();
+
+/** Stops everything this page is playing: clips already going, and the chime's audio context. */
+export function stopAllSound() {
+  for (const a of clips) {
+    try {
+      a.pause();
+    } catch {
+      // already gone
+    }
+  }
+  clips.clear();
+  void ctx?.suspend?.().catch?.(() => {});
+}
+
+// The moment the hub says the room is silent, whatever was playing stops.
+hub.subscribe(() => {
+  if (!soundAllowed()) stopAllSound();
+});
 
 /**
  * Pages inside the app (a scripted HTML tile, a custom stage) can make sound on their own. In a silent room

@@ -113,7 +113,9 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   const decision = speechDecision({ voiceReplies: s.voiceReplies, source, kind, quietRoom: quietRoom(s.brainNotes), sinceLastMs: Date.now() - lastSpokeAt });
   const spoken = decision === "speak";
   const words = spoken ? trimForSpeech(text) : text;
-  session.store.addEvent({ kind: "brain", authorType: "brain", authorName: s.brainName, text: words, relevance: "work", data: { spoken, source, speechKind: kind } });
+  // A silent hub sends the reply as text only: record that it was shown, not that it was said.
+  const muted = spoken && silent();
+  session.store.addEvent({ kind: "brain", authorType: "brain", authorName: s.brainName, text: words, relevance: "work", data: { spoken: spoken && !muted, shownNotSpoken: muted, source, speechKind: kind } });
   if (!spoken) {
     bus.send({ type: "toast", tone: kind === "problem" ? "warn" : "info", text: s.brainName, detail: text });
     return "shown";

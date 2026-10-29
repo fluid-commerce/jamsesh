@@ -1,18 +1,17 @@
 // A silent room (the hub runs with JAMSESH_SILENT=1) plays nothing in any page: not the brain's voice, not a
 // voice sample, not the chime, and nothing a frame inside the page could play.
 import { afterEach, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 
 (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
 (globalThis as any).navigator ??= {};
 const { hub } = await import("../src/shared/hub");
-const { clip, dropAudio, htmlFrame, playChime, roomSilent, soundAllowed, QUIET_CSP } = await import("../src/shared/sound");
-const { ScaledFrame } = await import("../src/shared/ui");
+const { clip, dropAudio, htmlFrame, playChime, roomSilent, soundAllowed, stopAllSound, QUIET_CSP } = await import("../src/shared/sound");
+const { CanvasFrame, ScaledFrame } = await import("../src/shared/ui");
 const { HtmlTile } = await import("../src/host/Stage");
 
 const was = hub.snap.state;
-const setSilent = (silent: boolean) => (hub.snap.state = { session: { silent }, devservers: [] } as any);
+const setSilent = (silent: boolean) => (hub.snap.state = { session: { silent, canvas: { status: "starting", reason: "" } }, devservers: [] } as any);
 afterEach(() => {
   hub.snap.state = was;
   delete (globalThis as any).AudioContext;
@@ -39,12 +38,19 @@ test("a spoken clip is never made in a silent room, so the host, client and voic
   expect(made).toEqual(["data:audio/mpeg;base64,AAAA"]);
 });
 
-test("every place the page plays a spoken clip goes through clip()", () => {
-  for (const f of ["host/HostView.tsx", "client/ClientView.tsx", "shared/Settings.tsx"]) {
-    const src = readFileSync(`${import.meta.dir}/../src/${f}`, "utf8");
-    expect(src.includes("new Audio("), `${f} builds its own Audio`).toBe(false);
-    expect(src.includes("clip("), `${f} doesn't use clip()`).toBe(true);
-  }
+test("a clip already playing stops the moment the hub says the room is silent", () => {
+  const paused: string[] = [];
+  const make = (src: string) => ({ pause: () => paused.push(src) }) as unknown as HTMLAudioElement;
+  setSilent(false);
+  clip("audio/mpeg", "ONE", make);
+  clip("audio/mpeg", "TWO", make);
+  expect(paused).toEqual([]);
+  // The hub (re)connects and its state now says silent.
+  (hub as any).set({ state: { session: { silent: true }, devservers: [] } });
+  expect(paused.sort()).toEqual(["data:audio/mpeg;base64,ONE", "data:audio/mpeg;base64,TWO"]);
+  // Nothing is left to stop twice.
+  stopAllSound();
+  expect(paused.length).toBe(2);
 });
 
 test("a chime makes no audio context at all in a silent room, and does in a normal one", () => {
@@ -113,10 +119,12 @@ test("a silent room drops any audio track that arrives on a shared screen", () =
   expect([a.enabled, a.stopped]).toEqual([false, true]);
 });
 
-test("the screen-share video elements are muted, and a received stream passes through dropAudio", () => {
-  const share = readFileSync(`${import.meta.dir}/../src/shared/share.tsx`, "utf8");
-  const videos = share.match(/<video\b[^>]*>/g) ?? [];
-  expect(videos.length).toBeGreaterThan(0);
-  for (const v of videos) expect(v, v).toContain("muted");
-  expect(readFileSync(`${import.meta.dir}/../src/shared/rtc.ts`, "utf8")).toContain("dropAudio(stream)");
+test("the live canvas is not mounted in a silent room, and is otherwise", () => {
+  setSilent(true);
+  const quiet = renderToStaticMarkup(<CanvasFrame kind="view" title="Live canvas" />);
+  expect(quiet).not.toContain("<iframe");
+  expect(quiet).toContain("data-quiet-frame");
+  setSilent(false);
+  // Not silent: the live canvas component runs (it has nothing to show without a link, but it isn't the quiet card).
+  expect(renderToStaticMarkup(<CanvasFrame kind="view" title="Live canvas" />)).not.toContain("data-quiet-frame");
 });

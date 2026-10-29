@@ -9,7 +9,8 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { type HelperRegistry, stopHelper, withStdinWatch } from "../children";
-import { config, REAL_PORTS } from "../config";
+import { config } from "../config";
+import { freePort, ownsListener } from "../isolate";
 import { downloadVerified, fileMatches, type ModelState, type ModelStatus } from "./models";
 import { encodeWav } from "./wav";
 
@@ -72,13 +73,12 @@ async function verified(path: string): Promise<boolean> {
 /** The port the host's whisper-server listens on. */
 /**
  * The port whisper-server uses: JAMSESH_WHISPER_PORT, else 8178. An isolated hub (a test build beside the real
- * app, `config.isolated`) has no default: the real app's whisper-server answers on 8178, so without its own
- * port a test hub runs no local speech engine at all (null).
+ * app, `config.isolated`) never uses either: the real app's helper answers on 8178, so it takes a port the OS
+ * hands out and runs a helper of its own on it.
  */
-export function whisperPort(env: Record<string, string | undefined> = process.env, isolated = config.isolated): number | null {
-  const p = Number(env.JAMSESH_WHISPER_PORT) || 0;
-  if (isolated) return p && !REAL_PORTS.includes(p) ? p : null;
-  return p || 8178;
+export function whisperPort(env: Record<string, string | undefined> = process.env, isolated = config.isolated): number {
+  if (isolated) return freePort();
+  return Number(env.JAMSESH_WHISPER_PORT) || 8178;
 }
 
 /** Something answers HTTP at `url` (it may be anything: see `isWhisperServer`). */
@@ -154,13 +154,12 @@ export class LocalWhisper {
    * else), downloading the model first when there's none and `download` allows it. Resolves with its URL,
    * or null with the reason in status().
    */
-  async start(port: number | null, download: boolean): Promise<string | null> {
+  async start(wanted: number, download: boolean): Promise<string | null> {
     this.stopped = false;
-    if (port === null) return this.set("off", "Turned off in this test build (set JAMSESH_WHISPER_PORT to give it its own speech helper)."), null;
+    // An isolated hub always runs its own helper on a port the OS just gave it, and never probes or adopts a server.
+    const port = config.isolated ? freePort() : wanted;
     const url = `http://127.0.0.1:${port}`;
-    if (await ping(url)) {
-      // Another app's helper (the real one's) is never adopted by an isolated hub: it would hear this room's audio.
-      if (config.isolated) return this.set("failed", `Something is already using port ${port}. An isolated build starts its own speech helper; pick a free JAMSESH_WHISPER_PORT.`), null;
+    if (!config.isolated && (await ping(url))) {
       if (await isWhisperServer(url)) return this.set("ready", "Running on this host."), url;
       return this.set("failed", `Something other than whisper-server is using port ${port}. Free it or set JAMSESH_WHISPER_PORT.`), null;
     }
@@ -196,7 +195,8 @@ export class LocalWhisper {
     });
     const until = Date.now() + this.startupMs;
     while (died === null && !this.stopped && Date.now() < until && !(await ping(url))) await Bun.sleep(250);
-    if (died === null && !this.stopped && (await isWhisperServer(url))) {
+    // An isolated hub also requires that the process it started is the one listening: a server that got there first would hear this room.
+    if (died === null && !this.stopped && (await isWhisperServer(url)) && (!config.isolated || (await ownsListener(port, proc.pid)))) {
       this.set("ready", "Running on this host.");
       return url;
     }

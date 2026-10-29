@@ -103,6 +103,9 @@ describe("silent mode reaches the page", () => {
       else process.env.NODE_ENV = wasEnv;
     }
     expect(spawned).toEqual([]);
+    // The feed records it as shown, not said.
+    const last = hub.session.store.recentEvents({ kinds: ["brain"], limit: 1 })[0];
+    expect(last?.data).toMatchObject({ spoken: false, shownNotSpoken: true });
     expect(sent.filter((m) => m.type === "speak")).toEqual([{ type: "speak", audio: null, mime: "", text: "Nothing should be said." }]);
   });
 

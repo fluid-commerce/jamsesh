@@ -8,6 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
+import { REAL_PORTS } from "./isolate";
 import { newId } from "./store";
 import type { Session } from "./session";
 import { allowDriveScript, driveScript, scriptHash, withDriveScript } from "./devdrive";
@@ -82,7 +83,7 @@ export class DevProxy {
     // A registration that is being replaced keeps its listener until the new one is bound.
     let hostPort = existing?.hostPort ?? config.devPortStart;
     const own = () => !!existing && this.listeners.get(existing.id)?.server.port === hostPort;
-    while ((used.has(hostPort) && hostPort !== existing?.hostPort) || (!own() && !portFree(hostPort))) hostPort++;
+    while ((used.has(hostPort) && hostPort !== existing?.hostPort) || (config.isolated && REAL_PORTS.includes(hostPort)) || (!own() && !portFree(hostPort))) hostPort++;
     const d: DevServer = {
       id: existing?.id ?? newId("dev"),
       agentId: opts.agentId,

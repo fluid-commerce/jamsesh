@@ -18,7 +18,23 @@ pub const DEFAULT_KEYCHAIN_SERVICE: &str = "JamSesh";
 pub const DEFAULT_HUB_PORTS: [u16; 3] = [4747, 4848, 4949];
 const DEFAULT_BONJOUR: &str = "_jamsesh._tcp";
 /// Ports the real app and its hub use. An isolated build (a data folder override) never takes one.
-pub const REAL_PORTS: [u16; 12] = [4790, 4747, 4848, 4949, 8178, 47900, 5100, 5101, 5102, 5103, 5104, 4443];
+pub const REAL_PORTS: [u16; 13] = [4790, 4747, 4848, 4949, 4443, 5100, 5101, 5102, 5103, 5104, 7979, 8178, 47900];
+
+/// Variables that say where data, tools or helpers live. An isolated build ignores them and the hub it starts never sees them.
+pub const LOCATION_VARS: [&str; 12] = [
+    "JAMSESH_DATA",
+    "JAMSESH_TEAM",
+    "JAMSESH_HOME",
+    "JAMSESH_FIGCRAFT_BIN_DIR",
+    "JAMSESH_FIGCRAFT_PORT",
+    "JAMSESH_DEV_PORT_START",
+    "JAMSESH_WHISPER_PORT",
+    "JAMSESH_WHISPER_MODEL",
+    "JAMSESH_WHISPER_SERVER",
+    "JAMSESH_PARAKEET_DIR",
+    "JAMSESH_PUBLIC_URL",
+    "JAMSESH_PUBLIC_HOST",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Isolation {
@@ -31,12 +47,6 @@ pub struct Isolation {
     pub hub_home: Option<PathBuf>,
     /// Bonjour service type without the `.local.` suffix.
     pub bonjour: String,
-    /// The hub's speech helper port (`JAMSESH_WHISPER_PORT`). An isolated build without one runs no speech helper.
-    pub whisper_port: Option<u16>,
-    /// FigCraft's port (`JAMSESH_FIGCRAFT_PORT`) and the first live-build port (`JAMSESH_DEV_PORT_START`);
-    /// an isolated build without them is given free ports at launch.
-    pub figcraft_port: Option<u16>,
-    pub dev_port_start: Option<u16>,
 }
 
 impl Default for Isolation {
@@ -48,9 +58,30 @@ impl Default for Isolation {
             app_data: None,
             hub_home: None,
             bonjour: DEFAULT_BONJOUR.into(),
-            whisper_port: None,
-            figcraft_port: None,
-            dev_port_start: None,
+        }
+    }
+}
+
+/// The real app's storage: `~/.jamsesh` and its system app data folder, resolved through links.
+fn real_roots(home: Option<&str>) -> Vec<PathBuf> {
+    let Some(h) = home else { return Vec::new() };
+    [Path::new(h).join(".jamsesh"), Path::new(h).join("Library/Application Support/com.fluidcommerce.jamsesh")].iter().map(|p| realish(p)).collect()
+}
+
+/// realpath of the deepest part that exists, then the rest (a folder not made yet still resolves through its real parents).
+fn realish(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut cur = p;
+    loop {
+        if let Ok(real) = cur.canonicalize() {
+            return rest.iter().rev().fold(real, |acc, c: &&std::ffi::OsStr| acc.join(c));
+        }
+        match (cur.file_name(), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
         }
     }
 }
@@ -98,7 +129,10 @@ impl Isolation {
             o.hub_home = Some(dir.join("home"));
             o.app_data = Some(dir);
         }
-        if let Some(v) = present("JAMSESH_HOME", get("JAMSESH_HOME"))? {
+        // An isolated build builds its home from JAMSESH_APP_DATA alone: an inherited JAMSESH_HOME is ignored.
+        if o.app_data.is_none()
+            && let Some(v) = present("JAMSESH_HOME", get("JAMSESH_HOME"))?
+        {
             o.hub_home = Some(PathBuf::from(v));
         }
         // A data folder alone must not leave the Keychain item or the Bonjour type at the real app's names.
@@ -113,14 +147,18 @@ impl Isolation {
         if let Some(v) = present("JAMSESH_BONJOUR_SERVICE", get("JAMSESH_BONJOUR_SERVICE"))? {
             o.bonjour = v.trim_end_matches('.').trim_end_matches(".local").to_string();
         }
-        for (name, slot) in [("JAMSESH_WHISPER_PORT", &mut o.whisper_port), ("JAMSESH_FIGCRAFT_PORT", &mut o.figcraft_port), ("JAMSESH_DEV_PORT_START", &mut o.dev_port_start)] {
-            if let Some(v) = present(name, get(name))? {
-                *slot = Some(port(name, &v)?);
-            }
-        }
         if o.isolated() {
-            let mine = [Some(o.relay_port), o.whisper_port, o.figcraft_port, o.dev_port_start].into_iter().flatten().chain(o.hub_ports.iter().copied());
-            if let Some(p) = mine.into_iter().find(|p| REAL_PORTS.contains(p)) {
+            let roots = real_roots(get("HOME").as_deref());
+            for p in [o.app_data.as_ref(), o.hub_home.as_ref()].into_iter().flatten() {
+                if let Some(root) = roots.iter().find(|r| realish(p).starts_with(r)) {
+                    return Err(format!("{} is inside the real JamSesh's storage ({}). A test build needs its own JAMSESH_APP_DATA.", p.display(), root.display()));
+                }
+            }
+            if o.keychain_service == DEFAULT_KEYCHAIN_SERVICE || o.bonjour == DEFAULT_BONJOUR.trim_end_matches(".local") {
+                return Err("A build with JAMSESH_APP_DATA set can't use the real app's Keychain service or Bonjour type.".into());
+            }
+            let mut mine = std::iter::once(o.relay_port).chain(o.hub_ports.iter().copied());
+            if let Some(p) = mine.find(|p| REAL_PORTS.contains(p)) {
                 return Err(format!("Port {p} belongs to the real JamSesh. A build with JAMSESH_APP_DATA set must say its own JAMSESH_RELAY_PORT and JAMSESH_HUB_PORTS (and any other port it sets) and use none of the real app's."));
             }
         }
@@ -139,19 +177,11 @@ impl Isolation {
         self.isolated().then_some("Agent setup is off in a test build: it would change the Claude Code and Codex setup that the real JamSesh uses.")
     }
 
-    /// The environment the hub it starts gets, beyond the ports: it must share nothing with the real hub.
-    /// `free` supplies a free port for the ones not set (FigCraft, live builds).
-    pub fn hub_env(&self, free: &mut dyn FnMut() -> u16) -> Vec<(&'static str, String)> {
-        if !self.isolated() {
-            return Vec::new();
-        }
-        let mut env = vec![("JAMSESH_ISOLATED", "1".to_string())];
-        env.push(("JAMSESH_FIGCRAFT_PORT", self.figcraft_port.unwrap_or_else(&mut *free).to_string()));
-        env.push(("JAMSESH_DEV_PORT_START", self.dev_port_start.unwrap_or_else(&mut *free).to_string()));
-        if let Some(p) = self.whisper_port {
-            env.push(("JAMSESH_WHISPER_PORT", p.to_string()));
-        }
-        env
+    /// What the hub it starts gets when isolated: every inherited location variable removed (the caller does that),
+    /// then these. Its home is `<app data>/home`; it chooses its own helper and canvas ports (port 0).
+    pub fn hub_env(&self) -> Vec<(&'static str, String)> {
+        let Some(dir) = &self.app_data else { return Vec::new() };
+        vec![("JAMSESH_ISOLATED", "1".into()), ("JAMSESH_APP_DATA", dir.to_string_lossy().into_owned()), ("JAMSESH_HOME", dir.join("home").to_string_lossy().into_owned())]
     }
 
     /// A stable id for the web view's data store (macOS 14 and later) when the app data folder is
@@ -213,7 +243,7 @@ mod tests {
         assert_eq!(o.hub_ports, [4747, 4848, 4949]);
         assert!(o.app_data.is_none() && o.hub_home.is_none() && o.web_store_id().is_none());
         assert_eq!(o.bonjour_type(), "_jamsesh._tcp.local.");
-        assert!(!o.isolated() && o.whisper_port.is_none());
+        assert!(!o.isolated());
     }
 
     #[test]
@@ -235,41 +265,74 @@ mod tests {
         assert_eq!((c.keychain_service.as_str(), c.bonjour.as_str()), ("Mine", "_mine._tcp"));
     }
 
-    #[test]
-    fn a_test_build_has_no_agent_setup_and_gets_its_own_hub_ports() {
-        assert!(Isolation::default().agent_setup_off().is_none());
-        let mut next = 6000;
-        let mut free = || {
-            next += 1;
-            next
-        };
-        assert!(Isolation::default().hub_env(&mut free).is_empty());
-        let o = Isolation::from_vars(vars(&[("JAMSESH_APP_DATA", "/tmp/a"), ("JAMSESH_RELAY_PORT", "5890"), ("JAMSESH_HUB_PORTS", "5747")])).unwrap();
-        assert!(o.agent_setup_off().is_some());
-        let env = o.hub_env(&mut free);
-        assert!(env.contains(&("JAMSESH_ISOLATED", "1".to_string())));
-        assert!(env.contains(&("JAMSESH_FIGCRAFT_PORT", "6001".to_string())) && env.contains(&("JAMSESH_DEV_PORT_START", "6002".to_string())));
-        // No speech helper port, none passed: the hub runs without one rather than using 8178.
-        assert!(!env.iter().any(|(k, _)| *k == "JAMSESH_WHISPER_PORT"));
+    const BASE: [(&str, &str); 3] = [("JAMSESH_APP_DATA", "/tmp/a"), ("JAMSESH_RELAY_PORT", "5890"), ("JAMSESH_HUB_PORTS", "5747,5848")];
+
+    fn iso(extra: &[(&str, &str)]) -> Result<Isolation, String> {
+        let mut pairs: Vec<_> = BASE.iter().filter(|(n, _)| !extra.iter().any(|(k, _)| k == n)).copied().collect();
+        pairs.extend_from_slice(extra);
+        Isolation::from_vars(vars(&pairs))
     }
 
     #[test]
-    fn app_data_alone_makes_the_build_isolated_and_the_real_ports_are_refused() {
-        // A data folder alone is refused: the relay and hub ports would be the real app's defaults.
-        assert!(Isolation::from_vars(vars(&[("JAMSESH_APP_DATA", "/tmp/a")])).is_err());
-        let base = [("JAMSESH_APP_DATA", "/tmp/a"), ("JAMSESH_RELAY_PORT", "5890"), ("JAMSESH_HUB_PORTS", "5747,5848")];
-        assert!(Isolation::from_vars(vars(&base)).unwrap().isolated());
-        for (k, v) in [("JAMSESH_RELAY_PORT", "4790"), ("JAMSESH_HUB_PORTS", "5800,4747"), ("JAMSESH_WHISPER_PORT", "8178"), ("JAMSESH_FIGCRAFT_PORT", "47900"), ("JAMSESH_DEV_PORT_START", "5102")] {
-            let mut pairs: Vec<_> = base.iter().filter(|(n, _)| n != &k).copied().collect();
-            pairs.push((k, v));
-            assert!(Isolation::from_vars(vars(&pairs)).is_err(), "{k}={v}");
+    fn a_test_build_has_no_agent_setup_and_the_hub_gets_only_its_own_home() {
+        assert!(Isolation::default().agent_setup_off().is_none());
+        assert!(Isolation::default().hub_env().is_empty());
+        let o = iso(&[]).unwrap();
+        assert!(o.agent_setup_off().is_some());
+        let env = o.hub_env();
+        assert!(env.contains(&("JAMSESH_ISOLATED", "1".to_string())));
+        assert!(env.contains(&("JAMSESH_APP_DATA", "/tmp/a".to_string())) && env.contains(&("JAMSESH_HOME", "/tmp/a/home".to_string())));
+        // Everything that says where data, helpers or ports live is removed from the hub's environment.
+        for k in ["JAMSESH_DATA", "JAMSESH_TEAM", "JAMSESH_HOME", "JAMSESH_WHISPER_PORT", "JAMSESH_FIGCRAFT_PORT", "JAMSESH_DEV_PORT_START", "JAMSESH_WHISPER_MODEL", "JAMSESH_PUBLIC_URL"] {
+            assert!(LOCATION_VARS.contains(&k), "{k}");
         }
-        let mut pairs = base.to_vec();
-        pairs.extend([("JAMSESH_WHISPER_PORT", "5878"), ("JAMSESH_FIGCRAFT_PORT", "5879"), ("JAMSESH_DEV_PORT_START", "5900")]);
-        let ok = Isolation::from_vars(vars(&pairs)).unwrap();
-        assert_eq!((ok.whisper_port, ok.figcraft_port, ok.dev_port_start), (Some(5878), Some(5879), Some(5900)));
+    }
+
+    #[test]
+    fn refusal_a_data_folder_without_its_own_relay_and_hub_ports() {
+        assert!(Isolation::from_vars(vars(&[("JAMSESH_APP_DATA", "/tmp/a")])).is_err());
+        assert!(iso(&[]).unwrap().isolated());
+    }
+
+    #[test]
+    fn refusal_every_real_port_is_refused_when_given() {
+        for p in REAL_PORTS {
+            assert!(iso(&[("JAMSESH_RELAY_PORT", &p.to_string())]).is_err(), "relay {p}");
+            assert!(iso(&[("JAMSESH_HUB_PORTS", &format!("5800,{p}"))]).is_err(), "hub {p}");
+        }
         // Without a data folder the old defaults stay legal (the real app itself).
         assert!(Isolation::from_vars(vars(&[("JAMSESH_RELAY_PORT", "4790")])).is_ok());
+    }
+
+    #[test]
+    fn refusal_the_real_keychain_service_and_bonjour_type_even_when_given() {
+        assert!(iso(&[("JAMSESH_KEYCHAIN_SERVICE", "JamSesh")]).is_err());
+        assert!(iso(&[("JAMSESH_BONJOUR_SERVICE", "_jamsesh._tcp")]).is_err());
+        assert!(iso(&[("JAMSESH_BONJOUR_SERVICE", "_jamsesh._tcp.local.")]).is_err());
+        assert!(iso(&[("JAMSESH_KEYCHAIN_SERVICE", "Mine"), ("JAMSESH_BONJOUR_SERVICE", "_mine._tcp")]).is_ok());
+    }
+
+    #[test]
+    fn refusal_a_data_folder_inside_the_real_storage_even_through_a_link_or_a_missing_folder() {
+        let tmp = std::env::temp_dir().join(format!("jam-iso-{}", std::process::id()));
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join(".jamsesh")).unwrap();
+        std::os::unix::fs::symlink(home.join(".jamsesh"), tmp.join("link")).unwrap();
+        let h = home.to_string_lossy().into_owned();
+        let try_dir = |d: &std::path::Path| iso(&[("JAMSESH_APP_DATA", &d.to_string_lossy()), ("HOME", &h)]);
+        assert!(try_dir(&home.join(".jamsesh")).is_err());
+        assert!(try_dir(&home.join(".jamsesh/deeper/not-made-yet")).is_err());
+        assert!(try_dir(&tmp.join("link")).is_err());
+        assert!(try_dir(&tmp.join("link/new")).is_err());
+        assert!(try_dir(&home.join("Library/Application Support/com.fluidcommerce.jamsesh/x")).is_err());
+        assert!(try_dir(&tmp.join("elsewhere")).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn an_inherited_home_is_ignored_when_isolated() {
+        let o = iso(&[("JAMSESH_HOME", "/Users/x/.jamsesh")]).unwrap();
+        assert_eq!(o.hub_home, Some(PathBuf::from("/tmp/a/home")));
     }
 
     #[test]
@@ -290,9 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sessions_own_home_wins_over_the_app_data_folder() {
-        let o = Isolation::from_vars(vars(&[("JAMSESH_APP_DATA", "/tmp/a"), ("JAMSESH_HOME", "/tmp/h"), ("JAMSESH_RELAY_PORT", "5890"), ("JAMSESH_HUB_PORTS", "5747")])).unwrap();
-        assert_eq!(o.hub_home, Some(PathBuf::from("/tmp/h")));
+    fn without_a_data_folder_the_homes_override_still_applies() {
         let o = Isolation::from_vars(vars(&[("JAMSESH_HOME", "/tmp/h")])).unwrap();
         assert_eq!((o.app_data, o.hub_home), (None, Some(PathBuf::from("/tmp/h"))));
     }
