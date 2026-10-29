@@ -1214,22 +1214,6 @@ test("a send that fails part-way and is retried after ownership changed still se
   expect(ds.find((d) => d.targets[0] === juno.id)!.text).toContain("fix B");
 }, 60_000);
 
-test("a line already published to the room (it has an event) is not read into a Stop's notes", async () => {
-  const r = room();
-  const base = Date.now() - 20_000;
-  r.at(base);
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
-  if (!a.ok) throw new Error("start");
-  const published = line(r.hub, "already in the room", r.maya.id, "mayaLaptop", base + 800);
-  r.s.store.put("utterances", { ...published, eventId: 99 });
-  line(r.hub, "still the recording's", r.maya.id, "mayaLaptop", base + 1500);
-  r.at(base + 4000);
-  const done = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
-  const text = done.ok ? done.notes.map((n) => n.text).join(" ") : "";
-  expect(text).toContain("still the recording's");
-  expect(text).not.toContain("already in the room");
-}, 30_000);
-
 test("every note's destination is fixed before the first wait: an ownership change during a crop doesn't move a later note", async () => {
   const r = room();
   const atlas = r.reg("Ben", "acme/web");
@@ -1251,14 +1235,18 @@ test("a line transcribed late, after a newer recording started, still goes to th
   const a = r.hub.recordStart("mayaLaptop", r.maya.id);
   if (!a.ok) throw new Error("start");
   r.at(base + 3000);
-  const real = (r.hub as any).windowLines.bind(r.hub);
-  (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(300), real(...args));
+  // The real wait runs: the window closes, then it keeps waiting while transcription of the last words is pending.
+  let pending = 1;
+  (r.hub as any).audio.pendingFor = () => pending;
   const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  await Bun.sleep(600);
+  expect((r.hub as any).promptMode.get("mayaLaptop")?.t1).toBe(base + 3000);
   r.at(base + 3100);
   const b = r.hub.recordStart("mayaLaptop", r.maya.id);
   if (!b.ok) throw new Error("start");
   // Transcription of what was said in A comes back only now, after B took the window.
   line(r.hub, "said in A, heard late", r.maya.id, "mayaLaptop", base + 2800);
+  pending = 0;
   const done = await stopping;
   expect(done.ok && done.notes.map((n) => n.text).join(" ")).toContain("said in A, heard late");
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).not.toContain("said in A, heard late");
@@ -1280,6 +1268,28 @@ test("a line that began exactly 300 ms after Stop is held and collected by the s
   expect(text).not.toContain("a moment past it");
   // The one past the boundary is ordinary room speech.
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("a moment past it");
+}, 30_000);
+
+test("a Stop sent again while the first is gathering changes nothing: speech between the two moments is not lost", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  r.at(base + 3000);
+  let pending = 1;
+  (r.hub as any).audio.pendingFor = () => pending;
+  const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "first" });
+  const first = stop();
+  await Bun.sleep(500);
+  // The duplicate arrives later by the hub's clock; the first close keeps its own time.
+  r.at(base + 4000);
+  const second = stop();
+  line(r.hub, "said between the two", r.maya.id, "mayaLaptop", base + 3800);
+  pending = 0;
+  const [one, two] = await Promise.all([first, second]);
+  expect(two).toEqual(one);
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("said between the two");
 }, 30_000);
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {

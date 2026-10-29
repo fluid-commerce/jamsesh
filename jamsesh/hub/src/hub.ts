@@ -635,11 +635,14 @@ export class Hub {
     if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
     if (rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
     const person = this.session.person(w.personId ?? rec.personId);
-    if (w.typed?.trim()) rec.typed = w.typed;
     // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
     const t0 = rec.t0;
     const t1 = this.clock();
-    rec.closeAt = t1;
+    // Only the Stop that starts the close sets its time and text; one sent again while it runs shares that close and changes nothing.
+    if (rec.state === "live") {
+      if (w.typed?.trim()) rec.typed = w.typed;
+      rec.closeAt = t1;
+    }
     const open = this.promptMode.get(w.deviceId);
     const out = await this.endRecording(
       rec,
