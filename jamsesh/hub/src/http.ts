@@ -22,6 +22,10 @@ const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
+const VOICE_NAME_MAX = 64;
+export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
+const lastVoicePreview = new Map<string, number>();
+
 export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
@@ -476,9 +480,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/voice-preview" && req.method === "POST") {
-    // A fixed sentence in the chosen voice, so the picker can be tried without a real reply.
+    // A fixed sentence in the chosen voice, so the picker can be tried without a real reply. Each one costs a speech call:
+    // one per device every few seconds is plenty for clicking through voices.
+    const voice = typeof body?.voice === "string" ? body.voice.trim() : undefined;
+    if (voice && voice.length > VOICE_NAME_MAX) return bad("That voice name is too long.");
+    const who = paired?.id ?? ip;
+    if (Date.now() - (lastVoicePreview.get(who) ?? 0) < VOICE_PREVIEW_COOLDOWN_MS) return bad("One sample at a time; try again in a moment.", 429);
+    lastVoicePreview.set(who, Date.now());
+    if (lastVoicePreview.size > 200) for (const [k, at] of lastVoicePreview) if (Date.now() - at > VOICE_PREVIEW_COOLDOWN_MS) lastVoicePreview.delete(k);
     try {
-      return json(await synthesize(s, "Hi, I'm the room brain. This is how I sound.", typeof body?.voice === "string" ? body.voice : undefined));
+      return json(await synthesize(s, "Hi, I'm the room brain. This is how I sound.", voice));
     } catch (e) {
       return bad(`Couldn't make a sample: ${describeError(e)}`, 502);
     }

@@ -10,6 +10,8 @@ import type { Agent, Artifact, JamEvent, Relevance, Share, Tile } from "../types
 import { describeError, model } from "./llm";
 import { chime, speak, type SpeechSource } from "./speech";
 import { newId } from "../store";
+import { brainNames, normName } from "../names";
+export { brainNames };
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import { aspect, type HostControl } from "../hostctl";
 
@@ -288,7 +290,7 @@ export class Brain {
           model: m,
           system: this.system(),
           prompt: `${this.situation([ev], null)}\n\n## Message from an agent\n${ev.authorName} (agent id ${ev.authorId}) wrote to you with jam_message: "${ev.text}"\n\nIt's an agent, not a person, so it can't approve or deny host requests. Act on it with your tools: answer it with an 'answer' directive to that agent if it asked something; note it (a 'note' directive) or record_decision if it states something the room should keep; route work if it asks for some. If nothing is needed, call no_action.`,
-          tools: this.tools([ev], pass),
+          tools: this.tools([ev], pass, "agent"),
           stopWhen: isStepCount(6),
         });
         if (!pass.effects && text?.trim() && ev.authorId) s.createDirective({ text: text.trim(), mode: "answer", targets: [ev.authorId], requestedBy: s.settings().brainName, rationale: "The brain's reply to your jam_message." });
@@ -338,7 +340,7 @@ export class Brain {
   }
 
   /** Something happened outside the room that may need coordination, such as a shipped change. */
-  async consider(note: string) {
+  async consider(note: string, from: "person" | "agent" = "agent") {
     const m = model(this.session, "router");
     if (this.stopped || !m || !this.session.settings().brainEnabled) return;
     try {
@@ -347,7 +349,7 @@ export class Brain {
         model: m,
         system: this.system(),
         prompt: `${this.situation([], null)}\n\n## Event to consider\n${note}\n\nAct only if this needs coordination between agents (for example the same change in another repository). Otherwise call no_action.`,
-        tools: this.tools([], { effects: 0 }),
+        tools: this.tools([], { effects: 0 }, from),
         stopWhen: isStepCount(4),
       });
     } catch (e) {
@@ -406,8 +408,12 @@ export class Brain {
       .join("\n\n");
   }
 
-  /** The brain's tools for one pass. `pass.effects` counts the calls that changed something (not refusals or no_action). */
-  tools(batch: JamEvent[], pass: { effects: number }) {
+  /**
+   * The brain's tools for one pass. `pass.effects` counts the calls that changed something (not refusals or no_action).
+   * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
+   * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
+   */
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person") {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
@@ -785,6 +791,7 @@ export class Brain {
         execute: async () => "OK",
       }),
     };
+    if (from === "agent") for (const name of Object.keys(all)) if (!AGENT_TOOLS.has(name)) delete (all as Record<string, unknown>)[name];
     // A call counts as an effect of this pass unless it refused or changed nothing; after stop(), nothing runs.
     for (const [name, t] of Object.entries(all) as [string, { execute?: (...a: any[]) => any }][]) {
       const run = t.execute;
@@ -926,7 +933,7 @@ export class Brain {
         (others.length
           ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. Only when the same user-visible change clearly belongs in their apps, send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders. A commit, refactor, fix or tooling change on one branch is not a parity gap.`
           : `Both platforms shipped. Only if they shipped the same feature and may differ in ways that aren't deliberate platform differences, send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message.`) +
-        ` Don't send a coordinate directive to an agent that already has an open one. Put a parity view on screen when both platforms have built artifacts.`,
+        ` Don't send a coordinate directive to an agent that already has an open one.`,
     );
   }
 
@@ -1092,11 +1099,6 @@ export function onlyTheName(text: string, name: string | string[]) {
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w && !filler.has(w)).length === 0;
 }
 
-/** The names the brain answers to: its display name, then any others the room gave it ("Computah", "computer"). */
-export function brainNames(s: { brainName: string; brainAliases?: string[] }): string[] {
-  return [s.brainName, ...(s.brainAliases ?? [])].filter((n) => n?.trim());
-}
-
 /**
  * Every spelling a name may arrive in: lowercase letters and digits only, with the ways speech-to-text
  * tends to write it. The default name has its known mishearings; other names get the "-er" / "-ah" / "-a"
@@ -1105,7 +1107,7 @@ export function brainNames(s: { brainName: string; brainAliases?: string[] }): s
 export function nameForms(name: string | string[]): string[] {
   const out = new Set<string>();
   for (const raw of Array.isArray(name) ? name : [name]) {
-    const n = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const n = normName(raw);
     if (n.length < 3) continue;
     out.add(n);
     if (n === "jamsesh") {
@@ -1195,6 +1197,8 @@ class Refusal {
 const refuse = (text: string) => new Refusal(text);
 /** Tools that never change anything, so calling them isn't an effect of the pass. */
 const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
+/** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
+export const AGENT_TOOLS = new Set(["create_directive", "record_decision", "ask_agent", "pair_agents", "no_action", "say_to_room"]);
 
 const EXPLICIT_YES = new Set(["approve", "approved", "approve it", "approve that", "approve the build", "approve the request", "yes approve", "yes approve it", "i approve", "i approve it"]);
 const EXPLICIT_NO = new Set(["deny", "denied", "deny it", "deny that", "deny the build", "reject", "reject it", "rejected", "i deny it"]);

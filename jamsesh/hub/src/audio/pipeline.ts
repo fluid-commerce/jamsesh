@@ -6,6 +6,7 @@
 // Network lag: a group waits an adaptive window (each device's recent lag) before it
 // is finalized. A copy that arrives later still joins its utterance; if it is clearly
 // better, the line is transcribed and attributed again in place.
+import { brainNames } from "../names";
 import { bus } from "../bus";
 import { newId } from "../store";
 import type { Session } from "../session";
@@ -245,8 +246,7 @@ export class AudioPipeline {
    * repeats its hint on near-silence, so people's names stay out of it ("Chey, Pat." from nobody).
    */
   private hint() {
-    const { brainName, brainAliases } = this.session.settings();
-    const named = [...new Set([brainName, ...brainAliases].map((n) => n?.trim()).filter((n): n is string => !!n && n !== "JamSesh"))];
+    const named = brainNames(this.session.settings()).filter((n) => n !== "JamSesh");
     return named.length ? `${named.join(", ")}, JamSesh.` : "JamSesh.";
   }
 

@@ -1,5 +1,6 @@
 // The session: people, devices, agents, workstreams, directives, artifacts and the
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
+import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { newId, PALETTE, Store } from "./store";
@@ -82,8 +83,8 @@ export class Session {
     for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
-    if (!st.pinned && st.mode !== "board" && st.mode !== "welcome") {
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Math.max(1000, st.since + 6 * 60_000 - Date.now()));
+    if (this.revertsToBoard(st)) {
+      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
       this.stageRevert.unref?.();
     }
     bus.resolver = (key) => this.resolve(key);
@@ -111,7 +112,7 @@ export class Session {
     return {
       sessionName: s.setting("sessionName", "Jam session"),
       brainName: s.setting("brainName", "JamSesh"),
-      brainAliases: s.setting<string[]>("brainAliases", []),
+      brainAliases: cleanNames(s.setting<unknown>("brainAliases", [])),
       brainNotes: s.setting<string[]>("brainNotes", []),
       brainEnabled: s.setting("brainEnabled", true),
       voiceReplies: s.setting("voiceReplies", true),
@@ -132,16 +133,23 @@ export class Session {
   /** Adds a name the brain answers to (or makes it the display name, keeping the old one as an alias). */
   addBrainName(name: string, makeDisplay = false) {
     const { brainName, brainAliases } = this.settings();
-    const same = (a: string, b: string) => a.toLowerCase().replace(/[^a-z0-9]/g, "") === b.toLowerCase().replace(/[^a-z0-9]/g, "");
     const names = [brainName, ...brainAliases];
-    if (names.some((n) => same(n, name)) && !(makeDisplay && !same(brainName, name))) return;
-    if (makeDisplay) this.updateSettings({ brainName: name, brainAliases: [brainName, ...brainAliases].filter((n) => !same(n, name)).slice(0, 8) });
-    else this.updateSettings({ brainAliases: [...brainAliases, name].slice(-8) });
+    if (names.some((n) => sameName(n, name)) && !(makeDisplay && !sameName(brainName, name))) return;
+    if (makeDisplay) this.updateSettings({ brainName: name, brainAliases: [brainName, ...brainAliases].filter((n) => !sameName(n, name)) });
+    else this.updateSettings({ brainAliases: [...brainAliases.slice(1 - MAX_ALIASES), name] });
   }
 
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
     const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
-    for (const k of allowed) if (patch[k] !== undefined) this.store.setSetting(k, patch[k]);
+    for (const k of allowed) {
+      if (patch[k] === undefined) continue;
+      // The API is the contract: a paired browser can post anything.
+      if (k === "brainAliases") this.store.setSetting(k, cleanNames(patch[k]));
+      else if (k === "brainName") {
+        const n = typeof patch[k] === "string" ? patch[k].trim().slice(0, MAX_NAME) : "";
+        if (n) this.store.setSetting(k, n);
+      } else this.store.setSetting(k, patch[k]);
+    }
     if (patch.models) this.store.setSetting("models", { ...this.store.setting("models", {}), ...patch.models });
     if (patch.gatewayKey !== undefined) this.store.setSetting("gatewayKey", patch.gatewayKey.trim());
     bus.changed("settings");
@@ -191,7 +199,8 @@ export class Session {
    * plus how many are older still. Events and utterances come oldest first, the rest newest first.
    */
   history(what: string, o: { before?: number | string; limit?: number; kinds?: EventKind[] }): { items: any[]; more: number; total: number } | null {
-    const limit = Math.max(1, Math.min(200, Math.floor(o.limit ?? 50)));
+    const asked = Number(o.limit ?? 50);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(asked) ? Math.floor(asked) : 50));
     // A cursor is "<time>|<id>" (the last item's), so items stamped the same millisecond aren't skipped.
     const [t, id = ""] = String(o.before ?? "").split("|");
     const beforeT = t !== "" && Number.isFinite(Number(t)) ? Number(t) : Infinity;
@@ -687,10 +696,8 @@ export class Session {
 
   /** The brain's name, or any alias the room set for it (settings may not have an alias list yet). */
   isBrainName(name: string) {
-    const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const aliases = this.store.setting<string[]>("brainAliases", []);
-    const names = [this.settings().brainName, "brain", ...(Array.isArray(aliases) ? aliases : [])];
-    return !!norm(name) && names.some((n) => typeof n === "string" && norm(n) === norm(name));
+    const s = this.settings();
+    return !!normName(name) && [...brainNames(s), "brain"].some((n) => sameName(n, name));
   }
 
   /** Decisions the room made (the brain's; agents' own decisions are updates), relevant to this agent's workstream when it has one. */
@@ -882,6 +889,8 @@ export class Session {
     };
     this.store.put("shares", share);
     this.store.addEvent({ kind: "system", authorType: "person", authorId: share.personId, authorName: share.personName, text: `${share.personName} is sharing their ${kind}.`, data: { shareId: share.id } });
+    // Nothing may ever place it: the first sweep comes when its placement window closes.
+    if (!this.shareSweep) this.scheduleShareSweep(Session.SHARE_PLACE_MS + 50);
     return share;
   }
 
@@ -943,7 +952,13 @@ export class Session {
   /** After any stage change: a live share that no host screen shows stops, once the grace period passes. */
   private scheduleShareSweep(delay = Session.SHARE_GRACE_MS) {
     if (this.shareSweep) clearTimeout(this.shareSweep);
-    this.shareSweep = setTimeout(() => this.sweepShares(), delay);
+    this.shareSweep = setTimeout(() => {
+      try {
+        this.sweepShares();
+      } catch (e) {
+        console.error("shares: sweep failed:", e instanceof Error ? e.message : e); // a timer must never take the hub down
+      }
+    }, delay);
     this.shareSweep.unref?.();
   }
 
@@ -1057,6 +1072,16 @@ export class Session {
     });
   }
 
+  /** How long a brought-up screen stays before the board comes back (tests shorten it). */
+  static STAGE_REVERT_MS = 6 * 60_000;
+
+  /** Whether a stage goes back to the board by itself. Not while it shows a live share: the share's end gives the screen back what it hid, and a timer would cut the share first. */
+  private revertsToBoard(stage: Stage) {
+    if (stage.pinned || stage.mode === "board" || stage.mode === "welcome") return false;
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && this.store.get("shares", t.shareId)?.status === "live")) return false;
+    return true;
+  }
+
   setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main") {
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...next, since: Date.now(), by };
     if (screen !== "main") {
@@ -1064,8 +1089,8 @@ export class Session {
       bus.changed("screens");
       this.scheduleShareSweep();
       clearTimeout(this.screenReverts.get(screen));
-      if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome")
-        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), 6 * 60_000));
+      if (this.revertsToBoard(stage))
+        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), Session.STAGE_REVERT_MS));
       return stage;
     }
     this.store.setSetting("stage", stage);
@@ -1074,10 +1099,8 @@ export class Session {
     if (this.bigScreens.size > 1) bus.changed("screens");
     if (this.stageRevert) clearTimeout(this.stageRevert);
     this.stageRevert = null;
-    if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome") {
-      // Anything the brain brought up returns to the live board after a while.
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), 6 * 60_000);
-    }
+    // Anything the brain brought up returns to the live board after a while.
+    if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Session.STAGE_REVERT_MS);
     return stage;
   }
 }

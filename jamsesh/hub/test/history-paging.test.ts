@@ -64,6 +64,13 @@ test("an unknown list is a 404, junk cursors don't crash", async () => {
   expect((await fetch(`${base}/api/history/secrets`, { headers: auth })).status).toBe(404);
   const r = await get(`/history/events?before=abc&limit=-5`);
   expect(r.items.length).toBeLessThanOrEqual(1);
+  // A limit that isn't a number gets the default page, not a broken query.
+  for (const what of ["events", "utterances", "directives", "artifacts"]) {
+    const junk = await get(`/history/${what}?limit=abc`);
+    expect(Array.isArray(junk.items)).toBe(true);
+    if (what !== "utterances") expect(junk.items.length).toBeGreaterThan(0);
+  }
+  expect((await get(`/history/events?limit=Infinity`)).items.length).toBeGreaterThan(0);
 });
 
 test("jam_artifacts and jam_directives page and say how many more there are", async () => {

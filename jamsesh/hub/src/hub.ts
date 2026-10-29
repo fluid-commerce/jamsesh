@@ -460,9 +460,10 @@ export class Hub {
     const { directives, messages } = this.session.inbox(agent.id, true);
     const lastSeen = this.store.setting<number>(`decisionsSeen:${agent.id}`, 0);
     const decisions = this.session.roomDecisions(agent.id, { afterId: lastSeen, limit: 10 });
-    // Seen is by position in the event log, not by what passed the relevance filter.
-    const newest = this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0];
-    if (newest && newest.id > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, newest.id);
+    // Seen moves to the last decision this agent was handed. With none handed over, everything newer
+    // than its mark was for other workstreams, so the mark moves to the newest decision in the log.
+    const seen = decisions.length ? decisions[decisions.length - 1].id : this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0]?.id;
+    if (seen && seen > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, seen);
     const lines = [
       ...directives.map((d) => `Room directive ${d.id} [${d.mode}] (${d.requestedBy}): ${d.text}`),
       ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),
