@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { closeRecording, newRecordToken, pointerOrNone, reapOrphans, type RecStatus, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { closeRecording, leaveActions, newRecordToken, pointerOrNone, reapOrphans, type RecStatus, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -93,4 +93,11 @@ test("a recording a page let go of is reaped later: asked after, cancelled if st
   });
   expect(cancelled).toEqual(["tb"]);
   expect([...orphans.keys()]).toEqual(["c"]);
+});
+
+test("leaving hands every kind of recording to the hub, including one waiting on its Stop or a Start in flight, and gives back a mic it turned on", () => {
+  expect(leaveActions({ id: "r1", token: "t1" }, null, true)).toEqual({ cancel: { token: "t1", orphanId: "r1" }, restoreMic: true });
+  expect(leaveActions(null, "t2", true)).toEqual({ cancel: { token: "t2" }, restoreMic: true });
+  expect(leaveActions(null, "t2", false).restoreMic).toBe(false);
+  expect(leaveActions(null, null, true)).toEqual({ restoreMic: false });
 });

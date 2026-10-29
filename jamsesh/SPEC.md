@@ -1538,8 +1538,7 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   they were handed to, another person can't stop or replace your recording, and a
   big screen refuses someone who isn't driving it. A recording whose Stop never comes ends on its own
   at 10 minutes, or about 30 seconds after its window disconnects, and gives back any lock it took.
-  If the page closes mid-recording, what was said goes to the brain as one prompt, as it always did
-  (`POST /api/prompt-window`, kept for that).
+  If the page closes mid-recording, the recording is cancelled by its token: it ends, its lock is given back and the words held in it go to the room as ordinary speech, not as a prompt. (`POST /api/prompt-window` stays for older clients.)
 
 **Pointer context** [A9]: while recording, the client watches the pointer over every tile, the
 canvas, artifacts, dev servers and shared screens, and distills it into up to 40 marks: clicks, drags

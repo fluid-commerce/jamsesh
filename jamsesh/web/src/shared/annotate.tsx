@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { closeRecording, newRecordToken, pointerOrNone, reapOrphans, sendSummary, type RecStatus, type RecordNote, type SendReply } from "./notes";
+import { closeRecording, leaveActions, newRecordToken, pointerOrNone, reapOrphans, sendSummary, type RecStatus, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -817,6 +817,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   const pointerCache = useRef<PointerMark[] | null>(null);
   /** The token made before a Start and kept until the hub answers it: the page closing in between cancels by it. */
   const pendingToken = useRef<string | null>(null);
+  /** The recording this button owns, from the hub's answer to Start until the hub says it ended: kept through Stop so a leave can hand it over. */
+  const held = useRef<{ id: string; token: string } | null>(null);
+  const micRef = useRef(mic);
+  micRef.current = mic;
   const unmuted = useRef(false);
   const start = async () => {
     if (recRef.current.phase !== "idle" || starting.current || review) return;
@@ -864,6 +868,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       }
       setResult(null);
       setNow(Date.now());
+      held.current = { id, token };
       setRec({ phase: "live", t0, id, screen, token });
     } finally {
       starting.current = false;
@@ -906,6 +911,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
         setRec(cur);
         return;
       }
+      held.current = null;
       const res: StopReply = closed.result ?? { ok: false, reason: "That recording ended before its notes could be read." };
       if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
       else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
@@ -971,13 +977,17 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   useEffect(() => {
     // Leaving: the recording (or a Start still in flight) is handed to the hub with a keepalive cancel by its token, then asked after.
     const letGoNow = () => {
-      const cur = recRef.current;
-      if (cur.phase === "live") {
+      const own = held.current;
+      const todo = leaveActions(own, pendingToken.current, unmuted.current);
+      if (own) {
+        held.current = null;
         recRef.current = { phase: "idle" };
         offDart.current?.();
         void recorder.current?.stop();
-        letGo(cur.token, cur.id);
-      } else if (pendingToken.current) letGo(pendingToken.current);
+      }
+      if (todo.cancel) letGo(todo.cancel.token, todo.cancel.orphanId);
+      // A recording that switched the mic on gives it back, so a layout change doesn't leave it open.
+      if (todo.restoreMic) (unmuted.current = false, micRef.current?.stop());
     };
     alive.current = true;
     window.addEventListener("pagehide", letGoNow);

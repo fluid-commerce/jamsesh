@@ -428,9 +428,11 @@ export class Hub {
     const rec = this.recs.get(w.deviceId);
     const t1 = this.clock();
     if (w.recordingId) {
-      if (!rec || rec.id !== w.recordingId || !open || open.rec !== rec.id) return { ok: false, reason: "That recording has already ended.", status: 409 };
-      const t0 = open.t0;
-      const out = await this.endRecording(rec, "window-close", () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open, rec)), (lines) => this.promptFrom(w, lines, t0, t1));
+      if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
+      // The recording's own start, so a close tried again after a failure (the speech window already closed) still has its bounds.
+      const t0 = rec.t0;
+      const win = open?.rec === rec.id ? open : undefined;
+      const out = await this.endRecording(rec, "window-close", () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, win, rec)), (lines) => this.promptFrom(w, lines, t0, t1));
       if (out.kind === "done") return out.value;
       return { ok: false, reason: out.kind === "busy" ? "That recording is being closed another way." : "That recording has already ended.", status: 409 };
     }
@@ -447,24 +449,33 @@ export class Hub {
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
     if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
-    const pointed = w.pointer
-      .filter((m) => m.kind !== "move")
-      .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));
-    const ev = s.store.addEvent({
-      kind: "speech",
-      authorType: "person",
-      authorId: person?.id ?? null,
-      authorName: person?.name ?? "Someone",
-      text: said || "(pointed without speaking)",
-      relevance: "work",
-      // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, saidAt: t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+    // The writes are one: if a later one fails nothing stays, so the close can be tried again without doubling the event or the pins.
+    const ev = s.store.atomic(() => {
+      const pointed = w.pointer
+        .filter((m) => m.kind !== "move")
+        .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));
+      const made = s.store.addEvent({
+        kind: "speech",
+        authorType: "person",
+        authorId: person?.id ?? null,
+        authorName: person?.name ?? "Someone",
+        text: said || "(pointed without speaking)",
+        relevance: "work",
+        // The recording laptop gets the chime for its own prompt.
+        data: { direct: true, recorded: true, saidAt: t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      });
+      // One spoken line: it can be relabelled from the prompt, like any line in the feed.
+      if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: made.id });
+      // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
+      for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: made.id });
+      return made;
     });
-    // One spoken line: it can be relabelled from the prompt, like any line in the feed.
-    if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
-    // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
-    for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
-    this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
+    // To the brain only once it is all committed, and a failure to hand it over doesn't undo the prompt.
+    try {
+      this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
+    } catch (e) {
+      console.error("brain couldn't take the prompt", e);
+    }
     return { ok: true, eventId: ev.id, text: said, pointed: marks };
   }
 
@@ -478,8 +489,8 @@ export class Hub {
    */
   private recs = new Map<string, Rec>();
   /** Recordings stopped and still gathering their last words, by device: a Start in that time writes its time on each (`nextT0`). */
-  private stoppingRecs = new Map<string, Set<{ nextT0?: number }>>();
-  private async waiting<T>(deviceId: string, rec: { nextT0?: number } | undefined, run: () => Promise<T>): Promise<T> {
+  private stoppingRecs = new Map<string, Set<Rec>>();
+  private async waiting<T>(deviceId: string, rec: Rec | undefined, run: () => Promise<T>): Promise<T> {
     if (!rec) return run();
     const set = this.stoppingRecs.get(deviceId) ?? new Set();
     this.stoppingRecs.set(deviceId, set.add(rec));
@@ -563,6 +574,8 @@ export class Hub {
     this.session.store.cancelToken(deviceId, token);
     const rec = this.recs.get(deviceId);
     if (rec?.token === token) void this.endRecording(rec, "cancel");
+    // A recording a Start replaced while its Stop waited is cancelled too: its notes are not made.
+    for (const r of this.stoppingRecs.get(deviceId) ?? []) if (r.token === token && r.state === "ended") this.keep(r, { kind: "cancel" });
     // A recording that had already finished keeps what it made: the cancel answers with that, and doesn't undo it.
     const done = [...this.outcomes.values()].find((o) => o.deviceId === deviceId && o.token === token);
     return { state: "ended", outcome: done ? this.visibleTo(done, caller) : { kind: "cancel" as EndReason } };

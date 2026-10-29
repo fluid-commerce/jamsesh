@@ -111,6 +111,15 @@ export async function reapOrphans(orphans: Map<string, { token: string }>, io: {
   }
 }
 
+/**
+ * What a Record button must do when it goes away: hand a recording it owns (live, or still waiting on its Stop) or a Start still in flight
+ * to the hub by token, remember an owned one to be asked after, and give back a mic it switched on for the recording.
+ */
+export function leaveActions(own: { id: string; token: string } | null, pendingToken: string | null, micWasOff: boolean): { cancel?: { token: string; orphanId?: string }; restoreMic: boolean } {
+  const token = own?.token ?? pendingToken;
+  return { ...(token ? { cancel: { token, ...(own ? { orphanId: own.id } : {}) } } : {}), restoreMic: micWasOff && !!token };
+}
+
 /** What the pointer recorder made of the gesture, or nothing if it can't be read: the recording still ends, with the words alone. */
 export async function pointerOrNone<P>(read: () => Promise<P[]>): Promise<P[]> {
   try {

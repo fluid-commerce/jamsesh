@@ -1097,6 +1097,39 @@ test("a Stop refused with 403 leaves the recording live, and asking says so: onl
   expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
 });
 
+test("Stop A, Start B, cancel A, then A's wait ends: A's notes are not made", async () => {
+  const r = room();
+  const tok = "rt_iiiiiiiiiiiiiiii";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  const real = (r.hub as any).windowLines.bind(r.hub);
+  (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(200), real(...args));
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" });
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!b.ok) throw new Error("start");
+  r.hub.recordCancel("mayaLaptop", tok, "host");
+  expect(await stopping).toMatchObject({ ok: false, status: 409 });
+  expect((r.hub as any).noteRecs.has(a.id)).toBe(false);
+  expect(r.hub.recordStatus("mayaLaptop", a.id, "host")).toMatchObject({ state: "ended", outcome: { kind: "cancel" } });
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
+}, 30_000);
+
+test("a prompt close whose later write fails leaves nothing behind, and its retry makes one event and one set of pins", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const close = () => r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, typed: "make it bigger", pointer: [{ t: Date.now(), kind: "click", x: 0.5, y: 0.5, target: { kind: "artifact", ref: "a", label: "A" } } as any] });
+  const real = r.s.store.patch.bind(r.s.store);
+  let failed = false;
+  (r.s.store as any).patch = (...args: any[]) => (failed ? (real as any)(...args) : ((failed = true), (() => { throw new Error("database is locked"); })()));
+  await expect(close()).rejects.toThrow("locked");
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(0);
+  expect(r.s.annotations().length).toBe(0);
+  expect((await close()).ok).toBe(true);
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
+  expect(r.s.annotations().length).toBe(1);
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {
