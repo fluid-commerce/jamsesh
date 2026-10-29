@@ -17,6 +17,21 @@ export function travel(pos: { x: number; y: number }, mx: number, my: number, w:
   return { x: clamp01(pos.x + mx / vw), y: clamp01(pos.y + my / Math.max(vh, 1)) };
 }
 
+type KeyLike = Pick<KeyboardEvent, "key" | "code" | "type" | "repeat" | "altKey" | "shiftKey" | "ctrlKey" | "metaKey">;
+
+/**
+ * What a key press does while this window has a trackpad: null when it isn't the trackpad's (it isn't captured, or
+ * another field has the keyboard, so the key stays there), "release" (Esc lets go), "swallow" (an auto-repeat of a
+ * key that doesn't repeat), else the event to send to the big screen. Option+R is Record's key: it stays here.
+ */
+export function keyAction(e: KeyLike, s: { locked: boolean; captured: boolean }, focused: boolean): DriveEvent | "release" | "swallow" | null {
+  if ((!s.locked && !s.captured) || !focused) return null;
+  if (e.altKey && e.code === "KeyR") return null;
+  if (e.key === "Escape" && !s.locked) return "release";
+  if (e.repeat && !e.key.match(/^(Arrow|Backspace|Delete|Page)/) && e.key.length > 1) return "swallow";
+  return { k: "key", key: e.key, code: e.code, down: e.type === "keydown", mods: { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey } };
+}
+
 const lineDelta = (e: WheelEvent) => (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 600 : 1);
 
 export function DriveSurface({ screen = "main" }: { screen?: string }) {
@@ -89,20 +104,18 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
       const k = lineDelta(e);
       send({ k: "wheel", x: s.x, y: s.y, dx: e.deltaX * k, dy: e.deltaY * k, ...(e.ctrlKey ? { ctrl: true } : {}) });
     };
+    const release = () => (setCaptured(false), send({ k: "leave" }));
+    // Keys go to the big screen only while the trackpad itself has the keyboard: typing in another field stays there.
     const onKey = (e: KeyboardEvent) => {
-      if (!s.locked && !s.captured) return;
-      // Option+R is Record's key while typing goes to the big screen: it stays here and is never sent on.
-      if (e.altKey && e.code === "KeyR") return;
-      if (e.key === "Escape" && !s.locked) {
-        // Pointer Lock gives Esc to the browser; in the other mode it lets go.
-        setCaptured(false);
-        send({ k: "leave" });
-        return;
-      }
+      const a = keyAction(e, s, document.activeElement === el);
+      if (!a) return;
+      // Pointer Lock gives Esc to the browser; in the other mode it lets go.
+      if (a === "release") return release();
       e.preventDefault();
-      if (e.repeat && !e.key.match(/^(Arrow|Backspace|Delete|Page)/) && e.key.length > 1) return;
-      send({ k: "key", key: e.key, code: e.code, down: e.type === "keydown", mods: { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey } });
+      if (a !== "swallow") send(a);
     };
+    // Clicking or tabbing to anything else lets go (pointer lock lets go by itself).
+    const onBlur = () => s.captured && !s.locked && release();
     const onLock = () => {
       s.locked = document.pointerLockElement === el;
       setCaptured(s.locked);
@@ -118,6 +131,7 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
     el.addEventListener("pointerleave", onLeave);
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("contextmenu", (e) => e.preventDefault());
+    el.addEventListener("blur", onBlur);
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keyup", onKey, true);
     document.addEventListener("pointerlockchange", onLock);
@@ -131,6 +145,7 @@ export function DriveSurface({ screen = "main" }: { screen?: string }) {
       el.removeEventListener("pointerup", onUp);
       el.removeEventListener("pointerleave", onLeave);
       el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keyup", onKey, true);
       document.removeEventListener("pointerlockchange", onLock);
