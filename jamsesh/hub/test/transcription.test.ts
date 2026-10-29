@@ -76,7 +76,16 @@ test("the vocabulary merges sources, caps its size, and takes only clean strings
   expect(chey.heard).toEqual(["Shay"]);
   expect(chey.proper).toBe(true);
   // An ordinary word in the list is only fixed from what the room listed, never fuzzily.
-  expect(correctTranscript("I missed it", v).text).toBe("I Mist it");
+  // An everyday word the room listed as heard-as is rewritten only where it reads as the name.
+  expect(correctTranscript("I missed it", v).text).toBe("I missed it");
+  expect(correctTranscript("Missed the bus again.", v).text).toBe("Missed the bus again.");
+  expect(correctTranscript("Missed, can you put the nav up?", v).text).toBe("Mist, can you put the nav up?");
+  expect(correctTranscript("Thanks, missed.", v).text).toBe("Thanks, Mist.");
+  expect(correctTranscript("Ask Missed about it", v).text).toBe("Ask Mist about it");
+  // A heard-as the room wrote with a capital ("Shay") is fixed wherever the engine writes it that way, not in lowercase.
+  const named = buildVocabulary({ people: ["Chey"], custom: ["Chey: Shay"] });
+  expect(correctTranscript("Shay is sharing", named).text).toBe("Chey is sharing");
+  expect(correctTranscript("the shay by the door", named).text).toBe("the shay by the door");
   expect(cleanVocabulary(["  Chey:  Shay ", "chey: shay", 7, "", "x".repeat(500)])).toEqual(["Chey: Shay", "x".repeat(160)]);
   expect(cleanVocabulary("FigCraft\nJamSesh")).toEqual(["FigCraft", "JamSesh"]);
   expect(cleanVocabulary({ evil: true })).toEqual([]);

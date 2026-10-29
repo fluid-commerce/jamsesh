@@ -13,7 +13,8 @@ import { existsSync, readFileSync } from "node:fs";
 export interface VocabEntry {
   /** How it is written: "Chey", "JamSesh", "left-hand nav". */
   term: string;
-  /** What engines write instead when they hear it ("Shay" for Chey); replaced wherever it appears. */
+  /** What engines write instead when they hear it ("Shay" for Chey). An everyday word ("missed" for Mist) is
+   * replaced only where it reads as the name: see `readsAsName`. Anything else is replaced wherever it appears. */
   heard: string[];
   /** A name or coined word: its splits and close misspellings are fixed too. */
   proper: boolean;
@@ -141,13 +142,33 @@ export interface Fix {
   to: string;
 }
 
+/**
+ * Whether an everyday word at text[start, end) is being used as a name: said on its own as an address
+ * ("Missed, can you…", "thanks, missed."), or written with a capital where a sentence doesn't start, or
+ * (when the room wrote the heard-as with a capital, like "Shay") written that way anywhere.
+ * "I missed it" is left alone.
+ */
+function readsAsName(text: string, start: number, end: number, original: string, capitalAlias: boolean): boolean {
+  const before = text.slice(0, start).trimEnd();
+  const after = text.slice(end).trimStart();
+  const opens = before === "" || /[.!?:;]$/.test(before);
+  const closes = after === "" || /^[.!?]/.test(after);
+  if ((opens && (closes || after.startsWith(","))) || (before.endsWith(",") && closes)) return true;
+  return /^\p{Lu}/u.test(original) && (capitalAlias || !opens);
+}
+
 /** Fixes the room's names and coined words in a transcript. Returns the text and what changed. */
 export function correctTranscript(text: string, vocab: VocabEntry[]): { text: string; fixes: Fix[] } {
   if (!vocab.length || !text) return { text, fixes: [] };
   const heard = new Map<string, VocabEntry>();
+  /** Heard-as words that are everyday words, and whether the room wrote them with a capital ("Shay", not "missed"). */
+  const everyday = new Map<string, boolean>();
   const exact = new Map<string, VocabEntry>();
   for (const e of vocab) {
-    for (const h of e.heard) heard.set(squash(h), e);
+    for (const h of e.heard) {
+      heard.set(squash(h), e);
+      if (h.split(/[\s-]+/).every((w) => w && isCommon(w.toLowerCase()))) everyday.set(squash(h), /^\p{Lu}/u.test(h));
+    }
     if (e.proper) exact.set(squash(e.term), e);
   }
   const known = (k: string) => heard.has(k) || vocab.some((e) => squash(e.term) === k);
@@ -167,6 +188,7 @@ export function correctTranscript(text: string, vocab: VocabEntry[]): { text: st
       const original = text.slice(span[0].start, span[n - 1].end - suffix.length);
       const key = squash(original);
       let to: VocabEntry | undefined = heard.get(key);
+      if (to && everyday.has(key) && !readsAsName(text, span[0].start, span[n - 1].end, original, everyday.get(key)!)) to = undefined;
       if (!to && exact.has(key) && original !== exact.get(key)!.term && (n > 1 || !isCommon(original))) to = exact.get(key);
       // A near-miss is fixed only when it isn't a word itself (without a word list, only capitalized words qualify).
       if (!to && !known(key) && key.length >= FUZZY_MIN - 1 && !isCommon(n > 1 ? key : original)) {

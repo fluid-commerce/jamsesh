@@ -48,10 +48,12 @@ const SOUND_DESCRIPTION = /^\s*\*[^*]+\*\s*$/;
 export function cleanTranscript(text: string, durationSec: number, snr = Infinity, names: string[] = []): string {
   const t = text.replace(/\s+/g, " ").trim();
   if (!/[\p{L}\p{N}]/u.test(t)) return "";
-  // Only people's names ("Chey, Pat."): whisper repeating names it was given, not someone talking.
+  // Only the room's own words ("Chey, Pat."): whisper repeating the names it was given, but only when the
+  // audio says so (weak or noisy) or it repeats one word. On a clean voice, "Chey, Passport." is someone talking.
   const words = t.toLowerCase().split(/[^\p{L}\p{N}']+/u).filter(Boolean);
   const known = new Set(names.flatMap((n) => n.toLowerCase().split(/[^\p{L}\p{N}']+/u)).filter(Boolean));
-  if (known.size && words.length && words.every((w) => known.has(w))) return "";
+  const onlyRoomWords = known.size > 0 && words.length > 0 && words.every((w) => known.has(w));
+  if (onlyRoomWords && (snr < CLEAN_VOICE_SNR || (words.length > 1 && new Set(words).size === 1))) return "";
   if (SOUND_DESCRIPTION.test(t) || OUTRO_ONLY.test(t)) return "";
   if (OUTRO_ANYWHERE.test(t) && (durationSec < 3 || snr < CLEAN_VOICE_SNR)) return "";
   if (HALLUCINATIONS.some((r) => r.test(t)) && (durationSec < 3 || snr < CLEAN_VOICE_SNR)) return "";

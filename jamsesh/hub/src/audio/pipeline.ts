@@ -85,6 +85,8 @@ const MAX_CLIPPED = 0.005;
 const SPLIT_SPAN_MS = 1000;
 /** Copies of one line, as clocks and microphones see it, start within this of each other. */
 const TWIN_MS = 3000;
+/** Copies of one voice on two microphones compare at 0.7 to 0.9; two voices saying the same words, about 0.4 to 0.55. */
+const SAME_VOICE = 0.6;
 /** An unnamed line is the corrected voice's when it sounds this much like it, among the last few dozen. */
 const RELABEL_SIM = 0.75;
 const RELABEL_LOOKBACK = 60;
@@ -285,7 +287,7 @@ export class AudioPipeline {
     if (!text) return;
     // Someone reading the join sentence: every laptop hears it, and none of it belongs in the transcript.
     if (this.isCalibration(text, g)) return;
-    if (await this.mergeTwin(g, text)) return;
+    if (await this.mergeTwin(g, text, best)) return;
     const person = this.session.person(guess.personId);
     const u: Utterance = {
       id: newId("utt"),
@@ -339,18 +341,34 @@ export class AudioPipeline {
   }
 
   /**
-   * The same words heard again a moment apart in the same place are one line, whatever the copies'
-   * clocks said (a laptop a second off, a line one microphone split in two). The new copies join the
-   * line already shown, which is then labelled from every copy.
+   * The same words heard a moment apart in the same place by other laptops are one line, whatever the
+   * copies' clocks said (a laptop a second off, a copy that arrived late). The new copies join the line
+   * already shown, which is then labelled from every copy. Only other devices' copies: a microphone that
+   * already gave the line hearing the same words again is someone saying them again. And not when the
+   * voices sound like two people (one repeats what another said), nor when the line is too old to join.
    */
-  private async mergeTwin(g: Group, text: string): Promise<boolean> {
+  private async mergeTwin(g: Group, text: string, best: Segment): Promise<boolean> {
+    const mine = new Set(g.segments.map((s) => s.deviceId));
     const twin = this.session.store
       .all("utterances")
-      .filter((x) => x.location === g.location && x.id !== g.utteranceId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && wordCount(x.text) >= 4 && wordCount(text) >= 4 && textSimilarity(x.text, text) >= 0.75 && Math.abs(wordCount(x.text) - wordCount(text)) <= 3)
+      .filter(
+        (x) =>
+          x.location === g.location &&
+          x.id !== g.utteranceId &&
+          Math.abs(x.t0 - g.t0) < TWIN_MS &&
+          Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 &&
+          !x.devices.some((d) => mine.has(d.deviceId)) &&
+          wordCount(x.text) >= 4 &&
+          wordCount(text) >= 4 &&
+          textSimilarity(x.text, text) >= 0.75 &&
+          Math.abs(wordCount(x.text) - wordCount(text)) <= 3,
+      )
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
     if (!twin) return false;
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
-    if (!home) return true; // too old to relabel; still not a second line
+    if (!home) return false;
+    const theirs = pickBest(home.segments).embedding;
+    if (best.embedding && theirs && cosine(best.embedding, theirs) < SAME_VOICE) return false;
     this.finalized = this.finalized.filter((x) => x !== g);
     home.segments.push(...g.segments);
     home.t0 = Math.min(home.t0, g.t0);

@@ -10,7 +10,7 @@ import { embed, learningNote } from "../src/audio/voiceprint";
 import { decodeWav, encodeWav, resample } from "../src/audio/wav";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
-import { CAN_SIM, CAST, enrol, ENROL_TEXT, LAPTOPS, makeRoom, play, rng, say, score, script, type Key, type Spoken } from "./voices.sim";
+import { CAN_SIM, CAST, copiesOf, enrol, ENROL_TEXT, LAPTOPS, makeRoom, play, rng, say, score, script, type Key, type Spoken } from "./voices.sim";
 
 const sim = test.skipIf(!CAN_SIM);
 const T = 120_000;
@@ -80,6 +80,44 @@ sim("two people saying the same words a moment apart are still two lines when fa
   const words = "Can we try the blue button on the settings page before the demo this afternoon.";
   await play(room, line("ana", words, t), r);
   await play(room, line("ben", words, t + 12_000), r);
+  expect(ofRoom(room)).toHaveLength(2);
+}, T);
+
+sim("one person repeating another's sentence two seconds later is a second line, not merged into the first", async () => {
+  const room = makeRoom();
+  const r = rng(16);
+  const t = base();
+  const words = "Can we try the blue button on the settings page before the demo this afternoon.";
+  const first = line("ana", words, t);
+  await play(room, first, r);
+  await play(room, line("ben", words, t + 2000), r);
+  expect(ofRoom(room)).toHaveLength(2);
+}, T);
+
+sim("two voices saying the same words on two laptops at once are two lines", async () => {
+  const room = makeRoom();
+  const words = "Can we try the blue button on the settings page before the demo this afternoon.";
+  const t = base();
+  const a = copiesOf(line("ana", words, t), rng(18))[0];
+  const b = copiesOf(line("ben", words, t + 1500), rng(19))[1];
+  for (const c of [a, b]) {
+    room.say.set(String(Bun.hash(c.wav)), c.text);
+    await room.pipeline.ingest({ deviceId: c.laptop, t0: c.t0, t1: c.t1, wav: c.wav });
+    await room.pipeline.flush();
+  }
+  expect(ofRoom(room).map((u) => u.devices[0].deviceId)).toEqual(["lap-a", "lap-b"]);
+}, T);
+
+sim("a late copy whose first line is too old to join is shown, never dropped", async () => {
+  const room = makeRoom();
+  const spoken = line("ana", "Let me check the spacing on the pricing cards and send a screenshot to the room.", base());
+  const [a, b] = copiesOf(spoken, rng(17), { skew: { "lap-b": 1500 } });
+  for (const c of [a, b]) room.say.set(String(Bun.hash(c.wav)), c.text);
+  await room.pipeline.ingest({ deviceId: a.laptop, t0: a.t0, t1: a.t1, wav: a.wav });
+  await room.pipeline.flush();
+  (room.pipeline as any).finalized = [];
+  await room.pipeline.ingest({ deviceId: b.laptop, t0: b.t0, t1: b.t1, wav: b.wav });
+  await room.pipeline.flush();
   expect(ofRoom(room)).toHaveLength(2);
 }, T);
 
