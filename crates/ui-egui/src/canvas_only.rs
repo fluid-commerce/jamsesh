@@ -1,6 +1,6 @@
 //! Canvas-only mode (`UiState::canvas_only`): the window is just the live canvas. These are the
-//! two things it adds over the canvas itself: a presence pill (who is here, and whether the
-//! session is up) at the top right, a zoom chip at the bottom right, and the placeholder shown
+//! two things it adds over the canvas itself: a presence pill (who is here, and a dot when the
+//! session isn't up) at the top right, a zoom chip at the bottom right, and the placeholder shown
 //! while no file has opened yet (a join still connecting).
 
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -62,9 +62,9 @@ fn presence(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
     }
     let shown = peers.len().min(MAX_SHOWN);
     let more = peers.len() - shown;
-    // Left to right: the status, then you, then everyone else.
-    let note_galley = note.as_ref().map(|(_, text)| ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), regular(12.0), t.text_secondary)));
-    let note_w = note_galley.as_ref().map_or(0.0, |g| g.size().x + 22.0);
+    // Left to right: the status, then you, then everyone else. The status is a dot (its words on
+    // hover): the page around the canvas (JamSesh) says how the session is doing.
+    let note_w = if note.is_some() { 18.0 } else { 0.0 };
     let count = 1 + shown + usize::from(more > 0);
     let width = PAD * 2.0 + note_w + 2.0 * R + (count - 1) as f32 * STEP;
     let size = vec2(width, 2.0 * R + 2.0 * PAD);
@@ -76,10 +76,11 @@ fn presence(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
         pill(painter, rect, &t);
         let cy = rect.center().y;
         let mut x = rect.min.x + PAD;
-        if let (Some((dot, _)), Some(galley)) = (&note, note_galley) {
+        if let Some((dot, text)) = &note {
             let pulse = if app.reduce_motion() { 1.0 } else { 0.55 + 0.45 * (ctx.input(|i| i.time) * 4.0).sin().abs() as f32 };
-            painter.circle_filled(pos2(x + 9.0, cy), 3.5, dot.gamma_multiply(pulse));
-            painter.galley(pos2(x + 18.0, cy - galley.size().y / 2.0), galley.clone(), t.text_secondary);
+            let at = pos2(x + 9.0, cy);
+            ui.painter().circle_filled(at, 3.5, dot.gamma_multiply(pulse));
+            ui.interact(Rect::from_center_size(at, vec2(16.0, 2.0 * R)), ui.scope_id().with("status"), Sense::hover()).tip(text.clone());
             x += note_w;
         }
         let mut c = pos2(x + R, cy);

@@ -44,7 +44,8 @@ fn a_file_shows_the_presence_pill_and_zoom_chip_and_no_chrome() {
     let texts = frames(&mut app, &ctx, 4);
     assert!(app.ui.toast.is_none(), "no panic toast: {:?}", app.ui.toast.as_ref().map(|t| &t.0));
     assert!(texts.iter().any(|t| t.ends_with('%')), "the zoom chip: {texts:?}");
-    assert!(texts.iter().any(|t| t == "Offline"), "the status: {texts:?}");
+    // The status is a dot: the page around the canvas (JamSesh) says it in words, once.
+    assert!(!texts.iter().any(|t| t == "Offline"), "the status is a dot, its words on hover: {texts:?}");
     for chrome in ["Layers", "Pages", "Share", "Design"] {
         assert!(!texts.iter().any(|t| t == chrome), "{chrome} is chrome: {texts:?}");
     }
@@ -58,4 +59,21 @@ fn without_a_file_it_is_a_placeholder_never_home() {
     assert!(app.ui.toast.is_none(), "no panic toast");
     assert!(!app.ui.home, "home is switched off");
     assert!(texts.iter().any(|t| t.contains("session")), "the placeholder: {texts:?}");
+}
+
+/// A session command's note ("You left the session…") isn't toasted over a canvas-only window:
+/// the page around it shows the session's state. The full app keeps the toast.
+#[test]
+fn session_notes_are_left_to_the_page_in_canvas_only_mode() {
+    for canvas_only in [true, false] {
+        let mut app = app(canvas_only, true);
+        app.session.message = Some("You left the session; your copy stays open here".into());
+        app.run("collab.peers", json!({}));
+        assert_eq!(app.ui.toast.is_some(), !canvas_only, "canvas-only {canvas_only}: {:?}", app.ui.toast.as_ref().map(|t| &t.0));
+    }
+    // Other commands' notes still show.
+    let mut app = app(true, true);
+    app.session.message = Some("Copied".into());
+    app.run("view.zoomFit", json!({}));
+    assert!(app.ui.toast.is_some());
 }
