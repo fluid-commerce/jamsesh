@@ -144,3 +144,28 @@ test("a late presenter layout of the share plus another tile is refused whole on
   expect(said).toContain("must include the share");
   expect(live.s.stage().layout?.tiles.some((t) => t.kind === "artifact")).not.toBe(true);
 });
+
+test("a share the presenter places on an extra screen gives that screen back what it showed, and main keeps its own", async () => {
+  mock.module("ai", () => ({
+    ...ai,
+    generateText: async (o: any) => {
+      const id = o.prompt.match(/share id (\S+)\)/)[1];
+      await o.tools.set_layout.execute({ tiles: [{ kind: "screen", ref: id }], screen: "screen-2" });
+      return {};
+    },
+  }));
+  const r = room();
+  const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
+  r.s.reportScreen("main", info);
+  r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], title: "Pricing" }, "Chey", "screen-2", { override: true });
+  r.s.setStage({ mode: "agents" }, "Chey", "main", { override: true });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage("screen-2").mode).toBe("layout");
+  expect(r.s.stage().mode).toBe("agents");
+  r.s.endShare(sh.id);
+  expect(r.s.stage("screen-2").mode).toBe("spotlight");
+  expect(r.s.stage("screen-2").items).toEqual([r.a.id]);
+  expect(r.s.stage().mode).toBe("agents");
+});

@@ -949,7 +949,7 @@ export class Brain {
           const held = this.lockBlock(item.screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!s.showReady(id, { claim, mayReplaceLock: this.replaceOk.get(item.screen) })) return refuse("The screen changed since; look again.");
+          if (!s.showReady(id, castBy(item.screen))) return refuse("The screen changed since; look again.");
           return `On screen: ${item.label}.`;
         },
       }),
@@ -965,7 +965,7 @@ export class Brain {
           const held = this.lockBlock(id, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          if (!s.restoreHistory(entry.id, id, { claim, mayReplaceLock: this.replaceOk.get(id) }, "Room brain")) return refuse("That screen is no longer in the history.");
+          if (!s.restoreHistory(entry.id, id, castBy(id), "Room brain")) return refuse("That screen is no longer in the history.");
           return `Brought back ${entry.label}, which ${entry.by} had up.`;
         },
       }),
@@ -1050,7 +1050,7 @@ export class Brain {
         continue;
       }
       // The owner's own request replaces their lock in the write itself; nothing is released ahead of it.
-      const wo = { claim, ...(held && ev.authorId ? { mayReplaceLock: ev.authorId } : {}) };
+      const wo = { claim, ...(ev.data?.direct && ev.authorId ? { person: { id: ev.authorId, name: ev.authorName } } : {}), ...(held && ev.authorId ? { mayReplaceLock: ev.authorId } : {}) };
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
         s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", wo);
         continue;

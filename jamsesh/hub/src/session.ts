@@ -1235,21 +1235,29 @@ export class Session {
   }
 
   /** What each screen showed just before a share took it over, so the share's end can give it back. */
-  private beforeShare = new Map<string, Stage>();
+  private beforeShare = new Map<string, Map<string, Stage>>();
 
-  /** Remember what the main screen shows now, ahead of a new share taking it over. */
+  /** Remember what every screen shows now (keyed by screen), ahead of a new share taking one of them over. */
   rememberStageFor(shareId: string) {
     if (this.beforeShare.has(shareId)) return;
-    const st = this.stage();
-    const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
-    if (tiles.length && tiles.every((t) => t.kind === "screen")) {
-      // Another share is all the screen shows: this one gives back what that one was hiding.
-      for (const t of tiles) {
-        const prior = t.kind === "screen" ? this.beforeShare.get(t.shareId) : undefined;
-        if (prior) return void this.beforeShare.set(shareId, prior);
+    const snap = new Map<string, Stage>();
+    for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) {
+      const st = this.stage(screen);
+      const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
+      let kept = st;
+      if (tiles.length && tiles.every((t) => t.kind === "screen")) {
+        // Another share is all this screen shows: this one gives back what that one was hiding.
+        for (const t of tiles) {
+          const prior = t.kind === "screen" ? this.beforeShare.get(t.shareId)?.get(screen) : undefined;
+          if (prior) {
+            kept = prior;
+            break;
+          }
+        }
       }
+      snap.set(screen, kept);
     }
-    this.beforeShare.set(shareId, st);
+    this.beforeShare.set(shareId, snap);
   }
 
   endShare(id: string, status: Share["status"] = "ended") {
@@ -1265,7 +1273,8 @@ export class Session {
       if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
         const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
         // When the share was all the screen showed, the screen goes back to what it showed before.
-        const back = !tiles.length && screen === "main" && before && !(before.mode === "layout" && before.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? before : null;
+        const prior = before?.get(screen);
+        const back = !tiles.length && prior && !(prior.mode === "layout" && prior.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? prior : null;
         // A lock still held when the share ends stays with what comes back (the owner's share over their own cast, SPEC 10.5).
         // One its owner let go of during the share stays gone.
         this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
@@ -1789,12 +1798,12 @@ export class Session {
   }
 
   /** Puts a queued item on its screen. A person showing it takes the screen's lock; with no person (the owner said yes) it goes up unlocked. */
-  showReady(id: string, who: { person: { id: string | null; name: string } } | { override: true } | { claim: StageClaim; mayReplaceLock?: string }): Stage | null {
+  showReady(id: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { override: true } | { claim: StageClaim; mayReplaceLock?: string }): Stage | null {
     const item = this.readyToShow().find((r) => r.id === id);
     if (!item) return null;
     if ("claim" in who && !this.claimHolds(who.claim, item.screen)) return null;
     this.dismissReady(id);
-    return this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim } : who);
+    return this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim, mayReplaceLock: who.mayReplaceLock } : who);
   }
 
   dismissReady(id: string) {
@@ -1915,7 +1924,7 @@ export class Session {
   }
 
   /** Brings an earlier screen back. A person's tap takes the lock; anyone else is held off by one. */
-  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string } } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): Stage | null {
+  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string }; claim?: StageClaim; mayReplaceLock?: string } | { claim: StageClaim; mayReplaceLock?: string }, by = "JamSesh"): Stage | null {
     const entry = (this.stageHistory(screen)[screen] ?? []).find((e) => e.id === id);
     if (!entry) return null;
     return this.setStage({ ...entry.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);

@@ -577,11 +577,17 @@ async fn leave_now(app: &AppHandle, state: &App) {
         warn(app, "Settings not saved", e);
     }
     // The session saves before anything else starts.
-    if let Some(mut h) = hub
-        && let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || h.stop()).await
-    {
-        state.switching.set_unsaved(Some(e.clone()));
-        app.dialog().message(e).title("The session didn't finish saving").kind(MessageDialogKind::Warning).show(|_| {});
+    if let Some(mut h) = hub {
+        // A stop that panicked or was cancelled has an unknown save outcome: say so, as `stop_hub` does.
+        let failed = match tauri::async_runtime::spawn_blocking(move || h.stop()).await {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(e) = failed {
+            state.switching.set_unsaved(Some(e.clone()));
+            app.dialog().message(e).title("The session didn't finish saving").kind(MessageDialogKind::Warning).show(|_| {});
+        }
     }
     // Every window the session opened, including a user-less host's extra screens.
     for (label, w) in app.webview_windows() {

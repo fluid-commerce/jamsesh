@@ -1094,3 +1094,46 @@ test("a direct request from the lock's owner that fails keeps their lock and wha
   expect(s.stage().items).toEqual([a.id]);
   expect(s.stage().lock?.personId).toBe(chey.id);
 });
+
+test("every path where a person asks JamSesh directly replaces their own lock with their own, in the same write", async () => {
+  const { hub, s, chey, felipe, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  const b = artifact(s, "Pricing");
+  const direct = (text: string) => ({ ...said(chey, text), data: { direct: true } }) as JamEvent;
+  const cast = (who: { id: string; name: string }, items: string[]) => s.setStage({ mode: "spotlight", items, title: who.name }, who.name, "main", { person: who });
+  const mine = () => cast(chey, [a.id]);
+  const owner = () => s.stage().lock?.personId;
+  cast(chey, [b.id]);
+  s.saveLayout("review");
+  const paths: Record<string, () => Promise<void> | void> = {
+    show_on_screen: async () => void (await tools([direct("JamSesh, show pricing")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [b.id] })),
+    set_layout: async () => void (await tools([direct("JamSesh, show pricing")]).set_layout.execute({ tiles: [{ kind: "artifact", ref: b.id }] })),
+    build_custom_view: async () => void (await tools([direct("JamSesh, show a view of pricing")]).build_custom_view.execute({ title: "x", html: "<p>x</p>" })),
+    show_saved_layout: async () => void (await tools([direct("JamSesh, bring back the review layout")]).show_saved_layout.execute({ name: "review" })),
+    restore_screen: async () => {
+      cast(chey, [b.id]);
+      await tools([direct("JamSesh, put the last thing back")]).restore_screen.execute({});
+    },
+    show_ready: async () => {
+      const r = s.queueReady({ screen: "main", agentId: "ag", agentName: "Agent", label: "Pricing build", stage: { mode: "spotlight", items: [b.id] } });
+      await tools([direct("JamSesh, show the pricing build")]).show_ready.execute({ id: r.id });
+    },
+  };
+  for (const [name, run] of Object.entries(paths)) {
+    mine();
+    const before = s.stage().since;
+    await run();
+    expect([name, s.stage().since > before || s.stage().items?.[0] !== a.id || s.stage().mode !== "spotlight" ? "changed" : "same"]).toEqual([name, "changed"]);
+    expect([name, owner()]).toEqual([name, chey.id]);
+  }
+  // The rule-based path (no gateway) does the same.
+  mine();
+  const ev = direct("JamSesh, show pricing");
+  hub.brain.ruleRoute([ev], { lines: [{ id: ev.id, relevance: "work", intent: "present" }] } as any);
+  expect(s.stage().items).toEqual([b.id]);
+  expect(owner()).toBe(chey.id);
+  // Someone else's lock is never replaced by these paths.
+  cast(felipe, [a.id]);
+  await tools([direct("JamSesh, show pricing")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [b.id] });
+  expect(owner()).toBe(felipe.id);
+});

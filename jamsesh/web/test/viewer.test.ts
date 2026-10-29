@@ -33,11 +33,10 @@ test("groups gather by group or title, variants read A, B, C, and the filter app
   expect(groupArtifacts(list, "built").map(([g]) => g)).toEqual(["Login"]);
 });
 
-test("the viewer keeps its item when the group changes, and lands nearby when it's gone", () => {
+test("the viewer keeps its item when the group changes; when it's gone the gallery (which passes no fallback) shows the first", () => {
   const items = [art("a"), art("b"), art("c")];
   expect(settle(items, "b", 0)).toBe(1);
-  expect(settle(items, "gone", 2)).toBe(2);
-  expect(settle(items, "gone", 9)).toBe(2);
+  expect(settle(items, "gone", 0)).toBe(0);
   expect(settle([], "gone", 0)).toBe(0);
 });
 
