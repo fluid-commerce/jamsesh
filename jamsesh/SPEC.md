@@ -1206,7 +1206,8 @@ Every client window and the big screen capture audio; it's consolidated on the h
   queue, one job at a time; a group (and each part split from it) gets its transcription queued before a
   late copy can find it, every late copy goes through one admit step, and a group with work queued is
   never let go. A copy so late its line's group was let go (after 15 s) can't change who said it, since
-  the line's other copies are gone: it joins the line's devices only. Cost: with four laptops,
+  the line's other copies are gone: it adds its device to the line, and its group then stands for
+  the line so still later copies join it as well. Cost: with four laptops,
   whisper runs once per line before; now once per copy within 10 dB, which is 2 for laptops spread
   across a room (6 dB apart) and 4 around one table (2 to 3 dB apart). Known limit: a quieter copy
   whisper hears slightly differently ("cup" for "up") shows as a second line.
@@ -1228,8 +1229,10 @@ Every client window and the big screen capture audio; it's consolidated on the h
   Its copies join the line already shown, which is relabelled from every copy. When unsure, both
   lines are kept: a copy that lost or misheard a word stays its own line, someone repeating what
   another said in another voice is two lines, and related sentences ("Make it blue now." and "Make
-  it blue now after lunch.") stay two. A copy so late its line can no longer be joined (an offline
-  buffer flushed) is dropped only on the same words from other laptops. Known limit: the same
+  it blue now after lunch.") stay two. A copy so late its line's group was let go (an offline buffer
+  flushed) joins that line only on the same words from other laptops: its device is added to the
+  line, the line's speaker and wording stay, and its group stands for the line from then on, so
+  still later copies join it too. Known limit: the same
   person saying exactly the same words again within 3 seconds, heard only by other laptops the
   second time, is one line.
 - **The join read stays out.** While someone reads the join sentences (from **Start reading** until
@@ -1242,7 +1245,9 @@ Every client window and the big screen capture audio; it's consolidated on the h
   or refuses the recording (25 seconds' grace for copies on their way), or the page says it stopped
   (`POST /api/people/:id/voice/end`, `read: false` when the microphone never started, which closes
   it at once), including when the recording couldn't be decoded or uploaded. Each read has an id
-  (`read`, from `voice/start`); its end (`id`) and its recording (`?read=`) name it, and only the
+  (`read`, from `voice/start`, which carries `seq`, the order the page began its reads in: a start
+  that reaches the host after a later-begun read's start is refused with 409, so it can't replace
+  it); its end (`id`) and its recording (`?read=`) name it, and only the
   person's latest open read is closed or taken, so an earlier read's late end or upload can't touch a
   newer one. Closing the profile mid-read stops the microphone, closes the read on the host, then
   aborts the upload; a recording that arrives after its read was closed isn't taken. One the host

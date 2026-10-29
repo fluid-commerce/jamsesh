@@ -3,10 +3,17 @@
 import "fake-indexeddb/auto";
 import { afterEach, expect, test } from "bun:test";
 import { api, OfflineError } from "../src/shared/hub";
-import { outbox } from "../src/shared/offline";
+import { idbTable, outbox } from "../src/shared/offline";
 
 const realFetch = globalThis.fetch;
-afterEach(() => (globalThis.fetch = realFetch));
+afterEach(async () => {
+  globalThis.fetch = realFetch;
+  // Nothing this test queued is left to leak into later tests: no retry timer, no stored or in-memory entry.
+  outbox.stop();
+  await idbTable("outbox").clear();
+  (outbox as any).entries = [];
+  (outbox as any).publish();
+});
 
 test("with the network down, approving and disconnecting throw and queue nothing; an ordinary edit is queued", async () => {
   await outbox.load();
