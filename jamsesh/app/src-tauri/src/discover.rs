@@ -17,38 +17,83 @@ pub struct Found {
     pub url: String,
 }
 
+/// An advertised host and whether it answered the last time it was checked.
+struct Entry {
+    found: Found,
+    /// Answers right now; only these are listed.
+    up: bool,
+    /// Checks in a row it failed since it last answered.
+    misses: u32,
+}
+
+/// A listed host that fails this many checks in a row is hidden (one slow answer on a busy network
+/// isn't enough); an advertised host that has never answered isn't listed at all.
+const MISSES_TO_HIDE: u32 = 2;
+const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone, Default)]
-pub struct Hosts(Arc<Mutex<BTreeMap<String, Found>>>);
+pub struct Hosts(Arc<Mutex<BTreeMap<String, Entry>>>);
 
 impl Hosts {
+    /// Hosts that answered their latest check.
     pub fn list(&self) -> Vec<Found> {
-        self.0.lock().map(|m| m.values().cloned().collect()).unwrap_or_default()
+        self.0.lock().map(|m| m.values().filter(|e| e.up).map(|e| e.found.clone()).collect()).unwrap_or_default()
+    }
+
+    /// A host's advert came in (or changed). It stays hidden until `check` finds it answering.
+    fn advertise(&self, key: String, found: Found) {
+        if let Ok(mut m) = self.0.lock() {
+            // A renamed advert for the same address replaces the old one.
+            m.retain(|k, e| e.found.url != found.url || *k == key);
+            let up = m.get(&key).is_some_and(|e| e.up && e.found.url == found.url);
+            m.insert(key, Entry { found, up, misses: 0 });
+        }
+    }
+
+    fn withdraw(&self, key: &str) {
+        if let Ok(mut m) = self.0.lock() {
+            m.remove(key);
+        }
+    }
+
+    /// Checks every advertised host (including ones hidden earlier: a host that was slow to start
+    /// shows up once it answers, and one whose advert outlives it drops off the list).
+    fn check(&self, answers: impl Fn(&Found) -> bool) {
+        let all: Vec<(String, Found)> = self.0.lock().map(|m| m.iter().map(|(k, e)| (k.clone(), e.found.clone())).collect()).unwrap_or_default();
+        for (key, found) in all {
+            let ok = answers(&found);
+            if let Ok(mut m) = self.0.lock()
+                && let Some(e) = m.get_mut(&key)
+                && e.found.url == found.url
+            {
+                if ok {
+                    (e.up, e.misses) = (true, 0);
+                } else {
+                    e.misses += 1;
+                    if !e.up || e.misses >= MISSES_TO_HIDE {
+                        e.up = false;
+                    }
+                }
+            }
+        }
     }
 }
 
-/// Browses in the background for as long as the app runs.
-fn answers(addr: std::net::SocketAddr) -> bool {
-    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)).is_ok()
+fn answers(f: &Found) -> bool {
+    f.url.trim_start_matches("http://").parse::<std::net::SocketAddr>().is_ok_and(|addr| {
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(800)).is_ok()
+    })
 }
 
+/// Browses in the background for as long as the app runs.
 pub fn start() -> Hosts {
     let hosts = Hosts::default();
     let found = hosts.clone();
-    // Every 10 seconds, drop hosts that stopped answering (closed without saying goodbye).
     let sweep = hosts.clone();
     std::thread::spawn(move || {
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            let listed: Vec<(String, String)> =
-                sweep.0.lock().map(|m| m.iter().map(|(k, v)| (k.clone(), v.url.clone())).collect()).unwrap_or_default();
-            for (key, url) in listed {
-                let addr = url.trim_start_matches("http://").parse::<std::net::SocketAddr>();
-                if addr.is_ok_and(|a| !answers(a))
-                    && let Ok(mut m) = sweep.0.lock()
-                {
-                    m.remove(&key);
-                }
-            }
+            std::thread::sleep(CHECK_EVERY);
+            sweep.check(answers);
         }
     });
     std::thread::spawn(move || {
@@ -64,24 +109,12 @@ pub fn start() -> Hosts {
                     let name = plain_name(full.strip_suffix(&format!(".{SERVICE}")).unwrap_or(&full));
                     let session = info.get_property_val_str("session").map(str::to_string).filter(|s| !s.is_empty());
                     let url = format!("http://{addr}:{}", info.get_port());
-                    // Listed only once something answers there: an advertisement can outlive its host.
-                    let sock = std::net::SocketAddr::from((*addr, info.get_port()));
+                    found.advertise(full, Found { name, session, url });
+                    // List it as soon as it answers, without waiting for the next sweep.
                     let list = found.clone();
-                    std::thread::spawn(move || {
-                        if answers(sock)
-                            && let Ok(mut m) = list.0.lock()
-                        {
-                            // One row per address, whatever names its advertisements carry.
-                            m.retain(|k, f| f.url != url || *k == full);
-                            m.insert(full, Found { name, session, url });
-                        }
-                    });
+                    std::thread::spawn(move || list.check(answers));
                 }
-                ServiceEvent::ServiceRemoved(_, full) => {
-                    if let Ok(mut m) = found.0.lock() {
-                        m.remove(&full);
-                    }
-                }
+                ServiceEvent::ServiceRemoved(_, full) => found.withdraw(&full),
                 _ => {}
             }
         }
@@ -99,7 +132,46 @@ fn plain_name(instance: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::plain_name;
+    use super::{Found, Hosts, plain_name};
+
+    fn host(url: &str) -> Found {
+        Found { name: "Mac".into(), session: None, url: url.into() }
+    }
+
+    #[test]
+    fn hides_hosts_that_never_answered_and_shows_them_once_they_do() {
+        let hosts = Hosts::default();
+        hosts.advertise("a".into(), host("http://10.0.0.2:4747"));
+        assert!(hosts.list().is_empty(), "not listed before it answers");
+        hosts.check(|_| false);
+        assert!(hosts.list().is_empty());
+        hosts.check(|_| true);
+        assert_eq!(hosts.list().len(), 1);
+    }
+
+    #[test]
+    fn drops_a_host_whose_advert_outlives_it_but_not_for_one_slow_answer() {
+        let hosts = Hosts::default();
+        hosts.advertise("a".into(), host("http://10.0.0.2:4747"));
+        hosts.check(|_| true);
+        hosts.check(|_| false);
+        assert_eq!(hosts.list().len(), 1, "one miss keeps it");
+        hosts.check(|_| false);
+        assert!(hosts.list().is_empty(), "two misses in a row hide it");
+        hosts.check(|_| true);
+        assert_eq!(hosts.list().len(), 1, "it comes back when it answers again");
+    }
+
+    #[test]
+    fn a_renamed_advert_replaces_the_old_one_and_a_withdrawn_one_goes() {
+        let hosts = Hosts::default();
+        hosts.advertise("old".into(), host("http://10.0.0.2:4747"));
+        hosts.advertise("new".into(), host("http://10.0.0.2:4747"));
+        hosts.check(|_| true);
+        assert_eq!(hosts.list().len(), 1);
+        hosts.withdraw("new");
+        assert!(hosts.list().is_empty());
+    }
 
     #[test]
     fn drops_bonjour_counter() {

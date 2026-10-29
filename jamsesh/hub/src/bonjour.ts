@@ -2,8 +2,10 @@
 // anyone typing an address. Uses macOS's own dns-sd; elsewhere it does nothing.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { hostname } from "node:os";
+import { withParentWatch } from "./children";
 
-export const SERVICE = "_jamsesh._tcp";
+// Tests advertise under another name so they never show up in a real room's session list.
+export const SERVICE = process.env.JAMSESH_BONJOUR_SERVICE || "_jamsesh._tcp";
 
 let child: ChildProcess | null = null;
 
@@ -19,11 +21,10 @@ export function advertise(port: number, txt: Record<string, string | undefined>)
   const record = Object.entries(txt)
     .filter(([, v]) => v)
     .map(([k, v]) => `${k}=${v}`);
-  // dns-sd outlives a hub that's killed outright, advertising a host that's gone. The wrapper
-  // ends it as soon as this process is no longer alive.
-  const args = ["-R", computerName(), SERVICE, "local", String(port), ...record].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
-  // Stopping the watcher stops dns-sd too (the trap), so no advertisement outlives its host.
-  child = spawn("/bin/sh", ["-c", `/usr/bin/dns-sd ${args} >/dev/null & d=$!; trap 'kill $d 2>/dev/null; exit 0' TERM INT HUP; while kill -0 ${process.pid} 2>/dev/null && kill -0 $d 2>/dev/null; do sleep 2; done; kill $d 2>/dev/null`], { stdio: "ignore" });
+  // dns-sd outlives a hub that's killed outright, advertising a host that's gone: it runs under
+  // a watcher that ends it when this process is gone.
+  const [bin, ...argv] = withParentWatch(["/usr/bin/dns-sd", "-R", computerName(), SERVICE, "local", String(port), ...record]);
+  child = spawn(bin, argv, { stdio: "ignore" });
   child.on("error", () => (child = null));
 }
 

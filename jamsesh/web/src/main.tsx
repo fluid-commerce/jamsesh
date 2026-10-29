@@ -15,6 +15,7 @@ import { registerServiceWorker } from "./shared/offline";
 import { ConnectionBanner } from "./shared/ConnectionBanner";
 import { ErrorBoundary } from "./shared/ErrorBoundary";
 import { BuildRequests } from "./shared/BuildRequests";
+import { startHeartbeat } from "./shared/heartbeat";
 
 function PinSlot({ target }: { target: PinTarget }) {
   const mode = useAnnotateMode();
@@ -37,6 +38,7 @@ registerServiceWorker();
 // the window.
 if ("__TAURI_INTERNALS__" in window) {
   document.documentElement.classList.add("in-app");
+  startHeartbeat();
   new MutationObserver(() => document.querySelectorAll(".app-header:not([data-tauri-drag-region])").forEach((h) => h.setAttribute("data-tauri-drag-region", ""))).observe(document.body, { childList: true, subtree: true });
 }
 
