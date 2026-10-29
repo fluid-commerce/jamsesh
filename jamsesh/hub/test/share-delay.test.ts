@@ -261,3 +261,79 @@ test("store.atomic: a throw in the middle undoes every write in it", () => {
   r.s.store.atomic(() => r.s.store.setSetting("probe", "done"));
   expect(r.s.store.setting("probe", "none")).toBe("done");
 });
+
+test("nobody matches nobody: an unclaimed device's share never takes a host lock or a host pin", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  r.s.touchDevice("stray", { label: "Unclaimed laptop", kind: "client" });
+  // A host window cast before anyone picked who they are: locked, no person id.
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], pinned: true }, "Host", "main", { person: { id: null, name: "Host" } });
+  expect(r.s.stage().lock?.personId).toBeNull();
+  const sh = r.s.startShare("stray", "screen");
+  expect(sh.personId).toBeNull();
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("spotlight");
+  // Same with a pin and no lock: a pin remembers the person's id, not their name.
+  (r.s as any).dropLock("main");
+  r.s.store.setSetting("stage", { ...r.s.stage(), by: "Unclaimed laptop" });
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("spotlight");
+  // A pin by an identified person is that person's to share over.
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], pinned: true }, "Felipe", "main", { person: { id: r.felipe.id, name: "Felipe" } });
+  expect(r.s.stage().pinnedById).toBe(r.felipe.id);
+});
+
+test("a share ending that fails part way changes nothing and runs none of its effects", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const { bus } = await import("../src/bus");
+  const r = room();
+  const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
+  r.s.reportScreen("main", info);
+  r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  const tiles = { mode: "layout" as const, layout: { tiles: [{ kind: "screen" as const, shareId: sh.id, label: "x" }, { kind: "feed" as const }] } };
+  r.s.setStage({ mode: "spotlight", items: [r.a.id] }, "Chey", "main", { override: true });
+  r.s.rememberStageFor(sh.id);
+  r.s.setStage(tiles, "JamSesh", "main", { override: true });
+  r.s.setStage(tiles, "JamSesh", "screen-2", { override: true });
+  const revs = [r.s.stageRev("main"), r.s.stageRev("screen-2")];
+  const real = r.s.store.setSetting.bind(r.s.store);
+  const sent: unknown[] = [];
+  const realSend = bus.send.bind(bus);
+  (bus as any).send = (m: any) => void sent.push(m);
+  (r.s.store as any).setSetting = (k: string, v: unknown) => { if (k === "screenStages") throw new Error("disk full"); real(k, v); };
+  expect(() => r.s.endShare(sh.id)).toThrow("disk full");
+  (r.s.store as any).setSetting = real;
+  (bus as any).send = realSend;
+  expect(sent).toEqual([]);
+  expect(r.s.store.get("shares", sh.id)?.status).toBe("live");
+  expect([r.s.stageRev("main"), r.s.stageRev("screen-2")]).toEqual(revs);
+  expect(r.s.stage().layout?.tiles.length).toBe(2);
+  expect(r.s.store.setting<Record<string, unknown>>("beforeShare", {})[sh.id]).toBeDefined();
+  // And it works once the disk does.
+  r.s.endShare(sh.id);
+  expect(r.s.stage().layout?.tiles.length).toBe(1);
+});
+
+test("an ended share still on a screen with no saved snapshot is left as it is at restart", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  r.s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id, label: "x" }] } }, "JamSesh", "main", { override: true });
+  r.s.store.put("shares", { ...r.s.store.get("shares", sh.id)!, status: "ended" });
+  const { Session } = await import("../src/session");
+  const again = new Session(r.s.store);
+  expect(again.stage().mode).toBe("layout");
+  expect(again.store.get("shares", sh.id)?.status).toBe("ended");
+});
+
+test("a failed BEGIN leaves the store usable: the next atomic write still opens a real transaction", () => {
+  const r = room();
+  const st = r.s.store as any;
+  const real = st.db.exec.bind(st.db);
+  let boom = true;
+  st.db.exec = (sql: string) => { if (boom && sql.startsWith("BEGIN")) { boom = false; throw new Error("busy"); } return real(sql); };
+  expect(() => st.atomic(() => st.setSetting("probe", "x"))).toThrow("busy");
+  expect(() => st.atomic(() => { st.setSetting("probe", "half"); throw new Error("boom"); })).toThrow("boom");
+  expect(st.setting("probe", "none")).toBe("none");
+});

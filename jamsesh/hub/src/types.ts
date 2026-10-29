@@ -297,6 +297,8 @@ export interface Stage {
   /** The key of the tile filling the presentation area (the rest become a strip of thumbnails); unset when none is. */
   expanded?: string;
   pinned: boolean;
+  /** The person who pinned it (their id); unset when no identified person did. */
+  pinnedById?: string;
   since: number;
   by: string;
   /** Which big screen this is the stage of ("main", or "screen-2"...); a stage with none is the main screen's. */

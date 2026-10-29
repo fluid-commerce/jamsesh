@@ -340,9 +340,10 @@ export class Brain {
     const eligible = (id: string) => {
       const st = s.stage(id);
       const lock = s.lockOf(id);
-      // A screen the sharer themself pinned or locked is theirs to share over.
-      if (lock) return lock.personId === share.personId;
-      return !(st.pinned && st.by !== "Room brain" && st.by !== "JamSesh") || st.by === share.personName;
+      // A screen the sharer themself pinned or locked is theirs to share over, matched by a person id on both sides: a missing id is nobody.
+      if (lock) return !!share.personId && lock.personId === share.personId;
+      if (!(st.pinned && st.by !== "Room brain" && st.by !== "JamSesh")) return true;
+      return !!share.personId && st.pinnedById === share.personId;
     };
     const target = ["main", ...s.screens().filter((x) => x.role === "extra").map((x) => x.id)].find(eligible);
     if (!target) {
@@ -1555,9 +1556,10 @@ export function refusesScreen(text: string) {
 }
 
 export function asksForScreen(ev: JamEvent) {
+  // A refusal wins over anything the model labelled. (The caller also needs the person's own direct request; a label alone never authorizes.)
+  if (refusesScreen(ev.text)) return false;
   const intent = ev.data?.intent;
   if (typeof intent === "string") return intent === "present";
-  if (refusesScreen(ev.text)) return false;
   const t = ev.text.trim().toLowerCase().replace(/^(?:hey |ok |okay )?(?:jamsesh|jam|the room)[,:]?\s+/, "");
   if (/^(?:what|why|who|when|where|how|which|is|are|do|does|did|has|have)\b/.test(t)) return false;
   return /\b(?:show|put|bring|pull|display|switch|swap|replace|cast|throw|open|pin|unlock|clear|take)\b/.test(t);

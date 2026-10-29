@@ -93,7 +93,6 @@ export class Session {
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
-    for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
     this.reconcileShares();
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
@@ -1269,8 +1268,9 @@ export class Session {
     const sh = this.store.get("shares", id);
     if (!sh) return;
     // The share's status, every screen's restore and the removal of its snapshot are one write: a crash between them can't leave an ended share on screen.
-    this.store.atomic(() => {
-      this.store.put("shares", { ...sh, status });
+    this.atomically(() => {
+      this.store.put("shares", { ...sh, status }, false);
+      this.after(() => bus.changed("shares"));
       this.sharesShown.delete(id);
       this.releaseShareTiles(id);
     });
@@ -1295,11 +1295,20 @@ export class Session {
     }
   }
 
-  /** At startup: a share that already ended but whose snapshot is still stored (the hub stopped between the steps of an older ending) is released now. */
+  /**
+   * At startup: shares that ended but whose snapshot is still stored (the hub stopped between the steps of an older
+   * ending) are released now. One whose snapshot is gone can't be given back what it hid, so its screen is left as it is.
+   */
   private reconcileShares() {
-    for (const id of Object.keys(this.priorStages())) {
-      if (this.store.get("shares", id)?.status === "live") continue;
-      this.store.atomic(() => this.releaseShareTiles(id));
+    // Nobody is still sharing after a restart.
+    for (const sh of this.store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
+    for (const id of Object.keys(this.priorStages())) this.atomically(() => this.releaseShareTiles(id));
+    // An ended share still on a screen with nothing saved to give back: nothing can be restored, so the screen stays as it is.
+    for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) {
+      const st = this.stage(screen);
+      for (const t of st.mode === "layout" ? st.layout?.tiles ?? [] : [])
+        if (t.kind === "screen" && this.store.get("shares", t.shareId)?.status !== "live")
+          console.warn(`share ${t.shareId} ended but still shows on ${screen}, and no earlier screen was saved; left as it is`);
     }
   }
 
@@ -1615,6 +1624,9 @@ export class Session {
     const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
+    // Who pinned it, by identity (never by name): only a person with an id of their own is recorded.
+    if (stage.pinned && opts.person?.id) stage.pinnedById = opts.person.id;
+    else if (!stage.pinned || opts.person) delete stage.pinnedById;
     this.commitStage(stage, screen);
     opts.claim?.revs.set(screen, this.stageRev(screen));
     this.recordHistory(stage, screen);
@@ -1643,29 +1655,63 @@ export class Session {
     return !claim || (claim.revs.get(screen) ?? 0) === this.stageRev(screen);
   }
 
+  /** Effects (sends, timers, sweeps) a stage write has beyond the store; inside `atomically` they wait for the commit. */
+  private effects: (() => void)[] | null = null;
+  private after(fn: () => void) {
+    if (this.effects) this.effects.push(fn);
+    else fn();
+  }
+
+  /**
+   * One store transaction whose in-memory side (stage revisions, shown-share marks) is put back if it fails, and whose
+   * effects (sends, timers) run only after it commits. A rollback runs none of them.
+   */
+  private atomically<T>(fn: () => T): T {
+    if (this.effects) return fn();
+    const revs = new Map(this.stageRevs);
+    const shown = new Set(this.sharesShown);
+    this.effects = [];
+    try {
+      const out = this.store.atomic(fn);
+      const run = this.effects;
+      this.effects = null;
+      for (const f of run) f();
+      return out;
+    } catch (e) {
+      this.effects = null;
+      this.stageRevs = revs;
+      this.sharesShown = shown;
+      throw e;
+    }
+  }
+
   private commitStage(stage: Stage, screen: string) {
     this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
-    bus.changed("stageTiles");
+    this.after(() => bus.changed("stageTiles"));
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
-      bus.changed("screens");
-      this.noteSharesShown();
-      this.scheduleShareSweep();
-      clearTimeout(this.screenReverts.get(screen));
-      if (this.revertsToBoard(stage))
-        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
+      this.after(() => {
+        bus.changed("screens");
+        this.noteSharesShown();
+        this.scheduleShareSweep();
+        clearTimeout(this.screenReverts.get(screen));
+        if (this.revertsToBoard(stage))
+          this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
+      });
       return;
     }
     this.store.setSetting("stage", stage);
-    bus.send({ type: "stage", stage });
-    this.noteSharesShown();
-    this.scheduleShareSweep();
-    if (this.bigScreens.size > 1) bus.changed("screens");
-    if (this.stageRevert) clearTimeout(this.stageRevert);
-    this.stageRevert = null;
-    // Anything the brain brought up returns to the live board after a while.
-    if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
+    this.after(() => {
+      bus.send({ type: "stage", stage });
+      this.noteSharesShown();
+      this.scheduleShareSweep();
+      if (this.bigScreens.size > 1) bus.changed("screens");
+      if (this.stageRevert) clearTimeout(this.stageRevert);
+      this.stageRevert = null;
+      // Anything the brain brought up returns to the live board after a while.
+      if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
+    });
   }
 
   // ---- locks: what a person puts up stays up (3.1) ----
@@ -1900,7 +1946,7 @@ export class Session {
   private expireShowRequest(req: ShowRequest): ShowRequest {
     const gone: ShowRequest = { ...req, status: "expired" };
     this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === req.id ? gone : r)));
-    bus.changed("showRequests");
+    this.after(() => bus.changed("showRequests"));
     return gone;
   }
 
@@ -1930,7 +1976,7 @@ export class Session {
     const mine = (all[screen] ?? []).filter((e) => JSON.stringify(e.stage) !== sig);
     const entry: StageHistoryEntry = { id: newId("his"), screen, at: stage.since, by: stage.by, label: stageLabel(stage, (id) => this.store.get("artifacts", id)?.title), stage: snap };
     this.store.setSetting("stageHistory", { ...all, [screen]: [entry, ...mine].slice(0, Session.HISTORY_MAX) });
-    bus.changed("stageHistory");
+    this.after(() => bus.changed("stageHistory"));
   }
 
   /** What a screen showed before what it shows now, newest first. */

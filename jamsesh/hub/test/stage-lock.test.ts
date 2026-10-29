@@ -1171,3 +1171,19 @@ test("refusals are never a request to put something up: not by the simple rules,
   expect(s.stage().items).toEqual([a.id]);
   expect(s.stage().lock?.personId).toBe(chey.id);
 });
+
+test("a refusal beats a model's 'present' label, and the label alone never replaces a lock", async () => {
+  const { s, chey, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  const b = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const labelled = { ...said(chey, "JamSesh, don't show me pricing"), data: { direct: true, intent: "present" } } as JamEvent;
+  expect(asksForScreen(labelled)).toBe(false);
+  const r = String(await tools([labelled]).show_on_screen.execute({ mode: "spotlight", artifactIds: [b.id] }));
+  expect(r).not.toBe("On screen.");
+  expect(s.stage().items).toEqual([a.id]);
+  // Labelled present but only overheard (not addressed to JamSesh): not the owner's request either.
+  const overheard = { ...said(chey, "let's look at pricing"), data: { intent: "present" } } as JamEvent;
+  expect(String(await tools([overheard]).show_on_screen.execute({ mode: "spotlight", artifactIds: [b.id] }))).not.toBe("On screen.");
+  expect(s.stage().items).toEqual([a.id]);
+});

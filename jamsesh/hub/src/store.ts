@@ -156,14 +156,17 @@ export class Store {
   private txDepth = 0;
   /** Everything `fn` writes lands together or not at all (a crash or a throw in between leaves the earlier state). Nests. */
   atomic<T>(fn: () => T): T {
-    if (this.txDepth++ > 0) {
+    if (this.txDepth > 0) {
+      this.txDepth++;
       try {
         return fn();
       } finally {
         this.txDepth--;
       }
     }
+    // The depth counts only a transaction that really began: a BEGIN that throws leaves it at 0.
     this.db.exec("BEGIN IMMEDIATE");
+    this.txDepth = 1;
     try {
       const out = fn();
       this.db.exec("COMMIT");
@@ -175,7 +178,7 @@ export class Store {
       this.cache.clear();
       throw e;
     } finally {
-      this.txDepth--;
+      this.txDepth = 0;
     }
   }
 
