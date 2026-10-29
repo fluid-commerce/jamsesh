@@ -430,8 +430,13 @@ export class Brain {
       .join("\n\n");
   }
 
-  /** When the brain last asked whether to replace each locked screen: a plain "yes" answers only that question. */
-  private unlockAsked = new Map<string, number>();
+  /**
+   * Locked screens the brain was refused (by lock `since`), until it asks the room about them; then the
+   * question it asked, per screen. A bystander's plain "yes" answers only that question: about that very
+   * lock, said after it and within `UNLOCK_ASK_MS`.
+   */
+  private unlockRefused = new Map<string, number>();
+  private unlockAsked = new Map<string, { since: number; at: number }>();
   static UNLOCK_ASK_MS = 3 * 60_000;
 
   /**
@@ -449,7 +454,7 @@ export class Brain {
       s.unlockStage(screen);
       return null;
     }
-    this.unlockAsked.set(screen, Date.now());
+    this.unlockRefused.set(screen, lock.since);
     return `${lock.by} has this screen locked, so you can't replace it. Ask the room with say_to_room (kind problem), for example "${lock.by} has the screen locked. Want me to replace it?". If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
 
@@ -637,6 +642,10 @@ export class Brain {
         inputSchema: z.object({ text: z.string(), kind: z.enum(["answer", "problem", "confirm"]) }),
         execute: async ({ text, kind }) => {
           const how = await speak(s, text, { source, kind });
+          // Telling the room it can't replace a locked screen is the question a bystander's yes may answer (about that lock only).
+          if (kind === "problem")
+            for (const [screen, since] of this.unlockRefused) if (s.lockOf(screen)?.since === since) this.unlockAsked.set(screen, { since, at: Date.now() });
+          this.unlockRefused.clear();
           return how === "spoken" ? "Said out loud." : "Shown as text.";
         },
       }),
@@ -850,7 +859,8 @@ export class Brain {
           // The words decide, not the model: a whole, plain yes ("yes, replace it"), never "don't unlock it" or "should I unlock it?".
           // The owner may ask for it directly; anyone else's yes counts only as the answer to the question just asked about this screen.
           const owner = !!ev && !!lock.personId && ev.authorId === lock.personId && !!ev.data?.direct;
-          const asked = Date.now() - (this.unlockAsked.get(id) ?? 0) < Brain.UNLOCK_ASK_MS;
+          const q = this.unlockAsked.get(id);
+          const asked = !!ev && !!q && q.since === lock.since && ev.ts >= q.at && ev.ts - q.at < Brain.UNLOCK_ASK_MS && Date.now() - q.at < Brain.UNLOCK_ASK_MS;
           if (!ev || !unlockConsent(ev.text, brainNames(s.settings())) || !(owner || asked))
             return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with say_to_room first.`);
           this.unlockAsked.delete(id);

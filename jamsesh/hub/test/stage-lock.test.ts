@@ -238,7 +238,9 @@ test("the room brain's show tools don't replace a lock; its owner asking does", 
     expect(String(r)).not.toBe("On screen.");
   }
   expect(s.stage().items).toEqual([mine.id]);
-  // Unlock needs a person's plain yes, named by its line, in answer to the question.
+  // Unlock needs a person's plain yes, named by its line, in answer to the question the brain asked.
+  (s as any).gatewayKey = () => "";
+  await t1.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
   const asking = said(felipe, "show the checkout");
   expect(String(await tools([asking]).unlock_screen.execute({ line: asking.id }))).toContain("no line here plainly says to replace it");
   const yes = said(felipe, "yeah go ahead and replace it");
@@ -642,8 +644,11 @@ test("unlock_screen takes only a whole plain yes: negations, questions and mixed
   const { s, chey, felipe, tools, said } = room();
   const mine = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  // The brain asked the room (a refused show), so a yes now answers that question.
-  await tools([said(felipe, "show something else")]).show_on_screen.execute({ mode: "agents" });
+  // The brain was refused and asked the room, so a yes now answers that question.
+  (s as any).gatewayKey = () => "";
+  const t0 = tools([said(felipe, "show something else")]);
+  await t0.show_on_screen.execute({ mode: "agents" });
+  await t0.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
   for (const text of ["No, don't unlock it", "don't unlock it", "should I unlock it?", "Yes, keep mine up", "yes but not yet", "I wouldn't unlock it", "unlock it?", "no", "keep it up", "maybe go ahead"]) {
     const line = said(felipe, text);
     const r: any = await tools([line]).unlock_screen.execute({ line: line.id });
@@ -657,15 +662,41 @@ test("unlock_screen takes only a whole plain yes: negations, questions and mixed
   expect(await tools([yes]).unlock_screen.execute({ line: yes.id })).toContain("Unlocked");
 });
 
-test("a bystander's yes counts only as the answer to the brain's question; the owner may ask to unlock directly", async () => {
-  const { s, chey, felipe, tools, said } = room();
+test("a bystander's yes counts only as the answer to the brain's question, about that lock; the owner may ask to unlock directly", async () => {
+  const { hub, s, chey, felipe, tools, said } = room();
   const mine = artifact(s, "Pricing");
   const cast = () => s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   cast();
+  (s as any).gatewayKey = () => "";
+  const brain = hub.brain as any;
+  const yesTo = async (text = "yes, replace it", ts = Date.now()) => {
+    const line = said(felipe, text, ts);
+    return String(await tools([line]).unlock_screen.execute({ line: line.id }));
+  };
   // Nobody asked: Felipe's "unlock it" out of the blue does nothing.
-  const out = said(felipe, "unlock it");
-  expect(String(await tools([out]).unlock_screen.execute({ line: out.id }))).toContain("plainly says");
+  expect(await yesTo("unlock it")).toContain("plainly says");
+  // The brain was refused but hasn't asked anyone yet: still nothing.
+  const t = tools([said(felipe, "show the agents")]);
+  await t.show_on_screen.execute({ mode: "agents" });
+  expect(await yesTo()).toContain("plainly says");
+  // Asked: a yes said before the question doesn't answer it; one said too long after doesn't either.
+  const before = Date.now() - 1000;
+  await t.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
+  expect(await yesTo("yes, replace it", before)).toContain("plainly says");
+  const asked = brain.unlockAsked.get("main");
+  brain.unlockAsked.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
+  expect(await yesTo("yes, replace it", Date.now() - 4 * 60_000 + 10)).toContain("plainly says");
+  brain.unlockAsked.set("main", asked);
+  // The lock changed since the question (Chey cast again): the question was about the old lock.
+  cast();
+  expect(await yesTo()).toContain("plainly says");
   expect(s.stage().lock?.by).toBe("Chey");
+  // A question asked about this lock, then a yes: that works.
+  const t2 = tools([said(felipe, "show the agents")]);
+  await t2.show_on_screen.execute({ mode: "agents" });
+  await t2.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
+  expect(await yesTo()).toContain("Unlocked");
+  cast();
   // Chey asking JamSesh to unlock her own screen does.
   const own = { ...said(chey, "JamSesh, unlock my screen"), data: { direct: true } } as JamEvent;
   expect(await tools([own]).unlock_screen.execute({ line: own.id })).toContain("Unlocked");
