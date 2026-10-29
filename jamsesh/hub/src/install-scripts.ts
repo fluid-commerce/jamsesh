@@ -378,27 +378,54 @@ configured=0
 
 CLAUDE="$(find_cli claude || true)"
 if [ -n "$CLAUDE" ]; then
+  # claude mcp has no replace: the old entry has to go before the new one is added. So the old entry and
+  # the credential it uses are saved first (the new token goes in only after), and both are put back
+  # if the new one can't be added. Nothing here puts a token on a command line.
+  cred="$DIR/mcp-headers.json"
+  prev_cred="$DIR/mcp-headers.json.prev"
+  rollback_json="$DIR/mcp-headers.rollback.json"
+  rollback_sh="$DIR/mcp-headers.rollback.sh"
+  rm -f "$prev_cred"
+  old_mcp="$(perl -MJSON::PP -0777 -ne 'my $d = eval { decode_json($_) }; my $o = ref $d eq "HASH" && ref $d->{mcpServers} eq "HASH" ? $d->{mcpServers}{jamsesh} : undef; print JSON::PP->new->canonical->encode($o) if ref $o eq "HASH"' "$HOME/.claude.json" 2>/dev/null || true)"
+  [ -f "$cred" ] && private "$prev_cred" < "$cred"
+  # An earlier entry with its credential inline: the credential goes to a helper of its own, since
+  # putting the entry back with it would put the token on a command line.
+  rollback_mcp=""
+  if [ -n "$old_mcp" ]; then
+    old_auth="$(printf '%s' "$old_mcp" | perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); my $h = ref $o->{headers} eq "HASH" ? $o->{headers} : {}; my ($k) = grep { lc eq "authorization" } keys %$h; print encode_json({ authorization => $h->{$k} }) if defined $k && !ref $h->{$k}' 2>/dev/null || true)"
+    if [ -n "$old_auth" ]; then
+      printf '%s' "$old_auth" | private "$rollback_json"
+      printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$rollback_json")" | private "$rollback_sh"
+      chmod 700 "$rollback_sh"
+    fi
+    rollback_mcp="$(printf '%s' "$old_mcp" | JAMSESH_HELPER="$([ -n "$old_auth" ] && printf '%s' "$rollback_sh")" perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); if ($ENV{JAMSESH_HELPER}) { delete $o->{headers}{$_} for grep { lc eq "authorization" } keys %{ $o->{headers} }; delete $o->{headers} unless %{ $o->{headers} }; $o->{headersHelper} = $ENV{JAMSESH_HELPER} } print JSON::PP->new->canonical->encode($o)')"
+  fi
   # Claude Code asks a helper for the credential header each time it connects, so the token is in
   # neither its arguments nor its config. Without a token the app's relay adds it.
   helper=""
   if [ -n "$TOKEN" ]; then
-    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' | private "$DIR/mcp-headers.json"
-    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$DIR/mcp-headers.json")" | private "$DIR/mcp-headers.sh"
+    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' | private "$cred"
+    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$cred")" | private "$DIR/mcp-headers.sh"
     chmod 700 "$DIR/mcp-headers.sh"
     helper="$DIR/mcp-headers.sh"
   fi
-  # claude mcp has no replace: the old entry has to go before the new one is added. It is kept, and put
-  # back if the new one can't be added (its credential from the helper file, never on a command line).
-  old_mcp="$(perl -MJSON::PP -0777 -ne 'my $d = eval { decode_json($_) }; my $o = ref $d eq "HASH" && ref $d->{mcpServers} eq "HASH" ? $d->{mcpServers}{jamsesh} : undef; print JSON::PP->new->canonical->encode($o) if ref $o eq "HASH"' "$HOME/.claude.json" 2>/dev/null || true)"
   new_mcp="$(JAMSESH_URL="$HUB/mcp" JAMSESH_HELPER="$helper" perl -MJSON::PP -e 'print JSON::PP->new->canonical->encode({ type => "http", url => $ENV{JAMSESH_URL}, ($ENV{JAMSESH_HELPER} ? (headersHelper => $ENV{JAMSESH_HELPER}) : ()) })')"
   "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
   if ! "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null; then
-    if [ -n "$old_mcp" ]; then
-      "$CLAUDE" mcp add-json -s user jamsesh "$(printf '%s' "$old_mcp" | JAMSESH_HELPER="$helper" perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); if (ref $o->{headers} eq "HASH") { delete $o->{headers}{$_} for grep { lc eq "authorization" } keys %{ $o->{headers} }; delete $o->{headers} unless %{ $o->{headers} }; $o->{headersHelper} = $ENV{JAMSESH_HELPER} if $ENV{JAMSESH_HELPER} } print JSON::PP->new->canonical->encode($o)')" >/dev/null 2>&1 || true
+    restored=1
+    # The earlier credential first, then the earlier entry, then a check that it is really there.
+    if [ -f "$prev_cred" ]; then mv -f "$prev_cred" "$cred" || restored=0; else rm -f "$cred" "$DIR/mcp-headers.sh"; fi
+    if [ -n "$rollback_mcp" ]; then
+      "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1 || restored=0
     fi
-    echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2
+    if [ "$restored" = 1 ]; then
+      echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2
+    else
+      echo "JamSesh couldn't register its MCP server with Claude Code, and couldn't put the earlier one back. Check it with: claude mcp get jamsesh" >&2
+    fi
     exit 1
   fi
+  rm -f "$prev_cred" "$rollback_json" "$rollback_sh"
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
   # JamSesh used to write a block into CLAUDE.md. It never does now, and takes the old one out.

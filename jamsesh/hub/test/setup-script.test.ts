@@ -388,8 +388,54 @@ describe("agent setup script", () => {
     const log = readFileSync(box.log, "utf8").trim().split("\n");
     const back = log.find((l) => l.includes("add-json") && l.includes("old-host"))!;
     expect(back).toBeDefined();
-    expect(back).toContain(`"headersHelper":"${box.home}/.jamsesh/mcp-headers.sh"`);
+    // Its credential moved to a helper of its own, and still authenticates to the old room.
+    expect(back).toContain(`"headersHelper":"${box.home}/.jamsesh/mcp-headers.rollback.sh"`);
+    expect(readFileSync(join(box.home, ".jamsesh/mcp-headers.rollback.json"), "utf8")).toBe('{"authorization":"Bearer old-secret"}');
+    expect(statSync(join(box.home, ".jamsesh/mcp-headers.rollback.json")).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(box.home, ".jamsesh/mcp-headers.json"))).toBe(false);
     expect(back).toContain('"X-Other":"1"');
     expect(log.join("\n")).not.toContain("old-secret");
+  });
+
+  test("a failed reinstall puts the earlier room's credential back, so the earlier entry still signs in to it", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
+    writeFileSync(join(dir, "mcp-headers.sh"), `#!/bin/sh\nexec cat '${dir}/mcp-headers.json'\n`, { mode: 0o700 });
+    const entry = { type: "http", url: "http://old-host:4747/mcp", headersHelper: join(dir, "mcp-headers.sh") };
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: entry } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("the earlier one was put back");
+    // The helper the earlier entry names still hands out the earlier room's credential, not this one's.
+    expect(readFileSync(join(dir, "mcp-headers.json"), "utf8")).toBe('{"authorization":"Bearer old-room"}');
+    const back = readFileSync(box.log, "utf8").split("\n").find((l) => l.includes("add-json") && l.includes("old-host"))!;
+    expect(back).toContain(`"headersHelper":"${dir}/mcp-headers.sh"`);
+    expect(readdirSync(dir).filter((f) => f.endsWith(".prev"))).toEqual([]);
+  });
+
+  test("if the earlier entry can't be put back either, setup says so instead of claiming it was", async () => {
+    const box = sandbox();
+    // Every add-json fails, and so does the check that the entry is there.
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*|*" get "*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("couldn't put the earlier one back");
+    expect(r.stderr).not.toContain("was put back");
+  });
+
+  test("a failed first install leaves no credential behind, and a good one leaves no spare copies", async () => {
+    const failing = sandbox();
+    writeFileSync(join(failing.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    expect((await run(failing)).code).not.toBe(0);
+    expect(existsSync(join(failing.home, ".jamsesh/mcp-headers.json"))).toBe(false);
+    const good = sandbox();
+    stubCli(join(good.bin, "claude"), good.log);
+    writeFileSync(join(good.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old/mcp", headers: { Authorization: "Bearer x" } } } }));
+    expect((await run(good)).code).toBe(0);
+    expect(readdirSync(join(good.home, ".jamsesh")).filter((f) => /\.prev$|rollback/.test(f))).toEqual([]);
   });
 });
