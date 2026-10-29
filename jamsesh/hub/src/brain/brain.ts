@@ -165,7 +165,9 @@ export class Brain {
   }
 
   /** Decides every waiting host request a person clearly answered in these lines; true when a line was only that answer. */
-  private decideByVoice(batch: JamEvent[]) {
+  private decideByVoice(lines: JamEvent[]) {
+    // A line that carries files never decides a host request (withFiles).
+    const batch = lines.filter((e) => !withFiles([e]));
     let only = false;
     const pending = this.host.pendingRequests();
     for (const req of pending) {
@@ -346,10 +348,7 @@ export class Brain {
 
   private async directPass(ev: JamEvent, extra: string) {
     const m = this.live("router");
-    // The rules act on the words straight away, so with files attached they don't run: the person is told instead.
-    const attached = Array.isArray(ev.data.attachments) && ev.data.attachments.length > 0;
-    const fallback = () => (attached ? void speak(this.session, "I couldn't work through those files just now. Try again in a moment.", { source: speechSource([ev]), kind: "problem" }) : this.offlineDirect(ev));
-    if (!m) return fallback();
+    if (!m) return this.offlineDirect(ev);
     const pass = { effects: 0 };
     this.session.setBrain("thinking");
     bus.send({ type: "thinking", on: true, label: `${this.session.settings().brainName} is on it` });
@@ -360,20 +359,20 @@ export class Brain {
         model: m,
         system: this.system(),
         ...input,
-        tools: this.tools([ev], pass, "person", "direct", files === true && ev.data.noWords ? "read" : files),
+        tools: this.tools([ev], pass, "person", "direct", files === "read"),
         stopWhen: isStepCount(8),
       });
       this.session.setBrain("ready");
       // A plain-text reply with no tool call is still an answer: say it rather than drop the request.
       if (!pass.effects && !this.stopped) {
         if (text?.trim()) void speak(this.session, text.trim(), { source: speechSource([ev]), kind: "answer" });
-        else fallback();
+        else this.offlineDirect(ev);
       }
     } catch (e) {
       this.gatewayTrouble(e);
       console.error("direct:", describeError(e));
       // Only when the pass did nothing yet: otherwise the rules would do some of it a second time.
-      if (!pass.effects) fallback();
+      if (!pass.effects) this.offlineDirect(ev);
     } finally {
       bus.send({ type: "thinking", on: false });
     }
@@ -555,15 +554,16 @@ export class Brain {
    * The brain's tools for one pass. `pass.effects` counts the calls that changed something (not refusals or no_action).
    * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
    * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
-   * `files`: the pass also reads attached files, whose text anyone can write, so it gets FILE_TOOLS only, and the ones
-   * that act only put cards on the Tasks board for a person to confirm, however the request was worded (SPEC 12.6).
-   * `"read"`: a message with files and no words, which asks for nothing: answering tools only.
+   * A pass whose lines carry files (withFiles, decided here for every route: direct, overheard, an agent's message)
+   * gets FILE_TOOLS only, and the ones that act only put cards on the Tasks board for a person to confirm, however
+   * the request was worded (SPEC 12.6). With files and no words, or `answerOnly` (files that couldn't be read): answering tools only.
    */
-  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", route: "direct" | "overheard" = "direct", files: boolean | "read" = false) {
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", route: "direct" | "overheard" = "direct", answerOnly = false) {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
+    const files = withFiles(batch);
     // Overheard, or with a file in the pass: nothing changes until a person accepts a card. One flag, read by every tool that acts.
-    const proposeOnly = route === "overheard" || !!files;
+    const proposeOnly = route === "overheard" || files;
     const origin = files ? ("document" as const) : ("overheard" as const);
     // Shell commands and builds on the host never run from here: they become requests a person
     // approves (button, or a clear spoken answer to that request), whoever or whatever asked.
@@ -1086,7 +1086,7 @@ export class Brain {
     if (route === "overheard") for (const name of ["triage_card", "ask_agent"]) delete (all as Record<string, unknown>)[name];
     // A file's contents never act: with one attached, only answering and proposing tools are offered (the acting ones
     // propose, above), and with no words, only answering ones.
-    const allowed = files === "read" ? ANSWERING : files ? FILE_TOOLS : null;
+    const allowed = files ? (answerOnly || batch.some((e) => e.data?.noWords) ? ANSWERING : FILE_TOOLS) : null;
     if (allowed) for (const name of Object.keys(all)) if (!allowed.has(name)) delete (all as Record<string, unknown>)[name];
     // A call counts as an effect of this pass unless it refused or changed nothing; after stop(), nothing runs.
     for (const [name, t] of Object.entries(all) as [string, { execute?: (...a: any[]) => any }][]) {
@@ -1110,6 +1110,8 @@ export class Brain {
   private offlineDirect(ev: JamEvent) {
     if (this.stopped) return;
     const s = this.session;
+    // The rules act on the words straight away, so with files attached they don't run: the person is told instead.
+    if (withFiles([ev])) return void speak(s, "I couldn't work through those files just now. Try again in a moment.", { source: speechSource([ev]), kind: "problem" });
     const t = ev.text.toLowerCase();
     // Feedback about how the brain behaves still sticks without a model.
     if (/\b(talk less|be quiet|stop talking|don'?t (talk|speak)|quieter|shush|less chatty)\b/.test(t)) {
@@ -1152,8 +1154,10 @@ export class Brain {
   }
 
   /** `direct`: someone asked JamSesh (so work goes straight out); otherwise it was overheard and waits on the Tasks board. */
-  ruleRoute(batch: JamEvent[], triage: Triage, direct = false) {
+  ruleRoute(lines: JamEvent[], triage: Triage, direct = false) {
     if (this.stopped) return;
+    // The rules act on words straight away: lines that carry files are left to a model pass, which can only propose.
+    const batch = lines.filter((e) => !withFiles([e]));
     const s = this.session;
     const agents = s.workers().filter((a) => a.status !== "offline");
     for (const line of triage.lines) {
@@ -1554,6 +1558,8 @@ const refuse = (text: string) => new Refusal(text);
 /** Tools that never change anything, so calling them isn't an effect of the pass. */
 const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
 
+/** Whether any line of a pass carries files: the one test every route into the brain goes through (tools, the rules, voice decisions). */
+export const withFiles = (batch: JamEvent[]) => batch.some((e) => Array.isArray(e.data?.attachments) && e.data.attachments.length > 0);
 /** What a pass that also reads attached files answers with. */
 const ANSWERING = new Set(["no_action", "say_to_room", "search_artifacts"]);
 /**
