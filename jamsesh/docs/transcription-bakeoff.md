@@ -49,13 +49,20 @@ On an 18-second clip both whisper (Metal) and Parakeet (CPU, 4 threads) take 0.5
 
 ## Decision
 
-Parakeet TDT 0.6B v2 with hotwords is the host engine (SPEC 9.3): it ties whisper on accuracy, is
-three times faster on typical lines, and runs on sherpa-onnx, which the app already ships, so
-nothing new is bundled. The model (482 MB, CC-BY-4.0, from sherpa-onnx's GitHub release with a
-pinned SHA-256) is downloaded on a Mac's first host session rather than bundled, because only hosts
-need it. Its cost is about 2 GB of memory in its own process while the hub runs. whisper.cpp stays
-second (and takes other languages), and the gateway is the fallback. The correction pass runs after
-every engine.
+**whisper.cpp with the vocabulary prompt and the correction pass is the default host engine**
+(SPEC 9.3). It had the lowest word error here, uses under half Parakeet's memory (876 MB against
+about 2 GB), needs no 482 MB download, works in any language, and doesn't invent the room's words on
+silence.
+
+**Parakeet TDT 0.6B v2 with hotwords is an opt-in**: Settings > Transcription > "Faster engine
+(English only, downloads 482 MB, uses about 2 GB memory)". It's three times faster on typical lines
+and runs on sherpa-onnx, which the app already ships. The model (CC-BY-4.0, from sherpa-onnx's
+GitHub release with a pinned SHA-256) downloads only when the host turns it on, and once it's ready
+it goes first. The gateway is the fallback, and the correction pass and the room-words-only drop
+apply to every engine.
+
+**The office's bake-off with real voices decides whether the default flips to Parakeet.** Run it on
+30 to 60 clips recorded in a real room, including the names that fail, before changing it.
 
 Parakeet's hotwords in sherpa-onnx need `modelingUnit: "bpe"` with a `bpeVocab` file; the model
 package has none, so the hub writes one from `tokens.txt`.

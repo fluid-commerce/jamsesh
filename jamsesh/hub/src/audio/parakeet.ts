@@ -1,4 +1,5 @@
-// Parakeet (5.2): NVIDIA's Parakeet TDT 0.6B v2 speech model, the host's transcriber. It runs through
+// Parakeet (5.2): NVIDIA's Parakeet TDT 0.6B v2 speech model, the host's opt-in faster engine
+// (Settings > Transcription; whisper.cpp is the default until real-room clips decide). It runs through
 // sherpa-onnx, the library the app already ships for voiceprints, so there's no new runtime. The
 // model (482 MB) is downloaded the first time a host needs it, into ~/.jamsesh/models, and checked
 // against a pinned hash. It runs in a child process (stt-server.ts): a decode never blocks the hub,
@@ -52,8 +53,8 @@ function serverArgv(dir: string): string[] {
 
 export class Parakeet {
   private proc: ReturnType<typeof Bun.spawn> | null = null;
-  private state: ModelState = "missing";
-  private detail = "Not started.";
+  private state: ModelState = "off";
+  private detail = "Off. Turn on the faster engine in Settings.";
   private progress: number | null = null;
   private stopped = false;
   /** Called when a running engine's process ends on its own. */
@@ -75,6 +76,7 @@ export class Parakeet {
    */
   async start(download: boolean): Promise<string | null> {
     if (process.env.JAMSESH_PARAKEET === "0") return this.set("off", "Turned off on this host (JAMSESH_PARAKEET=0)."), null;
+    this.stopped = false;
     let dir = findModel();
     if (!dir && !download) return this.set("missing", `The speech model isn't on this host (${Math.round(PARAKEET.bytes / 1e6)} MB download).`), null;
     try {
@@ -82,9 +84,11 @@ export class Parakeet {
       if (this.stopped) return null;
       this.set("starting", "Loading the speech model.");
       const url = await this.spawn(dir);
+      if (this.stopped) return this.stop(), null;
       this.set("ready", `Running on this host (${PARAKEET.label}).`);
       return url;
     } catch (e) {
+      if (this.stopped) return this.set("off", "Off. Turn on the faster engine in Settings."), null;
       this.set("failed", (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 240));
       return null;
     }
@@ -163,9 +167,11 @@ export class Parakeet {
     return `http://127.0.0.1:${port}`;
   }
 
+  /** Stops the engine, or a download in progress; start() can run again afterwards. */
   stop() {
     this.stopped = true;
     if (this.proc) void stopHelper(this.proc);
     this.proc = null;
+    if (this.state !== "off") this.set("off", "Off. Turn on the faster engine in Settings.");
   }
 }

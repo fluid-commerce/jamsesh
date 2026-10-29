@@ -136,6 +136,7 @@ export class Session {
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),
       vocabulary: cleanVocabulary(s.setting<unknown>("vocabulary", [])),
+      fastEngine: s.setting<unknown>("fastEngine", false) === true,
       gatewayKeySet: keyInSettings || !!config.envGatewayKey,
       gatewayKeySource: keyInSettings ? "settings" : config.envGatewayKey ? "env" : "none",
     };
@@ -155,12 +156,13 @@ export class Session {
   }
 
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language", "vocabulary"] as const;
+    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language", "vocabulary", "fastEngine"] as const;
     for (const k of allowed) {
       if (patch[k] === undefined) continue;
       // The API is the contract: a paired browser can post anything.
       if (k === "brainAliases") this.store.setSetting(k, cleanNames(patch[k]));
       else if (k === "vocabulary") this.store.setSetting(k, cleanVocabulary(patch[k]));
+      else if (k === "fastEngine") this.store.setSetting(k, patch[k] === true);
       else if (k === "brainName") {
         const n = typeof patch[k] === "string" ? patch[k].trim().slice(0, MAX_NAME) : "";
         if (n) this.store.setSetting(k, n);

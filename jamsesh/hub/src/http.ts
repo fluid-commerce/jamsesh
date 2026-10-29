@@ -40,7 +40,7 @@ function hostIdOf(hub: Hub) {
 /** Human-only paths whose personId is the person acted on, not the caller. */
 const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request|devices)$/;
 /** Settings only the host machine may change (SPEC 14, host-only). */
-const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled"] as const;
+const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled", "fastEngine"] as const;
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
@@ -515,9 +515,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/settings" && req.method === "POST") {
-    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control and the brain's on/off switch on the host itself.", 403);
+    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control, the faster engine and the brain's on/off switch on the host itself.", 403);
     s.updateSettings(body ?? {});
     hub.brain.refreshStatus();
+    if (body?.fastEngine !== undefined || body?.transcription !== undefined) void hub.transcriber.syncFastEngine();
     return json(s.settings());
   }
 

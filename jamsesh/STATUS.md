@@ -57,7 +57,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Multi-device grouping, lag, echo, degraded copies | Simulated | Real recorded voices, degraded and lagged in tests. |
 | Speaker ID when someone walks away from their laptop | Simulated | About 50 percent without a voice sample; better after "Teach JamSesh your voice". |
 | A real room with real microphones | Not tested | |
-| Host Parakeet with the room's vocabulary, correction pass (5.2) | Simulated | Bake-off on 50 synthetic clips (macOS voices, noise, a second voice): 5.6% word error and 97% of names after correction. The model download, the child process, crash and hub-exit handling, the cloud fallback and the correction's false positives are covered by `hub/test/transcription.test.ts`. Real room clips not yet run. |
+| Room vocabulary and correction pass for every engine; whisper.cpp default, Parakeet opt-in (5.2) | Simulated | Bake-off on 50 synthetic clips (macOS voices, noise, a second voice), after correction: whisper with the vocabulary prompt 4.7% word error and 96% of names; Parakeet with hotwords 5.2% and 97%. The opt-in, its download, the child process, crash and hub-exit handling, the cloud fallback and the correction's false positives are covered by `hub/test/transcription.test.ts`. Real room clips not yet run; they decide the default. |
 
 ## Agent briefing and live builds
 

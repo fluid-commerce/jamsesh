@@ -142,7 +142,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
 
           <Saved />
 
-          <Section title="Transcription" help="The host's speech model runs first, then whisper on the host or on laptops that offer theirs. The gateway is the fallback.">
+          <Section title="Transcription" help="Whisper runs on the host, then on laptops that offer theirs. The gateway is the fallback. The faster engine, when on, goes first.">
             <select value={s.transcription} onChange={(e) => update({ transcription: e.target.value as S["transcription"] })} style={{ marginBottom: 12 }}>
               <option value="auto">Local first, gateway fallback</option>
               <option value="local">Local only</option>
@@ -151,12 +151,18 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             {engines && (
               <div className="chip" style={{ display: "block", whiteSpace: "normal" }}>
                 {engines.transcription.length ? engines.transcription.map((e) => `${e.label}${e.healthy ? "" : " (failing)"}`).join(" · ") : "No local engine; using the gateway."}
-                {engines.speechModel && engines.speechModel.state !== "ready" && (
+                {engines.speechModel && !["ready", "off"].includes(engines.speechModel.state) && (
                   <div style={{ color: engines.speechModel.state === "failed" ? "var(--warn)" : "var(--dim)", marginTop: 4 }}>
                     {engines.speechModel.engine}: {engines.speechModel.detail}
                     {engines.speechModel.progress !== null && ` ${engines.speechModel.progress}%`}
                   </div>
                 )}
+              </div>
+            )}
+            {host && (
+              <div className="row between" style={{ marginTop: 12 }}>
+                <span>Faster engine (English only, downloads 482 MB, uses about 2 GB memory)</span>
+                <Toggle on={s.fastEngine} onChange={(v) => update({ fastEngine: v })} label="Faster engine" />
               </div>
             )}
             <div className="field" style={{ marginTop: 12 }}>

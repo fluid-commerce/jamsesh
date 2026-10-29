@@ -230,6 +230,70 @@ test("people's words reach the vocabulary through Settings; agents can't change 
   expect(JSON.stringify(engines.speechModel)).not.toContain(config.home);
 });
 
+// ---- the faster engine is opt-in ----
+
+/** Fetch that answers the model download itself and passes everything else through. */
+function interceptDownload(answer: () => Response) {
+  const real = globalThis.fetch;
+  const asked: string[] = [];
+  globalThis.fetch = ((url: any, init?: any) => (String(url) === PARAKEET.url ? (asked.push(String(url)), Promise.resolve(answer())) : real(url, init))) as typeof fetch;
+  return { asked, restore: () => (globalThis.fetch = real) };
+}
+
+test("by default whisper is the engine: nothing is downloaded and the faster engine says it's off", () => online(async () => {
+  const hub = room();
+  const net = interceptDownload(() => new Response("never", { status: 500 }));
+  try {
+    expect(hub.session.settings().fastEngine).toBe(false);
+    expect(await hub.transcriber.syncFastEngine()).toBe(false);
+    expect(net.asked).toEqual([]);
+    expect(hub.transcriber.parakeet.status()).toMatchObject({ state: "off", progress: null });
+  } finally {
+    net.restore();
+  }
+}));
+
+test("turning it on in Settings starts the download (host only); turning it off stops it and drops the engine", () => online(async () => {
+  const hub = room();
+  const server = startHttp(hub, 0);
+  servers.push(server);
+  const base = `http://127.0.0.1:${server.port}`;
+  const window = { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`, "content-type": "application/json" };
+  const net = interceptDownload(() => new Response("gone", { status: 404 }));
+  try {
+    const laptop = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.7", personId: hub.session.personByName("Britt")!.id });
+    const remote = await fetch(`${base}/api/settings`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.7", authorization: `Bearer ${laptop.token}` }, body: JSON.stringify({ fastEngine: true }) });
+    expect(remote.status).toBe(403);
+    expect(hub.session.settings().fastEngine).toBe(false);
+    const on = await fetch(`${base}/api/settings`, { method: "POST", headers: window, body: JSON.stringify({ fastEngine: true }) });
+    expect(on.status).toBe(200);
+    for (let i = 0; i < 50 && hub.transcriber.parakeet.status().state !== "failed"; i++) await Bun.sleep(20);
+    expect(net.asked).toEqual([PARAKEET.url]);
+    expect(hub.transcriber.parakeet.status().detail).toBe("Couldn't download the speech model: HTTP 404.");
+    // A junk value is off, not on.
+    hub.session.updateSettings({ fastEngine: "yes" as any });
+    expect(hub.session.settings().fastEngine).toBe(false);
+    // Off again: a running engine leaves the pool and whisper takes the lines.
+    hub.session.updateSettings({ fastEngine: true });
+    addParakeet(hub, fakeEngine("never").url);
+    const w = fakeEngine("Shay is here");
+    hub.transcriber.addWorker("laptop", "whisper", w.url);
+    await fetch(`${base}/api/settings`, { method: "POST", headers: window, body: JSON.stringify({ fastEngine: false }) });
+    await Bun.sleep(20);
+    expect(engines(hub).has("parakeet")).toBe(false);
+    expect(hub.transcriber.parakeet.status().state).toBe("off");
+    expect((await hub.transcriber.transcribe(clip, 2)).text).toBe("Chey is here");
+  } finally {
+    net.restore();
+  }
+}));
+
+test("whisper's own invention on noise is dropped too when it's made only of the room's words", async () => {
+  const hub = room();
+  hub.transcriber.addWorker("laptop", "whisper", fakeEngine("Chey, FigCraft, Passport.").url);
+  expect((await hub.transcriber.transcribe(clip, 3, "JamSesh.", 5)).text).toBe("");
+});
+
 // ---- the model and its process ----
 
 test("no model and no download: the status says so, nothing starts", async () => {
@@ -308,7 +372,8 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
   const wav = join(dir, "clip.wav");
   Bun.spawnSync(["/usr/bin/say", "-o", aiff, "-v", "Samantha", "Shay, put JamSesh and FigCraft on the big screen."]);
   Bun.spawnSync(["ffmpeg", "-loglevel", "quiet", "-y", "-i", aiff, "-ar", "16000", "-ac", "1", wav]);
-  expect(await hub.transcriber.startParakeet()).toBe(true);
+  hub.session.updateSettings({ fastEngine: true });
+  expect(await hub.transcriber.syncFastEngine()).toBe(true);
   expect(hub.transcriber.parakeet.status()).toMatchObject({ state: "ready", installed: true });
   const r = await hub.transcriber.transcribe(new Uint8Array(await Bun.file(wav).arrayBuffer()), 3.5, "JamSesh.");
   expect(r.engine).toBe("host Parakeet");
@@ -333,7 +398,7 @@ test.skipIf(!MODEL || !canSay)("end to end: Parakeet hears the room's words, and
   expect(hub.transcriber.parakeet.status().detail).toContain("The speech model stopped");
   expect(await fetch(`${url}/inference`).catch(() => null)).toBeNull();
   // Started again, it stops with the hub.
-  expect(await hub.transcriber.startParakeet()).toBe(true);
+  expect(await hub.transcriber.syncFastEngine()).toBe(true);
   const again = engines(hub).get("parakeet").url;
   hub.stop();
   await Bun.sleep(1000);

@@ -1,5 +1,5 @@
-// Speech to text. Order: Parakeet on the host (5.2), local whisper.cpp, whisper servers that client
-// machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
+// Speech to text. Order: Parakeet on the host when the room turned on the faster engine (5.2),
+// local whisper.cpp (the default), whisper servers that client machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
 // biased toward the room's vocabulary, and its text goes through the same correction pass.
 import { transcribe as aiTranscribe } from "ai";
 import { bus } from "../bus";
@@ -111,18 +111,34 @@ export class Transcriber {
     return [...this.engines.values()].filter((e) => e.failures < 3 && (e.kind !== "parakeet" || english)).sort((a, b) => a.inflight - b.inflight || RANK[a.kind] - RANK[b.kind]);
   }
 
+  private fastWanted() {
+    const s = this.session.settings();
+    return s.fastEngine && s.transcription !== "gateway";
+  }
+
+  private starting: Promise<boolean> | null = null;
   /**
-   * Starts Parakeet in the background: it downloads the model the first time (minutes), and the room
-   * uses whisper or the gateway meanwhile. Not when the session only uses the gateway, or offline.
+   * Starts or stops Parakeet to match the "Faster engine" setting (off by default). Turning it on
+   * downloads the model the first time (minutes, never offline) while whisper or the gateway carry
+   * the room; once it's ready it goes first. Resolves with whether it's running.
    */
-  async startParakeet() {
-    if (this.session.settings().transcription === "gateway") return false;
-    this.parakeet.onExit = () => this.engines.delete("parakeet");
-    const url = await this.parakeet.start(!config.offline);
-    if (!url) return false;
-    this.engines.set("parakeet", { id: "parakeet", label: "host Parakeet", kind: "parakeet", url, inflight: 0, failures: 0, lastOk: Date.now() });
-    this.trouble = null;
-    return true;
+  syncFastEngine(): Promise<boolean> {
+    if (!this.fastWanted()) {
+      this.parakeet.stop();
+      this.engines.delete("parakeet");
+      return Promise.resolve(false);
+    }
+    if (this.engines.has("parakeet")) return Promise.resolve(true);
+    this.starting ??= (async () => {
+      this.parakeet.onExit = () => this.engines.delete("parakeet");
+      const url = await this.parakeet.start(!config.offline);
+      if (!url) return false;
+      if (!this.fastWanted()) return this.parakeet.stop(), false;
+      this.engines.set("parakeet", { id: "parakeet", label: "host Parakeet", kind: "parakeet", url, inflight: 0, failures: 0, lastOk: Date.now() });
+      this.trouble = null;
+      return true;
+    })().finally(() => (this.starting = null));
+    return this.starting;
   }
 
   /** Says so once in a while, in the feed and on screen, instead of the room going silently deaf. */
