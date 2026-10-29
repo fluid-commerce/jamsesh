@@ -576,8 +576,13 @@ test("a paired window is the person it's bound to: another device naming the own
     await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: felipe.id });
     expect(await me(cheys)).toBe(chey.id);
     s.removePerson(maya.id);
+    // Freed, it picks again: not Felipe, whose own browser holds him (phase 5: only the host lets a laptop in as
+    // someone another laptop is), but someone nobody has been.
     await as(nobody)("/devices", { deviceId: "phone", personId: felipe.id });
-    expect(await me(nobody)).toBe(felipe.id);
+    expect(await me(nobody)).toBeNull();
+    const nia = s.upsertPerson({ name: "Nia" });
+    await as(nobody)("/devices", { deviceId: "phone", personId: nia.id });
+    expect(await me(nobody)).toBe(nia.id);
     // Someone who doesn't exist is never bound.
     const fresh = browser("Tablet", null);
     await as(fresh)("/devices", { deviceId: "tablet", personId: "per_nope" });
