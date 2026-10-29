@@ -508,33 +508,57 @@ export class Canvas {
   async resync(why: string) {
     const link = this.session.canvas.editLink;
     if (!this.host || !link) return;
-    console.warn(`canvas: resyncing the host (${why})`);
-    await this.host.command("collab.leave", {}).catch(() => {});
-    await this.host.command("collab.join", { link: this.localLink(link) });
-    if (!(await waitLive(this.host, 20_000))) this.session.setCanvas({ reason: "The host lost the canvas session; restart JamSesh." });
+    await this.recover(async () => {
+      console.warn(`canvas: resyncing the host (${why})`);
+      await this.host!.command("collab.leave", {}).catch(() => {});
+      await this.host!.command("collab.join", { link: this.localLink(link) });
+      if (!(await waitLive(this.host!, 20_000))) throw new Error("The host lost the canvas session; restart JamSesh.");
+    });
+  }
+
+  /**
+   * One recovery at a time. One that fails marks the canvas failed (people's canvases stop rejoining
+   * a dead link and say why); the watchdog tries again on its next round.
+   */
+  private async recover(fn: () => Promise<void>) {
+    if (this.recovering || this.stopped) return;
+    this.recovering = true;
+    try {
+      await fn();
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error("canvas:", reason);
+      this.session.setCanvas({ status: "failed", reason });
+    } finally {
+      this.recovering = false;
+    }
   }
 
   /** The canvas server stopped (it crashed, or something killed it): start it again on the same
    * data, rejoin the session file, and announce it again so people's canvases rejoin too. */
-  private async revive() {
-    console.warn("canvas: the canvas server stopped; starting it again");
-    // Wait for the old server to let go of its port, so the new one comes up on the same links.
-    if (this.serverProc) await stopHelper(this.serverProc);
-    this.serverProc = null;
-    await this.startServer();
-    const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
-    if (!this.host || !saved) return;
-    await this.host.command("collab.leave", {}).catch(() => {});
-    await this.host.command("collab.join", { link: this.loopLink(saved.edit) });
-    if (await waitLive(this.host, 15_000)) this.announce(this.lanLink(this.loopLink(saved.edit)), this.lanLink(this.loopLink(saved.view)));
-    else this.session.setCanvas({ reason: "The canvas server restarted but the session file didn't come back; restart JamSesh." });
+  private revive() {
+    return this.recover(async () => {
+      console.warn("canvas: the canvas server stopped; starting it again");
+      // Wait for the old server to let go of its port, so the new one comes up on the same links.
+      if (this.serverProc) await stopHelper(this.serverProc);
+      this.serverProc = null;
+      await this.startServer();
+      const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
+      if (!this.host || !saved) throw new Error("The canvas server restarted but there is no session file to rejoin; restart JamSesh.");
+      await this.host.command("collab.leave", {}).catch(() => {});
+      await this.host.command("collab.join", { link: this.loopLink(saved.edit) });
+      if (!(await waitLive(this.host, 15_000))) throw new Error("The canvas server restarted but the session file didn't come back; restart JamSesh.");
+      this.announce(this.lanLink(this.loopLink(saved.edit)), this.lanLink(this.loopLink(saved.view)));
+    });
   }
 
   /** The host should see every agent participant the hub runs; if it doesn't, it lost the session. */
   private async watchdog() {
     if (this.stopped || this.recovering || !this.host || this.polling) return;
     if (!this.host.alive) return this.restartHost();
-    if (this.session.canvas.status === "live" && !(await healthy(this.serverUrl)) && !(await healthy(this.serverUrl))) return this.revive();
+    // Live, or failed by an earlier recovery: a server that doesn't answer is started again.
+    const up = this.session.canvas.status === "live" || this.session.canvas.status === "failed";
+    if (up && !(await healthy(this.serverUrl)) && !(await healthy(this.serverUrl))) return this.revive();
     const ready = [...this.agents.values()].filter((a) => a.mcp.alive);
     const peers = await this.host.command("collab.peers").catch(() => null);
     if (!peers) return;
@@ -542,20 +566,17 @@ export class Canvas {
   }
 
   /** The host's own canvas process died: start a new one and rejoin the session file, or say the canvas failed. */
-  private async restartHost() {
-    this.recovering = true;
-    console.warn("canvas: the host's canvas process stopped; starting it again");
-    try {
+  private restartHost() {
+    return this.recover(async () => {
+      console.warn("canvas: the host's canvas process stopped; starting it again");
+      // The dead one stays until a new one starts, so a failed restart is tried again next round.
       this.host?.close();
-      this.host = null;
-      await this.startHost();
-    } catch (e) {
-      const reason = `The host's canvas stopped and didn't come back: ${e instanceof Error ? e.message : String(e)}`;
-      console.error("canvas:", reason);
-      this.session.setCanvas({ status: "failed", reason });
-    } finally {
-      this.recovering = false;
-    }
+      try {
+        await this.startHost();
+      } catch (e) {
+        throw new Error(`The host's canvas stopped and didn't come back: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
   }
 
   private reapIdleAgents() {
