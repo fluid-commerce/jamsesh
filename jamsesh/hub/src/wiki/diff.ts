@@ -5,27 +5,31 @@ const CONTEXT = 2;
 
 type Op = { k: " " | "+" | "-"; s: string };
 
-/** The line-by-line edit from `before` to `after`. Past MAX_LINES it doesn't line them up, but still names every line removed and added. */
+/**
+ * The line-by-line edit from `before` to `after`. The lines both pages start and end with are matched first. If what is
+ * left between is still too long to line up, it is shown whole (every line removed, then every line added), in order:
+ * a reordered page is never reported as unchanged.
+ */
 function ops(before: string, after: string): { ops: Op[]; aligned: boolean } {
-  const a = before ? before.split("\n") : [];
-  const b = after ? after.split("\n") : [];
+  const full = (before ? before.split("\n") : []) as string[];
+  const fullB = (after ? after.split("\n") : []) as string[];
+  let lo = 0;
+  while (lo < full.length && lo < fullB.length && full[lo] === fullB[lo]) lo++;
+  let hiA = full.length;
+  let hiB = fullB.length;
+  while (hiA > lo && hiB > lo && full[hiA - 1] === fullB[hiB - 1]) hiA--, hiB--;
+  const a = full.slice(lo, hiA);
+  const b = fullB.slice(lo, hiB);
+  const head: Op[] = full.slice(0, lo).map((s) => ({ k: " ", s }));
+  const tail: Op[] = full.slice(hiA).map((s) => ({ k: " ", s }));
   if (a.length > MAX_LINES || b.length > MAX_LINES) {
-    const count = (ls: string[]) => ls.reduce((m, l) => m.set(l, (m.get(l) ?? 0) + 1), new Map<string, number>());
-    const only = (ls: string[], other: Map<string, number>, k: "+" | "-") =>
-      ls.flatMap((l): Op[] => {
-        const n = other.get(l) ?? 0;
-        if (!n) return [{ k, s: l }];
-        other.set(l, n - 1);
-        return [];
-      });
-    return { ops: [...only(a, count(b), "-"), ...only(b, count(a), "+")], aligned: false };
+    return { ops: [...head, ...a.map((s): Op => ({ k: "-", s })), ...b.map((s): Op => ({ k: "+", s })), ...tail], aligned: false };
   }
-  // Longest common subsequence table, suffix form.
   const n = a.length;
   const m = b.length;
   const t: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) t[i][j] = a[i] === b[j] ? t[i + 1][j + 1] + 1 : Math.max(t[i + 1][j], t[i][j + 1]);
-  const out: Op[] = [];
+  const out: Op[] = [...head];
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
@@ -35,7 +39,7 @@ function ops(before: string, after: string): { ops: Op[]; aligned: boolean } {
   }
   while (i < n) out.push({ k: "-", s: a[i++] });
   while (j < m) out.push({ k: "+", s: b[j++] });
-  return { ops: out, aligned: true };
+  return { ops: [...out, ...tail], aligned: true };
 }
 
 export function lineDiff(before: string, after: string, maxChars = 6000): string {
@@ -44,7 +48,7 @@ export function lineDiff(before: string, after: string, maxChars = 6000): string
   all.forEach((o, x) => {
     if (o.k !== " ") for (let y = Math.max(0, x - CONTEXT); y <= Math.min(all.length - 1, x + CONTEXT); y++) keep[y] = true;
   });
-  const out: string[] = aligned ? [] : ["(too long to line up: every line removed, then every line added)"];
+  const out: string[] = aligned ? [] : ["(too long to line up: the lines that changed are shown whole, removed then added)"];
   let gap = false;
   all.forEach((o, x) => {
     if (!keep[x]) return void (gap = out.length > 0);
