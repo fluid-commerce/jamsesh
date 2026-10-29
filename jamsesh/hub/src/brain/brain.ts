@@ -464,7 +464,11 @@ export class Brain {
   }
 
   /** Someone started sharing a screen or camera: find it a place on the big screen. */
-  async placeShare(share: Share) {
+  placeShare(share: Share) {
+    return this.counted(() => this.placeShareRun(share));
+  }
+
+  private async placeShareRun(share: Share) {
     const s = this.session;
     if (this.stopped || !s.settings().brainEnabled) return;
     const stage = s.stage();
@@ -498,7 +502,8 @@ export class Brain {
       });
       if (!pass.effects && !this.stopped) fallback();
     } catch {
-      fallback();
+      // A stopped brain changes nothing: the screen is left as the final save found it.
+      if (!this.stopped) fallback();
     }
   }
 

@@ -280,8 +280,8 @@ export function readProjectContext(home: string, slug: string, waitMs = 2000): P
       const ctx = readAll(mem);
       return ctx.facts.length || ctx.workstreams.length || ctx.brief || ctx.goal || ctx.glossary.length || ctx.people.length ? ctx : null;
     } catch (e) {
-      if (e instanceof ExportRejected) throw new ContextUnavailable(`the project's saved context can't be read: ${e.message}`);
-      return null;
+      // Any failure reading the saved file is a failed start, never "no context".
+      throw e instanceof ContextUnavailable ? e : new ContextUnavailable(`the project's saved context can't be read: ${e instanceof Error ? e.message : e}`);
     } finally {
       mem.close();
     }

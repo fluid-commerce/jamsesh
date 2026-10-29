@@ -1,6 +1,7 @@
 // The Projects picker before any session exists (JAMSESH_LOBBY=1): a small server for the Mac app's
 // first screen when hosting. It serves the web app and the project routes to this Mac's own windows
 // and nothing else. Choosing a project makes the app start the real hub for it.
+import { buffered } from "./body";
 import { HostWindows, readWindowLinks } from "./auth";
 import { config } from "./config";
 import { cookie, hostWindowRoute, json, sameOrigin, webApp } from "./http";
@@ -12,7 +13,9 @@ export function startLobby(port = config.port) {
   const server = Bun.serve({
     port,
     hostname: "127.0.0.1",
-    async fetch(req) {
+    async fetch(incoming) {
+      const req = await buffered(incoming);
+      if (!req) return json({ error: "That request is too large." }, 413);
       const url = new URL(req.url);
       const path = url.pathname;
       const hostWindow = windows.matches(cookie(req, "jam_window"));

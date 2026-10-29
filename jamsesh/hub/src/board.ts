@@ -117,11 +117,14 @@ export class Board {
   }
 
   /** The same thing said again joins its card (and a dismissed one stays dismissed for a while). */
-  private repeat(match: TriageCard, sources: TriageSource[]): TriageCard {
+  private repeat(match: TriageCard, sources: TriageSource[], attachments: TriageCard["attachments"] = []): TriageCard {
     const fresh = sources.filter((x) => x.eventId == null || !match.sources.some((m) => m.eventId === x.eventId));
+    // Files sent with the repeat belong on the card too, once each.
+    const files = [...(match.attachments ?? []), ...(attachments ?? []).filter((a) => !(match.attachments ?? []).some((m) => m.id === a.id))];
+    const newFiles = files.length > (match.attachments?.length ?? 0);
     // A line seen twice (the same event) isn't a repeat.
-    if (!fresh.length && sources.some((x) => x.eventId != null)) return match;
-    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), updatedAt: this.stamp() };
+    if (!fresh.length && !newFiles && sources.some((x) => x.eventId != null)) return match;
+    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), ...(files.length ? { attachments: files } : {}), updatedAt: this.stamp() };
     return this.s.store.put("triage", next);
   }
 
@@ -181,7 +184,7 @@ export class Board {
     if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const same = this.match("context", text, (c) => !c.retire && c.kind === kind && sameName(c.workstream, workstream) && (!named || c.conflictsWith === named.id));
-    if (same) return this.repeat(same, sources);
+    if (same) return this.repeat(same, sources, p.attachments);
     // A close fact that differs in its specifics (option A versus B, 16 versus 24 px) or says the opposite is the one this would replace.
     // Only a fact of the same kind and workstream: "48px in Mobile" doesn't replace "64px in Desktop".
     const conflict = named ?? active.find((f) => f.kind === kind && sameName(f.workstream, workstream) && sameScope(f.text, text) && similar(f.text, text) > 0.45 && !restates(f.text, text));

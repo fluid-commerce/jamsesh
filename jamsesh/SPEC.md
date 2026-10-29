@@ -861,8 +861,9 @@ The brain keeps context current so new legs of work start informed [B27, A16d]:
   `decision`, `requirement`, `constraint`, `preference`, `question`, or `fact`, with status
   `active`, `resolved`, or `superseded`, the workstream it is about (an existing title, chosen by
   topic, not by who said it), and the ids of the events it came from. One topic is one fact:
-  a restatement, a repeated instruction or a later refinement updates the existing fact (new
-  detail, the new events added to its sources) instead of adding another. A replaced decision is
+  the same words again (identical once case, spacing and punctuation are set aside) add their events to the
+  existing fact's sources instead of another fact; any other wording, a refinement included, is a card for a person
+  to merge or replace (4.1 Repeats). A replaced decision is
   superseded in the same pass, answered questions are resolved, and no two active facts
   contradict. Never recorded: what an agent shipped (commit ids, branch names, "implemented X"),
   instructions typed to an agent, progress reports, banter, and JamSesh's own problems (the

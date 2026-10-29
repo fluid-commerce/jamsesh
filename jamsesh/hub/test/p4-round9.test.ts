@@ -457,3 +457,73 @@ test("a request let in before shutdown and still sending its body is turned away
     server.stop(true);
   }
 });
+
+// ---------- round 16 ----------
+
+test("one choke point: any route's body is read and capped before it runs, and shutdown starting while a body is still arriving refuses it (audio of an odd type, a project, a network config)", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    r.hub.auth.windows.adopt("aa".repeat(32));
+    const cookie = `jam_window=${"aa".repeat(32)}`;
+    const base = `http://127.0.0.1:${server.port}`;
+    const big = new Uint8Array(3 * 1024 * 1024).fill(32);
+    for (const path of ["/api/projects", "/api/net/config"]) expect((await fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", cookie }, body: big })).status).toBe(413);
+    // An audio upload of an unrecognised type stalls mid-body across shutdown: it is refused afterwards, nothing is transcribed.
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    let step = 0;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(c) {
+        if (step++ === 0) c.enqueue(new Uint8Array(100));
+        else {
+          await gate;
+          c.enqueue(new Uint8Array(100));
+          c.close();
+        }
+      },
+    });
+    const sending = fetch(`${base}/api/audio?deviceId=d9&t0=1&t1=2`, { method: "POST", headers: { "content-type": "application/x-weird", cookie }, body, duplex: "half" } as any);
+    await Bun.sleep(100);
+    const shutting = r.hub.shutdown();
+    await Bun.sleep(100);
+    release();
+    expect((await sending).status).toBe(503);
+    await shutting;
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the frame check only fetches public addresses: private literals, private resolutions and mapped IPv6 are refused", async () => {
+  const { isPublicUrl } = await import("../src/http");
+  const via = (map: Record<string, string[]>) => async (h: string) => map[h] ?? [];
+  const pub = via({ "example.com": ["93.184.216.34"], "rebind.example": ["93.184.216.34", "10.0.0.5"], "inner.example": ["127.0.0.1"] });
+  expect(await isPublicUrl(new URL("https://example.com/"), pub)).toBe(true);
+  for (const u of ["http://127.0.0.1/", "http://10.1.2.3/", "http://169.254.169.254/", "http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://localhost/", "http://rebind.example/", "http://inner.example/", "ftp://example.com/", "http://nothing.example/"]) expect(await isPublicUrl(new URL(u), pub)).toBe(false);
+});
+
+test("a repeated document proposal puts its files on the card it joins", () => {
+  const r = room();
+  const card = r.s.proposeContext({ text: "Keep the greeting short.", kind: "fact", by: "Chey" })!;
+  const att = { id: "att_1", name: "notes.txt", type: "text/plain", kind: "text" as const, size: 5 };
+  const again = r.s.proposeContext({ text: "Keep the greeting short.", kind: "fact", by: "Felipe", attachments: [att], origin: "document" })!;
+  expect(again.id).toBe(card.id);
+  expect(again.attachments).toEqual([att]);
+  expect(r.s.proposeContext({ text: "keep the greeting short", kind: "fact", by: "Felipe", attachments: [att] })!.attachments).toHaveLength(1);
+});
+
+test("share placement is counted work, and a stopped brain doesn't touch the stage afterwards", async () => {
+  const r = room();
+  const brain = r.hub.brain as any;
+  let finished = false;
+  brain.placeShareRun = async () => {
+    await Bun.sleep(200);
+    finished = true;
+  };
+  void brain.placeShare({ id: "s1" });
+  expect(brain.busy()).toEqual(["the brain's requests"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(finished).toBe(true);
+});

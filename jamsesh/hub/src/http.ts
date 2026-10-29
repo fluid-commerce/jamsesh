@@ -1,8 +1,11 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
+import { BODY_LIMITS, buffered, readBytes } from "./body";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
 import { voiceprintStatus, learningNote } from "./audio/voiceprint";
@@ -74,6 +77,32 @@ function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
   return agent ? { ...state, triage: [] } : state;
 }
 
+/** Whether every address a URL's host stands for is a public one (http or https only): the frame check fetches only those. */
+export async function isPublicUrl(u: URL, resolve: (host: string) => Promise<string[]> = async (h) => (await lookup(h, { all: true })).map((a) => a.address)): Promise<boolean> {
+  if (!/^https?:$/.test(u.protocol)) return false;
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  if (/^(localhost|.*\.localhost|.*\.local|.*\.lan|.*\.internal)$/i.test(host)) return false;
+  let addrs: string[];
+  try {
+    addrs = isIP(host) ? [host] : await resolve(host);
+  } catch {
+    return false;
+  }
+  return addrs.length > 0 && addrs.every((a) => !privateAddress(a));
+}
+
+function privateAddress(a: string): boolean {
+  const v6 = a.toLowerCase();
+  const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return privateAddress(mapped[1]);
+  // The URL parser writes a mapped address in hex (::ffff:7f00:1).
+  const hex = v6.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hex) return privateAddress(`${parseInt(hex[1], 16) >> 8}.${parseInt(hex[1], 16) & 255}.${parseInt(hex[2], 16) >> 8}.${parseInt(hex[2], 16) & 255}`);
+  if (v6.includes(":")) return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("ff");
+  const [p, q] = a.split(".").map(Number);
+  return p === 0 || p === 10 || p === 127 || (p === 100 && q >= 64 && q <= 127) || (p === 169 && q === 254) || (p === 172 && q >= 16 && q <= 31) || (p === 192 && q === 168) || (p === 192 && q === 0) || p >= 224;
+}
+
 function isLocal(ip: string) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
@@ -112,9 +141,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     ...(tls ? { tls } : {}),
     idleTimeout: 255,
     maxRequestBodySize: 64 * 1024 * 1024,
-    async fetch(req, srv) {
+    async fetch(incoming, srv) {
+      const peer = srv.requestIP(incoming)?.address ?? "0.0.0.0";
+      // Every body is read here, bounded, before any route (or the closing check below) looks at the request.
+      const req = await buffered(incoming);
+      if (!req) return bad("That request is too large.", 413);
       const url = new URL(req.url);
-      const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
       // Mac app's relay (which carries agents' traffic) all mark their requests.
       const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
@@ -126,7 +158,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
       if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
-      // Once the final save has begun nothing is written: every route that changes something (audio, prompts, messages, MCP) is turned away here.
+      // Once the final save has begun nothing is written: every route that changes something is turned away here, after its body was read.
       if (hub.closing && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad("The session is saving and closing.", 503);
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
@@ -234,15 +266,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
         if (path === "/mcp") {
-          // The body is read up to the JSON cap before the transport sees it, and the request counts as work in flight until it is answered.
-          let forward = req;
-          if (req.method === "POST") {
-            const raw = await readBytes(req, BODY_LIMITS.json);
-            if (!raw) return bad("That request is too large.", 413);
-            forward = new Request(req.url, { method: req.method, headers: req.headers, body: new Blob([raw as BlobPart]) });
-          }
-          if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
-          return await hub.track("an agent's request", Promise.resolve(hub.mcp.handle(forward, ip, device?.id ?? (local ? "host" : null), originOf(req, url))));
+          // Counted as work in flight until it is answered.
+          return await hub.track("an agent's request", Promise.resolve(hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url))));
         }
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
@@ -927,10 +952,21 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
         return null;
       }
     })();
-    const privateHost = (h: string) => /^(localhost|.*\.local|.*\.lan|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?|\[?f[cd])/i.test(h);
-    if (!target || !/^https?:$/.test(target.protocol) || privateHost(target.hostname)) return json({ blocked: false, checked: false });
+    if (!target) return json({ blocked: false, checked: false });
     try {
-      const res = await fetch(target, { redirect: "follow", signal: AbortSignal.timeout(5000), headers: { "user-agent": "Mozilla/5.0 JamSesh frame check" } });
+      // Redirects are followed by hand: every hop must be a public address, not just the one that was asked for.
+      let hop: URL = target;
+      let res: Response | null = null;
+      for (let i = 0; i < 4; i++) {
+        if (!(await isPublicUrl(hop))) return json({ blocked: false, checked: false });
+        res = await fetch(hop, { redirect: "manual", signal: AbortSignal.timeout(5000), headers: { "user-agent": "Mozilla/5.0 JamSesh frame check" } });
+        const next = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+        if (!next) break;
+        res.body?.cancel().catch(() => {});
+        hop = new URL(next, hop);
+        res = null;
+      }
+      if (!res) return json({ blocked: false, checked: false });
       res.body?.cancel().catch(() => {});
       const xfo = (res.headers.get("x-frame-options") ?? "").toLowerCase();
       const ancestors = (res.headers.get("content-security-policy") ?? "").match(/frame-ancestors([^;]*)/i)?.[1]?.trim().toLowerCase();
@@ -1081,26 +1117,6 @@ export async function readCapped(req: Request, max: number): Promise<{ __form: F
   } catch {
     return null;
   }
-}
-
-/** The most a request body may be: JSON is small; audio, pictures and forms carry media. */
-export const BODY_LIMITS = { json: 2 * 1024 * 1024, media: 32 * 1024 * 1024 };
-
-/** The body's bytes; null when it passes `max` (nothing past the cap is kept). */
-async function readBytes(req: Request, max: number): Promise<Uint8Array | null> {
-  if (!req.body) return new Uint8Array();
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    // Past the cap nothing more is kept; what is left is read and dropped (the server's own limit bounds it), so the sender gets its answer.
-    if (size <= max) chunks.push(value);
-    else chunks.length = 0;
-  }
-  return size > max ? null : new Uint8Array(await new Blob(chunks as BlobPart[]).arrayBuffer());
 }
 
 async function readBody(req: Request): Promise<any> {
