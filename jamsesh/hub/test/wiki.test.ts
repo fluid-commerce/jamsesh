@@ -2660,12 +2660,13 @@ test("a page whose commit failed stays owed across a restart until a commit succ
   expect(readState(dir).owed).toBeUndefined();
 });
 
-test("commit debt is bounded: past the cap it becomes the whole wiki folder, which one commit then takes", () => {
+test("commit debt is bounded: past the cap it becomes every page file in the wiki folder, named one by one, and a person's other files there stay out", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
   w.editPage("seed", "# Seed\n\nA page.", { by: "Chey" });
   const index = readFileSync(join(dir, ".git", "index"));
   writeFileSync(join(dir, ".git", "index"), "not an index");
+  writeFileSync(join(dir, "wiki", "notes.txt"), "a person's own file");
   const err = console.error;
   console.error = () => {};
   try {
@@ -2679,6 +2680,7 @@ test("commit debt is bounded: past the cap it becomes the whole wiki folder, whi
   (w as any).commitOwn("recovered", []);
   const history = Bun.spawnSync(["git", "log", "--name-only", "--pretty=format:"], { cwd: dir }).stdout.toString();
   expect(history).toContain("wiki/bulk-204.md");
+  expect(history).not.toContain("notes.txt");
   expect(readState(dir).owed).toBeUndefined();
 });
 

@@ -34,9 +34,10 @@ export async function dnsHasTxt(fqdn: string, value: string, f: FetchFn = fetch)
   return false;
 }
 
-export async function waitForTxt(fqdn: string, value: string, opts: { f?: FetchFn; timeoutMs?: number; everyMs?: number } = {}) {
+export async function waitForTxt(fqdn: string, value: string, opts: { f?: FetchFn; timeoutMs?: number; everyMs?: number; signal?: AbortSignal } = {}) {
   const deadline = Date.now() + (opts.timeoutMs ?? 180_000);
   while (Date.now() < deadline) {
+    opts.signal?.throwIfAborted();
     if (await dnsHasTxt(fqdn, value, opts.f)) return true;
     await new Promise((r) => setTimeout(r, opts.everyMs ?? 5000));
   }
@@ -84,6 +85,7 @@ export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle
     accountKey: await o.store.accountKey(),
   });
   const [key, csr] = await acme.crypto.createCsr({ commonName: names[0] });
+  o.signal?.throwIfAborted(); // the key and CSR took time: a room that closed meanwhile starts no order
   o.onProgress?.(`Requesting the ${kind === "apex" ? "main" : "wildcard"} certificate`);
   const cert = await client.auto({
     csr,
@@ -96,7 +98,7 @@ export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle
       const r = await setTxt(o.domain, o.token, txt, o.f);
       if (!r.ok) throw new Error(r.error ?? "DuckDNS refused the TXT record");
       o.onProgress?.("Waiting for DNS to publish the proof");
-      if (!(await waitForTxt(o.domain.fqdn, txt, { f: o.f, timeoutMs: o.propagationMs }))) throw new Error("DNS didn't show the challenge record in time. Try again in a minute.");
+      if (!(await waitForTxt(o.domain.fqdn, txt, { f: o.f, timeoutMs: o.propagationMs, signal: o.signal }))) throw new Error("DNS didn't show the challenge record in time. Try again in a minute.");
     },
     challengeRemoveFn: async () => {
       await clearTxt(o.domain, o.token, o.f);

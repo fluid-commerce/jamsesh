@@ -258,8 +258,10 @@ export class WikiService {
     for (const p of [...(st?.owed ?? []), ...paths]) this.owedPaths.add(p);
     // Past the cap the list collapses to the wiki folder as a whole (a full add of it): the debt stays small however long git is unwell.
     if (this.owedPaths.size > OWED_MAX) this.owedPaths = new Set(["wiki"]);
+    // "wiki" stands for every page file in the folder, named one by one: a person's other files there are never swept in.
+    const named = [...this.owedPaths].flatMap((p) => (p === "wiki" ? listPages(this.dir).map((i) => `wiki/${i.slug}.md`) : [p]));
     const raw = rawPaths(this.dir);
-    const result = raw ? commitPaths(this.dir, message, [...this.owedPaths, "index.md", "log.md", ...raw]) : "failed";
+    const result = raw ? commitPaths(this.dir, message, [...named, "index.md", "log.md", ...raw]) : "failed";
     if (result !== "failed") this.owedPaths.clear();
     const left = [...this.owedPaths];
     try {
@@ -267,6 +269,7 @@ export class WikiService {
       if ((now.owed ?? []).join("\n") !== left.join("\n")) writeState(this.dir, { ...now, ...(left.length ? { owed: left } : { owed: undefined }) });
     } catch (e) {
       // Not silent: the commit debt is only in memory until a write succeeds.
+      bus.send({ type: "toast", tone: "warn", text: "The wiki couldn't note a change it still owes its history", detail: errText(e).slice(0, 100) });
       console.error(`wiki: couldn't record ${left.length} page${left.length === 1 ? "" : "s"} waiting for a commit (${errText(e)}); they are kept in memory and tried again.`);
     }
   }

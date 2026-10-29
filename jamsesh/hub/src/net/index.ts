@@ -88,6 +88,8 @@ export class Network {
 
   /** The room is closing: nothing here starts, saves or maps from now on (stop() still takes the router mapping down). */
   private closed = false;
+  /** Bumped whenever the configuration changes or the network stops: a router request begun under an older one does nothing when it resumes. */
+  private gen = 0;
   private abort = new AbortController();
 
   close() {
@@ -128,6 +130,7 @@ export class Network {
   }
 
   async stop() {
+    this.gen++;
     this.stopUpdater?.();
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
@@ -202,13 +205,15 @@ export class Network {
   async openRouter() {
     const c = this.cfg;
     if (!c || this.closed) return;
+    const gen = this.gen;
     this.st.router = { state: "working", method: "none", externalPort: c.externalPort, message: "Asking your router to open the port…" };
     const lan = lanIpv4();
     const ip = await lookupIp(this.fetchFn, this.st.publicIp);
-    if (this.closed) return;
+    if (this.closed || gen !== this.gen) return;
     this.st.publicIp ??= ip;
     const r = await this.mapper.map(c.externalPort, c.internalPort, lan, ip);
     if (this.closed) return void (await this.mapper.unmap()); // mapped as the room closed: taken down again
+    if (gen !== this.gen) return; // the setup changed meanwhile; the new request maps its own port and replaces this
     this.st.router = { ...r, state: "done" };
   }
 

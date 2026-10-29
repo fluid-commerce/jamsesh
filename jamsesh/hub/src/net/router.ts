@@ -226,11 +226,12 @@ export class PortMapper {
               NewLeaseDuration: lease,
             });
           let add = await map(LEASE);
+          let permanent = false;
           // Many routers accept only permanent mappings (error 725): ask again without a lease.
-          if (!add.ok && String(add.errorCode) === "725") add = await map(0);
+          if (!add.ok && String(add.errorCode) === "725") (add = await map(0), (permanent = add.ok));
           if (add.ok) {
             this.current = { method: "upnp", internalPort, externalPort, lanIp };
-            status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: LEASE, message: `Your router opened port ${externalPort} automatically (UPnP).` };
+            status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: permanent ? undefined : LEASE, message: `Your router opened port ${externalPort} automatically (UPnP${permanent ? ", with no expiry" : ""}).` };
           } else {
             status = { method: "none", externalPort, routerIp: gateway, externalIp, error: `UPnP error ${add.errorCode ?? "unknown"}`, message: manualMessage(externalPort, lanIp, internalPort) };
           }
@@ -262,6 +263,8 @@ export class PortMapper {
       if (c.method === "nat-pmp" && c.gateway) await pmpMap(c.gateway, c.internalPort, c.externalPort, LEASE);
       else if (c.method === "upnp" && this.igd)
         await soap(this.igd, "AddPortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP", NewInternalPort: c.internalPort, NewInternalClient: c.lanIp, NewEnabled: 1, NewPortMappingDescription: "JamSesh", NewLeaseDuration: LEASE });
+      // A renewal that finishes after the mapping was taken down must not leave it open: it is taken down again.
+      if (this.current !== c) await this.unmapOne(c);
     } catch {}
   }
 
@@ -270,7 +273,10 @@ export class PortMapper {
     this.unrenew();
     const c = this.current;
     this.current = undefined;
-    if (!c) return;
+    if (c) await this.unmapOne(c);
+  }
+
+  private async unmapOne(c: NonNullable<PortMapper["current"]>) {
     try {
       if (c.method === "nat-pmp" && c.gateway) await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
       else if (c.method === "upnp" && this.igd) await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
