@@ -1593,30 +1593,60 @@ test("same-millisecond recast: a pending show request about the first lock expir
   void felipe;
 });
 
-test("a screen that goes quiet and comes back is published both ways, and a disconnected screen isn't listed", () => {
+test("a screen going quiet and coming back reaches clients as patches, a move is published, and a disconnected screen isn't listed", async () => {
   const { s } = room();
   artifact(s, "A");
-  const seen: string[] = [];
-  const real = bus.changed.bind(bus) as (key: string) => void;
-  (bus as any).changed = (key: string) => { seen.push(key); real(key); };
+  const prev = Session.SCREEN_LIVE_MS;
+  Session.SCREEN_LIVE_MS = 150;
+  const old = bus.resolver;
+  bus.resolver = (k) => (s as any).resolve(k);
+  const patches: string[] = [];
+  const off = bus.on((m: any) => m.type === "patch" && patches.push(m.key));
   try {
     const info = { width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0 };
+    s.reportScreen("main", { ...info, screenX: 0, at: Date.now() });
     s.reportScreen("screen-2", { ...info, at: Date.now() });
+    await Bun.sleep(80);
+    expect(patches).toContain("screens");
     expect(Object.keys(s.stageTiles())).toContain("screen-2");
-    // 4 minutes of silence: the next look (the expiry timer's) says it's gone.
-    seen.length = 0;
-    s.reportScreen("screen-2", { ...info, at: Date.now() - 4 * 60_000 });
-    s.sweepScreens();
-    expect(seen).toContain("screens");
-    expect(seen).toContain("stageTiles");
+    // A move alone is published.
+    patches.length = 0;
+    s.reportScreen("screen-2", { ...info, screenX: 3840, at: Date.now() });
+    await Bun.sleep(80);
+    expect(patches).toContain("screens");
+    // Silence: the expiry timer says it's gone.
+    patches.length = 0;
+    await Bun.sleep(400);
+    expect(patches).toContain("screens");
+    expect(patches).toContain("stageTiles");
     expect(Object.keys(s.stageTiles())).not.toContain("screen-2");
-    // It reports again: back, published, and its saved stage is still there.
-    seen.length = 0;
+    // It reports again: back.
+    patches.length = 0;
     s.reportScreen("screen-2", { ...info, at: Date.now() });
-    expect(seen).toContain("stageTiles");
+    await Bun.sleep(80);
+    expect(patches).toContain("stageTiles");
     expect(Object.keys(s.stageTiles())).toContain("screen-2");
   } finally {
-    (bus as any).changed = real;
+    Session.SCREEN_LIVE_MS = prev;
+    off();
+    bus.resolver = old;
+  }
+});
+
+test("layout keys can't be confused: two different tiles never share a key, whatever they contain", async () => {
+  const { hub, s } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    // These two used to share a 32-bit fingerprint.
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "html", html: "<p>1r</p>" }] } }, "Chey", "main", { override: true });
+    const old = s.stageTileKeys()[0].key;
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "html", html: "<p>30</p>" }] } }, "Chey", "main", { override: true });
+    expect(s.stageTileKeys()[0].key).not.toBe(old);
+    expect((await post("/stage/expand", { tile: old })).status).toBe(404);
+    expect(s.stage().expanded).toBeUndefined();
+  } finally {
+    server.stop();
   }
 });
 

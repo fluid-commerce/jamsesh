@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // The session: people, devices, agents, workstreams, directives, artifacts and the
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
 import { parseStage } from "./stageSchema";
@@ -1512,21 +1513,24 @@ export class Session {
     this.sweepScreens();
     // A screen not heard from for 3 minutes stops being listed: say so then (its stored stage stays for when it returns).
     clearTimeout(this.screenExpiry.get(id));
-    const t = setTimeout(() => this.sweepScreens(), Session.SCREEN_LIVE_MS + 500);
+    const t = setTimeout(() => this.sweepScreens(), Session.SCREEN_LIVE_MS + 100);
     t.unref?.();
     this.screenExpiry.set(id, t);
   }
 
   static SCREEN_LIVE_MS = 3 * 60_000;
   private screenExpiry = new Map<string, ReturnType<typeof setTimeout>>();
-  private liveScreens = new Set<string>(["main"]);
-  /** Publishes the screens and their tiles when the set of listed (live) screens changed: one appeared, came back, or went quiet. */
+  private liveScreens = { ids: "", shape: "" };
+  /** Publishes the screens (and their tiles) when what is listed changed: one appeared, came back, went quiet, or moved or resized. */
   sweepScreens() {
-    const now = new Set(this.screens().map((x) => x.id));
-    if (now.size === this.liveScreens.size && [...now].every((i) => this.liveScreens.has(i))) return;
-    this.liveScreens = now;
+    const live = this.screens();
+    const ids = live.map((x) => x.id).sort().join("|");
+    const shape = live.map((x) => `${x.id}:${x.width}x${x.height}@${x.screenX},${x.screenY}`).sort().join("|");
+    if (ids === this.liveScreens.ids && shape === this.liveScreens.shape) return;
+    const idsChanged = ids !== this.liveScreens.ids;
+    this.liveScreens = { ids, shape };
     bus.changed("screens");
-    bus.changed("stageTiles");
+    if (idsChanged) bus.changed("stageTiles");
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,
@@ -1605,6 +1609,8 @@ export class Session {
     const cur = this.stage(screen);
     const tile = typeof key === "string" ? key.trim() : "";
     if (!this.claimHolds(claim, screen) || cur.mode === "join" || (tile ? cur.expanded === tile : !cur.expanded)) return cur;
+    // Only a tile this screen really has can be expanded.
+    if (tile && !this.stageTileKeys(screen).some((k) => k.key === tile)) return cur;
     const { expanded: _drop, ...rest } = cur;
     const stage: Stage = tile ? { ...rest, expanded: tile } : rest;
     this.commitStage(stage, screen);
@@ -2176,10 +2182,7 @@ class NotShown extends Error {
 
 /** A short fingerprint of a layout tile's content (for tile keys). */
 function fingerprint(t: unknown): string {
-  const s = JSON.stringify(t) ?? "";
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-  return h.toString(36);
+  return createHash("sha256").update(JSON.stringify(t) ?? "").digest("hex").slice(0, 24);
 }
 
 /** A lock's identity for questions about it: its id, or (for one stored before ids) its start time. */

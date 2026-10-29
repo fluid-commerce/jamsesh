@@ -42,6 +42,7 @@ test("expanding a tile marks it on the stage in place; collapsing and a new stag
 
 test("the join screen has nothing to expand; an extra screen keeps its own expanded tile", () => {
   const s = new Session(new Store(mkdtempSync(join(tmpdir(), "jam-expand2-"))));
+  withArtifacts(s, "a", "b");
   s.setStage({ mode: "join" }, "Chey", "main", { claim: s.stageClaim() });
   expect(s.expandTile("a").expanded).toBeUndefined();
   const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
@@ -51,7 +52,7 @@ test("the join screen has nothing to expand; an extra screen keeps its own expan
   expect(s.expandTile("b", "screen-2").expanded).toBe("b");
   expect(s.stage("screen-2").expanded).toBe("b");
   expect(s.stage().expanded).toBeUndefined();
-  expect(s.expandTile("x".repeat(200), "screen-2").expanded?.length).toBe(200);
+  expect(s.expandTile("x".repeat(200), "screen-2").expanded).toBe("b");
 });
 
 test("a locked screen can still be expanded: the lock, its owner and its history stay, and each screen keeps its own", () => {
