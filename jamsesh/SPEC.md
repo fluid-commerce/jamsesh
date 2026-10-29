@@ -1501,8 +1501,10 @@ screen [A8b, A9]. The mic is already running; Record marks a window of it and wa
   shorter (under half a second), thinner and fainter, in a calm band of colour. On the big screen the
   overlay also shows a chip, "Recording · <name>", and every recording driver has their own trail.
   Model: `web/src/shared/trailmodel.ts`; drawing: `trail.tsx`; big screen: `ScreenRecording.tsx`.
-- **What it produces.** Stop (`POST /api/record/stop`) names the recording it ends (`recordingId`, from Start) and covers the
-  window the hub opened at Start; a Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
+- **What it produces.** Stop (`POST /api/record/stop`) names the recording it ends (`recordingId`, from Start) The window runs from the
+  hub's clock at Start to the hub's clock when Stop arrives: a time sent by the caller is never used, and pointer moments outside it
+  (with a second of slack) are dropped. Closing a prompt window (`POST /api/prompt-window`) works the same way, by recording id; an id
+  that is no longer the device's current recording closes nothing. A Stop for a recording that already ended (a lost reply, a replacement Start, a second Stop) is refused with 409 and ends nothing. It waits up to 7 seconds for the last words, then
   returns **notes**, one per thing said, each pinned to the spot being pointed at while it was said.
   Nothing is sent yet. A note keeps the item, the position in it, the page of a build, the scroll
   position, the canvas frame or node id and canvas point, the big screen it was on, and who said it.
@@ -1847,7 +1849,7 @@ the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps`
   tile's screen. When the tile is shown anywhere else, or its screen is unlocked, the take, pass and release
   above apply again. Agents and strangers are refused either way.
 - **A Mac button is never left down.** Every line to a Mac helper goes through one place in the hub, which knows whether a
-  button is down, where and for whom. It lets go (an `up` at the last position) when control changes hands, the tile ends, another
+  button is down, where and for whom. It lets go (an `up` at the last position) when control changes hands (also when a locked screen's drivers or lock change), the tile ends, another
   person's input arrives, or the button has seen no input for 4 seconds. The helper does the same on its own at 6 seconds, when the
   hub closes its input, and on SIGTERM. The page also sends its own `up` on pointer cancel, capture loss and leaving the tile, so
   a drag ends promptly; the hub is what guarantees it.
