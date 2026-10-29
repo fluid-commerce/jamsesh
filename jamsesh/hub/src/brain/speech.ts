@@ -32,13 +32,27 @@ export function resetSpeechState() {
 
 /** Voices the OpenAI speech models offer; other providers name theirs differently. */
 export const OPENAI_VOICES = ["nova", "alloy", "echo", "fable", "onyx", "shimmer", "coral", "sage", "ash"];
+/** Microsoft's MAI voices that the gateway accepts by name (checked 2026-10-28); the model's own voice is the default. */
+export const MAI_VOICES = ["Grant", "Iris", "Jasper"];
+
+/**
+ * The voice to ask the model for: the room's choice when the model offers it, otherwise none, so
+ * the model's own default speaks instead of the request failing ("nova" is only an OpenAI voice).
+ */
+export function voiceFor(model: string, voice: string): string | undefined {
+  // OpenAI's models need a voice named; nova is the one rooms have always heard.
+  if (model.startsWith("openai/")) return OPENAI_VOICES.includes(voice) ? voice : "nova";
+  if (model.startsWith("microsoft/mai-voice")) return MAI_VOICES.includes(voice) ? voice : undefined;
+  return voice || undefined;
+}
 
 /** One spoken sentence from the configured speech model; throws when it can't (no key, gateway down). */
 export async function synthesize(session: Session, text: string, voice?: string) {
   const gw = gateway(session);
   if (!gw) throw new Error(config.offline ? "the hub is running offline" : "no AI Gateway key is set");
   const s = session.settings();
-  const { audio } = await generateSpeech({ model: gw.speech(s.models.speech), text, voice: voice || s.voice });
+  const chosen = voiceFor(s.models.speech, voice || s.voice);
+  const { audio } = await generateSpeech({ model: gw.speech(s.models.speech), text, ...(chosen ? { voice: chosen } : {}) });
   return { audio: audio.base64, mime: audio.mediaType ?? "audio/mpeg" };
 }
 

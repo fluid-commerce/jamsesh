@@ -32,7 +32,7 @@ export const DEFAULT_MODELS: Settings["models"] = {
   router: "anthropic/claude-sonnet-5.5",
   presenter: "anthropic/claude-sonnet-5.5",
   digest: "google/gemini-3.5-flash",
-  speech: "openai/tts-1-hd",
+  speech: "microsoft/mai-voice-2.1",
   transcribe: "openai/gpt-transcribe",
 };
 
@@ -115,7 +115,7 @@ export class Session {
       brainNotes: s.setting<string[]>("brainNotes", []),
       brainEnabled: s.setting("brainEnabled", true),
       voiceReplies: s.setting("voiceReplies", true),
-      voice: s.setting("voice", "nova"),
+      voice: s.setting("voice", ""),
       models: withCurrentSpeech({ ...DEFAULT_MODELS, ...s.setting<Partial<Settings["models"]>>("models", {}) }),
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),

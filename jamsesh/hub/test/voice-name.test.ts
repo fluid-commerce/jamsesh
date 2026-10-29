@@ -121,3 +121,15 @@ test("when speech falls back to the Mac's voice, the room is told why", async ()
   expect(toasts.some((m) => /built-in voice|No good voice/.test(m.text) && m.detail)).toBe(true);
   hub.stop();
 });
+
+test("the voice asked for fits the speech model", async () => {
+  const { voiceFor } = await import("../src/brain/speech");
+  // The default model's own voice speaks unless the room picked one it offers.
+  expect(voiceFor("microsoft/mai-voice-2.1", "")).toBeUndefined();
+  expect(voiceFor("microsoft/mai-voice-2.1", "nova")).toBeUndefined();
+  expect(voiceFor("microsoft/mai-voice-2.1", "Iris")).toBe("Iris");
+  // OpenAI always needs a voice.
+  expect(voiceFor("openai/tts-1-hd", "")).toBe("nova");
+  expect(voiceFor("openai/tts-1-hd", "onyx")).toBe("onyx");
+  expect(voiceFor("google/gemini-3.8-flash-tts", "Kore")).toBe("Kore");
+});

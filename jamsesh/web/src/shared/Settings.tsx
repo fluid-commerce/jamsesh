@@ -321,14 +321,22 @@ function Saved() {
   );
 }
 
-/** Voices the OpenAI speech models offer; any other provider gets a free-text field. */
+/** Voices the speech models offer by name (matches `hub/src/brain/speech.ts`); any other provider gets a free-text field. */
 const OPENAI_VOICES = ["nova", "alloy", "echo", "fable", "onyx", "shimmer", "coral", "sage", "ash"];
+const MAI_VOICES = ["Grant", "Iris", "Jasper"];
+
+/** The voices to list for a model, with "" for the model's own default voice where it has one. */
+function voicesFor(model: string): string[] | null {
+  if (model.startsWith("openai/")) return OPENAI_VOICES;
+  if (model.startsWith("microsoft/mai-voice")) return ["", ...MAI_VOICES];
+  return null;
+}
 
 function VoicePicker({ voice, model, onChange }: { voice: string; model: string; onChange: (v: string) => void }) {
   const [chosen, setChosen] = useState(voice);
   const [phase, setPhase] = useState<"idle" | "busy" | "error">("idle");
   const [err, setErr] = useState("");
-  const listed = model.startsWith("openai/");
+  const listed = voicesFor(model);
   const preview = async () => {
     setPhase("busy");
     try {
@@ -346,8 +354,10 @@ function VoicePicker({ voice, model, onChange }: { voice: string; model: string;
       <div className="row">
         {listed ? (
           <select className="grow" value={chosen} onChange={(e) => (setChosen(e.target.value), onChange(e.target.value))}>
-            {(OPENAI_VOICES.includes(chosen) ? OPENAI_VOICES : [chosen, ...OPENAI_VOICES]).map((v) => (
-              <option key={v}>{v}</option>
+            {(listed.includes(chosen) ? listed : [chosen, ...listed]).map((v) => (
+              <option key={v} value={v}>
+                {v || "Default voice"}
+              </option>
             ))}
           </select>
         ) : (
