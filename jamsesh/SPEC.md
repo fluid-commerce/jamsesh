@@ -1767,6 +1767,8 @@ stage area for the same view. Code: `web/src/wiki/`.
   pages (by category, then title), `N` hops to a linked page, Enter opens, Escape clears; the page is announced
   (title, kind, backlinks, what it links with). **Phone**: fewer names, a tap selects and shows a card with **Open**.
   **Reduced motion**: the map settles once without animating, hover snaps, and a pulse is a still ring.
+- **Work tab.** The retired fact list is replaced by three cards (Decisions, Requirements, Open questions) linking to the pages `decisions`, `requirements` and `open-questions`, each with a count of its bullets; a card opens its page in the Wiki tab (`wiki/nav.ts`). A project with none yet says so and links to the wiki.
+- **Names on the map.** A name goes below its node, then above, to the right, to the left, and is skipped when every spot would sit on another name or another node (the page being pointed at is always named).
 - **Pulse.** The hub's `{type:"wiki", touched:[slug]}` message (an ingest raised, a page edited or applied) pulses those
   pages for 2.4 seconds and refetches the index after 400 ms; reconnecting refetches too.
 - **Big screen.** `StageMode` gains `"wiki"`. `Stage.tsx` draws `WikiStage`: the graph at twice the size, with the title

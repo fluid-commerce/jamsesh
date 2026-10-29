@@ -153,18 +153,35 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       for (const n of list) if (n.id === hot || n.id === focus || (hot && near?.has(n.id)) || (!hot && top.has(n.id))) want.push(n);
       want.sort((a, b) => (a.id === hot ? -2 : a.id === focus ? -1 : 0) - (b.id === hot ? -2 : b.id === focus ? -1 : 0) || b.backlinks - a.backlinks);
       const placed: [number, number, number, number][] = [];
+      // Every node as a circle on screen, so a name can be kept off other nodes as well as off other names.
+      const discs = list.map((n) => ({ id: n.id, x: sx(n.x ?? 0), y: sy(n.y ?? 0), r: Math.max(stage ? 7 : coarse ? 5.5 : 3.5, n.r * Math.min(1.6, Math.max(0.7, k))) + 2 }));
+      const hitsDisc = (b: [number, number, number, number], own: string) =>
+        discs.some((d) => d.id !== own && d.x + d.r > b[0] && d.x - d.r < b[2] && d.y + d.r > b[1] && d.y - d.r < b[3]);
+      const hitsLabel = (b: [number, number, number, number]) => placed.some((p) => b[0] < p[2] && b[2] > p[0] && b[1] < p[3] && b[3] > p[1]);
       for (const n of want) {
-        const x = sx(n.x ?? 0), y = sy(n.y ?? 0) + Math.max(5, n.r * Math.min(1.6, Math.max(0.7, k))) + 4;
+        const me = discs.find((d) => d.id === n.id)!;
         const text = n.title.length > 26 ? `${n.title.slice(0, 25)}…` : n.title;
         const w = g.measureText(text).width, h = fs + 2;
-        const box: [number, number, number, number] = [x - w / 2 - 3, y - 1, x + w / 2 + 3, y + h];
         const must = n.id === hot || n.id === focus;
-        if (!must && placed.some((p) => box[0] < p[2] && box[2] > p[0] && box[1] < p[3] && box[3] > p[1])) continue;
-        placed.push(box);
+        // Below the node first, then above, then to the right, then to the left.
+        const tries: { box: [number, number, number, number]; align: CanvasTextAlign; x: number; y: number }[] = [
+          { x: me.x, y: me.y + me.r + 3, align: "center" as CanvasTextAlign },
+          { x: me.x, y: me.y - me.r - 3 - h, align: "center" as CanvasTextAlign },
+          { x: me.x + me.r + 5, y: me.y - h / 2, align: "left" as CanvasTextAlign },
+          { x: me.x - me.r - 5, y: me.y - h / 2, align: "right" as CanvasTextAlign },
+        ].map((t) => ({
+          ...t,
+          box: (t.align === "center" ? [t.x - w / 2 - 3, t.y - 1, t.x + w / 2 + 3, t.y + h] : t.align === "left" ? [t.x - 3, t.y - 1, t.x + w + 3, t.y + h] : [t.x - w - 3, t.y - 1, t.x + 3, t.y + h]) as [number, number, number, number],
+        }));
+        const clear = tries.find((t) => !hitsLabel(t.box) && !hitsDisc(t.box, n.id));
+        const pick = clear ?? (must ? tries[0] : null);
+        if (!pick) continue;
+        placed.push(pick.box);
+        g.textAlign = pick.align;
         g.fillStyle = hot && !must && !near?.has(n.id) ? "rgba(243,242,239,.4)" : must ? "#f3f2ef" : "rgba(243,242,239,.8)";
         g.shadowColor = "rgba(12,13,15,.9)";
         g.shadowBlur = 5;
-        g.fillText(text, x, y);
+        g.fillText(text, pick.x, pick.y);
         g.shadowBlur = 0;
       }
 

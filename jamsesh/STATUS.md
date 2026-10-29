@@ -101,7 +101,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | The graph on the big screen ("show the wiki graph") | Simulated | Brain tool tested; drawn at 1920 x 1080 in headless Chromium. Not seen on a real TV, and not asked by voice. |
 | Wiki cards on the Tasks board: per-page toggles and diffs, Add N pages | Simulated | Accepting through `api()` tested; the card was looked at in Chromium. |
 | Rendered page text: raw HTML, `javascript:` and `data:` links, pictures, hostile titles | Simulated | Unit tests on the markdown layer; a hostile page opened in headless Chromium ran nothing (DOMPurify itself is only exercised in a browser, by hand). |
-| The Work tab links to the decisions, requirements and questions pages | Not tested | Not built: the Work tab still shows the fact list. |
+| The Work tab links to the decisions, requirements and open-questions pages, each with a count; the old fact list is gone from the app | Simulated | Counts are bullet lines on each page; clicking opens the page in the Wiki tab. Looked at in headless Chromium. |
 
 ## Big screen: locks, versions, history
 

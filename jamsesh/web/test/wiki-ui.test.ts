@@ -163,3 +163,19 @@ test("a wiki card on the Tasks board: the checked pages are written through api(
   await expect(api(`/triage/${card.id}/add`, { personId: person.id, pages: ["billing"] })).rejects.toBeTruthy();
   expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
 });
+
+test("the Work tab's links count a page's items by its bullets", async () => {
+  const { countItems } = await import("../src/wiki/SettledLinks");
+  expect(countItems("# Decisions\n\n- Keep 30 days\n- Drop magic link\n  - sub-point\n1. Third\n\nProse, not an item.")).toBe(4);
+  expect(countItems("")).toBe(0);
+  const nav = await import("../src/wiki/nav");
+  (globalThis as any).window = new EventTarget();
+  (globalThis as any).CustomEvent = class extends Event { detail: unknown; constructor(t: string, i: { detail?: unknown } = {}) { super(t); this.detail = i.detail; } };
+  let heard = 0;
+  const off = nav.onWikiOpen(() => heard++);
+  nav.openWiki("decisions");
+  expect(heard).toBe(1);
+  expect(nav.takePendingWikiPage()).toBe("decisions");
+  expect(nav.takePendingWikiPage()).toBeNull();
+  off();
+});

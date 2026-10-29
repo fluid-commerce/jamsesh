@@ -5,6 +5,7 @@ import { useLayout } from "../client/mobile";
 import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
+import { onWikiOpen, takePendingWikiPage } from "./nav";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -60,6 +61,18 @@ export function WikiView({ big }: { big?: boolean }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [back, go, dialog]);
+
+  // Asked for a page from outside (the Work tab's links), now or just before this tab opened.
+  useEffect(() => {
+    const take = () => {
+      const slug = takePendingWikiPage();
+      if (slug === null) return;
+      if (slug) openPage(slug);
+      else go({ kind: "graph" });
+    };
+    take();
+    return onWikiOpen(take);
+  }, [openPage, go]);
 
   const pageSet = useMemo(() => new Set(wiki.pages.map((p) => p.slug)), [wiki.pages]);
   const empty = !wiki.loading && !wiki.pages.length;
