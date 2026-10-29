@@ -98,7 +98,7 @@ export class Brain {
     // "JamSesh, approve" for a waiting host request: decided here, with or without a model.
     if (this.decideByVoice([ev])) return;
     // "Hey JamSesh…" then a pause: the same person's next line is the request.
-    const name = this.session.settings().brainName;
+    const name = brainNames(this.session.settings());
     if (ev.kind !== "prompt" && addressesBrain(ev.text, name) && onlyTheName(ev.text, name)) {
       this.calledBy = { authorId: ev.authorId, until: Date.now() + 8000 };
       if (!ev.data?.typed) chime(this.session, ev.data?.deviceId);
@@ -121,7 +121,7 @@ export class Brain {
     let only = false;
     const pending = this.host.pendingRequests();
     for (const req of pending) {
-      const v = verdictFor(batch, req, pending, this.session.settings().brainName);
+      const v = verdictFor(batch, req, pending, brainNames(this.session.settings()));
       if (!v) continue;
       this.host.decide(req.id, v.approve, v.by, v.at);
       only ||= v.only;
@@ -152,8 +152,13 @@ export class Brain {
       const triage = await this.triage(batch);
       if (this.stopped) return;
       for (const line of triage.lines) {
-        const ev = batch.find((e) => e.id === line.id);
-        if (ev) this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence } });
+        const i = batch.findIndex((e) => e.id === line.id);
+        const ev = batch[i];
+        if (!ev) continue;
+        // A question to the brain is addressed to it even without its name, so its answer is spoken.
+        const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
+        const updated = this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, ...(asked ? { direct: true } : {}) } });
+        if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, direct: true } };
       }
       for (const intro of triage.introductions) {
         if (intro.name) this.session.upsertPerson({ name: intro.name, role: intro.role || undefined });
@@ -246,7 +251,7 @@ export class Brain {
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
         system: this.system(),
-        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room (kind answer). If it's feedback about how you behave, call remember_feedback. Always do something visible: act on the screen or with a directive, answer, or use say_to_room (kind problem) to say briefly why you can't. Don't add a spoken confirmation of an action that is already visible.`,
+        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room (kind answer). If it's feedback about how you behave, call remember_feedback. Always do something visible: act on the screen or with a directive, answer, or use say_to_room (kind problem) to say briefly why you can't. After a SPOKEN request that sends work to an agent, confirm in a few words with say_to_room (kind confirm), for example "Sent to Felipe's agent."; don't confirm anything that is already visible on the screen, and say nothing more.`,
         tools: this.tools([ev], pass),
         stopWhen: isStepCount(8),
       });
@@ -299,8 +304,9 @@ export class Brain {
 
   /** The system prompt: the router's rules, the brain's name, and what the room told it about itself. */
   system() {
-    const { brainName, brainNotes } = this.session.settings();
-    return `${ROUTER_SYSTEM.replaceAll("JamSesh", brainName === "JamSesh" ? "JamSesh" : `JamSesh (the room calls you "${brainName}")`)}${brainNotes.length ? `\n\nWhat this room has told you about how to behave (follow it):\n${brainNotes.map((n) => `- ${n}`).join("\n")}` : ""}`;
+    const { brainName, brainAliases, brainNotes } = this.session.settings();
+    const also = brainAliases.length ? `, and also answer to ${brainAliases.map((a) => `"${a}"`).join(", ")}` : "";
+    return `${ROUTER_SYSTEM.replaceAll("JamSesh", brainName === "JamSesh" && !also ? "JamSesh" : `JamSesh (the room calls you "${brainName}"${also})`)}${brainNotes.length ? `\n\nWhat this room has told you about how to behave (follow it):\n${brainNotes.map((n) => `- ${n}`).join("\n")}` : ""}`;
   }
 
   /** Something happened outside the room that may need coordination, such as a shipped change. */
@@ -523,7 +529,7 @@ export class Brain {
       }),
       say_to_room: tool({
         description:
-          "Reply to the room. kind 'answer' for a question someone asked you, 'problem' when you can't do what was asked or a person must act, 'confirm' for anything else. JamSesh decides whether it is spoken or shown as text (typed and overheard requests get text; visible actions stay silent). One or two short sentences; never narrate what you're doing.",
+          "Reply to the room. kind 'answer' for a question someone asked you, 'problem' when you can't do what was asked or a person must act, 'confirm' for a few-word acknowledgement of work you just sent (Sent to Felipe's agent). JamSesh decides whether it is spoken or shown as text (only spoken requests are answered out loud; typed and overheard lines get text); don't confirm visible actions. One or two short sentences; never narrate what you're doing.",
         inputSchema: z.object({ text: z.string(), kind: z.enum(["answer", "problem", "confirm"]) }),
         execute: async ({ text, kind }) => {
           const how = await speak(s, text, { source, kind });
@@ -581,7 +587,7 @@ export class Brain {
           const pending = host.pendingRequests();
           const req = pending.find((r) => r.id === id || r.id.endsWith(id));
           if (!req) return refuse("There's no waiting request with that id.");
-          const v = verdictFor(batch, req, pending, s.settings().brainName);
+          const v = verdictFor(batch, req, pending, brainNames(s.settings()));
           if (!v) return refuse("Nobody in these lines clearly approved or denied that request (just 'approve' or 'deny', naming it when several wait), so it keeps waiting. If someone seemed to answer, ask them to say approve or deny.");
           return host.decide(req.id, v.approve, v.by, v.at);
         },
@@ -648,8 +654,19 @@ export class Brain {
           return share ? `Asked ${p.name}; it appears on screen when they accept.` : refuse(`${p.name} has no JamSesh window open.`);
         },
       }),
+      set_brain_name: tool({
+        description:
+          "Someone asks you to go by another name ('call it Computer', 'I want to call you Computah'). Use this, never remember_feedback, for what the room calls you. 'add' keeps your current names and also answers to the new one (the default when people just want to use another word); 'rename' makes it your display name and keeps the old name as another you answer to.",
+        inputSchema: z.object({ name: z.string().describe("The name, as people say it"), how: z.enum(["add", "rename"]).default("add") }),
+        execute: async ({ name, how }) => {
+          const clean = name.trim().replace(/\s+/g, " ").slice(0, 40);
+          if (clean.replace(/[^a-z0-9]/gi, "").length < 3) return refuse("That name is too short to listen for.");
+          s.addBrainName(clean, how === "rename");
+          return `I answer to ${[s.settings().brainName, ...s.settings().brainAliases].join(", ")} now.`;
+        },
+      }),
       remember_feedback: tool({
-        description: "Someone gave you feedback about how you behave (talk less, be bolder, don't interrupt, call me Chey, always ask before building). Save it as a short instruction to yourself; it applies for the rest of the session.",
+        description: "Someone gave you feedback about how you behave (talk less, be bolder, don't interrupt, call me Chey, always ask before building). Save it as a short instruction to yourself; it applies for the rest of the session. Not for what people call you: that is set_brain_name.",
         inputSchema: z.object({ note: z.string().describe("An instruction to yourself, imperative, one line") }),
         execute: async ({ note }) => {
           const notes = [...s.settings().brainNotes, note.trim()].slice(-30);
@@ -1007,10 +1024,36 @@ function describeBigScreens(s: Session): string[] {
 }
 
 /** The line is only the name, perhaps with a greeting: "Hey JamSesh", "JamSesh?" */
-export function onlyTheName(text: string, name: string) {
-  const own = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const filler = new Set(["hey", "hi", "ok", "okay", "yo", "so", "um", "uh", "oh", own, "jam", "sesh", "session", "jamsesh", "jamsession"]);
+export function onlyTheName(text: string, name: string | string[]) {
+  const filler = new Set(["hey", "hi", "ok", "okay", "yo", "so", "um", "uh", "oh", ...nameForms(name), "jam", "sesh", "session", "jamsesh", "jamsession"]);
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w && !filler.has(w)).length === 0;
+}
+
+/** The names the brain answers to: its display name, then any others the room gave it ("Computah", "computer"). */
+export function brainNames(s: { brainName: string; brainAliases?: string[] }): string[] {
+  return [s.brainName, ...(s.brainAliases ?? [])].filter((n) => n?.trim());
+}
+
+/**
+ * Every spelling a name may arrive in: lowercase letters and digits only, with the ways speech-to-text
+ * tends to write it. The default name has its known mishearings; other names get the "-er" / "-ah" / "-a"
+ * endings swapped ("computah" is heard as "computer"), and a plural.
+ */
+export function nameForms(name: string | string[]): string[] {
+  const out = new Set<string>();
+  for (const raw of Array.isArray(name) ? name : [name]) {
+    const n = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (n.length < 3) continue;
+    out.add(n);
+    if (n === "jamsesh") {
+      for (const v of ["jamsession", "jamsess", "jamseh", "jamsech", "jamses", "jamsey", "jamsy", "jamsessions"]) out.add(v);
+      continue;
+    }
+    const stem = n.replace(/(er|ah|a|ar|or)$/, "");
+    if (stem.length >= 3 && stem !== n) for (const end of ["er", "ah", "a", "ar"]) out.add(stem + end);
+    out.add(`${n}s`);
+  }
+  return [...out];
 }
 
 /**
@@ -1018,11 +1061,9 @@ export function onlyTheName(text: string, name: string) {
  * "hey jam sesh", "…can you do that, JamSesh?"), not mentioned as a thing ("update the jamsesh
  * skill", "open the JamSesh app").
  */
-export function addressesBrain(text: string, name: string) {
-  const n = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (n.length < 3) return false;
-  // How speech-to-text tends to write the default name.
-  const names = n === "jamsesh" ? new Set(["jamsesh", "jamsession", "jamsess", "jamseh", "jamsech", "jamses", "jamsey", "jamsy", "jamsessions"]) : new Set([n]);
+export function addressesBrain(text: string, name: string | string[]) {
+  const names = new Set(nameForms(name));
+  if (!names.size) return false;
   const raw = text.toLowerCase().split(/\s+/).filter((w) => /[a-z0-9]/.test(w));
   const words = raw.map((w) => w.replace(/[^a-z0-9]/g, ""));
   const ARTICLE = new Set(["the", "a", "an", "this", "that", "our", "your", "my", "in", "into", "to", "of", "with", "from", "on", "for", "about"]);
@@ -1030,7 +1071,8 @@ export function addressesBrain(text: string, name: string) {
   const GREETING = new Set(["hey", "hi", "ok", "okay", "yo", "so", "and", "alright", "um", "uh", "oh"]);
   for (let i = 0; i < words.length; i++) {
     // The name may be split by the transcriber ("jam sesh").
-    const span = names.has(words[i]) ? 1 : i + 1 < words.length && names.has(words[i] + words[i + 1]) ? 2 : 0;
+    let span = 0;
+    for (let n = 1; n <= 3 && !span && i + n <= words.length; n++) if (names.has(words.slice(i, i + n).join(""))) span = n;
     if (!span) continue;
     // Set off by a comma or a question mark ("can you do that, JamSesh?", "JamSesh, has it built?") is always an address.
     const setOff = /[,?!]$/.test(raw[i + span - 1] ?? "") || (i > 0 && /[,]$/.test(raw[i - 1] ?? ""));
@@ -1097,9 +1139,8 @@ const GENERIC_YES = new Set(["yes", "yeah", "yep", "yup", "sure", "go ahead", "g
 const GENERIC_NO = new Set(["no", "nope", "not now", "no not now", "dont build", "dont build it", "dont", "cancel", "cancel it", "cancel that", "hold off", "not yet", "no thanks", "nah"]);
 
 /** The answer part of a line: lowercase words, without the brain's name, greetings, fillers or punctuation. */
-function answerOf(text: string, brainName: string) {
-  const name = brainName.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const drop = new Set(["hey", "hi", "ok", "okay", "um", "uh", "oh", "please", "jamsesh", "jam", "sesh", "session", "jamsession", name]);
+function answerOf(text: string, brainName: string | string[]) {
+  const drop = new Set(["hey", "hi", "ok", "okay", "um", "uh", "oh", "please", "jamsesh", "jam", "sesh", "session", "jamsession", ...nameForms(brainName)]);
   return text
     .toLowerCase()
     .replace(/[’']/g, "")
@@ -1116,7 +1157,7 @@ function answerOf(text: string, brainName: string) {
  * else, so negations, questions and other sentences that contain the word don't count. Prompts
  * typed to agents never count. `only`: the line was nothing but the answer.
  */
-export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
+export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
   if (pending.length !== 1) return null;
   const asked = pending[0].createdAt;
   for (const e of [...batch].reverse()) {
@@ -1150,7 +1191,7 @@ const NAMING_FILLER = new Set(["the", "build", "for", "of", "request", "one", "s
  * this request and no other (its agent, owner, repository or branch) and otherwise be only "approve"
  * or "deny" ("approve Sam's build", "deny the ios one"); anything else is left for the brain to ask.
  */
-export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], brainName = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
+export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
   if (!pending.some((p) => p.id === req.id)) return null;
   if (pending.length === 1) return buildVerdict(batch, pending, brainName);
   const mine = requestWords(req);

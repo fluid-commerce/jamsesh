@@ -9,16 +9,19 @@ import type { Pcm } from "./wav";
 type Extractor = { createStream(): any; compute(s: any): Float32Array };
 
 let extractor: Extractor | null | undefined;
+/** Why the speaker model is off, when it is (kept so the host can be told, not just the log). */
+let loadError = "";
 
 function getExtractor(): Extractor | null {
   if (extractor !== undefined) return extractor;
   try {
-    if (!config.speakerModel) throw new Error("no speaker model in ~/.jamsesh/models");
+    if (!config.speakerModel) throw new Error("the speaker model (wespeaker_en.onnx) isn't in ~/.jamsesh/models");
     // Inside the Mac app the hub is one compiled program; the native library sits beside it.
     const sherpa = config.nodeModules ? createRequire(join(config.nodeModules, "index.js"))("sherpa-onnx-node") : require("sherpa-onnx-node");
     extractor = new sherpa.SpeakerEmbeddingExtractor({ model: config.speakerModel, numThreads: 2, debug: 0 });
   } catch (e) {
-    console.warn("voiceprints off:", e instanceof Error ? e.message : e);
+    loadError = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").slice(0, 200);
+    console.warn("voiceprints off:", loadError);
     extractor = null;
   }
   return extractor ?? null;
@@ -28,9 +31,26 @@ export function voiceprintsAvailable() {
   return getExtractor() !== null;
 }
 
+/** Whether voice matching works on this host, and if not, why. */
+export function voiceprintStatus(): { available: boolean; reason: string } {
+  const available = getExtractor() !== null;
+  return { available, reason: available ? "" : loadError || "the speaker model didn't load" };
+}
+
+/** What a speaker correction did for the voiceprint: it learned, or why it could not. */
+export type Learning = { learned: true } | { learned: false; reason: string };
+
+/** What to tell the person who corrected a line. */
+export function learningNote(name: string, l: Learning) {
+  return l.learned ? `Learning ${name}'s voice.` : `Renamed, but couldn't learn from that line (${l.reason}).`;
+}
+
+/** The shortest line that carries enough voice to learn from. */
+export const MIN_VOICE_SECONDS = 0.8;
+
 export function embed(pcm: Pcm): Float32Array | null {
   const ex = getExtractor();
-  if (!ex || pcm.samples.length < pcm.sampleRate * 0.8) return null;
+  if (!ex || pcm.samples.length < pcm.sampleRate * MIN_VOICE_SECONDS) return null;
   const s = ex.createStream();
   s.acceptWaveform({ sampleRate: pcm.sampleRate, samples: pcm.samples });
   return normalize(ex.compute(s));

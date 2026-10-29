@@ -131,7 +131,7 @@ test("A3: a speaker correction keeps the person it was corrected to", async () =
   const felipe = hub.session.upsertPerson({ name: "Felipe" });
   const laptop = hub.auth.issue({ kind: "browser", label: "Maya's laptop", ip: "10.0.0.6", personId: maya.id });
   let target = "";
-  (hub.audio as any).assign = (_u: string, pid: string) => ((target = pid), { ok: true });
+  (hub.audio as any).assign = (_u: string, pid: string) => ((target = pid), { utterance: { id: _u }, learning: { learned: true } });
   const r = await fetch(`${base}/api/utterances/u1/assign`, { method: "POST", headers: { ...remote, authorization: `Bearer ${laptop.token}` }, body: JSON.stringify({ personId: felipe.id }) });
   expect(r.status).toBe(200);
   expect(target).toBe(felipe.id);

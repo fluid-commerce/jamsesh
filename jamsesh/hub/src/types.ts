@@ -263,6 +263,8 @@ export interface Settings {
   sessionName: string;
   /** What the room calls the brain; saying it addresses the brain directly. */
   brainName: string;
+  /** Other names the brain answers to ("Computah", "computer"); each is heard like the display name. */
+  brainAliases: string[];
   /** What the room told the brain about how to behave, kept across the session. */
   brainNotes: string[];
   brainEnabled: boolean;
@@ -334,6 +336,8 @@ export interface HubState {
   screens: ScreenInfo[];
   digest: string;
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
+  /** Voice matching labels lines by voice; off when the speaker model or its native library fails to load. */
+  voiceprints: { available: boolean; reason: string; enrolled: number };
 }
 
 export interface CanvasInfo {
