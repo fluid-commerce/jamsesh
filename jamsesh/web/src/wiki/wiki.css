@@ -519,7 +519,7 @@ button.wk-chip:hover:not(:disabled) {
   opacity: 0.5;
 }
 .wk-local {
-  height: 260px;
+  height: 300px;
   border-radius: 16px;
   background: var(--bg-2);
   border: 1px solid var(--line);
@@ -816,4 +816,116 @@ button.wk-chip:hover:not(:disabled) {
 .tab-pane.wiki-pane {
   padding: 0;
   overflow: hidden;
+}
+
+.wk-edit-hint {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.wk-chips .wk-quiet {
+  align-self: center;
+  padding-left: 6px;
+}
+.wk.phone .wk-crumb {
+  flex-wrap: nowrap;
+}
+.wk.phone .wk-crumb .wk-upd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- a wiki card on the Tasks board ---- */
+.wk-card-sum {
+  margin: 8px 0 4px;
+  line-height: 1.5;
+  color: var(--text);
+  font-size: 14px;
+}
+.wk-card-list,
+.wk-card-find {
+  list-style: none;
+  margin: 8px 0 4px;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.wk-card-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 4px 0;
+}
+.wk-card-list li.off .wk-card-t {
+  color: var(--dim);
+  text-decoration: line-through;
+}
+.wk-card-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 100%;
+  min-width: 0;
+  cursor: pointer;
+}
+.wk-card-list input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  accent-color: var(--built);
+}
+.wk-card-t {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+.wk-card-list li > .btn {
+  margin-left: 20px;
+  height: 24px;
+  padding: 0 8px;
+}
+.wk-card-op,
+.wk-card-stale {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.wk-card-stale {
+  flex-basis: 100%;
+  color: var(--directive);
+  padding-left: 24px;
+}
+.wk-card-find li {
+  font-size: 13px;
+  color: var(--muted);
+}
+.wk-card-find b {
+  color: var(--dim);
+  font-weight: 560;
+  margin-right: 6px;
+}
+.wk-diff {
+  flex-basis: 100%;
+  margin: 4px 0 6px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wk-diff .add {
+  color: var(--built);
+}
+.wk-diff .del {
+  color: var(--warn);
 }

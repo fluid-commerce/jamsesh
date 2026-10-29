@@ -92,6 +92,10 @@ function purify(html: string): string | null {
   if (!DOMPurify.isSupported || typeof DOMPurify.sanitize !== "function") return null;
   if (!hooked) {
     hooked = true;
+    // data-slug / data-src / data-at carry names, not addresses, so the address rule below would refuse them.
+    DOMPurify.addHook("uponSanitizeAttribute", (_node, data) => {
+      if (/^data-(slug|src|at)$/.test(data.attrName) && /^[\w./:-]{1,200}$/.test(data.attrValue)) data.forceKeepAttr = true;
+    });
     DOMPurify.addHook("afterSanitizeAttributes", (node) => {
       if (node.tagName === "A" && /^https?:/i.test(node.getAttribute("href") ?? "")) {
         node.setAttribute("target", "_blank");

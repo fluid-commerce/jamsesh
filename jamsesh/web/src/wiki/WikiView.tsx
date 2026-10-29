@@ -7,7 +7,7 @@ import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/atta
 import { isTypingTarget, plain } from "../shared/keys";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
-import { dropTitle, renderMarkdown } from "./markdown";
+import { dropTitle, plainText, renderMarkdown } from "./markdown";
 import { wikiApi, useWiki, type WikiData } from "./wikiApi";
 import { CATEGORIES, CATEGORY_COLOR, CATEGORY_LABEL, type Category, type LogEntry, type PageMeta, type SearchHit, type SourceText, type WikiPage } from "./types";
 import "./wiki.css";
@@ -182,7 +182,7 @@ function Index({ wiki, q, setQ, search, current, onOpen, onGraph, onAdd, graphOn
                 <span className="wk-dot" style={{ background: CATEGORY_COLOR[h.category] }} />
                 <span className="wk-hit-t">
                   <b>{h.title}</b>
-                  <small>{h.snippet}</small>
+                  <small>{plainText(h.snippet, 140)}</small>
                 </span>
               </button>
             ))
@@ -224,15 +224,15 @@ function Empty({ ready, error, onAdd }: { ready: boolean; error: string | null; 
           <circle key={`${x}${y}`} cx={x as number} cy={y as number} r={r as number} fill={c as string} opacity=".55" />
         ))}
       </svg>
-      <h2>{error ? "The wiki didn't load" : ready ? "Nothing in the wiki yet" : "Setting up the wiki"}</h2>
+      <h2>{error ? "The wiki didn't load" : ready ? "The first pages are on their way" : "Nothing in the wiki yet"}</h2>
       <p>
         {error
           ? error
           : ready
-            ? "JamSesh builds it from what the room says and what the agents ship. Add a document, a link or your notes to start it off."
-            : "The project's wiki folder is being created. It will be here in a moment."}
+            ? "JamSesh has sources to read. When it proposes pages they wait on the Tasks board for you to approve."
+            : "JamSesh builds it from what the room says and what the agents ship. Add a document, a link or your notes to start it off."}
       </p>
-      {!error && ready && (
+      {!error && (
         <button className="btn primary" onClick={onAdd}>Add to wiki</button>
       )}
     </div>
@@ -335,7 +335,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
     <div className="wk-page scrollbars-thin">
       <article className="wk-article">
         <div className="wk-crumb">
-          {onBack && <button className="btn ghost small" onClick={onBack}>← Back</button>}
+          {onBack && !phone && <button className="btn ghost small" onClick={onBack}>← Back</button>}
           <span className="wk-cat" style={{ ["--c" as any]: CATEGORY_COLOR[cat] }}>{CATEGORY_LABEL[cat]}</span>
           {page.frontMatter.updated && <span className="wk-upd">Updated {page.frontMatter.updated}</span>}
           <span className="grow" />
@@ -364,13 +364,18 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
           <section className="wk-sec">
             <h3 className="label">Sources</h3>
             <ul className="wk-chips">
-              {page.sources.map((s) => (
+              {page.sources.filter((s) => s.kind !== "edit").map((s) => (
                 <li key={s.id}>
                   <button className={`wk-chip ${s.exists ? "" : "gone"}`} disabled={!s.exists} onClick={() => onSource(s.id, null)} title={s.exists ? "Open the source" : "This source was removed"}>
                     <small>{s.kind}</small> {s.title}
                   </button>
                 </li>
               ))}
+              {page.sources.some((s) => s.kind === "edit") && (
+                <li className="wk-quiet">
+                  {page.sources.filter((s) => s.kind === "edit").length} edit{page.sources.filter((s) => s.kind === "edit").length === 1 ? "" : "s"} by people, in History
+                </li>
+              )}
             </ul>
           </section>
         )}
@@ -403,7 +408,9 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
 
 function Editor({ value, onChange, onSave, onCancel, saving, dirty, conflict, onTheirs, error }: { value: string; onChange: (s: string) => void; onSave: () => void; onCancel: () => void; saving: boolean; dirty: boolean; conflict: WikiPage | null; onTheirs: () => void; error: string | null }) {
   const ta = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => ta.current?.focus(), []);
+  useEffect(() => {
+    ta.current?.focus();
+  }, []);
   return (
     <div className="wk-edit">
       {conflict && (
@@ -424,7 +431,7 @@ function Editor({ value, onChange, onSave, onCancel, saving, dirty, conflict, on
         }}
       />
       <div className="wk-edit-bar">
-        <span className="wk-quiet">Markdown. Link pages with [[their name]]. Your edit counts as a source for the next update.</span>
+        <span className="wk-quiet wk-edit-hint">Markdown. Link pages with [[name]]. Your edit is logged as a source.</span>
         <span className="grow" />
         {error && <span className="wk-err">{error}</span>}
         <button className="btn ghost small" onClick={onCancel}>Cancel</button>

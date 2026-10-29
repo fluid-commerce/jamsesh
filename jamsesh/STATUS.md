@@ -96,7 +96,12 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Query, filing an answer, lint (orphans, broken links, stale, unread sources, contradictions) | Tested live | Query and lint ran once with the live model; the contradiction check has only seen a clean wiki. |
 | `jam_wiki_read` / `search` / `query` / `jam_source_add`; join briefing carries index and workstream pages under 1,500 tokens | Simulated | Scripted agent over the tool path. A real Claude Code chat hasn't used them. |
 | Fact list folded into pages on first use | Simulated | From a context.json and session facts; not from a real project's history. |
-| Wiki tab, graph and the Work tab links | Not tested | Built by the UI worker against the API. |
+| Wiki tab: index and search, page view with backlinks and citations, editing with stale-save handling, history, Add to wiki (text, link, file) | Simulated | The client calls (`api()`) run against a throwaway hub with a 40-page seeded folder; looked at in headless Chromium at 1440 px and 390 px. A PDF upload was not run (needs the router key). |
+| Wiki graph (hover, click, drag, keyboard, local graph, phone, reduced motion) and the pulse when an ingest touches pages | Simulated | Looked at in headless Chromium with 41 pages; the pulse was triggered by a real page edit through the hub's own message. Not tried with a real ingest or on a touch device. |
+| The graph on the big screen ("show the wiki graph") | Simulated | Brain tool tested; drawn at 1920 x 1080 in headless Chromium. Not seen on a real TV, and not asked by voice. |
+| Wiki cards on the Tasks board: per-page toggles and diffs, Add N pages | Simulated | Accepting through `api()` tested; the card was looked at in Chromium. |
+| Rendered page text: raw HTML, `javascript:` and `data:` links, pictures, hostile titles | Simulated | Unit tests on the markdown layer; a hostile page opened in headless Chromium ran nothing (DOMPurify itself is only exercised in a browser, by hand). |
+| The Work tab links to the decisions, requirements and questions pages | Not tested | Not built: the Work tab still shows the fact list. |
 
 ## Big screen: locks, versions, history
 

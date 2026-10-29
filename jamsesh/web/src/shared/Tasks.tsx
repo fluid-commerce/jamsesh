@@ -6,6 +6,7 @@ import { WorkViewer } from "../client/WorkViewer";
 import { api, pref, setPref, type Agent, type Artifact, type Directive, type Fact, type HubState, type JamEvent, type TriageCard } from "./hub";
 import { agoWords } from "./StageControls";
 import { colorFor, Reactions, useNow } from "./ui";
+import { WikiCardView } from "../wiki/WikiCard";
 import "./tasks.css";
 
 type ColId = "triage" | "waiting" | "working" | "done";
@@ -104,7 +105,7 @@ export function TasksView({ state, personId, big }: { state: HubState; personId?
             <div className="tk-body scrollbars-thin" onKeyDown={moveFocus}>
               {c.id === "triage" ? (
                 cards.length ? (
-                  cards.map((card, i) => <TriageCardView key={card.id} card={card} index={i + 1} {...act} />)
+                  cards.map((card, i) => (card.type === "wiki" ? <WikiCardView key={card.id} card={card} index={i + 1} {...act} /> : <TriageCardView key={card.id} card={card} index={i + 1} {...act} />))
                 ) : (
                   <p className="tk-empty">Nothing waiting. What JamSesh overhears, and what agents report, shows up here for you to send or add.</p>
                 )

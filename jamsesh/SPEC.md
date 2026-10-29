@@ -1736,6 +1736,53 @@ saves a fact). The first time a project has a wiki, its `context.json` and the s
 (`decisions`, `requirements`, `open-questions`, `project-brief`, one page per workstream), without a model, with a source holding the
 original text. The **Work** tab links to these pages.
 
+### 12.9 The Wiki tab, the graph and the big screen's wiki mode
+
+The **Wiki** tab sits between **Work** and **Tasks** in people's apps; the host has a **Wiki** button (key 5) that swaps the
+stage area for the same view. Code: `web/src/wiki/`.
+
+- **Index.** Pages grouped by category (people, workstreams, features, decisions, requirements, open questions, repos,
+  topics) with a count of backlinks, and search: the hub's `GET /api/wiki/search` after 200 ms, titles and summaries
+  filtered locally until it answers or if it can't. `/` focuses search, Up and Down move through the list.
+- **Page.** The body is rendered Markdown at 16.5 px on a 70-character measure. `[[page]]`, `[[page|alias]]` and
+  `[[page#heading]]` are links (a link to a page that doesn't exist is dashed, and opens an empty page to start); `(src: id, 14:32)`
+  and `[[raw/id]]` are small citation chips. A citation opens the source's text in a dialog and marks the line that starts
+  `[14:32]` (the transcript source format). The page also lists its Sources and its Backlinks, and a small local graph of the
+  page and its direct neighbours. Edits to a page by people collapse to one line ("N edits by people, in History").
+- **Editing.** Edit puts the whole body in a text box; Save (Cmd/Ctrl+Enter) is `PUT /api/wiki/page/:slug` with the page's
+  `rev`. A stale `rev` (409) shows "Someone saved this page while you were editing" with **Use their version** or **Save over
+  theirs**. Nothing is queued offline: a failed save leaves the text where it is. **History** is `GET /api/wiki/log`, for the
+  page or everything.
+- **Add to wiki.** Write or paste (title and text), a link, or a file (Markdown and text are read in the browser and sent as
+  text; a PDF is uploaded with Phase 4's `uploadAttachment` and sent as `{attachment}`; a drop anywhere on the dialog works).
+  The check on file types and sizes is `checkFile` from `shared/attach.tsx`.
+- **Wiki cards on the Tasks board** (`card.type === "wiki"`) show the summary and one row per page with a checkbox, New or
+  Changed, a diff that opens on demand and a note when someone edited the page since. **Add N pages** is
+  `POST /api/triage/:id/add {pages}`; a lint card lists its findings and has **Done**.
+- **The graph.** `d3-force` lays out; a plain 2D canvas draws. Nodes are coloured by category, sized by the square root of their
+  backlinks; edges are links. Hover (or keyboard focus) lights a node and its neighbours and dims the rest; click opens the
+  page; dragging moves a node. The layout takes the shape of its room (wide on a screen, tall on a phone), a loose page is held
+  near the rest, and the whole map is fitted in view. Names are drawn for the biggest pages and for what is highlighted, never
+  on top of each other. The frame loop only runs while something moves. **Keyboard**: Tab to the map, Left and Right walk the
+  pages (by category, then title), `N` hops to a linked page, Enter opens, Escape clears; the page is announced
+  (title, kind, backlinks, what it links with). **Phone**: fewer names, a tap selects and shows a card with **Open**.
+  **Reduced motion**: the map settles once without animating, hover snaps, and a pulse is a still ring.
+- **Pulse.** The hub's `{type:"wiki", touched:[slug]}` message (an ingest raised, a page edited or applied) pulses those
+  pages for 2.4 seconds and refetches the index after 400 ms; reconnecting refetches too.
+- **Big screen.** `StageMode` gains `"wiki"`. `Stage.tsx` draws `WikiStage`: the graph at twice the size, with the title
+  "What we know", a legend and, for seven seconds after an ingest, "Just updated &lt;pages&gt;". The brain's `show_on_screen`
+  takes `mode: "wiki"` ("JamSesh, show the wiki graph") and pins it unless told not to; the wiki view's **On the big screen**
+  button puts it up too.
+- **Safety.** Page text never becomes raw HTML: markdown-it runs with HTML off; only `http(s):`, `mailto:` and in-page links
+  stand (`javascript:`, `data:`, `vbscript:`, `file:` and relative paths are shown as text); pictures are not fetched (their
+  alt text stands in, so a page can't phone home); outside links get `target="_blank" rel="noopener noreferrer nofollow"`.
+  DOMPurify then sanitises the result with a short tag and attribute list, and if it can't run (no DOM) the page is shown
+  escaped. Titles are rendered as text by React.
+- **Libraries** (pinned in `web/package.json`): `d3-force` 3.0.0 (ISC), `markdown-it` 14.1.0 (MIT), `dompurify` 3.4.0
+  (MPL-2.0 OR Apache-2.0). Their dependencies are ISC (d3-quadtree, d3-dispatch, d3-timer), MIT (mdurl, linkify-it, uc.micro,
+  punycode.js) and BSD-2-Clause (entities); `markdown-it` also lists `argparse` (Python-2.0), used only by its command-line
+  tool and not in the bundle. Types: `@types/d3-force`, `@types/markdown-it` (MIT, dev only).
+
 ## 13. Host control and permissions
 
 The brain pilots the host machine as well as the big screen [B44]. Host control is on by default

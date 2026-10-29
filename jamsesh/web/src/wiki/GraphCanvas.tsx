@@ -37,7 +37,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
   const [picked, setPicked] = useState<string | null>(null);
   const [announce, setAnnounce] = useState("");
   // Everything the frame loop reads lives in one ref, so a hover never re-renders React.
-  const live = useRef({ hover: null as string | null, active: null as string | null, emph: 0, k: 1, cx: 0, cy: 0, fitted: false, drag: null as { n: GNode; moved: number; sx: number; sy: number } | null, raf: 0, last: 0 });
+  const live = useRef({ hover: null as string | null, active: null as string | null, emph: 0, k: 1, cx: 0, cy: 0, fitted: false, midY: 0, drag: null as { n: GNode; moved: number; sx: number; sy: number } | null, raf: 0, last: 0 });
   const pos = useRef(new Map<string, { x: number; y: number }>());
   const sim = useRef<Simulation<GNode, undefined> | null>(null);
   const nodes = useRef<GNode[]>([]);
@@ -74,9 +74,13 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
         const x = n.x ?? 0, y = n.y ?? 0;
         x0 = Math.min(x0, x - n.r); x1 = Math.max(x1, x + n.r); y0 = Math.min(y0, y - n.r); y1 = Math.max(y1, y + n.r);
       }
-      const pad = (stage ? 120 : mode === "local" ? 56 : 48) + (stage ? 40 : 0);
-      const kMax = stage ? 2.2 : mode === "local" ? 1.5 : 1.25;
-      const kFit = Math.max(0.25, Math.min(kMax, (size.w - pad * 2) / Math.max(1, x1 - x0), (size.h - pad * 2) / Math.max(1, y1 - y0)));
+      const padX = stage ? 110 : mode === "local" ? 56 : 52;
+      const padY = stage ? 40 : padX;
+      const padT = stage ? 110 : 0;
+      const padB = stage ? 90 : mode === "full" ? 36 : 0;
+      L.midY = padT + (size.h - padT - padB) / 2;
+      const kMax = stage ? 2.6 : mode === "local" ? 1.9 : 2;
+      const kFit = Math.max(0.25, Math.min(kMax, (size.w - padX * 2) / Math.max(1, x1 - x0), (size.h - padY * 2 - padT - padB) / Math.max(1, y1 - y0)));
       const snap = reduced || !L.fitted;
       L.k = snap ? kFit : ease(L.k, kFit, dt, 3);
       L.cx = snap ? (x0 + x1) / 2 : ease(L.cx, (x0 + x1) / 2, dt, 3);
@@ -84,7 +88,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       L.fitted = true;
       const k = L.k;
       const sx = (x: number) => (x - L.cx) * k + size.w / 2;
-      const sy = (y: number) => (y - L.cy) * k + size.h / 2;
+      const sy = (y: number) => (y - L.cy) * k + L.midY;
 
       const hot = L.hover ?? L.active ?? picked;
       const near = hot ? graph.near.get(hot) : undefined;
@@ -144,7 +148,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       g.textAlign = "center";
       g.textBaseline = "top";
       const room = Math.floor((size.w * size.h) / (stage ? 52000 : coarse ? 30000 : mode === "local" ? 9000 : 15000));
-      const top = labelled(graph, Math.min(coarse ? 7 : 40, Math.max(mode === "local" ? 12 : 4, room)));
+      const top = labelled(graph, Math.min(coarse ? 7 : stage ? 14 : 40, Math.max(mode === "local" ? 14 : 4, room)));
       const want: GNode[] = [];
       for (const n of list) if (n.id === hot || n.id === focus || (hot && near?.has(n.id)) || (!hot && top.has(n.id))) want.push(n);
       want.sort((a, b) => (a.id === hot ? -2 : a.id === focus ? -1 : 0) - (b.id === hot ? -2 : b.id === focus ? -1 : 0) || b.backlinks - a.backlinks);
@@ -206,14 +210,24 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
       const f = byId.current.get(focus);
       if (f) (f.fx = 0, (f.fy = 0));
     }
+    const aspect = Math.max(0.5, Math.min(2, size.w / Math.max(1, size.h)));
     const links = graph.edges.map((e) => ({ source: e.source, target: e.target }));
     const s = forceSimulation<GNode>(fresh)
-      .force("link", forceLink<GNode, { source: string; target: string }>(links).id((n) => n.id).distance(mode === "local" ? 70 * S : 38 * S).strength(0.5))
-      .force("charge", forceManyBody<GNode>().strength(mode === "local" ? -260 * S : -(70 + Math.min(80, fresh.length)) * S).distanceMax(400 * S))
+      .force("link", forceLink<GNode, { source: string; target: string }>(links).id((n) => n.id).distance(mode === "local" ? 100 * S : 62 * S).strength(0.4))
+      .force("charge", forceManyBody<GNode>().strength(mode === "local" ? -320 * S : -(160 + Math.min(120, fresh.length * 2)) * S).distanceMax(600 * S))
       .force("center", forceCenter(0, 0))
-      .force("x", forceX(0).strength(0.045))
-      .force("y", forceY(0).strength(0.045))
-      .force("collide", forceCollide<GNode>((n) => n.r + 4 * S))
+      // The map takes the shape of the room it has: wide on a screen, tall on a phone.
+      .force("x", forceX<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : 0.07 / aspect) : 0.3)))
+      .force("y", forceY<GNode>(0).strength((n) => (n.degree ? (mode === "local" ? 0.07 : 0.07 * aspect) : 0.3)))
+      .force("collide", forceCollide<GNode>((n) => n.r + 5 * S))
+      // Nothing drifts out of the map: a loose page stays within reach of the rest.
+      .force("fence", () => {
+        const R = (150 + 34 * Math.sqrt(fresh.length)) * S;
+        for (const n of fresh) {
+          if (n.x !== undefined) n.x = Math.max(-R * 2, Math.min(R * 2, n.x));
+          if (n.y !== undefined) n.y = Math.max(-R * (aspect < 1 ? 2 : 1), Math.min(R * (aspect < 1 ? 2 : 1), n.y));
+        }
+      })
       .alphaDecay(0.035)
       .velocityDecay(0.42);
     sim.current = s;
@@ -230,7 +244,9 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
     };
   }, [graph, size.w, size.h, mode, focus, S, wake]);
 
-  useEffect(() => wake(), [picked, focus, wake]);
+  useEffect(() => {
+    wake();
+  }, [picked, focus, wake]);
   // A pulse needs a frame to start and one to end, even when the map is otherwise still.
   useEffect(() => {
     const off = pulses.on(() => wake());
@@ -245,7 +261,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
   const world = (e: PointerEvent) => {
     const r = cv.current!.getBoundingClientRect();
     const L = live.current;
-    return { x: (e.clientX - r.left - size.w / 2) / L.k + L.cx, y: (e.clientY - r.top - size.h / 2) / L.k + L.cy };
+    return { x: (e.clientX - r.left - size.w / 2) / L.k + L.cx, y: (e.clientY - r.top - L.midY) / L.k + L.cy };
   };
   const hit = (e: PointerEvent) => {
     const w = world(e);

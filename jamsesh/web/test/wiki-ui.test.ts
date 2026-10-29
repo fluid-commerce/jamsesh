@@ -10,6 +10,7 @@ import { api } from "../src/shared/hub";
 import { wikiApi } from "../src/wiki/wikiApi";
 import { shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
+import type { Decider } from "../../hub/src/wiki/service";
 
 process.env.JAMSESH_SILENT = "1";
 const dir = mkdtempSync(join(tmpdir(), "jam-web-wiki-"));
@@ -80,7 +81,7 @@ test("saving an edit: it lands, it is logged, and a stale save comes back as a c
   if (!("page" in saved)) throw new Error("expected a save");
   expect(saved.page.markdown).toContain("Likes short meetings.");
   expect(saved.page.rev).not.toBe(before.rev);
-  expect((await wikiApi.log())[0].text.toLowerCase()).toContain("felipe");
+  expect((await wikiApi.log())[0].pages).toContain("felipe");
   // The same revision again is stale now.
   const stale = await wikiApi.save("felipe", { markdown: "Overwritten by a slow tab", rev: before.rev });
   if (!("conflict" in stale)) throw new Error("expected a conflict");
@@ -144,4 +145,21 @@ test("hostile page text and titles come back as data and render as inert text", 
   const list = (await wikiApi.pages()).pages.find((p) => p.slug === "evil-page")!;
   expect(typeof list.title).toBe("string");
   await api("/wiki/pages");
+});
+
+test("a wiki card on the Tasks board: the checked pages are written through api(), the unchecked ones are not", async () => {
+  const page = (slug: string, title: string, md: string) => ({ slug, title, type: "topic" as const, workstreams: [], markdown: `# ${title}\n\n${md}`, sources: [] });
+  hub.wiki.addSource("document", "Pricing notes", "Two tiers, monthly.", "Chey");
+  hub.wiki.decide = (async () => ({ summary: "Pricing", pages: [page("pricing", "Pricing", "Two tiers."), page("billing", "Billing", "Monthly.")] })) as Decider;
+  const r = await hub.wiki.tick();
+  const card = hub.session.board.get(r!.card!.id)!;
+  expect(card.type).toBe("wiki");
+  expect(card.wiki!.changes.map((c) => c.slug)).toEqual(["pricing", "billing"]);
+  const person = hub.session.upsertPerson({ name: "Chey" });
+  await api(`/triage/${card.id}/add`, { personId: person.id, pages: ["pricing"] });
+  expect((await wikiApi.pages()).pages.map((p) => p.slug)).toContain("pricing");
+  expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
+  // Accepting twice says so instead of writing again.
+  await expect(api(`/triage/${card.id}/add`, { personId: person.id, pages: ["billing"] })).rejects.toBeTruthy();
+  expect((await wikiApi.pages()).pages.map((p) => p.slug)).not.toContain("billing");
 });
