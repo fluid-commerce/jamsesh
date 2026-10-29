@@ -182,6 +182,36 @@ describe("migration from the single-session layout", () => {
     expect(migrateLegacy(home)).toEqual(second);
   });
 
+  test("two hubs starting together migrate once: one waits for the other, and nothing is copied twice", async () => {
+    const home = oldHome();
+    const src = join(import.meta.dir, "..", "src", "projects.ts");
+    const run = () => Bun.spawn(["bun", "-e", `const { migrateLegacy } = await import(${JSON.stringify(src)}); console.log(JSON.stringify(migrateLegacy(${JSON.stringify(home)})));`], { stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+    const both = [run(), run()];
+    const outs = await Promise.all(both.map(async (p) => ((await p.exited), JSON.parse((await new Response(p.stdout).text()).trim().split("\n").pop()!))));
+    for (const records of outs) {
+      expect(records.length).toBe(3);
+      expect(records.every((r: any) => r.verified)).toBe(true);
+    }
+    expect(listProjects(home).map((p) => [p.name, p.sessions]).sort()).toEqual([["Billing", 1], ["Passport", 2]]);
+    const passport = listProjects(home).find((p) => p.name === "Passport")!;
+    expect(readdirSync(join(home, "projects", passport.slug, "sessions")).sort()).toEqual(["host-2026-05-01-0930", "last-session"]);
+    expect(existsSync(join(home, "projects", ".migration.lock"))).toBe(false);
+  }, 30_000);
+
+  test("a lock left by a process that's gone doesn't block the migration", () => {
+    const home = oldHome();
+    mkdirSync(join(home, "projects"), { recursive: true });
+    // A pid that can't be running: far past any real pid.
+    writeFileSync(join(home, "projects", ".migration.lock"), "999999999");
+    expect(migrateLegacy(home).filter((r) => r.verified).length).toBe(3);
+    // A live holder that never lets go: this start gives up after its wait and leaves the work to it.
+    const other = oldHome();
+    mkdirSync(join(other, "projects"), { recursive: true });
+    writeFileSync(join(other, "projects", ".migration.lock"), String(process.pid));
+    expect(migrateLegacy(other, 200)).toEqual([]);
+    expect(listProjects(other)).toEqual([]);
+  });
+
   test("a copy cut off part way never counts as a session", () => {
     const home = tmp();
     const meta = createProject(home, "Passport");

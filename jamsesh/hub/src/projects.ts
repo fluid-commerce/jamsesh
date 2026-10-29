@@ -12,7 +12,7 @@
 // This file takes the home directory as an argument and imports nothing from config, so tests and
 // the migration can point it at a temp directory.
 import { Database } from "bun:sqlite";
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -274,14 +274,60 @@ function counts(db: Database) {
  * done, and any other is tried again at the next start. A copy is built under a hidden name and only
  * takes its real one once verified, so a failed or cut-off copy never shows as a session.
  */
-export function migrateLegacy(home: string): MigrationRecord[] {
+export function migrateLegacy(home: string, waitMs = 60_000): MigrationRecord[] {
+  // One migration at a time per home: two hubs starting together would copy the same sessions and
+  // overwrite each other's record. The other start waits, then finds the work done.
+  const root = projectsDir(home);
+  mkdirSync(root, { recursive: true });
+  const lock = join(root, MIGRATION_LOCK);
+  const until = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const fd = openSync(lock, "wx");
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if (lockAbandoned(lock)) {
+        rmSync(lock, { force: true });
+        continue;
+      }
+      // Still busy after the wait: leave it to that start (this one tries again next time).
+      if (Date.now() > until) return readJson<{ records: MigrationRecord[] }>(join(root, MIGRATION_FILE))?.records ?? [];
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try {
+    return migrateNow(home);
+  } finally {
+    rmSync(lock, { force: true });
+  }
+}
+
+const MIGRATION_LOCK = ".migration.lock";
+
+/** A lock left by a process that's gone (or one far older than any migration takes). */
+function lockAbandoned(lock: string) {
+  try {
+    if (Date.now() - statSync(lock).mtimeMs > 10 * 60_000) return true;
+    const pid = Number(readFileSync(lock, "utf8"));
+    // Being written right now: not abandoned yet.
+    if (!pid) return Date.now() - statSync(lock).mtimeMs > 5_000;
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+function migrateNow(home: string): MigrationRecord[] {
   const root = projectsDir(home);
   const marker = join(root, MIGRATION_FILE);
   const before = readJson<{ records: MigrationRecord[] }>(marker)?.records ?? [];
   const done = new Map(before.filter((r) => r.verified).map((r) => [r.from, r]));
   const pending = legacySessions(home).filter((src) => !done.has(src));
   if (existsSync(marker) && !pending.length) return before;
-  mkdirSync(root, { recursive: true });
   const records: MigrationRecord[] = [];
   // Projects this migration made before (by name), so a retried session joins its siblings.
   const byName = new Map<string, ProjectMeta>();
@@ -319,8 +365,8 @@ export function migrateLegacy(home: string): MigrationRecord[] {
         const sessions = join(dirOf(home, project.slug), "sessions");
         const id = (existsSync(join(sessions, basenameOf(src))) ? `${basenameOf(src)}-copy` : basenameOf(src)).replace(/^host$/, "last-session");
         const dest = join(sessions, id);
-        staging = join(sessions, `.${id}.partial`);
-        rmSync(staging, { recursive: true, force: true });
+        // Private to this attempt: nothing else ever writes or removes it.
+        staging = join(sessions, `.${id}.${process.pid}-${crypto.randomUUID().slice(0, 8)}.partial`);
         mkdirSync(staging, { recursive: true });
         cpSync(src, staging, { recursive: true, filter: (f) => !/jamsesh\.db(-wal|-shm)?$|host-link\.secret$/.test(f) });
         work.exec(`VACUUM INTO '${join(staging, "jamsesh.db").replace(/'/g, "''")}'`);
