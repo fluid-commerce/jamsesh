@@ -1713,7 +1713,7 @@ closes; if the hub stops in between, the next start closes the card with what wa
 (`PUT /api/wiki/page/:slug`) apply directly. The proposal's full text, and the card as raised, are kept in the project's
 `.proposals/<card>.json`, not in the session: a new session raises every open proposal on its own board again (pages edited
 since marked `stale`). The card's diff per page is cut at 6,000 characters, at a line, with a note of how many changed lines are left out and `cut: true`;
-`GET /api/wiki/proposal/:card/:slug` (people only) returns the whole change (`{diff, added, removed}`), and the card offers it as
+`GET /api/wiki/proposal/:card/:slug` (people only) returns the whole change (`{diff, added, removed, meta}`), and the card offers it as
 "Show the whole change". A change that shrinks a page by a third or more is flagged on the card. The card shows the first 400 diff
 lines and says how many more there are, with a button that shows them all. Before each page is written the proposal records the intent (the page and the hash of the exact bytes it will hold); nothing is
 added to the page. A page that holds exactly those bytes counts as written, whoever put them there: if a person made the same edit, the
@@ -1731,11 +1731,11 @@ sources first and on their own (5 s budget), never behind an ingest; the ingest 
 the brain takes no new pass; what is already under way (requests being answered, body and all; speech still waiting, transcribed at
 once; the brain's pass) finishes first, for up to 10 s in total (requests first, so an upload still sending its body is in before the speech is flushed), and only then is the local whisper stopped. The store's events are then sealed
 before that capture (everything is sealed once the hub has stopped): a write past it throws `ESEALED`, which a request answers with
-503, so nothing lands after the capture unseen; a window closing after the seal is let go quietly. A card shows how each page is filed (category, workstreams) before and after, in the card and in the whole change, and the page view asks before leaving unsaved text. Pages a failed accept already wrote stay part of its
+503, so nothing lands after the capture unseen; a window closing after the seal is let go quietly. A card shows how each page is filed (category, workstreams) before and after, in the card and in the whole change, and an unsaved edit is held outside the page view (the editor reopens into it after a page link, a tab or host-mode switch or the Wiki view closing; Save or Cancel drops it; closing or reloading the window asks while one is held). A long source is drawn a window of lines at a time. Pages a failed accept already wrote stay part of its
 record whatever is checked on the retry; dismissing the card after a partial accept still gives them the log line, index and commit.
 When the model's answer holds an update to an existing page it wasn't shown whole, that part isn't written and the card's sources
 stay pending when it closes (`.wiki-state.json` `need` lists the pages to show first next time), so nothing it said is lost with its
-source. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,cut?,stale,added,removed,largeDeletion}], findings?, applied?, skipped?}`.
+source. Card payload: `card.wiki = {kind: "ingest"|"lint"|"answer", summary, changes:[{slug,title,category,op:"create"|"update",diff,cut?,stale,added,removed,largeDeletion,meta:{from?:{category,workstreams},to:{category,workstreams}}}], findings?, applied?, skipped?}`.
 
 **Query and lint.** `POST /api/wiki/query {question, file?}` answers from the best-matching pages with `[[links]]`; a substantial
 answer with `file:true` raises an `answer` card that creates a page. Its source is unread until that card is resolved; if the
@@ -1752,7 +1752,7 @@ and for accepting or dismissing a wiki card.
 |---|---|
 | `GET /api/wiki/pages` | `{ready, project, pages:[{slug,title,category,summary,links,backlinks,updated,mtime}]}` |
 | `GET /api/wiki/page/:slug` | `{slug,title,category,frontMatter,markdown,rev,backlinks:[{slug,title}],links:[{slug,title,exists}],sources:[{id,title,kind,ts,exists}]}` |
-| `PUT /api/wiki/page/:slug` | body `{markdown, rev?, title?, category?}`; `rev` is required to change a page and absent to create one; 409 `{error,current}` when stale |
+| `PUT /api/wiki/page/:slug` | body `{markdown, rev?, title?, category?}` (the same text under a different `category` is a change: it is written and logged as an edit source); `rev` is required to change a page and absent to create one; 409 `{error,current}` when stale |
 | `GET /api/wiki/search?q=` | `{results:[{slug,title,category,snippet,score}]}` |
 | `GET /api/wiki/graph` | `{nodes:[{id,title,category,backlinks}],edges:[{from,to}],trimmed?}`; each page keeps its strongest links (by how linked-to the target is), an even share of a 6,000-edge budget (at most 8 a page); the page route has every link, the index lists 20 a page |
 | `GET /api/wiki/log` | `{entries:[{ts,text,pages}]}` newest first |

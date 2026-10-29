@@ -542,7 +542,7 @@ test("transcript capture: a failed source write keeps the cursor, and the sessio
 test("the end of a session flushes the last short exchange into the sources", async () => {
   const { w, s } = room();
   s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "Final call: we keep the bottom bar.", relevance: "work" });
-  await w.flush();
+  w.captureFinal();
   expect(w.pendingSources().map((id) => w.readSource(id)!.text).join("\n")).toContain("we keep the bottom bar");
 });
 
@@ -837,7 +837,8 @@ test("an agent's shipped report that can't be written is read again from the ses
   }
   expect(errors.join("\n")).toContain("tried again");
   expect(sourceIds(dir)).toEqual([]);
-  // The next pass finds it again in the session's events.
+  // The next pass finds it again in the session's events (a stub model: with a key in the environment a bare tick would call the real one).
+  w.decide = (async () => ({ summary: "", pages: [] })) as Decider;
   await w.tick();
   expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).toContain("Built the settings screen.");
   await w.tick();
@@ -1090,7 +1091,7 @@ test("what is said past 600 characters reaches the wiki, and an event longer tha
   s.store.addEvent({ kind: "decision", authorType: "person", authorId: null, authorName: "Chey", text: `${lead}DECISION: guests check out without an account.`, relevance: "work" });
   s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Chey", text: "Agreed, that is the plan for launch week.", relevance: "work" });
   s.store.addEvent({ kind: "speech", authorType: "person", authorId: null, authorName: "Sam", text: "I will start on the guest flow tomorrow morning.", relevance: "work" });
-  await w.flush();
+  w.captureFinal();
   const all = () => sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n");
   expect(all()).toContain("guests check out without an account.");
   // One typed prompt of 120,000 characters: split in parts, and a crash after the first part resumes at the next.
@@ -2156,3 +2157,75 @@ test("a window closing after the store is sealed is let go without an error", as
     server.stop(true);
   }
 }, 30_000);
+
+test("a PUT that changes only the category is written and logged, never answered with success and no write", () => {
+  const { w, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  const cur = readPage(dir, "pricing")!;
+  const same = w.editPage("pricing", cur.markdown, { rev: cur.rev, by: "Chey" });
+  expect(same.ok).toBe(true);
+  expect(readPage(dir, "pricing")!.category).toBe("topics"); // nothing asked, nothing changed
+  const r = w.editPage("pricing", cur.markdown, { rev: cur.rev, by: "Chey", category: "decisions" });
+  expect(r.ok).toBe(true);
+  expect(readPage(dir, "pricing")!.category).toBe("decisions");
+  expect(readPage(dir, "pricing")!.markdown).toBe(cur.markdown);
+  expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).toContain("Filed under decisions (was topics)");
+  // The same category again is no change.
+  const again = readPage(dir, "pricing")!;
+  const before = sourceIds(dir).length;
+  expect(w.editPage("pricing", again.markdown, { rev: again.rev, by: "Chey", category: "decisions" }).ok).toBe(true);
+  expect(sourceIds(dir).length).toBe(before);
+});
+
+test("a projects folder that is itself a link is refused, and nothing is made behind it", () => {
+  const base = join(root, `link-${Math.random().toString(36).slice(2)}`);
+  const real = join(base, "real");
+  mkdirSync(real, { recursive: true });
+  const trusted = join(base, "projects");
+  symlinkSync(real, trusted);
+  expect(() => projectRoot(join(trusted, "proj"), trusted)).toThrow("link");
+  expect(readdirSync(real)).toEqual([]);
+});
+
+test("shutdown lets the brain's active pass finish before it stops: queued passes and new lines are not taken", async () => {
+  const { hub } = room();
+  const brain = hub.brain as any;
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  let stoppedDuring: boolean | undefined;
+  let queuedRan = false;
+  const active = brain.exclusive(async () => {
+    await gate;
+    stoppedDuring = brain.stopped;
+    return "done";
+  });
+  const queued = brain.exclusive(async () => void (queuedRan = true));
+  await Bun.sleep(20); // the first pass is running
+  const done = hub.shutdown();
+  const state = flag(done);
+  await Bun.sleep(300);
+  expect(state.done).toBe(false); // waiting on the pass
+  release();
+  expect(await active).toBe("done");
+  await done;
+  await queued;
+  expect(stoppedDuring).toBe(false); // it ran to its end, not cut off
+  expect(queuedRan).toBe(false);
+  expect(brain.stopped).toBe(true);
+}, 30_000);
+
+test("the card's old filing is the one the model was shown, not the page's after the call", async () => {
+  const { w, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  w.addSource("document", "Pricing", "We decided pricing: two tiers.", "Chey");
+  w.decide = (async () => {
+    // A person re-files the page during the model call.
+    const cur = readPage(dir, "pricing")!;
+    writePage(dir, "pricing", cur.markdown, { category: "people", workstreams: ["x"] });
+    return { summary: "Pricing is a decision", pages: [page("pricing", "Pricing", "decision", "Two tiers.")] };
+  }) as Decider;
+  const card = (await w.tick())!.card!;
+  expect(card.wiki!.changes[0]!.meta!.from).toEqual({ category: "topics", workstreams: [] });
+});

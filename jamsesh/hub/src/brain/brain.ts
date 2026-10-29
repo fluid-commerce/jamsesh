@@ -76,6 +76,7 @@ export class Brain {
   }
 
   private stopped = false;
+  private draining = false;
   private nagTimer: ReturnType<typeof setInterval> | undefined;
   private lastNagAt = 0;
 
@@ -97,6 +98,17 @@ export class Brain {
     const what = tasks === waiting.length ? "task" : tasks === 0 ? "context item" : "item";
     void speak(s, `${waiting.length === 1 ? `One ${what} has` : `${waiting.length} ${what}s have`} been waiting in triage, the oldest for ${oldest} minutes.`, { source: "voice", kind: "problem" });
     return true;
+  }
+
+  /** Takes nothing new (no line is heard, no timer fires, no queued pass starts); the pass running now finishes. `stop()` ends the rest. */
+  drain() {
+    this.draining = true;
+    clearInterval(this.digestTimer);
+    clearInterval(this.nagTimer);
+    if (this.timer) clearTimeout(this.timer);
+    if (this.shipTimer) clearTimeout(this.shipTimer);
+    this.timer = null;
+    this.shipTimer = null;
   }
 
   stop() {
@@ -136,7 +148,7 @@ export class Brain {
 
   /** A new room line (speech or typed). Batches lines that arrive together. */
   hear(ev: JamEvent) {
-    if (this.stopped || !this.session.settings().brainEnabled) return;
+    if (this.stopped || this.draining || !this.session.settings().brainEnabled) return;
     // "JamSesh, approve" for a waiting host request: decided here, with or without a model.
     if (this.decideByVoice([ev])) return;
     // "Hey JamSesh…" then a pause: the same person's next line is the request.
@@ -192,7 +204,7 @@ export class Brain {
     return this.queue;
   }
   private exclusive<T>(fn: () => Promise<T>): Promise<T | undefined> {
-    const guarded = () => (this.stopped ? Promise.resolve(undefined) : fn());
+    const guarded = () => (this.stopped || this.draining ? Promise.resolve(undefined) : fn());
     const run = this.queue.then(guarded, guarded);
     this.queue = run.catch(() => {});
     return run;

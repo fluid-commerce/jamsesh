@@ -57,7 +57,7 @@ export interface IngestInput {
   notes: string;
   index: string;
   /** Existing pages shown whole, with the revision that text is. */
-  existing: { slug: string; markdown: string; rev?: string }[];
+  existing: { slug: string; markdown: string; rev?: string; /** How the page was filed when shown (kept with its text for the card's diff). */ filed?: { category: Category; workstreams: string[] } }[];
   sources: Source[];
   workstreams: string[];
   people: string[];
@@ -144,6 +144,14 @@ export function projectRoot(dir: string, trusted?: string): string {
   // The parent is checked against `trusted` before anything is made: a path outside it is refused, not created.
   const root = trusted && resolve(trusted);
   if (root && dirname(path) !== root) throw refuse();
+  // The projects folder itself must not be a link (nothing is made behind one); a missing one is made.
+  if (root) {
+    try {
+      if (lstatSync(root).isSymbolicLink()) throw refuse();
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
+  }
   mkdirSync(dirname(path), { recursive: true });
   const parent = realpathSync(dirname(path));
   if (root && parent !== realpathSync(root)) throw refuse();
@@ -735,12 +743,12 @@ export class WikiService {
     const index = infos.map((p) => `${p.slug} [${p.category}]: ${p.title}${p.summary ? ` - ${p.summary}` : ""}`).join("\n");
     // Pages go in whole or not at all: a page the model saw only part of could lose the rest.
     // Each with the revision of the text shown, so a person's edit during the model call isn't overwritten by an answer made without it.
-    const existing: { slug: string; markdown: string; rev: string }[] = [];
+    const existing: { slug: string; markdown: string; rev: string; filed: { category: Category; workstreams: string[] } }[] = [];
     let room = MAX_EXISTING_CHARS;
     for (const slug of [...wanted].slice(0, 10)) {
       const p = readPage(this.dir, slug);
       if (!p || p.markdown.length > room) continue;
-      existing.push({ slug, markdown: p.markdown, rev: p.rev });
+      existing.push({ slug, markdown: p.markdown, rev: p.rev, filed: { category: p.category, workstreams: p.frontMatter.workstreams } });
       room -= p.markdown.length;
     }
     const input: IngestInput = {
@@ -753,7 +761,7 @@ export class WikiService {
     };
     const out = await decide(input);
     if (!out) return null; // The sources stay pending: the next pass tries again.
-    const result = this.propose(out, batch, "ingest", new Map(existing.map((p) => [p.slug, { rev: p.rev, markdown: p.markdown }])), parts);
+    const result = this.propose(out, batch, "ingest", new Map(existing.map((p) => [p.slug, { rev: p.rev, markdown: p.markdown, filed: p.filed }])), parts);
     this.setNeed(new Set(existing.map((p) => p.slug)), result.needs ?? []);
     // Nothing worth proposing: these parts are read, unless the answer asked for pages it wasn't shown (they stay pending
     // and go in whole next time). Otherwise the card holds them until someone accepts or dismisses it.
@@ -797,7 +805,7 @@ export class WikiService {
    * Turns the model's pages into one card with a diff per page. Nothing is written to the wiki yet. An existing page
    * the model wasn't shown in full (`shown`) is never replaced.
    */
-  private propose(out: IngestOutput, batch: Source[], kind: "ingest" | "answer", shown: Map<string, { rev: string; markdown: string }>, parts: Proposal["parts"]): IngestResult {
+  private propose(out: IngestOutput, batch: Source[], kind: "ingest" | "answer", shown: Map<string, { rev: string; markdown: string; filed?: { category: Category; workstreams: string[] } }>, parts: Proposal["parts"]): IngestResult {
     const known = new Set([...sourceIds(this.dir)]);
     const changes: WikiChange[] = [];
     const prop: Proposal = { changes: [], sources: batch.map((b) => b.id), parts };
@@ -825,7 +833,8 @@ export class WikiService {
       // The text the model was shown, so the diff says what its answer changes even if the page moved on during the call.
       const before = shown.get(slug)?.markdown.trim() ?? cur?.markdown.trim() ?? "";
       const workstreams = p.workstreams.slice(0, 12);
-      const beforeMeta = cur ? { category: cur.category, workstreams: cur.frontMatter.workstreams } : undefined;
+      // The filing the model was shown, with the text it was shown, not the page's filing after the call.
+      const beforeMeta = shown.get(slug)?.filed ?? (cur ? { category: cur.category, workstreams: cur.frontMatter.workstreams } : undefined);
       prop.changes.push({ slug, category, workstreams, body, sources, baseRev, before, ...(beforeMeta ? { beforeMeta } : {}) });
       const { text: diff, cut } = cutDiff(before, body, CARD_DIFF_MAX);
       changes.push({ slug, title: p.title || cur?.title || slug, category, op: cur ? "update" : "create", diff, ...(cut ? { cut } : {}), stale: (cur?.rev ?? "") !== baseRev, ...diffStats(before, body), meta: { ...(beforeMeta ? { from: beforeMeta } : {}), to: { category, workstreams } } });
@@ -1087,11 +1096,13 @@ export class WikiService {
     let text = cleanBody(body);
     if (!text) return { ok: false, error: "A page can't be empty.", status: 400 };
     if (!/^#\s/m.test(text)) text = `# ${(opts.title ?? slug).slice(0, 120)}\n\n${text}`;
-    if (cur && cur.markdown.trim() === text) return { ok: true, page: cur };
+    // The same text is no change only when the filing asked for is the filing it has too.
+    const refiled = !!cur && opts.category !== undefined && opts.category !== cur.category;
+    if (cur && !refiled && cur.markdown.trim() === text) return { ok: true, page: cur };
     let src: Source | null = null;
     let page: Page;
     try {
-      src = addSource(this.dir, { kind: "edit", title: `Edit to ${cur?.title ?? opts.title ?? slug} (${slug})`, by: opts.by, text: `${opts.by} ${cur ? "changed" : "wrote"} the page "${slug}".\n\n${lineDiff(cur?.markdown.trim() ?? "", text)}` });
+      src = addSource(this.dir, { kind: "edit", title: `Edit to ${cur?.title ?? opts.title ?? slug} (${slug})`, by: opts.by, text: `${opts.by} ${cur ? "changed" : "wrote"} the page "${slug}".${refiled ? `\nFiled under ${opts.category} (was ${cur!.category}).` : ""}\n\n${lineDiff(cur?.markdown.trim() ?? "", text)}` });
       page = this.write(slug, text, { category: opts.category, sources: [src.id] });
     } catch (e) {
       // The write can fail after the page landed (reading it back): then the edit happened, and its source stays.
@@ -1146,7 +1157,7 @@ export class WikiService {
       // The source stays unread until its card is resolved: if the card never lands, an ingest reads it instead.
       // Filing again replaces that question's earlier answer page, and the card's diff shows what goes.
       const parts = [{ id: src.id, to: src.text.length, whole: src.text.length }];
-      card = this.propose({ summary: `File the answer to "${q.slice(0, 60)}"`, pages: [{ slug, title: q.slice(0, 80), type: "topic", workstreams: [], markdown: `# ${q.slice(0, 80)}\n\n${text}\n\n(src: ${src.id})`, sources: [src.id] }] }, [src], "answer", new Map(((cur) => (cur ? [[slug, { rev: cur.rev, markdown: cur.markdown }] as const] : []))(readPage(this.dir, slug))), parts).card;
+      card = this.propose({ summary: `File the answer to "${q.slice(0, 60)}"`, pages: [{ slug, title: q.slice(0, 80), type: "topic", workstreams: [], markdown: `# ${q.slice(0, 80)}\n\n${text}\n\n(src: ${src.id})`, sources: [src.id] }] }, [src], "answer", new Map(((cur) => (cur ? [[slug, { rev: cur.rev, markdown: cur.markdown, filed: { category: cur.category, workstreams: cur.frontMatter.workstreams } }] as const] : []))(readPage(this.dir, slug))), parts).card;
       if (!card) this.markRead(parts);
     }
     return { answer: text, pages: cited, card };

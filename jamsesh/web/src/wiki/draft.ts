@@ -12,6 +12,23 @@ export function onRefresh(editing: boolean, base: string, latest: WikiPage): { p
 /** The revision a save is checked against: the one the edit began from, or the newer page's once the person chose to save over it. */
 export const saveRev = (base: string, theirs: WikiPage | null, overTheirs: boolean): string | undefined => (overTheirs && theirs ? theirs.rev : base) || undefined;
 
-/** Leaving a page with unsaved text asks first; `ask` is the confirm. Every way off a page goes through this. */
-export const mayLeave = (dirty: boolean, ask: () => boolean): boolean => !dirty || ask();
-export const DISCARD = "Throw away your changes?";
+/**
+ * Unsaved edits, held outside the page view: whatever unmounts the editor (a page link, the phone's Index button, a tab or
+ * host-mode switch, the Wiki view closing) leaves the text here, and the page opens back into it. It goes only when the
+ * person saves or cancels. Closing or reloading the window asks first while anything is held.
+ */
+const held = new Map<string, { text: string; base: string }>();
+let armed = false;
+
+export const drafts = {
+  hold(slug: string, text: string, base: string) {
+    held.set(slug, { text, base });
+    if (!armed && typeof window !== "undefined") {
+      armed = true;
+      window.addEventListener("beforeunload", (e) => void (held.size && e.preventDefault()));
+    }
+  },
+  get: (slug: string) => held.get(slug),
+  drop: (slug: string) => void held.delete(slug),
+  count: () => held.size,
+};

@@ -10,9 +10,10 @@ import { api } from "../src/shared/hub";
 import { wikiApi } from "../src/wiki/wikiApi";
 import { shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
-import { mayLeave, onRefresh, saveRev } from "../src/wiki/draft";
+import { drafts, onRefresh, saveRev } from "../src/wiki/draft";
 import { settled } from "../src/wiki/SettledLinks";
 import { diffView, metaLine } from "../src/wiki/WikiCard";
+import { sourceWindow } from "../src/wiki/WikiView";
 import { cutDiff, lineDiff } from "../../hub/src/wiki/diff";
 import { listPages, readPage, readState, writeState } from "../../hub/src/wiki/files";
 import { bus } from "../../hub/src/bus";
@@ -285,15 +286,30 @@ test("a card's cut change is fetched whole through the client's api(): every add
   await expect(wikiApi.fullChange(card.id, "nope")).rejects.toBeTruthy();
 });
 
-test("leaving a page with unsaved text asks first; a clean page, or a yes, lets go", () => {
-  let asked = 0;
-  const no = () => (asked++, false);
-  const yes = () => (asked++, true);
-  expect(mayLeave(false, no)).toBe(true);
-  expect(asked).toBe(0);
-  expect(mayLeave(true, no)).toBe(false);
-  expect(mayLeave(true, yes)).toBe(true);
-  expect(asked).toBe(2);
+test("an unsaved edit outlives whatever unmounts the editor: a page link, Index, a tab or host-mode switch, closing the Wiki view", () => {
+  // PageView holds its text here on every change and opens back into it; each way off the page only unmounts it, so each leaves the draft.
+  for (const way of ["page link", "phone Index button", "backlink", "tab switch", "host mode switch", "wiki view closed"]) {
+    drafts.hold("pricing", `edited via ${way}`, "rev1");
+    expect(drafts.get("pricing")).toEqual({ text: `edited via ${way}`, base: "rev1" });
+  }
+  drafts.hold("other", "second page", "rev9");
+  expect(drafts.count()).toBe(2);
+  expect(drafts.get("pricing")!.base).toBe("rev1"); // the revision the edit began from comes back too, so a save over a newer page is still a conflict
+  // Save or cancel drops it, and only that page's.
+  drafts.drop("pricing");
+  expect(drafts.get("pricing")).toBeUndefined();
+  expect(drafts.get("other")).toBeDefined();
+  drafts.drop("other");
+  expect(drafts.count()).toBe(0);
+});
+
+test("a long source draws a window around the cited moment and grows a window at a time", () => {
+  expect(sourceWindow(100, -1)).toEqual([0, 100]);
+  expect(sourceWindow(50_000, -1)).toEqual([0, 300]);
+  expect(sourceWindow(50_000, 30_000)).toEqual([29_850, 30_150]);
+  expect(sourceWindow(50_000, 49_999)).toEqual([49_700, 50_000]);
+  expect(sourceWindow(50_000, 30_000, [29_550, 30_150])).toEqual([29_550, 30_150]);
+  expect(sourceWindow(1000, 0, [-300, 1300])).toEqual([0, 1000]);
 });
 
 test("the card says how a page is filed, as far as the change alters it", () => {

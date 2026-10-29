@@ -6,7 +6,7 @@ import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
-import { DISCARD, mayLeave, onRefresh, saveRev } from "./draft";
+import { drafts, onRefresh, saveRev } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -32,28 +32,22 @@ export function WikiView({ big }: { big?: boolean }) {
   const search = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
 
-  // Whether the open page holds text not yet saved (PageView says). Every way off the page asks first.
-  const dirty = useRef(false);
-  const setDirty = useCallback((d: boolean) => void (dirty.current = d), []);
-  const leave = useCallback(() => mayLeave(dirty.current, () => confirm(DISCARD)), []);
   const go = useCallback(
     (next: Open) => {
-      if (!leave()) return;
       setTrail((t) => [...t.slice(-30), open]);
       setOpen(next);
       setListOnPhone(false);
     },
-    [open, leave],
+    [open],
   );
   const back = useCallback(() => {
-    if (!leave()) return;
     setTrail((t) => {
       const prev = t[t.length - 1];
       if (prev) setOpen(prev);
       else setListOnPhone(true);
       return t.slice(0, -1);
     });
-  }, [leave]);
+  }, []);
   const openPage = useCallback((slug: string) => go({ kind: "page", slug }), [go]);
 
   useEffect(() => {
@@ -115,7 +109,6 @@ export function WikiView({ big }: { big?: boolean }) {
               phone={phone}
               onOpen={openPage}
               onBack={trail.length ? back : undefined}
-              onDirty={setDirty}
               onSource={(id, at) => setDialog({ kind: "source", id, at })}
               onHistory={() => setDialog({ kind: "history", slug: open.slug })}
             />
@@ -281,24 +274,24 @@ function GraphPane({ wiki, phone, onOpen }: { wiki: WikiData; phone: boolean; on
   );
 }
 
-function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onDirty, onSource, onHistory }: { slug: string; wiki: WikiData; pageSet: Set<string>; phone: boolean; onOpen: (s: string) => void; onBack?: () => void; onDirty: (dirty: boolean) => void; onSource: (id: string, at: string | null) => void; onHistory: () => void }) {
+function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHistory }: { slug: string; wiki: WikiData; pageSet: Set<string>; phone: boolean; onOpen: (s: string) => void; onBack?: () => void; onSource: (id: string, at: string | null) => void; onHistory: () => void }) {
   const [page, setPage] = useState<WikiPage | null>(null);
   const [err, setErr] = useState<{ status?: number; message: string } | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(() => drafts.get(slug)?.text ?? null);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<WikiPage | null>(null);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   // The revision the open edit started from. A refresh never changes it (draft.ts).
-  const [base, setBase] = useState("");
+  const [base, setBase] = useState(() => drafts.get(slug)?.base ?? "");
   const meta = wiki.pages.find((p) => p.slug === slug);
   const draft = useRef({ editing, base });
   draft.current = { editing, base };
   const begin = (text: string, rev: string) => (setEditing(text), setBase(rev), setConflict(null));
-  const unsaved = editing !== null && editing !== page?.markdown;
+  // The edit is kept outside this view (draft.ts): leaving the page any way at all leaves it there.
   useEffect(() => {
-    onDirty(unsaved);
-    return () => onDirty(false);
-  }, [unsaved, onDirty]);
+    if (editing === null) drafts.drop(slug);
+    else drafts.hold(slug, editing, base);
+  }, [slug, editing, base]);
 
   useEffect(() => {
     let live = true;
@@ -628,7 +621,14 @@ function HistoryDialog({ slug, pages, onClose, onOpen }: { slug: string | null; 
   );
 }
 
-const SOURCE_LINES = 4000;
+const WINDOW = 300;
+
+/** The stretch of a long source on screen: WINDOW lines around the cited moment (or from the top), grown a window at a time. */
+export function sourceWindow(total: number, hit: number, grown?: [number, number]): [number, number] {
+  if (grown) return [Math.max(0, grown[0]), Math.min(total, grown[1])];
+  const from = Math.max(0, Math.min(hit < 0 ? 0 : hit - WINDOW / 2, total - WINDOW));
+  return [from, Math.min(total, from + WINDOW)];
+}
 
 function SourceDialog({ id, at, onClose }: { id: string; at: string | null; onClose: () => void }) {
   const [src, setSrc] = useState<SourceText | null>(null);
@@ -638,15 +638,15 @@ function SourceDialog({ id, at, onClose }: { id: string; at: string | null; onCl
     wikiApi.source(id).then(setSrc, (e) => setErr(e?.status === 404 ? "This source is no longer in the project." : pretty(e, "Couldn't open the source.")));
   }, [id]);
   const every = useMemo(() => (src?.text ?? "").split("\n"), [src]);
-  const [more, setMore] = useState(false);
+  const [grown, setGrown] = useState<[number, number] | null>(null);
   // A transcript line starts "[14:32] Name: …"; the cited moment is the first line at or after the time given.
   const hit = useMemo(() => {
     if (!at) return -1;
     const want = at.length === 4 ? `0${at}` : at;
     return every.findIndex((l) => l.startsWith(`[${at}`) || l.startsWith(`[${want}`));
   }, [every, at]);
-  // A long source shows its first stretch; a cited moment further on opens the rest on its own.
-  const lines = more || hit >= SOURCE_LINES ? every : every.slice(0, SOURCE_LINES);
+  // Only a window of a long source is drawn (a transcript can run to tens of thousands of lines), around the cited moment.
+  const [from, to] = sourceWindow(every.length, hit, grown ?? undefined);
   useEffect(() => {
     mark.current?.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [src, hit]);
@@ -656,15 +656,13 @@ function SourceDialog({ id, at, onClose }: { id: string; at: string | null; onCl
         <>
           <div className="wk-src-meta"><span className="wk-chip static"><small>{src.kind}</small></span> {when(src.ts)}</div>
           <div className="wk-src scrollbars-thin" tabIndex={0}>
-            {lines.map((l, i) => (
-              <div key={i} className={i === hit ? "hit" : ""} ref={i === hit ? (el) => void (mark.current = el) : undefined}>{l || " "}</div>
+            {from > 0 && <button className="btn ghost small" onClick={() => setGrown([from - WINDOW, to])}>Show {Math.min(WINDOW, from)} earlier lines</button>}
+            {every.slice(from, to).map((l, k) => (
+              <div key={from + k} className={from + k === hit ? "hit" : ""} ref={from + k === hit ? (el) => void (mark.current = el) : undefined}>{l || " "}</div>
             ))}
+            {to < every.length && <button className="btn ghost small" onClick={() => setGrown([from, to + WINDOW])}>Show {Math.min(WINDOW, every.length - to)} more lines</button>}
           </div>
-          {lines.length < every.length && (
-            <p className="wk-quiet">
-              Showing the first {lines.length} of {every.length} lines. <button className="btn ghost small" onClick={() => setMore(true)}>Show the rest</button>
-            </p>
-          )}
+          {(from > 0 || to < every.length) && <p className="wk-quiet">Showing lines {from + 1} to {to} of {every.length}.</p>}
           {at && hit < 0 && <p className="wk-quiet">The moment at {at} isn't marked in this source.</p>}
         </>
       )}
