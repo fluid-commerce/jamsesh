@@ -1,10 +1,10 @@
 // Fonts for everyone (SPEC 12.4), page side. The host holds the open fonts its repositories use and
-// the fonts people lent for the session; a canvas loads the ones it lacks, then the ones on its own Mac
-// (canvasJoin.ts), and asks the room for what is still missing. A person whose Mac has a font that
-// someone is waiting for is asked once whether they may share it. Nothing here is stored: bytes go
-// from the host's memory into the canvas's memory.
+// the fonts people lent for the session; a canvas loads the ones it lacks and asks the room for what
+// is still missing. A person whose Mac has a font that someone is waiting for is asked once whether
+// they may share it (the Mac app's own dialog sends it; no page reads a Mac's fonts). Nothing here is
+// stored: bytes go from the host's memory into the canvas's memory.
 import type { FontInfo, FontWant } from "../../../hub/src/types";
-import { loadLocalFonts, missingFamilies, type Fc, type Invoke } from "./canvasJoin";
+import { missingFamilies, type Fc } from "./canvasJoin";
 
 export const familyKey = (f: string) => f.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
 
@@ -23,39 +23,47 @@ export interface RoomFonts {
   want: (families: string[]) => Promise<unknown>;
 }
 
-/** Per canvas: the fonts already loaded into it, the families asked of this Mac, and the ones the room was told about. */
+/**
+ * Per canvas: the faces already in it (by font key), how often each face failed, the families it has drawn in a
+ * substitute, and the ones the room was told about.
+ */
 export interface FontMemory {
-  loaded: Set<string>;
-  tried: Set<string>;
+  faces: Map<string, Set<number>>;
+  fails: Map<string, number>;
+  needed: Set<string>;
   asked: Set<string>;
 }
-export const newFontMemory = (): FontMemory => ({ loaded: new Set(), tried: new Set(), asked: new Set() });
+export const newFontMemory = (): FontMemory => ({ faces: new Map(), fails: new Map(), needed: new Set(), asked: new Set() });
+
+/** A face the host can't serve, or the canvas refuses, is tried this many times (one a pass); a dropped connection doesn't count. */
+export const FACE_TRIES = 3;
 
 /**
- * Loads into the canvas the fonts it lacks, in order: the room's (open fonts and borrowed ones),
- * this Mac's own, and then asks the room for what is still missing. Returns the families still drawn
- * in a substitute. The canvas keeps every font in memory only (`text.loadFont` installs nothing).
+ * Loads into the canvas the room's fonts (open fonts and borrowed ones) for the families it lacks, face by face: a
+ * face that didn't come is tried again on later passes, even once another face of its family has filled in. Then
+ * asks the room for what is still missing. Returns the families still drawn in a substitute. The canvas keeps every
+ * font in memory only (`text.loadFont` installs nothing).
  */
-export async function loadFonts(fc: Fc, invoke: Invoke | null, memory: FontMemory, room: RoomFonts): Promise<string[]> {
+export async function loadFonts(fc: Fc, memory: FontMemory, room: RoomFonts): Promise<string[]> {
   let missing = await missingFamilies(fc);
-  if (!missing.length) return missing;
+  for (const f of missing) memory.needed.add(familyKey(f));
   const held = new Map(room.available.map((f) => [familyKey(f.family), f]));
   let loadedAny = false;
-  for (const family of missing) {
-    const font = held.get(familyKey(family));
-    if (!font || memory.loaded.has(font.key)) continue;
-    memory.loaded.add(font.key);
-    let got = 0;
+  for (const family of memory.needed) {
+    const font = held.get(family);
+    if (!font) continue;
+    const have = memory.faces.get(font.key) ?? new Set<number>();
+    memory.faces.set(font.key, have);
     for (let n = 0; n < font.faces; n++) {
-      const data = await room.fetchFace(font.key, n).catch(() => null);
-      if (data && (await fc.execute("text.loadFont", { data }).then(() => true, () => false))) got++;
+      const face = `${font.key}/${n}`;
+      if (have.has(n) || (memory.fails.get(face) ?? 0) >= FACE_TRIES) continue;
+      const data = await room.fetchFace(font.key, n).catch(() => undefined);
+      if (data === undefined) continue;
+      if (data && (await fc.execute("text.loadFont", { data }).then(() => true, () => false))) (have.add(n), (loadedAny = true));
+      else memory.fails.set(face, (memory.fails.get(face) ?? 0) + 1);
     }
-    // A font that didn't come is tried again on the next pass.
-    if (got) loadedAny = true;
-    else memory.loaded.delete(font.key);
   }
   if (loadedAny) missing = await missingFamilies(fc);
-  missing = await loadLocalFonts(fc, invoke, memory.tried);
   const ask = missing.filter((f) => !memory.asked.has(familyKey(f)) && !held.has(familyKey(f)));
   if (ask.length) {
     for (const f of ask) memory.asked.add(familyKey(f));

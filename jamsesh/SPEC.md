@@ -1680,20 +1680,25 @@ never loads a font twice:
    `fonts.gstatic.com`), falling back to Fontsource's CDN. A canvas that shows a font no card named gets
    the same on demand. A download is kept only if it is a font file of that family within the size caps.
    *Borrowed fonts* are the second kind, below.
-2. **This Mac's own fonts** (Mac app only; `local_fonts`), for that person's own canvas.
-3. **Ask the room.** What is still missing is reported to the host (`POST /api/fonts/want`). Open fonts
+2. **Ask the room.** What is still missing is reported to the host (`POST /api/fonts/want`). Open fonts
    are fetched; anything else becomes a question to the people whose Macs might have it.
 
 **Borrowing.** A person's Mac app answers `has_fonts` (names only) for the families someone is waiting
 for. If it has one, their window shows a card: *Share <font> with <session name>?*, naming who is drawing
 in it, what sharing means (everyone's canvas uses it until the session ends; it's never saved on anyone's Mac), and
-that they should share it only if their licence allows. **I'm allowed to share it** reads the files
-(`local_fonts`) and sends them (`POST /api/fonts/lend`); **Don't share** is remembered for that person and
-that font, and the canvas keeps its marked substitute. The first person to confirm wins. A person who
-shared sees a row, *Sharing <font> until the session ends*, with **Stop sharing**. The page's card is the
-friendly first step; the Mac enforces the consent itself: the files are read only by the app's
-`lend_font` command, which shows a native macOS dialog (the font, the session, who is waiting; **I'm
-allowed to share it** / **Don't share**) and returns nothing on a no.
+that they should share it only if their licence allows. **I'm allowed to share it** asks the Mac app to lend
+it; **Don't share** is remembered for that person and that font, and the canvas keeps its marked substitute.
+The first person to confirm wins. A person who shared sees a row, *Sharing <font> until the session ends*,
+with **Stop sharing**. The page's card is the friendly first step; the Mac enforces the consent itself, and
+no page ever holds a Mac's font files (session pages are served by whoever hosts, so the Mac app gives them
+font *names* only). The app's `lend_font` command shows a native macOS dialog (the font, the session, who is
+waiting; **I'm allowed to share it** / **Don't share**), reads the files only on a yes, and sends them to the
+hub itself: it asks for a one-time ticket (`POST /api/fonts/lend-ticket`, two minutes, bound to that window,
+person and family) and posts the files with an HMAC-SHA256 signature over the ticket and the files' SHA-256
+(`POST /api/fonts/lend`). The key is one no page can read: the window key the app shares with the hub it
+started, or, for a host joined through the relay, the SHA-256 of the window's own credential (the relay adds
+the credential; the hub keeps only its hash). The hub refuses a lend without a valid, unused ticket and
+signature, so lent fonts come from that dialog and nowhere else.
 
 **Rules the host keeps.**
 - Fonts live in the hub's memory only. Nothing is written to a session folder, and a lent font is never
@@ -1702,11 +1707,14 @@ allowed to share it** / **Don't share**) and returns nothing on a no.
   `text.loadFont`. Ending the session (`Hub.stop`) overwrites and drops every font and refuses any later
   lend; a fetch in flight is aborted. A person who is removed from the room takes their lent fonts with
   them; **Stop sharing** does the same on request (a canvas that already drew with it keeps it until it reloads).
-- Only people act: `want`, `lend`, `decline` and `withdraw` are human-only (an agent's credential gets
-  403 on them and on downloading a font file; agents see names and counts in the state). A person lends as
+- Only people act: `want`, `lend-ticket`, `lend`, `decline` and `withdraw` are human-only, and a font file
+  goes only to a person's window, a paired one or the host's own (an agent's credential, and any other
+  process on the host without the window key, gets 403; agents see names and counts in the state). A person lends as
   their own person; a lend must be for a font someone is waiting for, so a font can't be pushed
   unasked. An agent's FigCraft tools refuse `text.loadFont` too.
-- A lend request body is read at most 45 MB (413 past it, before parsing).
+- A lend request body is read at most 45 MB (413 past it, before parsing). An open font's download is
+  refused from its Content-Length when that is over the cap, and is otherwise read only up to the cap
+  (the catalogue, a family's details and a stylesheet too).
 - Limits: 24 MB per file, 12 files and 32 MB per family, 128 MB lent and 96 MB open in all, 48 families
   asked for. A file must be a TrueType/OpenType font or collection whose family name is the one asked
   for; damaged, oversize, mislabelled and non-font files are refused with a plain reason.

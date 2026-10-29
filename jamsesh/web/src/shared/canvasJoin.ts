@@ -119,20 +119,3 @@ export async function missingFamilies(fc: Fc): Promise<string[]> {
   const r = await fc.execute("text.missingFonts", {});
   return (r?.families ?? []).map((f: any) => String(f.family ?? "")).filter(Boolean);
 }
-
-/**
- * Loads into the canvas the fonts this Mac has for the families it lacks, each family asked for
- * once (`tried`, per canvas): the Mac app reads them from its font folders and they go only into
- * this canvas, for this session (`text.loadFont`; its text refits). Returns the families still
- * missing, which the canvas draws in a substitute.
- */
-export async function loadLocalFonts(fc: Fc, invoke: Invoke | null, tried: Set<string>): Promise<string[]> {
-  const missing = await missingFamilies(fc);
-  const ask = missing.filter((f) => !tried.has(f.toLowerCase()));
-  if (!invoke || !ask.length) return missing;
-  for (const f of ask) tried.add(f.toLowerCase());
-  const fonts: { family: string; data: string }[] = await invoke("local_fonts", { families: ask }).catch(() => []);
-  if (!Array.isArray(fonts) || !fonts.length) return missing;
-  for (const f of fonts) await fc.execute("text.loadFont", { data: f.data }).catch(() => {});
-  return missingFamilies(fc);
-}

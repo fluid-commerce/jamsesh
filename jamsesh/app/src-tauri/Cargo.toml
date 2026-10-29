@@ -39,6 +39,8 @@ block2 = "0.6"
 # The Mac's font folders, for people's canvases (fonts.rs).
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs"] }
 base64 = "0.22"
+# SHA-256 and HMAC for signing a lent font (fonts.rs); already built for rustls.
+ring = "0.17"
 
 [profile.release]
 strip = true

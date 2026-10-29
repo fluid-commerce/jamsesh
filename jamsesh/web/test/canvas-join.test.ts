@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
-// fails, instead of leaving a blank document up. It also loads fonts from the person's own Mac.
+// fails, instead of leaving a blank document up.
 import { expect, test } from "bun:test";
-import { canvasSrc, friendlyReason, JoinWatch, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
+import { canvasSrc, friendlyReason, JoinWatch, joinLabel, joinStateOf, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -36,48 +36,6 @@ test("join errors read as a few plain reasons", () => {
   expect(friendlyReason("file not found on the server")).toBe("The host's canvas is restarting.");
   expect(friendlyReason("something odd")).toBe("The connection to the host dropped.");
   expect(friendlyReason(null)).toBe("The connection to the host dropped.");
-});
-
-/** A canvas that lacks `missing` until a font for it is loaded. */
-function fakeCanvas(missing: string[]) {
-  const left = new Set(missing);
-  const loaded: string[] = [];
-  const fc = {
-    async execute(command: string, params: any) {
-      if (command === "text.missingFonts") return { families: [...left].map((family) => ({ family, layers: 1 })) };
-      if (command === "text.loadFont") {
-        const family = atob(params.data);
-        loaded.push(family);
-        left.delete(family);
-        return { families: [family], refitted: [] };
-      }
-      throw new Error(`unexpected ${command}`);
-    },
-  };
-  return { fc, loaded };
-}
-
-test("fonts this Mac has are loaded into the canvas, each family asked for once", async () => {
-  const { fc, loaded } = fakeCanvas(["Helvetica Neue", "Söhne"]);
-  const asked: string[][] = [];
-  const invoke = async (cmd: string, args: any) => {
-    expect(cmd).toBe("local_fonts");
-    asked.push(args.families);
-    // This Mac has Helvetica Neue, not Söhne.
-    return args.families.filter((f: string) => f === "Helvetica Neue").map((family: string) => ({ family, data: btoa(family) }));
-  };
-  const tried = new Set<string>();
-  expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["Söhne"]);
-  expect(loaded).toEqual(["Helvetica Neue"]);
-  // Polling again doesn't ask the Mac for what it didn't have.
-  expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["Söhne"]);
-  expect(asked).toEqual([["Helvetica Neue", "Söhne"]]);
-});
-
-test("in a browser there's no Mac to ask: the missing families are only listed", async () => {
-  const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
-  expect(await loadLocalFonts(fc, null, new Set())).toEqual(["Helvetica Neue"]);
-  expect(loaded).toEqual([]);
 });
 
 test("only a person's canvas asks for the panel buttons", () => {

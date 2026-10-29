@@ -2,7 +2,7 @@
 // the person with a font is asked once; and a font file never goes into the offline outbox.
 import "fake-indexeddb/auto";
 import { expect, test } from "bun:test";
-import { bytesToBase64, familyKey, loadFonts, newFontMemory, openQuestions, type RoomFonts } from "../src/shared/roomFonts";
+import { bytesToBase64, FACE_TRIES, familyKey, loadFonts, newFontMemory, openQuestions, type RoomFonts } from "../src/shared/roomFonts";
 import { api } from "../src/shared/hub";
 import { idbTable, outbox } from "../src/shared/offline";
 
@@ -38,7 +38,7 @@ const room = (available: ReturnType<typeof info>[], faces: Record<string, string
 test("a canvas takes the room's fonts first and asks for nothing it was given", async () => {
   const { fc, loaded } = canvas(["Inter", "Gotham"], { AAA: "Inter" });
   const { r, asked, fetched } = room([info("Inter")], { "inter/0": "AAA" });
-  const left = await loadFonts(fc, null, newFontMemory(), r);
+  const left = await loadFonts(fc, newFontMemory(), r);
   expect(loaded).toEqual(["Inter"]);
   expect(fetched).toEqual(["inter/0"]);
   expect(left).toEqual(["Gotham"]);
@@ -49,8 +49,8 @@ test("every face of a font loads, and a font loads into a canvas once", async ()
   const { fc } = canvas(["Inter"], { A: "Inter", B: "Inter" });
   const { r, fetched } = room([info("Inter", 2)], { "inter/0": "A", "inter/1": "B" });
   const memory = newFontMemory();
-  await loadFonts(fc, null, memory, r);
-  await loadFonts(fc, null, memory, r);
+  await loadFonts(fc, memory, r);
+  await loadFonts(fc, memory, r);
   expect(fetched).toEqual(["inter/0", "inter/1"]);
 });
 
@@ -58,12 +58,12 @@ test("a font that didn't come, or that the canvas refuses, is tried again; the r
   const { fc, loaded } = canvas(["Inter", "Gotham"], { GOOD: "Inter" });
   const memory = newFontMemory();
   const bad = room([info("Inter")], { "inter/0": "NOPE" });
-  await loadFonts(fc, null, memory, bad.r);
+  await loadFonts(fc, memory, bad.r);
   expect(loaded).toEqual([]);
   // Held fonts aren't asked for (they are on their way).
   expect(bad.asked).toEqual([["Gotham"]]);
   const good = room([info("Inter")], { "inter/0": "GOOD" });
-  await loadFonts(fc, null, memory, good.r);
+  await loadFonts(fc, memory, good.r);
   expect(loaded).toEqual(["Inter"]);
   // Gotham was already asked about in this canvas.
   expect(good.asked).toEqual([]);
@@ -72,7 +72,7 @@ test("a font that didn't come, or that the canvas refuses, is tried again; the r
   down.r.fetchFace = async () => {
     throw new Error("offline");
   };
-  await expect(loadFonts(canvas(["Inter"]).fc, null, newFontMemory(), down.r)).resolves.toEqual(["Inter"]);
+  await expect(loadFonts(canvas(["Inter"]).fc, newFontMemory(), down.r)).resolves.toEqual(["Inter"]);
 });
 
 test("a failed ask is made again on the next pass", async () => {
@@ -80,26 +80,60 @@ test("a failed ask is made again on the next pass", async () => {
   const memory = newFontMemory();
   let calls = 0;
   const r: RoomFonts = { available: [], fetchFace: async () => null, want: async () => (++calls === 1 ? Promise.reject(new Error("offline")) : undefined) };
-  await loadFonts(fc, null, memory, r);
-  await loadFonts(fc, null, memory, r);
-  await loadFonts(fc, null, memory, r);
+  await loadFonts(fc, memory, r);
+  await loadFonts(fc, memory, r);
+  await loadFonts(fc, memory, r);
   expect(calls).toBe(2);
 });
 
-test("this Mac's own fonts come before asking the room", async () => {
+test("a face that fails is tried again on later passes, even after its family's other faces filled in, up to a limit", async () => {
+  // Bold fails at first; Regular loads, so the family is no longer missing, but Bold is still fetched again.
+  const { fc, loaded } = canvas(["Inter"], { REG: "Inter", BOLD: "Inter" });
+  const memory = newFontMemory();
+  const faces: Record<string, string> = { "inter/0": "REG", "inter/1": "BROKEN" };
+  const { r, fetched } = room([info("Inter", 2)], faces);
+  await loadFonts(fc, memory, r);
+  expect(loaded).toEqual(["Inter"]);
+  expect(fetched).toEqual(["inter/0", "inter/1"]);
+  faces["inter/1"] = "BOLD";
+  await loadFonts(fc, memory, r);
+  expect(loaded).toEqual(["Inter", "Inter"]);
+  expect(fetched).toEqual(["inter/0", "inter/1", "inter/1"]);
+  // Loaded faces aren't fetched again.
+  await loadFonts(fc, memory, r);
+  expect(fetched.length).toBe(3);
+  // A face that keeps failing stops being asked for after FACE_TRIES passes.
+  const stuck = room([info("Gotham", 1)], { "gotham/0": "NOPE" });
+  const c2 = canvas(["Gotham"]);
+  const m2 = newFontMemory();
+  for (let i = 0; i < FACE_TRIES + 3; i++) await loadFonts(c2.fc, m2, stuck.r);
+  expect(stuck.fetched.length).toBe(FACE_TRIES);
+  // A dropped connection isn't a failure: it is tried again whenever the network is back.
+  const flaky = room([info("Avenir", 1)], { "avenir/0": "AV" });
+  let down = true;
+  const realFetch = flaky.r.fetchFace;
+  flaky.r.fetchFace = (k, n) => (down ? Promise.reject(new Error("offline")) : realFetch(k, n));
+  const c3 = canvas(["Avenir"], { AV: "Avenir" });
+  const m3 = newFontMemory();
+  for (let i = 0; i < FACE_TRIES + 2; i++) await loadFonts(c3.fc, m3, flaky.r);
+  down = false;
+  await loadFonts(c3.fc, m3, flaky.r);
+  expect(c3.loaded).toEqual(["Avenir"]);
+});
+
+test("no page reads this Mac's fonts: loading asks only the room", async () => {
   const { fc, loaded } = canvas(["Helvetica Neue"], { MAC: "Helvetica Neue" });
   const { r, asked } = room([]);
-  const invoke = async (cmd: string) => (cmd === "local_fonts" ? [{ family: "Helvetica Neue", data: "MAC" }] : []);
-  const left = await loadFonts(fc, invoke, newFontMemory(), r);
-  expect(loaded).toEqual(["Helvetica Neue"]);
-  expect(left).toEqual([]);
-  expect(asked).toEqual([]);
+  const left = await loadFonts(fc, newFontMemory(), r);
+  expect(loaded).toEqual([]);
+  expect(left).toEqual(["Helvetica Neue"]);
+  expect(asked).toEqual([["Helvetica Neue"]]);
 });
 
 test("a canvas with nothing missing does no work", async () => {
   const { fc } = canvas([]);
   const { r, asked, fetched } = room([info("Inter")]);
-  expect(await loadFonts(fc, null, newFontMemory(), r)).toEqual([]);
+  expect(await loadFonts(fc, newFontMemory(), r)).toEqual([]);
   expect([asked, fetched]).toEqual([[], []]);
 });
 
@@ -124,7 +158,7 @@ test("a font file is never saved on this laptop for later: with the network down
   try {
     await idbTable("outbox").clear();
     await outbox.load();
-    for (const [path, body] of [["/fonts/lend", { family: "Gotham", files: ["AAAA"] }], ["/fonts/want", { families: ["Gotham"] }], ["/fonts/decline", { family: "Gotham" }], ["/fonts/withdraw", { family: "Gotham" }]] as const) {
+    for (const [path, body] of [["/fonts/lend", { family: "Gotham", files: ["AAAA"] }], ["/fonts/lend-ticket", { family: "Gotham" }], ["/fonts/want", { families: ["Gotham"] }], ["/fonts/decline", { family: "Gotham" }], ["/fonts/withdraw", { family: "Gotham" }]] as const) {
       await expect(api(path, body, "POST", { queue: false })).rejects.toThrow();
       // And not even by forgetting the option: fonts are never queued.
       await expect(api(path, body)).rejects.toThrow();

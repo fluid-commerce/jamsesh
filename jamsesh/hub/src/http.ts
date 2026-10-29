@@ -1,5 +1,6 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
@@ -8,6 +9,7 @@ import { voiceprintStatus, learningNote } from "./audio/voiceprint";
 import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
+import { lendMessage } from "./fonts";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { projectsRoute } from "./projects-api";
@@ -27,7 +29,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|fonts\/(want|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -526,7 +528,21 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!person) return bad("Choose who you are first, so JamSesh knows whose font this is.", 403);
     if (path === "/fonts/decline") return hub.fonts.decline(person.id, body?.family) ? json({ ok: true }) : json({ ok: true, nothing: true });
     if (path === "/fonts/withdraw") return hub.fonts.withdraw(person.id, body?.family) ? json({ ok: true }) : bad("You aren't sharing that font.", 404);
+    // Lending: font bytes leave a Mac only through the Mac app's native dialog (lend_font). After a yes, the app asks
+    // for a ticket and signs the files it read with a key the page never sees: the host's window key, or (through
+    // the relay) the window's own credential, of which the hub keeps the hash. Anything else is refused.
+    if (!caller) return notAPerson()!;
+    if (path === "/fonts/lend-ticket") {
+      const ticket = hub.fonts.lendTicket(caller, person.id, body?.family);
+      return ticket ? json({ ticket }) : hub.fonts.ended ? bad("The session has ended.", 410) : bad("Couldn't start sharing that font. Try again.", 409);
+    }
     if (path === "/fonts/lend") {
+      const files = Array.isArray(body?.files) ? body.files.map(String) : [];
+      const msg = typeof body?.ticket === "string" ? lendMessage(body.ticket, files) : "";
+      const want = hostWindow ? hub.auth.windows.sign(msg) : paired ? createHmac("sha256", paired.tokenHash).update(msg).digest("hex") : "";
+      const sig = Buffer.from(typeof body?.sig === "string" ? body.sig : "");
+      const signed = !!msg && !!want && sig.length === want.length && timingSafeEqual(sig, Buffer.from(want));
+      if (!hub.fonts.redeemTicket(body?.ticket, caller, person.id, body?.family) || !signed) return bad("Share fonts from the JamSesh app on your Mac: it asks you first.", 403);
       const r = hub.fonts.lend(person.id, body?.family, body?.files);
       return r.ok ? json(r) : bad(r.error, r.status);
     }

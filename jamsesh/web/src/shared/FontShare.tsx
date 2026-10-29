@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { pref, useHub } from "./hub";
 import { macInvoke } from "./canvasJoin";
 import { familyKey, openQuestions } from "./roomFonts";
-import { declineFont, lendFont, withdrawFont } from "./roomFontsApi";
+import { declineFont, withdrawFont } from "./roomFontsApi";
 
 const MAX_OFFERS = 3;
 
@@ -54,8 +54,9 @@ function Offer({ family, session, askers, onDone }: { family: string; session: s
     setErr("");
     try {
       // The Mac app asks in a native dialog and reads the files only on a yes: this page never gets them otherwise.
-      const files: { family: string; data: string }[] = (await invoke?.("lend_font", { family, session, askers })) ?? [];
-      await lendFont(family, files.map((f) => f.data));
+      // The Mac app asks in its own dialog and sends the font to the host itself: this page never holds it.
+      if (!invoke) throw new Error("Share fonts from the JamSesh app on your Mac.");
+      await invoke("lend_font", { family, session, askers });
       onDone();
     } catch (e: any) {
       setErr(String(typeof e === "string" ? e : e?.message ?? "Couldn't share it."));

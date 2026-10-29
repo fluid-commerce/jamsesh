@@ -11,6 +11,5 @@ export async function fetchRoomFace(key: string, n: number): Promise<string | nu
 
 export const askRoomForFonts = (families: string[]) => api("/fonts/want", { families }, "POST", { queue: false });
 
-export const lendFont = (family: string, files: string[]) => api("/fonts/lend", { family, files }, "POST", { queue: false, timeoutMs: 60_000 });
 export const declineFont = (family: string) => api("/fonts/decline", { family }, "POST", { queue: false });
 export const withdrawFont = (family: string) => api("/fonts/withdraw", { family }, "POST", { queue: false });
