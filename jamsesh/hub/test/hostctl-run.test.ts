@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { config } from "../src/config";
-import { commandProblem, confine, groups, HostControl, openProblem, redactUrls, repoProblem, run, urlProblem } from "../src/hostctl";
+import { CREDENTIALS_REFUSED, commandProblem, confine, credentialProblem, groups, HostControl, openProblem, redactUrls, repoProblem, run, shellCommands, urlProblem } from "../src/hostctl";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-hostctl-"));
 const homeWas = config.home;
@@ -200,8 +200,8 @@ test("a preview that fails normally releases the lock at once", async () => {
 }, 30_000);
 
 test("build and shell command text with a credentialed URL is refused at filing, and redacted anywhere shown", () => {
-  expect(commandProblem("git clone https://ghp_tok@github.com/a/b && make")).toContain("username or token");
-  expect(commandProblem("curl -u me:pw https://user:pw@host/x")).toContain("username or token");
+  expect(commandProblem("git clone https://ghp_tok@github.com/a/b && make")).toContain("passwords or tokens");
+  expect(commandProblem("curl -u me:pw https://user:pw@host/x")).toContain("passwords or tokens");
   expect(commandProblem("make test && curl https://example.com/x")).toBeNull();
   const hc: any = Object.create(HostControl.prototype);
   hc.requests = new Map();
@@ -254,10 +254,9 @@ test("request() refuses an open that carries credentials or escapes the checkout
   expect(typeof hc.request({ ...base, open: "build/App.app" })).toBe("object");
 });
 
-test("one URL check for commands, open and repos: control characters, whitespace, encodings and parsed credentials", () => {
+test("one credential check for commands, open and repos: parsed the way a shell parses, URLs with the URL class", () => {
   for (const bad of [
-    "git clone https://tok\t@github.com/a/b", // a tab the URL parser drops
-    "git clone https://tok\n@github.com/a/b",
+    "git clone https://tok@github.com/a/b",
     "curl https://user:pw@example.com",
     "curl 'https://tok@example.com'",
     "curl https://%74ok@example.com/", // %-encoded user, still before an @
@@ -266,21 +265,62 @@ test("one URL check for commands, open and repos: control characters, whitespace
     "wget ssh://deploy@host/a/b",
     "curl https://@example.com",
     "curl https://[::1",
-    "curl https://user;password@example.com/path", // ; is a legal userinfo character
-    "curl https://user&x=1@example.com/",
-    "curl \"https://user'tok@example.com\"",
+    "curl \"https://example.com/a'b?token=1\"", // a quote inside a double-quoted URL
+    "curl 'https://example.com/it\"s?api_key=zzz'",
+    "curl https://example.com/a\"b?token=1\"",
+    "curl -u me:pw https://example.com",
+    "curl -sSu me:pw https://example.com",
+    "curl --user me:pw https://example.com",
+    "curl --user=me:pw https://example.com",
+    "curl -H 'Authorization: Bearer abcdefghijkl' https://example.com",
+    "curl -H \"Cookie: session=abc\" https://example.com",
+    "wget --header='Authorization: Basic Zm9vOmJhcg==' https://example.com",
+    "API_KEY=abc make",
+    "make --password=hunter2",
+    "TOKEN=abc npm publish",
+    "make secret=abc",
+    "echo ghp_abcdefghijklmnopqrstuvwxyz0123",
+    "export K=sk-ant-abcdefghijklmnopqrstuvwxyz",
+    "AWS=AKIAABCDEFGHIJKLMNOP true",
+    "curl 'https://example.com/?a=1&api_key=zzz'",
+    "open https://example.com/cb#access_token=abc&x=1",
+    "curl https://example.com/x?token=abc",
+    `curl https://${"a".repeat(3000)}@example.com/`,
   ])
-    expect([bad, urlProblem(bad)]).toEqual([bad, expect.any(String)]);
-  for (const ok of ["make && curl https://example.com/path?x=1#frag", "git clone git@github.com:a/b.git", "echo hello\nmake\ttest", "open http://localhost:3000/a@b"])
-    expect([ok, urlProblem(ok)]).toEqual([ok, null]);
-  // single values: no whitespace or control characters at all
-  expect(urlProblem("https://example.com/a b", { single: true })).toContain("whitespace");
-  expect(urlProblem("https://example.com/\t", { single: true })).toContain("whitespace");
-  expect(urlProblem("ssh://git@github.com/a/b.git", { single: true, allowGitUser: true })).toBeNull();
-  expect(urlProblem("ssh://git:pw@github.com/a/b.git", { single: true, allowGitUser: true })).not.toBeNull();
+    expect([bad, credentialProblem(bad)]).toEqual([bad, CREDENTIALS_REFUSED]);
+  for (const ok of [
+    "make && curl https://example.com/path?x=1#frag",
+    "git clone git@github.com:a/b.git",
+    "echo hello\nmake\ttest",
+    "sort -u file",
+    "git commit --author=Bob -m x",
+    "curl https://example.com/?page=2&q=token",
+    "curl https://example.com/?keyboard=1",
+    "open http://localhost:3000/a@b",
+    "ls -la; pwd",
+    "npm run build -- --key-name x",
+    "git clone https://github.com/a/b.git && cd b && make test",
+    `curl https://${"a".repeat(3000)}.example.com/ok`,
+  ])
+    expect([ok, credentialProblem(ok)]).toEqual([ok, null]);
+  // What the shell really sees: a tab or ; ends the word, so these are not one credentialed URL.
+  expect(credentialProblem("git clone https://tok\t@github.com/a/b")).toBeNull();
+  // A single value (open, repo, URL) is parsed whole and may hold no whitespace at all.
+  for (const bad of ["https://user;password@example.com/path", "https://user&x=1@example.com/", "https://u:p@h/", "https://h/a'b?token=1", "https://h/a\"b#access_token=1", "https://h/a b", "https://h/\t", "https://tok\t@h/"])
+    expect([bad, credentialProblem(bad, { single: true })]).toEqual([bad, expect.any(String)]);
+  expect(credentialProblem("ssh://git@github.com/a/b.git", { single: true, allowGitUser: true })).toBeNull();
+  expect(credentialProblem("ssh://git:pw@github.com/a/b.git", { single: true, allowGitUser: true })).not.toBeNull();
   expect(repoProblem("https://github.com/a/b\t.git")).not.toBeNull();
+  expect(repoProblem("https://github.com/a/b.git?token=abc")).not.toBeNull();
   expect(openProblem("https://tok\t@example.com/")).not.toBeNull();
-  expect(commandProblem("git push https://tok\t@github.com/a/b")).not.toBeNull();
+  expect(openProblem("https://example.com/?token=abc")).not.toBeNull();
+  expect(commandProblem("git push https://tok@github.com/a/b")).toBe(CREDENTIALS_REFUSED);
+});
+
+test("the shell splitter honours quotes, escapes and operators", () => {
+  expect(shellCommands(`curl "a b" 'c d' e\\ f; ls | wc && x`)).toEqual([["curl", "a b", "c d", "e f"], ["ls"], ["wc"], ["x"]]);
+  expect(shellCommands("a\nb # comment\nc")).toEqual([["a"], ["b"], ["c"]]);
+  expect(shellCommands(`echo "it's" 'say "hi"'`)).toEqual([["echo", "it's", 'say "hi"']]);
 });
 
 test("a preview step that can't be stopped (the open step) ends it there, reports it, and holds the lock until the group is gone", async () => {
@@ -342,11 +382,11 @@ test("open_url and the Simulator URL refuse credentials before anything runs or 
   let spawned = 0;
   (Bun as any).spawn = () => (spawned++, real(["true"]));
   try {
-    expect(await hc.act({ action: "open_url", url: "https://tok@example.com/" })).toContain("username or token");
-    expect(await hc.act({ action: "open_url", url: "https://user;pw@example.com/" })).toContain("username or token");
+    expect(await hc.act({ action: "open_url", url: "https://tok@example.com/" })).toContain("passwords or tokens");
+    expect(await hc.act({ action: "open_url", url: "https://user;pw@example.com/" })).toContain("passwords or tokens");
     const sim = await hc.simulatorUp(undefined, "https://u:p@example.com/");
     expect(sim).toMatchObject({ ok: false });
-    expect(sim.msg).toContain("username or token");
+    expect(sim.msg).toContain("passwords or tokens");
     expect(spawned).toBe(0);
     expect(logs.join("\n")).not.toContain("tok@");
   } finally {

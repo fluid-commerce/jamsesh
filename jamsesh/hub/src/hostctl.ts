@@ -215,45 +215,135 @@ export async function runShort(cmd: string[], timeoutMs = 30_000, cwd?: string):
 const SECRET_PARAM = /(^|[_.-])(token|access[_-]?token|id[_-]?token|refresh[_-]?token|api[_-]?key|apikey|key|secret|client[_-]?secret|password|passwd|pwd|auth|authorization|sig|signature|credential|credentials|session|sessionid|bearer)s?$/i;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
-/**
- * One check for every URL in text that is stored, shown to the room, logged or put in a process
- * list: no username, token or password. Each `scheme://` token is cut at the first character that
- * ends an authority, with tabs, newlines and other control characters removed the way a URL parser
- * would, and parsed with the URL class; any `@` in the authority, or a parsed username or password,
- * is refused, as is a URL that will not parse. `single` is for a value that must be one URL or path:
- * it may not contain whitespace or control characters at all. `allowGitUser` lets an ssh remote
- * keep the plain user `git`.
- */
-export function urlProblem(text: string, o: { single?: boolean; allowGitUser?: boolean } = {}): string | null {
-  const creds = "That has a URL with a username or token in it. Leave the credentials out; the host's own git login does the authenticating.";
-  if (typeof text !== "string") return "That isn't valid.";
-  if (o.single && (/\s/.test(text) || CONTROL.test(text))) return "That has whitespace or control characters in it.";
-  if (text.length > 100_000) return "That is too long to check.";
-  for (const m of text.matchAll(/[a-z][a-z0-9+.-]*:\/\//gi)) {
-    // The whole token after the scheme, with the control characters a URL parser drops removed (no length limit: an @ far along still counts).
-    const rest = text.slice(m.index! + m[0].length).replace(/[\u0000-\u001f\u007f]/g, "");
-    const authority = rest.split(/[/?#\\\s]/)[0];
-    if (authority.includes("@")) {
-      const user = authority.slice(0, authority.lastIndexOf("@"));
-      if (!(o.allowGitUser && user === "git" && m[0].toLowerCase() === "ssh://")) return creds;
-      continue;
+/** What the owner said to every refusal: no passwords or tokens in anything the room sees or the host runs. */
+export const CREDENTIALS_REFUSED = "Commands can't contain passwords or tokens. Use a public URL, or set it up on the host.";
+
+/** Well-known token shapes, wherever they appear. */
+const TOKEN_FORMATS = [
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
+  /\bglpat-[A-Za-z0-9_-]{16,}/,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/,
+  /\bsk-(ant-)?[A-Za-z0-9_-]{20,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\bAIza[0-9A-Za-z_-]{35}/,
+  /\bnpm_[A-Za-z0-9]{30,}/,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/i,
+];
+
+/** Commands whose own flags carry credentials (-u user:pass, --user, cookies, bearer tokens). */
+const CURLISH = new Set(["curl", "wget", "http", "https", "xh", "aria2c", "httpie", "git-credential"]);
+const CRED_FLAG = /^(--(user|proxy-user|password|http-password|ftp-password|oauth2-bearer|token|cookie|header-auth)(=.*)?|-[A-Za-z]*[uUb]|-[uUb].+)$/;
+const HEADER = /(^|[=\s])(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:/i;
+const CRED_ASSIGN = /^-{0,2}[\w.-]*?(token|secret|password|passwd|api[_-]?key|apikey|access[_-]?key|auth(orization)?(?![a-z]))[\w.-]*=./i;
+const KEY_ASSIGN = /^-{0,2}([\w.]*[_.-])?key=./i;
+
+/** Splits shell text into commands, each a list of words, the way a shell does: quotes and backslashes are honoured, and unquoted `; | & ( ) < >` and newlines separate. */
+export function shellCommands(text: string): string[][] {
+  const cmds: string[][] = [[]];
+  let cur = "";
+  let has = false;
+  const endWord = () => {
+    if (has) cmds[cmds.length - 1].push(cur);
+    cur = "";
+    has = false;
+  };
+  const endCmd = () => {
+    endWord();
+    if (cmds[cmds.length - 1].length) cmds.push([]);
+  };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "'") {
+      const j = text.indexOf("'", i + 1);
+      cur += text.slice(i + 1, j < 0 ? text.length : j);
+      has = true;
+      i = j < 0 ? text.length : j;
+    } else if (c === '"') {
+      has = true;
+      let j = i + 1;
+      for (; j < text.length && text[j] !== '"'; j++) {
+        if (text[j] === "\\" && j + 1 < text.length && /["\\$`\n]/.test(text[j + 1])) j++;
+        if (text[j] !== "\n" || text[j - 1] !== "\\") cur += text[j];
+      }
+      i = j;
+    } else if (c === "\\") {
+      if (text[i + 1] === "\n") i++;
+      else if (i + 1 < text.length) {
+        cur += text[++i];
+        has = true;
+      }
+    } else if (c === " " || c === "\t") endWord();
+    else if (c === "#" && !has) {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++;
+    } else if (c === "\n" || c === ";" || c === "|" || c === "&" || c === "(" || c === ")") endCmd();
+    else if (c === "<" || c === ">") endWord();
+    else {
+      cur += c;
+      has = true;
     }
-    try {
-      const u = new URL(`${m[0]}${rest.split(/[\s"'`<>]/)[0]}`);
-      if (u.username || u.password) return creds;
-      // Secrets can ride in the query or fragment too (?token=..., #access_token=...).
-      for (const params of [u.searchParams, new URLSearchParams(u.hash.slice(1))]) for (const key of params.keys()) if (SECRET_PARAM.test(key)) return creds;
-    } catch {
-      return "That has a URL that doesn't parse.";
+  }
+  endCmd();
+  return cmds.filter((c) => c.length);
+}
+
+/** Refuses a URL (one value) with a username, password, or secret query or fragment parameter. */
+function urlValueProblem(url: string, o: { allowGitUser?: boolean }): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return true;
+  }
+  const authority = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split(/[/?#]/)[0];
+  if (authority.includes("@") && !(o.allowGitUser && u.username === "git" && u.protocol === "ssh:" && !u.password)) return true; // any userinfo, even an empty one
+  if (u.password) return true;
+  if (u.username && !(o.allowGitUser && u.username === "git" && u.protocol === "ssh:")) return true;
+  for (const params of [u.searchParams, new URLSearchParams(u.hash.slice(1))]) for (const key of params.keys()) if (SECRET_PARAM.test(key)) return true;
+  return false;
+}
+
+/**
+ * The one credential check for anything stored, shown to the room, logged or run: a command, an
+ * `open` value, a repository, a URL. Returns the refusal message, or null.
+ *
+ * A command is split into words the way a shell splits it, so a quote can't hide or truncate
+ * anything; then every word is checked: URL-like parts are parsed with the URL class (username,
+ * password, secret-named query or fragment parameters, or no parse at all), curl-style credential
+ * flags, Authorization/Cookie headers, `token=`/`key=`/`password=` assignments, and known token
+ * formats. A `single` value (a URL or path) must be one token with no whitespace or control
+ * characters, and is parsed whole. `allowGitUser` lets an ssh remote keep the plain user `git`.
+ */
+export function credentialProblem(text: string, o: { single?: boolean; allowGitUser?: boolean } = {}): string | null {
+  if (typeof text !== "string") return "That isn't valid.";
+  if (text.length > 100_000) return "That is too long to check.";
+  if (TOKEN_FORMATS.some((r) => r.test(text))) return CREDENTIALS_REFUSED;
+  if (o.single) {
+    if (/\s/.test(text) || CONTROL.test(text)) return "That has whitespace or control characters in it.";
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(text) && urlValueProblem(text, o) ? CREDENTIALS_REFUSED : null;
+  }
+  for (const words of shellCommands(text)) {
+    const argv0 = (words[0] ?? "").split("/").pop()!.toLowerCase();
+    const curlish = CURLISH.has(argv0);
+    for (const w of words.slice(1).concat(words[0] ?? [])) {
+      if (HEADER.test(w) || /^bearer\s+\S{8,}/i.test(w)) return CREDENTIALS_REFUSED;
+      if (curlish && CRED_FLAG.test(w)) return CREDENTIALS_REFUSED;
+      if (CRED_ASSIGN.test(w) || KEY_ASSIGN.test(w)) return CREDENTIALS_REFUSED;
+      for (const m of w.matchAll(/[a-z][a-z0-9+.-]*:\/\/\S*/gi)) if (urlValueProblem(m[0], o)) return CREDENTIALS_REFUSED;
     }
   }
   return null;
 }
 
+/** Kept under its old name for callers and tests. */
+export const urlProblem = credentialProblem;
+
 /** A remote a build may clone: https, ssh:// or git@, with no credentials in it. */
 export function repoProblem(repo: string): string | null {
   if (typeof repo !== "string" || !/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(repo)) return "I need the repository's remote URL (https or git@) to build it.";
-  if (repo.startsWith("git@")) return (repo.split(":")[0].match(/@/g) ?? []).length === 1 ? null : "That repository URL has a username or token in it.";
+  if (repo.startsWith("git@")) return (repo.split(":")[0].match(/@/g) ?? []).length === 1 ? null : CREDENTIALS_REFUSED;
   return urlProblem(repo, { single: true, allowGitUser: true });
 }
 

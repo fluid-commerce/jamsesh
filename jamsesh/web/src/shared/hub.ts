@@ -282,7 +282,16 @@ class HubClient {
 
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
-    const state = await api<HubState>("/state");
+    this.adopt(await api<HubState>("/state"));
+  }
+
+  /** The one way a whole state replaces the old (socket message or HTTP fallback): events newer than the old state's newest are announced, so lines that came in while this client was away from the wire still reach listeners (only those the snapshot still holds). */
+  private adopt(state: HubState) {
+    const old = this.snap.state;
+    if (old) {
+      const known = Math.max(0, ...old.events.map((e) => e.id));
+      for (const e of [...state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
+    }
     this.set({ state });
   }
 
@@ -305,12 +314,7 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
-        // A replacement (after a reconnect) can carry lines that arrived while this client was away from the wire: announce the new ones.
-        if (s) {
-          const known = Math.max(0, ...s.events.map((e) => e.id));
-          for (const e of [...m.state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
-        }
-        return this.set({ state: m.state });
+        return this.adopt(m.state);
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });
         return;
