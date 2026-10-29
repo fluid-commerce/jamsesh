@@ -1,6 +1,7 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { hostname } from "node:os";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
 import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
@@ -48,14 +49,33 @@ const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
-/** Host names this hub answers to: loopback, any IP address, .local names, and its own domains. */
-function knownHost(req: Request, hub: Hub) {
+/** Host names this hub answers to: loopback, any IP address, this Mac's own .local names, and its own domains. */
+export function knownHost(req: Request, hub: Hub) {
   const host = (req.headers.get("host") ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
-  if (!host || host === "localhost" || host.endsWith(".local") || /^[\d.]+$/.test(host) || host.includes(":")) return true;
+  if (!host || host === "localhost" || /^[\d.]+$/.test(host) || host.includes(":")) return true;
+  if (ownLocalNames().has(host)) return true;
   const domain = hub.net.status().domain?.toLowerCase();
   if (domain && (host === domain || host.endsWith(`.${domain}`))) return true;
   const extra = [process.env.JAMSESH_PUBLIC_URL, process.env.JAMSESH_PUBLIC_HOST].map((u) => (u ? u.replace(/^https?:\/\//, "").replace(/[:/].*$/, "").toLowerCase() : ""));
   return extra.includes(host);
+}
+
+/** This Mac's own Bonjour names (name.local), and no other `.local` name: a page can't reach the host under one it picked. */
+let localNames: Set<string> | null = null;
+function ownLocalNames(): Set<string> {
+  if (localNames) return localNames;
+  const names = new Set<string>();
+  const add = (n: string) => {
+    const base = n.trim().toLowerCase().replace(/\.local\.?$/, "");
+    if (base) (names.add(`${base}.local`), names.add(base));
+  };
+  add(hostname());
+  try {
+    const r = Bun.spawnSync(["scutil", "--get", "LocalHostName"], { stdout: "pipe", stderr: "ignore" });
+    if (r.exitCode === 0) add(r.stdout.toString());
+  } catch {}
+  for (const n of (process.env.JAMSESH_HOSTNAMES ?? "").split(",")) add(n);
+  return (localNames = names);
 }
 
 /** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
@@ -226,6 +246,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // an agent's token, or no credential at all, gets the agents' view (no Tasks board proposals).
         const seesAll = hostWindow || (local ? loopbackCredential : device)?.kind === "browser";
         const ok = local || !!device;
+        // A page in a browser (it sends an Origin) reaching loopback without the host window's key or a credential reads no room data.
+        if (local && incoming.headers.get("origin") && !hostWindow && !loopbackCredential && (path === "/ws" || path === "/api/state")) return bad("Open JamSesh from its own window.", 403);
 
         if (path === "/") {
           if (local) return Response.redirect("/host", 302);
@@ -769,6 +791,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // credential (or the host's own agents on loopback); a named agent that isn't theirs is refused, not replaced by a guess.
     const named = String(form!.get("agent") ?? "");
     const agent = named ? (s.agent(named) ?? null) : null;
+    // An agent's credential uploads for one of its own agents: leaving the name out would pass as the host's (and replace its work).
+    if (paired?.kind === "agent" && !named) return bad("Name the agent this is for (field 'agent').", 403);
     if (named) {
       const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
       if (!agent || (paired && paired.kind !== "agent") || !machine || agent.machine !== machine) return bad("That agent isn't yours to upload for.", 403);

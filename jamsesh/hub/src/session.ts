@@ -940,10 +940,12 @@ export class Session {
   }
 
   /** Cancels an open directive and tells each of its agents to stop, and why. */
-  cancelDirective(d: Directive, reason: string) {
+  cancelDirective(d: Directive, reason: string, attachments: AttachmentRef[] = []) {
+    // The files the cancelling card showed go with the message, with where to fetch each (an agent's inbox prints only text).
+    const files = attachments.length ? `\nFiles with this: ${attachments.map((a) => `${a.name} (${a.type}) ${this.hubUrl}/api/attachments/${a.id}`).join("; ")}` : "";
     this.setDirective(d.id, { status: "cancelled", progress: Object.fromEntries(d.targets.map((t) => [t, "cancelled" as const])) });
     for (const t of d.targets) {
-      this.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Cancelled: "${d.text.slice(0, 120)}". ${reason} Stop that work; a new directive follows if there's something else to do.`, relevance: "work", data: { to: t, directiveId: d.id } });
+      this.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Cancelled: "${d.text.slice(0, 120)}". ${reason} Stop that work; a new directive follows if there's something else to do.${files}`, relevance: "work", data: { to: t, directiveId: d.id, ...(attachments.length ? { attachments } : {}) } });
       this.wake(t);
     }
   }

@@ -202,6 +202,11 @@ test("over loopback, no credential and an agent's token both get the agents' vie
     const callers: Record<string, Record<string, string>> = { none: {}, agent: { authorization: `Bearer ${agent.token}` }, host: { cookie: `jam_window=${key}` }, person: { authorization: `Bearer ${person.token}` } };
     for (const [who, headers] of Object.entries(callers)) {
       const sees = who === "host" || who === "person";
+      // A browser page (it sends an Origin) with neither the window key nor a credential reads nothing at all.
+      if (who === "none") {
+        expect((await fetch(`${base}/api/state`, { headers: { origin: "http://evil.example" } })).status).toBe(403);
+        continue;
+      }
       const state = await (await fetch(`${base}/api/state`, { headers })).json();
       expect(state.triage.length > 0).toBe(sees);
       const list = await fetch(`${base}/api/triage`, { headers });
@@ -549,7 +554,12 @@ test("a body that never finishes is dropped at the deadline, and bodies share a 
       pull: (c) =>
         new Promise((res) => {
           if (first) return (first = false), c.enqueue(new Uint8Array(10)), res();
-          setTimeout(() => (c.enqueue(new Uint8Array(10)), res()), 1500);
+          setTimeout(() => {
+            try {
+              c.enqueue(new Uint8Array(10));
+            } catch {} // the reader gave up at its deadline
+            res();
+          }, 1500);
         }),
     });
     return new Request(url, { method: "POST", headers: { "content-type": url.includes("/audio") ? "audio/wav" : "application/json" }, body, duplex: "half" } as any);
@@ -745,4 +755,70 @@ test("each snapshot has a directory of its own, and a failed canvas copy never l
   expect(listed.map((s) => s.label)).toEqual(["same minute", "same minute"]);
   expect(listed.find((s) => s.id === second.id)!.canvas).toBe(false);
   expect(readdirSync(join(first.dir, "..")).some((d) => d.startsWith(".staging-"))).toBe(false);
+});
+
+
+// ---------- round 21 ----------
+
+test("only this Mac's own .local names are accepted: a page can't pick one and rebind it to loopback", async () => {
+  const { knownHost } = await import("../src/http");
+  const r = room();
+  const asHost = (host: string) => knownHost(new Request("http://x/", { headers: { host } }), r.hub);
+  const own = (await import("node:os")).hostname().toLowerCase().replace(/\.local$/, "");
+  expect(asHost(`${own}.local:4790`)).toBe(true);
+  expect(asHost("localhost:4790")).toBe(true);
+  expect(asHost("127.0.0.1:4790")).toBe(true);
+  expect(asHost("evil.local:4790")).toBe(false);
+  expect(asHost("attacker.example")).toBe(false);
+});
+
+test("an agent's credential can't upload as the host by leaving the agent out", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const cred = r.hub.auth.issue({ kind: "agent", label: "Agents", ip: "10.0.0.4", personId: r.chey.id, ownerDeviceId: "host" });
+    const png = new Uint8Array(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    const form = new FormData();
+    form.set("file", new File([png], "s.png", { type: "image/png" }));
+    form.set("replaces", "art_host_owned");
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/upload`, { method: "POST", headers: { authorization: `Bearer ${cred.token}`, "x-forwarded-for": "10.0.0.4" }, body: form });
+    expect(res.status).toBe(403);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a cancellation sent from the board reaches its agents with the files the card showed, and the curl hint keeps the token out of the command line", () => {
+  const r = room();
+  const att = { id: "att_c1", name: "scrap.txt", type: "text/plain", kind: "text" as const, size: 5 };
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const d = r.s.createDirective({ text: "Make the header", mode: "implement", targets: [agent.id], requestedBy: "Chey" });
+  const ev = r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: "scrap it", relevance: "work", data: { attachments: [att] } });
+  const card = r.s.board.proposeCancel({ directive: d, reason: "Scrap it", by: "Chey", sourceEventIds: [ev.id], attachments: [att] })!;
+  expect(r.s.board.send(card.id, "Chey").ok).toBe(true);
+  const msg = r.s.store.recentEvents({ kinds: ["message"], limit: 10 }).find((e) => e.data.directiveId === d.id)!;
+  expect(msg.text).toContain(`/api/attachments/${att.id}`);
+  expect(msg.data.attachments).toEqual([att]);
+  const src = readFileSync(join(import.meta.dir, "../src/mcp.ts"), "utf8");
+  expect(src).not.toContain("Bearer $JAMSESH_TOKEN");
+});
+
+test("a title changed in one session isn't put back by another session's later save", () => {
+  const p = createProject(dir, "Titles");
+  const a = room();
+  const b = room();
+  a.s.upsertPerson({ name: "Chey", role: "Designer" });
+  expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
+  expect(readProjectContext(dir, p.slug)!.people).toEqual([{ name: "Chey", role: "Designer" }]);
+  // B joins later, sees "Designer", changes it, and saves.
+  const { seedFromProject: seed } = require("../src/carryover");
+  b.s.upsertPerson({ name: "Chey" });
+  seed(dir, p.slug, "B", b.s);
+  b.s.upsertPerson({ name: "Chey", role: "Design lead" });
+  expect(saveProjectContext(dir, p.slug, "B", b.s)).toBe("written");
+  // A saves again (a fact changed), with the old title still in its copy: the title stays B's.
+  a.s.board.rememberNow({ text: "A later call", kind: "decision", by: "Chey" });
+  expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
+  expect(readProjectContext(dir, p.slug)!.people).toEqual([{ name: "Chey", role: "Design lead" }]);
 });

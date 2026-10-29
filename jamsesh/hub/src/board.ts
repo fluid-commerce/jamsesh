@@ -330,7 +330,7 @@ export class Board {
       const d = this.s.store.get("directives", card.cancels);
       if (!d || d.status === "done" || d.status === "cancelled") return fail(`That task is already ${d?.status ?? "gone"}: dismiss this card.`, 409);
       return this.commit(() => {
-        this.s.cancelDirective(d, `${card.text} (${by} confirmed it from the Tasks board.)`);
+        this.s.cancelDirective(d, `${card.text} (${by} confirmed it from the Tasks board.)`, card.attachments ?? []);
         return { ok: true as const, card: this.done(card, "sent", by, { directiveId: d.id }), directiveId: d.id };
       });
     }

@@ -919,7 +919,7 @@ function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined, ba
 /** The files that came with a task: where to fetch each one with your credential. */
 function attachmentLine(d: Directive, base: string) {
   if (!d.attachments?.length) return "";
-  return `\n  attachments (fetch with your credential, for example curl -H "authorization: Bearer $JAMSESH_TOKEN"): ${d.attachments.map((a) => `${a.name} (${a.type}, ${sizeLabel(a.size)}) ${base}/api/attachments/${a.id}`).join("; ")}`;
+  return `\n  attachments (fetch with your credential, for example curl -H @"$HOME/.jamsesh/auth.header"): ${d.attachments.map((a) => `${a.name} (${a.type}, ${sizeLabel(a.size)}) ${base}/api/attachments/${a.id}`).join("; ")}`;
 }
 
 void config;

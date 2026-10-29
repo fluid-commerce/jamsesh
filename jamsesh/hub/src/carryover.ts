@@ -376,7 +376,8 @@ export function snapshotContext(s: Session, sessionId: string): ContextChanges {
     workstreams,
     // The brief is the brain's own summary, not an accepted item: it is cut to the reader's limits.
     brief: hasBrief(s) ? { changedAt, brief: buildBrief(s).full.slice(0, 40_000), goal: goalOf(s).slice(0, 2000), glossary: glossaryOf(s).filter((g) => g.term.trim()).slice(0, 300).map((g) => ({ term: g.term.slice(0, 200), meaning: g.meaning.slice(0, 2000) })) } : null,
-    people: s.people().filter((p) => p.role.trim() && p.name.trim()).map((p) => ({ name: p.name.slice(0, 200), role: p.role.slice(0, 200) })),
+    // Only a title this session set or changed since it last saw the project's: an unchanged one would carry a stale copy over a newer edit.
+    people: s.people().filter((p) => p.role.trim() && p.name.trim() && bases[`person:${p.name.slice(0, 200)}`]?.sig !== p.role.slice(0, 200)).map((p) => ({ name: p.name.slice(0, 200), role: p.role.slice(0, 200) })),
   };
 }
 
@@ -394,6 +395,7 @@ export function saveProjectContext(home: string, slug: string, sessionId: string
   const bases = { ...basesOf(s) };
   for (const f of ch.facts) if (result.applied.has(f.id)) bases[f.id] = { v: result.applied.get(f.id)!, sig: factSig(f) };
   for (const w of ch.workstreams) if (result.applied.has(w.id)) bases[w.id] = { v: result.applied.get(w.id)!, sig: wsSig(w) };
+  for (const p of ch.people) bases[`person:${p.name}`] = { v: 0, sig: p.role };
   const now = Date.now();
   for (const [id, row] of result.superseded) {
     const data = JSON.parse(row.data);
@@ -584,6 +586,8 @@ export function seedFromProject(home: string, slug: string, sessionId: string, s
     n++;
   }
   for (const p of ctx.people) {
+    // What this session saw for the title: only a different one later is its own change to save.
+    bases[`person:${p.name}`] = { v: 0, sig: p.role };
     const person = s.personByName(p.name);
     if (person && !person.role && p.role) s.store.put("people", { ...person, role: p.role }, false);
   }
