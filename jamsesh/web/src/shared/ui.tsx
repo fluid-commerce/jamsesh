@@ -388,6 +388,9 @@ const NEAR_TOP = 160;
  * as the reader reaches the top. The big screens (`big`) always follow and keep a short tail.
  * The feed scrolls its own box (scrollTop), never its ancestors.
  */
+/** How many lines the feed keeps in memory and renders while following the bottom. */
+const FEED_KEEP = 1500;
+
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   const { state } = useHub();
   const box = useRef<HTMLDivElement>(null);
@@ -401,16 +404,23 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   // Where the box was before older lines went in above, to hold the reader's place.
   const holdPlace = useRef<{ height: number; top: number } | null>(null);
   const busy = useRef(false);
+  const trimmed = useRef(false);
   const [older, setOlder] = useState<{ loading: boolean; failed: boolean; done: boolean; more: number | null }>({ loading: false, failed: false, done: false, more: null });
 
   for (const e of state?.events ?? []) seen.current.set(e.id, e);
   const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
+  // A long session keeps a bounded tail while the reader follows the bottom; older lines load again from the hub on scroll.
+  if (following.current && seen.current.size > FEED_KEEP) {
+    const ids = [...seen.current.keys()].sort((a, b) => a - b);
+    for (const id of ids.slice(0, ids.length - FEED_KEEP)) seen.current.delete(id);
+    trimmed.current = true;
+  }
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
   const last = events[events.length - 1]?.id ?? 0;
   const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
-  const exhausted = big || older.done || everything;
+  const exhausted = big || ((older.done || everything) && !trimmed.current);
   const fresh = following.current ? 0 : events.filter((e) => e.id > readTo.current).length;
 
   const toBottom = (smooth = false) => {
@@ -440,6 +450,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
       const r = await api<{ items: JamEvent[]; more: number }>(`/history/events?before=${first}&limit=60&kinds=${kinds}`);
       holdPlace.current = { height: el.scrollHeight, top: el.scrollTop };
       for (const e of r.items) seen.current.set(e.id, e);
+      if (r.more === 0 || r.items.length === 0) trimmed.current = false; // the start of history is back in memory
       setOlder({ loading: false, failed: false, done: r.more === 0 || r.items.length === 0, more: r.more });
     } catch {
       setOlder((o) => ({ ...o, loading: false, failed: true }));

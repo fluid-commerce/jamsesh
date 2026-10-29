@@ -215,3 +215,11 @@ test("empty frames count against the cap too, after the canvas server has opened
     upstream.close();
   }
 }, 20_000);
+
+test("an empty message that went out is not a failure", () => {
+  const fine = fakeRelay({ sendResult: 0 });
+  relayDown(fine.ws, "");
+  relayDown(fine.ws, new Uint8Array(0));
+  expect(fine.log.closed).toEqual([]);
+  expect(fine.log.sent).toBe(2);
+});

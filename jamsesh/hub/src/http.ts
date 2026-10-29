@@ -50,7 +50,8 @@ export function relayUp(ws: ServerWebSocket<WsData>, raw: string | Buffer | Arra
 
 export function relayDown(ws: ServerWebSocket<WsData>, data: string | Uint8Array) {
   const sent = ws.send(data);
-  if (sent === 0 || ws.getBufferedAmount() > RELAY_LIMITS.bytes) endRelay(ws, "can't keep up, try again");
+  // 0 means dropped, except for an empty message (nothing to send is a success).
+  if ((sent === 0 && data.length > 0) || ws.getBufferedAmount() > RELAY_LIMITS.bytes) endRelay(ws, "can't keep up, try again");
 }
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */

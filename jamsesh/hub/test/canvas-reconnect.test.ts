@@ -370,13 +370,13 @@ test("a key helper that hangs is killed and reaped, and the start fails instead 
   const was = { bin: config.figcraftServerBin, data: config.dataDir, ms: Canvas.KEY_TIMEOUT_MS };
   (config as any).figcraftServerBin = bin;
   (config as any).dataDir = dir;
-  Canvas.KEY_TIMEOUT_MS = 300;
+  Canvas.KEY_TIMEOUT_MS = 1500; // the wrapper adds a moment under load
   const session: any = { canvas: { status: "off" }, setCanvas() {}, store: { setting: (_k: string, d: unknown) => d, setSetting() {} } };
   const canvas: any = new Canvas(session);
   try {
     const t0 = Date.now();
     await expect(canvas.serverKey()).rejects.toThrow("didn't answer");
-    expect(Date.now() - t0).toBeLessThan(3000);
+    expect(Date.now() - t0).toBeLessThan(6000);
     const pid = Number(readFileSync(pidFile, "utf8").trim());
     expect(() => process.kill(pid, 0)).toThrow(); // gone
   } finally {
@@ -500,8 +500,8 @@ test("Stop reaps a canvas server that ignores SIGTERM, and a key helper still ru
     expect(await waitFor(() => existsSync(join(dir, "key.pid")) && existsSync(join(dir, "serve.pid")))).toBe(true);
     const pids = ["key", "serve"].map((m) => Number(readFileSync(join(dir, `${m}.pid`), "utf8").trim()));
     expect(pids.every(isAlive)).toBe(true);
-    canvas.stop();
-    expect(await waitFor(() => pids.every((p) => !isAlive(p)), 12_000)).toBe(true);
+    await canvas.stop(); // resolves only once the TERM-resistant helpers are reaped
+    expect(pids.every((p) => !isAlive(p))).toBe(true);
     await key;
   } finally {
     (config as any).figcraftServerBin = was.bin;

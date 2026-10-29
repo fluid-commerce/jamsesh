@@ -164,17 +164,18 @@ export class Hub {
   async shutdown() {
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
-    this.stop();
+    await Promise.race([this.stop(), Bun.sleep(6000)]); // helpers get their TERM-then-KILL before the process exits
   }
 
-  stop() {
+  stop(): Promise<void> {
     this.awake.stop();
     this.autosave.stop();
     this.brain.stop();
-    this.canvas.stop();
+    const reaped = this.canvas.stop();
     this.transcriber.stop();
     this.devproxy.stop();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
+    return reaped;
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */

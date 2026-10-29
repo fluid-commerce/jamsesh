@@ -130,15 +130,18 @@ export class Canvas {
     if (this.stopped) throw new Error("the canvas was stopped");
   }
 
-  stop() {
+  /** Stops everything; the promise resolves once the helpers are reaped (a TERM-resistant one gets KILL). */
+  stop(): Promise<void> {
     this.stopped = true;
     if (this.startRetry) clearTimeout(this.startRetry);
     if (this.poller) clearInterval(this.poller);
     for (const t of this.timers.splice(0)) clearInterval(t);
-    this.host?.close();
-    for (const a of this.agents.values()) a.mcp.close();
-    this.keyProc?.kill();
-    if (this.serverProc) void stopHelper(this.serverProc).catch(() => {}); // TERM, then KILL, and reaped
+    const reaped: Promise<unknown>[] = [];
+    if (this.host) reaped.push(this.host.close());
+    for (const a of this.agents.values()) reaped.push(a.mcp.close());
+    if (this.keyProc) reaped.push(stopHelper(this.keyProc).catch(() => {}));
+    if (this.serverProc) reaped.push(stopHelper(this.serverProc).catch(() => {})); // TERM, then KILL, and reaped
+    return Promise.all(reaped).then(() => {});
   }
 
   private async startServer() {
@@ -195,7 +198,7 @@ export class Canvas {
   /** How long `figcraft-server key` may take before the start counts as failed. */
   static KEY_TIMEOUT_MS = 10_000;
 
-  private keyProc: { kill(): void } | null = null;
+  private keyProc: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void } | null = null;
 
   private async serverKey(): Promise<string> {
     this.checkRunning();

@@ -1151,8 +1151,9 @@ Pins are app-wide [A7a, A7c]:
 - The brain (`request_share`), or anyone from **Settings > People**, can ask you to share [A5a].
   Your window asks first: "<who> would like to see your screen", **Share** or **Not now**. A
   request lasts 2 minutes.
-- Shares are peer-to-peer video that works on the LAN and across the internet, through STUN and,
-  when needed, a relay on the host. A screen is captured at up to 3840×2160 at 15 fps and sent to
+- Shares are peer-to-peer video that works on the LAN and across the internet, through STUN only:
+  the host runs no relay (TURN), so a network that blocks direct connections can't carry a share
+  until a TURN server is configured in the page (`configureRtc`). A screen is captured at up to 3840×2160 at 15 fps and sent to
   the host at 14 Mbps; people's own windows get a scaled-down preview (about 1 Mbps). A camera is
   1280×720.
 - **One share of a kind per person.** Starting a new screen share, from any of your windows, ends

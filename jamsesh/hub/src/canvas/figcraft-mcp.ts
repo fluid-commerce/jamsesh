@@ -139,7 +139,8 @@ export class FigcraftMcp {
     }
   }
 
-  close() {
-    if (!this.closed) void stopHelper(this.proc).catch(() => {}); // TERM, then KILL for one that ignores it
+  /** TERM, then KILL for one that ignores it; resolves once it is gone. */
+  close(): Promise<void> {
+    return this.closed ? Promise.resolve() : stopHelper(this.proc).catch(() => {});
   }
 }
