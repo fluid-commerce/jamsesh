@@ -42,6 +42,8 @@ export interface SessionMeta {
   id: string;
   startedAt: number;
   lastActive: number;
+  /** A migrated copy: the old directory it was made from, so a retry finds it instead of copying again. */
+  migratedFrom?: string;
 }
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -198,7 +200,7 @@ export function openSession(home: string, slug: string, opts: { fresh?: boolean;
   const dir = join(dirOf(home, slug), "sessions", id);
   mkdirSync(dir, { recursive: true });
   const prior = readJson<Partial<SessionMeta>>(join(dir, "session.json"));
-  writeJson(join(dir, "session.json"), { id, startedAt: Number(prior?.startedAt) || now, lastActive: now } satisfies SessionMeta);
+  writeJson(join(dir, "session.json"), { id, startedAt: Number(prior?.startedAt) || now, lastActive: now, ...(prior?.migratedFrom ? { migratedFrom: prior.migratedFrom } : {}) } satisfies SessionMeta);
   writeProject(home, { ...project, lastUsed: now });
   return { project, sessionId: id, dir, resumed };
 }
@@ -207,7 +209,7 @@ export function openSession(home: string, slug: string, opts: { fresh?: boolean;
 export function touchSession(home: string, slug: string, sessionId: string, people: ProjectPerson[] = [], now = Date.now()) {
   const dir = join(dirOf(home, slug), "sessions", sessionId);
   const prior = readJson<Partial<SessionMeta>>(join(dir, "session.json"));
-  if (existsSync(dir)) writeJson(join(dir, "session.json"), { id: sessionId, startedAt: Number(prior?.startedAt) || now, lastActive: now } satisfies SessionMeta);
+  if (existsSync(dir)) writeJson(join(dir, "session.json"), { id: sessionId, startedAt: Number(prior?.startedAt) || now, lastActive: now, ...(prior?.migratedFrom ? { migratedFrom: prior.migratedFrom } : {}) } satisfies SessionMeta);
   const project = readProject(home, slug);
   if (!project) return;
   const seen = new Set<string>();
@@ -295,8 +297,8 @@ export function migrateLegacy(home: string, waitMs = 60_000): MigrationRecord[] 
         rmSync(lock, { force: true });
         continue;
       }
-      // Still busy after the wait: leave it to that start (this one tries again next time).
-      if (Date.now() > until) return readJson<{ records: MigrationRecord[] }>(join(root, MIGRATION_FILE))?.records ?? [];
+      // Still busy after the wait: the other start's work isn't done, so this one can't go on as if it were.
+      if (Date.now() > until) throw new Error("Another JamSesh start is still bringing the old sessions into projects. Try again in a minute.");
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
   }
@@ -359,32 +361,55 @@ function migrateNow(home: string): MigrationRecord[] {
           }
         };
         const name = cleanName(setting("sessionName")) || "Jam session";
-        project = byName.get(name.toLowerCase()) ?? null;
-        if (!project) {
-          project = made = createProject(home, name, statSync(src).mtimeMs);
-          byName.set(name.toLowerCase(), project);
-        }
         const span = work.query("SELECT MIN(ts) AS a, MAX(ts) AS b FROM events").get() as { a: number | null; b: number | null };
         const mtime = statSync(join(src, "jamsesh.db")).mtimeMs;
         const lastActive = Math.max(span.b ?? 0, mtime);
         const startedAt = span.a ?? statSync(src).birthtimeMs;
-        const sessions = join(dirOf(home, project.slug), "sessions");
-        const id = (existsSync(join(sessions, basenameOf(src))) ? `${basenameOf(src)}-copy` : basenameOf(src)).replace(/^host$/, "last-session");
-        const dest = join(sessions, id);
-        // Private to this attempt: nothing else ever writes or removes it.
-        staging = join(sessions, `.${id}.${process.pid}-${crypto.randomUUID().slice(0, 8)}.partial`);
-        mkdirSync(staging, { recursive: true });
-        cpSync(src, staging, { recursive: true, filter: (f) => !/jamsesh\.db(-wal|-shm)?$|host-link\.secret$/.test(f) });
-        work.exec(`VACUUM INTO '${join(staging, "jamsesh.db").replace(/'/g, "''")}'`);
         const was = counts(work);
-        const copy = new Database(join(staging, "jamsesh.db"), { readonly: true });
-        const after = counts(copy);
-        copy.close();
-        const verified = was.events === after.events && was.docs === after.docs;
-        if (!verified) throw new Error(`counts differ (${was.events}/${was.docs} vs ${after.events}/${after.docs}); the copy was removed`);
-        writeJson(join(staging, "session.json"), { id, startedAt, lastActive } satisfies SessionMeta);
-        renameSync(staging, dest);
-        staging = "";
+        // Published by an earlier attempt that stopped before recording it: adopt it if it still matches.
+        let dest = "";
+        let id = "";
+        let after = was;
+        const prior = publishedFrom(home, src);
+        if (prior) {
+          try {
+            const old = new Database(join(prior.dir, "jamsesh.db"), { readonly: true });
+            after = counts(old);
+            old.close();
+            if (after.events === was.events && after.docs === was.docs) {
+              project = readProject(home, prior.slug);
+              dest = prior.dir;
+              id = prior.id;
+            }
+          } catch {}
+        }
+        if (!dest) {
+          project = byName.get(name.toLowerCase()) ?? null;
+          if (!project) {
+            project = made = createProject(home, name, statSync(src).mtimeMs);
+            byName.set(name.toLowerCase(), project);
+          }
+          const sessions = join(dirOf(home, project.slug), "sessions");
+          // The name it will really have, so a collision is checked against where it is going.
+          const base = basenameOf(src).replace(/^host$/, "last-session");
+          id = base;
+          for (let n = 1; existsSync(join(sessions, id)); n++) id = n === 1 ? `${base}-copy` : `${base}-copy-${n}`;
+          dest = join(sessions, id);
+          // Private to this attempt: nothing else ever writes or removes it.
+          staging = join(sessions, `.${id}.${process.pid}-${crypto.randomUUID().slice(0, 8)}.partial`);
+          mkdirSync(staging, { recursive: true });
+          cpSync(src, staging, { recursive: true, filter: (f) => !/jamsesh\.db(-wal|-shm)?$|host-link\.secret$/.test(f) });
+          work.exec(`VACUUM INTO '${join(staging, "jamsesh.db").replace(/'/g, "''")}'`);
+          const copy = new Database(join(staging, "jamsesh.db"), { readonly: true });
+          after = counts(copy);
+          copy.close();
+          const verified = was.events === after.events && was.docs === after.docs;
+          if (!verified) throw new Error(`counts differ (${was.events}/${was.docs} vs ${after.events}/${after.docs}); the copy was removed`);
+          writeJson(join(staging, "session.json"), { id, startedAt, lastActive, migratedFrom: src } satisfies SessionMeta);
+          renameSync(staging, dest);
+          staging = "";
+        }
+        if (!project) throw new Error("the project of an earlier copy is gone");
         const names = (work.query("SELECT DISTINCT author_name AS n FROM events WHERE author_type = 'person' ORDER BY id DESC LIMIT 40").all() as { n: string }[]).map((r) => ({ name: r.n }));
         const cur = readProject(home, project.slug) ?? project;
         const seen = new Set(cur.people.map((p) => p.name.toLowerCase()));
@@ -411,6 +436,21 @@ function migrateNow(home: string): MigrationRecord[] {
   const all = [...done.values(), ...records];
   writeJson(marker, { at: Date.now(), records: all });
   return all;
+}
+
+/** A session already published from `src` (the process stopped before the migration was recorded). */
+function publishedFrom(home: string, src: string): { slug: string; id: string; dir: string } | null {
+  const root = projectsDir(home);
+  if (!existsSync(root)) return null;
+  for (const slug of readdirSync(root).filter(isSlug)) {
+    const sessions = join(dirOf(home, slug), "sessions");
+    if (!existsSync(sessions)) continue;
+    for (const id of readdirSync(sessions)) {
+      if (id.startsWith(".")) continue;
+      if (readJson<Partial<SessionMeta>>(join(sessions, id, "session.json"))?.migratedFrom === src) return { slug, id, dir: join(sessions, id) };
+    }
+  }
+  return null;
 }
 
 const basenameOf = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
