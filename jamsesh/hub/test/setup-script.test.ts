@@ -53,7 +53,7 @@ function sandbox() {
  * `mcp remove` deletes it, `mcp get` succeeds only while it is there. Marker files next to the log make it
  * refuse: `.refuse-add` (an `add-json` call whose arguments contain its text fails; empty refuses all) and `.refuse-remove`.
  */
-function stubCli(path: string, log: string, opts: { entry?: boolean; refuseAdd?: string; refuseRemove?: boolean } = {}) {
+function stubCli(path: string, log: string, opts: { entry?: boolean; refuseAdd?: string; refuseRemove?: boolean; config?: string } = {}) {
   mkdirSync(join(path, ".."), { recursive: true });
   if (opts.entry) writeFileSync(`${log}.entry`, "earlier\n");
   if (opts.refuseAdd !== undefined) writeFileSync(`${log}.refuse-add`, opts.refuseAdd);
@@ -63,9 +63,9 @@ function stubCli(path: string, log: string, opts: { entry?: boolean; refuseAdd?:
     `#!/bin/sh
 echo "$0 $*" >> "${log}"
 case "$*" in
-  *"mcp remove"*) [ -e "${log}.refuse-remove" ] && exit 1; rm -f "${log}.entry"; exit 0 ;;
+  *"mcp remove"*) [ -e "${log}.refuse-remove" ] && exit 1; rm -f "${log}.entry"; ${opts.config ? `perl -MJSON::PP -0777 -i -pe 'my $d = decode_json($_); delete $d->{mcpServers}{jamsesh}; $_ = encode_json($d)' "${opts.config}";` : ""} exit 0 ;;
   *"add-json"*) if [ -e "${log}.refuse-add" ]; then pat="$(cat "${log}.refuse-add")"; case "$*" in *"$pat"*) exit 1 ;; esac; fi; echo "$*" > "${log}.entry"; exit 0 ;;
-  *"mcp get"*) [ -e "${log}.entry" ]; exit $? ;;
+  *"mcp get"*) [ -e "${log}.entry" ] && exit 0; ${opts.config ? `perl -MJSON::PP -0777 -ne 'exit(decode_json($_)->{mcpServers}{jamsesh} ? 0 : 1)' "${opts.config}"; exit $?;` : "exit 1;"} ;;
 esac
 exit 0
 `,
@@ -73,9 +73,9 @@ exit 0
   chmodSync(path, 0o755);
 }
 
-async function run(box: ReturnType<typeof sandbox>, name = "Felipe") {
+async function run(box: ReturnType<typeof sandbox>, name = "Felipe", extra: Record<string, string> = {}) {
   const proc = Bun.spawn(["/bin/bash", "-c", joinScript({} as Hub, origin, "tok")], {
-    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: name, JAMSESH_CLI_DIRS: box.bin },
+    env: { HOME: box.home, PATH: `${box.bin}:/usr/bin:/bin`, JAMSESH_NAME: name, JAMSESH_CLI_DIRS: box.bin, ...extra },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -441,10 +441,11 @@ describe("agent setup script", () => {
     expect(back).toBeDefined();
     // Its credential moved to a helper of its own, and still authenticates to the old room.
     expect(back).toContain(`"headersHelper":"${box.home}/.jamsesh/mcp-headers.rollback.sh"`);
-    expect(readFileSync(join(box.home, ".jamsesh/mcp-headers.rollback.json"), "utf8")).toBe('{"authorization":"Bearer old-secret"}');
+    expect(readFileSync(join(box.home, ".jamsesh/mcp-headers.rollback.json"), "utf8")).toBe('{"Authorization":"Bearer old-secret","X-Other":"1"}');
     expect(statSync(join(box.home, ".jamsesh/mcp-headers.rollback.json")).mode & 0o777).toBe(0o600);
     expect(existsSync(join(box.home, ".jamsesh/mcp-headers.json"))).toBe(false);
-    expect(back).toContain('"X-Other":"1"');
+    // No header value is in the arguments at all: every one moved to the helper.
+    expect(back).not.toContain("X-Other");
     expect(log.join("\n")).not.toContain("old-secret");
   });
 
@@ -669,5 +670,76 @@ describe("agent setup script", () => {
     expect(existsSync(`${box.log}.entry`)).toBe(false);
     const log = readFileSync(box.log, "utf8").trim().split("\n");
     expect(log.filter((l) => l.includes("mcp get")).length).toBeGreaterThan(0);
+  });
+
+  test("an earlier entry with extra secret headers goes back with none of them in any command", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log, { entry: true, refuseAdd: `${origin}/mcp` });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headers: { Authorization: "Bearer a-secret", "X-Api-Key": "k-secret" } } } }));
+    expect((await run(box)).code).not.toBe(0);
+    const log = readFileSync(box.log, "utf8");
+    expect(log).not.toMatch(/a-secret|k-secret/);
+    expect(JSON.parse(readFileSync(join(box.home, ".jamsesh/mcp-headers.rollback.json"), "utf8"))).toEqual({ Authorization: "Bearer a-secret", "X-Api-Key": "k-secret" });
+  });
+
+  test("an earlier entry whose secret is in env (or the address) is written back to Claude Code's config, never passed as an argument", async () => {
+    const box = sandbox();
+    const config = join(box.home, ".claude.json");
+    const entry = { type: "stdio", command: "old-jamsesh", args: ["--token", "arg-secret"], env: { TOKEN: "env-secret" } };
+    writeFileSync(config, JSON.stringify({ other: 1, mcpServers: { jamsesh: entry, keep: { type: "http", url: "http://keep/mcp" } } }), { mode: 0o600 });
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp`, config });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(readFileSync(box.log, "utf8")).not.toMatch(/env-secret|arg-secret/);
+    expect(r.stderr).not.toMatch(/env-secret|arg-secret/);
+    const after = JSON.parse(readFileSync(config, "utf8"));
+    expect(after.mcpServers.jamsesh).toEqual(entry);
+    expect(after.mcpServers.keep).toEqual({ type: "http", url: "http://keep/mcp" });
+    expect(after.other).toBe(1);
+    expect(statSync(config).mode & 0o777).toBe(0o600);
+    expect(r.stdout + r.stderr).toContain("put back");
+  });
+
+  test("a second setup waits, then says another is running, and leaves the first one's files alone", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(join(dir, "setup.lock"), { recursive: true });
+    // A live holder: this test process.
+    writeFileSync(join(dir, "setup.lock/pid"), String(process.pid));
+    writeFileSync(join(dir, "client.env"), "mine\n");
+    const r = await run(box, "Felipe", { JAMSESH_LOCK_WAIT: "1" });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("Another JamSesh setup is running");
+    expect(readFileSync(join(dir, "client.env"), "utf8")).toBe("mine\n");
+    expect(existsSync(join(dir, "setup.lock"))).toBe(true);
+    expect(readdirSync(dir).filter((f) => f.startsWith(".saved"))).toEqual([]);
+  });
+
+  test("a lock left by a run that died is taken over, and released when setup ends, well or badly", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(join(dir, "setup.lock"), { recursive: true });
+    const dead = Bun.spawn(["true"]);
+    await dead.exited;
+    writeFileSync(join(dir, "setup.lock/pid"), String(dead.pid));
+    expect((await run(box)).code).toBe(0);
+    expect(existsSync(join(dir, "setup.lock"))).toBe(false);
+    hookBody = null;
+    try {
+      expect((await run(box)).code).not.toBe(0);
+    } finally {
+      hookBody = HOOK_OK;
+    }
+    expect(existsSync(join(dir, "setup.lock"))).toBe(false);
+  });
+
+  test("two setups started together run one after the other and both finish", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const [a, b] = await Promise.all([run(box), run(box)]);
+    expect([a.code, b.code]).toEqual([0, 0]);
+    expect(existsSync(join(box.home, ".jamsesh/setup.lock"))).toBe(false);
   });
 });

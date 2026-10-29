@@ -298,6 +298,30 @@ case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing toke
 command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 # The credential goes in files (mode 600) that curl and Claude Code read, never in a command's
 # arguments, which any process on this computer can list. Empty: the JamSesh app's relay adds it.
+# Only one setup runs at a time: two would share these files and the one MCP entry, and a failing run
+# would roll back a good one. The lock is a folder (made in one step) holding its owner's process id; a
+# lock whose owner is gone is taken over. A second run waits a few seconds, then gives up.
+LOCK="$DIR/setup.lock"
+locked=0
+unlock() { if [ "$locked" = 1 ]; then rm -rf "$LOCK"; locked=0; fi; }
+waited=0
+until mkdir "$LOCK" 2>/dev/null; do
+  holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    # Taken over by moving it aside, which only one waiting run can do.
+    mv "$LOCK" "$LOCK.stale.$$" 2>/dev/null && rm -rf "$LOCK.stale.$$"
+    continue
+  fi
+  if [ "$waited" -ge "\${JAMSESH_LOCK_WAIT:-10}" ]; then
+    echo "Another JamSesh setup is running on this computer. Wait for it to finish, then connect again." >&2
+    exit 1
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+locked=1
+echo $$ > "$LOCK/pid"
+trap unlock EXIT
 # Setup is one transaction. Every file it can change is saved before the first change, the saved copies
 # stay until the very last step has succeeded, and any failure before then (any command that fails
 # under set -e, or an explicit exit) puts every file and the Claude Code MCP entry back. A restore that
@@ -320,13 +344,14 @@ reason=""
 mcp_touched=0
 CLAUDE=""
 rollback_mcp=""
+rollback_kind=""
 rollback_json="$DIR/mcp-headers.rollback.json"
 rollback_sh="$DIR/mcp-headers.rollback.sh"
 on_exit() {
   local rc=$? i real bad="" restored=1
   trap - EXIT
   set +e
-  [ "$committed" = 1 ] && exit "$rc"
+  [ "$committed" = 1 ] && { unlock; exit "$rc"; }
   [ "$rc" = 0 ] && rc=1
   for ((i = 0; i < \${#TRACKED[@]}; i++)); do
     real="\${TRACKED[$i]}"
@@ -342,8 +367,10 @@ on_exit() {
     "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1
     if "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then
       mcp_result=failed
-    elif [ -n "$rollback_mcp" ]; then
+    elif [ "$rollback_kind" = argv ]; then
       if "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then mcp_result=restored; else mcp_result=failed; fi
+    elif [ "$rollback_kind" = file ]; then
+      if perl -MJSON::PP -MFile::Temp -MFile::Basename -MCwd=abs_path -e 'my ($path, $saved) = @ARGV; $path = abs_path($path) // $path; open(my $e, "<", $saved) or exit 1; my $entry = decode_json(do { local $/; <$e> }); open(my $in, "<", $path) or exit 1; my $d = decode_json(do { local $/; <$in> }); close $in; $d->{mcpServers} = {} unless ref $d->{mcpServers} eq "HASH"; $d->{mcpServers}{jamsesh} = $entry; my $mode = (stat $path)[2] & 07777; my ($o, $t) = File::Temp::tempfile(".claude.jamsesh-XXXXXXXX", DIR => dirname($path)); print $o JSON::PP->new->canonical->pretty->encode($d); close $o or exit 1; chmod $mode, $t; rename $t, $path or exit 1' "$HOME/.claude.json" "$SAVED/old_mcp.json" 2>/dev/null && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then mcp_result=restored; else mcp_result=failed; fi
     else
       mcp_result=removed
     fi
@@ -363,6 +390,7 @@ on_exit() {
     [ "$mcp_result" != failed ] || echo "The jamsesh entry in Claude Code is not as it was; check it with: claude mcp get jamsesh" >&2
     echo "Setup didn't finish, and JamSesh couldn't put your earlier connection back completely." >&2
   fi
+  unlock
   exit "$rc"
 }
 trap on_exit EXIT
@@ -427,16 +455,24 @@ if [ -n "$CLAUDE" ]; then
   # if the new one can't be added. Nothing here puts a token on a command line.
   cred="$DIR/mcp-headers.json"
   old_mcp="$(perl -MJSON::PP -0777 -ne 'my $d = eval { decode_json($_) }; my $o = ref $d eq "HASH" && ref $d->{mcpServers} eq "HASH" ? $d->{mcpServers}{jamsesh} : undef; print JSON::PP->new->canonical->encode($o) if ref $o eq "HASH"' "$HOME/.claude.json" 2>/dev/null || true)"
-  # An earlier entry with its credential inline: the credential goes to a helper of its own, since
-  # putting the entry back with it would put the token on a command line.
+  # An earlier entry is put back without a secret on a command line (claude mcp add-json takes its JSON as
+  # an argument, which any process can list). Every header moves to a helper of its own, as a fresh
+  # install's credential does. An entry that keeps a secret anywhere else (env, args, a command, a
+  # credential in the address) can't go through an argument at all: it is written back into Claude
+  # Code's config file, only in a rollback, with the rest of that file untouched.
+  rollback_kind=""
   if [ -n "$old_mcp" ]; then
-    old_auth="$(printf '%s' "$old_mcp" | perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); my $h = ref $o->{headers} eq "HASH" ? $o->{headers} : {}; my ($k) = grep { lc eq "authorization" } keys %$h; print encode_json({ authorization => $h->{$k} }) if defined $k && !ref $h->{$k}' 2>/dev/null || true)"
-    if [ -n "$old_auth" ]; then
-      printf '%s' "$old_auth" | private "$rollback_json"
-      printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$rollback_json")" | private "$rollback_sh"
-      chmod 700 "$rollback_sh"
+    printf '%s' "$old_mcp" | private "$SAVED/old_mcp.json"
+    rollback_kind="$(printf '%s' "$old_mcp" | perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); my $h = $o->{headers}; my $bad = grep { exists $o->{$_} } qw(env args command oauth); $bad ||= ($o->{url} // "") =~ /[@?#]/; $bad ||= (defined $h && ref $h ne "HASH"); $bad ||= (ref $h eq "HASH" && grep { ref $h->{$_} } keys %$h); $bad ||= (ref $h eq "HASH" && %$h && exists $o->{headersHelper}); $bad ||= ($o->{type} // "") !~ /^(http|sse)$/; print $bad ? "file" : "argv"' 2>/dev/null || echo file)"
+    if [ "$rollback_kind" = argv ]; then
+      old_headers="$(printf '%s' "$old_mcp" | perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); print JSON::PP->new->canonical->encode($o->{headers}) if ref $o->{headers} eq "HASH" && %{ $o->{headers} }')"
+      if [ -n "$old_headers" ]; then
+        printf '%s' "$old_headers" | private "$rollback_json"
+        printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$rollback_json")" | private "$rollback_sh"
+        chmod 700 "$rollback_sh"
+      fi
+      rollback_mcp="$(printf '%s' "$old_mcp" | JAMSESH_HELPER="$([ -n "$old_headers" ] && printf '%s' "$rollback_sh")" perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); if ($ENV{JAMSESH_HELPER}) { delete $o->{headers}; $o->{headersHelper} = $ENV{JAMSESH_HELPER} } print JSON::PP->new->canonical->encode($o)')"
     fi
-    rollback_mcp="$(printf '%s' "$old_mcp" | JAMSESH_HELPER="$([ -n "$old_auth" ] && printf '%s' "$rollback_sh")" perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); if ($ENV{JAMSESH_HELPER}) { delete $o->{headers}{$_} for grep { lc eq "authorization" } keys %{ $o->{headers} }; delete $o->{headers} unless %{ $o->{headers} }; $o->{headersHelper} = $ENV{JAMSESH_HELPER} } print JSON::PP->new->canonical->encode($o)')"
   fi
   # Claude Code asks a helper for the credential header each time it connects, so the token is in
   # neither its arguments nor its config. Without a token the app's relay adds it.

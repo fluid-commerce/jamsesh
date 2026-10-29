@@ -29,7 +29,8 @@ interface WsData {
 const HOP = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length"];
 
 export class DevProxy {
-  private listeners = new Map<string, Server<WsData>>();
+  /** Each dev port's listener, with the target it forwards to (changed in place when a registration moves to another target). */
+  private listeners = new Map<string, { server: Server<WsData>; target: { v: string } }>();
   private tokenCache: { at: number; hashes: Map<string, string> } = { at: 0, hashes: new Map() };
   /** Open WebSockets on every dev port. */
   private sockets = new Set<ServerWebSocket<WsData>>();
@@ -66,9 +67,10 @@ export class DevProxy {
     if (!existing && this.session.devservers().filter((d) => d.agentId === opts.agentId).length >= MAX_PER_AGENT)
       throw new Error(`You already have ${MAX_PER_AGENT} dev servers on the host. Remove one with jam_devserver_remove first.`);
     const used = new Set(this.session.devservers().map((d) => d.hostPort));
-    if (existing) this.close(existing.id);
+    // A registration that is being replaced keeps its listener until the new one is bound.
     let hostPort = existing?.hostPort ?? config.devPortStart;
-    while ((!existing && used.has(hostPort)) || !portFree(hostPort)) hostPort++;
+    const own = () => !!existing && this.listeners.get(existing.id)?.server.port === hostPort;
+    while ((used.has(hostPort) && hostPort !== existing?.hostPort) || (!own() && !portFree(hostPort))) hostPort++;
     const d: DevServer = {
       id: existing?.id ?? newId("dev"),
       agentId: opts.agentId,
@@ -84,7 +86,14 @@ export class DevProxy {
     // The new generation is on record before anything is awaited: a refresh still holding the old one
     // sees it changed and leaves this registration (and its listener) alone.
     this.session.store.put("devservers", d, false);
-    await this.listen(d);
+    try {
+      await this.listen(d);
+    } catch (e) {
+      // The bind failed: the earlier registration, still listening, stays exactly as it was.
+      if (existing) this.session.store.put("devservers", existing, false);
+      else this.session.store.remove("devservers", d.id);
+      throw e;
+    }
     const up = await this.check(d);
     // Registered again (or removed) meanwhile: this registration is no longer the one to publish.
     const now = this.session.store.get("devservers", d.id);
@@ -138,7 +147,13 @@ export class DevProxy {
 
   private async listen(d: DevServer) {
     const proxy = this;
-    const target = d.target;
+    const held = this.listeners.get(d.id);
+    // The same port again: the listener stays up and only its target changes, so nothing can fail or drop.
+    if (held && held.server.port === d.hostPort) {
+      held.target.v = d.target;
+      return;
+    }
+    const ref = { v: d.target };
     const server = Bun.serve<WsData, never>({
       hostname: "0.0.0.0",
       port: d.hostPort,
@@ -155,11 +170,12 @@ export class DevProxy {
           if (srv.upgrade(req, { data: { path, protocols, queue: [], deviceId: deviceId || undefined }, headers })) return undefined;
           return new Response("expected a WebSocket", { status: 400 });
         }
-        return forward(req, target, path);
+        return forward(req, ref.v, path);
       },
       websocket: {
         open(ws: ServerWebSocket<WsData>) {
           proxy.sockets.add(ws);
+          const target = ref.v;
           const up = new WebSocket(`ws://${target}${ws.data.path}`, { protocols: ws.data.protocols.slice(0, 1), headers: { origin: `http://${target}` } } as any);
           up.binaryType = "arraybuffer";
           ws.data.up = up;
@@ -185,7 +201,9 @@ export class DevProxy {
         },
       },
     });
-    this.listeners.set(d.id, server);
+    this.listeners.set(d.id, { server, target: ref });
+    // Moved to another port: the old one closes only now that the new one is up.
+    held?.server.stop(true);
   }
 
   /** Whether the dev server itself answers (asked directly, not through the forwarder). */
@@ -235,7 +253,7 @@ export class DevProxy {
   }
 
   close(id: string) {
-    this.listeners.get(id)?.stop(true);
+    this.listeners.get(id)?.server.stop(true);
     this.listeners.delete(id);
   }
 

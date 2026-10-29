@@ -163,3 +163,50 @@ test("a stale refresh finishing while the build is being registered again never 
     fresh.stop(true);
   }
 });
+
+test("registering the same dev server again keeps its port listening and points it at the new target", async () => {
+  const { hub, s, agent } = room();
+  const one = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("one") });
+  const two = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("two") });
+  try {
+    const d1 = await hub.devproxy.register({ agentId: agent.id, name: "Web", target: `127.0.0.1:${one.port}` });
+    const local = d1.url.replace(/^http:\/\/[^:]+/, "http://127.0.0.1");
+    expect(await (await fetch(local)).text()).toBe("one");
+    const d2 = await hub.devproxy.register({ agentId: agent.id, name: "Web", target: `127.0.0.1:${two.port}` });
+    expect(d2.hostPort).toBe(d1.hostPort);
+    expect(await (await fetch(local)).text()).toBe("two");
+    expect(s.devservers()).toHaveLength(1);
+  } finally {
+    one.stop(true);
+    two.stop(true);
+  }
+});
+
+test("a re-registration whose bind fails leaves the earlier record and its listener as they were", async () => {
+  const { hub, s, agent } = room();
+  const one = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("one") });
+  try {
+    const d1 = await hub.devproxy.register({ agentId: agent.id, name: "Web", target: `127.0.0.1:${one.port}` });
+    const local = d1.url.replace(/^http:\/\/[^:]+/, "http://127.0.0.1");
+    const proxy = hub.devproxy as any;
+    const real = proxy.listen.bind(proxy);
+    proxy.listen = async () => {
+      throw new Error("bind failed");
+    };
+    await expect(hub.devproxy.register({ agentId: agent.id, name: "Web", target: "127.0.0.1:59999" })).rejects.toThrow("bind failed");
+    proxy.listen = real;
+    const left = s.devservers();
+    expect(left).toHaveLength(1);
+    expect(left[0].target).toBe(d1.target);
+    expect(left[0].generation).toBe(d1.generation);
+    expect(await (await fetch(local)).text()).toBe("one");
+    // A first registration that can't bind leaves no record at all.
+    proxy.listen = async () => {
+      throw new Error("bind failed");
+    };
+    await expect(hub.devproxy.register({ agentId: agent.id, name: "Other", target: `127.0.0.1:${one.port}` })).rejects.toThrow();
+    expect(s.devservers()).toHaveLength(1);
+  } finally {
+    one.stop(true);
+  }
+});

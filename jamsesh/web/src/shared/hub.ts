@@ -278,7 +278,7 @@ class HubClient {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
-  /** Every state source (an HTTP request, a socket state, a new connection) takes the next number; a state is taken only if nothing numbered later has been taken, so an answer that arrives late is dropped. */
+  /** Every state source takes the next number: an HTTP request, a new connection, and every socket message that can change what is held (a state, or any patch or event once there is a state). An HTTP answer is applied only if nothing has been applied since its request started, so a late answer never overwrites newer room updates. */
   private seq = 0;
   private taken = 0;
 
@@ -304,6 +304,7 @@ class HubClient {
 
   private handle(m: BusMessage | { type: "pong"; t: number; now: number }) {
     const s = this.snap.state;
+    if (m.type === "state" || (m.type !== "pong" && s)) this.taken = ++this.seq;
     switch (m.type) {
       case "pong": {
         const t1 = Date.now();
@@ -316,7 +317,6 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
-        this.taken = ++this.seq;
         return this.adopt(m.state);
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });

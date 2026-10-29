@@ -580,6 +580,20 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     }
 }
 
+/// Held while the agent setup runs; taking it fails if another run holds it.
+struct SetupGuard;
+static SETUP_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+impl SetupGuard {
+    fn take() -> Option<SetupGuard> {
+        (!SETUP_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(SetupGuard)
+    }
+}
+impl Drop for SetupGuard {
+    fn drop(&mut self) {
+        SETUP_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The setup's notices about the block an earlier JamSesh wrote into an instruction file (file, lines,
 /// what to delete), taken from its stderr. Any other stderr line is not shown.
 fn old_block_notices(stderr: &str) -> Vec<String> {
@@ -589,6 +603,15 @@ fn old_block_notices(stderr: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::old_block_notices;
+
+    #[test]
+    fn only_one_setup_at_a_time() {
+        let first = super::SetupGuard::take();
+        assert!(first.is_some());
+        assert!(super::SetupGuard::take().is_none());
+        drop(first);
+        assert!(super::SetupGuard::take().is_some());
+    }
 
     #[test]
     fn keeps_only_the_old_block_notices() {
@@ -759,12 +782,17 @@ fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "agents" => {
-                let result = set_up_agents(&app, &state).await;
-                let (kind, title, text) = match result {
-                    Ok(t) => (MessageDialogKind::Info, "Agents connected", t),
-                    Err(t) => (MessageDialogKind::Warning, "Couldn't set up your agents", t),
-                };
-                app.dialog().message(text).title(title).kind(kind).show(|_| {});
+                // One setup at a time: a second would race the first over the same files.
+                if let Some(_running) = SetupGuard::take() {
+                    let result = set_up_agents(&app, &state).await;
+                    let (kind, title, text) = match result {
+                        Ok(t) => (MessageDialogKind::Info, "Agents connected", t),
+                        Err(t) => (MessageDialogKind::Warning, "Couldn't set up your agents", t),
+                    };
+                    app.dialog().message(text).title(title).kind(kind).show(|_| {});
+                } else {
+                    app.dialog().message("Agent setup is already running. Wait for it to finish.").title("Setup is running").kind(MessageDialogKind::Info).show(|_| {});
+                }
             }
             // The windows' own M shortcut, so muting works from the menu bar without finding the window.
             "mute" | "muteroom" => {

@@ -102,3 +102,34 @@ test("a room change resets the clock, so audio isn't stamped against the old hos
   (hub as any).handle({ type: "state", state: state("room-b") });
   expect([hub.get().clockSynced, hub.get().clockOffset]).toEqual([false, 0]);
 });
+
+test("a socket patch that arrives while a fallback is in flight isn't overwritten by its answer", async () => {
+  const state = (agents: string[]) => ({ session: { roomId: "room-a" }, events: [], agents });
+  (hub as any).snap = { ...(hub as any).snap, state: state(["old"]) };
+  let answer: (r: Response) => void = () => {};
+  const real = globalThis.fetch;
+  globalThis.fetch = (() => new Promise<Response>((res) => (answer = res))) as any;
+  try {
+    const pending = hub.refreshState();
+    (hub as any).handle({ type: "patch", key: "agents", value: ["new"] });
+    answer(Response.json(state(["old"])));
+    await pending;
+  } finally {
+    globalThis.fetch = real;
+  }
+  expect((hub.get().state as any).agents).toEqual(["new"]);
+});
+
+test("with no state yet, patches change nothing and the fallback still applies", async () => {
+  (hub as any).snap = { ...(hub as any).snap, state: null };
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ session: { roomId: "room-a" }, events: [] })) as any;
+  try {
+    const pending = hub.refreshState();
+    (hub as any).handle({ type: "patch", key: "agents", value: [] });
+    await pending;
+  } finally {
+    globalThis.fetch = real;
+  }
+  expect(hub.get().state?.session.roomId).toBe("room-a");
+});
