@@ -133,6 +133,7 @@ export class Hub {
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text) => this.brain.agentUpdated(agent, kind, text);
+    this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
     this.brain.relabel = (eventId, name) => {
       const ev = this.store.event(eventId);
@@ -457,8 +458,10 @@ export class Hub {
     this.session.touchAgent(agent.id, { status: "working" });
     const { directives, messages } = this.session.inbox(agent.id, true);
     const lastSeen = this.store.setting<number>(`decisionsSeen:${agent.id}`, 0);
-    const decisions = this.store.recentEvents({ kinds: ["decision"], afterId: lastSeen, limit: 10 });
-    if (decisions.length) this.store.setSetting(`decisionsSeen:${agent.id}`, decisions[decisions.length - 1].id);
+    const decisions = this.session.roomDecisions(agent.id, { afterId: lastSeen, limit: 10 });
+    // Seen is by position in the event log, not by what passed the relevance filter.
+    const newest = this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0];
+    if (newest && newest.id > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, newest.id);
     const lines = [
       ...directives.map((d) => `Room directive ${d.id} [${d.mode}] (${d.requestedBy}): ${d.text}`),
       ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),

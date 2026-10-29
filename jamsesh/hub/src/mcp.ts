@@ -86,7 +86,7 @@ const JAM_TOOLS = [
   {
     name: "jam_update",
     description:
-      "Tell the room and the other agents what you're doing. kind: progress, done, shipped (implemented in the repo and verified), question (you need a person), blocked, handoff, decision. Keep text to one or two sentences with specifics.",
+      "Tell the room and the other agents what you're doing. kind: progress, done, shipped (implemented in the repo and verified), question (you need a person), blocked, handoff, decision (proposed to the room brain, which makes it a room decision if it binds others). Keep text to one or two sentences with specifics.",
     inputSchema: {
       type: "object",
       properties: {
@@ -124,7 +124,7 @@ const JAM_TOOLS = [
   },
   {
     name: "jam_message",
-    description: "Message another agent directly (by name or id), or 'all'. Use it to align on shared changes, hand work off, or ask who owns something.",
+    description: "Message another agent directly (by name or id), or 'all'. Message the room brain by its name to ask it something or have it route or note something. Use it to align on shared changes, hand work off, or ask who owns something.",
     inputSchema: { type: "object", properties: { to: { type: "string" }, text: { type: "string" } }, required: ["to", "text"] },
   },
   {
@@ -410,7 +410,7 @@ export class McpEndpoint {
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId } });
         if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
-        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind)}`);
+        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
@@ -592,8 +592,10 @@ export class McpEndpoint {
   }
 
   /** A reminder appended to jam_update when "done" or "shipped" skips the checks the skill asks for. */
-  private checkWarning(agent: Agent, kind: string): string {
+  private checkWarning(agent: Agent, kind: string, directiveId?: string): string {
     const s = this.hub.session;
+    // A note has no build or canvas work to check.
+    if (directiveId && s.store.get("directives", directiveId)?.mode === "note") return "";
     const now = Date.now();
     if (kind === "done") {
       const c = this.canvasState.get(agent.id);
@@ -649,6 +651,8 @@ export class McpEndpoint {
     return [
       "People (name, title, whose call counts more when people disagree):",
       ...s.people().map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ", (no title yet)"}${p.weight > 1 ? ` (weight ${p.weight})` : ""}${s.agents().filter((a) => a.ownerId === p.id && a.status !== "offline").length ? `; agents: ${s.agents().filter((a) => a.ownerId === p.id && a.status !== "offline").map((a) => a.name).join(", ")}` : ""}`),
+      "Room brain (jam_message it by name; it routes work and answers):",
+      `- ${s.settings().brainName}`,
       "Agents:",
       ...agents.map(
         (a) =>
@@ -663,11 +667,22 @@ export class McpEndpoint {
     const ws = workstream
       ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === workstream.toLowerCase())
       : s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
-    const decisions = s.store.recentEvents({ kinds: ["decision"], limit: 12 });
+    const decisions = s.roomDecisions(agent.id, { limit: 12, workstreamId: ws?.id });
     const room = s.store
       .recentEvents({ kinds: ["speech", "prompt"], since: Date.now() - minutes * 60_000, limit: 80 })
       .filter((e) => e.relevance !== "banter" && e.relevance !== "chatter");
-    const updates = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 20 }).filter((e) => e.authorId !== agent.id);
+    const fromOthers = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 40 }).filter((e) => e.authorId !== agent.id);
+    const isShip = (e: JamEvent) => e.kind === "update" && e.data.updateKind === "shipped";
+    const updates = fromOthers.filter((e) => !isShip(e)).slice(-20);
+    // Ships are information, not tasks: listed here, one line per agent and branch (earlier ones folded in).
+    const shipped = new Map<string, { e: JamEvent; n: number }>();
+    for (const e of fromOthers.filter(isShip)) {
+      const a = s.agent(e.authorId ?? "");
+      const k = `${e.authorId}@${a?.branch ?? ""}`;
+      const prev = shipped.get(k);
+      shipped.set(k, { e, n: (prev?.n ?? 0) + 1 });
+    }
+    const shippedLines = [...shipped.values()].slice(-8).map(({ e, n }) => `${fmtEvent(e)}${n > 1 ? ` (+${n - 1} earlier on this branch)` : ""}`);
     const open = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled").slice(0, 16);
     const mine = open.filter((d) => d.targets.includes(agent.id));
     const others = open.filter((d) => !d.targets.includes(agent.id)).slice(0, 8);
@@ -679,6 +694,7 @@ export class McpEndpoint {
       `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
       `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
       `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
+      `## Recently shipped by other agents (information, nothing for you to do unless a directive says so)\n${shippedLines.join("\n") || "(nothing yet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
     ]
       .filter(Boolean)
@@ -716,6 +732,8 @@ function modeHint(mode: Directive["mode"]) {
       return "Implement in your repository. Run the dev server (jam_devserver), screenshot the build at the mockup's size, compare with canvas_render of the mockup, fix differences, then post the screenshot and jam_update shipped.";
     case "coordinate":
       return "Align with the named agents through jam_message. Agree on the behavior, implement your side, post renders, and compare side by side with jam_show parity.";
+    case "note":
+      return "Write it down where the room said (or a notes file in your repo if it didn't). No code changes beyond that, no canvas, no dev server.";
     case "answer":
       return "This answers your question. Continue with it.";
     case "present":

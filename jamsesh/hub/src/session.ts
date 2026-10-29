@@ -52,6 +52,8 @@ export class Session {
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   onDirective: ((d: Directive) => void) | null = null;
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
+  /** An agent wrote to the room brain (jam_message by its name). */
+  onBrainMessage: ((ev: JamEvent) => void) | null = null;
   onClaim: ((agentId: string, workstream: string) => void) | null = null;
   /** An agent took a new name because its owner was renamed (the canvas cursor follows). */
   onAgentRenamed: ((agent: Agent, oldName: string) => void) | null = null;
@@ -436,7 +438,8 @@ export class Session {
     const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
     const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
     const ev = this.store.addEvent({
-      kind: kind === "decision" ? "decision" : "update",
+      // An agent's decision is an update the brain can promote; only the brain makes room decisions.
+      kind: "update",
       authorType: "agent",
       authorId: agentId,
       authorName: agent.name,
@@ -621,10 +624,40 @@ export class Session {
     return (this.waiters.get(agentId)?.size ?? 0) > 0;
   }
 
+  /** The brain's name, or any alias the room set for it (settings may not have an alias list yet). */
+  isBrainName(name: string) {
+    const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const aliases = this.store.setting<string[]>("brainAliases", []);
+    const names = [this.settings().brainName, "brain", ...(Array.isArray(aliases) ? aliases : [])];
+    return !!norm(name) && names.some((n) => typeof n === "string" && norm(n) === norm(name));
+  }
+
+  /** Decisions the room made (the brain's; agents' own decisions are updates), relevant to this agent's workstream when it has one. */
+  roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
+    const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
+    return this.store
+      .recentEvents({ kinds: ["decision"], afterId: opts.afterId, limit: opts.limit * 3 })
+      .filter((e) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId)))
+      .slice(-opts.limit);
+  }
+
   sendMessage(fromAgentId: string, to: string, text: string, data: Record<string, any> = {}) {
     const from = this.agent(fromAgentId);
     if (!from) throw new Error("Unknown agent; call jam_join first.");
     const target = to === "all" ? null : this.agent(to) ?? this.store.all("agents").find((a) => a.name.toLowerCase() === to.toLowerCase());
+    if (to !== "all" && !target && this.isBrainName(to)) {
+      const ev = this.store.addEvent({
+        kind: "message",
+        authorType: "agent",
+        authorId: from.id,
+        authorName: from.name,
+        text,
+        relevance: "work",
+        data: { to: "brain", toName: this.settings().brainName, typed: true, ...data },
+      });
+      this.onBrainMessage?.(ev);
+      return ev;
+    }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
     const ev = this.store.addEvent({
       kind: "message",
