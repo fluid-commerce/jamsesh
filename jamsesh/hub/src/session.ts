@@ -43,6 +43,8 @@ export const AGENT_OFFLINE_MS = 20 * 60_000;
 /** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
 export const TASK_STALE_MS = 20 * 60_000;
 export const TASK_OFFER_MS = 10 * 60_000;
+/** Why product work for observers alone is refused (createDirective, the API, the brain's tools). */
+export const ONLY_OBSERVERS = "Those agents only watch (observers), so nobody would do this. Pick a working agent.";
 /** Why an observer can't take a workstream (jam_claim and Session.claim say the same). */
 export const OBSERVER_CLAIM = "You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.";
 /** A person prompt this recent means the agent's own work was asked for. */
@@ -952,7 +954,12 @@ export class Session {
     for (const a of d.attachments ?? []) files.set(a.id, a);
     for (const id of d.sourceEventIds ?? []) for (const a of (this.store.event(id)?.data.attachments ?? []) as AttachmentRef[]) files.set(a.id, a);
     // Observers only watch: product work never goes to them (answers and notes still can).
-    if (d.mode !== "answer" && d.mode !== "note") d = { ...d, targets: d.targets.filter((t) => this.agent(t)?.role !== "observer") };
+    if (d.mode !== "answer" && d.mode !== "note") {
+      const workers = d.targets.filter((t) => this.agent(t)?.role !== "observer");
+      // Nobody left to do it: no task is made (a task nobody can receive would sit open for ever).
+      if (d.targets.length && !workers.length) throw new Error(ONLY_OBSERVERS);
+      d = { ...d, targets: workers };
+    }
     const directive: Directive = {
       id: newId("d"),
       ts: Date.now(),

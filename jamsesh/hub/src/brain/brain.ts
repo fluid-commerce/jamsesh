@@ -895,8 +895,9 @@ export class Brain {
           "Get agents to work together: compare their variants or builds, review each other's work, agree on shared behavior or tokens across repositories. Each gets a 'coordinate' directive naming the others and the goal, and is told to use jam_ask / jam_message and canvas_render of each other's frames.",
         inputSchema: z.object({ agentIds: z.array(z.string()).min(2), goal: z.string().describe("What they should compare or agree on, and what to produce (for example a parity view with differences listed)") }),
         execute: async ({ agentIds, goal }) => {
-          const agents = agentIds.map((id) => s.agent(id)).filter(Boolean) as Agent[];
-          if (agents.length < 2) return refuse("Need at least two agent ids from the Agents list.");
+          // Observers only watch: they're never paired into work.
+          const agents = agentIds.map((id) => s.agent(id)).filter((a): a is Agent => !!a && a.role !== "observer");
+          if (agents.length < 2) return refuse("Need at least two working agents' ids from the Agents list (observers only watch).");
           const cards: string[] = [];
           for (const a of agents) {
             const others = agents.filter((o) => o.id !== a.id);
@@ -1151,7 +1152,7 @@ export class Brain {
         const pool = shown.length ? shown : s.artifacts().slice(0, 12);
         const pick = letter ? pool.find((a) => new RegExp(`/\\s*${letter}\\b`).test(a.title)) : undefined;
         const owner = pick?.agentId ? s.agent(pick.agentId) : undefined;
-        const build = pick && owner ? { text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement" as const, targets: [owner.id], by: ev.authorName, sourceEventIds: [ev.id] } : null;
+        const build = pick && owner && owner.role !== "observer" ? { text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement" as const, targets: [owner.id], by: ev.authorName, sourceEventIds: [ev.id] } : null;
         if (build && direct) s.createDirective({ text: build.text, mode: build.mode, targets: build.targets, requestedBy: build.by, sourceEventIds: build.sourceEventIds, rationale: "The room chose this variant (routed by keyword; the brain has no model right now)." });
         else if (build) s.proposeTask(build);
         continue;
@@ -1253,7 +1254,7 @@ export class Brain {
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
         execute: async ({ feature, shipments, platforms }) => {
-          const from = batch.filter((b) => shipments.includes(b.id));
+          const from = batch.filter((b) => shipments.includes(b.id) && b.agent.role !== "observer");
           if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
           // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
           if (from.some((b) => !b.seen)) return refuse("A shipper didn't say what a person sees, so there is nothing to check: call no_action.");
@@ -1262,7 +1263,7 @@ export class Brain {
           const shippers = from.map((b) => b.agent);
           const seen = from.map((b) => b.seen).join("; ");
           const made = new Set(shippers.map((a) => a.platform));
-          const partners = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
+          const partners = s.workers().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
           const team = [...shippers, ...partners];
           if (new Set(team.map((a) => a.platform)).size < 2) return refuse("That isn't a cross-platform feature: no app on another platform needs it.");
           const sent: string[] = [];

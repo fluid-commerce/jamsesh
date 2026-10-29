@@ -223,7 +223,10 @@ test("observers join without a repository, get no product tasks, and can skip br
   expect(s.workers().map((a) => a.id)).toEqual([worker.id]);
   // Product work never goes to an observer; answers and notes may.
   expect(directive(s, "Build the settings page", [obs.id, worker.id]).targets).toEqual([worker.id]);
-  expect(directive(s, "Explore a dark mode", [obs.id], "explore").targets).toEqual([]);
+  // Product work for observers alone is refused, and no task nobody can receive is left behind.
+  const before = s.directives().length;
+  expect(() => directive(s, "Explore a dark mode", [obs.id], "explore")).toThrow("only watch");
+  expect(s.directives()).toHaveLength(before);
   expect(directive(s, "Here is your answer", [obs.id], "answer").targets).toEqual([obs.id]);
   // A room-wide message reaches the worker, not the opted-out observer.
   const other = reg("Mo", "acme/api", "/api");

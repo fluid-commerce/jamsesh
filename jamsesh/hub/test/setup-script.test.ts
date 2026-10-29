@@ -1,7 +1,7 @@
 // Runs the real /agent/setup.sh against a throwaway home folder: finding agent CLIs that aren't on
 // PATH, never wiping a settings file it can't parse, and failing when no agent was set up.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Hub } from "../src/hub";
@@ -12,6 +12,9 @@ let origin = "";
 let people = 0;
 /** The name the host knows this computer's person by (the room controls it); null: /api/me fails. */
 let meName: string | null = "Chey";
+const HOOK_OK = "#!/usr/bin/env bash\nexit 0\n";
+/** What the fake host serves as hook.sh (null: an error). */
+let hookBody: string | null = HOOK_OK;
 /** The credential each request to the fake host carried. */
 const auths: string[] = [];
 
@@ -21,7 +24,7 @@ beforeAll(() => {
     fetch: (req) => {
       const path = new URL(req.url).pathname;
       auths.push(req.headers.get("authorization") ?? "");
-      if (path === "/hook.sh") return new Response("#!/usr/bin/env bash\nexit 0\n");
+      if (path === "/hook.sh") return hookBody === null ? new Response("down", { status: 503 }) : new Response(hookBody);
       if (path === "/skill.md") return new Response("# JamSesh skill\n");
       if (path === "/launcher.md") return new Response("# JamSesh launcher\n");
       if (path === "/api/me") return meName === null ? new Response("down", { status: 503 }) : Response.json({ person: { id: "p_1", name: meName } });
@@ -355,5 +358,38 @@ describe("agent setup script", () => {
     expect(toml).not.toContain("http://old/mcp");
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain('[keep]\na = "b\\" # [c]"');
+  });
+
+  test("a hook download that fails or comes back broken leaves the installed hook as it was", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    expect((await run(box)).code).toBe(0);
+    const hook = join(box.home, ".jamsesh/hook.sh");
+    const good = readFileSync(hook, "utf8");
+    for (const broken of ["#!/usr/bin/env bash\nif [ x = x; then\n", "<html>Gateway timeout</html>", null]) {
+      hookBody = broken;
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("couldn't download its hook");
+      expect(readFileSync(hook, "utf8")).toBe(good);
+      expect(readdirSync(join(box.home, ".jamsesh")).filter((f) => f.startsWith("hook.sh."))).toEqual([]);
+    }
+    hookBody = HOOK_OK;
+  });
+
+  test("if Claude Code won't take the new MCP entry, the earlier one is put back, without its token on a command line", async () => {
+    const box = sandbox();
+    // A claude that logs its arguments and refuses the new entry (the one for this host).
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headers: { Authorization: "Bearer old-secret", "X-Other": "1" } } } }));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("the earlier one was put back");
+    const log = readFileSync(box.log, "utf8").trim().split("\n");
+    const back = log.find((l) => l.includes("add-json") && l.includes("old-host"))!;
+    expect(back).toBeDefined();
+    expect(back).toContain(`"headersHelper":"${box.home}/.jamsesh/mcp-headers.sh"`);
+    expect(back).toContain('"X-Other":"1"');
+    expect(log.join("\n")).not.toContain("old-secret");
   });
 });

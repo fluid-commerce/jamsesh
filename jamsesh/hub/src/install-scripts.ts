@@ -340,7 +340,16 @@ if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)";
   printf 'JAMSESH_NAME=%s\\n' "$(q "$NAME")"
   echo 'JAMSESH_ACTIVE=1'
 } | private "$DIR/client.env"
-curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$DIR/hook.sh" && chmod +x "$DIR/hook.sh"
+# The hook is fetched to a private temporary file and checked before it replaces the installed one, so
+# a download cut short never leaves Claude Code's hooks running half a script.
+hooktmp="$(mktemp "$DIR/hook.sh.XXXXXXXX")"
+if curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$hooktmp" && head -n 1 "$hooktmp" | grep -q '^#!/usr/bin/env bash' && bash -n "$hooktmp"; then
+  chmod 755 "$hooktmp" && mv -f "$hooktmp" "$DIR/hook.sh"
+else
+  rm -f "$hooktmp"
+  echo "JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2
+  exit 1
+fi
 
 # Agent CLIs often aren't on PATH: the Claude desktop app keeps its own copy of Claude Code, and nvm
 # and Volta keep theirs in their own folders. Prints the first one found, the newest copy first.
@@ -369,7 +378,6 @@ configured=0
 
 CLAUDE="$(find_cli claude || true)"
 if [ -n "$CLAUDE" ]; then
-  "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
   # Claude Code asks a helper for the credential header each time it connects, so the token is in
   # neither its arguments nor its config. Without a token the app's relay adds it.
   helper=""
@@ -379,7 +387,18 @@ if [ -n "$CLAUDE" ]; then
     chmod 700 "$DIR/mcp-headers.sh"
     helper="$DIR/mcp-headers.sh"
   fi
-  "$CLAUDE" mcp add-json -s user jamsesh "$(JAMSESH_URL="$HUB/mcp" JAMSESH_HELPER="$helper" perl -MJSON::PP -e 'print JSON::PP->new->canonical->encode({ type => "http", url => $ENV{JAMSESH_URL}, ($ENV{JAMSESH_HELPER} ? (headersHelper => $ENV{JAMSESH_HELPER}) : ()) })')" >/dev/null
+  # claude mcp has no replace: the old entry has to go before the new one is added. It is kept, and put
+  # back if the new one can't be added (its credential from the helper file, never on a command line).
+  old_mcp="$(perl -MJSON::PP -0777 -ne 'my $d = eval { decode_json($_) }; my $o = ref $d eq "HASH" && ref $d->{mcpServers} eq "HASH" ? $d->{mcpServers}{jamsesh} : undef; print JSON::PP->new->canonical->encode($o) if ref $o eq "HASH"' "$HOME/.claude.json" 2>/dev/null || true)"
+  new_mcp="$(JAMSESH_URL="$HUB/mcp" JAMSESH_HELPER="$helper" perl -MJSON::PP -e 'print JSON::PP->new->canonical->encode({ type => "http", url => $ENV{JAMSESH_URL}, ($ENV{JAMSESH_HELPER} ? (headersHelper => $ENV{JAMSESH_HELPER}) : ()) })')"
+  "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
+  if ! "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null; then
+    if [ -n "$old_mcp" ]; then
+      "$CLAUDE" mcp add-json -s user jamsesh "$(printf '%s' "$old_mcp" | JAMSESH_HELPER="$helper" perl -MJSON::PP -0777 -ne 'my $o = decode_json($_); if (ref $o->{headers} eq "HASH") { delete $o->{headers}{$_} for grep { lc eq "authorization" } keys %{ $o->{headers} }; delete $o->{headers} unless %{ $o->{headers} }; $o->{headersHelper} = $ENV{JAMSESH_HELPER} if $ENV{JAMSESH_HELPER} } print JSON::PP->new->canonical->encode($o)')" >/dev/null 2>&1 || true
+    fi
+    echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2
+    exit 1
+  fi
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
   # JamSesh used to write a block into CLAUDE.md. It never does now, and takes the old one out.
