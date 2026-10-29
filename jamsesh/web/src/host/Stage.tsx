@@ -91,6 +91,12 @@ interface StageTile {
 const hubTiles = (state: HubState) => state.stageTiles?.[state.stage.screenId ?? "main"] ?? [];
 
 /** The hub's key for a tile this stage draws (an artifact, or a layout's nth tile); null when the hub lists none, so no Expand. */
+/** The key of the tile at this place in a parity column (the hub keys them by column and place). */
+function parityKey(state: HubState, column: number, place: number): string | null {
+  const key = `p${column}.${place}`;
+  return hubTiles(state).some((k) => k.key === key) ? key : null;
+}
+
 function tileKey(state: HubState, t: { artifactId: string } | { layoutIndex: number }): string | null {
   return hubTiles(state).find((k) => ("layoutIndex" in t ? k.layoutIndex === t.layoutIndex : k.layoutIndex === undefined && k.artifactId === t.artifactId))?.key ?? null;
 }
@@ -226,14 +232,14 @@ function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Art
     <>
       <Header title={stage.title || "Side by side"} caption={stage.caption} />
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 22, gridTemplateColumns: cols.map((c) => `${Math.max(1, c.items.length)}fr`).join(" ") }}>
-        {cols.map((c) => (
-          <div key={c.label} style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
+        {cols.map((c, ci) => (
+          <div key={`${ci}:${c.label}`} style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
             <div className="label" style={{ fontSize: 13, marginBottom: 10 }}>
               {c.label}
             </div>
             <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 14, gridTemplateColumns: `repeat(${Math.max(1, c.items.length)}, minmax(0, 1fr))` }}>
-              {pick(c.items).map((a) => (
-                <TileKeyCtx.Provider key={a.id} value={tileKey(state, { artifactId: a.id })}>
+              {pick(c.items).map((a, ii) => (
+                <TileKeyCtx.Provider key={`${a.id}:${ii}`} value={parityKey(state, ci, ii)}>
                   <PinnedTile art={a} state={state} />
                 </TileKeyCtx.Provider>
               ))}

@@ -1617,7 +1617,8 @@ export class Session {
           return (p.variant || p.title).localeCompare(q.variant || q.title);
         });
       case "parity":
-        return byId((st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c) => c.items));
+        // Keyed by column and place, so the same artifact in two columns is two tiles.
+        return (st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c, ci) => c.items.filter((id) => known.has(id)).map((id, ii) => ({ key: `p${ci}.${ii}`, artifactId: id })));
       case "layout":
         return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
       default:
@@ -1669,7 +1670,7 @@ export class Session {
     }
     const now = Date.now();
     const quiet = next.mode === "board" || next.mode === "welcome";
-    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
+    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { id: newId("lk"), by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     // The checks every stage passes before it is stored, whoever wrote it: what the read path would reject, or what would draw nothing, isn't written.
@@ -1824,18 +1825,19 @@ export class Session {
     if (!cur.lock) return;
     // The lock goes and so does the claim a person's pin had on the screen.
     const { lock: _drop, pinnedById: _pin, ...rest } = cur;
-    this.commitStage({ ...rest, pinned: false }, screen);
+    // The lock goes together with the questions about it: all of it, or none.
+    this.atomically(() => this.commitStage({ ...rest, pinned: false }, screen));
   }
 
   /** A person's yes to the lock question counts this long after it was asked. */
   static UNLOCK_ASK_MS = 3 * 60_000;
   /** The question JamSesh asked the room about replacing a screen's lock: its id, which lock (its `since`), and when. */
-  private lockQuestions = new Map<string, { id: string; since: number; at: number }>();
+  private lockQuestions = new Map<string, { id: string; key: string; at: number }>();
 
   /** JamSesh just asked the room whether to replace this screen's current lock (the brain's ask_to_replace_screen). */
   askedAboutLock(screen: string) {
     const lock = this.lockOf(screen);
-    if (lock) this.lockQuestions.set(screen, { id: newId("lq"), since: lock.since, at: Date.now() });
+    if (lock) this.lockQuestions.set(screen, { id: newId("lq"), key: lockKey(lock), at: Date.now() });
   }
 
   /**
@@ -1853,7 +1855,7 @@ export class Session {
       .filter((r) => r.status === "pending" && !!personId && r.ownerId === personId)
       .map((r) => ({ kind: "show" as const, id: r.id, screen: r.screen, label: r.label }));
     const locks = [...this.lockQuestions.entries()]
-      .filter(([screen, q]) => now - q.at < Session.UNLOCK_ASK_MS && this.lockOf(screen)?.since === q.since)
+      .filter(([screen, q]) => now - q.at < Session.UNLOCK_ASK_MS && lockKey(this.lockOf(screen)) === q.key)
       .map(([screen, q]) => ({ kind: "lock" as const, id: q.id, screen }));
     return [...builds, ...shows, ...locks];
   }
@@ -1883,10 +1885,11 @@ export class Session {
         ? !!consent.owner && consent.owner === lock.personId
         : "hostWindow" in consent
           ? !lock.personId || lock.personId === this.store.setting<string>("hostPersonId", "")
-          : !!q && q.since === lock.since && consent.answeredAt >= q.at && consent.answeredAt - q.at < Session.UNLOCK_ASK_MS && Date.now() - q.at < Session.UNLOCK_ASK_MS && only(consent.by);
+          : !!q && q.key === lockKey(lock) && consent.answeredAt >= q.at && consent.answeredAt - q.at < Session.UNLOCK_ASK_MS && Date.now() - q.at < Session.UNLOCK_ASK_MS && only(consent.by);
     if (!ok) return false;
-    this.lockQuestions.delete(screen);
     this.dropLock(screen);
+    // The question is used up only once the lock is really gone: a failed write leaves it to answer again.
+    this.lockQuestions.delete(screen);
     claim?.revs.set(screen, this.stageRev(screen));
     return true;
   }
@@ -2019,6 +2022,7 @@ export class Session {
       ownerId: lock.personId,
       ownerName: lock.by,
       lockSince: lock.since,
+      lockKey: lockKey(lock),
       agentName: item.agentName,
       agentOwner: agent?.ownerName ?? "",
       label: item.label,
@@ -2042,7 +2046,7 @@ export class Session {
     if (!req || req.status !== "pending") return null;
     const lock = this.lockOf(req.screen);
     const waiting = this.readyToShow().some((r) => r.id === req.readyId);
-    if (!lock || lock.since !== req.lockSince || lock.personId !== req.ownerId || (approve && !waiting)) return this.expireShowRequest(req);
+    if (!lock || lockKey(lock) !== (req.lockKey ?? `s${req.lockSince}`) || lock.personId !== req.ownerId || (approve && !waiting)) return this.expireShowRequest(req);
     const done: ShowRequest = { ...req, status: approve ? "approved" : "denied", decidedBy: by, at: approve ? req.at : Date.now() };
     // The approval, the item leaving the queue and the stage write happen together or not at all.
     try {
@@ -2070,7 +2074,7 @@ export class Session {
   /** A screen's lock changed: questions about the lock it had are over (their items stay queued). */
   private expireAsksFor(screen: string, lock: StageLock | undefined) {
     for (const r of this.store.setting<ShowRequest[]>("showRequests", []))
-      if (r.screen === screen && r.status === "pending" && (!lock || lock.since !== r.lockSince)) this.expireShowRequest(r);
+      if (r.screen === screen && r.status === "pending" && (!lock || lockKey(lock) !== (r.lockKey ?? `s${r.lockSince}`))) this.expireShowRequest(r);
   }
 
   // ---- history: what each screen showed (3.6) ----
@@ -2145,6 +2149,11 @@ class NotShown extends Error {
   constructor(reason: string) {
     super(reason);
   }
+}
+
+/** A lock's identity for questions about it: its id, or (for one stored before ids) its start time. */
+export function lockKey(lock: StageLock | null | undefined): string {
+  return lock ? lock.id ?? `s${lock.since}` : "";
 }
 
 export interface StageClaim {

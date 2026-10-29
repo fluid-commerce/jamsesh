@@ -36,7 +36,7 @@ const stageShape = {
   since: z.number().finite().optional(),
   by: z.string().max(200).optional(),
   screenId: z.string().max(100).optional(),
-  lock: z.object({ by: z.string().max(200), personId: z.string().max(200).nullable(), since: z.number().finite(), lastActive: z.number().finite() }).optional(),
+  lock: z.object({ id: z.string().max(100).optional(), by: z.string().max(200), personId: z.string().max(200).nullable(), since: z.number().finite(), lastActive: z.number().finite() }).optional(),
 };
 const stageSchema = z.object(stageShape).superRefine((s, ctx) => {
   // A screen that locks should show what was asked for.

@@ -316,6 +316,8 @@ export interface StageTileKey {
 }
 
 export interface StageLock {
+  /** Tells this lock from any other, even one made in the same millisecond; questions about a lock are bound to it. Locks stored before it existed have none (see lockKey). */
+  id?: string;
   by: string;
   personId: string | null;
   since: number;
@@ -343,6 +345,8 @@ export interface ShowRequest {
   ownerName: string;
   /** The lock asked about (its `since`): an answer counts only while that same lock holds the screen. */
   lockSince: number;
+  /** The lock this was asked about (`lockKey`); `lockSince` alone is how older requests name it. */
+  lockKey?: string;
   agentName: string;
   /** Whose agent it is ("Felipe"), for the question: "Felipe's agent has the checkout build ready". */
   agentOwner: string;

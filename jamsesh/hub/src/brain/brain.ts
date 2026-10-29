@@ -5,7 +5,7 @@ import { generateText, isStepCount, Output, tool } from "ai";
 import { z } from "zod";
 import { bus } from "../bus";
 import type { Session, StageClaim, StageResult, UpdateKind } from "../session";
-import { shortRepo } from "../session";
+import { lockKey, shortRepo } from "../session";
 import type { Agent, Artifact, JamEvent, Relevance, Share, Stage, Tile } from "../types";
 import { describeError, model } from "./llm";
 import { chime, speak, type SpeechSource } from "./speech";
@@ -472,7 +472,7 @@ export class Brain {
     for (const old of this.answerLines) if (this.answerLines.size > 500) this.answerLines.delete(old);
   }
   /** Locked screens the brain was refused this pass (by lock `since`), until it asks the room about them (the question itself is the session's). */
-  private unlockRefused = new Map<string, number>();
+  private unlockRefused = new Map<string, string>();
   /** Screens whose lock this pass's direct requester owns and may replace with the write that follows (screen -> owner). */
   private replaceOk = new Map<string, string>();
 
@@ -493,7 +493,7 @@ export class Brain {
       this.replaceOk.set(screen, lock.personId);
       return null;
     }
-    this.unlockRefused.set(screen, lock.since);
+    this.unlockRefused.set(screen, lockKey(lock));
     return `${lock.by} has this screen locked, so you can't replace it. Ask the room with ask_to_replace_screen (it asks the one question about this screen). If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
 
@@ -912,10 +912,10 @@ export class Brain {
           if (!id) return noScreen();
           const lock = s.lockOf(id);
           // Only for a lock this pass was refused by, and only once the question is out.
-          if (!lock || this.unlockRefused.get(id) !== lock.since) return refuse("Nothing here was refused by a locked screen.");
+          if (!lock || this.unlockRefused.get(id) !== lockKey(lock)) return refuse("Nothing here was refused by a locked screen.");
           const name = id === "main" ? "the screen" : (s.findScreen(id)?.name ?? "that screen");
           await speak(s, `${lock.by} has ${name} locked. Want me to replace it?`, { source, kind: "problem" });
-          if (s.lockOf(id)?.since === lock.since) s.askedAboutLock(id);
+          if (lockKey(s.lockOf(id)) === lockKey(lock)) s.askedAboutLock(id);
           this.unlockRefused.delete(id);
           return "Asked the room.";
         },

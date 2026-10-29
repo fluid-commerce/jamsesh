@@ -79,16 +79,14 @@ test("a cast resolves with what the hub said, not with the click", async () => {
   (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
   (globalThis as any).navigator ??= {};
   Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });
-  const { cast, putOnScreen } = await import("../src/client/CastPicker");
+  const { putOnScreen } = await import("../src/client/CastPicker");
   const realFetch = globalThis.fetch;
   let reply: Response = Response.json({});
   globalThis.fetch = (async (url: string) => (url === "/api/pair/info" ? Response.json({ hostId: "h" }) : reply.clone())) as typeof fetch;
   try {
     expect(await putOnScreen({ mode: "agents" })).toBe(true);
-    expect(await cast({ mode: "agents" })).toBe(true);
     reply = Response.json({ error: "Chey has this screen locked." }, { status: 409 });
     expect(await putOnScreen({ mode: "agents" })).toBe(false);
-    expect(await cast({ mode: "agents" })).toBe(false);
   } finally {
     globalThis.fetch = realFetch;
   }

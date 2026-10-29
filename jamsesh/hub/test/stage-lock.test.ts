@@ -9,7 +9,7 @@ import { showRequestSpeech } from "../src/brain/speech";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
-import { buildKey, Session } from "../src/session";
+import { buildKey, lockKey, Session } from "../src/session";
 import type { Agent, JamEvent, ShowRequest, Stage } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -695,9 +695,9 @@ test("a bystander's yes counts only as the answer to the brain's question, about
   await t1.show_on_screen.execute({ mode: "agents" });
   expect(await t1.ask_to_replace_screen.execute({})).toBe("Asked the room.");
   expect(await yesTo("yes, replace it", before)).toContain("plainly says");
-  const questions = (s as any).lockQuestions as Map<string, { id: string; since: number; at: number }>;
+  const questions = (s as any).lockQuestions as Map<string, { id: string; key: string; at: number }>;
   const asked = questions.get("main")!;
-  expect(asked.since).toBe(s.stage().lock!.since);
+  expect(asked.key).toBe(lockKey(s.stage().lock));
   questions.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
   expect(await yesTo("yes, replace it", Date.now() - 4 * 60_000 + 10)).toContain("plainly says");
   questions.set("main", asked);
@@ -1428,11 +1428,16 @@ test("malformed stage data is refused, never thrown on: raw writes, stored histo
 });
 
 test("a stage write is all or nothing: a failure at the stage write or the history write leaves the screen, its revision and its questions as they were", () => {
-  const { s, chey } = room();
+  const { s, chey, reg } = room();
   const a = artifact(s, "Checkout");
   const b = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const agent = reg("Felipe");
+  s.onShowRequest = () => {};
   for (const failing of ["stage", "stageHistory"]) {
+    const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: `Build ${failing}`, stage: { mode: "spotlight", items: [b.id] } });
+    age(s, 6 * 60_000);
+    const req = s.askOwner(item)!;
     const rev = s.stageRev();
     const claim = s.stageClaim();
     const real = s.store.setSetting.bind(s.store);
@@ -1441,6 +1446,8 @@ test("a stage write is all or nothing: a failure at the stage write or the histo
     (s.store as any).setSetting = real;
     expect(s.stageRev()).toBe(rev);
     expect(s.stage().items).toEqual([a.id]);
+    // The question about the lock is still open: nothing expired it.
+    expect(s.showRequests().find((r) => r.id === req.id)?.status).toBe("pending");
     // The claim didn't move on, so it still holds.
     expect(s.setStage({ mode: "spotlight", items: [b.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" }, claim })).toMatchObject({ applied: true });
     s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
@@ -1469,4 +1476,49 @@ test("malformed history records are skipped, a new stage starts unexpanded, and 
   expect(s.setStage({ mode: "spotlight", items: [a.id], expanded: a.id }, "Chey", "main", { override: true })).toMatchObject({ applied: true });
   expect(s.stage().expanded).toBeUndefined();
   expect(s.setStage({ mode: "layout", layout: { tiles: [{ kind: "html", html: "" }] } }, "Chey", "main", { override: true })).toMatchObject({ applied: false });
+});
+
+test("two casts in the same millisecond are two locks: a question about the first can't release the second", () => {
+  const { s, chey, felipe } = room();
+  const a = artifact(s, "Checkout");
+  const realNow = Date.now;
+  const fixed = realNow();
+  Date.now = () => fixed;
+  try {
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    const first = s.stage().lock!;
+    s.askedAboutLock("main");
+    s.setStage({ mode: "spotlight", items: [a.id], title: "again" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
+    const second = s.stage().lock!;
+    expect(second.since).toBe(first.since);
+    expect(second.id).not.toBe(first.id);
+    expect(s.releaseLock("main", { answeredAt: fixed + 1, by: felipe.id })).toBe(false);
+    expect(s.stage().lock?.personId).toBe(felipe.id);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("lifting a lock is all or nothing: a failed write keeps the lock, its questions and the chance to answer again", () => {
+  const { s, chey } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  s.askedAboutLock("main");
+  const rev = s.stageRev();
+  const real = s.store.setSetting.bind(s.store);
+  (s.store as any).setSetting = (k: string, v: unknown) => { if (k === "stage") throw new Error("disk full"); real(k, v); };
+  expect(() => s.releaseLock("main", { owner: chey.id })).toThrow("disk full");
+  (s.store as any).setSetting = real;
+  expect(s.stageRev()).toBe(rev);
+  expect(s.stage().lock?.personId).toBe(chey.id);
+  expect((s as any).lockQuestions.get("main")).toBeDefined();
+  expect(s.releaseLock("main", { owner: chey.id })).toBe(true);
+  expect(s.stage().lock).toBeUndefined();
+});
+
+test("the same artifact in two parity columns is two tiles, keyed by column and place", () => {
+  const { s } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "parity", columns: [{ label: "L", items: [a.id] }, { label: "R", items: [a.id] }] }, "Chey", "main", { override: true });
+  expect(s.stageTileKeys().map((k) => k.key)).toEqual(["p0.0", "p1.0"]);
 });
