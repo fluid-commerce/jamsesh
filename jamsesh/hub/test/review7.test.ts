@@ -108,20 +108,41 @@ test("hook.sh: a host switch between the room check and the replay leaves the pr
   }
 });
 
-test("a removed Codex chat is keyed by machine and folder on the hub: a supplied chat, a missing cwd or a trailing slash don't give it a new identity", async () => {
-  const fresh = () => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID() });
+test("a removed Codex chat is keyed by the connection's harness and the folder's real path: a supplied chat, harness, repo or spelling of the folder doesn't give it a new identity", async () => {
+  // The connection said it was Codex when it initialized; that is not something a tool argument can change.
+  const fresh = (harness = "codex") => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID(), harness });
   const first: any = await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone" });
   expect(first.isError).toBeFalsy();
   const mine = s.store.all("agents").find((a: any) => a.harness === "codex" && a.cwd === "/w/codex-gone")!;
   s.removeAgent(mine.id);
   const gone = /removed this chat/;
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone" })).rejects.toThrow(gone);
-  // Naming another chat, or another repo, or the folder with a slash, changes nothing.
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone", chat: "made-up" })).rejects.toThrow(gone);
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "other", cwd: "/w/codex-gone/" })).rejects.toThrow(gone);
-  // No folder: refused, not given an identity from the repo.
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app" })).rejects.toThrow("cwd");
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "  " })).rejects.toThrow("cwd");
+  const attempt = (args: any) => hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-gone", ...args });
+  await expect(attempt({})).rejects.toThrow(gone);
+  await expect(attempt({ chat: "made-up" })).rejects.toThrow(gone);
+  await expect(attempt({ harness: "other" })).rejects.toThrow(gone);
+  await expect(attempt({ harness: "claude-code", chat: "made-up" })).rejects.toThrow(gone);
+  await expect(attempt({ repo: "other", cwd: "/w/codex-gone/" })).rejects.toThrow(gone);
+  await expect(attempt({ cwd: "/w/./codex-gone" })).rejects.toThrow(gone);
+  await expect(attempt({ cwd: "/w/x/../codex-gone//" })).rejects.toThrow(gone);
+  // A blank or relative folder is refused, not given an identity from the repo.
+  for (const cwd of ["", "  ", "codex-gone", "./codex-gone", "../w/codex-gone"]) await expect(attempt({ cwd })).rejects.toThrow("absolute path");
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app" })).rejects.toThrow("absolute path");
   // Another folder is another chat.
   expect((await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/codex-other" })).isError).toBeFalsy();
+});
+
+test("an initialize names the harness: Claude Code, Codex, or other", async () => {
+  const { harnessOfClient } = await import("../src/mcp");
+  expect([harnessOfClient("claude-code"), harnessOfClient("codex-mcp-client"), harnessOfClient("Codex"), harnessOfClient("cursor"), harnessOfClient(undefined)]).toEqual(["claude-code", "codex", "codex", "other", "other"]);
+});
+
+test("on the host's own file system a folder is its real path, so a link to it is the same chat", async () => {
+  const { canonicalCwd } = await import("../src/mcp");
+  const real = mkdtempSync(join(dir, "real-"));
+  const link = join(dir, "link-to-real");
+  require("node:fs").symlinkSync(real, link);
+  expect(canonicalCwd(link, true)).toBe(require("node:fs").realpathSync(real));
+  expect(canonicalCwd(link, false)).toBe(link);
+  expect(canonicalCwd("/no/such/./place/", true)).toBe("/no/such/place");
+  expect(canonicalCwd("rel/path", true)).toBe("");
 });

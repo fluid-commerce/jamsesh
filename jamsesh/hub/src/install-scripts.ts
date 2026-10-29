@@ -515,7 +515,7 @@ find_cli() {
   local name="$1" c d
   c="$(command -v "$name" 2>/dev/null || true)"
   [ -n "$c" ] && { printf '%s' "$c"; return 0; }
-  for d in "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.volta/bin" \${JAMSESH_CLI_DIRS-/opt/homebrew/bin /usr/local/bin}; do
+  for d in "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.volta/bin" "$HOME/.bun/bin" \${JAMSESH_CLI_DIRS-/opt/homebrew/bin /usr/local/bin}; do
     [ -x "$d/$name" ] && { printf '%s' "$d/$name"; return 0; }
   done
   for c in $(ls -td "$HOME"/.nvm/versions/node/*/bin/"$name" 2>/dev/null || true); do
@@ -526,6 +526,12 @@ find_cli() {
     [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
   fi
   return 1
+}
+# Bun: the one the JamSesh app hands over (its own hub runs as Bun when told to, so a Mac without Bun
+# has one), else one on PATH or in the usual places.
+find_bun() {
+  if [ -n "\${JAMSESH_BUN:-}" ] && [ -x "$JAMSESH_BUN" ]; then printf '%s' "$JAMSESH_BUN"; return 0; fi
+  find_cli bun
 }
 # Says where the block an earlier JamSesh wrote into an instruction file is. Never changes the file.
 note_block() { perl - "$1" <<'FIND'
@@ -647,11 +653,17 @@ else
   skip "Claude Code isn't installed"
 fi
 
-if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
+CODEX_HERE=0
+{ find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; } && CODEX_HERE=1
+BUN="$(find_bun || true)"
+if [ "$CODEX_HERE" = 1 ] && [ -n "$BUN" ]; then
   mkdir -p "$HOME/.codex/prompts"
   # The token comes from the header file, not this process's arguments or environment.
-  perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" > "$SAVED/config.new" <<'PL'
-use strict; use warnings; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
+  # Codex's config is TOML, which setup does not parse with string matching: the edit below is by lines, and
+  # Bun's real parser then checks the result (toml-check.js) before anything is written.
+  CODEXCFG="$HOME/.codex/config.toml"
+  perl - "$HUB" "$DIR/auth.header" "$CODEXCFG" > "$SAVED/config.new" <<'PL'
+use strict; use warnings; use Cwd qw(abs_path);
 my ($hub, $header, $path) = @ARGV;
 # A symlinked config is edited at its target, so the link stays a link.
 $path = abs_path($path) // $path if -l $path;
@@ -664,9 +676,9 @@ if (-e $path) {
   $text = do { local $/; <$in> };
   close $in;
 }
-# JamSesh's part of the file sits between two marker comments, and setup only ever replaces the text
-# between its own markers. The rest is never parsed. A table of the same name outside the markers
-# (written by hand, or by an earlier JamSesh) is not ours to edit: the file is left as it is.
+# JamSesh's part of the file sits between two marker comments, and only the text between them is replaced.
+# A file without markers that holds the table an earlier JamSesh wrote (exactly its two headers) has that
+# table moved into the markers; the checker refuses anything else.
 my ($open, $close) = ('# >>> jamsesh', '# <<< jamsesh');
 my @lines = split /(?<=\\n)/, $text;
 my (@from, @to);
@@ -677,24 +689,68 @@ for my $i (0 .. $#lines) {
 }
 die "JamSesh: $path has a broken pair of '$open' / '$close' lines, so it was left as it is. Delete them and the JamSesh lines between them, then connect again.\\n"
   unless (@from == 0 && @to == 0) || (@from == 1 && @to == 1 && $from[0] < $to[0]);
-my $has = @from ? 1 : 0;
-for my $i (0 .. $#lines) {
-  next if $has && $i >= $from[0] && $i <= $to[0];
-  if ($lines[$i] =~ /^\\s*\\[\\[?\\s*mcp_servers\\s*\\.\\s*["']?jamsesh\\b/ || $lines[$i] =~ /^\\s*mcp_servers\\s*\\.\\s*["']?jamsesh\\b/) {
-    die "JamSesh: $path already has its own [mcp_servers.jamsesh] outside JamSesh's markers (line " . ($i + 1) . "), so it was left as it is. Delete that table (and its [mcp_servers.jamsesh.http_headers]), then connect again.\\n";
-  }
-}
 (my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
 (my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
 my $block = "$open\\n[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n$close\\n";
-if ($has) {
+if (@from) {
   $text = join('', @lines[0 .. $from[0] - 1]) . $block . join('', @lines[$to[0] + 1 .. $#lines]);
 } else {
+  my @kept;
+  my $drop = 0;
+  for my $l (@lines) {
+    if ($l =~ /^\\[mcp_servers\\.jamsesh(\\.http_headers)?\\]\\s*$/) { $drop = 1; next }
+    $drop = 0 if $l =~ /^\\s*\\[/;
+    next if $drop;
+    push @kept, $l;
+  }
+  $text = join('', @kept);
   $text =~ s/\\s+\\z//;
   $text .= ($text eq '' ? '' : "\\n\\n") . $block;
 }
 print $text;
 PL
+  cat > "$SAVED/toml-check.js" <<'JS'
+// Checks a Codex config edit with Bun's TOML parser: the edited file must parse, hold exactly the one
+// mcp_servers.jamsesh table setup writes, and be the same as the original everywhere else. The one table
+// an earlier JamSesh wrote may be moved into the markers; any other table of that name is refused.
+const fs = require("fs");
+const env = process.env;
+const read = (p) => { try { return fs.readFileSync(p, "utf8"); } catch (e) { return ""; } };
+const fail = (m) => { console.error(m); process.exit(1); };
+const parse = (t, what) => {
+  if (!t.trim()) return {};
+  try { return Bun.TOML.parse(t); } catch (e) { return fail(what + " isn't valid TOML (" + String(e.message || e).split("\\n")[0] + ")."); }
+};
+const sorted = (v) => Array.isArray(v) ? v.map(sorted) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sorted(v[k])])) : v;
+const same = (a, b) => JSON.stringify(sorted(a)) === JSON.stringify(sorted(b));
+const keys = (o) => Object.keys(o).sort().join(",");
+const without = (o) => {
+  const c = JSON.parse(JSON.stringify(o));
+  if (c.mcp_servers && typeof c.mcp_servers === "object") {
+    delete c.mcp_servers.jamsesh;
+    if (!Object.keys(c.mcp_servers).length) delete c.mcp_servers;
+  }
+  return c;
+};
+const oldText = read(env.JAMSESH_OLD);
+const orig = parse(oldText, "The Codex config");
+const next = parse(read(env.JAMSESH_NEW), "The edited Codex config");
+const token = (read(env.JAMSESH_HEADER).split("Bearer ")[1] || "").trim();
+const want = { url: env.JAMSESH_URL, tool_timeout_sec: 600, default_tools_approval_mode: "approve", http_headers: { authorization: "Bearer " + token } };
+const marked = oldText.split("\\n").some((l) => l.trim() === "# >>> jamsesh");
+const had = orig.mcp_servers && orig.mcp_servers.jamsesh;
+const isOld = (o) => o && typeof o === "object" && keys(o) === "default_tools_approval_mode,http_headers,tool_timeout_sec,url"
+  && typeof o.url === "string" && o.url.endsWith("/mcp") && o.tool_timeout_sec === 600 && o.default_tools_approval_mode === "approve"
+  && o.http_headers && typeof o.http_headers === "object" && keys(o.http_headers) === "authorization"
+  && typeof o.http_headers.authorization === "string" && o.http_headers.authorization.startsWith("Bearer ");
+if (had && !marked && !isOld(had)) fail("It has an [mcp_servers.jamsesh] table that JamSesh didn't write.");
+if (!same(next.mcp_servers && next.mcp_servers.jamsesh, want)) fail("The edit would not leave exactly one [mcp_servers.jamsesh] table with JamSesh's settings.");
+if (!same(without(orig), without(next))) fail("The edit would change something outside JamSesh's table.");
+JS
+  JAMSESH_OLD="$CODEXCFG" JAMSESH_NEW="$SAVED/config.new" JAMSESH_HEADER="$DIR/auth.header" JAMSESH_URL="$HUB/mcp" BUN_BE_BUN=1 "$BUN" "$SAVED/toml-check.js" || {
+    echo "JamSesh left $CODEXCFG as it is. If it has an [mcp_servers.jamsesh] table of your own, delete it and its subtables, then connect again." >&2
+    exit 1
+  }
   safe_write "$HOME/.codex/config.toml" 600 < "$SAVED/config.new"
   mkdir -p "$HOME/.codex/skills/jamsesh"
   fetch launcher.md "$SAVED/codex-launcher.md"
@@ -707,6 +763,10 @@ PL
   note_block "$HOME/.codex/AGENTS.md"
   ok "Codex: MCP server, skill, /jamsesh prompt (Codex has no hooks here; a chat joins only when told to)"
   configured=$((configured + 1))
+elif [ "$CODEX_HERE" = 1 ]; then
+  # Without a real TOML parser setup won't edit Codex's config: it leaves it, and says what to add.
+  skip "Codex: JamSesh checks Codex's config with Bun and this computer has none, so Codex was left as it is. Install Bun (bun.sh) and connect again, or add this to ~/.codex/config.toml yourself:"
+  printf '%s\\n' '[mcp_servers.jamsesh]' "url = \\"$HUB/mcp\\"" 'tool_timeout_sec = 600' 'default_tools_approval_mode = "approve"' '' '[mcp_servers.jamsesh.http_headers]' 'authorization = "Bearer <your JamSesh token>"' >&2
 else
   skip "Codex isn't installed"
 fi

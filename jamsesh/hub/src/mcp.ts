@@ -1,6 +1,8 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { realpathSync } from "node:fs";
+import { isAbsolute, normalize } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -26,6 +28,8 @@ interface Ctx {
   sessionId?: string;
   /** The skill text has been handed over in this connection (a new conversation starts a new one). */
   skillSent?: boolean;
+  /** The harness, decided when the client says who it is at initialize, never from a tool argument. */
+  harness?: string;
   /** Who opened this session (see McpEndpoint.owner): every later request must come from the same. */
   owner?: string;
 }
@@ -266,6 +270,22 @@ const JAM_TOOLS = [
   },
 ];
 
+/** The harness a connection belongs to, from the client name it gave at initialize. */
+export const harnessOfClient = (name: string | undefined) => (/claude/i.test(name ?? "") ? "claude-code" : /codex/i.test(name ?? "") ? "codex" : "other");
+
+/** A folder as one spelling: absolute, normalized, without a trailing slash, and (on this computer's own file system) its real path. */
+export function canonicalCwd(cwd: string, real: boolean) {
+  const c = cwd.trim();
+  if (!c || !isAbsolute(c)) return "";
+  let out = normalize(c).replace(/(.)\/+$/, "$1");
+  if (real) {
+    try {
+      out = realpathSync(out);
+    } catch {}
+  }
+  return out;
+}
+
 const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 
 export class McpEndpoint {
@@ -339,6 +359,9 @@ export class McpEndpoint {
           `These tools connect this chat to a live JamSesh room session with jam_join. ${JOIN_RULE} Until your person asks, don't call any JamSesh tool. Once you've joined, follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, when idle: Claude Code stops (JamSesh wakes it when the room has something), Codex calls jam_wait (it returns after a few minutes with nothing; call it again), and verify mockups against the design system and builds against mockups.`,
       },
     );
+    server.oninitialized = () => {
+      ctx.harness = harnessOfClient(server.getClientVersion()?.name);
+    };
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.toolList() }));
     server.setRequestHandler(ListPromptsRequestSchema, async () => ({
       prompts: [{ name: "jamsesh", description: "How to work in this JamSesh session" }],
@@ -406,12 +429,13 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
-        // Claude Code's hooks hand it its chat id. Every other harness is keyed here, by machine and folder, and a
-        // chat or repo it supplies is ignored: neither can give a removed chat a fresh identity. No folder, no join.
-        const harness = String(args.harness ?? "other");
-        const cwd = String(args.cwd ?? "").trim().replace(/(.)\/+$/, "$1");
+        // The harness is what the connection said it was at initialize, so a tool argument can't pick another
+        // identity. Claude Code's hooks hand it its chat id. Every other harness is keyed here, by machine and
+        // real folder, and a chat or repo it supplies is ignored. No absolute folder, no join.
+        const harness = ctx.harness ?? String(args.harness ?? "other");
+        const cwd = canonicalCwd(String(args.cwd ?? ""), machine === "host");
+        if (!cwd) throw new Error("Pass cwd, this chat's working directory as an absolute path, to jam_join: without it the room can't tell which chat this is.");
         const claudeChat = harness === "claude-code" && typeof args.chat === "string" ? args.chat.trim().slice(0, 80) : "";
-        if (harness !== "claude-code" && !cwd) throw new Error("Pass cwd (this chat's working directory) to jam_join: without it the room can't tell which chat this is.");
         const chatId = claudeChat || (harness !== "claude-code" ? `${harness}:${machine}:${cwd}`.slice(0, 300) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
         // A chat the room removed stays out until a person lets it back in. A Claude Code join without its chat
         // id can't show it isn't the removed one: a removal in this folder counts.
@@ -421,12 +445,12 @@ export class McpEndpoint {
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
         const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
-          harness: args.harness ?? "other",
+          harness: harness as Agent["harness"],
           repo: cleanRepo(String(args.repo ?? "")),
           role,
           broadcasts: typeof args.broadcasts === "boolean" ? args.broadcasts : undefined,
           branch: args.branch,
-          cwd: cwd || args.cwd,
+          cwd,
           machine,
           chatId, // see above
           platform: args.platform,

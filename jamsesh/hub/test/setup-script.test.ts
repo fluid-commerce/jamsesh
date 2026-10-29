@@ -1,7 +1,7 @@
 // Runs the real /agent/setup.sh against a throwaway home folder: finding agent CLIs that aren't on
 // PATH, never wiping a settings file it can't parse, and failing when no agent was set up.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, rmSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Hub } from "../src/hub";
@@ -46,6 +46,8 @@ function sandbox() {
   const bin = join(root, "bin");
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
+  // The setup checks Codex's config with Bun's parser; a Mac or terminal without Bun is its own test.
+  symlinkSync(process.execPath, join(bin, "bun"));
   return { home, bin, log: join(root, "cli.log") };
 }
 
@@ -392,6 +394,82 @@ describe("agent setup script", () => {
     expect(toml.endsWith("# <<< jamsesh\n")).toBe(true);
   });
 
+  test("Codex: the table an earlier JamSesh wrote, without markers, is moved into the markers on the next setup", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    const old = '[mcp_servers.jamsesh]\nurl = "http://old-host:4747/mcp"\ntool_timeout_sec = 600\ndefault_tools_approval_mode = "approve"\n\n[mcp_servers.jamsesh.http_headers]\nauthorization = "Bearer old"\n';
+    writeFileSync(config, `model = "gpt"\n\n${old}\n[mcp_servers.other]\nurl = "http://x"\n\n[profiles.a]\nk = 1\n`);
+    for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
+    const toml = readFileSync(config, "utf8");
+    expect(toml).not.toContain("old-host");
+    expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
+    expect(toml).toContain(`# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "${origin}/mcp"`);
+    expect(Bun.TOML.parse(toml)).toMatchObject({ model: "gpt", mcp_servers: { other: { url: "http://x" } }, profiles: { a: { k: 1 } } });
+  });
+
+  test("Codex: valid TOML that looks like a marker or a table is never mistaken for one", async () => {
+    for (const body of [
+      // Markers inside a multi-line string are string content, not JamSesh's block.
+      'notes = """\n# >>> jamsesh\n# <<< jamsesh\n"""\n',
+      // A table of ours spelled with quoted keys, beside a markerless file.
+      'model = "gpt"\n\n["mcp_servers"."jamsesh"]\nurl = "http://hand/mcp"\n',
+      // Our exact headers, but not the shape an earlier JamSesh wrote.
+      'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://hand/mcp"\nenv_vars = ["A"]\n',
+      // A string holding a header-shaped line, then our table with an extra key.
+      's = """\n[mcp_servers.jamsesh]\n"""\n\n[mcp_servers.jamsesh]\nurl = "u"\n',
+    ]) {
+      const box = sandbox();
+      const { dir, files } = earlierInstall(box);
+      mkdirSync(join(box.home, ".codex"), { recursive: true });
+      const config = join(box.home, ".codex/config.toml");
+      writeFileSync(config, body);
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toContain("as it is");
+      expect(readFileSync(config, "utf8")).toBe(body);
+      connectionIntact(dir, files);
+    }
+  });
+
+  test("Codex: a config that isn't valid TOML is left alone", async () => {
+    const box = sandbox();
+    const { dir, files } = earlierInstall(box);
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    writeFileSync(config, "model = = nope\n");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("isn't valid TOML");
+    expect(readFileSync(config, "utf8")).toBe("model = = nope\n");
+    connectionIntact(dir, files);
+  });
+
+  test("Codex: with no Bun to check the config, it is left as it is, the person is told what to add, and Claude Code is still set up", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    rmSync(join(box.bin, "bun"));
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    writeFileSync(join(box.home, ".codex/config.toml"), 'model = "gpt"\n');
+    const r = await run(box);
+    expect(r.code).toBe(0);
+    expect(r.stdout + r.stderr).toContain("Install Bun");
+    expect(r.stderr).toContain("[mcp_servers.jamsesh]");
+    expect(r.stderr).not.toContain("Bearer tok");
+    expect(readFileSync(join(box.home, ".codex/config.toml"), "utf8")).toBe('model = "gpt"\n');
+    expect(existsSync(join(box.home, ".codex/prompts/jamsesh.md"))).toBe(false);
+    expect(existsSync(join(box.home, ".claude/skills/jamsesh/SKILL.md"))).toBe(true);
+  });
+
+  test("Codex: the Bun the app hands over (JAMSESH_BUN, run as Bun) is used when none is on PATH", async () => {
+    const box = sandbox();
+    rmSync(join(box.bin, "bun"));
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const r = await run(box, "Felipe", { JAMSESH_BUN: process.execPath });
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(box.home, ".codex/config.toml"), "utf8")).toContain("# >>> jamsesh");
+  });
+
   test("Codex: a [mcp_servers.jamsesh] table outside the markers, or a broken marker pair, leaves the file untouched and says what to remove", async () => {
     for (const body of [
       'model = "gpt"\n\n[mcp_servers.jamsesh]\nurl = "http://old/mcp"\n',
@@ -406,8 +484,8 @@ describe("agent setup script", () => {
       writeFileSync(config, body);
       const r = await run(box);
       expect(r.code).not.toBe(0);
-      expect(r.stderr).toMatch(/left it as it is|left as it is/);
-      expect(r.stderr).toMatch(/Delete/);
+      expect(r.stderr).toContain("as it is");
+      expect(r.stderr).toMatch(/[Dd]elete/);
       expect(readFileSync(config, "utf8")).toBe(body);
       connectionIntact(dir, files);
     }

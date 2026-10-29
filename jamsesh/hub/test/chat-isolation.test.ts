@@ -44,7 +44,7 @@ const hook = (kind: string, token: string, body: object, ack = "") =>
 
 const mcpPost = (token: string, body: object, sid?: string) =>
   fetch(`${base}/mcp`, { method: "POST", headers: { ...bearer(token), accept: "application/json, text/event-stream", ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body) });
-const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1" } } };
+const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "codex-mcp-client", version: "1" } } };
 const callTool = (name: string, args: object) => ({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } });
 
 test("room state never shows a chat's transport id, and an MCP session answers only its own machine", async () => {

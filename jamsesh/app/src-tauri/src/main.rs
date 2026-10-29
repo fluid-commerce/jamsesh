@@ -543,15 +543,22 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     if !status.is_success() || !script.starts_with("#!") {
         return Err("The host didn't hand out the setup. Connect this Mac again with a fresh code.".into());
     }
-    let mut child = tokio::process::Command::new("/bin/bash")
-        .arg("-s")
+    let mut cmd = tokio::process::Command::new("/bin/bash");
+    cmd.arg("-s")
         .env("PATH", host::path_env())
         .env("JAMSESH_NAME", &name)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(std::process::Stdio::piped());
+    // The setup checks Codex's TOML config with Bun's parser. The app's own hub is a Bun executable (it
+    // runs as Bun itself when told to), so a Mac without Bun installed still has one.
+    let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
+    match host::runtime(resources.as_deref()) {
+        Ok(host::Runtime::Bundled { hub, .. }) => cmd.env("JAMSESH_BUN", hub),
+        Ok(host::Runtime::Checkout { bun, .. }) => cmd.env("JAMSESH_BUN", bun),
+        Err(_) => &mut cmd,
+    };
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         stdin.write_all(script.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -580,19 +587,29 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     }
 }
 
-/// Every line setup printed to stderr (they name the failed paths and where the saved copies are), capped
-/// so a runaway script can't fill the dialog.
+/// What setup printed to stderr, for the dialog: the first lines (the root error) and the last ones (what
+/// was put back, what was not, and where the saved copies are), with a mark where lines were left out,
+/// and capped so a runaway script can't fill the dialog.
 fn failure_lines(stderr: &str) -> String {
+    const HEAD: usize = 4;
+    const TAIL: usize = 8;
     let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if lines.is_empty() {
         return "unknown error".to_string();
     }
-    let mut text = lines.iter().take(12).copied().collect::<Vec<_>>().join("\n");
-    if lines.len() > 12 {
-        text.push_str("\n…");
+    let mut shown: Vec<&str> = Vec::new();
+    if lines.len() <= HEAD + TAIL {
+        shown.extend(&lines);
+    } else {
+        shown.extend(&lines[..HEAD]);
+        shown.push("…");
+        shown.extend(&lines[lines.len() - TAIL..]);
     }
-    if text.chars().count() > 1500 {
-        text = text.chars().take(1500).collect::<String>() + "…";
+    let text = shown.join("\n");
+    if text.chars().count() > 1800 {
+        // Keep the end: the recovery details are there.
+        let tail: String = text.chars().rev().take(1800).collect::<Vec<_>>().into_iter().rev().collect();
+        return format!("…{tail}");
     }
     text
 }
@@ -627,7 +644,12 @@ mod tests {
         assert_eq!(failure_lines("a\n\nb\n"), "a\nb");
         let many = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         let shown = failure_lines(&many);
-        assert!(shown.contains("line 11") && !shown.contains("line 12") && shown.ends_with('…'));
+        // The root error at the top and the recovery details at the end both survive.
+        assert!(shown.starts_with("line 0\n") && shown.contains("line 3\n…\nline 22") && shown.ends_with("line 29"));
+        assert!(!shown.contains("line 10"));
+        let long = format!("root\n{}\nlast", "x".repeat(5000));
+        let shown = failure_lines(&long);
+        assert!(shown.chars().count() <= 1801 && shown.ends_with("last"));
     }
 
     #[test]
