@@ -199,7 +199,7 @@ test("a burst of more relevant decisions than one prompt carries is handed over 
   const { hub, s, desktop } = room();
   const nav = s.claim(desktop.id, "Navigation").workstream;
   for (let i = 0; i < 25; i++) s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text: `Nav rule ${i}.`, workstreamId: nav.id, relevance: "work", data: {} });
-  const handed = (prompt: string) => (JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt }, "127.0.0.1")).match(/Nav rule \d+\./g) ?? []).map((t) => Number(t.match(/\d+/)![0]));
+  const handed = (prompt: string) => (JSON.stringify(hooksOf(hub).prompt(desktop, { prompt })).match(/Nav rule \d+\./g) ?? []).map((t) => Number(t.match(/\d+/)![0]));
   const all = [...handed("one"), ...handed("two"), ...handed("three"), ...handed("four")];
   expect(all).toEqual(Array.from({ length: 25 }, (_, i) => i));
 });
