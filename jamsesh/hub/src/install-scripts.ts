@@ -121,7 +121,10 @@ if [ "$1" = "listen" ]; then
       sleep "\${JAMSESH_RETRY_SECONDS:-5}"
     fi
   done
-  exit 0
+  # Out of time with the chat still in the room: nothing starts another listener until the agent next stops,
+  # so wake it into the jam_wait fallback, which keeps it reachable.
+  printf 'JamSesh: keep listening: call jam_wait.\n' >&2
+  exit 2
 fi
 
 if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-prompt-id: $pid" -H "x-jam-room: $room" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then

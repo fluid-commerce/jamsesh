@@ -121,7 +121,13 @@ export class Session {
       const folder = canonicalCwd(cwd, machine === "host");
       return folder ? { folder, key: chatKey(harness, machine, folder) } : null;
     };
+    // A folder is compared as one spelling for every harness, so a removal holds for the whole folder.
     for (const a of this.store.all("agents")) {
+      if (a.harness === "claude-code" && a.machine && a.cwd) {
+        const folder = canonicalCwd(a.cwd, a.machine === "host");
+        if (folder && folder !== a.cwd) this.store.put("agents", { ...a, cwd: folder }, false);
+        continue;
+      }
       if (!keyed(a.harness) || !a.chatId || isChatKey(a.chatId, a.harness)) continue;
       const n = redo(a.harness, a.machine, a.cwd);
       if (n) this.store.put("agents", { ...a, chatId: n.key, cwd: n.folder }, false);
@@ -129,6 +135,14 @@ export class Session {
     const removed = this.removedChats();
     let changed = false;
     const next = removed.map((r) => {
+      if (r.harness === "claude-code" && r.machine && r.cwd) {
+        const folder = canonicalCwd(r.cwd, r.machine === "host");
+        if (folder && folder !== r.cwd) {
+          changed = true;
+          return { ...r, cwd: folder };
+        }
+        return r;
+      }
       if (!keyed(r.harness) || (r.chatId && isChatKey(r.chatId, r.harness))) return r;
       const n = redo(r.harness, r.machine, r.cwd);
       if (!n) return r;

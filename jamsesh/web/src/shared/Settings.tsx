@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
@@ -286,13 +286,30 @@ function Paired({ host }: { host: boolean }) {
 
 /** Chats the room removed: they can't join again by themselves until someone lets them back in. */
 function RemovedChats() {
+  const { state } = useHub();
   const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number }[]>([]);
   const [error, setError] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
-  const load = () => api("/removed-chats").then((l) => (setList(l), setLoadFailed(false))).catch(() => setLoadFailed(true));
+  // The list belongs to a room: a window that outlived a room switch, or a chat removed by someone else
+  // meanwhile, reloads it, and an answer for an earlier request or room is dropped.
+  const latest = useRef(0);
+  const roomId = state?.session?.roomId;
+  const agentCount = state?.agents.length ?? 0;
+  const load = () => {
+    const mine = ++latest.current;
+    return api("/removed-chats")
+      .then((l) => mine === latest.current && (setList(l), setLoadFailed(false)))
+      .catch(() => mine === latest.current && setLoadFailed(true));
+  };
   useEffect(() => {
-    load();
-  }, []);
+    setList([]);
+    void load();
+  }, [roomId, agentCount]);
+  // Letting a chat back in is a permission change: it is never queued for later, and a failure leaves the list as it was.
+  const allow = (id: string) =>
+    api(`/removed-chats/${id}/allow`, {}, "POST", { queue: false })
+      .then(() => (setError(""), load()))
+      .catch((e) => setError(e instanceof Error && e.message ? e.message : "Couldn't allow that chat. Try again."));
   if (loadFailed)
     return (
       <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in here.">
@@ -303,7 +320,6 @@ function RemovedChats() {
       </Section>
     );
   if (!list.length) return null;
-  const allow = (id: string) => api(`/removed-chats/${id}/allow`, {}).then(() => (setError(""), load())).catch((e) => setError(e.message));
   return (
     <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in here.">
       {list.map((c) => (

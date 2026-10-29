@@ -590,13 +590,18 @@ function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState
   const here = !!agentId && state.agents.some((a) => a.id === agentId);
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   const remove = async (purge: boolean) => {
     setBusy(true);
+    setError("");
     try {
       await api(`/agents/${agentId}/remove`, { purge });
+      setAsking(false);
+    } catch (e) {
+      // Still there: keep the choices open and say why.
+      setError(e instanceof Error && e.message ? e.message : "Couldn't remove it. Try again.");
     } finally {
       setBusy(false);
-      setAsking(false);
     }
   };
   return (
@@ -622,6 +627,7 @@ function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState
             <button className="btn small ghost" disabled={busy} onClick={() => setAsking(false)}>
               Cancel
             </button>
+            {error && <span className="join-error" role="alert" style={{ color: "var(--warn)", marginLeft: 8 }}>{error}</span>}
           </span>
         )}
       </span>

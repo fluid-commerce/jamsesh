@@ -28,7 +28,10 @@ test("a removed Claude Code chat can't rejoin through a fresh MCP session that d
   s.removeAgent(a.id);
   // A fresh connection: no agent on it, a new session id, no chat.
   const fresh = (device = cred.device.id) => ({ agentId: null as string | null, ip: "relayed", device, origin: base, sessionId: crypto.randomUUID() });
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).rejects.toThrow("removed this chat");
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).rejects.toThrow("removed from the room");
+  // Nor under a new chat id it makes up: the folder is out for every new chat from this Mac until Allow again.
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app", chat: "made-up-new-id" })).rejects.toThrow("A chat in this folder was removed from the room. Ask someone to choose Settings > Removed chats > Allow again.");
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/./app", chat: "another-new-id" })).rejects.toThrow("removed from the room");
   // Another folder on this Mac, or the same folder on another Mac, is another chat.
   expect((await hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/other" })).isError).toBeFalsy();
   const otherWin = hub.auth.issue({ kind: "browser", label: "Mo's Mac", ip: "10.0.0.6" });
@@ -37,7 +40,7 @@ test("a removed Claude Code chat can't rejoin through a fresh MCP session that d
   // "connect to jamsesh" in that chat doesn't let it back, however it is sent: only a person's Allow again does.
   const said = await (await fetch(`${base}/api/hooks/joined`, { method: "POST", headers: { ...remote, authorization: `Bearer ${cred.token}` }, body: JSON.stringify({ session_id: "chat-gone7" }) })).json();
   expect(said).toMatchObject({ joined: false, removed: true });
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).rejects.toThrow("removed this chat");
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).rejects.toThrow("removed from the room");
   expect(s.allowRejoin({ id: s.removedChats().find((r) => r.chatId === "chat-gone7")!.id })).toBe(true);
   expect((await hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).isError).toBeFalsy();
 });
@@ -245,4 +248,16 @@ test("over the MCP protocol: a connection that initializes as Codex stays Codex 
   for (const args of [{ harness: "other" }, { harness: "claude-code", chat: "made-up" }, { harness: "codex" }]) {
     expect(await join(await open("codex-mcp-client"), { repo: "app", cwd: "/w/proto", ...args })).toContain("removed this chat");
   }
+});
+
+test("a removal stored with the folder as typed still blocks the folder after the store opens", async () => {
+  const data = join(dir, "claude-fold");
+  const one = new Hub({ canvas: false, whisper: false, dataDir: data });
+  const a = one.session.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "app", cwd: "/w/./typed", machine: "host", chatId: "chat-typed" }).agent;
+  one.session.removeAgent(a.id);
+  one.stop();
+  const two = new Hub({ canvas: false, whisper: false, dataDir: data });
+  const host = () => ({ agentId: null as string | null, ip: "127.0.0.1", device: "host", sessionId: crypto.randomUUID(), harness: "claude-code" });
+  await expect(two.mcp.call(host(), "jam_join", { owner: "Chey", harness: "claude-code", repo: "app", cwd: "/w/typed", chat: "brand-new" })).rejects.toThrow("A chat in this folder was removed");
+  two.stop();
 });

@@ -426,10 +426,18 @@ export class McpEndpoint {
         // The key is a hash of the whole folder path, so two long paths that share a beginning stay two chats;
         // the readable folder is the agent's own `cwd`.
         const chatId = claudeChat || (harness !== "claude-code" ? chatKey(harness, machine, cwd) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
-        // A chat the room removed stays out until a person lets it back in. A Claude Code join without its chat
-        // id can't show it isn't the removed one: a removal in this folder counts.
-        if (s.rejoinBlocked(chatId, ctx.agentId, claudeChat ? undefined : { machine, cwd, harness }))
-          throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Someone in the room can choose Settings > Removed chats > Allow again.');
+        // A chat the room removed stays out until a person lets it back in, and so does any new chat from its
+        // machine and folder: a chat id is the chat's own word, so a removed chat could otherwise return
+        // under a new one.
+        const blocked = s.rejoinBlocked(chatId, ctx.agentId, { machine, cwd, harness });
+        if (blocked) {
+          const sameChat = (!!chatId && blocked.chatId === chatId) || (!!ctx.agentId && blocked.agentId === ctx.agentId);
+          throw new Error(
+            sameChat
+              ? "The room removed this chat from the session, so it can't join again by itself. Someone in the room can choose Settings > Removed chats > Allow again."
+              : "A chat in this folder was removed from the room. Ask someone to choose Settings > Removed chats > Allow again.",
+          );
+        }
         // Rejoining keeps the stored role unless the caller names one (the session settles it).
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
         const { agent, resumed, quietMs } = s.registerAgent({

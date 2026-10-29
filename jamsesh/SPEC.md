@@ -381,7 +381,9 @@ machine. Only a record from before chats had ids migrates to the chat that comes
 "Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
 which takes the agent out and, with `purge`, deletes the feed lines it caused.
 
-**A removed chat stays out.** Its `jam_join` is refused (by its chat id, which for Codex is its
+**A removed chat stays out, and so does its folder.** While a removal is outstanding, every new join from that machine and
+folder (any chat id, since an id is the chat's own word) is refused with "A chat in this folder was removed from the
+room. Ask someone to choose Settings > Removed chats > Allow again." Its `jam_join` is refused (by its chat id, which for Codex is its
 folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
 Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only). Nothing
 an agent or its hook sends clears a removal: a removed chat that types "connect to jamsesh" is told by its
@@ -635,7 +637,7 @@ steps, and an idle agent goes back to its person and is woken when the room has 
 4. **Wake-up.** A second `Stop` hook, `hook.sh listen`, runs in the background (`asyncRewake`).
    It calls `/api/hooks/listen`, which the hub holds open (up to about 200 seconds, which the
    server's idle limit allows) until the room has something for that agent; the script calls again
-   until about 50 minutes (3000 seconds) pass; the hook's own `timeout` is 3300 seconds, since Claude Code enforces it on async hooks too (its default is 600). With news it prints it and exits with code 2, which wakes the agent
+   until about 50 minutes (3000 seconds) pass (and keeps asking through a host that is down meanwhile); at that limit, with the chat still in the room, it exits 2 with "keep listening: call jam_wait", so the agent is woken into the `jam_wait` fallback and stays reachable; the hook's own `timeout` is 3300 seconds, since Claude Code enforces it on async hooks too (its default is 600). With news it prints it and exits with code 2, which wakes the agent
    with that text as its next turn (the script prints the items to stderr, which is what Claude sees on a rewake). Async hooks are killed when a non-interactive `claude -p` run ends, so the wake-up works in interactive chats only. Verified on 2026-10-29 in a real interactive Claude Code 2.1.308 chat: an idle chat woke when a background `Stop` hook exited 2. The full JamSesh path (installed hooks, a hub, a real room) still needs a real room. A newer listener for the same agent, or the person's next
    prompt, ends the old one empty; an agent that is itself in `jam_wait` or `jam_ask` is left to
    get its items there.

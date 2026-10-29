@@ -571,3 +571,33 @@ test("hook.sh listen keeps asking through a host that is down, then wakes the id
     fake.stop(true);
   }
 });
+
+test("hook.sh listen at its time limit wakes the agent into jam_wait, so an idle chat stays reachable", async () => {
+  const fake = Bun.serve({
+    port: 0,
+    fetch: async (req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/hooks/joined")) return Response.json({ joined: true, room: "r1" });
+      if (path.endsWith("/hooks/listen")) return new Response("", { headers: { "x-jam-joined": "1", "content-type": "text/plain" } });
+      return Response.json({});
+    },
+  });
+  try {
+    const home = mkdtempSync(join(tmpdir(), "jam-listen-end-"));
+    const env = join(home, "client.env");
+    writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${fake.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
+    const run = async (extra: Record<string, string>) => {
+      const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "listen"], {
+        env: { HOME: home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: home, JAMSESH_LISTEN_SECONDS: "2", JAMSESH_RETRY_SECONDS: "0.2", ...extra },
+        stdin: new Blob([JSON.stringify({ session_id: "chat-end" })]),
+        stderr: "pipe",
+      });
+      return { code: await proc.exited, err: await new Response(proc.stderr).text() };
+    };
+    const r = await run({});
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("keep listening: call jam_wait");
+  } finally {
+    fake.stop(true);
+  }
+});
