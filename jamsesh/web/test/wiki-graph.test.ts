@@ -137,3 +137,56 @@ test("a settled map stops asking for frames, the big screen's too; motion, easin
   expect(keepDrawing({ ...still, k: 1.2 })).toBe(true);
   expect(keepDrawing({ ...still, drag: true })).toBe(true);
 });
+
+// ---------- round 5: a full vault ----------
+
+import { nameRoom, settleFor } from "../src/wiki/GraphCanvas";
+import { NAME_BUDGET, labelledAtLeast } from "../src/wiki/graph";
+
+const vault = (n: number) => {
+  const nodes = Array.from({ length: n }, (_, i) => ({ id: `p${i}`, title: `Page title number ${i}`, category: "topics", backlinks: 2 + (i % 4) }));
+  const edges = Array.from({ length: n - 1 }, (_, i) => ({ from: `p${i + 1}`, to: `p${(i * 7) % (i + 1)}` }));
+  return shapeGraph({ nodes, edges } as any, 2);
+};
+
+test("the big screen names at most NAME_BUDGET pages, the most important first", () => {
+  const g = vault(1500);
+  const names = labelledAtLeast(g, 2, 8, NAME_BUDGET);
+  expect(names.size).toBe(NAME_BUDGET);
+  expect(labelledAtLeast(g, 2, 8).size).toBe(1500);
+  expect(labelled(g, 3).size).toBe(3);
+});
+
+test("name room clears two overlapping names, and leaves far apart ones alone", () => {
+  const g = shapeGraph({ nodes: [{ id: "a", title: "Alpha page", category: "topics", backlinks: 3 }, { id: "b", title: "Beta page", category: "topics", backlinks: 3 }, { id: "c", title: "Far page", category: "topics", backlinks: 0 }], edges: [] } as any);
+  const nodes = g.nodes.map((n, i) => ({ ...n, x: i === 2 ? 5000 : i * 3, y: i === 2 ? 5000 : 0 }));
+  const force = nameRoom(nodes, new Set(["a", "b"]), () => 1);
+  for (let i = 0; i < 30; i++) force(1);
+  expect(Math.hypot(nodes[0].x! - nodes[1].x!, nodes[0].y! - nodes[1].y!)).toBeGreaterThan(30);
+  expect([nodes[2].x, nodes[2].y]).toEqual([5000, 5000]);
+});
+
+test("name room at 1500 pages does bounded work: a tick is far from pairs-squared", () => {
+  const g = vault(1500);
+  const nodes = g.nodes.map((n, i) => ({ ...n, x: Math.cos(i * 2.4) * 40 * Math.sqrt(i + 1), y: Math.sin(i * 2.4) * 40 * Math.sqrt(i + 1) }));
+  const force = nameRoom(nodes, labelledAtLeast(g, 2, 8, NAME_BUDGET), () => 0.3);
+  const t0 = performance.now();
+  for (let i = 0; i < 5; i++) force(1);
+  // 5 ticks of the old all-pairs pass was ~850 million box checks (many seconds); this is a few milliseconds a tick.
+  expect(performance.now() - t0).toBeLessThan(1500);
+});
+
+test("the first ticks of a layout stop at their time budget, however many were asked for", () => {
+  let ticks = 0;
+  let clock = 0;
+  settleFor({ tick: () => void ticks++ }, 320, 250, () => (clock += 10));
+  expect(ticks).toBeGreaterThan(0);
+  expect(ticks).toBeLessThan(30);
+  ticks = 0;
+  settleFor({ tick: () => void ticks++ }, 30, 250, () => 0);
+  expect(ticks).toBe(30);
+  // At least one tick always runs, even with no time left.
+  ticks = 0;
+  settleFor({ tick: () => void ticks++ }, 30, 0, () => 1e9);
+  expect(ticks).toBe(1);
+});

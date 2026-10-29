@@ -1,5 +1,5 @@
 // The wiki's routes, through the same api() helper every button uses. People only: an agent's credential gets 403.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, hub } from "../shared/hub";
 import { asCategory, type LogEntry, type PageMeta, type RawGraph, type SearchHit, type SourceText, type WikiPage } from "./types";
 import { pulses } from "./pulse";
@@ -31,6 +31,8 @@ export const wikiApi = {
   search: async (q: string): Promise<SearchHit[]> => (await api<{ results: SearchHit[] }>(`/wiki/search?q=${enc(q)}`, undefined, undefined, NOW)).results ?? [],
   log: async (): Promise<LogEntry[]> => (await api<{ entries: LogEntry[] }>("/wiki/log", undefined, undefined, NOW)).entries ?? [],
   source: (id: string): Promise<SourceText> => api(`/wiki/source/${enc(id)}`, undefined, undefined, NOW),
+  /** The whole of a change a wiki card shows part of. */
+  fullChange: (cardId: string, slug: string): Promise<{ diff: string; added: number; removed: number }> => api(`/wiki/proposal/${enc(cardId)}/${enc(slug)}`, undefined, undefined, NOW),
   addSource: (body: { title?: string; text?: string; url?: string; attachment?: string }) => api<{ ok: boolean; source: { id: string } }>("/wiki/sources", body, "POST", NOW),
 };
 
@@ -77,12 +79,13 @@ export function useWiki(scale = 1): WikiData {
   }, [load]);
 
   // Pages and links come from the same fetch; if the graph route is unavailable, it is built from the pages' links.
-  const graph = (() => {
+  // Rebuilt only when the data or the scale changes: a new graph object restarts the layout.
+  const graph = useMemo(() => {
     const raw = data.raw ?? {
       nodes: data.pages.map((p) => ({ id: p.slug, title: p.title, category: p.category, backlinks: p.backlinks })),
       edges: data.pages.flatMap((p) => p.links.map((to) => ({ from: p.slug, to }))),
     };
     return data.pages.length || raw.nodes.length ? shapeGraph(raw, scale) : EMPTY;
-  })();
+  }, [data, scale]);
   return { ...data, ...state, graph, reload: () => void load() };
 }

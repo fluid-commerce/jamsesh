@@ -92,11 +92,14 @@ export function labelled(g: Graph, max: number): Set<string> {
   return new Set(byImportance(g).slice(0, Math.max(0, max)).map((n) => n.id));
 }
 
-/** Every page with `min` or more backlinks, plus up to `extra` of the rest; only the smallest leaves go unnamed. */
-export function labelledAtLeast(g: Graph, min: number, extra: number): Set<string> {
+/** The most names the big screen draws and makes room for: past this many they couldn't be read anyway, and finding room for each costs more than a frame. */
+export const NAME_BUDGET = 120;
+
+/** Every page with `min` or more backlinks, plus up to `extra` of the rest (only the smallest leaves go unnamed), at most `cap` in all. */
+export function labelledAtLeast(g: Graph, min: number, extra: number, cap = Infinity): Set<string> {
   const all = byImportance(g);
   const key = all.filter((n) => n.backlinks >= min);
-  return new Set([...key, ...all.slice(key.length, key.length + extra)].map((n) => n.id));
+  return new Set([...key, ...all.slice(key.length, key.length + extra)].slice(0, cap).map((n) => n.id));
 }
 
 /** The nearest node under a point, if the point is within its radius plus a little slack. */
