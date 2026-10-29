@@ -97,8 +97,8 @@ export class Session {
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
     this.reconcileShares();
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
-    this.rearmRevert("main");
-    for (const id of Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))) this.rearmRevert(id);
+    this.armRevert("main", this.stage(), 1000);
+    for (const id of Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))) this.armRevert(id, this.stage(id), 1000);
     // A lock whose owner left lets go without anyone asking.
     this.lockSweep = setInterval(() => this.sweepLocks(), 30_000);
     this.lockSweep.unref?.();
@@ -1538,7 +1538,7 @@ export class Session {
     // A screen that just appeared or came back: what it saved is checked, and its return-to-board wait runs again.
     for (const x of live) {
       if (before.has(x.id) || x.id === "main") continue;
-      if (!this.screenReverts.has(x.id)) this.rearmRevert(x.id);
+      if (!this.screenReverts.has(x.id)) this.armRevert(x.id, this.stage(x.id), 1000);
     }
     if (idsChanged) this.dropDeadExpanded();
     bus.changed("screens");
@@ -1637,32 +1637,8 @@ export class Session {
       const st = this.stage(screen);
       if (!st.expanded || this.stageTileKeys(screen).some((k) => k.key === st.expanded)) continue;
       const { expanded: _gone, ...rest } = st;
-      this.atomically(() => this.commitStage(rest, screen));
-      // Cleaning up isn't someone looking at it: the return-to-board wait keeps its deadline.
-      this.rearmRevert(screen);
-    }
-  }
-
-  /** The return-to-board wait of a screen, from when its stage went up (a restart or a returning screen lost its timer). */
-  private rearmRevert(screen: string) {
-    const st = this.stage(screen);
-    const wait = Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now());
-    const fire = () => void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true });
-    if (screen === "main") {
-      if (this.stageRevert) clearTimeout(this.stageRevert);
-      this.stageRevert = null;
-      if (this.revertsToBoard(st)) {
-        this.stageRevert = setTimeout(fire, wait);
-        this.stageRevert.unref?.();
-      }
-      return;
-    }
-    clearTimeout(this.screenReverts.get(screen));
-    this.screenReverts.delete(screen);
-    if (this.revertsToBoard(st)) {
-      const t = setTimeout(fire, wait);
-      t.unref?.();
-      this.screenReverts.set(screen, t);
+      // Cleaning up isn't someone looking at it: the return-to-board wait keeps its saved deadline.
+      this.atomically(() => this.commitStage(rest, screen, { keepDeadline: true }));
     }
   }
 
@@ -1726,7 +1702,7 @@ export class Session {
     const parsed = parseStage(next);
     if (!parsed.ok) return refused(parsed.error);
     // A new stage starts unexpanded (expandTile is what sets it).
-    const { expanded: _x, ...clean } = parsed.stage;
+    const { expanded: _x, revertAt: _r, ...clean } = parsed.stage;
     next = clean;
     // The lock is looked at first (a lapse is a change too), then the claim: a decision made before the lapse doesn't land after it.
     const held = this.lockOf(screen);
@@ -1832,9 +1808,14 @@ export class Session {
     return out;
   }
 
-  private commitStage(stage: Stage, screen: string) {
-    // Every stage write is part of a transaction: the revision, the questions it expires and the store move together or not at all.
+  /**
+   * Stores a stage and tells everyone. Every stage write is part of a transaction (the revision, the questions it expires
+   * and the store move together or not at all). The return-to-board deadline is saved with the stage: a write that
+   * restarts the wait sets it fresh; `keepDeadline` (cleanup that isn't someone looking) carries the old one.
+   */
+  private commitStage(stage: Stage, screen: string, opts: { keepDeadline?: boolean } = {}) {
     if (!this.effects) throw new Error("commitStage outside Session.atomically");
+    stage.revertAt = opts.keepDeadline && stage.revertAt !== undefined ? stage.revertAt : Date.now() + Session.STAGE_REVERT_MS;
     this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
     this.after(() => bus.changed("stageTiles"));
@@ -1844,9 +1825,7 @@ export class Session {
         bus.changed("screens");
         this.noteSharesShown();
         this.scheduleShareSweep();
-        clearTimeout(this.screenReverts.get(screen));
-        if (this.revertsToBoard(stage))
-          this.screenReverts.set(screen, setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), Session.STAGE_REVERT_MS));
+        this.armRevert(screen, stage);
       });
       return;
     }
@@ -1856,11 +1835,28 @@ export class Session {
       this.noteSharesShown();
       this.scheduleShareSweep();
       if (this.bigScreens.size > 1) bus.changed("screens");
+      // Anything the brain brought up returns to the live board after a while.
+      this.armRevert("main", stage);
+    });
+  }
+
+  /** Sets the screen's return-to-board timer from the stage's saved deadline (none when it stays up). Returns the delay, for tests. */
+  private armRevert(screen: string, st: Stage, minDelay = 0): number | null {
+    if (screen === "main") {
       if (this.stageRevert) clearTimeout(this.stageRevert);
       this.stageRevert = null;
-      // Anything the brain brought up returns to the live board after a while.
-      if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", "main", { override: true }), Session.STAGE_REVERT_MS);
-    });
+    } else {
+      clearTimeout(this.screenReverts.get(screen));
+      this.screenReverts.delete(screen);
+    }
+    if (!this.revertsToBoard(st)) return null;
+    // A stage saved before deadlines were kept falls back to its age.
+    const delay = Math.max(minDelay, (st.revertAt ?? st.since + Session.STAGE_REVERT_MS) - Date.now());
+    const t = setTimeout(() => void this.setStage({ mode: "board" }, "JamSesh", screen, { override: true }), delay);
+    t.unref?.();
+    if (screen === "main") this.stageRevert = t;
+    else this.screenReverts.set(screen, t);
+    return delay;
   }
 
   // ---- locks: what a person puts up stays up (3.1) ----
@@ -2179,7 +2175,7 @@ export class Session {
     if (stage.mode === "board" || stage.mode === "welcome" || stage.mode === "join") return;
     // A share ends on its own, so a screen showing one can't be brought back.
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen")) return;
-    const { lock: _l, since: _s, by: _b, ...snap } = stage;
+    const { lock: _l, since: _s, by: _b, revertAt: _r, ...snap } = stage;
     const sig = JSON.stringify(snap);
     const all = this.stageHistory();
     const mine = (all[screen] ?? []).filter((e) => JSON.stringify(e.stage) !== sig);

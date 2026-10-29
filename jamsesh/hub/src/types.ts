@@ -299,6 +299,8 @@ export interface Stage {
   pinned: boolean;
   /** The person who pinned it (their id); unset when no identified person did. */
   pinnedById?: string;
+  /** When a brought-up screen goes back to the board by itself (ms). Saved with the stage in the same write as every action that restarts the wait, so a restart or a returning screen resumes the same deadline. */
+  revertAt?: number;
   since: number;
   by: string;
   /** Which big screen this is the stage of ("main", or "screen-2"...); a stage with none is the main screen's. */

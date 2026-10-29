@@ -26,6 +26,13 @@ class Bus {
     }
   }
 
+  /** For tests: forget what is waiting to be sent, so one fixture's leftovers don't reach the next one. */
+  reset() {
+    this.dirty.clear();
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = null;
+  }
+
   changed(key: string) {
     this.dirty.add(key);
     if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flush(), 40);

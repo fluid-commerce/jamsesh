@@ -33,6 +33,7 @@ const stageShape = {
   expanded: z.string().max(400).optional(),
   pinned: z.boolean().optional(),
   pinnedById: z.string().max(200).optional(),
+  revertAt: z.number().finite().optional(),
   since: z.number().finite().optional(),
   by: z.string().max(200).optional(),
   screenId: z.string().max(100).optional(),

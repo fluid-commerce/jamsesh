@@ -1680,7 +1680,7 @@ test("an expand request is for the content that was clicked: a long parity key e
 });
 
 test("Expand is a transaction like every stage write: a failed save leaves the revision, what clients were sent and other work's claims alone, on main and on an extra screen", async () => {
-  await Bun.sleep(120); // what earlier tests left to send goes out first
+  bus.reset(); // what earlier tests left to send doesn't reach this one
   const { s } = room();
   const oldResolver = bus.resolver;
   bus.resolver = (k) => (s as any).resolve(k);
@@ -1691,7 +1691,7 @@ test("Expand is a transaction like every stage write: a failed save leaves the r
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   for (const screen of ["main", "screen-2"]) {
     s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", screen, { override: true });
-    await Bun.sleep(90);
+    bus.reset();
     const rev = s.stageRev(screen);
     const claim = s.stageClaim();
     const sent: any[] = [];
@@ -1817,6 +1817,71 @@ test("saved extra screens: a dead expansion is cleared at restart and when the s
     expect(s2.stage("screen-2").expanded).toBeUndefined();
     s2.stop();
   } finally {
+    Session.STAGE_REVERT_MS = prev;
+  }
+});
+
+test("the return-to-board deadline is saved with the stage: Expand, Unlock and touching restart it, cleanup keeps it, and a restart or a returning screen resumes it", async () => {
+  const prev = Session.STAGE_REVERT_MS;
+  Session.STAGE_REVERT_MS = 6 * 60_000;
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    const rdir = mkdtempSync(join(tmpdir(), "jam-deadline-"));
+    const info = () => ({ width: 1920, height: 1080, dpr: 1, screenX: 1920, screenY: 0, at: now });
+    const s1 = new Session(new Store(rdir));
+    const a = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", image: "/renders/a.png" });
+    const b = s1.upsertArtifact({ kind: "screenshot", stage: "built", title: "B", image: "/renders/b.png" });
+    s1.reportScreen("main", info());
+    s1.reportScreen("screen-2", info());
+    const start = now;
+    s1.setStage({ mode: "compare", items: [a.id, b.id] }, "Room brain", "main", { override: true });
+    s1.setStage({ mode: "compare", items: [a.id, b.id] }, "Room brain", "screen-2", { override: true });
+    expect(s1.stage().revertAt).toBe(start + 6 * 60_000);
+    // Five minutes later someone expands: the wait starts over, from that moment.
+    now = start + 5 * 60_000;
+    s1.expandTile(b.id);
+    s1.expandTile(b.id, "screen-2");
+    expect(s1.stage().revertAt).toBe(now + 6 * 60_000);
+    // Two minutes on, the expanded artifact is deleted: cleanup collapses it and keeps the deadline.
+    now = start + 7 * 60_000;
+    const kept = s1.stage().revertAt;
+    s1.store.remove("artifacts", b.id);
+    (s1 as any).dropDeadExpanded();
+    expect(s1.stage().expanded).toBeUndefined();
+    expect(s1.stage().revertAt).toBe(kept);
+    expect(s1.stage("screen-2").revertAt).toBe(kept);
+    s1.stop();
+    (s1.store as any).db.close();
+    // The hub restarts three minutes later: both screens resume the saved deadline, not one worked out from their age.
+    now = start + 10 * 60_000;
+    const s2 = new Session(new Store(rdir));
+    const left = kept! - now;
+    expect(left).toBeGreaterThan(0);
+    expect((s2 as any).armRevert("main", s2.stage(), 1000)).toBe(left);
+    expect((s2 as any).armRevert("screen-2", s2.stage("screen-2"), 1000)).toBe(left);
+    // Unlock restarts the wait: a pinned, locked view goes back to being timed from the unlock.
+    const chey = s2.upsertPerson({ name: "Chey" });
+    s2.setStage({ mode: "compare", items: [a.id, a.id === b.id ? b.id : a.id].slice(0, 1) }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    now += 60_000;
+    s2.releaseLock("main", { owner: chey.id });
+    expect(s2.stage().revertAt).toBe(now + 6 * 60_000);
+    // Touching a lock counts as activity and restarts it too.
+    s2.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    now += 30_000;
+    s2.touchLock("main");
+    expect(s2.stage().revertAt).toBe(now + 6 * 60_000);
+    // A screen that was unplugged and comes back resumes its saved deadline.
+    const saved = s2.stage("screen-2").revertAt!;
+    s2.removeScreen("screen-2");
+    now += 60_000;
+    s2.reportScreen("screen-2", info());
+    expect(s2.stage("screen-2").revertAt).toBe(saved);
+    expect((s2 as any).armRevert("screen-2", s2.stage("screen-2"), 1000)).toBe(Math.max(1000, saved - now));
+    s2.stop();
+  } finally {
+    Date.now = realNow;
     Session.STAGE_REVERT_MS = prev;
   }
 });
