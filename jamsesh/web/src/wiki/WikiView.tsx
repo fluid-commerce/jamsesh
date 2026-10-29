@@ -292,19 +292,22 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   const begin = (text: string, rev: string) => (drafts.hold(slug, text, rev), setEditing(text), setBase(rev), setConflict(null));
   // The edit is kept outside this view (draft.ts): leaving the page any way at all leaves it there.
   // A save made from another view of this page settles this one's draft too.
-  useEffect(
-    () =>
-      drafts.listen(slug, (o) => {
-        const held = drafts.get(slug);
-        if (o === "cleared") (setEditing(null), setConflict(null));
-        else if (held) (setEditing(held.text), setBase(held.base));
-      }),
-    [slug],
-  );
   useEffect(() => {
+    // One that settled it between this render and now is caught here: the view started from a draft that is no longer held.
+    if (editing !== null && !drafts.get(slug)) (setEditing(null), setConflict(null));
+    return drafts.listen(slug, (o) => {
+      const held = drafts.get(slug);
+      if (o === "cleared") (setEditing(null), setConflict(null));
+      else if (held) (setEditing(held.text), setBase(held.base));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per page: `editing` here is the draft this view started from
+  }, [slug]);
+  // What is typed is held. The first run is the draft the view started from: already held (or already settled by a save), never held again.
+  const started = useRef(true);
+  useEffect(() => {
+    if (started.current) return void (started.current = false);
     track(slug, editing, drafts.get(slug)?.base ?? base); // the held revision is the truth: a save answered meanwhile moved it
   }, [slug, editing, base]);
-
   useEffect(() => {
     let live = true;
     wikiApi.page(slug).then(

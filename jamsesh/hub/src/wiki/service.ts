@@ -357,7 +357,7 @@ export class WikiService {
    * reads forward from a cursor that moves only past a report whose source is written: one that can't be written (a
    * full disk, a locked folder) is found again at the next pass or after a restart, and none is lost or skipped.
    */
-  agentUpdate(): Source[] {
+  agentUpdate(final = false): Source[] {
     const out: Source[] = [];
     const start = (this.reportCursor ??= this.cursorOf(readState(this.dir).reports?.[this.sessionId]));
     let cursor = start;
@@ -378,7 +378,10 @@ export class WikiService {
             out.push(src);
           } catch (err) {
             console.error(`wiki: couldn't save ${e.authorName}'s ${kind} report (${errText(err)}); it will be tried again.`);
-            return done();
+            if (!final) return done();
+            // The session is ending: its events are not read again by the next session, so the report goes to the project's own queue (the state file), which the next start writes.
+            this.queue.push({ kind: "agent", title: `${e.authorName} ${kind}: ${text.slice(0, 50)}`, text: `${e.authorName} reported (${kind})${ws ? ` on ${ws}` : ""} at ${new Date(e.ts).toTimeString().slice(0, 5)}:\n\n${text}`, by: e.authorName });
+            this.saveQueue();
           }
         }
         cursor = this.reportCursor = e.id;
@@ -703,7 +706,7 @@ export class WikiService {
   captureFinal(): Source[] {
     this.checkState();
     this.drainQueue();
-    this.agentUpdate();
+    this.agentUpdate(true);
     try {
       this.catchUpLog();
     } catch (e) {

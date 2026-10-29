@@ -188,23 +188,27 @@ export function commitPaths(dir: string, message: string, paths: string[]): bool
 }
 
 /**
- * Every source file the wiki owns, for a commit to name: those in raw/ and raw/archive/ now, and those git still has that
- * are gone (a source that moved to the archive is a deletion in one place and a new file in the other; both sides are named).
+ * The source files in raw/ and raw/archive/ that changed since the last commit, for a commit to name: new ones, and the two
+ * sides of a move to the archive (a deletion and a new file). Only what git says changed, so the list stays as long as the
+ * change and not as long as the archive; a person's own files there are not sources and are never named.
  */
 export function rawPaths(dir: string): string[] {
+  if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
   const out = new Set<string>();
-  for (const [folder, name] of [["raw", "raw"], ["raw/archive", "raw/archive"]] as const) {
-    try {
-      const d = vaultDir(dir, folder);
-      if (d) for (const f of readdirSync(d)) if (f.endsWith(".md") && isSourceId(f.slice(0, -3))) out.add(`${name}/${f}`);
-    } catch {}
-  }
-  if (gitAvailable() && existsSync(join(dir, ".git"))) {
-    try {
-      const r = Bun.spawnSync(["git", "ls-files", "-z", "--", "raw"], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
-      for (const f of r.stdout.toString().split("\0")) if (/^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3))) out.add(f);
-    } catch {}
-  }
+  const own = (f: string) => /^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3));
+  try {
+    const r = Bun.spawnSync(["git", "status", "--porcelain=v1", "-z", "-uall", "--", "raw"], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    const parts = r.stdout.toString().split("\0");
+    for (let i = 0; i < parts.length; i++) {
+      const e = parts[i];
+      if (e.length < 4) continue;
+      if (own(e.slice(3))) out.add(e.slice(3));
+      if (e[0] === "R" || e[0] === "C") {
+        i++; // a rename lists the old name next
+        if (own(parts[i] ?? "")) out.add(parts[i]);
+      }
+    }
+  } catch {}
   return [...out];
 }
 

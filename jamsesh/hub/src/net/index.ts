@@ -1,5 +1,6 @@
 // Network: makes the host reachable at https://<name>.duckdns.org from anywhere.
 // DuckDNS name -> Let's Encrypt cert (DNS-01) -> router port forward -> self-check.
+import { assertLive } from "../room-context";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
@@ -242,17 +243,20 @@ export class Network {
     if (req.method === "GET" && p === "status") return json(this.status());
     if (req.method !== "POST") return json({ error: "not found" }, 404);
     const body: any = await req.json().catch(() => ({}));
+    assertLive();
     if (p === "config") {
       const d = parseDomain(body.domain);
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);
       if (!/^[0-9a-f-]{20,}$/i.test(token)) return json({ error: "The DuckDNS token is a long code of letters, numbers and dashes. Copy it from the top of the DuckDNS page." }, 400);
       const r = await updateIp(d, token, this.fetchFn);
+      assertLive();
       if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
       const externalPort = Number(body.externalPort ?? this.cfg?.externalPort ?? 443);
       const internalPort = Number(body.internalPort ?? this.cfg?.internalPort ?? 4443);
       if (![externalPort, internalPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) return json({ error: "Ports must be between 1 and 65535." }, 400);
       await this.stop();
+      assertLive();
       this.st.publicIp = r.ip;
       this.st.dns = "ok";
       this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
@@ -262,6 +266,7 @@ export class Network {
     if (!this.cfg) return json({ error: "Set up a name first." }, 400);
     if (p === "check") {
       await this.check();
+      assertLive();
       return json(this.status());
     }
     if (p === "issue-cert") {
@@ -270,10 +275,12 @@ export class Network {
     }
     if (p === "retry-router") {
       await this.openRouter();
+      assertLive();
       return json(this.status());
     }
     if (p === "disable") {
       await this.stop();
+      assertLive();
       this.saveConfig({ ...this.cfg, enabled: false });
       this.st.reachable = "unknown";
       return json(this.status());

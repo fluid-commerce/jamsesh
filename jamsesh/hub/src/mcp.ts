@@ -1,6 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { assertLive } from "./room-context";
 import { wikiBriefing, wikiReadText, wikiSearchText } from "./wiki/agent";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -390,7 +391,9 @@ export class McpEndpoint {
 
     if (name.startsWith("canvas_") && name !== "canvas_frames" && name !== "canvas_render") {
       const agent = this.requireAgent(ctx);
+      assertLive(); // not started past the shutdown deadline: the final snapshot is taken without it
       const r = await this.hub.track(this.hub.canvas.call(agent, name.slice("canvas_".length), args)); // in flight until it is answered: shutdown waits, then records its activity
+      assertLive(); // answered past the deadline, it is not part of the saved room
       if (!r.isError && /^canvas_(create_node|set_properties|batch|run_command|delete_nodes?|import_svg)$/.test(name)) this.canvasNote(agent.id).edit = Date.now();
       return r as ToolOut;
     }

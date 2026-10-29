@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -2536,4 +2536,48 @@ test("a [[raw/source]] citation is not a link to a page", () => {
   expect(linksOf("See [[Pricing]] and [[raw/2026-10-29_note]] and [[raw/x#12:30|12:30]].")).toEqual(["pricing"]);
   writePage(dir, "cites", "# Cites\n\nFrom [[raw/2026-10-29_note]].");
   expect(listPages(dir).find((p) => p.slug === "cites")!.links).toEqual([]);
+});
+
+test("an agent report that can't be written when the session ends is carried to the next session, which has its own events", async () => {
+  const { w, s, agent, dir } = room();
+  const err = console.error;
+  console.error = () => {};
+  chmodSync(join(dir, "raw"), 0o555);
+  try {
+    s.postUpdate(agent.id, "shipped", "Built the carry-over screen.");
+    w.captureFinal();
+  } finally {
+    chmodSync(join(dir, "raw"), 0o755);
+    console.error = err;
+  }
+  expect(readState(dir).queued?.some((q) => q.text.includes("carry-over screen"))).toBe(true);
+  // A fresh session (a different event store) on the same project folder.
+  const next = new Hub({ canvas: false, whisper: false, dataDir: join(root, `next-${Math.random().toString(36).slice(2)}`), wikiDir: dir });
+  hubs.push(next);
+  expect(next.wiki.drainQueue()).toBe(1);
+  expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).toContain("carry-over screen");
+});
+
+test("a commit names only what changed in raw/, not the whole archive", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const ids = Array.from({ length: 5 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  archiveSources(dir, ids);
+  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  const fresh = w.addSource("document", "Later", "A later source", "Chey");
+  expect(rawPaths(dir)).toEqual([`raw/${fresh.id}.md`]); // the archive is already in history
+});
+
+test("project and network changes by a request past the shutdown deadline are refused, wherever it resumes", async () => {
+  const { assertLive } = await import("../src/room-context");
+  let over = false;
+  await inRequest({ over: () => over }, async () => {
+    expect(() => assertLive()).not.toThrow();
+    await Bun.sleep(10);
+    over = true;
+    await Bun.sleep(5);
+    expect(() => assertLive()).toThrow("closed");
+  });
+  expect(() => assertLive()).not.toThrow(); // the room's own work carries no request context
 });

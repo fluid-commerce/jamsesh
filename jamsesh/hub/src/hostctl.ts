@@ -499,6 +499,9 @@ export class HostControl {
     this.log(`${o.by} started a preview build of ${label} on the host: ${o.command}`);
     bus.send({ type: "toast", tone: "info", text: `Building ${label} on the host`, detail: o.command.slice(0, 80) });
     let reported = false; // the room is told how the build ended once, whatever fails around telling it
+    const note = (err: unknown) => {
+      if ((err as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", err instanceof Error ? err.message : err);
+    };
     void (async () => {
       const r = await run(["/bin/zsh", "-lc", `${sync} && ${o.command}`], 20 * 60_000);
       let result: string;
@@ -524,14 +527,15 @@ export class HostControl {
       }
       this.builds.delete(slug);
       reported = true;
-      this.log(result);
+      try {
+        this.log(result);
+      } catch (err) {
+        note(err); // a note that can't be written doesn't change how the build ended
+      }
       this.onBuilt(label, ok, result);
       bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
     })().catch((e) => {
       // A background job never ends as an unhandled rejection, whatever its own error handling hits.
-      const note = (err: unknown) => {
-        if ((err as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", err instanceof Error ? err.message : err);
-      };
       this.builds.delete(slug);
       note(e);
       if (reported) return; // the build's own ending was already told; a failure while telling it is only logged

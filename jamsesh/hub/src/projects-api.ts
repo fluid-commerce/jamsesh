@@ -1,5 +1,6 @@
 // The Projects picker's routes (/api/projects…), shared by the running hub and the lobby. Only the
 // host's own windows may use them: they list project names and the people who came.
+import { assertLive } from "./room-context";
 import { config } from "./config";
 import { cleanName, createProject, findProject, isSlug, listProjects, thumbnailPath } from "./projects";
 
@@ -33,6 +34,7 @@ export async function projectsRoute(req: Request, url: URL, who: { local: boolea
   const body = (await req.json().catch(() => ({}))) as { name?: unknown; slug?: unknown; fresh?: unknown };
 
   if (path === "/api/projects") {
+    assertLive();
     try {
       return reply({ project: createProject(home, cleanName(body.name)) }, 201);
     } catch (e) {
@@ -43,6 +45,7 @@ export async function projectsRoute(req: Request, url: URL, who: { local: boolea
   // Opening swaps the session, which only the Mac app (it runs the hub) can do. From a terminal this
   // makes the project and says how to start it; the picker shows that.
   if (path === "/api/projects/open") {
+    assertLive();
     const project = isSlug(body.slug) ? findProject(home, body.slug) : body.name ? (findProject(home, cleanName(body.name)) ?? createProject(home, cleanName(body.name))) : null;
     if (!project) return fail("That project isn't here.", 404);
     return reply({ switched: false, project, command: `jamsesh host --project ${project.slug}` }, 200);
