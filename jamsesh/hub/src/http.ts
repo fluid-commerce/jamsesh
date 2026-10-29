@@ -95,6 +95,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     return null;
   };
 
+  /** The credential for a loopback attachment read: the Authorization header or the jam_token cookie, never the address. */
+  const fileReader = (req: Request) => {
+    for (const t of [req.headers.get("authorization")?.replace(/^Bearer\s+/i, ""), cookie(req, "jam_token")]) {
+      const d = t ? hub.auth.check(t, "127.0.0.1") : null;
+      if (d) return d;
+    }
+    return null;
+  };
+
   const PUBLIC_FILES = /^\/(assets\/|icons\/|fonts\/|favicon\.svg$|manifest\.webmanifest$|sw\.js$)/;
 
   const server = Bun.serve<WsData, any>({
@@ -193,7 +202,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // On loopback a request is the host's, except reading an attachment: there a paired agent calling the hub directly
         // is its credential (the route still turns away a local process with neither a credential nor the host's window).
         const readsFile = local && (req.method === "GET" || req.method === "HEAD") && /^\/api\/attachments\/[\w-]+$/.test(path);
-        const device = local ? (readsFile ? anyToken(hub, req, url, ip) : null) : hub.auth.check(tokenOf(req, url), ip);
+        const device = local ? (readsFile ? fileReader(req) : null) : hub.auth.check(tokenOf(req, url), ip);
         const ok = local || !!device;
 
         if (path === "/") {
@@ -579,6 +588,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && (req.method === "GET" || req.method === "HEAD")) {
     // A file is read by a paired device, an agent of the session, or the host's own window; another process on the host's loopback is none of them.
     if (!paired && !hostWindow) return bad("This device isn't paired with this JamSesh host.", 401);
+    // A credential in the address ends up in histories and logs: this route takes it in a header or cookie only.
+    if (url.searchParams.has("token")) return bad("Send the credential in the Authorization header or the jam_token cookie, not in the address.", 400);
     const f = hub.attachments.file(m[1]);
     if (!f) return bad("No such file.", 404);
     const inline = f.rec.kind === "image" || f.rec.kind === "text";
@@ -590,7 +601,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
         "content-disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.rec.name)}`,
         "x-content-type-options": "nosniff",
         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
-        "cache-control": "private, max-age=31536000, immutable",
+        // Never kept: a device whose pairing is revoked can't read a copy it fetched earlier.
+        "cache-control": "no-store",
       },
     });
   }
