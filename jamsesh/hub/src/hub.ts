@@ -71,6 +71,9 @@ const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command
 
 type RecordSendResult = { ok: true; sent: { agentId: string; agentName: string; notes: number; directiveId: string }[]; brain: number; pins: string[] } | { ok: false; reason: string; status?: number };
 
+/** How many stopped recordings' notes the hub remembers. */
+export const NOTE_RECS_MAX = 200;
+
 /** A recording laptop's open window: when it started (hub clock), when Stop closed it, and the recording (if any) it belongs to. */
 interface PromptWindow {
   t0: number;
@@ -263,6 +266,11 @@ export class Hub {
     return w;
   }
 
+  /** Whether a recording (started with Record) is running on this laptop. */
+  recordingOn(deviceId: string): boolean {
+    return this.recs.has(deviceId);
+  }
+
   /** Closes a window that never got Stop and hands what it held back to the room as ordinary speech. */
   private releasePrompt(deviceId: string, only?: PromptWindow) {
     const w = this.promptMode.get(deviceId);
@@ -270,7 +278,7 @@ export class Hub {
     clearTimeout(w.timer);
     this.promptMode.delete(deviceId);
     for (const u of this.session.store.all("utterances")) {
-      if (u.eventId || u.t1 < w.t0 - 500 || u.t0 > w.t0 + w.max || !this.fromRecorder(u, deviceId)) continue;
+      if (u.eventId || u.t0 < w.t0 || u.t0 > w.t0 + w.max || !this.fromRecorder(u, deviceId)) continue;
       this.roomLine(u, true);
     }
   }
@@ -292,7 +300,7 @@ export class Hub {
 
   private inPrompt(u: Utterance) {
     // Inside the recording only: once Stop is pressed, or past the window's cap, what the person says is ordinary speech.
-    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && u.t0 <= w.t0 + w.max && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
+    for (const [deviceId, w] of this.promptMode) if (u.t0 >= w.t0 && u.t0 <= w.t0 + w.max && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
     return false;
   }
 
@@ -344,7 +352,7 @@ export class Hub {
   }
 
   /** What this device heard in a closed recording window, once the last words are transcribed (about 7 s at most). */
-  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }, open: PromptWindow | undefined): Promise<Utterance[]> {
+  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }, open: PromptWindow | undefined, ownId?: string): Promise<Utterance[]> {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
@@ -355,7 +363,14 @@ export class Hub {
     // Words still in transcription after that reach the feed as ordinary room speech (the window is closed by then).
     const deadline = Date.now() + 7000;
     const max = open?.max ?? Hub.PROMPT_MAX_MS;
-    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
+    // A line belongs to this recording if it began after the recording did and before it stopped. Only the stopping recording gets the
+    // 300 ms for a last word still being transcribed, and never past the start of the next recording on this device: no line is in two.
+    const upto = () => {
+      const cur = this.recs.get(w.deviceId);
+      const next = cur && cur.id !== ownId && cur.t0 >= w.t0 ? cur.t0 : Infinity;
+      return Math.min(w.t1 + 300, next);
+    };
+    const heard = () => s.store.all("utterances").filter((u) => u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
     while (Date.now() < deadline) {
@@ -389,7 +404,7 @@ export class Hub {
     } else if (!open || open.rec || open.t1 !== undefined) return { ok: false, reason: "There is no recording to stop.", status: 409 };
     const t0 = open.t0;
     const t1 = this.clock();
-    const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open);
+    const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open, w.recordingId);
     if (rec && w.recordingId) this.recordEnd(w.deviceId, rec);
     w = { ...w, pointer: this.inWindow(w.pointer, t0, t1) };
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
@@ -431,10 +446,12 @@ export class Hub {
     t.unref?.();
     return t;
   })();
-  /** Whose each stopped recording's notes are: the window (`caller`) and person they were handed to. Only those can send them. */
-  private noteOwners = new Map<string, { caller: string; personId: string | null }>();
-  /** Each send, from its first moment: a repeated send (a lost reply, a double click) gets the same answer and does nothing twice. */
-  private sentRecs = new Map<string, Promise<RecordSendResult>>();
+  /**
+   * Each stopped recording's notes: the window (`caller`) and person they were handed to, and the send once it has begun. One record, so
+   * the right to send and the receipt of the send are kept and dropped together (the oldest 200 go): a record that is gone is a 404,
+   * never a send that happens a second time. A repeated send (a lost reply, a double click) gets the same answer and does nothing twice.
+   */
+  private noteRecs = new Map<string, { caller: string; personId: string | null; sending?: Promise<RecordSendResult> }>();
 
   /**
    * Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last
@@ -534,7 +551,7 @@ export class Hub {
     const t0 = rec.t0;
     const t1 = this.clock();
     const open = this.promptMode.get(w.deviceId);
-    const lines = await this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined);
+    const lines = await this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined, rec.id);
     // Only the recording this Stop belongs to: a Start that came in while the words were gathered stays.
     this.recordEnd(w.deviceId, rec);
     const marks = this.inWindow(Array.isArray(w.pointer) ? w.pointer : [], t0, t1).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
@@ -548,8 +565,8 @@ export class Hub {
       n.ownerName = owner ? s.agent(owner)?.name ?? null : null;
     }
     const recordingId = rec.id;
-    this.noteOwners.set(recordingId, { caller: w.caller, personId: person?.id ?? null });
-    if (this.noteOwners.size > 200) this.noteOwners.delete(this.noteOwners.keys().next().value!);
+    this.noteRecs.set(recordingId, { caller: w.caller, personId: person?.id ?? null });
+    if (this.noteRecs.size > NOTE_RECS_MAX) this.noteRecs.delete(this.noteRecs.keys().next().value!);
     return { ok: true, recordingId, notes };
   }
 
@@ -590,22 +607,20 @@ export class Hub {
     const person = this.session.person(w.personId);
     if (!person) return Promise.resolve({ ok: false, reason: "Pick who you are before sending notes.", status: 403 });
     // Only a recording this hub stopped, sent from the window it was stopped in, by the person it was handed to.
-    const owner = this.noteOwners.get(w.recordingId);
+    const owner = this.noteRecs.get(w.recordingId);
     if (!owner) return Promise.resolve({ ok: false, reason: "That recording isn't one of this session's. Record again.", status: 404 });
     if (owner.caller !== w.caller || (owner.personId && owner.personId !== person.id)) return Promise.resolve({ ok: false, reason: "Those notes belong to someone else.", status: 403 });
     // Reserved before anything waits, so two sends at once share one.
-    const done = this.sentRecs.get(w.recordingId);
-    if (done) return done;
+    if (owner.sending) return owner.sending;
     // Nothing went out (no notes, or it failed): the reservation goes, so a corrected send may follow.
-    const sending = this.sendNotes(person, w.recordingId, w.notes).then(
-      (r) => (r.ok || this.sentRecs.delete(w.recordingId), r),
+    const sending: Promise<RecordSendResult> = this.sendNotes(person, w.recordingId, w.notes).then(
+      (r) => (r.ok || owner.sending !== sending || (owner.sending = undefined), r),
       (e) => {
-        this.sentRecs.delete(w.recordingId);
+        if (owner.sending === sending) owner.sending = undefined;
         throw e;
       },
     );
-    this.sentRecs.set(w.recordingId, sending);
-    if (this.sentRecs.size > 200) this.sentRecs.delete(this.sentRecs.keys().next().value!);
+    owner.sending = sending;
     return sending;
   }
 

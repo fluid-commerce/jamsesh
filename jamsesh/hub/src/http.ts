@@ -895,6 +895,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/prompt-window/start" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
     if (!ownDeviceOf(body.deviceId)) return bad("Record from your own window.", 403);
+    // The older start call would replace the open window of a recording that is still running: refused, the recording keeps going.
+    if (hub.recordingOn(String(body.deviceId))) return bad("A recording is already running in this window. Stop it first.", 409);
     hub.promptStart(String(body.deviceId));
     return json({ ok: true });
   }

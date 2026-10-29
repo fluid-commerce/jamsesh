@@ -14,7 +14,7 @@ process.env.JAMSESH_SILENT = "1";
 const dir = mkdtempSync(join(tmpdir(), "jam-record-"));
 // The hub reads its home folder when it loads: a throwaway one, so renders, uploads and links the tests make never touch a real session.
 process.env.JAMSESH_HOME = join(dir, "home");
-const { Hub } = await import("../src/hub");
+const { Hub, NOTE_RECS_MAX } = await import("../src/hub");
 const { startHttp } = await import("../src/http");
 type Hub = HubType;
 const hubs: Hub[] = [];
@@ -631,7 +631,8 @@ test("the older prompt routes need the caller's own device too: another person c
   // Maya's recording and her lock are untouched; her own window still works.
   expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
   expect(r.s.lockOf("main")).toEqual(lock);
-  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop", t0 })).status).toBe(200);
+  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop", t0 })).status).toBe(409);
+  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
 }, 30_000);
 
 test("a Stop still gathering words doesn't end the recording that started after it", async () => {
@@ -757,3 +758,76 @@ test("the recording window is the hub's clock: a caller's start or stop time cha
   expect(stopB.notes.map((n) => n.text)).toEqual(["after A stopped"]);
   expect(stopB.notes.every((n) => !n.pin)).toBe(true);
 }, 60_000);
+
+test("speech belongs to one recording: the stopping one's 300 ms never reaches into the recording that started right after it", async () => {
+  const r = room();
+  const base = Date.now() - 60_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "said in A", r.maya.id, "mayaLaptop", base + 1000);
+  // A stops at base+5000; while it waits for its last words, B starts at base+5100 and its first words come at base+5200: inside A's
+  // 300 ms of slack, but B's.
+  r.at(base + 5000);
+  const stoppingA = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  r.at(base + 5100);
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!b.ok) throw new Error("start");
+  line(r.hub, "said in B", r.maya.id, "mayaLaptop", base + 5200);
+  const gotA = await stoppingA;
+  expect(gotA.ok && gotA.notes.map((n) => n.text)).toEqual(["said in A"]);
+  r.at(base + 9000);
+  const gotB = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: b.id, caller: "host", personId: r.maya.id, pointer: [] });
+  expect(gotB.ok && gotB.notes.map((n) => n.text)).toEqual(["said in B"]);
+  // A line that began before a recording started is not that recording's.
+  r.at(base + 20_000);
+  line(r.hub, "before C", r.maya.id, "mayaLaptop", base + 19_800);
+  const c = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!c.ok) throw new Error("start");
+  line(r.hub, "inside C", r.maya.id, "mayaLaptop", base + 20_500);
+  r.at(base + 24_000);
+  const gotC = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: c.id, caller: "host", personId: r.maya.id, pointer: [] });
+  expect(gotC.ok && gotC.notes.map((n) => n.text)).toEqual(["inside C"]);
+}, 60_000);
+
+test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
+  const r = room();
+  const stopOne = async (text: string) => {
+    const started = r.hub.recordStart("mayaLaptop", r.maya.id);
+    if (!started.ok) throw new Error("start");
+    const res = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: started.id, caller: "host", personId: r.maya.id, pointer: [], typed: text });
+    if (!res.ok) throw new Error(res.reason);
+    return res;
+  };
+  const first = await stopOne("first");
+  const notes = first.notes;
+  const send = () => r.post("/record/send", { recordingId: first.recordingId, personId: r.maya.id, notes });
+  expect((await send()).status).toBe(200);
+  const sentOnce = r.s.store.recentEvents({ kinds: ["speech"], limit: 50 }).filter((e) => e.data.recordingId === first.recordingId).length;
+  expect(sentOnce).toBeGreaterThan(0);
+  // More stopped recordings than the hub keeps: the first one's record is evicted, authorization and receipt together.
+  for (let i = 0; i < NOTE_RECS_MAX; i++) (r.hub as any).noteRecs.set(`filler${i}`, { caller: "host", personId: r.maya.id });
+  r.hub.recordStart("mayaLaptop", r.maya.id);
+  await stopOne("evictor").catch(() => {});
+  expect((r.hub as any).noteRecs.has(first.recordingId)).toBe(false);
+  // A retry now is refused outright, not run a second time.
+  const retry = await send();
+  expect(retry.status).toBe(404);
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 50 }).filter((e) => e.data.recordingId === first.recordingId).length).toBe(sentOnce);
+  expect(r.s.directives().length).toBe(0);
+}, 60_000);
+
+test("the older prompt-window start is refused while a recording runs, and the recording and its window are untouched", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const win = (r.hub as any).promptMode.get("mayaLaptop");
+  const res = await r.post("/prompt-window/start", { deviceId: "mayaLaptop" });
+  expect(res.status).toBe(409);
+  expect((r.hub as any).promptMode.get("mayaLaptop")).toBe(win);
+  expect(r.s.recordings().map((x) => x.id)).toEqual([a.id]);
+  // Its own Stop still closes the window.
+  expect((await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, text: "ok" })).status).toBe(200);
+  // With no recording running the older call works as before.
+  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop" })).status).toBe(200);
+}, 30_000);

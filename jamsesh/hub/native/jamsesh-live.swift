@@ -22,22 +22,10 @@ import ScreenCaptureKit
 setvbuf(stdout, nil, _IOFBF, 1 << 20)
 signal(SIGPIPE, SIG_IGN)
 
-/// The button the hub told us is down: where, for whom, and when we last heard. A button never stays down once the hub is gone or quiet.
+// (Declared first: quit() can run before any other line has.)
+/// The button the hub told us is down; see "the left mouse button" below.
 var held: (p: CGPoint, pid: pid_t, wid: CGWindowID, at: Date)?
-let heldLock = NSLock()
-func setHeld(_ h: (p: CGPoint, pid: pid_t, wid: CGWindowID, at: Date)?) {
-  heldLock.lock()
-  held = h
-  heldLock.unlock()
-}
-/// Lets go of the held button (if any) where it was last.
-func releaseHeld() {
-  heldLock.lock()
-  let h = held
-  held = nil
-  heldLock.unlock()
-  if let h { mouse(.leftMouseUp, h.p, h.pid, h.wid) }
-}
+let pressLock = NSLock()
 
 /// Every way out of this program goes through here, so a button the hub told us is down never outlives it.
 func quit(_ code: Int32) -> Never {
@@ -232,6 +220,60 @@ func mouse(_ type: CGEventType, _ p: CGPoint, _ pid: pid_t, _ wid: CGWindowID) {
 }
 
 
+// ---- the left mouse button: one state machine ----
+// `held` is the button the hub told us is down: where, for whom, and when we last heard. It is read and changed, and the events that
+// go with each change are posted, only inside these functions and only under `pressLock`, so what we think is down and what the app
+// was told never disagree. Every way a press can start or end (down, move, up, tap, the quiet watchdog, quit) goes through them.
+
+func buttonDown(_ p: CGPoint, _ pid: pid_t, _ wid: CGWindowID) {
+  pressLock.lock()
+  defer { pressLock.unlock() }
+  if let h = held { mouse(.leftMouseUp, h.p, h.pid, h.wid) }  // a new press ends the old one
+  mouse(.leftMouseDown, p, pid, wid)
+  held = (p, pid, wid, Date())
+}
+
+func buttonDrag(_ p: CGPoint, _ pid: pid_t, _ wid: CGWindowID) {
+  pressLock.lock()
+  defer { pressLock.unlock() }
+  mouse(.leftMouseDragged, p, pid, wid)
+  if held != nil { held = (p, pid, wid, Date()) }
+}
+
+/// The press ends where the hub says if the window is still there, else where it went down. With nothing held and a window, the up is still sent.
+func buttonUp(_ at: (CGPoint, pid_t, CGWindowID)?) {
+  pressLock.lock()
+  defer { pressLock.unlock() }
+  let was = held
+  held = nil
+  if let (p, pid, wid) = at { mouse(.leftMouseUp, p, was?.pid ?? pid, was?.wid ?? wid) } else if let was { mouse(.leftMouseUp, was.p, was.pid, was.wid) }
+}
+
+/// A tap is a press: held between its down and its up, so quitting or the watchdog in between lets it go like any other.
+func buttonTap(_ p: CGPoint, _ pid: pid_t, _ wid: CGWindowID) {
+  buttonDown(p, pid, wid)
+  usleep(40_000)
+  buttonUp((p, pid, wid))
+}
+
+/// Lets go of the held button (if any) where it was last.
+func releaseHeld() {
+  pressLock.lock()
+  defer { pressLock.unlock() }
+  guard let h = held else { return }
+  held = nil
+  mouse(.leftMouseUp, h.p, h.pid, h.wid)
+}
+
+/// Lets go of a press nothing has touched for `seconds`.
+func releaseIfStale(_ seconds: Double) {
+  pressLock.lock()
+  defer { pressLock.unlock() }
+  guard let h = held, Date().timeIntervalSince(h.at) > seconds else { return }
+  held = nil
+  mouse(.leftMouseUp, h.p, h.pid, h.wid)
+}
+
 /// While nobody watches the tile the hub says "pause": frames are dropped before they are encoded, "resume" starts them again.
 var paused = false
 let pauseLock = NSLock()
@@ -254,30 +296,13 @@ func handle(_ line: String) {
   let fy = (m["y"] as? Double) ?? 0.5
   switch t {
   case "tap":
-    guard let (p, pid, wid) = point(fx, fy) else { return }
-    mouse(.leftMouseDown, p, pid, wid)
-    usleep(40_000)
-    mouse(.leftMouseUp, p, pid, wid)
+    if let (p, pid, wid) = point(fx, fy) { buttonTap(p, pid, wid) }
   case "down":
-    releaseHeld()
-    if let (p, pid, wid) = point(fx, fy) {
-      mouse(.leftMouseDown, p, pid, wid)
-      setHeld((p, pid, wid, Date()))
-    }
+    if let (p, pid, wid) = point(fx, fy) { buttonDown(p, pid, wid) } else { releaseHeld() }
   case "move":
-    if let (p, pid, wid) = point(fx, fy) {
-      mouse(.leftMouseDragged, p, pid, wid)
-      heldLock.lock()
-      if held != nil { held = (p, pid, wid, Date()) }
-      heldLock.unlock()
-    }
+    if let (p, pid, wid) = point(fx, fy) { buttonDrag(p, pid, wid) }
   case "up":
-    // Where the hub says if the window is still there; else where the button went down. Either way the held button comes up.
-    heldLock.lock()
-    let was = held
-    held = nil
-    heldLock.unlock()
-    if let (p, pid, wid) = point(fx, fy) { mouse(.leftMouseUp, p, was?.pid ?? pid, was?.wid ?? wid) } else if let was { mouse(.leftMouseUp, was.p, was.pid, was.wid) }
+    buttonUp(point(fx, fy))
   case "scroll":
     guard let (p, pid, wid) = point(fx, fy) else { return }
     mouse(.mouseMoved, p, pid, wid)
@@ -320,10 +345,7 @@ Thread.detachNewThread {
 Thread.detachNewThread {
   while true {
     sleep(1)
-    heldLock.lock()
-    let stale = held.map { Date().timeIntervalSince($0.at) > 6 } ?? false
-    heldLock.unlock()
-    if stale { releaseHeld() }
+    releaseIfStale(6)
   }
 }
 signal(SIGTERM, SIG_IGN)
