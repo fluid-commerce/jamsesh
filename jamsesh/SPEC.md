@@ -1169,7 +1169,8 @@ Every client window and the big screen capture audio; it's consolidated on the h
   window can send audio as another's microphone (403), and an unregistered device gets 404, which
   the window retries until its registration lands. Segments that end while the brain is speaking are dropped, so it doesn't transcribe
   itself.
-- **A WAV is read only when it is whole.** `RIFF`/`WAVE`, every chunk inside the file, exactly one
+- **A WAV is read only when it is whole.** `RIFF`/`WAVE` with the RIFF size the file really has,
+  every chunk (with a printable id) inside the file and ending at its end, one `data` chunk, exactly one
   complete `fmt ` chunk (16 bytes or more) before `data`, whole sample frames, a rate of 8 to 48 kHz,
   1 or 2 channels, 8/16/32-bit PCM or 32-bit float, at most 120 seconds. Anything else is refused
   with 400 for a segment and for a join read, before any audio is allocated, and a refused segment
@@ -1196,7 +1197,14 @@ Every client window and the big screen capture audio; it's consolidated on the h
   (case and punctuation aside) becomes its own line, after the line it was grouped with; copies with
   the same other words make one line together. The original line is labelled from the copies left.
   A split-out line never teaches a voice and stays "Someone" unless a voice match names it (its
-  laptop's owner doesn't count). A late copy is checked the same way. Cost: with four laptops,
+  laptop's owner doesn't count). A late copy is checked the same way, before it can change the line:
+  one that could be other speech, or that is now the clearest copy, is transcribed first and is its own
+  line when its words differ; only a copy with the line's words changes it (speaker, and wording when
+  much cleaner). **One rule for copies:** every copy becomes exactly one line or joins exactly one, never
+  lost or counted twice, however late. Each group's copies are decided only in that group's own job
+  queue, one job at a time; a group (and each part split from it) gets its transcription queued before a
+  late copy can find it, every late copy goes through one admit step, and a group with work queued is
+  never let go. Cost: with four laptops,
   whisper runs once per line before; now once per copy within 10 dB, which is 2 for laptops spread
   across a room (6 dB apart) and 4 around one table (2 to 3 dB apart). Known limit: a quieter copy
   whisper hears slightly differently ("cup" for "up") shows as a second line.
@@ -1277,8 +1285,10 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
      `~/.jamsesh/models`, then `~/.cache/whisper-cpp` (large-v3-turbo, then medium.en, base.en).
      A file of the pinned name is used only at its exact size and SHA-256 (checked once per file
      each run); a bad one is passed over, and deleted only when it is the exact file the hub downloaded
-     itself (recorded in `~/.jamsesh/models/downloaded.json`, compared by real path), never one chosen
-     with `JAMSESH_WHISPER_MODEL` or put there by anyone else. Other
+     itself (recorded in `~/.jamsesh/models/downloaded.json` by that file's identity: device, inode,
+     size, birth and modification times; compared by real path), never one chosen with
+     `JAMSESH_WHISPER_MODEL` or put there by anyone else. A download never lands over such a file
+     either (checked before and after downloading); the host says the file was left alone. Other
      models must be at least a model's size (25 MB). With none, the hub downloads it on the first
      host session from Hugging Face (`ggerganov/whisper.cpp`), checked against the pinned size and
      SHA-256 by the same code as Parakeet's, into `~/.jamsesh/models`, with progress in Settings;
@@ -1400,7 +1410,9 @@ ever been them, they aren't the host window's person, and the host has no voice 
 else (on another laptop now, on a disconnected one before, or taught to the host by the room) is
 refused with 403, the request is shown to the host (a toast, and **Let in as <name>** beside that
 laptop in **Settings > Connected devices**), and only the host's window can let it in
-(`POST /api/paired/:id/allow`), which disconnects the person's other laptops. The laptop that was
+(`POST /api/paired/:id/allow` with the `personId` it was shown; a request changed since is 409), which
+disconnects the person's other laptops. Letting in and disconnecting are never queued for later. One
+function (`bindBrowser`) is the only place a browser credential is given a person. The laptop that was
 refused says so and offers **Pick someone else**; it asks again every 10 seconds. The join read is
 offered only after the host acknowledged the window's registration as that person.
 
@@ -1416,8 +1428,8 @@ transcribed, a correction of an older "Someone" line, or a held first sample can
 
 Device clocks can't be trusted for this, so the host also issues a **reset epoch**: the number of
 resets it has made (`voiceResets`, each one's moment kept). It goes with every clock pong and with
-`POST /api/people/:id/voice/start`. A device stamps each segment with the epoch it had when it
-captured it (`epoch` on `/api/audio`), and a read sends back the epoch its start returned
+`POST /api/people/:id/voice/start`. A device stamps each segment with the epoch its earliest frame
+(pre-roll included) was captured under, set when the segment starts, never when it ends (`epoch` on `/api/audio`), and a read sends back the epoch its start returned
 (`POST /api/people/:id/voice?epoch=`). Audio from an older epoch counts as heard no later than the
 first reset after it, whatever its timestamp says; a missing or unknown epoch counts as the oldest.
 So audio buffered across a Reset with a clock ahead of the host, or a read started before the Reset
