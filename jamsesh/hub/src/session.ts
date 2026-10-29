@@ -638,10 +638,28 @@ export class Session {
     return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
   }
 
+  /**
+   * Why an agent can't finish a coordinate directive yet, or null. A comparison with another agent is
+   * the whole job, so "done" needs a recorded exchange since the directive was made: a message this
+   * agent sent to someone else, and one it got back. (Dropping it, "cancelled", is always allowed.)
+   */
+  exchangeGap(d: Directive, agentId: string): string | null {
+    if (d.mode !== "coordinate") return null;
+    const msgs = this.store.recentEvents({ kinds: ["message"], limit: 400 }).filter((e) => e.ts >= d.ts && !e.data.inline);
+    const sent = msgs.some((e) => e.authorId === agentId && e.data.to && e.data.to !== agentId && e.data.to !== "brain");
+    const got = msgs.some((e) => e.authorId !== agentId && e.authorType !== "brain" && e.authorType !== "system" && (e.data.to === agentId || (e.data.to === "all" && e.authorType === "agent")));
+    if (sent && got) return null;
+    return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message"} (jam_ask works too) before you mark it done. If nobody can answer, jam_ack it cancelled and say why.`;
+  }
+
   /** One agent's progress on a directive; the directive's status follows the slowest target. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
+    if (status === "done") {
+      const gap = this.exchangeGap(d, agentId);
+      if (gap) throw new Error(gap);
+    }
     // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
     if (d.status === "cancelled" || d.progress?.[agentId] === "cancelled") return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };

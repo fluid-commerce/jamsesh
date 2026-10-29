@@ -422,9 +422,12 @@ export class McpEndpoint {
       case "jam_update": {
         const agent = this.requireAgent(ctx);
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}), ...(args.kind === "shipped" && typeof args.seen === "string" && args.seen.trim() ? { seen: args.seen.trim().slice(0, 300) } : {}) } });
-        if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
+        // A report never closes a coordinate directive: that waits for jam_ack done after the exchange.
+        const coordinate = args.directiveId && s.store.get("directives", String(args.directiveId))?.mode === "coordinate";
+        if (args.directiveId && !coordinate && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
-        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);
+        const open = coordinate && (args.kind === "done" || args.kind === "shipped") ? "\n\nThat directive is a comparison with another agent, so it stays open: compare through jam_message, then jam_ack it done." : "";
+        return text(`Posted (#${ev.id}).${open}${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);

@@ -185,14 +185,14 @@ test("the parity tool uses the shipper's own 'seen', refuses without one, and it
   // The brain can't supply what a person sees: the tool has no such input.
   expect(Object.keys(tools.coordinate_parity.inputSchema.shape).sort()).toEqual(["platforms", "shipments"]);
   // Same platform only, or a shipper that isn't in the batch: refused, nothing sent.
-  expect(await said({ feature: "Sidebar", shipments: ["ship-1"], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
-  expect(await said({ feature: "Sidebar", shipments: ["ship-9"], platforms: ["desktop"] })).toContain("Name the shipments");
+  expect(await said({ shipments: ["ship-1"], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
+  expect(await said({ shipments: ["ship-9"], platforms: ["desktop"] })).toContain("Name the shipments");
   // A shipper who said nothing a person sees: refused.
   const none = (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped background sync status telemetry to the metrics collector", seen: "" }]);
-  expect(((r: any) => r?.text ?? String(r))(await none.coordinate_parity.execute({ feature: "Sync status badge", shipments: ["ship-1"], platforms: ["mobile"] }))).toContain("didn't say what a person sees");
+  expect(((r: any) => r?.text ?? String(r))(await none.coordinate_parity.execute({ shipments: ["ship-1"], platforms: ["mobile"] }))).toContain("didn't say what a person sees");
   expect(s.directives()).toHaveLength(0);
   expect(hub.mcp.inboxText(mobile, false)).toBe("Nothing new.");
-  const check = { feature: "Collapsible sidebar navigation", shipments: ["ship-1"], platforms: ["mobile"] };
+  const check = { shipments: ["ship-1"], platforms: ["mobile"] };
   await tools.coordinate_parity.execute(check);
   const inbox = hub.mcp.inboxText(mobile, false);
   expect(inbox).toContain("[coordinate]");
@@ -250,7 +250,7 @@ test("two different features from one agent each get their look; the same featur
 
 test("parity checks are deduplicated by feature and agent, and a short feature doesn't swallow a longer, different one", async () => {
   const { hub, s, desktop, mobile } = room();
-  const send = (seen: string) => (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped", seen }]).coordinate_parity.execute({ feature: seen, shipments: ["ship-1"], platforms: ["mobile"] });
+  const send = (seen: string) => (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped", seen }]).coordinate_parity.execute({ shipments: ["ship-1"], platforms: ["mobile"] });
   await send("A sidebar that collapses to icons");
   await send("A sidebar that collapses to icons");
   await send("A dark mode toggle in settings");
@@ -286,14 +286,55 @@ test("two different features shipped in one window stay separate: two looks' wor
     { id: "ship-3", agent: mobile, text: "Shipped a profile photo picker", seen: "A profile photo picker on the account screen" },
   ];
   const tools = (hub.brain as any).parityTools(batch);
-  const r = await tools.coordinate_parity.execute({ feature: "Sidebar and dark mode", shipments: ["ship-1", "ship-2"], platforms: ["mobile"] });
+  const r = await tools.coordinate_parity.execute({ shipments: ["ship-1", "ship-2"], platforms: ["mobile"] });
   expect(r?.text ?? String(r)).toContain("different features");
-  const mixed = await tools.coordinate_parity.execute({ feature: "Sidebar", shipments: ["ship-1", "ship-3"], platforms: [] });
+  const mixed = await tools.coordinate_parity.execute({ shipments: ["ship-1", "ship-3"], platforms: [] });
   expect(mixed?.text ?? String(mixed)).toContain("different features");
   expect(s.directives()).toHaveLength(0);
-  await tools.coordinate_parity.execute({ feature: "Collapsible sidebar", shipments: ["ship-1"], platforms: ["mobile"] });
-  await tools.coordinate_parity.execute({ feature: "Dark mode toggle", shipments: ["ship-2"], platforms: ["mobile"] });
+  await tools.coordinate_parity.execute({ shipments: ["ship-1"], platforms: ["mobile"] });
+  await tools.coordinate_parity.execute({ shipments: ["ship-2"], platforms: ["mobile"] });
   const inbox = hub.mcp.inboxText(mobile, false);
   expect(inbox.match(/\[coordinate\]/g)).toHaveLength(2);
   expect(inbox.split("\n").filter((l) => l.includes("[coordinate]")).every((l) => !(l.includes("sidebar") && l.includes("dark mode")))).toBe(true);
+});
+
+test("a coordinate directive stays open on jam_update and closes only after a recorded exchange", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const ctx = (a: any) => ({ agentId: a.id, ip: "127.0.0.1", device: "host" });
+  const d = s.createDirective({ text: "Parity check, not a build task: compare the sidebar with desktop.", mode: "coordinate", targets: [mobile.id], requestedBy: "JamSesh", rationale: "Parity" });
+  const state = () => s.store.get("directives", d.id)!.progress[mobile.id] ?? s.store.get("directives", d.id)!.status;
+  const refused = (p: Promise<unknown>) => p.then(() => "accepted", (e: Error) => e.message);
+  // Reporting done or shipped against it posts the update but never closes it.
+  for (const kind of ["done", "shipped"]) {
+    const r: any = await hub.mcp.call(ctx(mobile), "jam_update", { kind, text: "Our sidebar matches", directiveId: d.id, seen: "A sidebar" });
+    expect(JSON.stringify(r)).toContain("stays open");
+    expect(state()).not.toBe("done");
+  }
+  // jam_ack done with no exchange is refused, and so is one where only this agent has spoken.
+  expect(await refused(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" }))).toContain("send them what you found");
+  expect(state()).not.toBe("done");
+  s.sendMessage(mobile.id, desktop.id, "Mobile has the sidebar, collapsed to a bar");
+  expect(await refused(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" }))).toContain("wait for their reply");
+  expect(state()).not.toBe("done");
+  // A message from the brain or to someone else doesn't count as the counterpart's reply.
+  s.store.addEvent({ kind: "message", authorType: "brain", authorId: null, authorName: "JamSesh", text: "ok?", relevance: "work", data: { to: mobile.id } });
+  const other = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
+  s.sendMessage(desktop.id, other.id, "unrelated chat with a third agent");
+  expect(await refused(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" }))).toContain("wait for their reply");
+  expect(state()).not.toBe("done");
+  // The counterpart replies: now it can close, through the explicit ack.
+  s.sendMessage(desktop.id, mobile.id, "Agreed, same on ours");
+  await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" });
+  expect(state()).toBe("done");
+});
+
+test("a coordinate directive can always be dropped, and other modes close on jam_update as before", async () => {
+  const { hub, s, mobile } = room();
+  const ctx = { agentId: mobile.id, ip: "127.0.0.1", device: "host" };
+  const c = s.createDirective({ text: "Parity check: compare.", mode: "coordinate", targets: [mobile.id], requestedBy: "JamSesh", rationale: "" });
+  await hub.mcp.call(ctx, "jam_ack", { directiveId: c.id, status: "cancelled", result: "nobody answers" });
+  expect(s.store.get("directives", c.id)!.status).toBe("cancelled");
+  const i = s.createDirective({ text: "Add the footer", mode: "implement", targets: [mobile.id], requestedBy: "Jonathan", rationale: "" });
+  await hub.mcp.call(ctx, "jam_update", { kind: "done", text: "Footer added", directiveId: i.id });
+  expect(s.store.get("directives", i.id)!.status).toBe("done");
 });
