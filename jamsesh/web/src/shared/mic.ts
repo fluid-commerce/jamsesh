@@ -312,6 +312,7 @@ export class Mic {
 
   /** The person's own start or stop makes the mic theirs: a loan's pending mute must not undo it. */
   private dropLoan() {
+    this.control++;
     if (this.muteTimer) (clearTimeout(this.muteTimer), (this.muteTimer = null));
     this.lentOn = false;
   }
@@ -325,6 +326,8 @@ export class Mic {
   }
 
   private leases = 0;
+  /** Counts the person's own start/stop, so a loan still switching the mic on can tell the mic became theirs meanwhile. */
+  private control = 0;
   private lentOn = false;
   private muteTimer: ReturnType<typeof setTimeout> | null = null;
   /**
@@ -336,8 +339,10 @@ export class Mic {
   async lend(): Promise<{ release: () => void; turnedOn: boolean } | null> {
     if (this.muteTimer) (clearTimeout(this.muteTimer), (this.muteTimer = null));
     const wasOn = this.status.on;
+    const gen = this.control;
     if (!wasOn && !(await this.ensureOn())) return null;
-    if (!wasOn) this.lentOn = true;
+    // Switched on by this loan, unless the person took over the mic while it was starting: then it is theirs and no loan mutes it.
+    if (!wasOn && this.control === gen) this.lentOn = true;
     this.leases++;
     let given = false;
     return {
@@ -354,7 +359,7 @@ export class Mic {
   /** Turns the mic on if it is off; false (with the reason on status.error) when it can't be. */
   async ensureOn() {
     try {
-      await this.start();
+      await this.begin();
       return this.status.on;
     } catch {
       return false;

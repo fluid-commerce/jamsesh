@@ -1265,6 +1265,36 @@ test("text typed with a failed older close is not lost: it goes to the room when
   }
 }, 30_000);
 
+test("a read that fails after the window closed still lets a cancel or the window's timer give its words to the room", async () => {
+  for (const how of ["cancel", "timeout"] as const) {
+    const r = room();
+    const base = Date.now() - 30_000;
+    r.at(base);
+    const tok = "rt_nnnnnnnnnnnnnnnn";
+    const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+    if (!a.ok) throw new Error("start");
+    line(r.hub, "words before the read failed", r.maya.id, "mayaLaptop", base + 500);
+    r.at(base + 4000);
+    (r.hub as any).audio.pendingFor = () => { throw new Error("read failed"); };
+    await expect(r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] })).rejects.toThrow("read failed");
+    expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
+    if (how === "cancel") r.hub.recordCancel("mayaLaptop", tok, "host");
+    else (r.hub as any).releasePrompt("mayaLaptop", (r.hub as any).promptMode.get("mayaLaptop"));
+    expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("words before the read failed");
+  }
+}, 60_000);
+
+test("a retry of the older close with blank text keeps the text from the failed try", async () => {
+  const r = room();
+  r.hub.promptStart("mayaLaptop", Date.now() - 3000);
+  const real = r.s.store.addEvent.bind(r.s.store);
+  let failed = false;
+  (r.s.store as any).addEvent = (e: any) => (e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
+  await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "typed only note" })).rejects.toThrow("locked");
+  const again = await r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "" });
+  expect(again).toMatchObject({ ok: true, text: "typed only note" });
+});
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

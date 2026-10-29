@@ -78,3 +78,19 @@ test("the person's own mute and unmute win over a loan's pending mute", async ()
   expect(opens).toBe(2);
   expect(stopsBefore()).toBe(0);
 }, 20_000);
+
+test("a loan still switching the mic on when the person starts it by hand does not claim it: releasing the loan leaves their mic on", async () => {
+  const mic: any = new Mic("dev");
+  let finishOpen!: () => void;
+  mic.open = () => new Promise<void>((r) => (finishOpen = () => (mic.status = { ...mic.status, on: true }, r())));
+  const lending = mic.lend();
+  // The person starts the mic themselves while the loan's start is unresolved (deferred open).
+  const manual = mic.start();
+  finishOpen();
+  await manual;
+  const loan = await lending;
+  expect(loan.turnedOn).toBe(false);
+  loan.release();
+  await Bun.sleep(1800);
+  expect(mic.status.on).toBe(true);
+}, 20_000);

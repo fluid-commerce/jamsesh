@@ -406,12 +406,18 @@ export class Hub {
     const heard = () => s.store.all("utterances").filter((u) => u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
-    while (Date.now() < deadline) {
-      const now = heard();
-      stable = now.length === lines.length && Date.now() > w.t1 + 1500 && this.audio.pendingFor(w.deviceId) === 0 ? stable + 1 : 0;
-      lines = now;
-      if (stable >= 2) break;
-      await Bun.sleep(400);
+    try {
+      while (Date.now() < deadline) {
+        const now = heard();
+        stable = now.length === lines.length && Date.now() > w.t1 + 1500 && this.audio.pendingFor(w.deviceId) === 0 ? stable + 1 : 0;
+        lines = now;
+        if (stable >= 2) break;
+        await Bun.sleep(400);
+      }
+    } catch (e) {
+      // The read failed with the window already closed: it stays, bounded, so a later cancel or its timer can still give its words to the room.
+      if (open) open.retry = true;
+      throw e;
     }
     // Only this window's entry: a new recording may have started while this one waited.
     if (open && this.promptMode.get(w.deviceId) === open) {
@@ -445,7 +451,7 @@ export class Hub {
     // A close tried again keeps its first end time, so the same words are gathered and nothing later slips in.
     const end = open.t1 ?? t1;
     // The text typed with the first try is used again when the retry carries none.
-    const typed = w.typed ?? open.held?.text;
+    const typed = w.typed?.trim() ? w.typed : open.held?.text ?? w.typed;
     w = { ...w, ...(typed !== undefined ? { typed } : {}) };
     const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0: open.t0, t1: end }, open);
     open.retry = false;
