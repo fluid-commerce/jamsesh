@@ -1,6 +1,6 @@
 # What's tested
 
-Status of each major capability as of October 27, 2026. **Tested live** means exercised end to end
+Status of each major capability as of October 29, 2026. **Tested live** means exercised end to end
 with the real pieces (real Claude Code or Codex, the live brain on the AI Gateway, real network
 connections). **Simulated** means covered by automated tests or emulation, not the real thing.
 **Not tested** means built but not exercised yet.
@@ -45,6 +45,19 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Agents fetching a task's files with their credential | Simulated | Fetch tested with an agent token; no real agent run. |
 | Document with no request becomes proposed context | Simulated | A context card on the Tasks board with the file's text (or asking a person to word it); hub tests, and the card looked at in headless Chromium. |
 | Context carried between two sessions of a project | Simulated | Temp `JAMSESH_HOME` tests, and a real hub process started twice on a project (second with a new session). |
+
+## Live app tiles (phase 6.3)
+
+| Capability | Status | Notes |
+|---|---|---|
+| iPhone Simulator streamed into a tile, device frame, Home, Rotate, Light/Dark, taps and swipes from the tile | Tested live | Real Simulator (iOS 18.6, a throwaway device), real idb companion, headless Chromium: a tap on the tile turned a test app green in about 160 ms; Dark, Home and Rotate checked in screenshots. About 8 frames a second at full resolution on a busy Mac (15 to 18 on an idle one). |
+| Typing into the Simulator (US layout, shift, Return, Delete) | Tested live | Through idb on a throwaway device into a text field: capitals, digits, symbols and Return arrived as typed. Mapping unit-tested. |
+| Window capture of the Simulator at 30 fps, and its fallback | Simulated | Selection logic and the fallbacks (no permission, no or two windows, helper dying, turned screen) tested with fake helpers. The real capture needs Screen Recording on a host (office checklist). |
+| Brain puts a live app tile on a layout | Simulated | Tested through the layout tool by id and by name. |
+| Taps while the screen is turned | Not working | The companion's touches don't land in landscape; the hub refuses them with a reason. Rotating and watching work. |
+| Control passing, agents refused, a person without control refused, a device that vanishes mid-stream | Simulated | `hub/test/liveapps.test.ts` with a fake `xcrun`, a fake companion and a fake Mac helper. |
+| Mac and Electron apps: capture and input | Not tested | The Swift helper compiles and refuses cleanly without Screen Recording; capture and CGEvent input need those permissions on a real host (office checklist). |
+| Idb companion missing | Simulated | The tile starts watch-only with the install line. Not tried on a Mac without it. |
 
 ## Room and brain
 
@@ -112,6 +125,29 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | A rebuilt screen is one item with versions; "v3 · 2 min ago" badge opens the earlier builds; the screen swaps in place | Simulated | Uploads through the same path as `jam_post_image`; badge and version viewer checked in a screenshot. |
 | What each screen showed is kept; tapping the strip or "bring back what Jonathan had up" restores it | Simulated | Strip checked in the client window. The brain's tool is tested without a model; not tried with the live gateway. |
 
+## Driving the big screen (6.1)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Drive, Pass control, Drive together; agents, non-owners, stale drivers refused | Simulated | Real hub, a host window and paired driver windows in headless Chromium; unit tests for every refusal. |
+| Your named dart on the big screen, gliding, over a live build and over the canvas | Simulated | Seen in screenshots; geometry and tag style from FigCraft's `live.rs`. Not compared side by side with a live FigCraft cursor (the headless canvas never drew a peer's cursor). |
+| Click, scroll and type in a proxied live build | Simulated | Clicks, wheel (box and page), typing, Backspace, link navigation land. Hover styles (`:hover`) don't apply to synthetic events. |
+| Canvas: wheel pans, pinch zooms, drag pans, click selects | Simulated | Against a real figcraft-server; click uses FigCraft's own `ui.pointer`. Typing on the canvas isn't driven. |
+| Trackpad with Pointer Lock (relative motion) | Not tested for real | Headless Chromium refuses Pointer Lock; the relative path ran against a stand-in. Needs the Mac app (WKWebView may lack Pointer Lock; it then falls back to mapping over the mirror). |
+| Real trackpad feel, latency over Wi-Fi | Not tested | Loopback latency was under 1 ms; about 55 moves a second. |
+## Record (6.2)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Record on your own screen: rainbow trail, notes pinned where you pointed, tidy list, send to owning agents | Simulated | Headless Chromium against a throwaway hub with injected, timestamped utterances (no audio played); trail frames mid-motion, the tidy list, the sent toast and the pins in the picture viewer were looked at. |
+| Rainbow trail with reduced motion | Simulated | Frame checked with `prefers-reduced-motion`: shorter, thinner, fainter. Frame rate on a real Retina display not measured. |
+| Record on the big screen: lock taken and given back, refused when someone else drives, each driver recorded, trail and chip on the screen | Simulated | Two headless windows (driver and big screen) with a stand-in for the dart bridge; 6.1's real dart not connected yet. |
+| Note alignment (pauses, edges, splitting a long line, several drivers) | Simulated | Unit tests of the timing rules. Not tuned against real speech timing. |
+| Tidy then send through the web client's own `api()` | Simulated | Real hub over HTTP; a lost reply and a repeat send checked. |
+| Crop of the spot in a directive | Simulated | Made with macOS `sips` on the host; skipped elsewhere. Only for pictures, not the live canvas. |
+| Option+R toggles Record while the trackpad is captured (a bare R is typed into the big screen); R alone works when nothing is captured | Simulated | Key handling checked in the driving e2e; not pressed on a real Mac keyboard. |
+| Speech from a real mic into the notes | Not tested | Needs a room: real transcription timing against real pointer movement. |
+
 ## Phones and browsers
 
 | Capability | Status | Notes |
@@ -129,6 +165,16 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Full-size frame render (`/renders/full`) | Tested live | Against a real figcraft-server: 1440x900 frame came back 1600, 3200 and 4096 px wide. Not yet seen on a TV. |
 | Expand on a second display | Not tested | Needs a real second screen. |
 
+## Canvas panels and fonts (phase 6.4, 6.5)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Panel buttons: layers (left) and Design (right) slide in over a person's canvas; the big screen has none (6.4) | Simulated | Real canvas build in headless Chromium against a throwaway hub: both panels closed, each open, and the big screen's canvas, screenshots looked at. The `view.canvasPanel` command and the slide are covered by FigCraft's tests. |
+| The chosen panels come back after a reload | Simulated | Kept in the browser's local storage; reload checked in headless Chromium. Not tried in the Mac app's web view. |
+| Open fonts from repo cards fetched for every canvas (6.5) | Tested live | Real network: Fraunces, Lora and Space Grotesk fetched from Google Fonts (files on fonts.gstatic.com), Fontsource as the fallback; all OFL 1.1. Text in them drew correctly on a second person's canvas. |
+| A font only one person has, lent after their confirmation (6.5) | Simulated | The Mac app's `has_fonts`/`local_fonts` stood in by a script serving real fonts from this Mac (Zapfino); prompt, sharing, declining, a damaged file and a session ending checked in headless Chromium. The real Mac app prompt hasn't been clicked. |
+| Fonts are never kept: memory only, `no-store`, not in the offline outbox, dropped when the session ends | Simulated | Tested in the hub (bytes overwritten on withdraw and end) and the page (outbox stays empty with the network down). |
+
 ## Remote access
 
 | Capability | Status | Notes |
@@ -137,3 +183,9 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Router port mapping (NAT-PMP, UPnP) | Tested live | On this network's router. |
 | DuckDNS name and Let's Encrypt certificate | Not tested | Try with the staging certificate first. |
 | A real remote join over the internet | Not tested | |
+
+## Live apps under driving (6.3 with 6.1)
+
+| Capability | Status | Notes |
+|---|---|---|
+| A live app tile on a locked screen is driven by the screen's drivers; Pass control and Drive together carry over; elsewhere take, pass and release still apply | Simulated | Tested against the fake Simulator through the real routes (driver, co-driver, non-driver, agent, stranger, replay `as`). The dart replay onto a real Simulator tile has not been run on screen. |

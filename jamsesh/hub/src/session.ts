@@ -12,6 +12,7 @@ import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
   Agent,
+  ActiveRecording,
   Annotation,
   Artifact,
   ArtifactVersion,
@@ -32,7 +33,7 @@ import type {
   Stage,
   Workstream,
  TriageCard,
- BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
+ BuildRequest, FontsState, LiveApp, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -199,6 +200,9 @@ export class Session {
 
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
+  /** Live Simulator and Mac app tiles; LiveApps owns them. */
+  liveApps: () => LiveApp[] = () => [];
+  fonts: () => FontsState = () => ({ available: [], wanted: [] });
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
   voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", code: "ok", fix: "", enrolled: 0, lines: 0, byVoice: 0, neverUsed: false });
 
@@ -218,9 +222,12 @@ export class Session {
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
+      recordings: this.recordings(),
       facts: this.facts(),
       triage: this.board.shown(),
       buildRequests: this.buildRequests(),
+      liveApps: this.liveApps(),
+      fonts: this.fonts(),
       screens: this.screens(),
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
@@ -297,6 +304,8 @@ export class Session {
         return { key, value: this.shares() };
       case "annotations":
         return { key, value: this.annotations() };
+      case "recordings":
+        return { key, value: this.recordings() };
       case "facts":
         return { key, value: this.facts() };
       case "triage":
@@ -312,6 +321,10 @@ export class Session {
         return { key, value: this.screens() };
       case "buildRequests":
         return { key, value: this.buildRequests() };
+      case "liveApps":
+        return { key, value: this.liveApps() };
+      case "fonts":
+        return { key, value: this.fonts() };
       case "readyToShow":
         return { key, value: this.readyToShow() };
       case "showRequests":
@@ -1552,6 +1565,17 @@ export class Session {
     this.checkShares(true);
   }
 
+  // ---- recordings in progress ----
+
+  private active = new Map<string, ActiveRecording>();
+  recordings(): ActiveRecording[] {
+    return [...this.active.values()];
+  }
+  setRecording(r: ActiveRecording | null, deviceId?: string) {
+    if (r) this.active.set(r.deviceId, r);
+    else if (deviceId) this.active.delete(deviceId);
+    bus.changed("recordings");
+  }
   // ---- annotations ----
 
   annotations(): Annotation[] {
@@ -1714,6 +1738,7 @@ export class Session {
   private revertsToBoard(stage: Stage) {
     if (stage.pinned || stage.lock || stage.mode === "board" || stage.mode === "welcome") return false;
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && this.store.get("shares", t.shareId)?.status === "live")) return false;
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "app")) return false;
     return true;
   }
 
@@ -1781,7 +1806,9 @@ export class Session {
     if (next.mode === "layout") for (const t of next.layout?.tiles ?? []) if (t.kind === "screen" && !had.has(t.shareId)) this.rememberStageFor(t.shareId, screen, cur);
     const now = Date.now();
     const quiet = next.mode === "board" || next.mode === "welcome";
-    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
+    // An owner who re-casts while driving keeps driving the new stage; anyone they handed control to is cut off.
+    const keeps = opts.person?.id && cur.lock?.personId === opts.person.id && cur.lock.drivers?.includes(opts.person.id);
+    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now, ...(keeps ? { drivers: [opts.person.id!] } : {}) } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     this.commitStage(stage, screen);
@@ -1791,6 +1818,8 @@ export class Session {
 
   private commitStage(stage: Stage, screen: string) {
     this.expireAsksFor(screen, stage.lock);
+    // A live app tile on this screen is driven by whoever the lock says drives.
+    bus.changed("liveApps");
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
@@ -1854,11 +1883,74 @@ export class Session {
     this.commitStage(rest, screen);
   }
 
+  /** A person takes a free screen's lock, driving it, without changing what it shows (they start recording on it). */
+  holdScreen(screen: string, person: { id: string; name: string }) {
+    const cur = this.stage(screen);
+    if (cur.lock) return;
+    const now = Date.now();
+    this.commitStage({ ...cur, lock: { by: person.name, personId: person.id, since: now, lastActive: now, drivers: [person.id] } }, screen);
+  }
+
   /** The owner did something with their screen: it counts as activity. */
   touchLock(screen = "main") {
     const cur = this.stage(screen);
     if (!cur.lock) return;
     this.commitStage({ ...cur, lock: { ...cur.lock, lastActive: Date.now() } }, screen);
+  }
+
+  // ---- driving: a cursor of your own on the big screen (6.1) ----
+
+  /** Whether a person has a window open right now (the host's own window counts for the person at the host). */
+  personOnline(personId: string) {
+    const atHost = personId === this.store.setting<string>("hostPersonId", "");
+    return this.store.all("devices").some((d) => (d.personId === personId || (atHost && d.kind === "host")) && this.deviceOnline(d.id));
+  }
+
+  /** The people with a window open right now. */
+  onlinePeople(): string[] {
+    return this.people().filter((p) => this.personOnline(p.id)).map((p) => p.id);
+  }
+
+  /** Who is driving a screen: always a subset of the lock's owner and whoever they handed control to. */
+  driversOf(screen = "main"): string[] {
+    return this.lockOf(screen)?.drivers ?? [];
+  }
+
+  private setDrivers(screen: string, drivers: string[]) {
+    const cur = this.stage(screen);
+    if (!cur.lock) return;
+    const { drivers: _old, ...lock } = cur.lock;
+    this.commitStage({ ...cur, lock: { ...lock, lastActive: Date.now(), ...(drivers.length ? { drivers } : {}) } }, screen);
+  }
+
+  /**
+   * Start, stop, pass or share driving. `by` is the person asking. Only the lock's owner starts, passes or shares; anyone driving
+   * can stop themselves, and the owner can stop anyone. Says why when it can't.
+   */
+  drive(action: "start" | "stop" | "pass" | "together", screen: string, by: string | null, to?: string | null): { ok: true; drivers: string[] } | { ok: false; error: string; status: number } {
+    const lock = this.lockOf(screen);
+    const no = (error: string, status = 403) => ({ ok: false as const, error, status });
+    if (!by || !this.person(by)) return no("Pick who you are in this window first.");
+    if (!lock) return no("Put something on the screen first; driving belongs to whoever holds it.", 409);
+    const drivers = lock.drivers ?? [];
+    const owner = lock.personId === by;
+    if (action === "stop") {
+      const who = to && owner ? to : by;
+      if (who !== by && !owner) return no(`Only ${lock.by} can stop someone else.`);
+      this.setDrivers(screen, drivers.filter((d) => d !== who));
+      return { ok: true, drivers: this.driversOf(screen) };
+    }
+    if (!owner) return no(`Only ${lock.by}, who holds the screen, can ${action === "start" ? "start driving it" : action === "pass" ? "pass control" : "drive together"}.`);
+    if (action === "start") {
+      if (!drivers.includes(by)) this.setDrivers(screen, [...drivers, by]);
+      return { ok: true, drivers: this.driversOf(screen) };
+    }
+    const target = to ? this.person(to) : undefined;
+    if (!target) return no("Pass it to a person in the room.", 404);
+    if (target.id === by) return no("That's you already.", 400);
+    if (!this.personOnline(target.id)) return no(`${target.name} isn't in the room right now.`, 409);
+    this.setDrivers(screen, action === "pass" ? [target.id] : [...new Set([...drivers, by, target.id])]);
+    return { ok: true, drivers: this.driversOf(screen) };
   }
 
   /** Locks whose owners left or went quiet let go even when nobody asks (a timer runs this). */

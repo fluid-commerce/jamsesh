@@ -35,13 +35,15 @@ test("offline, screen controls go nowhere later and the person is told; online, 
     sent.push(url);
     return Response.json({});
   }) as typeof fetch;
+  // Other files in this process may have left calls queued: count only what this test adds.
+  await outbox.load();
+  const before = outbox.get().pending;
   try {
     online(false);
     for (const [path, body] of controls) expect(await stageAction(path, body)).toBe("Not connected to the host. Try again when you're back.");
     expect(sent).toEqual([]);
     // Nothing waits in the outbox to replay over a later lock once the laptop is back.
-    await outbox.load();
-    expect(outbox.get().pending).toBe(0);
+    expect(outbox.get().pending).toBe(before);
 
     online(true);
     for (const [path, body] of controls) expect(await stageAction(path, body)).toBe("");
@@ -51,7 +53,7 @@ test("offline, screen controls go nowhere later and the person is told; online, 
       throw new TypeError("network down");
     }) as typeof fetch;
     expect(await stageAction("/stage/unlock", { screen: "main" })).toBe("Not connected to the host. Try again when you're back.");
-    expect(outbox.get().pending).toBe(0);
+    expect(outbox.get().pending).toBe(before);
     globalThis.fetch = (async () => Response.json({ error: "Felipe has this screen locked. Unlock it first to bring something else back." }, { status: 409 })) as typeof fetch;
     expect(await stageAction("/stage/restore", { id: "his_1" })).toBe("Felipe has this screen locked. Unlock it first to bring something else back.");
   } finally {

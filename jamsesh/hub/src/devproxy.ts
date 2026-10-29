@@ -4,12 +4,13 @@
 // has to come from the host itself or carry a paired device's token (the cookie a paired
 // browser already holds, which browsers send to every port of the same address, or a
 // bearer header such as the Mac app's relay adds).
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { newId } from "./store";
 import type { Session } from "./session";
+import { allowDriveScript, driveScript, scriptHash, withDriveScript } from "./devdrive";
 import type { DevServer, Platform } from "./types";
 
 /** How long a dev server may stay unreachable before its tile clears itself. */
@@ -50,6 +51,17 @@ export class DevProxy {
 
   reserve(port: number) {
     this.reserved.add(port);
+  }
+
+  /** The session's frame key: the host's big screen sends it with each driver's event (GET /api/drive/frame-key, host windows only). */
+  readonly frameKey = randomBytes(24).toString("hex");
+  /** The script pages get, once the hub knows the big screen's origin; until then pages are served undriven. */
+  private drive: { script: string; hash: string } | null = null;
+
+  /** The origin the host's own windows (the big screen) load from: http://127.0.0.1:<the hub's port>. */
+  hostPage(origin: string) {
+    const script = driveScript(origin, createHash("sha256").update(this.frameKey).digest("hex"));
+    this.drive = { script, hash: scriptHash(script) };
   }
 
   restore() {
@@ -155,7 +167,7 @@ export class DevProxy {
           if (srv.upgrade(req, { data: { path, protocols, queue: [], deviceId: deviceId || undefined }, headers })) return undefined;
           return new Response("expected a WebSocket", { status: 400 });
         }
-        return forward(req, target, path);
+        return forward(req, target, path, proxy.drive);
       },
       websocket: {
         open(ws: ServerWebSocket<WsData>) {
@@ -255,7 +267,7 @@ export class DevProxy {
 }
 
 /** Passes a request to the dev server and its answer back, without the room's credentials (or the host window key). */
-async function forward(req: Request, target: string, path: string): Promise<Response> {
+async function forward(req: Request, target: string, path: string, drive: { script: string; hash: string } | null): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const h of HOP) headers.delete(h);
   headers.set("host", target);
@@ -277,6 +289,12 @@ async function forward(req: Request, target: string, path: string): Promise<Resp
     out.delete("content-encoding");
     const loc = out.get("location");
     if (loc?.startsWith(`http://${target}`)) out.set("location", loc.slice(`http://${target}`.length) || "/");
+    // A page the big screen frames gets the script that replays a driver's clicks, scrolls and typing (6.1).
+    if (drive && req.method === "GET" && r.status === 200 && /^text\/html/i.test(out.get("content-type") ?? "")) {
+      const csp = out.get("content-security-policy");
+      if (csp) out.set("content-security-policy", allowDriveScript(csp, drive.hash));
+      return new Response(withDriveScript(await r.text(), drive.script), { status: r.status, statusText: r.statusText, headers: out });
+    }
     return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
   } catch {
     return new Response("That build isn't answering right now. Its agent may have stopped it, or it crashed.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });

@@ -89,7 +89,7 @@ for (const p of se.processes.whose({ visible: true })()) {
 }
 JSON.stringify(out);`;
 
-async function run(cmd: string[], timeoutMs = 30_000): Promise<{ code: number; out: string }> {
+export async function run(cmd: string[], timeoutMs = 30_000): Promise<{ code: number; out: string }> {
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
   const timer = setTimeout(() => p.kill(), timeoutMs);
   const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
@@ -205,6 +205,8 @@ export class HostControl {
   onImage: (path: string, title: string) => void = () => {};
   /** Set by the hub: a preview build finished (opened, or failed), so the brain can arrange the result. */
   onBuilt: (label: string, ok: boolean, text: string) => void = () => {};
+  /** Set by the hub: an approved build opened an app (an iPhone build in the Simulator, or a Mac app by name), so it can stream live (6.3). */
+  onOpened: (app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) => void = () => {};
   /** The latest Simulator screenshot: taps and swipes are given in its pixels. */
   private simShot: { udid: string; name: string; px: number; py: number } | null = null;
 
@@ -506,12 +508,18 @@ export class HostControl {
         const launch = inst.code ? inst : await run(["xcrun", "simctl", "launch", "booted", id]);
         ok = !launch.code && app.startsWith(`${dir}/`);
         result = launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
+        if (ok) this.onOpened({ kind: "ios" }, o.by);
       } else if (o.open) {
         const target = /^https?:\/\//.test(o.open) ? o.open : resolve(dir, o.open);
         const inside = /^https?:\/\//.test(o.open) || target.startsWith(`${dir}/`);
         const opened = inside ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout" };
         ok = !opened.code;
         result = opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
+        if (ok && target.endsWith(".app")) {
+          const info = (key: string) => run(["/usr/bin/defaults", "read", join(target, "Contents", "Info"), key]).then((r) => (r.code ? "" : r.out.trim()));
+          // Its bundle id is how the live tile finds this app's window, and no other app's.
+          this.onOpened({ kind: "mac", name: (await info("CFBundleName")) || (target.split("/").pop() ?? "").replace(/\.app$/, ""), bundle: (await info("CFBundleIdentifier")) || undefined }, o.by);
+        }
       } else {
         result = `${label} is built on the host (${dir}).`;
       }
@@ -524,7 +532,7 @@ export class HostControl {
   }
 
   /** The simulator to act on: the booted one that matches, else one that's booted for it. */
-  private async pickSim(device?: string): Promise<{ udid: string; name: string } | string> {
+  async pickSim(device?: string): Promise<{ udid: string; name: string } | string> {
     const list = await run(["xcrun", "simctl", "list", "devices", "available", "-j"]);
     if (list.code) return `Xcode's simctl isn't available: ${list.out.slice(0, 200)}`;
     const devices = Object.values(JSON.parse(list.out).devices as Record<string, any[]>).flat();

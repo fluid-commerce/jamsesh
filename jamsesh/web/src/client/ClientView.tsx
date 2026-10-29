@@ -276,14 +276,14 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
   return (
     <>
       <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
-        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" />
+        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" panels={!phone} />
         <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
       </div>
       {tab === "screen" &&
         (phone ? (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "0 12px" }}>
             <div style={{ flex: "none", paddingTop: 8 }}>
-              <StageBar state={state} />
+              <StageBar state={state} drive />
             </div>
             <div style={{ position: "relative", flex: 1, minHeight: 0, margin: "0 -12px" }}>
               <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
@@ -294,7 +294,7 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
         ) : (
           <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
             <div style={{ flex: 1, minHeight: 0 }}>
-              <Stage state={state} interactive />
+              <Stage state={state} interactive drive="trackpad" />
             </div>
             <HistoryStrip state={state} />
           </div>
@@ -531,7 +531,7 @@ function MirrorStage({ state, personId, scale }: { state: HubState; personId: st
       ) : (
         // Laid out larger and scaled down, in percentages, so it follows a resize in the same frame.
         <div className="m-mirror-inner" style={{ width: `${100 / scale}%`, height: `${100 / scale}%`, transform: `scale(${scale})` }}>
-          <Stage state={state} interactive tilePins={false} />
+          <Stage state={state} interactive tilePins={false} drive="trackpad" />
         </div>
       )}
       {pinAll && <PinLayer target={target} personId={personId} enabled={mode.on} />}

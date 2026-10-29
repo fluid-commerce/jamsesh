@@ -1,8 +1,9 @@
 // A full-size look at one piece of work, on your own screen. The arrows step through its group;
 // putting it on the big screen is a second, deliberate button.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ago, type Artifact, type HubState } from "../shared/hub";
+import { RecordHere } from "../shared/annotate";
 import { ArtImage, Reactions, ScaledFrame } from "../shared/ui";
 import { CloseIcon } from "./mobile";
 import { keyAction, step } from "./viewerNav";
@@ -13,10 +14,49 @@ const Arrow = ({ dir }: { dir: "prev" | "next" }) => (
   </svg>
 );
 
+/** The notes pinned to this picture, drawn over it where they were pinned (read-only; Record puts them here). */
+function ViewerPins({ art, state, media }: { art: Artifact; state: HubState; media: React.RefObject<HTMLDivElement | null> }) {
+  const pins = state.annotations.filter((a) => a.source === "pin" && a.status !== "done" && a.target.kind === "artifact" && a.target.ref === art.id);
+  const [box, setBox] = useState<{ l: number; t: number; w: number; h: number } | null>(null);
+  useLayoutEffect(() => {
+    const m = media.current;
+    if (!m || !pins.length) return setBox(null);
+    const measure = () => {
+      const img = m.querySelector("img");
+      if (!img) return setBox(null);
+      const mr = m.getBoundingClientRect();
+      const ir = img.getBoundingClientRect();
+      setBox({ l: ir.left - mr.left + m.scrollLeft, t: ir.top - mr.top + m.scrollTop, w: ir.width, h: ir.height });
+    };
+    measure();
+    const img = m.querySelector("img");
+    img?.addEventListener("load", measure);
+    addEventListener("resize", measure);
+    const mo = new MutationObserver(measure);
+    mo.observe(m, { attributes: true, subtree: true, attributeFilter: ["class", "src"] });
+    return () => {
+      img?.removeEventListener("load", measure);
+      removeEventListener("resize", measure);
+      mo.disconnect();
+    };
+  }, [art.id, pins.length, media]);
+  if (!box || !pins.length) return null;
+  return (
+    <div className="wv-pins" aria-hidden="true">
+      {pins.map((p, i) => (
+        <span key={p.id} className="wv-pin" style={{ left: box.l + p.x * box.w, top: box.t + p.y * box.h }} title={p.text}>
+          {i + 1}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export function WorkViewer({ items, index, state, name, onIndex, onClose, onShow }: { items: Artifact[]; index: number; state: HubState; name: string; onIndex: (i: number) => void; onClose: () => void; onShow: (items: Artifact[]) => void }) {
   const art = items[index];
   const [zoom, setZoom] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const media = useRef<HTMLDivElement>(null);
   const swipe = useRef<number | null>(null);
   const last = items.length - 1;
   // Keys are read before the screen behind (its shortcuts) hears them.
@@ -80,6 +120,7 @@ export function WorkViewer({ items, index, state, name, onIndex, onClose, onShow
           </span>
         )}
         <div className="wv-actions">
+          <RecordHere />
           {items.length > 1 && (
             <button className="btn small" onClick={() => onShow(items.slice(0, 6))}>
               All {Math.min(items.length, 6)} side by side
@@ -95,14 +136,15 @@ export function WorkViewer({ items, index, state, name, onIndex, onClose, onShow
         <button className="wv-step" onClick={() => onIndex(step(index, items.length, -1))} disabled={index === 0} aria-label="Previous (Left arrow)">
           <Arrow dir="prev" />
         </button>
-        <div className={`wv-media ${zoom ? "zoom" : ""} ${live ? "live" : ""}`}>
+        <div ref={media} className={`wv-media ${zoom ? "zoom" : ""} ${live ? "live" : ""}`} data-jam-target={JSON.stringify({ kind: "artifact", ref: art.id, label: art.title })}>
           {live ? (
             <ScaledFrame src={art.url!} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} fill={art.platform !== "mobile"} bare />
           ) : art.image ? (
-            <ArtImage art={art} full key={art.id} onClick={() => setZoom((z) => !z)} />
+            <ArtImage art={art} full box key={art.id} onClick={() => setZoom((z) => !z)} />
           ) : (
             <div className="empty-note">{art.kind === "devserver" ? dev?.problem ?? "This build isn't answering." : art.note || art.title}</div>
           )}
+          <ViewerPins art={art} state={state} media={media} />
         </div>
         <button className="wv-step" onClick={() => onIndex(step(index, items.length, 1))} disabled={index === last} aria-label="Next (Right arrow)">
           <Arrow dir="next" />

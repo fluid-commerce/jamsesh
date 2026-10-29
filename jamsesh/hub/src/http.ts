@@ -15,9 +15,9 @@ import { agentGuide, agentIntro, joinScript, hookScript } from "./install-script
 import { publicEvent } from "./session";
 import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
-import type { BusMessage, EventKind, Stage } from "./types";
+import type { BusMessage, DriveEvent, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
+type WsData = { deviceId: string | null; caller?: string | null; appId?: string; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; pairedId?: string | null; hostWindow?: boolean; driveDenied?: number };
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -57,7 +57,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|fonts\/(want|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -259,11 +259,21 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
         if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+        // A live Simulator or Mac app's frames (binary JPEGs): for people's windows only, a paired one or
+        // the host's own. Agents have nothing to watch there, and loopback alone is any process on the host.
+        const appWs = path.match(/^\/ws\/app\/([\w-]+)$/);
+        if (appWs) {
+          if (!sameOrigin(req)) return bad("Not from this site.", 403);
+          if (!hostWindow && device?.kind !== "browser") return bad(local ? NOT_THE_HOST_WINDOW : "That's for people.", 403);
+          if (!hub.live.get(appWs[1])) return bad("That app isn't live.", 404);
+          if (srv.upgrade(req, { data: { deviceId: null, appId: appWs[1], pairedId: device?.id ?? null } as any })) return undefined as any;
+          return bad("expected a WebSocket");
+        }
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
           const caller = hostWindow ? "host" : device?.kind === "browser" ? device.id : null;
-          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, hostWindow, pairedId: device?.id ?? null, agent: device?.kind === "agent" } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -300,6 +310,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     websocket: {
       idleTimeout: 120,
       open(ws: ServerWebSocket<WsData>) {
+        if (ws.data.appId) {
+          const pid = (ws.data as any).pairedId;
+          const offRevoked = bus.on((msg) => (msg as any).type === "revoked" && pid && (msg as any).deviceId === pid && ws.close(4401, "disconnected"));
+          // A slow viewer skips frames instead of falling behind: only the newest picture matters.
+          const unsub = hub.live.subscribe(ws.data.appId, (f) => ws.getBufferedAmount() < 1_500_000 && ws.sendBinary(f));
+          (ws as any).off = () => (offRevoked(), unsub?.());
+          if (!unsub) ws.close(4404, "not live");
+          return;
+        }
         if (ws.data.collab != null) {
           // Disconnected in Settings: the canvas (or dev server) connection closes too.
           const pid = (ws.data as any).pairedId;
@@ -329,6 +348,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
       },
       message(ws: ServerWebSocket<WsData>, raw) {
+        if (ws.data.appId) return;
         if (ws.data.collab != null) {
           const up = ws.data.upstream;
           if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
@@ -341,6 +361,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (m.type === "level" && me) {
             bus.send({ type: "level", deviceId: me, level: m.level });
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
+          else if (m.type === "drive") driveFrom(ws, hub, m);
           else if (m.type === "rtc" && me && typeof m.to === "string") {
             const msg = JSON.stringify({ type: "rtc", from: me, to: m.to, data: m.data });
             for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
@@ -348,6 +369,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         } catch {}
       },
       close(ws: ServerWebSocket<WsData>) {
+        if (ws.data.appId) return void (ws as any).off?.();
         if (ws.data.collab != null) {
           (ws as any).off?.();
           return void ws.data.upstream?.close();
@@ -365,8 +387,60 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       },
     },
   });
-  if (server.port) hub.devproxy.reserve(server.port);
+  if (server.port) {
+    hub.devproxy.reserve(server.port);
+    // The big screen is a host window, on 127.0.0.1 at this port: the only page a build's frame takes input from.
+    hub.devproxy.hostPage(`http://127.0.0.1:${server.port}`);
+  }
   return server;
+}
+
+/** The most input events a person may send a second, across all their windows. */
+const DRIVE_PER_SECOND = 120;
+const driveRate = new Map<string, { since: number; n: number }>();
+const clamp01 = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null);
+const delta = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.min(5000, Math.max(-5000, v)) : 0);
+
+/** The sane form of one driver's input event, or null (junk). */
+export function cleanDrive(ev: any): DriveEvent | null {
+  if (!ev || typeof ev !== "object") return null;
+  if (ev.k === "leave") return { k: "leave" };
+  if (ev.k === "key") {
+    if (typeof ev.key !== "string" || !ev.key || ev.key.length > 32) return null;
+    const mods = ev.mods && typeof ev.mods === "object" ? { shift: !!ev.mods.shift, ctrl: !!ev.mods.ctrl, alt: !!ev.mods.alt, meta: !!ev.mods.meta } : undefined;
+    return { k: "key", key: ev.key, ...(typeof ev.code === "string" ? { code: ev.code.slice(0, 32) } : {}), down: ev.down !== false, ...(mods ? { mods } : {}) };
+  }
+  const [x, y] = [clamp01(ev.x), clamp01(ev.y)];
+  if (x === null || y === null) return null;
+  if (ev.k === "move") return { k: "move", x, y };
+  if (ev.k === "down" || ev.k === "up") return { k: ev.k, x, y, b: Math.min(4, Math.max(0, Math.trunc(Number(ev.b) || 0))), n: Math.min(3, Math.max(1, Math.trunc(Number(ev.n) || 1))) };
+  if (ev.k === "wheel") return { k: "wheel", x, y, dx: delta(ev.dx), dy: delta(ev.dy), ...(ev.ctrl ? { ctrl: true } : {}) };
+  return null;
+}
+
+/**
+ * A driver's input from their window's WebSocket (6.1). The person is whoever this window is paired as (or the host's own window),
+ * never what the message says; agents have no window here. Anyone not driving this screen is dropped, with a note once a second.
+ */
+export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
+  const s = hub.session;
+  const now = Date.now();
+  const dev = hub.auth.get(ws.data.pairedId);
+  const personId = dev ? (dev.kind === "browser" ? dev.personId : null) : ws.data.hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null;
+  const screen = s.findScreen(typeof m.screen === "string" ? m.screen : undefined)?.id ?? "main";
+  const person = personId ? s.person(personId) : undefined;
+  const deny = (why: string) => {
+    if (now - (ws.data.driveDenied ?? 0) < 1000) return;
+    ws.data.driveDenied = now;
+    ws.send(JSON.stringify({ type: "drive-denied", screen, why }));
+  };
+  if (!person) return deny("Pick who you are in this window first.");
+  const rate = driveRate.get(person.id);
+  if (!rate || now - rate.since >= 1000) driveRate.set(person.id, { since: now, n: 1 });
+  else if (++rate.n > DRIVE_PER_SECOND) return;
+  if (!s.driversOf(screen).includes(person.id)) return deny("You aren't driving this screen.");
+  const ev = cleanDrive(m.ev);
+  if (ev) bus.send({ type: "drive", screen, personId: person.id, name: person.name, color: person.color, ev, t: now });
 }
 
 /** Relays a canvas WebSocket to the canvas server, which only listens on this machine. */
@@ -456,10 +530,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const path = url.pathname.slice("/api".length);
   // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
   const upload = path === "/attachments" && req.method === "POST";
-  const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE" ? await readBody(req) : null;
+  // A font lend carries up to a family's worth of base64: read at most that much, never Bun's 128 MB default.
+  const cap = path.startsWith("/fonts/") ? FONT_BODY_MAX : Infinity;
+  if (!upload && Number(req.headers.get("content-length") ?? 0) > cap) return bad("That request is too large.", 413);
+  const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE" ? await readBody(req, cap) : null;
+  if (body === TOO_LARGE) return bad("That request is too large.", 413);
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+  /** Refuses what's for people's windows (a paired one, or the host's own) to anyone else: agents, and other processes on the host. */
+  const notAPerson = () => (caller ? null : bad(paired?.kind === "agent" ? "That's for people; agents use their jam_ tools." : isLocal(ip) ? NOT_THE_HOST_WINDOW : "That's for people.", 403));
 
   if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
   if (path === "/clock") return json({ now: Date.now() });
@@ -483,6 +563,32 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // Except where personId names someone else: the speaker a line is corrected to, the person asked to share.
     // A window that hasn't said who it is yet is nobody in particular, not whoever the request names.
     if (paired && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
+  }
+
+  // Fonts for the canvases (SPEC 12.4). The bytes go to people's canvases only: an agent's credential gets
+  // names and counts in the state, never a font file (agents run on Macs, and a borrowed font stays off them).
+  let fm = path.match(/^\/fonts\/([^/]{1,300})\/(\d{1,2})$/);
+  if (fm && req.method === "GET") {
+    if (!caller) return paired?.kind === "agent" ? bad("Fonts are for people's canvases; agents don't get the files.", 403) : notAPerson()!;
+    const key = (() => { try { return decodeURIComponent(fm[1]); } catch { return ""; } })();
+    const data = hub.fonts.face(key, Number(fm[2]));
+    // A copy, and never cached to disk: a borrowed font is not kept on anyone's Mac.
+    return data ? new Response(data.slice(), { headers: { "content-type": "font/ttf", "cache-control": "no-store" } }) : bad("No such font.", 404);
+  }
+  if (path.startsWith("/fonts/") && req.method === "POST") {
+    const personId = String(paired?.personId || (hostWindow ? s.store.setting<string>("hostPersonId", "") : "") || "");
+    const person = personId ? s.person(personId) : undefined;
+    if (path === "/fonts/want") {
+      await hub.fonts.want(person?.id ?? null, body?.families);
+      return json(s.fonts());
+    }
+    if (!person) return bad("Choose who you are first, so JamSesh knows whose font this is.", 403);
+    if (path === "/fonts/decline") return hub.fonts.decline(person.id, body?.family) ? json({ ok: true }) : json({ ok: true, nothing: true });
+    if (path === "/fonts/withdraw") return hub.fonts.withdraw(person.id, body?.family) ? json({ ok: true }) : bad("You aren't sharing that font.", 404);
+    if (path === "/fonts/lend") {
+      const r = hub.fonts.lend(person.id, body?.family, body?.files);
+      return r.ok ? json(r) : bad(r.error, r.status);
+    }
   }
 
   if (path === "/me") {
@@ -552,7 +658,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined }));
   }
   let m = path.match(/^\/people\/([\w-]+)$/);
-  if (m && req.method === "DELETE") return (s.removePerson(m[1]), json({ ok: true }));
+  if (m && req.method === "DELETE") return (s.removePerson(m[1]), hub.fonts.dropLender(m[1]), json({ ok: true }));
   if (m && req.method === "PATCH") {
     const p = s.person(m[1]);
     if (!p) return bad("no such person", 404);
@@ -697,6 +803,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const who = actor();
     const screen = screenOf();
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
+  }
+  // Driving the big screen (6.1): the lock's owner starts, passes control or drives together; `to` names the other person.
+  // The big screen's key for the builds it frames (devdrive.ts): the host's own windows only.
+  if (path === "/drive/frame-key" && req.method === "GET") return hostWindow ? json({ key: hub.devproxy.frameKey }) : bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host's big screen drives builds.", 403);
+  if (path === "/drive/online" && req.method === "GET") return notAPerson() ?? json({ people: s.onlinePeople() });
+  m = path.match(/^\/drive\/(start|stop|pass|together)$/);
+  if (m && req.method === "POST") {
+    const r = s.drive(m[1] as "start", screenOf(), actor().id, typeof body?.to === "string" ? body.to : typeof body?.who === "string" ? body.who : null);
+    return r.ok ? json({ drivers: r.drivers }) : bad(r.error, r.status);
   }
   if (path === "/stage/unlock" && req.method === "POST") {
     s.unlockStage(screenOf());
@@ -967,6 +1082,30 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(await hub.promptWindow({ deviceId: body.deviceId, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
   }
 
+  // ---- Record: talk and point, review the notes, send them to the agents that own the work ----
+  // A recording is on the caller's own window's device, and its notes go out only from that window.
+  if (path.startsWith("/record/") && req.method === "POST") {
+    if (!caller) return notAPerson()!;
+    const ownDevice = (id: unknown) => typeof id === "string" && s.store.get("devices", id)?.pairedId === caller;
+    if (path === "/record/start") {
+      if (!body?.deviceId) return bad("deviceId is required");
+      if (!ownDevice(body.deviceId)) return bad("Record from your own window.", 403);
+      const r = hub.recordStart(String(body.deviceId), actor().id, Number(body.t0) || Date.now(), typeof body.screen === "string" ? body.screen : null);
+      return r.ok ? json(r) : bad(r.reason, r.status);
+    }
+    if (path === "/record/stop") {
+      if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+      if (!ownDevice(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
+      const r = await hub.recordStop({ deviceId: String(body.deviceId), caller, personId: actor().id, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
+      return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
+    }
+    if (path === "/record/send") {
+      if (!body?.recordingId || !Array.isArray(body?.notes)) return bad("recordingId and notes are required");
+      const r = await hub.recordSend({ caller, personId: actor().id, recordingId: String(body.recordingId), notes: body.notes });
+      return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
+    }
+  }
+
   // ---- snapshots ----
   if (path === "/snapshots" && req.method === "GET") return json({ snapshots: hub.autosave.list().map(({ dir: _d, ...x }) => x), layouts: Object.keys(s.savedLayouts()) });
   if (path === "/snapshots" && req.method === "POST") {
@@ -1030,6 +1169,37 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "DELETE") {
     if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can disconnect devices.", 403);
     return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
+  }
+
+  // Live apps (6.3): a person starts a tile for a running Simulator or Mac app, takes or passes control, and drives it.
+  // Starting one builds nothing (builds still wait for approval); it only shows what's already running on the host.
+  m = path.match(/^\/apps(?:\/([\w-]+)(?:\/(control|input))?)?$/);
+  if (m && req.method !== "GET") {
+    const personId = paired?.personId ?? (hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null);
+    const person = personId ? s.person(personId) : undefined;
+    if (!person) return bad("Pick who you are in this window first.", 403);
+    const who = { personId: person.id, name: person.name, host: hostWindow };
+    if (!m[1] && req.method === "POST") {
+      if (!hostWindow) return bad("Only the host can put an app on a tile.", 403);
+      if (!s.settings().hostControl) return bad("Host control is turned off in Settings.", 409);
+      const r = body?.kind === "mac" ? await hub.live.startMac({ name: String(body?.name ?? ""), bundle: typeof body?.bundle === "string" ? body.bundle : undefined }, person.name) : await hub.live.startIos(body?.device ? String(body.device) : undefined, person.name);
+      return typeof r === "string" ? bad(r, 409) : json({ app: r });
+    }
+    if (m[1] && !m[2] && req.method === "DELETE") return hostWindow || hub.live.drives(m[1], who.personId) ? (hub.live.stop(m[1]) ? json({ ok: true }) : bad("No such app.", 404)) : bad("Only the host or whoever is driving can stop it.", 403);
+    if (m[1] && m[2] === "control" && req.method === "POST") {
+      const toPerson = body?.to ? s.person(String(body.to)) : undefined;
+      if (body?.action === "pass" && !toPerson) return bad("Say who to pass control to.", 400);
+      const act = body?.action === "release" || body?.action === "pass" ? body.action : "take";
+      return json({ result: hub.live.control(m[1], act, who, toPerson ? { personId: toPerson.id, name: toPerson.name } : undefined) });
+    }
+    if (m[1] && m[2] === "input" && req.method === "POST") {
+      // The big screen's window replays a driver's cursor on the tile: it acts as that driver, and only if they drive the tile's screen.
+      const { as, ...input } = (body ?? {}) as Record<string, unknown>;
+      const asDriver = hostWindow && typeof as === "string" && hub.live.screenDriverIds(m[1])?.includes(as) ? s.person(as) : undefined;
+      const why = await hub.live.input(m[1], asDriver ? { personId: asDriver.id, name: asDriver.name, host: false } : who, input as any);
+      return why ? json({ ok: false, error: why }, 409) : json({ ok: true });
+    }
+    return bad("not found", 404);
   }
 
   // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.
@@ -1163,9 +1333,38 @@ export async function readCapped(req: Request, max: number): Promise<{ __form: F
   }
 }
 
-async function readBody(req: Request): Promise<any> {
+/** The most a /api/fonts request may carry: a family's files (32 MB) as base64, plus the envelope. */
+export const FONT_BODY_MAX = 45 * 1024 * 1024;
+const TOO_LARGE = Symbol("too large");
+
+/** The text of a request body, read in chunks and abandoned past `max` bytes (null: over). */
+async function readTextCapped(req: Request, max: number): Promise<string | null> {
+  if (max === Infinity) return req.text();
+  const reader = req.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > max) return (await reader.cancel().catch(() => {}), null);
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readBody(req: Request, max = Infinity): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) return req.json().catch(() => ({}));
+  if (type.includes("application/json")) {
+    const text = await readTextCapped(req, max);
+    if (text === null) return TOO_LARGE;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {};
+    }
+  }
   if (type.includes("multipart/form-data")) return { __form: await req.formData() };
   if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
   return null;

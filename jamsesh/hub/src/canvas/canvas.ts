@@ -56,6 +56,8 @@ export class Canvas {
   private serverDir: string;
   rendersDir: string;
   filesDir: string;
+  /** The font faces the room holds (fonts.ts), so a participant that starts later loads them too. */
+  fonts: () => { family: string; data: Uint8Array }[] = () => [];
   /** Called when new or changed frames have been rendered. */
   onRendered: ((artifactIds: string[]) => void) | null = null;
   /** Pages from the last poll: the brain and the views list them. */
@@ -398,6 +400,7 @@ export class Canvas {
         this.session.touchAgent(agent.id, { canvas: "joining" });
         await mcp.init();
         await mcp.command("pref.userName", { name: agent.name });
+        for (const f of this.fonts()) await mcp.command("text.loadFont", { data: Buffer.from(f.data).toString("base64") }).catch(() => {});
         await mcp.command("collab.join", { link: this.localLink(link) });
         if (!(await waitLive(mcp, 20_000))) {
           this.session.touchAgent(agent.id, { canvas: "failed" });
@@ -433,6 +436,7 @@ export class Canvas {
   /** Forwards a FigCraft tool call for an agent and remembers which nodes it touched. */
   async call(agent: Agent, tool: string, args: any): Promise<ToolResult> {
     const blocked = forbiddenCommand(tool, args);
+    if (blocked === "text.loadFont") return { content: [{ type: "text", text: "Fonts reach the canvas from the room: the open fonts your repository names (put them in your repo card), or a font one person confirms they may share. An agent can't add one. Until then the text is drawn in a substitute." }], isError: true };
     if (blocked) return { content: [{ type: "text", text: `${blocked} is a file or collaboration command, and the shared file belongs to the room. Agents work in the file through nodes, styles and variables; ask a person to open, save or share files.` }], isError: true };
     const mcp = await this.forAgent(agent);
     args = this.place(tool, args ?? {}, this.agentPage.get(agent.id));
@@ -517,6 +521,16 @@ export class Canvas {
   }
 
   /** An agent took a new name: its cursor on the canvas follows. */
+  /**
+   * Loads a font face into the host's canvas and every agent's participant, in memory (FigCraft's
+   * `text.loadFont` installs nothing), so the frames they draw and the renders the room sees use it.
+   */
+  async loadFont(data: Uint8Array) {
+    const b64 = Buffer.from(data).toString("base64");
+    const all = [this.host, ...[...this.agents.values()].map((a) => a.mcp)].filter((m): m is FigcraftMcp => !!m && m.alive);
+    await Promise.all(all.map((m) => m.command("text.loadFont", { data: b64 }).catch(() => {})));
+  }
+
   async renameAgent(agentId: string, name: string) {
     const a = this.agents.get(agentId);
     if (!a) return;
@@ -745,9 +759,9 @@ function guessPlatform(f: FrameInfo, agent: Agent | undefined): Platform | null 
   return agent?.platform ?? null;
 }
 
-/** Agents don't open, save or share the room's file: the name of the file or collab command in a call, if any. */
+/** Agents don't open, save or share the room's file, or add fonts to it: the name of that command in a call, if any. */
 export function forbiddenCommand(tool: string, args: any): string | null {
-  const bad = (c: unknown) => (typeof c === "string" && /^(file|collab)\./.test(c.trim()) ? c.trim() : null);
+  const bad = (c: unknown) => (typeof c === "string" && /^((file|collab)\.|text\.loadFont$)/.test(c.trim()) ? c.trim() : null);
   if (tool === "run_command") return bad(args?.command);
   if (tool === "batch" && Array.isArray(args?.commands)) for (const c of args.commands) { const b = bad(c?.command); if (b) return b; }
   return null;

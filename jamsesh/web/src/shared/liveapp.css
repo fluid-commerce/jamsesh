@@ -1,0 +1,101 @@
+.liveapp {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.liveapp-stage {
+  container-type: size;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 14px;
+}
+.liveapp-device {
+  --bezel: 0px;
+  position: relative;
+  box-sizing: content-box;
+  /* As large as fits the stage with the screen's own proportions (--r is width over height). */
+  width: min(100cqw - 2 * var(--bezel), (100cqh - 2 * var(--bezel)) * var(--r));
+  aspect-ratio: var(--r);
+  overflow: hidden;
+  background: #000;
+}
+/* A plain phone bezel, drawn here: a dark rounded rectangle around the screen. */
+.liveapp-device.ios {
+  --bezel: clamp(5px, 0.9vmin, 12px);
+  border: var(--bezel) solid #0a0a0b;
+  border-radius: 13% / 6%;
+  box-shadow: 0 0 0 1.5px #3a3d42, 0 18px 50px -18px rgba(0, 0, 0, 0.8);
+}
+.liveapp-device.mac {
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--line-2), 0 18px 50px -18px rgba(0, 0, 0, 0.8);
+}
+.liveapp-device.driving {
+  box-shadow: 0 0 0 2px var(--built), 0 0 36px -10px rgba(69, 224, 160, 0.5);
+}
+.liveapp-screen {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.liveapp-wait {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.liveapp-tap {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  margin: -17px 0 0 -17px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+  animation: liveapp-tap 0.5s var(--ease) forwards;
+}
+@keyframes liveapp-tap {
+  from {
+    transform: scale(0.4);
+    opacity: 1;
+  }
+  to {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+}
+.liveapp-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 14px 12px;
+  font-size: 13px;
+}
+.liveapp-who {
+  color: var(--muted);
+  margin-right: auto;
+}
+.liveapp-bar .btn {
+  height: 28px;
+  padding: 0 12px;
+}
+.liveapp-note {
+  flex-basis: 100%;
+  color: var(--directive);
+}
+.liveapp-mode {
+  color: var(--dim);
+  font-size: 12px;
+}
+.liveapp-screen:focus {
+  outline: none;
+}

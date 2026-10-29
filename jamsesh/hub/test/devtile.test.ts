@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 process.env.JAMSESH_DEV_PORT_START = String(47100 + Math.floor(Math.random() * 400));
 const { Hub } = await import("../src/hub");
@@ -161,5 +162,32 @@ test("a stale refresh finishing while the build is being registered again never 
   } finally {
     old.stop(true);
     fresh.stop(true);
+  }
+});
+
+test("a build's pages carry the driving script for the host's big screen only once the hub knows where that is, and its policy lets the script run", async () => {
+  const { hub, agent } = room();
+  const page = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => new Response("<!doctype html><head><title>b</title></head>", { headers: { "content-type": "text/html", "content-security-policy": "script-src-elem 'self'" } }),
+  });
+  try {
+    const d = await hub.devproxy.register({ agentId: agent.id, name: "Web build", target: `127.0.0.1:${page.port}` });
+    const get = () => fetch(d.url.replace(/^http:\/\/[^:]+/, "http://127.0.0.1"));
+    // No HTTP server yet, so no big screen to listen to: the page is left as it is.
+    const plain = await get();
+    expect(await plain.text()).toBe("<!doctype html><head><title>b</title></head>");
+    expect(plain.headers.get("content-security-policy")).toBe("script-src-elem 'self'");
+    hub.devproxy.hostPage("http://127.0.0.1:4790");
+    const driven = await get();
+    const html = await driven.text();
+    expect(html).toContain(JSON.stringify("http://127.0.0.1:4790"));
+    expect(html).not.toContain(hub.devproxy.frameKey);
+    const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? "";
+    const hash = `'sha256-${createHash("sha256").update(script).digest("base64")}'`;
+    expect(driven.headers.get("content-security-policy")).toBe(`script-src-elem 'self' ${hash}`);
+  } finally {
+    page.stop(true);
   }
 });

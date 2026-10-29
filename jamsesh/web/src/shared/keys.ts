@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { anyoneDriving } from "./driving";
 
 /** True when a key press is going into a text field, so single-letter shortcuts must stay out of the way. */
 export function isTypingTarget(e: KeyboardEvent) {
@@ -11,7 +12,8 @@ export const plain = (e: KeyboardEvent) => !e.metaKey && !e.ctrlKey && !e.altKey
 
 /**
  * Clicking into an iframe (the canvas, a dev server) moves keyboard focus there, and the page stops
- * hearing shortcuts such as M. On a screen nobody types into, take focus back when the pointer leaves.
+ * hearing shortcuts such as M. On a screen nobody types into, take focus back when the pointer leaves
+ * (unless someone is driving the screen: their typing goes into that frame).
  */
 export function useReclaimFocus(enabled = true) {
   useEffect(() => {
@@ -23,7 +25,7 @@ export function useReclaimFocus(enabled = true) {
     const id = setInterval(() => {
       // Focus sits in an iframe and the pointer is not over it: bring it back.
       const f = document.activeElement;
-      if (f?.tagName === "IFRAME" && !(f as HTMLElement).matches(":hover")) reclaim();
+      if (f?.tagName === "IFRAME" && !(f as HTMLElement).matches(":hover") && !anyoneDriving()) reclaim();
     }, 800);
     return () => clearInterval(id);
   }, [enabled]);
