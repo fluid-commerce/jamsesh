@@ -326,15 +326,11 @@ The setup installs, for each harness found:
 | Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the same small skill at `~/.codex/skills/jamsesh/SKILL.md`; the prompt `~/.codex/prompts/jamsesh.md` (the full instructions, for `/jamsesh`); no hooks (Codex has none here) |
 
 **Only chats you connect join the room.** JamSesh never writes to `CLAUDE.md` or `AGENTS.md`, and the
-setup removes the `<!-- jamsesh:start -->` block an earlier install wrote: only the exact text of one
-of the two blocks earlier installs wrote, as whole lines in the file's own line endings (an edited or
-indented block, or anything else between the markers, stays), plus the one blank line the old writer
-put before a block it appended at the end. Every other byte is kept, and a symlinked file is edited at
-its target, so the link stays a link. Just before replacing the file, or deleting one that held only
-the block, it reads the file again and leaves it alone if it changed since it was first read. That
-re-read is the last step before the rename or unlink; POSIX has no atomic compare-and-swap for files,
-so a save landing in the microseconds between them is the one window left, which no plain file
-operation can close. Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
+setup only tells you where the `<!-- jamsesh:start -->` block an earlier install wrote is (file and
+line numbers, on stderr) and never edits the file: replacing a file you may be saving in your editor
+can't be made safe with plain file operations, so you delete those lines yourself. Only the exact text
+of one of the two blocks earlier installs wrote counts (an edited or indented block, or anything else
+between the markers, is yours and isn't mentioned). Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
 which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
 harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect

@@ -2,11 +2,11 @@
 // AGENTS.md, hooks do nothing for a chat that never called jam_join, and chats are told apart even in
 // one folder. A wrongly joined agent can be removed, with what it caused.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
-import { OLD_BLOCKS, STRIP_BLOCK_PL, hookScript, joinScript } from "../src/install-scripts";
+import { OLD_BLOCKS, FIND_BLOCK_PL, hookScript, joinScript } from "../src/install-scripts";
 import { Session } from "../src/session";
 import { Store } from "../src/store";
 
@@ -16,115 +16,68 @@ const [LONG, SHORT] = OLD_BLOCKS;
 const block = (b: string) => `${b}\n`;
 const BLOCK = block(LONG);
 
-async function strip(content: string | null) {
-  const file = join(tmp(), "AGENTS.md");
-  if (content !== null) writeFileSync(file, content);
-  const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe" });
+/** Runs the finder on a file; returns what it said and whether the file is byte for byte as it was. */
+async function find(content: string | null, link = false) {
+  const d = tmp();
+  const file = join(d, "AGENTS.md");
+  let given = file;
+  if (content !== null) writeFileSync(file, content, { mode: 0o640 });
+  if (link) symlinkSync(file, (given = join(d, "CLAUDE.md")));
+  const before = readdirSync(d).map((n) => [n, lstatSync(join(d, n)).mtimeMs]);
+  const proc = Bun.spawn(["perl", "-", given], { stdin: new Blob([FIND_BLOCK_PL]), stderr: "pipe" });
   expect(await proc.exited).toBe(0);
-  return existsSync(file) ? readFileSync(file, "utf8") : null;
+  const said = await new Response(proc.stderr).text();
+  // It never writes: same files, same times, same bytes.
+  expect(readdirSync(d).map((n) => [n, lstatSync(join(d, n)).mtimeMs])).toEqual(before);
+  if (content !== null) expect(readFileSync(file, "utf8")).toBe(content);
+  return said;
 }
 
-describe("removing the block an earlier install wrote", () => {
-  test("a file with no block is left exactly as it is", async () => {
-    const text = "# Mine\r\nkeep   \r\n\r\n\r\n";
-    expect(await strip(text)).toBe(text);
+describe("telling the person where the block an earlier install wrote is", () => {
+  test("a file with no block gets no message, and neither does a missing one", async () => {
+    expect(await find("# Mine\r\nkeep   \r\n\r\n\r\n")).toBe("");
+    expect(await find(null)).toBe("");
   });
-  test("a block at the end of the file takes its blank line with it", async () => {
-    expect(await strip(`# Mine\n\nrules\n\n${BLOCK}`)).toBe("# Mine\n\nrules\n");
+  test("a block names its lines and how to remove it, and the file is untouched", async () => {
+    const said = await find(`# Mine\n\nrules\n\n${BLOCK}`);
+    const n = LONG.split("\n").length;
+    expect(said).toContain(`(lines 5-${5 + n - 1})`);
+    expect(said).toContain("Delete those lines");
+    expect(said.trim().split("\n")).toHaveLength(1);
   });
-  test("a block at the end with no final newline", async () => {
-    expect(await strip(`# Mine\n\n${BLOCK.trimEnd()}`)).toBe("# Mine\n");
+  test("CRLF files, a block at the very start, and one with no final newline", async () => {
+    expect(await find(`# Mine\r\n${BLOCK.replaceAll("\n", "\r\n")}`)).toContain("(lines 2-");
+    expect(await find(BLOCK)).toContain("(lines 1-");
+    expect(await find(`a\n${BLOCK.trimEnd()}`)).toContain("(lines 2-");
   });
-  test("a block in the middle leaves everything around it byte for byte", async () => {
-    expect(await strip(`# Mine\n\n${BLOCK}\nMore rules  \n\n\n`)).toBe("# Mine\n\n\nMore rules  \n\n\n");
+  test("two blocks are two lines of notice", async () => {
+    const said = await find(`a\n${BLOCK}b\n${block(SHORT)}`);
+    expect(said.trim().split("\n")).toHaveLength(2);
   });
-  test("CRLF files keep their line endings", async () => {
-    const crlf = BLOCK.replaceAll("\n", "\r\n");
-    expect(await strip(`# Mine\r\n\r\nrules\r\n\r\n${crlf}`)).toBe("# Mine\r\n\r\nrules\r\n");
-    expect(await strip(`a\r\n${crlf}b\r\n`)).toBe("a\r\nb\r\n");
-  });
-  test("a file that was only the block is removed, and a missing file is fine", async () => {
-    expect(await strip(BLOCK)).toBeNull();
-    expect(await strip(null)).toBeNull();
-  });
-  test("an unfinished block (no end marker) is left alone", async () => {
-    const text = "# Mine\n<!-- jamsesh:start -->\nhalf\n";
-    expect(await strip(text)).toBe(text);
-  });
-  test("two blocks both go", async () => {
-    expect(await strip(`a\n${BLOCK}b\n${block(SHORT)}`)).toBe("a\nb\n");
-  });
-  test("only the exact block goes: an edited one, an indented one, or the markers alone stay", async () => {
+  test("an edited block, an indented one, an unfinished one or the markers alone are the person's: no notice", async () => {
     const edited = BLOCK.replace("host or join a session.", "host or join a session. Also: my own rule.");
-    for (const text of [`# Mine\n\n${edited}`, `# Mine\n\n${BLOCK.replace(/^/gm, "  ")}`, "a\n<!-- jamsesh:start -->\nmy notes\n<!-- jamsesh:end -->\nb\n", `x ${BLOCK}`])
-      expect(await strip(text)).toBe(text);
+    for (const text of [`# Mine\n\n${edited}`, `# Mine\n\n${BLOCK.replace(/^/gm, "  ")}`, "a\n<!-- jamsesh:start -->\nmy notes\n<!-- jamsesh:end -->\nb\n", `x ${BLOCK}`, "# Mine\n<!-- jamsesh:start -->\nhalf\n"])
+      expect(await find(text)).toBe("");
   });
-  test("blank lines and indentation around the block stay byte for byte", async () => {
-    expect(await strip(`# Mine\n\n\n${BLOCK}\n\n  indented rule\n\t\n`)).toBe("# Mine\n\n\n\n\n  indented rule\n\t\n");
-    expect(await strip(`  - item\n${BLOCK}    - next\n`)).toBe("  - item\n    - next\n");
+  test("a symlinked file is read at its target and neither it nor the link changes", async () => {
+    expect(await find(`# Shared\n\n${BLOCK}`, true)).toContain("lines 3-");
   });
-  test("the new text goes through a fresh private file, never a predictable path", async () => {
-    const d = tmp();
-    const file = join(d, "AGENTS.md");
-    writeFileSync(file, `# Mine\n\n${BLOCK}`, { mode: 0o640 });
-    // Something left at the old temp name (world-readable) is neither written through nor used.
-    const planted = `${file}.jamsesh-tmp`;
-    writeFileSync(planted, "planted", { mode: 0o644 });
-    const proc = Bun.spawn(["/bin/sh", "-c", 'umask 000; exec perl - "$1"', "x", file], { stdin: new Blob([STRIP_BLOCK_PL]) });
-    expect(await proc.exited).toBe(0);
-    expect(readFileSync(file, "utf8")).toBe("# Mine\n");
-    expect(statSync(file).mode & 0o777).toBe(0o640);
-    expect(readFileSync(planted, "utf8")).toBe("planted");
-    expect(readdirSync(d).sort()).toEqual(["AGENTS.md", "AGENTS.md.jamsesh-tmp"]);
-    expect(STRIP_BLOCK_PL).toContain("File::Temp::tempfile");
-  });
-  test("an edit someone makes while the block is being taken out is kept, not overwritten", async () => {
+  test("a save made while it runs can't be lost: it holds no write path at all", async () => {
+    expect(FIND_BLOCK_PL).not.toMatch(/rename|unlink|'>'|'>>'|open\(\$\w+, ['"]>|File::Temp|chmod/);
+    // The file the person is saving into is never opened for writing, so an edit at any moment stays.
     const d = tmp();
     const file = join(d, "AGENTS.md");
     writeFileSync(file, `# Mine\n\n${BLOCK}`);
-    const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe", env: { ...process.env, JAMSESH_STRIP_PAUSE: "0.5" } });
-    await Bun.sleep(150);
+    const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([FIND_BLOCK_PL]), stderr: "pipe" });
     writeFileSync(file, `# Mine, edited\n\n${BLOCK}`);
     expect(await proc.exited).toBe(0);
-    expect(await new Response(proc.stderr).text()).toContain("changed while");
     expect(readFileSync(file, "utf8")).toBe(`# Mine, edited\n\n${BLOCK}`);
     expect(readdirSync(d)).toEqual(["AGENTS.md"]);
-    // Run again with nobody editing: the block goes.
-    expect(await strip(readFileSync(file, "utf8"))).toBe("# Mine, edited\n");
-  });
-  test("a file that was only the block isn't deleted if someone wrote in it meanwhile", async () => {
-    const d = tmp();
-    const file = join(d, "AGENTS.md");
-    writeFileSync(file, BLOCK);
-    const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe", env: { ...process.env, JAMSESH_STRIP_PAUSE: "0.5" } });
-    await Bun.sleep(150);
-    writeFileSync(file, `${BLOCK}# A rule I just added\n`);
-    expect(await proc.exited).toBe(0);
-    expect(await new Response(proc.stderr).text()).toContain("changed while");
-    expect(readFileSync(file, "utf8")).toBe(`${BLOCK}# A rule I just added\n`);
-  });
-  test("a symlinked file is edited at its target and stays a symlink", async () => {
-    const d = tmp();
-    const target = join(d, "shared-instructions.md");
-    writeFileSync(target, `# Shared\n\n${BLOCK}`, { mode: 0o640 });
-    const link = join(d, "CLAUDE.md");
-    symlinkSync(target, link);
-    const proc = Bun.spawn(["perl", "-", link], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe" });
-    expect(await proc.exited).toBe(0);
-    expect(lstatSync(link).isSymbolicLink()).toBe(true);
-    expect(readlinkSync(link)).toBe(target);
-    expect(readFileSync(target, "utf8")).toBe("# Shared\n");
-    expect(statSync(target).mode & 0o777).toBe(0o640);
-    // A link whose target was only the block keeps the link, now to an empty file.
-    writeFileSync(target, BLOCK);
-    expect(await Bun.spawn(["perl", "-", link], { stdin: new Blob([STRIP_BLOCK_PL]) }).exited).toBe(0);
-    expect(lstatSync(link).isSymbolicLink()).toBe(true);
-    expect(readFileSync(link, "utf8")).toBe("");
   });
 });
 
 describe("the install", () => {
-  test("never writes to CLAUDE.md or AGENTS.md, and removes the old block from both", async () => {
+  test("never writes to CLAUDE.md or AGENTS.md, and leaves both untouched and says where the old block is", async () => {
     const root = tmp();
     const home = join(root, "home");
     const bin = join(root, "bin");
@@ -150,8 +103,12 @@ describe("the install", () => {
         stderr: "pipe",
       });
       expect(await proc.exited).toBe(0);
-      expect(readFileSync(join(home, ".claude/CLAUDE.md"), "utf8")).toBe("# Me\n");
-      expect(readFileSync(join(home, ".codex/AGENTS.md"), "utf8")).toBe("# Codex me\r\n");
+      // Neither file is touched; setup names the lines to delete.
+      expect(readFileSync(join(home, ".claude/CLAUDE.md"), "utf8")).toBe(`# Me\n\n${BLOCK}`);
+      expect(readFileSync(join(home, ".codex/AGENTS.md"), "utf8")).toBe(`# Codex me\r\n\r\n${BLOCK.replaceAll("\n", "\r\n")}`);
+      const said = await new Response(proc.stderr).text();
+      expect(said).toContain(`${join(home, ".claude/CLAUDE.md")} still has the block`);
+      expect(said).toContain(`${join(home, ".codex/AGENTS.md")} still has the block`);
       expect(readFileSync(join(home, ".claude/skills/jamsesh/SKILL.md"), "utf8")).toBe("LAUNCHER");
       expect(readFileSync(join(home, ".codex/skills/jamsesh/SKILL.md"), "utf8")).toBe("LAUNCHER");
       const hooks = JSON.parse(readFileSync(join(home, ".claude/settings.json"), "utf8")).hooks;

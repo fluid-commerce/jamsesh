@@ -226,7 +226,7 @@ describe("agent setup script", () => {
     }
   });
 
-  test("Codex: replaces its earlier JamSesh server, and takes its old instructions block out", async () => {
+  test("Codex: replaces its earlier JamSesh server, and leaves its old instructions block for the person to delete", async () => {
     const box = sandbox();
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
@@ -241,8 +241,8 @@ describe("agent setup script", () => {
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`url = "${origin}/mcp"`);
     expect(toml).toContain('authorization = "Bearer tok"');
-    // Nothing of ours is left in the person's own instructions, and nothing of theirs is lost.
-    expect(readFileSync(agents, "utf8")).toBe("# Mine\n");
+    // The person's instructions are never edited, and the notice says which lines are the old block.
+    expect(readFileSync(agents, "utf8")).toBe(`# Mine\n\n${OLD_BLOCKS[0]}\n`);
   });
 
   test("Codex: a symlinked config.toml stays a link and its target is what changes", async () => {

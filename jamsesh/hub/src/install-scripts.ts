@@ -181,23 +181,21 @@ export const OLD_BLOCKS = [
 ].map((lines) => lines.join("\n"));
 
 /**
- * Removes the block an earlier JamSesh wrote into AGENTS.md (or CLAUDE.md) and touches nothing else.
- * Only the exact blocks JamSesh used to write count, whole lines, with the file's own line endings;
- * anything else between the markers is the person's and stays. Every other byte is kept, except the
- * one blank line the old writer put before a block it appended at the end of the file. A symlinked
- * file (a shared CLAUDE.md/AGENTS.md) is edited at its target, so the link stays a link. A file
- * with no block isn't rewritten.
+ * Finds the block an earlier JamSesh wrote into AGENTS.md (or CLAUDE.md) and says where it is; it
+ * never writes. Taking it out here would mean reading a file and replacing it, and an editor save
+ * between the two would be lost, which no plain file operation can rule out. So the person deletes
+ * the lines. Only the exact blocks JamSesh used to write count, as whole lines, with either line
+ * ending; anything else between the markers is the person's. Prints one line per block found.
  */
-export const STRIP_BLOCK_PL = String.raw`use strict; use warnings; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
+export const FIND_BLOCK_PL = String.raw`use strict; use warnings; use Cwd qw(abs_path);
 my ($path) = @ARGV;
 exit 0 unless -f $path;
 my $real = abs_path($path) // exit 0;
 open(my $in, '<:raw', $real) or exit 0;
 my $text = do { local $/; <$in> };
 close $in;
-my $before = $text;
 my @blocks = (${OLD_BLOCKS.map((b) => `'${b.replace(/[\\']/g, "\\$&")}'`).join(", ")});
-my $changed = 0;
+my %found;
 for my $old (@blocks) {
   for my $eol ("\r\n", "\n") {
     my $block = join($eol, split(/\n/, $old, -1));
@@ -207,36 +205,15 @@ for my $old (@blocks) {
       my $starts = $i == 0 || substr($text, $i - 1, 1) eq "\n";
       my $after = substr($text, $j, length $eol);
       if (!$starts || ($j < length $text && $after ne $eol)) { $from = $i + 1; next; }
-      $j += length $after;
-      # Appended at the end after a blank line ("text\n\n<block>\n"): that blank line was JamSesh's too.
-      $i -= length $eol if $j == length $text && $i >= 2 * length($eol) && substr($text, $i - 2 * length($eol), 2 * length($eol)) eq $eol x 2;
-      substr($text, $i, $j - $i) = '';
-      $changed = 1;
-      $from = $i;
+      my $first = 1 + (() = substr($text, 0, $i) =~ /\n/g);
+      $found{$first} = $first + (() = $block =~ /\n/g);
+      $from = $j;
     }
   }
 }
-exit 0 unless $changed;
-# Edited by someone else since it was read (an editor saving): theirs stays, and nothing of it is lost.
-# Checked again right before the file is replaced or, when only the block was in it, deleted.
-sub unchanged {
-  select(undef, undef, undef, $ENV{JAMSESH_STRIP_PAUSE}) if $ENV{JAMSESH_STRIP_PAUSE}; # tests widen the window
-  my $now = do { open(my $again, '<:raw', $real) or return 0; local $/; <$again> };
-  return 1 if defined $now && $now eq $before;
-  print STDERR "JamSesh: $path changed while the old JamSesh block was being taken out, so it was left as it is. Connect again to take the block out.\n";
-  return 0;
+for my $first (sort { $a <=> $b } keys %found) {
+  print STDERR "JamSesh: $path still has the block an earlier JamSesh wrote (lines $first-$found{$first}). JamSesh no longer changes this file, so a chat joins only when you ask it to. Delete those lines, from <!-- jamsesh:start --> to <!-- jamsesh:end -->, to be rid of it.\n";
 }
-if ($text eq '' && !-l $path) { unlink $real if unchanged(); exit 0; }
-my $mode = (stat $real)[2] & 07777;
-# A new private file next to it (created exclusively, mode 600): its contents are never readable to
-# others on the way, and a file left at a predictable name can't be written through.
-my ($o, $tmp) = File::Temp::tempfile('.jamsesh-strip-XXXXXXXX', DIR => File::Basename::dirname($real));
-binmode $o;
-print $o $text;
-close $o or die "JamSesh: can't write $tmp: $!\n";
-chmod $mode, $tmp;
-if (!unchanged()) { unlink $tmp; exit 0; }
-rename $tmp, $real or die "JamSesh: can't replace $real: $!\n";
 `;
 
 /** What a coding agent sees when it opens the host's address without a code. */
@@ -370,9 +347,9 @@ find_cli() {
   fi
   return 1
 }
-# Takes the block an earlier JamSesh wrote into an instruction file out again, and nothing else.
-strip_block() { perl - "$1" <<'STRIP'
-${STRIP_BLOCK_PL}STRIP
+# Says where the block an earlier JamSesh wrote into an instruction file is. Never changes the file.
+note_block() { perl - "$1" <<'FIND'
+${FIND_BLOCK_PL}FIND
 }
 configured=0
 
@@ -428,8 +405,8 @@ if [ -n "$CLAUDE" ]; then
   rm -f "$prev_cred" "$rollback_json" "$rollback_sh"
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
-  # JamSesh used to write a block into CLAUDE.md. It never does now, and takes the old one out.
-  strip_block "$HOME/.claude/CLAUDE.md"
+  # JamSesh used to write a block into CLAUDE.md. It never does now, and says where the old one is.
+  note_block "$HOME/.claude/CLAUDE.md"
   cat > "$HOME/.claude/commands/jamsesh.md" <<'CMD'
 ---
 description: Join the JamSesh room session
@@ -585,8 +562,8 @@ PL
   # The prompt is the full instructions, for when a person types /jamsesh in Codex.
   curl -fsS "\${AUTH[@]}" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
   printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
-  # JamSesh used to write a block into AGENTS.md. It never does now, and takes the old one out.
-  strip_block "$HOME/.codex/AGENTS.md"
+  # JamSesh used to write a block into AGENTS.md. It never does now, and says where the old one is.
+  note_block "$HOME/.codex/AGENTS.md"
   ok "Codex: MCP server, skill, /jamsesh prompt (Codex has no hooks here; a chat joins only when told to)"
   configured=$((configured + 1))
 else
