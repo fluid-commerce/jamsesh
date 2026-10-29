@@ -1262,7 +1262,7 @@ export class Brain {
       if (!output) return;
       // Curate first: the brief only moves past these events once their facts are stored, so a
       // failed pass is retried next time instead of losing them.
-      await this.curate(events.filter(forCuration));
+      if (this.curateInDigest) await this.curate(events.filter(forCuration));
       s.store.setDigest("brief-parts", JSON.stringify(output), lastId);
       s.store.setDigest("session", buildBrief(s).full, lastId);
       await this.workstreamBriefs(lastId);
@@ -1276,6 +1276,9 @@ export class Brain {
    * requirements, constraints, preferences, open questions, facts), resolve what was
    * answered, and supersede what changed. Agents get the active set in jam_context.
    */
+  /** The wiki's ingest replaces the periodic curation pass in a hub (12.8); a bare Brain still curates. */
+  curateInDigest = true;
+
   async curate(events: JamEvent[]): Promise<CurationResult | null> {
     const decided = await this.decideCuration(events);
     return decided ? this.applyCuration(decided, events) : null;

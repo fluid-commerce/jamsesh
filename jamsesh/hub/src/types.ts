@@ -292,7 +292,7 @@ export interface TriageCard {
   id: string;
   ts: number;
   updatedAt: number;
-  type: "task" | "context";
+  type: "task" | "context" | "wiki";
   status: "open" | "sent" | "added" | "merged" | "replaced" | "dismissed";
   /** Overheard in the room, reported by an agent, or taken from a document someone attached. */
   origin: "overheard" | "agent" | "document";
@@ -324,6 +324,30 @@ export interface TriageCard {
   factId: string | null;
   /** When JamSesh last mentioned it out loud as waiting. */
   mentionedAt: number | null;
+  /** A wiki card (12.8): page changes the maintainer proposes. Accepting applies the pages that are checked. */
+  wiki?: WikiCardPayload;
+}
+
+export interface WikiChange {
+  slug: string;
+  title: string;
+  category: string;
+  op: "create" | "update";
+  /** Unified diff against the page now (a new page is all additions), cut to a readable size. */
+  diff: string;
+  /** The page changed (a person edited it) since this was proposed: it is skipped on accept. */
+  stale: boolean;
+}
+
+export interface WikiCardPayload {
+  kind: "ingest" | "lint" | "answer";
+  summary: string;
+  changes: WikiChange[];
+  /** Lint: what was found. Nothing to apply for these alone. */
+  findings?: { kind: string; slug: string; text: string }[];
+  /** After accepting: what was written and what was left alone. */
+  applied?: string[];
+  skipped?: string[];
 }
 
 export interface Annotation {
@@ -548,6 +572,7 @@ export type BusMessage =
   | { type: "patch"; key: keyof HubState; value: any }
   | { type: "utterance"; utterance: Utterance }
   | { type: "stage"; stage: Stage }
+  | { type: "wiki"; kind: "ingest" | "edit" | "apply" | "source"; touched: string[]; by: string; at: number }
   | { type: "toast"; text: string; tone: "info" | "directive" | "decision" | "warn"; detail?: string }
   | { type: "speak"; audio: string | null; text: string; mime: string }
   | { type: "level"; deviceId: string; level: number }
