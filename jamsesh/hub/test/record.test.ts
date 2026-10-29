@@ -1170,6 +1170,50 @@ test("a cancel while the real read is running, then the read failing, still give
   expect((r.hub as any).promptMode.get("mayaLaptop")).toBeUndefined();
 }, 30_000);
 
+test("after a failed Stop the recording's speech window is back: words said before the retry are still its own", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "before the failure", r.maya.id, "mayaLaptop", base + 500);
+  r.at(base + 3000);
+  const real = (r.hub as any).stopNotes.bind(r.hub);
+  let n = 0;
+  (r.hub as any).stopNotes = (...args: any[]) => (++n === 1 ? (() => { throw new Error("database is locked"); })() : real(...args));
+  const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  await expect(stop()).rejects.toThrow("locked");
+  expect((r.hub as any).promptMode.get("mayaLaptop")?.rec).toBe(a.id);
+  r.at(base + 3500);
+  line(r.hub, "after the failure", r.maya.id, "mayaLaptop", base + 3300);
+  // Held for the recording, not given to the room in between.
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).not.toContain("after the failure");
+  const done = await stop();
+  expect(done.ok && done.notes.map((x) => x.text).join(" ")).toContain("after the failure");
+}, 60_000);
+
+test("a send that fails part-way and is retried after ownership changed still sends each note where it first went", async () => {
+  const r = room();
+  const atlas = r.reg("Ben", "acme/web");
+  const juno = r.reg("Ana", "acme/api");
+  const a = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", agentId: atlas.id, image: "/renders/a.png" });
+  const b = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "B", agentId: juno.id, image: "/renders/b.png" });
+  const recordingId = await r.stopped();
+  const notes = [a, b].map((x, i) => ({ id: `n${i}`, text: `fix ${x.title}`, t0: 1, t1: 2, pin: { target: { kind: "artifact", ref: x.id, label: x.title }, x: 0.5, y: 0.5, kind: "click" } }));
+  const real = r.s.createDirective.bind(r.s);
+  let calls = 0;
+  (r.s as any).createDirective = (...args: any[]) => (++calls === 2 ? (() => { throw new Error("database is locked"); })() : (real as any)(...args));
+  expect((await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).status).toBeGreaterThanOrEqual(500);
+  // B now belongs to Atlas, who already has a directive from this send.
+  r.s.upsertArtifact({ ...b, agentId: atlas.id });
+  const retry = (await (await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).json()) as any;
+  expect(retry.sent.map((x: any) => x.agentName).sort()).toEqual([atlas.name, juno.name].sort());
+  const ds = r.s.directives();
+  expect(ds.length).toBe(2);
+  expect(ds.find((d) => d.targets[0] === atlas.id)!.text).not.toContain("fix B");
+  expect(ds.find((d) => d.targets[0] === juno.id)!.text).toContain("fix B");
+}, 60_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

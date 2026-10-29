@@ -85,7 +85,7 @@ type Outcome = { kind: EndReason | "unknown"; result?: unknown };
 type Ended<R> = { kind: "done"; value: R } | { kind: "busy" } | { kind: "ended"; outcome?: Outcome };
 
 type StopAnswer = { ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number };
-type SendProgress = { brain?: boolean };
+type SendProgress = { brain?: boolean; owners?: Map<string, string | null> };
 
 export class Hub {
   store: Store;
@@ -572,7 +572,11 @@ export class Hub {
         return { kind: "done", value };
       })
       .catch((e): Ended<R> => {
-        if (rec.state === "ending") (rec.state = "live"), (rec.ending = undefined), (rec.error = e instanceof Error ? e.message : String(e));
+        if (rec.state === "ending") {
+          (rec.state = "live"), (rec.ending = undefined), (rec.error = e instanceof Error ? e.message : String(e));
+          // The recording goes on: its speech window is put back (the read took it away), so what is said before the retry is still its own.
+          if (!this.promptMode.get(rec.deviceId)) this.promptStart(rec.deviceId, rec.t0, Hub.RECORD_MAX_MS).rec = rec.id;
+        }
         else if (!released) return (released = true), abort?.(), { kind: "ended", outcome: rec.outcome };
         else if (released) return { kind: "ended", outcome: rec.outcome };
         throw e;
@@ -745,8 +749,11 @@ export class Hub {
     const pins: Annotation[] = [];
     const byAgent = new Map<string, { n: RecordNote; crop: string | null }[]>();
     const loose: { n: RecordNote; crop: string | null }[] = [];
+    // Who each note goes to is decided the first time and kept: a retry after a part-way failure must not send a note somewhere else.
+    const owners = (done.owners ??= new Map());
     for (const n of notes) {
-      const owner = ownerOf(s, n.pin?.target);
+      if (!owners.has(n.id)) owners.set(n.id, ownerOf(s, n.pin?.target) ?? null);
+      const owner = owners.get(n.id) ?? undefined;
       let crop: string | null = null;
       if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin);
       if (n.pin) {

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { tidyKey } from "../src/shared/record";
 import { notesToSend, closeRecording, leaveActions, newRecordToken, pointerOrNone, reapOrphans, type RecStatus, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
@@ -109,4 +110,13 @@ test("a send carries the notes as first submitted: edits made after it began, or
   review.submitted = notesToSend(review);
   review.notes = [note("a", "make it much bigger")];
   expect(notesToSend(review)).toEqual(first);
+});
+
+test("in the tidy sheet Send by keyboard needs notes, nothing already sending, and no Discard question open", () => {
+  const key = { key: "Enter", metaKey: true, ctrlKey: false };
+  expect(tidyKey(key, { live: 2, busy: false, confirm: false })).toBe("send");
+  expect(tidyKey(key, { live: 0, busy: false, confirm: false })).toBeNull();
+  expect(tidyKey(key, { live: 2, busy: true, confirm: false })).toBeNull();
+  expect(tidyKey(key, { live: 2, busy: false, confirm: true })).toBeNull();
+  expect(tidyKey({ key: "Enter", metaKey: false, ctrlKey: false }, { live: 2, busy: false, confirm: false })).toBeNull();
 });

@@ -41,13 +41,18 @@ function Note({ n, i, brain, locked, onText, onMerge, onDelete }: { n: RecordNot
   );
 }
 
+/** What a key does in the tidy sheet: Send only when there is something to send, nothing is already going out, and Discard isn't being asked about. */
+export function tidyKey(e: { key: string; metaKey: boolean; ctrlKey: boolean }, st: { live: number; busy: boolean; confirm: boolean }): "send" | null {
+  return (e.metaKey || e.ctrlKey) && e.key === "Enter" && st.live > 0 && !st.busy && !st.confirm ? "send" : null;
+}
+
 export function RecordTidy({ notes, brain, busy, locked = busy, error, onChange, onSend, onDiscard }: { notes: RecordNote[]; brain: string; busy: boolean; locked?: boolean; error?: string | null; onChange: (n: RecordNote[]) => void; onSend: () => void; onDiscard: () => void }) {
   const [confirm, setConfirm] = useState(false);
   const live = notes.filter((n) => n.text.trim());
   const agents = new Set(live.map((n) => n.ownerName).filter(Boolean));
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && live.length && !busy) {
+      if (tidyKey(e, { live: live.length, busy, confirm }) === "send") {
         e.preventDefault();
         onSend();
       }
@@ -87,7 +92,7 @@ export function RecordTidy({ notes, brain, busy, locked = busy, error, onChange,
               <button type="button" className="btn small" onClick={() => setConfirm(false)}>
                 Keep them
               </button>
-              <button type="button" className="btn small danger" onClick={onDiscard}>
+              <button type="button" className="btn small danger" onClick={onDiscard} disabled={busy}>
                 Discard
               </button>
             </>
