@@ -4,6 +4,8 @@ import { readPref } from "./identity";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
+import { registerDriveTarget } from "./driving";
+import { canvasDriver, frameDriver } from "./drivetiles";
 import { VersionBadge } from "./StageControls";
 import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
@@ -266,6 +268,11 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
       live = false;
     };
   }, [raw, detectBlocked]);
+  // A driver's clicks, scrolls and typing reach the page through the dev proxy's script (SPEC 10.6).
+  useEffect(() => {
+    const f = frame.current;
+    return f && !blocked ? registerDriveTarget(f, frameDriver(f)) : undefined;
+  }, [blocked, src]);
   // Sized in the resize callback itself, not through React state: state would land a frame late
   // and the frame would shake while the window is being resized.
   useLayoutEffect(() => {
@@ -1068,6 +1075,12 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
       clearTimeout(retry);
     };
   }, [kind, status, epoch, attempt, link, generation]);
+
+  // A driver pans, zooms and selects through FigCraft's own commands (SPEC 10.6).
+  useEffect(() => {
+    const f = frame.current;
+    return f && link ? registerDriveTarget(f, canvasDriver(f)) : undefined;
+  }, [link]);
 
   // Rejoin: fetch the link again and start a fresh canvas on it. `why` shows meanwhile.
   const [mount, setMount] = useState(0);

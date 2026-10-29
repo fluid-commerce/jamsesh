@@ -10,6 +10,7 @@ import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { newId } from "./store";
 import type { Session } from "./session";
+import { allowDriveScript, withDriveScript } from "./devdrive";
 import type { DevServer, Platform } from "./types";
 
 /** How long a dev server may stay unreachable before its tile clears itself. */
@@ -263,6 +264,12 @@ async function forward(req: Request, target: string, path: string): Promise<Resp
     out.delete("content-encoding");
     const loc = out.get("location");
     if (loc?.startsWith(`http://${target}`)) out.set("location", loc.slice(`http://${target}`.length) || "/");
+    // A page the big screen frames gets the script that replays a driver's clicks, scrolls and typing (6.1).
+    if (req.method === "GET" && r.status === 200 && /^text\/html/i.test(out.get("content-type") ?? "")) {
+      const csp = out.get("content-security-policy");
+      if (csp) out.set("content-security-policy", allowDriveScript(csp));
+      return new Response(withDriveScript(await r.text()), { status: r.status, statusText: r.statusText, headers: out });
+    }
     return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
   } catch {
     return new Response("That build isn't answering right now. Its agent may have stopped it, or it crashed.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });

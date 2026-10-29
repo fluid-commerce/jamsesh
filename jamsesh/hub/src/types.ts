@@ -296,6 +296,8 @@ export interface StageLock {
   personId: string | null;
   since: number;
   lastActive: number;
+  /** People driving this screen right now (6.1): the owner, and whoever they passed control to. Ends with the lock. */
+  drivers?: string[];
 }
 
 /** What an agent wanted to show while a screen was locked; it waits here until someone shows or dismisses it. */
@@ -457,6 +459,14 @@ export interface CanvasInfo {
   generation: number;
 }
 
+/** One bit of a driver's input, positions as fractions 0..1 of the screen's stage area (SPEC 10.6). */
+export type DriveEvent =
+  | { k: "move"; x: number; y: number }
+  | { k: "down" | "up"; x: number; y: number; b?: number; n?: number }
+  | { k: "wheel"; x: number; y: number; dx: number; dy: number; ctrl?: boolean }
+  | { k: "key"; key: string; code?: string; down: boolean; mods?: { shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean } }
+  | { k: "leave" };
+
 export type BusMessage =
   | { type: "state"; state: HubState }
   | { type: "event"; event: JamEvent }
@@ -469,6 +479,7 @@ export type BusMessage =
   | { type: "level"; deviceId: string; level: number }
   | { type: "thinking"; on: boolean; label?: string }
   | { type: "rtc"; from: string; to: string; data: any }
+  | { type: "drive"; screen: string; personId: string; name: string; color: string; ev: DriveEvent; t: number }
   | { type: "chime"; deviceId: string | null }
   | { type: "share-ended"; shareId: string; deviceId: string; text: string }
   | { type: "share-request"; shareId: string; deviceIds: string[]; kind: "screen" | "camera"; reason: string; by: string };

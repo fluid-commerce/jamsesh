@@ -12,9 +12,9 @@ import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
-import type { BusMessage, EventKind, Stage } from "./types";
+import type { BusMessage, DriveEvent, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
+type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; pairedId?: string | null; hostWindow?: boolean; driveWindow?: number; driveCount?: number; driveDenied?: number };
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -210,7 +210,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null } as any })) return undefined as any;
+          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, hostWindow, pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -284,6 +284,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (m.type === "level" && ws.data.deviceId) {
             bus.send({ type: "level", deviceId: ws.data.deviceId, level: m.level });
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
+          else if (m.type === "drive") driveFrom(ws, hub, m);
           else if (m.type === "rtc" && ws.data.deviceId && typeof m.to === "string") {
             const msg = JSON.stringify({ type: "rtc", from: ws.data.deviceId, to: m.to, data: m.data });
             for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
@@ -310,6 +311,51 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
   });
   if (server.port) hub.devproxy.reserve(server.port);
   return server;
+}
+
+const DRIVE_PER_SECOND = 120;
+const clamp01 = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : null);
+const delta = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.min(5000, Math.max(-5000, v)) : 0);
+
+/** The sane form of one driver's input event, or null (junk). */
+export function cleanDrive(ev: any): DriveEvent | null {
+  if (!ev || typeof ev !== "object") return null;
+  if (ev.k === "leave") return { k: "leave" };
+  if (ev.k === "key") {
+    if (typeof ev.key !== "string" || !ev.key || ev.key.length > 32) return null;
+    const mods = ev.mods && typeof ev.mods === "object" ? { shift: !!ev.mods.shift, ctrl: !!ev.mods.ctrl, alt: !!ev.mods.alt, meta: !!ev.mods.meta } : undefined;
+    return { k: "key", key: ev.key, ...(typeof ev.code === "string" ? { code: ev.code.slice(0, 32) } : {}), down: ev.down !== false, ...(mods ? { mods } : {}) };
+  }
+  const [x, y] = [clamp01(ev.x), clamp01(ev.y)];
+  if (x === null || y === null) return null;
+  if (ev.k === "move") return { k: "move", x, y };
+  if (ev.k === "down" || ev.k === "up") return { k: ev.k, x, y, b: Math.min(4, Math.max(0, Math.trunc(Number(ev.b) || 0))), n: Math.min(3, Math.max(1, Math.trunc(Number(ev.n) || 1))) };
+  if (ev.k === "wheel") return { k: "wheel", x, y, dx: delta(ev.dx), dy: delta(ev.dy), ...(ev.ctrl ? { ctrl: true } : {}) };
+  return null;
+}
+
+/**
+ * A driver's input from their window's WebSocket (6.1). The person is whoever this window is paired as (or the host's own window),
+ * never what the message says; agents have no window here. Anyone not driving this screen is dropped, with a note once a second.
+ */
+function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
+  const s = hub.session;
+  const now = Date.now();
+  if (!ws.data.driveWindow || now - ws.data.driveWindow >= 1000) ((ws.data.driveWindow = now), (ws.data.driveCount = 0));
+  if ((ws.data.driveCount = (ws.data.driveCount ?? 0) + 1) > DRIVE_PER_SECOND) return;
+  const dev = hub.auth.get(ws.data.pairedId);
+  const personId = dev ? (dev.kind === "browser" ? dev.personId : null) : ws.data.hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null;
+  const screen = s.findScreen(typeof m.screen === "string" ? m.screen : undefined)?.id ?? "main";
+  const person = personId ? s.person(personId) : undefined;
+  const deny = (why: string) => {
+    if (now - (ws.data.driveDenied ?? 0) < 1000) return;
+    ws.data.driveDenied = now;
+    ws.send(JSON.stringify({ type: "drive-denied", screen, why }));
+  };
+  if (!person) return deny("Pick who you are in this window first.");
+  if (!s.driversOf(screen).includes(person.id)) return deny("You aren't driving this screen.");
+  const ev = cleanDrive(m.ev);
+  if (ev) bus.send({ type: "drive", screen, personId: person.id, name: person.name, color: person.color, ev, t: now });
 }
 
 /** Relays a canvas WebSocket to the canvas server, which only listens on this machine. */
@@ -536,6 +582,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const who = actor();
     const screen = screenOf();
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
+  }
+  // Driving the big screen (6.1): the lock's owner starts, passes control or drives together; `to` names the other person.
+  m = path.match(/^\/drive\/(start|stop|pass|together)$/);
+  if (m && req.method === "POST") {
+    const r = s.drive(m[1] as "start", screenOf(), actor().id, typeof body?.to === "string" ? body.to : typeof body?.who === "string" ? body.who : null);
+    return r.ok ? json({ drivers: r.drivers }) : bad(r.error, r.status);
   }
   if (path === "/stage/unlock" && req.method === "POST") {
     s.unlockStage(screenOf());

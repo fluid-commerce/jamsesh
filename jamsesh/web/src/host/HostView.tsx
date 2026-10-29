@@ -207,7 +207,7 @@ export function HostView() {
       <MicNotice status={micStatus} onRetry={toggleMic} />
       <main style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) clamp(320px, 22vw, 440px)", gap: 18 }}>
         <section style={{ minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <Stage state={state} interactive />
+          <Stage state={state} interactive drive="replay" />
         </section>
         <aside style={{ minHeight: 0, display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="tile" style={{ flex: 1, padding: "14px 12px 10px", animation: "none" }}>

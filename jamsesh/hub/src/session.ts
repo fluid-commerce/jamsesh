@@ -1513,6 +1513,56 @@ export class Session {
     this.commitStage({ ...cur, lock: { ...cur.lock, lastActive: Date.now() } }, screen);
   }
 
+  // ---- driving: a cursor of your own on the big screen (6.1) ----
+
+  /** Whether a person has a window open right now (the host's own window counts for the person at the host). */
+  personOnline(personId: string) {
+    const atHost = personId === this.store.setting<string>("hostPersonId", "");
+    return this.store.all("devices").some((d) => (d.personId === personId || (atHost && d.kind === "host")) && this.deviceOnline(d.id));
+  }
+
+  /** Who is driving a screen: always a subset of the lock's owner and whoever they handed control to. */
+  driversOf(screen = "main"): string[] {
+    return this.lockOf(screen)?.drivers ?? [];
+  }
+
+  private setDrivers(screen: string, drivers: string[]) {
+    const cur = this.stage(screen);
+    if (!cur.lock) return;
+    const { drivers: _old, ...lock } = cur.lock;
+    this.commitStage({ ...cur, lock: { ...lock, lastActive: Date.now(), ...(drivers.length ? { drivers } : {}) } }, screen);
+  }
+
+  /**
+   * Start, stop, pass or share driving. `by` is the person asking. Only the lock's owner starts, passes or shares; anyone driving
+   * can stop themselves, and the owner can stop anyone. Says why when it can't.
+   */
+  drive(action: "start" | "stop" | "pass" | "together", screen: string, by: string | null, to?: string | null): { ok: true; drivers: string[] } | { ok: false; error: string; status: number } {
+    const lock = this.lockOf(screen);
+    const no = (error: string, status = 403) => ({ ok: false as const, error, status });
+    if (!by || !this.person(by)) return no("Pick who you are in this window first.");
+    if (!lock) return no("Put something on the screen first; driving belongs to whoever holds it.", 409);
+    const drivers = lock.drivers ?? [];
+    const owner = lock.personId === by;
+    if (action === "stop") {
+      const who = to && owner ? to : by;
+      if (who !== by && !owner) return no(`Only ${lock.by} can stop someone else.`);
+      this.setDrivers(screen, drivers.filter((d) => d !== who));
+      return { ok: true, drivers: this.driversOf(screen) };
+    }
+    if (!owner) return no(`Only ${lock.by}, who holds the screen, can ${action === "start" ? "start driving it" : action === "pass" ? "pass control" : "drive together"}.`);
+    if (action === "start") {
+      if (!drivers.includes(by)) this.setDrivers(screen, [...drivers, by]);
+      return { ok: true, drivers: this.driversOf(screen) };
+    }
+    const target = to ? this.person(to) : undefined;
+    if (!target) return no("Pass it to a person in the room.", 404);
+    if (target.id === by) return no("That's you already.", 400);
+    if (!this.personOnline(target.id)) return no(`${target.name} isn't in the room right now.`, 409);
+    this.setDrivers(screen, action === "pass" ? [target.id] : [...new Set([...drivers, by, target.id])]);
+    return { ok: true, drivers: this.driversOf(screen) };
+  }
+
   /** Locks whose owners left or went quiet let go even when nobody asks (a timer runs this). */
   sweepLocks() {
     for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) this.lockOf(screen);

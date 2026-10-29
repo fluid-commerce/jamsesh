@@ -12,12 +12,22 @@ function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
 import { StageBar } from "../shared/StageControls";
+import { DriveSurface } from "../shared/DriveSurface";
+import { useDriverState } from "../shared/driving";
+import { DriveLayer } from "./DriveLayer";
 import { cast } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
-export function Stage({ state, interactive, tilePins = true, bar }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string }) {
+/** What a stage does with driving (SPEC 10.6): "replay" is the big screen (it plays drivers' input into its tiles), "trackpad" is the driver's own app (it can turn the mirror into a trackpad). Every stage draws the cursors. */
+export type DriveMode = "replay" | "trackpad";
+
+function Trackpad({ screen }: { screen: string }) {
+  return useDriverState(screen).me.driving ? <DriveSurface screen={screen} /> : null;
+}
+
+export function Stage({ state, interactive, tilePins = true, bar, drive }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string; drive?: DriveMode }) {
   const stage = state.stage;
   // Which screen this stage is: an extra display passes its id (`bar`), a mirror shows the main one.
   const screen = bar ?? stage.screenId ?? "main";
@@ -67,12 +77,19 @@ export function Stage({ state, interactive, tilePins = true, bar }: { state: Hub
     default:
       body = <Board state={state} onPick={spotlight} />;
   }
+  // The cursors and the trackpad cover the stage below the lock bar, so a fraction means the same spot in every window.
   return (
-    <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
-      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} />}
-      <TilePins.Provider value={tilePins}>
-        <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
-      </TilePins.Provider>
+    <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }} data-drive-screen={screen}>
+      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} drive={drive === "trackpad"} />}
+      <div className="stage-body" style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
+          <TilePins.Provider value={tilePins}>
+            <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
+          </TilePins.Provider>
+        </div>
+        <DriveLayer screen={screen} replay={drive === "replay"} />
+        {drive === "trackpad" && <Trackpad screen={screen} />}
+      </div>
     </div>
   );
 }

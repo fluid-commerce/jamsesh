@@ -209,6 +209,12 @@ export class Auth {
     for (const a of this.devices.values()) if (a.ownerDeviceId === ownerDeviceId && a.kind === "agent" && !a.revoked) this.revoke(a.id);
   }
 
+  /** A device that is still paired. */
+  get(id: string | null | undefined): PairedDevice | null {
+    const d = id ? this.devices.get(id) : undefined;
+    return d && !d.revoked ? d : null;
+  }
+
   list() {
     return [...this.devices.values()].filter((d) => !d.revoked).map(({ tokenHash: _h, ...d }) => d);
   }
