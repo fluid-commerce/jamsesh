@@ -64,7 +64,8 @@ test("Hub.stop stops a local whisper the hub started (one that ignores SIGTERM t
     expect(alive(pid)).toBe(true);
     expect(hub.helpers.size).toBe(1);
     expect(await hub.stop()).toBe(true);
-    expect(alive(pid)).toBe(false);
+    // The exit was seen; on macOS launchd takes a moment (about 100 ms) to reap the orphan.
+    expect(await until(() => !alive(pid), 3000)).toBe(true);
     expect(hub.helpers.size).toBe(0);
   }), 30_000);
 
@@ -87,8 +88,15 @@ test("a local whisper dies within seconds of its hub being killed outright", asy
   `;
   const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit", env: { ...process.env, JAMSESH_SILENT: "1", JAMSESH_OFFLINE: "1", JAMSESH_WHISPER_SERVER: bin, JAMSESH_WHISPER_MODEL: join(dir, "model.bin") } });
   try {
-    const { value } = await hub.stdout.getReader().read();
-    expect(new TextDecoder().decode(value).trim().split("\n").at(-1)).toBe("true");
+    // The hub prints "whisper: ready" first and the answer after; they can arrive as separate chunks.
+    const reader = hub.stdout.getReader();
+    let out = "";
+    while (!/^(true|false)$/m.test(out)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += new TextDecoder().decode(value);
+    }
+    expect(out.trim().split("\n").at(-1)).toBe("true");
     expect(existsSync(pidFile)).toBe(true);
     const pid = Number(readFileSync(pidFile, "utf8"));
     expect(alive(pid)).toBe(true);
