@@ -16,6 +16,8 @@ export interface Carried {
   updatedAt?: number;
   /** The host this copy was taken from (its host key). */
   host?: string;
+  /** That host's seal: after a reset there, it takes back only a copy it sealed since. */
+  stamp?: unknown;
 }
 
 /** Where one person's copy and their yes or no live. */
@@ -60,13 +62,17 @@ function read<T>(key: string): T | null {
     return null;
   }
 }
+/** Saving isn't allowed to fail quietly either: a "no" that wasn't kept would let a later sync make a copy. */
 function write(key: string, value: unknown) {
+  const raw = JSON.stringify(value);
+  localStorage.setItem(key, raw);
+  if (localStorage.getItem(key) !== raw) throw new Error("this browser didn't keep it");
+}
+/** Clears an old key nobody reads any more; a failure there only means it stays unused. */
+function drop(key: string) {
   try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* private window or full storage: the copy simply isn't kept */
-  }
+    localStorage.removeItem(key);
+  } catch {}
 }
 /** Deleting is not allowed to fail quietly: a copy that stays can bring a forgotten voice back. */
 function erase(key: string) {
@@ -79,13 +85,14 @@ function browserStore(personId: string): CopyStore {
   const copyKey = `jamsesh.voiceprint.v2::${personId}`;
   const consentKey = `jamsesh.voiceCarry.v2::${personId}`;
   // Copies from before they were kept per person could be anyone's: never use them.
-  write("jamsesh.voiceprint.v1", null);
-  write("jamsesh.voiceCarry", null);
+  drop("jamsesh.voiceprint.v1");
+  drop("jamsesh.voiceCarry");
   return {
     consent: async () => read<boolean>(consentKey),
     setConsent: async (on) => {
-      write(consentKey, on);
+      // The copy goes first: a "no" whose copy stayed would be no at all.
       if (!on) erase(copyKey);
+      write(consentKey, on);
     },
     get: async () => read<Carried>(copyKey),
     put: async (copy) => write(copyKey, copy),
@@ -135,20 +142,27 @@ export async function pullCopy(personId: string, here = currentHostKey()): Promi
   }
 }
 
-/** Offers this device's copy to the host, if the person agrees, then keeps what the host holds now (its copy and its version). */
+/**
+ * Offers this device's copy to the host, if the person agrees, then keeps what the host holds now (its copy and
+ * its version). The host refuses a copy after the person's voice was reset there: one it sealed before the reset
+ * is stale and is deleted here (and a failure to delete is thrown, never hidden); one from another host just
+ * isn't taken. Throws on a failure worth trying again (offline, the host not answering).
+ */
 export async function pushCopy(personId: string, here = currentHostKey()): Promise<boolean> {
-  const c = await quiet(() => storeFor(personId).share(), null);
+  const c = await storeFor(personId).share();
   if (!c?.samples?.length) return false;
+  let r: { ok?: boolean };
   try {
-    const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples, updatedAt: c.updatedAt }, "PUT");
-    if (!r?.ok) return false;
-    await pullCopy(personId, here);
-    return true;
+    r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples, updatedAt: c.updatedAt, stamp: c.stamp }, "PUT", { queue: false });
   } catch (e) {
-    // Made before they reset their voice on this host: it must not come back, here or anywhere.
-    if ((e as { status?: number }).status === 409) await forgetCopy(personId).catch(() => {});
+    const err = e as { status?: number; body?: { reset?: boolean; stale?: boolean } };
+    if (err.status !== 409 || !err.body?.reset) throw e;
+    if (err.body.stale) await forgetCopy(personId);
     return false;
   }
+  if (!r?.ok) return false;
+  await pullCopy(personId, here);
+  return true;
 }
 
 /**
@@ -160,12 +174,8 @@ export async function pushCopy(personId: string, here = currentHostKey()): Promi
 export async function syncVoiceprint(me: Pick<Person, "id">, here = currentHostKey()) {
   if (!(await carryAllowed(me.id))) return;
   const copy = await localCopy(me.id);
-  let host: Carried;
-  try {
-    host = await api<Carried>(`/people/${me.id}/voiceprint`);
-  } catch {
-    return;
-  }
+  // A failure here is thrown: the sync isn't settled, and is tried again.
+  const host = await api<Carried>(`/people/${me.id}/voiceprint`);
   const hostHas = !!host?.samples?.length;
   if (!copy) return void (hostHas && (await storeFor(me.id).put(tagged(host, here))));
   if (!hostHas) return void (await pushCopy(me.id, here));
@@ -187,16 +197,27 @@ export const beginRead = (personId: string) => api(`/people/${personId}/voice/st
  */
 export const endRead = (personId: string, read: boolean) => api(`/people/${personId}/voice/end`, { read }, "POST", { queue: false }).catch(() => {});
 
-/** Runs the sync once per person on this host; `ready` is false until it has settled (so the join read isn't asked first). */
-export function useVoiceprintSync(me: Pick<Person, "id"> | undefined) {
-  const [done, setDone] = useState<string | null>(null);
+/**
+ * Runs the sync once this window is acknowledged as the person (`registered`, the person id the host bound it
+ * to), so the host never answers "not yours" to a window it hasn't bound yet. `ready` turns true once a try
+ * finished either way (the join read isn't held up); a failed try is made again on reconnect (`connected`), and
+ * `problem` says what went wrong when it's the person's to know (a stale copy that couldn't be deleted).
+ */
+export function useVoiceprintSync(me: Pick<Person, "id"> | undefined, registered: string | null, connected = true) {
+  const [tried, setTried] = useState<string | null>(null);
+  const [synced, setSynced] = useState<string | null>(null);
+  const [problem, setProblem] = useState("");
   const id = me?.id;
   useEffect(() => {
-    if (!me || done === me.id) return;
+    if (!me || registered !== me.id || synced === me.id || !connected) return;
     let live = true;
-    syncVoiceprint(me).finally(() => live && setDone(me.id));
+    syncVoiceprint(me)
+      .then(
+        () => live && (setSynced(me.id), setProblem("")),
+        (e) => live && setProblem(`Your voice isn't synced with this host yet: ${(e as Error)?.message ?? e}`),
+      )
+      .finally(() => live && setTried(me.id));
     return () => void (live = false);
-    // Only a new person starts a sync.
-  }, [id]);
-  return !!me && done === me.id;
+  }, [id, registered, connected, synced]);
+  return { ready: !!me && tried === me.id, problem };
 }

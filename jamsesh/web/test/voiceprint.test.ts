@@ -92,17 +92,21 @@ test("an older copy from another host gives way to this host's newer one", async
   expect(await localCopy("p1")).toMatchObject({ host: "hostB", version: "b7" });
 });
 
-test("a refused or failed call changes nothing and never throws", async () => {
+test("a refused or failed call changes nothing, and the sync throws so it's tried again rather than marked done", async () => {
   await setCarryAllowed("p1", true);
   store.set(key("p1"), JSON.stringify(copy()));
+  store.set(key("someone-else"), JSON.stringify(copy()));
+  await setCarryAllowed("someone-else", true);
   reply = () => ({ status: 403, body: { error: "A voice is only for its own person to give." } });
-  expect(await pushCopy("someone-else")).toBe(false);
+  await expect(pushCopy("someone-else")).rejects.toThrow("only for its own person");
   expect(await pullCopy("someone-else")).toBe(false);
+  await expect(syncVoiceprint({ id: "p1" }, H)).rejects.toThrow("only for its own person");
   (globalThis as any).fetch = async () => {
     throw new TypeError("network down");
   };
-  await syncVoiceprint({ id: "p1" }, H);
+  await expect(syncVoiceprint({ id: "p1" }, H)).rejects.toThrow();
   expect(await localCopy("p1")).toEqual(copy());
+  expect(await localCopy("someone-else")).toEqual(copy());
 });
 
 test("turning it off forgets the copy on this device", async () => {
@@ -165,15 +169,22 @@ test("starting the join read fails out loud when the host didn't take it, and is
   expect(calls.at(-1)).toMatchObject({ method: "POST", path: "/api/people/p1/voice/start" });
 });
 
-test("a copy made before the person reset their voice on this host is deleted here when the host refuses it", async () => {
+test("a copy the host sealed before the person reset their voice there is deleted here; one from elsewhere is only not taken", async () => {
   await setCarryAllowed("p1", true);
-  store.set(key("p1"), JSON.stringify(copy({ host: "hostA", version: "a1", updatedAt: 10 })));
-  reply = (m) => (m === "PUT" ? { status: 409, body: { error: "Your voice was reset on this host after that copy was made.", reset: true } } : { status: 200, body: copy({ samples: [], version: "", updatedAt: 0 }) });
+  const stamp = { gen: 0, at: 5, mac: "m" };
+  store.set(key("p1"), JSON.stringify(copy({ host: "hostA", version: "a1", updatedAt: 10, stamp })));
+  let stale = true;
+  reply = (m) => (m === "PUT" ? { status: 409, body: { error: "Your voice was reset on this host.", reset: true, stale } } : { status: 200, body: copy({ samples: [], version: "", updatedAt: 0 }) });
   await syncVoiceprint({ id: "p1" }, H);
   expect(calls.map((c) => c.method)).toEqual(["GET", "PUT"]);
-  expect(calls[1].body.updatedAt).toBe(10);
+  expect(calls[1].body).toMatchObject({ updatedAt: 10, stamp });
   expect(await localCopy("p1")).toBeNull();
   expect(await carryAllowed("p1")).toBe(true);
+  // Not provably stale (another host's copy): kept on the device, just not given to this host.
+  stale = false;
+  store.set(key("p1"), JSON.stringify(copy({ host: "hostA", updatedAt: 10 })));
+  await syncVoiceprint({ id: "p1" }, H);
+  expect(await localCopy("p1")).toMatchObject({ host: "hostA" });
 });
 
 test("Reset and a failed read reach the host, never queued; saving the choice can fail out loud", async () => {
@@ -201,12 +212,35 @@ test("a copy that can't be deleted is an error, so Reset can say so", async () =
   // The Mac app's person declined the delete in its dialog.
   (globalThis as any).__TAURI_INTERNALS__ = { invoke: async () => Promise.reject("You kept the copy on this Mac.") };
   await expect(forgetCopy("p1")).rejects.toBe("You kept the copy on this Mac.");
-  // And a stale copy the host refused (409) doesn't throw out of the sync when it can't be deleted.
+  // And a stale copy the host refused (409) that can't be deleted fails the sync out loud: it isn't settled.
   delete (globalThis as any).__TAURI_INTERNALS__;
+  await setCarryAllowed("p1", true);
   (globalThis as any).localStorage.removeItem = () => {
     throw new Error("blocked");
   };
-  reply = () => ({ status: 409, body: { error: "reset", reset: true } });
-  expect(await pushCopy("p1", H)).toBe(false);
+  reply = (m) => (m === "PUT" ? { status: 409, body: { error: "reset", reset: true, stale: true } } : { status: 200, body: copy({ samples: [], version: "", updatedAt: 0 }) });
+  await expect(pushCopy("p1", H)).rejects.toThrow("blocked");
+  await expect(syncVoiceprint({ id: "p1" }, H)).rejects.toThrow("blocked");
   (globalThis as any).localStorage.removeItem = remove;
+});
+
+test("saving the choice or the copy can't fail quietly: a write the browser didn't keep throws, and no leaves no copy", async () => {
+  const set = (globalThis as any).localStorage.setItem;
+  (globalThis as any).localStorage.setItem = () => {};
+  await expect(setCarryAllowed("p1", true)).rejects.toThrow("didn't keep");
+  (globalThis as any).localStorage.setItem = () => {
+    throw new Error("quota");
+  };
+  store.set(key("p1"), JSON.stringify(copy()));
+  store.set("jamsesh.voiceCarry.v2::p1", "true");
+  await expect(setCarryAllowed("p1", false)).rejects.toThrow("quota");
+  // The copy went first, so a "no" that couldn't be written still left nothing to carry.
+  expect(await localCopy("p1")).toBeNull();
+  (globalThis as any).localStorage.setItem = set;
+  // A copy taken from the host that the browser didn't keep fails the sync too.
+  await setCarryAllowed("p1", true);
+  (globalThis as any).localStorage.setItem = () => {};
+  reply = () => ({ status: 200, body: copy({ version: "b1", updatedAt: 9 }) });
+  await expect(syncVoiceprint({ id: "p1" }, H)).rejects.toThrow("didn't keep");
+  (globalThis as any).localStorage.setItem = set;
 });

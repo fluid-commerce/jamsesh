@@ -36,8 +36,12 @@ export function ClientView() {
   const [enrollAsked, setEnrollAsked] = useState(pref("enrollAsked") === "1");
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const me = state?.people.find((p) => p.id === personId);
-  // A voiceprint this device carries is offered to the host before the join read is asked for.
-  const voiceReady = useVoiceprintSync(me);
+  // Which person the host has bound this window to (its acknowledged registration), or why it won't yet.
+  const [registered, setRegistered] = useState<string | null>(null);
+  const [refused, setRefused] = useState("");
+  // A voiceprint this device carries is offered to the host, once it knows this window is them, before the join read is asked for.
+  const voice = useVoiceprintSync(me, registered, connected);
+  const voiceReady = voice.ready;
   const layout = useLayout();
 
   useEffect(() => {
@@ -81,8 +85,29 @@ export function ClientView() {
     if (!me) return;
     // Never leave it to the hub's guess on the host Mac itself (loopback is always in the room).
     const location = pref("location") || (/^(127\.0\.0\.1|localhost|\[::1\])$/.test(window.location.hostname) ? "room" : undefined);
-    api("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on, location }).catch(() => {});
-  }, [me?.id, micStatus.on]);
+    let live = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Sent now, never queued: the voiceprint sync waits for the answer. Refused (the host hasn't let this
+    // laptop in as them yet) or not reached, it's asked again until it is.
+    const register = () =>
+      api<{ personId?: string | null }>("/devices", { deviceId: DEVICE, label: `${me.name}'s laptop`, personId: me.id, micOn: micStatus.on, location }, "POST", { queue: false }).then(
+        (d) => {
+          if (!live) return;
+          setRegistered(d?.personId ?? null);
+          setRefused("");
+        },
+        (e) => {
+          if (!live) return;
+          if ((e as { status?: number }).status === 403) setRefused((e as Error).message);
+          retry = setTimeout(register, 10_000);
+        },
+      );
+    void register();
+    return () => {
+      live = false;
+      clearTimeout(retry);
+    };
+  }, [me?.id, micStatus.on, connected]);
   useEffect(() => {
     setPref("tab", tab);
   }, [tab]);
@@ -141,6 +166,16 @@ export function ClientView() {
         overlays={
           <>
             <Toasts />
+            {(refused || voice.problem) && (
+              <div className="mic-notice info" role="status">
+                <span>{refused || voice.problem}</span>
+                {refused && (
+                  <button className="btn small" onClick={() => (setPref("personId", ""), setPersonId(""))}>
+                    Pick someone else
+                  </button>
+                )}
+              </div>
+            )}
             <ShareRequestPrompt />
             {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
             {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
@@ -183,6 +218,16 @@ export function ClientView() {
         </div>
       </header>
       <MicNotice status={micStatus} onRetry={toggleMic} />
+      {(refused || voice.problem) && (
+        <div className="mic-notice info" role="status">
+          <span>{refused || voice.problem}</span>
+          {refused && (
+            <button className="btn small" onClick={() => (setPref("personId", ""), setPersonId(""))}>
+              Pick someone else
+            </button>
+          )}
+        </div>
+      )}
 
       <main className="client-main" style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>

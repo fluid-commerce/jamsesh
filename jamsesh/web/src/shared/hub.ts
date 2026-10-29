@@ -455,7 +455,7 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
       if (queueable) return save();
       throw Object.assign(new Error("That was meant for the host this window was showing; it changed. Try again."), { status: 409 });
     }
-    throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), { status: res.status });
+    throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), { status: res.status, body: json });
   }
   return json as T;
 }
