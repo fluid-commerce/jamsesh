@@ -1,5 +1,6 @@
 // Automatic port forwarding: NAT-PMP first (tiny UDP protocol), then UPnP IGD (SSDP + SOAP).
 import dgram from "node:dgram";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 export type RouterStatus = {
   method: "nat-pmp" | "upnp" | "none";
@@ -185,14 +186,62 @@ export const CGNAT_MESSAGE = "Your internet provider shares one public address b
 
 const LEASE = 3600;
 
+type Mapping = { gateway?: string; method: RouterStatus["method"]; internalPort: number; externalPort: number; lanIp: string };
+
 export class PortMapper {
   private timer?: ReturnType<typeof setInterval>;
   private igd: Igd | null = null;
-  private current?: { gateway?: string; method: RouterStatus["method"]; internalPort: number; externalPort: number; lanIp: string };
+  private current?: Mapping;
+  /** A mapping whose removal failed: kept on disk (when there is a `statePath`) and tried again at the next start, so a port is never left open with nothing remembering it. */
+  private owed?: Mapping;
+
+  constructor(private statePath?: string) {
+    try {
+      if (statePath && existsSync(statePath)) this.owed = JSON.parse(readFileSync(statePath, "utf8"));
+    } catch {}
+  }
+
+  private remember(m: Mapping | undefined) {
+    this.owed = m;
+    if (!this.statePath) return;
+    try {
+      if (m) writeFileSync(this.statePath, JSON.stringify(m), { mode: 0o600 });
+      else rmSync(this.statePath, { force: true });
+    } catch {}
+  }
+
+  /** Takes down a mapping an earlier run could not (called at start, before a new mapping). True when none is owed any more. */
+  async settleOwed(): Promise<boolean> {
+    if (!this.owed) return true;
+    const m = this.owed;
+    try {
+      await this.remove(m);
+      this.remember(undefined);
+      return true;
+    } catch {
+      return false; // still owed: stays on disk for the next start
+    }
+  }
+
+  get owing() {
+    return this.owed;
+  }
+
+  /** Deletes one mapping at the router. Throws when the router did not confirm. */
+  protected async remove(c: Mapping) {
+    if (c.method === "nat-pmp" && c.gateway) await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
+    else if (c.method === "upnp") {
+      this.igd ??= await findIgd();
+      if (!this.igd) throw new Error("no router answered");
+      const r = await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
+      if (!r.ok && String(r.errorCode) !== "714") throw new Error(`UPnP error ${r.errorCode ?? "unknown"}`); // 714: there was no such mapping
+    }
+  }
 
   /** Opens externalPort -> lanIp:internalPort. Never throws; the status says what happened. */
   async map(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
     this.unrenew();
+    await this.settleOwed(); // a mapping an earlier run couldn't remove goes first
     const gateway = await defaultGateway();
     let status: RouterStatus | undefined;
 
@@ -201,6 +250,7 @@ export class PortMapper {
         const r = await pmpMap(gateway, internalPort, externalPort, LEASE);
         if (r.supported && r.result === 0) {
           this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp };
+          this.remember(this.current);
           status = { method: "nat-pmp", externalPort: r.externalPort, routerIp: gateway, externalIp: r.externalIp, lifetimeSec: r.lifetimeSec, message: `Your router opened port ${r.externalPort} automatically (NAT-PMP).` };
         } else if (r.supported) {
           status = { method: "none", externalPort, routerIp: gateway, externalIp: r.externalIp, error: PMP_ERRORS[r.result] ?? `error ${r.result}`, message: manualMessage(externalPort, lanIp, internalPort) };
@@ -230,6 +280,7 @@ export class PortMapper {
           if (!add.ok && String(add.errorCode) === "725") add = await map(0);
           if (add.ok) {
             this.current = { method: "upnp", internalPort, externalPort, lanIp };
+            this.remember(this.current); // on disk from the moment it exists: a crash leaves the port open but remembered
             status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: LEASE, message: `Your router opened port ${externalPort} automatically (UPnP).` };
           } else {
             status = { method: "none", externalPort, routerIp: gateway, externalIp, error: `UPnP error ${add.errorCode ?? "unknown"}`, message: manualMessage(externalPort, lanIp, internalPort) };
@@ -265,15 +316,17 @@ export class PortMapper {
     } catch {}
   }
 
-  /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). */
+  /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). A removal the router doesn't confirm is remembered and tried again at the next start. */
   async unmap() {
     this.unrenew();
     const c = this.current;
     this.current = undefined;
-    if (!c) return;
+    if (!c) return void (await this.settleOwed());
     try {
-      if (c.method === "nat-pmp" && c.gateway) await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
-      else if (c.method === "upnp" && this.igd) await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
-    } catch {}
+      await this.remove(c);
+      this.remember(undefined);
+    } catch {
+      this.remember(c);
+    }
   }
 }

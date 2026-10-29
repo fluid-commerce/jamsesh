@@ -2616,3 +2616,23 @@ test("when git can't say what changed in raw/, no half commit is made", () => {
   writeFileSync(join(dir, ".git", "index"), "not an index"); // git status fails on it
   expect(rawPaths(dir)).toBeNull();
 });
+
+test("a page whose commit was skipped because git couldn't list raw/ is named by the next commit", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("first", "# First\n\nA page.", { by: "Chey" });
+  const index = readFileSync(join(dir, ".git", "index"));
+  writeFileSync(join(dir, ".git", "index"), "not an index"); // git status fails
+  const err = console.error;
+  console.error = () => {};
+  try {
+    w.editPage("skipped", "# Skipped\n\nMade while git was unwell.", { by: "Chey" });
+  } finally {
+    console.error = err;
+  }
+  writeFileSync(join(dir, ".git", "index"), index);
+  w.editPage("later", "# Later\n\nAfter.", { by: "Chey" });
+  const tracked = Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString();
+  expect(tracked).toContain("wiki/skipped.md");
+  expect(tracked).toContain("wiki/later.md");
+});

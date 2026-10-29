@@ -40,7 +40,7 @@ export class Network {
   private cfgPath: string;
   private cfg: NetConfig | null = null;
   private store: CertStore;
-  private mapper = new PortMapper();
+  private mapper: PortMapper;
   private stopUpdater?: () => void;
   private renewTimer?: ReturnType<typeof setInterval>;
   private issuing?: Promise<void>;
@@ -61,6 +61,8 @@ export class Network {
     this.store = new CertStore(join(dir, "tls"));
     this.cfg = this.readConfig();
     this.refreshCertState();
+    this.mapper = new PortMapper(join(dir, "router-map.json"));
+    void this.mapper.settleOwed(); // a port an earlier run couldn't close is closed now, whether or not a new one is opened
   }
 
   // ---- config (token lives in a 0600 file; it is never returned by status()) ----
@@ -88,9 +90,16 @@ export class Network {
 
   /** The room is closing: nothing here starts, saves or maps from now on (stop() still takes the router mapping down). */
   private closed = false;
+  private abort = new AbortController();
+  /** Every outgoing call the network makes: refused once the room is closing, and cut short if one is under way. */
+  private f: FetchFn = async (u, init) => {
+    this.abort.signal.throwIfAborted();
+    return this.fetchFn(u, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, this.abort.signal]) : this.abort.signal });
+  };
 
   close() {
     this.closed = true;
+    this.abort.abort();
     this.stopUpdater?.();
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
@@ -107,7 +116,7 @@ export class Network {
       this.st.dns = r.ok ? "ok" : "error";
       this.st.dnsError = r.ok ? undefined : r.error;
       if (r.ip) this.st.publicIp = r.ip;
-    }, 5 * 60_000, this.fetchFn);
+    }, 5 * 60_000, this.f);
     this.renewTimer ??= setInterval(() => void this.ensureCert(), 24 * 3600_000);
     (this.renewTimer as any).unref?.();
     void this.openRouter();
@@ -179,7 +188,7 @@ export class Network {
       try {
         for (const kind of todo) {
           if (this.closed) break;
-          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.fetchFn, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.f, signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
           if (this.closed) break; // issued as the room closed: not kept
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };
@@ -202,7 +211,7 @@ export class Network {
     if (!c || this.closed) return;
     this.st.router = { state: "working", method: "none", externalPort: c.externalPort, message: "Asking your router to open the port…" };
     const lan = lanIpv4();
-    const ip = await lookupIp(this.fetchFn, this.st.publicIp);
+    const ip = await lookupIp(this.f, this.st.publicIp);
     if (this.closed) return;
     this.st.publicIp ??= ip;
     const r = await this.mapper.map(c.externalPort, c.internalPort, lan, ip);
@@ -214,13 +223,13 @@ export class Network {
   async check() {
     const d = this.domain();
     if (!d) return;
-    const local = await localCheck(d.fqdn, this.fetchFn);
+    const local = await localCheck(d.fqdn, this.f);
     if (local.ok) {
       this.st.reachable = "yes";
       this.st.reachDetail = local.detail;
       return;
     }
-    const outside = await externalCheck(d.fqdn, this.fetchFn);
+    const outside = await externalCheck(d.fqdn, this.f);
     if (outside) {
       this.st.reachable = outside.ok ? "yes" : "no";
       this.st.reachDetail = outside.detail;
@@ -267,7 +276,7 @@ export class Network {
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);
       if (!/^[0-9a-f-]{20,}$/i.test(token)) return json({ error: "The DuckDNS token is a long code of letters, numbers and dashes. Copy it from the top of the DuckDNS page." }, 400);
-      const r = await updateIp(d, token, this.fetchFn);
+      const r = await updateIp(d, token, this.f);
       assertLive();
       if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
       const externalPort = Number(body.externalPort ?? this.cfg?.externalPort ?? 443);

@@ -242,13 +242,24 @@ export class WikiService {
     bus.send({ type: "wiki", kind, touched, by, at: Date.now() });
   }
 
+  /** Page files whose commit was skipped because git couldn't say what changed in raw/: named again by the next commit, so none is left outside history. */
+  private owedPaths = new Set<string>();
+
+  /** One commit of the files named, the sources that changed, the index and the log, plus any paths an earlier commit skipped. */
+  private commitOwn(message: string, paths: string[]) {
+    for (const p of paths) this.owedPaths.add(p);
+    const raw = rawPaths(this.dir);
+    if (!raw) return; // git couldn't list the sources: no half commit; these paths wait for the next one
+    commitPaths(this.dir, message, [...this.owedPaths, "index.md", "log.md", ...raw]);
+    this.owedPaths.clear();
+  }
+
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
   private finish(message: string, pages: string[], key?: string) {
     this.catchUpLog();
     appendLog(this.dir, message, pages, Date.now(), key);
     rebuildIndex(this.dir);
-    const raw = rawPaths(this.dir);
-    if (raw) commitPaths(this.dir, message, [...pages.map((p) => `wiki/${p}.md`), "index.md", "log.md", ...raw]); // git couldn't list the sources: no half commit; the next change commits it
+    this.commitOwn(message, pages.map((p) => `wiki/${p}.md`));
   }
 
   // ---- sources ----
@@ -695,8 +706,7 @@ export class WikiService {
         this.catchUpLog();
         rebuildIndex(this.dir);
         // Named files only: a directory pathspec would stage whatever else a person keeps beside the wiki's own files.
-        const raw = rawPaths(this.dir);
-        if (raw) commitPaths(this.dir, "Changes made by hand in the vault", [...[...new Set([...touched, ...gone])].map((s) => `wiki/${s}.md`), "index.md", "log.md", ...raw]);
+        this.commitOwn("Changes made by hand in the vault", [...new Set([...touched, ...gone])].map((s) => `wiki/${s}.md`));
         this.notify("edit", [...new Set([...touched, ...gone])], "Someone in the vault");
       }
     }

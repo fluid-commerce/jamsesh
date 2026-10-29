@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dnsHasTxt, needsRenewal, parseDohTxt, safeError, waitForTxt } from "../src/net/acme";
@@ -170,5 +170,50 @@ describe("Network config", () => {
     expect(mapped).toBe(0);
     expect(n2.tlsOptions()).toBeNull();
     void n;
+  });
+  test("a mapping the router would not remove is remembered on disk and removed at the next start", async () => {
+    const { PortMapper } = await import("../src/net/router");
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const file = join(dir, "router-map.json");
+    class Flaky extends PortMapper {
+      fail = true;
+      removed: unknown[] = [];
+      protected override async remove(c: any) {
+        if (this.fail) throw new Error("router did not answer");
+        this.removed.push(c);
+      }
+    }
+    const a = new Flaky(file);
+    (a as any).current = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "192.168.1.5" };
+    await a.unmap(); // fails
+    expect(existsSync(file)).toBe(true);
+    expect(a.owing?.externalPort).toBe(443);
+    // A new run (a restart) loads it and settles it once the router answers.
+    const b = new Flaky(file);
+    expect(b.owing?.externalPort).toBe(443);
+    expect(await b.settleOwed()).toBe(false); // still failing: stays on disk
+    expect(existsSync(file)).toBe(true);
+    b.fail = false;
+    expect(await b.settleOwed()).toBe(true);
+    expect(b.removed.length).toBe(1);
+    expect(existsSync(file)).toBe(false);
+  });
+  test("ACME issuance and DuckDNS calls stop when the room closes: no account key, no TXT record", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const seen: string[] = [];
+    const f = async (u: string) => (seen.push(u), resp("OK\n9.9.9.9\n\nUPDATED"));
+    await Bun.write(join(dir, "net.json"), JSON.stringify({ domain: "jam.duckdns.org", token: "11111111-2222-3333-4444-555555555555", externalPort: 443, internalPort: 4443, enabled: true, staging: true }), {});
+    const n = new Network(dir, f as any);
+    n.close();
+    await expect(n.ensureCert(true)).resolves.toBeUndefined();
+    await expect((n as any).f("https://www.duckdns.org/update?txt=x")).rejects.toThrow();
+    expect(seen).toEqual([]);
+    expect(existsSync(join(dir, "tls", "account.key"))).toBe(false);
+    const { issueOne, CertStore } = await import("../src/net/acme");
+    const ac = new AbortController();
+    ac.abort();
+    await expect(issueOne("apex", { domain: { fqdn: "jam.duckdns.org", sub: "jam" } as any, token: "t", store: new CertStore(join(dir, "tls2")), f: f as any, signal: ac.signal })).rejects.toThrow();
+    expect(existsSync(join(dir, "tls2", "account.key"))).toBe(false);
+    expect(seen).toEqual([]);
   });
 });
