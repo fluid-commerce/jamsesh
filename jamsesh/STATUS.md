@@ -13,7 +13,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Join mode: pairing, name, live session, shared canvas, through the local relay | Tested live | Pairing and the canvas relay checked through the app's relay address. |
 | Hosts found on the local network (Bonjour) | Tested live | The host advertises; the app lists it. |
 | "Connect my agents" setup, then "connect to jamsesh" | Tested live | A real Claude Code joined with no address, code, or name; posted its repo card and claimed a workstream. |
-| Codex "connect to jamsesh" | Simulated | Setup writes Codex's MCP server and instructions; not run with a real Codex session tonight. |
+| Codex "connect to jamsesh" | Simulated | Setup writes Codex's MCP server, skill and prompt; not run with a real Codex session tonight. |
 | Permission setup window | Simulated | Rendered and laid out; the macOS prompts themselves weren't clicked through. |
 | Microphone inside the app's window (WebKit) | Not tested | The page is a secure origin, so the browser allows it; macOS will ask for Microphone on first use. |
 | Big screen on a second display, same-Space full screen | Not tested | Needs a second display. |
@@ -23,6 +23,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 
 | Capability | Status | Notes |
 |---|---|---|
+| Only chats you connect join the room; the install never writes CLAUDE.md or AGENTS.md; Remove on a join notice | Built, tests only | Block removal tested on temp files (CRLF, EOF, none), hooks tested with a fake host, two chats in one folder tested as two agents, Remove checked in a throwaway room. Not yet tried with real Claude Code and Codex chats. |
 | Directives reach agents (Stop hook, `jam_wait`, inbox) | Tested live | Real Claude Code and Codex in two-repository scenarios, earlier in the project. |
 | Brain routing, decisions, affinity, curation | Tested live | 37 live scenarios on the gateway pass; a few are occasionally flaky under parallel load. |
 | "How do I join?" puts the Join view up | Tested live | Two phrasings, about 3 seconds. |

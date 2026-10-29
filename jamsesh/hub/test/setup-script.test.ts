@@ -18,6 +18,7 @@ beforeAll(() => {
       const path = new URL(req.url).pathname;
       if (path === "/hook.sh") return new Response("#!/usr/bin/env bash\nexit 0\n");
       if (path === "/skill.md") return new Response("# JamSesh skill\n");
+      if (path === "/launcher.md") return new Response("# JamSesh launcher\n");
       if (path === "/api/me") return Response.json({ person: { id: "p_1", name: "Chey" } });
       if (path === "/api/people") return (people++, Response.json({ ok: true }));
       return new Response("not found", { status: 404 });
@@ -123,14 +124,22 @@ describe("agent setup script", () => {
   test("the hook keeps Claude Code's own notices out of the room", async () => {
     const box = sandbox();
     const posted: string[] = [];
-    const hub = Bun.serve({ port: 0, fetch: async (req) => (posted.push(await req.text()), Response.json({ ok: true })) });
+    const hub = Bun.serve({
+      port: 0,
+      fetch: async (req) => {
+        const body = await req.text();
+        if (new URL(req.url).pathname.endsWith("/hooks/joined")) return Response.json({ joined: true });
+        posted.push(body);
+        return Response.json({ ok: true });
+      },
+    });
     try {
       const env = join(box.home, "client.env");
       writeFileSync(env, `JAMSESH_HUB="http://127.0.0.1:${hub.port}"\nJAMSESH_TOKEN="t"\nJAMSESH_ACTIVE=1\n`);
       const hook = async (prompt: string) => {
         const proc = Bun.spawn(["/bin/bash", "-c", hookScript({} as Hub), "hook", "prompt"], {
           env: { HOME: box.home, PATH: "/usr/bin:/bin", JAMSESH_CLIENT_ENV: env, JAMSESH_DIR: box.home },
-          stdin: new Blob([JSON.stringify({ prompt })]),
+          stdin: new Blob([JSON.stringify({ prompt, session_id: "chat-1" })]),
         });
         await proc.exited;
       };
@@ -144,7 +153,7 @@ describe("agent setup script", () => {
     }
   });
 
-  test("Codex: replaces its earlier JamSesh server and instructions once", async () => {
+  test("Codex: replaces its earlier JamSesh server, and takes its old instructions block out", async () => {
     const box = sandbox();
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
@@ -159,9 +168,7 @@ describe("agent setup script", () => {
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`url = "${origin}/mcp"`);
     expect(toml).toContain('authorization = "Bearer tok"');
-    const md = readFileSync(agents, "utf8");
-    expect(md.startsWith("# Mine\n\n<!-- jamsesh:start -->")).toBe(true);
-    expect(md.match(/jamsesh:start/g)).toHaveLength(1);
-    expect(md).not.toContain("old");
+    // Nothing of ours is left in the person's own instructions, and nothing of theirs is lost.
+    expect(readFileSync(agents, "utf8")).toBe("# Mine\n");
   });
 });

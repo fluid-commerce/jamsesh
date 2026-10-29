@@ -40,6 +40,8 @@ export interface Agent {
   branch: string;
   cwd: string;
   machine: string;
+  /** The chat this agent is: Claude Code's session id (what its hooks carry) or the MCP connection. A second chat in the same folder is a different agent. */
+  chatId?: string;
   platform: Platform;
   focus: string;
   status: AgentStatus;
@@ -80,6 +82,7 @@ export type EventKind =
   | "canvas"
   | "message"
   | "brain"
+  | "join"
   | "system";
 
 /** How the brain judged a room line. */
@@ -357,6 +360,7 @@ export interface CanvasInfo {
 export type BusMessage =
   | { type: "state"; state: HubState }
   | { type: "event"; event: JamEvent }
+  | { type: "events-removed"; ids: number[] }
   | { type: "patch"; key: keyof HubState; value: any }
   | { type: "utterance"; utterance: Utterance }
   | { type: "stage"; stage: Stage }

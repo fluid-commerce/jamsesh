@@ -5,15 +5,17 @@ import type { Hub } from "./hub";
 export function hookScript(hub: Hub) {
   void hub;
   return `#!/usr/bin/env bash
-# JamSesh hook for Claude Code: hook.sh prompt|stop|start, with the hook's JSON on stdin.
-# Sends your prompts into the room's context, picks up directives the room sends you, and
-# at the start of a session reminds the agent to join the room.
-# Does nothing unless this machine is connected (jamsesh-client on).
+# JamSesh hook for Claude Code: hook.sh prompt|stop, with the hook's JSON on stdin.
+# Does nothing for a chat that hasn't joined the room: only a chat whose person said "connect to
+# jamsesh" sends its prompts in, picks up directives, or is held at the end of a turn. Chats are told
+# apart by Claude Code's session id, so a second chat in the same folder is not the joined one.
 cfg="\${JAMSESH_CLIENT_ENV:-$HOME/.jamsesh/client.env}"
 [ -f "$cfg" ] || exit 0
 . "$cfg"
 [ "\${JAMSESH_ACTIVE:-0}" = "1" ] || exit 0
 body="$(cat)"
+sid="$(printf '%s' "$body" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -n 1)"
+[ -n "$sid" ] || exit 0
 # Claude Code also sends prompts it writes itself (background task reports, relayed shell output).
 # They aren't the person talking, and they carry file paths and whole reports, so they stay out of the room.
 if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eq '"prompt"[[:space:]]*:[[:space:]]*"([[:space:]]|\\\\n)*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)'; then
@@ -22,17 +24,21 @@ fi
 dir="\${JAMSESH_DIR:-$HOME/.jamsesh}"
 outbox="\${JAMSESH_OUTBOX:-$dir/outbox.jsonl}"
 down="$dir/hub-down"
+mark="$dir/chats/$sid"
 now="$(date +%s)"
+hub_down() { [ -f "$down" ] && [ $((now - $(cat "$down" 2>/dev/null || echo 0))) -lt 45 ]; }
 
-if [ "$1" = "start" ]; then
-  # Only a live room gets the reminder, and the skill is refreshed from the host while we're here.
-  curl -fs --max-time 2 "$JAMSESH_HUB/healthz" >/dev/null 2>&1 || exit 0
-  skill="$HOME/.claude/skills/jamsesh/SKILL.md"
-  if [ -d "$(dirname "$skill")" ] && curl -fs --max-time 3 -H "authorization: Bearer $JAMSESH_TOKEN" "$JAMSESH_HUB/skill.md" -o "$skill.new" 2>/dev/null; then
-    mv -f "$skill.new" "$skill"
+# Has this chat joined? Remembered once the host says so; the question carries only the session id.
+if [ ! -f "$mark" ]; then
+  if ! hub_down && printf '{"session_id":"%s"}' "$sid" | curl -fs --max-time 2 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" --data-binary @- "$JAMSESH_HUB/api/hooks/joined" 2>/dev/null | grep -q '"joined":true'; then
+    mkdir -p "$dir/chats" && : > "$mark"
+  else
+    # Not joined. The person asking to connect is the one moment this chat needs its id: the agent passes it to jam_join.
+    if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eiq '"prompt"[[:space:]]*:[[:space:]]*"[^"]{0,40}(connect to jamsesh|join jamsesh|join the (jam)?session|/jamsesh)'; then
+      printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"JamSesh chat id for jam_join (pass it as chat): %s"}}' "$sid"
+    fi
+    exit 0
   fi
-  printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"JamSesh: this computer is connected to a live room session. Before you start work in a repository, join it: load the jamsesh skill, then call jam_join (harness claude-code, this directory), post your jam_repo_card, and jam_claim your workstream. If you already joined in this conversation, carry on. When you have nothing to do, keep calling jam_wait so the room can reach you."}}'
-  exit 0
 fi
 
 # The host was unreachable a moment ago: don't make every prompt wait for it again.
@@ -42,7 +48,7 @@ queue() {
   # Keep the newest 50 only.
   if [ "$(wc -l < "$outbox")" -gt 50 ]; then tail -n 50 "$outbox" > "$outbox.tmp" && mv -f "$outbox.tmp" "$outbox"; fi
 }
-if [ -f "$down" ] && [ $((now - $(cat "$down" 2>/dev/null || echo 0))) -lt 45 ]; then queue "$1"; exit 0; fi
+if hub_down; then queue "$1"; exit 0; fi
 
 if ! printf '%s' "$body" | curl -fs --max-time 2 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" \\
   --data-binary @- "$JAMSESH_HUB/api/hooks/$1" 2>/dev/null; then
@@ -63,6 +69,42 @@ if [ -s "$outbox" ]; then
 fi
 `;
 }
+
+/**
+ * Removes the block an earlier JamSesh wrote into CLAUDE.md or AGENTS.md (between its markers) and
+ * touches nothing else: line endings stay as they are, and a file with no block isn't rewritten.
+ */
+export const STRIP_BLOCK_PL = String.raw`use strict; use warnings;
+my ($path) = @ARGV;
+exit 0 unless -f $path;
+open(my $in, '<:raw', $path) or exit 0;
+my $text = do { local $/; <$in> };
+close $in;
+my $S = '<!-- jamsesh:start -->';
+my $E = '<!-- jamsesh:end -->';
+my $out = '';
+my $changed = 0;
+while (1) {
+  my $i = index($text, $S);
+  my $j = $i < 0 ? -1 : index($text, $E, $i + length $S);
+  if ($i < 0 || $j < 0) { $out .= $text; last; }
+  $out .= substr($text, 0, $i);
+  $text = substr($text, $j + length $E);
+  $text =~ s/\A[ \t]*(?:\r?\n)?//;
+  $changed = 1;
+  # The block was written after a blank line at the end of the file: take that blank line with it.
+  $out =~ s/(\r?\n)(?:\r?\n)+\z/$1/ if $text eq '';
+}
+exit 0 unless $changed;
+my $mode = (stat $path)[2] & 07777;
+if ($out eq '') { unlink $path; exit 0; }
+my $tmp = "$path.jamsesh-tmp";
+open(my $o, '>:raw', $tmp) or die "JamSesh: can't write $tmp: $!\n";
+print $o $out;
+close $o or die "JamSesh: can't write $tmp: $!\n";
+chmod $mode, $tmp;
+rename $tmp, $path or die "JamSesh: can't replace $path: $!\n";
+`;
 
 /** What a coding agent sees when it opens the host's address without a code. */
 export function agentIntro(origin: string) {
@@ -89,9 +131,9 @@ files outside your home folder.
 ## Set yourself up (one time per computer)
 
 Run this one command. It configures Claude Code and Codex on this computer: the \`jamsesh\` MCP
-server, the JamSesh skill, a \`/jamsesh\` command, and Claude Code hooks (prompts go to the room,
-directives from the room reach you, and each new session is reminded to join). Replace <NAME> with your person's first name; ask them if you
-don't know it.
+server, a small JamSesh skill, a \`/jamsesh\` command, and Claude Code hooks. Nothing joins the room by
+itself: a chat joins only when its person tells it to ("connect to jamsesh"), and the hooks do nothing for
+any other chat. Replace <NAME> with your person's first name; ask them if you don't know it.
 
 \`\`\`bash
 curl -fsSL -H "authorization: Bearer ${token}" "${origin}/agent/setup.sh" | JAMSESH_NAME="<NAME>" bash
@@ -100,9 +142,9 @@ curl -fsSL -H "authorization: Bearer ${token}" "${origin}/agent/setup.sh" | JAMS
 ## Then
 
 1. Tell your person in one line: "Connected to JamSesh. Restart me (or run /mcp and reconnect
-   jamsesh), then type /jamsesh in each repository you're working in."
-2. After the restart, \`/jamsesh\` joins the session: you call \`jam_join\`, claim your workstream,
-   and follow the JamSesh skill.
+   jamsesh), then tell me \"connect to jamsesh\" in each chat you want in the room."
+2. After the restart, when your person says "connect to jamsesh" (or types \`/jamsesh\`), you call
+   \`jam_join\`, claim your workstream, and follow the JamSesh skill. Until then this chat is not in the room.
 
 If the command fails because the host is unreachable, say so; don't retry in a loop.
 `;
@@ -162,6 +204,10 @@ find_cli() {
   fi
   return 1
 }
+# Takes the block an earlier JamSesh wrote into an instruction file out again, and nothing else.
+strip_block() { perl - "$1" <<'STRIP'
+${STRIP_BLOCK_PL}STRIP
+}
 configured=0
 
 CLAUDE="$(find_cli claude || true)"
@@ -169,7 +215,9 @@ if [ -n "$CLAUDE" ]; then
   "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
   "$CLAUDE" mcp add --transport http -s user jamsesh "$HUB/mcp" --header "authorization: Bearer $TOKEN" >/dev/null
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
-  curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
+  curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
+  # JamSesh used to write a block into CLAUDE.md. It never does now, and takes the old one out.
+  strip_block "$HOME/.claude/CLAUDE.md"
   cat > "$HOME/.claude/commands/jamsesh.md" <<'CMD'
 ---
 description: Join the JamSesh room session
@@ -179,7 +227,7 @@ Join the JamSesh room session and work as part of it.
 
 1. Load the jamsesh skill and follow it for the rest of this session.
 2. Find this repository's remote (git remote get-url origin), branch, and what it builds (desktop, mobile, web, backend, or design).
-3. Call jam_join (harness: claude-code, cwd: this directory; add owner only if jam_join asks). Use this as the focus: $ARGUMENTS
+3. Call jam_join (harness: claude-code, cwd: this directory; chat: the JamSesh chat id from the note at the start of this prompt, if there is one; add owner only if jam_join asks). Use this as the focus: $ARGUMENTS
 4. Post your repo card with jam_repo_card, jam_claim your workstream, and tell me in two lines who else is here and what's open.
 5. Then do the work. When you're idle, call jam_wait so the room can reach you.
 CMD
@@ -200,7 +248,12 @@ if (-e $path) {
 $data->{hooks} = {} unless ref $data->{hooks} eq 'HASH';
 my $hooks = $data->{hooks};
 my $plain = JSON::PP->new->allow_nonref;
-for my $pair (['SessionStart', 'start'], ['UserPromptSubmit', 'prompt'], ['Stop', 'stop']) {
+# JamSesh no longer reminds every new session to join: take that hook out of earlier installs.
+if (ref $hooks->{SessionStart} eq 'ARRAY') {
+  my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } @{ $hooks->{SessionStart} };
+  if (@kept) { $hooks->{SessionStart} = \\@kept } else { delete $hooks->{SessionStart} }
+}
+for my $pair (['UserPromptSubmit', 'prompt'], ['Stop', 'stop']) {
   my ($event, $arg) = @$pair;
   my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
   push @kept, { hooks => [{ type => 'command', command => "$hook $arg", timeout => 5 }] };
@@ -212,7 +265,7 @@ print $out JSON::PP->new->pretty->canonical->encode($data);
 close $out or die "JamSesh: can't write $tmp: $!\\n";
 rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
 PL
-  ok "Claude Code: MCP server, skill, /jamsesh command, hooks"
+  ok "Claude Code: MCP server, skill, /jamsesh command, hooks (a chat joins only when told to)"
   configured=$((configured + 1))
 else
   skip "Claude Code isn't installed"
@@ -241,44 +294,13 @@ chmod 0600, $tmp;
 rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
 PL
   mkdir -p "$HOME/.codex/skills/jamsesh"
-  curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/skills/jamsesh/SKILL.md" || true
+  curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/launcher.md" -o "$HOME/.codex/skills/jamsesh/SKILL.md"
+  # The prompt is the full instructions, for when a person types /jamsesh in Codex.
   curl -fsS -H "authorization: Bearer $TOKEN" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
   printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
-  # "connect to jamsesh" in any Codex session: a marked block in Codex's global instructions.
-  perl - "$HOME/.codex/AGENTS.md" <<'PL'
-use strict; use warnings;
-my ($path) = @ARGV;
-my $text = '';
-if (-e $path) {
-  open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
-  $text = do { local $/; <$in> };
-  close $in;
-}
-my $block = <<'BLOCK';
-<!-- jamsesh:start -->
-## JamSesh
-
-When your person says "connect to jamsesh", "join jamsesh", or "join the session", read
-~/.codex/prompts/jamsesh.md and follow it: it connects you to the room session through the
-\`jamsesh\` MCP tools. If those tools fail to connect, tell your person to open the JamSesh app and
-host or join a session.
-
-When the \`jamsesh\` tools are available and you start work in a repository, join the session first
-(jam_join, jam_repo_card, jam_claim) unless you already did in this conversation. Codex has no hooks
-here, so you are the room's only link to your person: post a one-line jam_update (progress) when
-your person gives you a new task, check jam_inbox between steps, and when you are idle keep
-calling jam_wait instead of ending your turn.
-<!-- jamsesh:end -->
-BLOCK
-$text =~ s/\\n*<!-- jamsesh:start -->.*?<!-- jamsesh:end -->\\n*/\\n/gs;
-$text =~ s/\\s+\\z//;
-my $tmp = "$path.jamsesh-tmp";
-open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
-print $out (length $text ? "$text\\n\\n" : '') . $block;
-close $out or die "JamSesh: can't write $tmp: $!\\n";
-rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
-PL
-  ok "Codex: MCP server, skill, /jamsesh prompt and join instructions (Codex has no hooks here)"
+  # JamSesh used to write a block into AGENTS.md. It never does now, and takes the old one out.
+  strip_block "$HOME/.codex/AGENTS.md"
+  ok "Codex: MCP server, skill, /jamsesh prompt (Codex has no hooks here; a chat joins only when told to)"
   configured=$((configured + 1))
 else
   skip "Codex isn't installed"

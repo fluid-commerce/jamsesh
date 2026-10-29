@@ -428,12 +428,19 @@ export class Hub {
 
   // ---------- Claude Code hooks ----------
 
-  /** `device` is the paired device the hook came from: agents are registered by it (see jam_join). */
-  hookAgent(body: any, ip: string, device?: string | null): Agent | undefined {
-    const machine = device ?? (ip === "127.0.0.1" || ip === "::1" ? "host" : ip);
+  /**
+   * The agent a hook is for: the chat that joined, found by Claude Code's session id. A chat that never
+   * called jam_join (another chat in the same folder included) is nobody here, and its hooks do nothing.
+   */
+  hookAgent(body: any, _ip: string, _device?: string | null): Agent | undefined {
     if (body?.agentId) return this.session.agent(body.agentId);
-    if (typeof body?.cwd === "string") return this.session.findAgentByCwd(body.cwd, machine);
-    return undefined;
+    const chat = typeof body?.session_id === "string" ? body.session_id : "";
+    return chat ? this.session.agents().find((a) => a.chatId === chat && a.harness === "claude-code") : undefined;
+  }
+
+  /** Whether this chat has joined (a hook asks before it sends anything). */
+  chatJoined(body: any): boolean {
+    return !!this.hookAgent(body, "");
   }
 
   /** UserPromptSubmit: the prompt goes into context; new room items come back as context. */

@@ -10,7 +10,7 @@ import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
-import { skillMarkdown } from "./skill";
+import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
 type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
@@ -26,7 +26,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -206,6 +206,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
+        if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
         if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
         if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
         if (path === "/agent/setup.sh") {
@@ -516,6 +517,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
   }
 
+  // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
+  const rm = path.match(/^\/agents\/([\w-]+)\/remove$/);
+  if (rm && req.method === "POST") {
+    const r = s.removeAgent(rm[1], { purge: !!body?.purge });
+    return r.removed ? json(r) : bad("no such agent", 404);
+  }
+
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
@@ -541,6 +549,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
+  if (path === "/hooks/joined" && req.method === "POST") return json({ joined: hub.chatJoined(body) });
   if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
 
   if (path === "/workers" && req.method === "POST") {

@@ -132,12 +132,13 @@ const AGENT_MAY = [
   "GET /api/paired",
   "GET /api/snapshots",
   "POST /api/brain/digest",
+  "POST /api/hooks/joined",
   "POST /api/hooks/prompt",
   "POST /api/hooks/stop",
   "POST /api/upload",
 ];
 // One concrete path for each `path.match(...)` route in http.ts.
-const SAMPLES = ["/people/p_x", "/people/p_x/voiceprint", "/people/p_x/voice", "/people/p_x/photo", "/utterances/u_x/assign", "/directives/d_x", "/shares/s_x", "/shares/s_x/decline", "/annotations/a_x", "/snapshots/s_x/notes.md", "/paired/dev_x", "/build-requests/br_x", "/history/events"];
+const SAMPLES = ["/people/p_x", "/people/p_x/voiceprint", "/people/p_x/voice", "/people/p_x/photo", "/utterances/u_x/assign", "/directives/d_x", "/shares/s_x", "/shares/s_x/decline", "/annotations/a_x", "/snapshots/s_x/notes.md", "/paired/dev_x", "/build-requests/br_x", "/history/events", "/agents/a_x/remove"];
 
 test("the /api routes an agent's credential can call are exactly the reviewed list", async () => {
   const src = readFileSync(join(import.meta.dir, "../src/http.ts"), "utf8");

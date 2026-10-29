@@ -41,7 +41,7 @@ you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever yo
 1. Call `jam_join` with your harness, the repository (remote URL or
    name), the branch, your absolute working directory, the platform the repository builds, and a
    one-line focus. Find the repository and branch with `git remote get-url origin` and
-   `git branch --show-current`. Leave `owner` out: the room knows whose computer this is. If
+   `git branch --show-current`. If you were handed a "JamSesh chat id", pass it as `chat`. Leave `owner` out: the room knows whose computer this is. If
    `jam_join` asks for it, ask your person their first name.
 2. Read what `jam_join` returns: who is here, open directives, the session brief.
 3. Post your repo card with `jam_repo_card` (see Work with the other agents).

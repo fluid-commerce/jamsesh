@@ -367,7 +367,7 @@ function toneStyle(tone: string) {
 
 // ---------- the room feed ----------
 
-const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "update", "message", "artifact"]);
+const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "join", "update", "message", "artifact"]);
 
 /** How close to the bottom still counts as "at the bottom" (px). */
 const AT_BOTTOM = 40;
@@ -382,7 +382,7 @@ const NEAR_TOP = 160;
  * The feed scrolls its own box (scrollTop), never its ancestors.
  */
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
-  const { state } = useHub();
+  const { state, removed } = useHub();
   const box = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
   // Every line this window has seen, so lines the live state trims (or the reader loaded) stay put.
@@ -397,7 +397,9 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const [older, setOlder] = useState<{ loading: boolean; failed: boolean; done: boolean; more: number | null }>({ loading: false, failed: false, done: false, more: null });
 
   for (const e of state?.events ?? []) seen.current.set(e.id, e);
-  const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
+  // Lines the room took out (an agent removed with what it posted) leave this window's memory too.
+  for (const id of removed) seen.current.delete(id);
+  const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain", "join"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
   const last = events[events.length - 1]?.id ?? 0;
@@ -521,6 +523,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
       </div>
     );
   }
+  if (e.kind === "join") return <JoinLine e={e} state={state} canRemove={!!editable && !condensed} color={color} />;
   if (e.kind === "decision") {
     return (
       <div className="line decision">
@@ -558,6 +561,51 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+/** "Jonathan's Codex joined from ~/fluid", with a way to take a wrong join out of the room. */
+function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState; canRemove: boolean; color: string }) {
+  const agentId = e.data.agentId as string | undefined;
+  const here = !!agentId && state.agents.some((a) => a.id === agentId);
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const remove = async (purge: boolean) => {
+    setBusy(true);
+    try {
+      await api(`/agents/${agentId}/remove`, { purge });
+    } finally {
+      setBusy(false);
+      setAsking(false);
+    }
+  };
+  return (
+    <div className="line join">
+      <span className="who" title={e.authorName} style={{ color }}>
+        {e.authorName}
+      </span>
+      <span className="what">
+        {e.text.slice(e.authorName.length).trim()}
+        {canRemove && here && !asking && (
+          <button className="btn small ghost join-remove" onClick={() => setAsking(true)}>
+            Remove
+          </button>
+        )}
+        {asking && (
+          <span className="join-ask">
+            <button className="btn small" disabled={busy} onClick={() => void remove(false)}>
+              Remove
+            </button>
+            <button className="btn small" disabled={busy} onClick={() => void remove(true)} title="Also deletes what it posted and what was sent to it">
+              Remove and delete its messages
+            </button>
+            <button className="btn small ghost" disabled={busy} onClick={() => setAsking(false)}>
+              Cancel
+            </button>
           </span>
         )}
       </span>

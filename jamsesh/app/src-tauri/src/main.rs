@@ -463,7 +463,7 @@ fn offer_agents(app: AppHandle) {
         }
         let handle = app.clone();
         app.dialog()
-            .message("Connect Claude Code and Codex on this Mac to JamSesh? After this, telling either one \"connect to jamsesh\" is all it takes, in any repository.")
+            .message("Connect Claude Code and Codex on this Mac to JamSesh? Nothing joins the room on its own: tell a chat \"connect to jamsesh\" and only that chat joins.")
             .title("Connect your agents")
             .buttons(MessageDialogButtons::OkCancelCustom("Connect".into(), "Not now".into()))
             .show(move |yes| {

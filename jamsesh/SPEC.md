@@ -302,10 +302,22 @@ The setup installs, for each harness found:
 | Harness | What's installed |
 |---|---|
 | Both | `~/.jamsesh/client.env` (hub, token, name, `JAMSESH_ACTIVE`), `~/.jamsesh/hook.sh` |
-| Claude Code | User-scope MCP server `jamsesh` (HTTP, bearer token); the skill at `~/.claude/skills/jamsesh/SKILL.md`; the `/jamsesh [focus]` command; `UserPromptSubmit` and `Stop` hooks (5-second timeout) |
-| Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the prompt `~/.codex/prompts/jamsesh.md`; a marked block in `~/.codex/AGENTS.md` so "connect to jamsesh" starts the prompt; prompt-capture and turn-end hooks equivalent to Claude Code's |
+| Claude Code | User-scope MCP server `jamsesh` (HTTP, bearer token); a small skill at `~/.claude/skills/jamsesh/SKILL.md` (finds the running host, reads the instructions it serves, says in one line if none is running); the `/jamsesh [focus]` command; `UserPromptSubmit` and `Stop` hooks (5-second timeout) |
+| Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the same small skill at `~/.codex/skills/jamsesh/SKILL.md`; the prompt `~/.codex/prompts/jamsesh.md` (the full instructions, for `/jamsesh`); no hooks (Codex has none here) |
 
-`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. It posts to the hub with
+**Only chats you connect join the room.** JamSesh never writes to `CLAUDE.md` or `AGENTS.md`, and the
+setup removes the `<!-- jamsesh:start -->` block an earlier install wrote (nothing else in the file
+changes). Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
+`/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
+which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`), and
+a Codex chat is its own MCP connection. The hooks ask the host whether the chat has joined
+(`POST /api/hooks/joined`, session id only) and do nothing, and send nothing, for a chat that hasn't;
+a second chat in the same folder is not the joined agent. When an agent joins, the feed shows
+"Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
+which takes the agent out and, with `purge`, deletes the feed lines it caused.
+
+`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`, and nothing for a chat that
+hasn't joined. It posts to the hub with
 a 3-second limit; prompts that can't be delivered go to `~/.jamsesh/outbox.jsonl` and are replayed
 on the next successful call.
 
@@ -548,7 +560,7 @@ build titled after its mockup with "(built)" is paired with it on screen.
 
 ### 6.7 The skill
 
-The hub serves the JamSesh skill (`/skill.md`, the `jamsesh` MCP prompt, and the `jam_join`
+The hub serves the small launcher skill (`/launcher.md`, installed on each computer) and the JamSesh skill (`/skill.md`, the `jamsesh` MCP prompt, and the `jam_join`
 briefing), with the host address filled in [B8]. It triggers on "connect to jamsesh", "join
 jamsesh", "join the session", `/jamsesh`, and mentions of the room, big screen, or shared canvas.
 It tells agents:

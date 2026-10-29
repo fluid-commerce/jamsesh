@@ -30,6 +30,8 @@ interface Snapshot {
   /** Bumps on every (re)connect, so views can refetch what the socket doesn't carry. */
   epoch: number;
   toasts: Toast[];
+  /** Feed lines the hub deleted (an agent removed with its messages), newest last. */
+  removed: number[];
   thinking: string | null;
   levels: Record<string, number>;
   speaking: string | null;
@@ -48,7 +50,7 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 }
 
 class HubClient {
-  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
+  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
   private listeners = new Set<() => void>();
   private ws: WebSocket | null = null;
   private started = false;
@@ -308,6 +310,12 @@ class HubClient {
         const events = i >= 0 ? s.events.map((e) => (e.id === m.event.id ? m.event : e)) : [...s.events, m.event].slice(-400);
         return this.set({ state: { ...s, events } });
       }
+      case "events-removed": {
+        const gone = new Set(m.ids);
+        this.set({ removed: [...this.snap.removed, ...m.ids].slice(-500) });
+        if (s) this.set({ state: { ...s, events: s.events.filter((e) => !gone.has(e.id)) } });
+        return;
+      }
       case "utterance": {
         if (!s) return;
         const i = s.utterances.findIndex((u) => u.id === m.utterance.id);
@@ -357,7 +365,7 @@ export function useHub() {
 /** Calls that must never wait in the outbox: they only make sense live. */
 // Not worth replaying later, or unsafe to: approvals must be live, and a screen size is only worth
 // reporting now.
-const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
+const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|agents\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {

@@ -654,6 +654,22 @@ textarea:focus {
   grid-template-columns: 1fr;
 }
 
+.line.join .what {
+  color: var(--dim);
+}
+
+.line.join .join-remove {
+  display: flex;
+  margin: 4px 0 0 -14px;
+}
+
+.line.join .join-ask {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .line.agent .what {
   color: var(--muted);
 }

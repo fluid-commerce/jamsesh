@@ -22,6 +22,8 @@ interface Ctx {
   device: string | null;
   /** The address the agent reached the hub through (the app's relay on the host Mac, or the LAN address). */
   origin?: string;
+  /** This MCP connection: one per chat, so it tells chats apart when the harness has no hooks (Codex). */
+  sessionId?: string;
   /** The skill text has been handed over in this connection (a new conversation starts a new one). */
   skillSent?: boolean;
 }
@@ -37,7 +39,7 @@ const JAM_TOOLS = [
   {
     name: "jam_join",
     description:
-      "Join the JamSesh session. Call this first, once per agent session. Returns your agent id, the session brief, who is here, your open directives, and how to work here. Calling it again with the same cwd resumes the same agent.",
+      "Join the JamSesh session, only because your person told you to (\"connect to jamsesh\"). Call this first, once per chat. Returns your agent id, the session brief, who is here, your open directives, and how to work here. Calling it again from the same chat resumes the same agent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -46,6 +48,7 @@ const JAM_TOOLS = [
         repo: { type: "string", description: "Repository name or remote URL" },
         branch: { type: "string" },
         cwd: { type: "string", description: "Absolute path of your working directory" },
+        chat: { type: "string", description: "Claude Code only: the chat id from the JamSesh note at the start of your conversation. Leave it out if you didn't get one." },
         platform: { type: "string", enum: PLATFORMS, description: "What this repository builds" },
         focus: { type: "string", description: "One line: what you're working on today" },
         name: { type: "string", description: "Optional display name; default is \"<Owner>'s Claude\" or \"<Owner>'s Codex\"" },
@@ -293,7 +296,10 @@ export class McpEndpoint {
     const ctx: Ctx = { agentId: null, ip, device, origin };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
-      onsessioninitialized: (id) => void this.sessions.set(id, { transport, ctx }),
+      onsessioninitialized: (id) => {
+        ctx.sessionId = id;
+        this.sessions.set(id, { transport, ctx });
+      },
       onsessionclosed: (id) => void this.sessions.delete(id),
     });
     const server = this.server(ctx);
@@ -332,6 +338,7 @@ export class McpEndpoint {
 
   private requireAgent(ctx: Ctx): Agent {
     const a = this.hub.session.agent(ctx.agentId);
+    if (!a && ctx.agentId && this.hub.session.removedAgents.has(ctx.agentId)) throw new Error("The room removed you from this session. Don't join again unless your person asks you to.");
     if (!a) throw new Error("Call jam_join first. (If you were already in the session, the hub restarted: call jam_join again with the same details to pick up where you left off.)");
     this.hub.session.touchAgent(a.id);
     return a;
@@ -368,6 +375,9 @@ export class McpEndpoint {
           branch: args.branch,
           cwd: args.cwd,
           machine,
+          // Claude Code's hooks know the chat by its session id, which the SessionStart note hands the
+          // agent. Without one (Codex has no hooks) the MCP connection is the chat.
+          chatId: typeof args.chat === "string" && args.chat.trim() ? args.chat.trim().slice(0, 80) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined,
           platform: args.platform,
           focus: args.focus,
           name: args.name,

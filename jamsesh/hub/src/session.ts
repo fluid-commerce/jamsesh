@@ -417,6 +417,8 @@ export class Session {
     platform?: Platform;
     focus?: string;
     name?: string;
+    /** The chat joining (see Agent.chatId). */
+    chatId?: string;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
     sameMachine?: (machine: string) => boolean;
   }): { agent: Agent; resumed: boolean; quietMs: number | null } {
@@ -428,11 +430,16 @@ export class Session {
     // The owner, harness and folder are the caller's word, so they alone never hand over a record
     // that may still be live (an agent busy for a minute is still live).
     const now = Date.now();
+    // A chat is its own agent: one that names its chat resumes only that chat's record (or an older
+    // record from before chats were told apart), and a chat that doesn't never takes a named chat's.
+    const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
-      agents.find((a) => a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
+      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness) : undefined) ??
+      agents.find((a) => sameChat(a) && a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
             .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && now - a.lastSeen > 60_000)
+            .filter((a) => sameChat(a) || now - a.lastSeen > AGENT_OFFLINE_MS)
             .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
@@ -454,6 +461,7 @@ export class Session {
       branch: info.branch ?? existing?.branch ?? "",
       cwd: info.cwd ?? existing?.cwd ?? "",
       machine: info.machine,
+      chatId: info.chatId ?? existing?.chatId,
       platform: info.platform ?? existing?.platform ?? "other",
       focus: info.focus ?? existing?.focus ?? "",
       status: "idle",
@@ -463,15 +471,36 @@ export class Session {
       canvas: existing?.canvas ?? "none",
     };
     this.store.put("agents", agent);
+    // The room is told who joined and from where, with a way to remove an agent that shouldn't be here.
     this.store.addEvent({
-      kind: "system",
+      kind: "join",
       authorType: "agent",
       authorId: agent.id,
       authorName: agent.name,
-      text: `${agent.name} ${existing ? "rejoined" : "joined"}: ${shortRepo(agent.repo)}${agent.branch ? ` @ ${agent.branch}` : ""}${agent.focus ? `, ${agent.focus}` : ""}.`,
-      data: { platform: agent.platform },
+      text: `${agent.name} ${existing ? "rejoined" : "joined"} from ${tildePath(agent.cwd || agent.repo)}`,
+      data: { agentId: agent.id, platform: agent.platform, harness: agent.harness, repo: shortRepo(agent.repo), branch: agent.branch, focus: agent.focus, resumed: !!existing },
     });
     return { agent, resumed: !!existing, quietMs: existing ? Date.now() - existing.lastSeen : null };
+  }
+
+  /**
+   * Takes an agent out of the room: it no longer exists to the hub (its tools and hooks stop working
+   * until it joins again), its workstreams are free, and with `purge` everything it caused goes too:
+   * its updates, the prompts forwarded for it, messages to it and its join notices.
+   */
+  /** Agents the room took out, so a tool call from one says so instead of asking it to join again. */
+  readonly removedAgents = new Set<string>();
+
+  removeAgent(id: string, opts: { purge?: boolean } = {}): { removed: boolean; events: number } {
+    const agent = this.agent(id);
+    if (!agent) return { removed: false, events: 0 };
+    for (const w of this.store.all("workstreams")) if (w.ownerAgentId === id) this.store.put("workstreams", { ...w, ownerAgentId: null, status: "paused", updatedAt: Date.now() });
+    this.store.remove("agents", id);
+    this.removedAgents.add(id);
+    const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
+    if (ids.length) bus.send({ type: "events-removed", ids });
+    if (!opts.purge) this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed from the session.` });
+    return { removed: true, events: ids.length };
   }
 
   touchAgent(id: string, fields: Partial<Agent> = {}) {
@@ -1109,6 +1138,11 @@ export function publicEvent(e: JamEvent): JamEvent {
   if (!e.data?.embedding) return e;
   const { embedding: _drop, ...data } = e.data;
   return { ...e, data };
+}
+
+/** A folder as a person would say it: the home folder is ~. */
+export function tildePath(p: string) {
+  return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~").replace(/^[A-Za-z]:\\Users\\[^\\]+/, "~");
 }
 
 /** Compares paths the way macOS resolves them: /private/tmp is /tmp, ~ is home, no trailing slash. */
