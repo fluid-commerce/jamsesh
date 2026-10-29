@@ -902,13 +902,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   m = path.match(/^\/paired\/([\w-]+)\/allow$/);
   if (m && req.method === "POST") {
     if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can let a laptop in as someone.", 403);
-    const d = hub.auth.get(m[1]);
+    const d = hub.auth.list().find((x) => x.id === m![1]);
     const personId = d?.kind === "browser" ? d.wants : null;
     if (!d || !personId || !s.person(personId)) return bad("That laptop isn't asking to be anyone.", 404);
+    // The host confirms one exact person: the one it was shown. A request changed since then is not what it confirmed.
+    if (typeof body?.personId !== "string" || body.personId !== personId) return bad(`That laptop is now asking to be ${s.person(personId)?.name ?? "someone else"}. Look again before letting it in.`, 409);
     if (s.store.setting<string>("hostPersonId", "") === personId) return bad("That's the person using the host's own window.", 409);
-    for (const other of hub.auth.list()) if (other.kind === "browser" && other.id !== d.id && other.personId === personId) hub.auth.revoke(other.id);
-    hub.auth.update(d.id, { personId, wants: null });
-    setKeeper(hub, personId, d.id);
+    bindBrowser(hub, d.id, personId, true);
     return json({ ok: true });
   }
 
@@ -1083,6 +1083,18 @@ function setKeeper(hub: Hub, personId: string, keeper: string | null) {
 }
 
 /**
+ * The only place a browser credential is given a person (auth.update with a personId happens nowhere else).
+ * `confirmed`: the host's own window confirmed this exact person for this exact credential (POST /paired/:id/allow
+ * with the person it was shown); the person's other browsers are then disconnected. Otherwise becomePerson has
+ * found the person is this browser's own (it made them) or nobody's yet.
+ */
+function bindBrowser(hub: Hub, deviceId: string, personId: string, confirmed: boolean) {
+  if (confirmed) for (const other of hub.auth.list()) if (other.kind === "browser" && other.id !== deviceId && other.personId === personId) hub.auth.revoke(other.id);
+  hub.auth.update(deviceId, { personId, wants: null });
+  setKeeper(hub, personId, deviceId);
+}
+
+/**
  * The one rule for a browser becoming a person, since their voiceprint and every owner-only answer follow
  * it. A browser is someone it made itself, or someone nobody has been yet who has no voice here; anyone
  * else (on another laptop now, before, or the host's own window) only once the host lets it in. Returns
@@ -1093,8 +1105,7 @@ function becomePerson(hub: Hub, paired: PairedDevice, personId: string): string 
   const keeper = s.store.setting<Record<string, string>>("personKeepers", {})[personId];
   const fresh = !keeper && !hub.auth.everHeld(personId) && s.store.setting<string>("hostPersonId", "") !== personId && hub.audio.voiceprints.count(personId) === 0;
   if (keeper === paired.id || fresh) {
-    hub.auth.update(paired.id, { personId, wants: null });
-    setKeeper(hub, personId, paired.id);
+    bindBrowser(hub, paired.id, personId, false);
     return null;
   }
   const name = s.person(personId)?.name ?? "them";

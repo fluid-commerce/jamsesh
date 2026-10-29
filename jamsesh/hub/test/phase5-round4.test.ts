@@ -66,7 +66,7 @@ test("the host letting a laptop in moves the person: their other laptops are dis
   expect((await call(old.token, "POST", "/devices", { deviceId: "d-kim-old", personId: kim.id })).status).toBe(200);
   const fresh = browser("Kim's new laptop");
   expect((await call(fresh.token, "POST", "/devices", { deviceId: "d-kim-new", personId: kim.id })).status).toBe(403);
-  expect((await asHostWindow("POST", `/paired/${fresh.device.id}/allow`, {})).status).toBe(200);
+  expect((await asHostWindow("POST", `/paired/${fresh.device.id}/allow`, { personId: kim.id })).status).toBe(200);
   expect(hub.auth.get(old.device.id)).toBeNull();
   expect(hub.auth.get(fresh.device.id)).toMatchObject({ personId: kim.id, wants: null });
   expect((await call(fresh.token, "POST", "/devices", { deviceId: "d-kim-new", personId: kim.id })).status).toBe(200);
@@ -77,7 +77,7 @@ test("the host letting a laptop in moves the person: their other laptops are dis
   hub.session.store.setSetting("hostPersonId", hostP.id);
   const wanna = browser("Wanna");
   expect((await call(wanna.token, "POST", "/devices", { deviceId: "d-wanna", personId: hostP.id })).status).toBe(403);
-  expect((await asHostWindow("POST", `/paired/${wanna.device.id}/allow`, {})).status).toBe(409);
+  expect((await asHostWindow("POST", `/paired/${wanna.device.id}/allow`, { personId: hostP.id })).status).toBe(409);
   hub.session.store.setSetting("hostPersonId", "");
 });
 

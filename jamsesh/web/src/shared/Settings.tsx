@@ -323,12 +323,12 @@ function Paired({ host }: { host: boolean }) {
           <span className="grow ellipsis">{d.label}</span>
           <span className="chip mono" style={{ fontSize: 12 }}>{ago(d.lastSeen)}</span>
           {host && d.wants && (
-            <button className="btn small" title="Their voice and their own answers go to this laptop; their other laptops are disconnected." onClick={() => confirm(`Let ${d.label} in as ${nameOf(d.wants!)}?`) && api(`/paired/${d.id}/allow`, {}, "POST").then(load, (e) => alert(e?.message ?? e))}>
+            <button className="btn small" title="Their voice and their own answers go to this laptop; their other laptops are disconnected." onClick={() => confirm(`Let ${d.label} in as ${nameOf(d.wants!)}?`) && api(`/paired/${d.id}/allow`, { personId: d.wants }, "POST", { queue: false }).then(load, (e) => (alert(e?.message ?? e), load()))}>
               Let in as {nameOf(d.wants)}
             </button>
           )}
           {host && (
-            <button className="btn ghost small" onClick={() => confirm(`Disconnect ${d.label}?`) && api(`/paired/${d.id}`, undefined, "DELETE").then(load)}>
+            <button className="btn ghost small" onClick={() => confirm(`Disconnect ${d.label}?`) && api(`/paired/${d.id}`, undefined, "DELETE", { queue: false }).then(load, (e) => alert(e?.message ?? e))}>
               Disconnect
             </button>
           )}
