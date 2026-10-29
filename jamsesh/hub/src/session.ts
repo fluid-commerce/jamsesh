@@ -33,7 +33,7 @@ import type {
   Stage,
   Workstream,
  TriageCard,
- BuildRequest, FontsState, LiveApp, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
+ BuildRequest, FontsState, LiveApp, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock, StageTileKey } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -245,6 +245,7 @@ export class Session {
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
       stageHistory: this.stageHistory(),
+      stageTiles: this.stageTiles(),
       digest: hasBrief(this) ? this.brief().full : "",
       totals: this.totals(),
       brain: this.brainStatus,
@@ -344,6 +345,8 @@ export class Session {
         return { key, value: this.showRequests().filter((r) => r.status === "pending") };
       case "stageHistory":
         return { key, value: this.stageHistory() };
+      case "stageTiles":
+        return { key, value: this.stageTiles() };
       default:
         return null;
     }
@@ -1726,13 +1729,35 @@ export class Session {
     bus.changed("screens");
   }
 
-  /** A screen by its id or by what it's called ("left tv", "the Left TV"); undefined when nothing fits. */
+  /** A screen by its id or by what it's called ("left tv", "the Left TV"); undefined when nothing fits, or more than one does. */
   findScreen(ref?: string): ScreenInfo | undefined {
-    const want = (ref ?? "").toLowerCase().replace(/^the\s+/, "").trim();
-    if (!want) return undefined;
+    const m = this.screenMatch(ref);
+    return m && "screen" in m ? m.screen : undefined;
+  }
+
+  /**
+   * What a screen reference means: an id ("screen-2") as an id only; else the name of exactly one screen (ignoring case,
+   * "the" and punctuation), or the start of exactly one screen's name in whole words ("left" for "Left TV"). Never part
+   * of an id or a word. Two screens with that name, or starting that way: the ones to ask between. Nothing: null.
+   */
+  screenMatch(ref?: string): { screen: ScreenInfo } | { choices: string[] } | null {
+    const plain = (x: string) => x.toLowerCase().replace(/^the\s+/, "").replace(/[^a-z0-9]+/g, " ").trim();
+    const raw = (ref ?? "").trim();
+    const want = plain(raw);
+    if (!want) return null;
     const all = this.screens();
-    const plain = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    return all.find((sc) => sc.id === want) ?? all.find((sc) => plain(sc.name) === plain(want)) ?? all.find((sc) => plain(sc.name).includes(plain(want)) || plain(want).includes(plain(sc.name)));
+    // An id is looked up as an id only: a stale "screen-20" never lands on a screen someone named "screen 20".
+    if (/^screen-\d+$/i.test(raw) || raw === "main") {
+      const byId = all.find((sc) => sc.id === raw);
+      return byId ? { screen: byId } : null;
+    }
+    // A name counts only when one screen has it: two called "Left TV" are asked about, never the first picked.
+    const named = all.filter((sc) => plain(sc.name) === want);
+    if (named.length === 1) return { screen: named[0] };
+    if (named.length > 1) return { choices: named.map((sc) => `${sc.name} (${sc.id})`) };
+    const starts = all.filter((sc) => plain(sc.name).startsWith(`${want} `));
+    if (starts.length === 1) return { screen: starts[0] };
+    return starts.length ? { choices: starts.map((sc) => sc.name) } : null;
   }
 
   private screenReverts = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1804,18 +1829,25 @@ export class Session {
    * its history entry and its lock, and a lock doesn't refuse it, since looking closer isn't replacing what the owner put up. Someone is
    * looking at it, so a stage that returns to the board by itself starts its wait again.
    */
-  expandTile(key: string | null, screen = "main"): Stage {
+  expandTile(key: string | null, screen = "main", claim?: StageClaim): Stage {
     const cur = this.stage(screen);
     const tile = typeof key === "string" ? key.trim().slice(0, 80) : "";
-    if (cur.mode === "join" || (tile ? cur.expanded === tile : !cur.expanded)) return cur;
+    if (!this.claimHolds(claim, screen) || cur.mode === "join" || (tile ? cur.expanded === tile : !cur.expanded)) return cur;
     const { expanded: _drop, ...rest } = cur;
     const stage: Stage = tile ? { ...rest, expanded: tile } : rest;
     this.commitStage(stage, screen);
+    claim?.revs.set(screen, this.stageRev(screen));
     return stage;
   }
 
-  /** The keys of the tiles a screen's stage shows, in the order the screen draws them (the web's `stageTiles` keeps the same rules). */
-  stageTileKeys(screen = "main"): { key: string; artifactId?: string }[] {
+  /** Every screen's tile keys (`stageTileKeys`), as windows get them: they draw tiles from these and never work keys out themselves. */
+  stageTiles(): Record<string, StageTileKey[]> {
+    const ids = new Set(["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]);
+    return Object.fromEntries([...ids].map((id) => [id, this.stageTileKeys(id)]));
+  }
+
+  /** The keys of the tiles a screen's stage shows, in the order the screen draws them. The one place keys are made. */
+  stageTileKeys(screen = "main"): StageTileKey[] {
     const st = this.stage(screen);
     const arts = this.artifacts();
     const known = new Set(arts.map((a) => a.id));
@@ -1834,20 +1866,21 @@ export class Session {
       case "parity":
         return byId((st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c) => c.items));
       case "layout":
-        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, artifactId: t.kind === "artifact" ? t.artifactId : undefined }));
+        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
       default:
         return [];
     }
   }
 
   /** Expand "the second one" or a named artifact's tile, or collapse (neither given). Says why when it can't. */
-  expandWhich(ref: { artifactId?: string; position?: number }, screen = "main"): { ok: true; stage: Stage } | { ok: false; error: string } {
-    if (ref.artifactId === undefined && ref.position === undefined) return { ok: true, stage: this.expandTile(null, screen) };
+  expandWhich(ref: { artifactId?: string; position?: number }, screen = "main", claim?: StageClaim): { ok: true; stage: Stage } | { ok: false; error: string } {
+    if (!this.claimHolds(claim, screen)) return { ok: false, error: "The screen changed since; look again before expanding." };
+    if (ref.artifactId === undefined && ref.position === undefined) return { ok: true, stage: this.expandTile(null, screen, claim) };
     const tiles = this.stageTileKeys(screen);
     if (!tiles.length) return { ok: false, error: "The screen isn't showing tiles to expand." };
     const hit = ref.artifactId !== undefined ? tiles.find((t) => t.artifactId === ref.artifactId) : tiles[Math.trunc(ref.position ?? 0) - 1];
     if (!hit) return { ok: false, error: ref.artifactId !== undefined ? "That isn't on the screen right now." : `The screen has ${tiles.length} tile${tiles.length === 1 ? "" : "s"}.` };
-    return { ok: true, stage: this.expandTile(hit.key, screen) };
+    return { ok: true, stage: this.expandTile(hit.key, screen, claim) };
   }
 
   /**
@@ -1855,9 +1888,16 @@ export class Session {
    * for the hub's own housekeeping: a share ending, a request the owner approved): the stage comes back
    * unchanged, and callers that want to explain why ask `lockOf` first. A person's cast takes the lock.
    */
-  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main", opts: StageOpts = {}) {
+  setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen: string, opts: StageOpts) {
     const cur = this.stage(screen);
+    if (!this.claimHolds(opts.claim, screen)) return cur;
     if (!opts.person && !opts.override && this.lockOf(screen)) return cur;
+    // A share is shown only while it's live: an ended one's tile is dropped, and a layout that was only ended shares isn't put up.
+    if (next.mode === "layout" && next.layout?.tiles.length) {
+      const tiles = next.layout.tiles.filter((t) => t.kind !== "screen" || this.store.get("shares", t.shareId)?.status === "live");
+      if (!tiles.length) return cur;
+      if (tiles.length !== next.layout.tiles.length) next = { ...next, layout: { ...next.layout, tiles, grid: undefined } };
+    }
     // A share taking over this display: what it showed comes back when the share ends.
     const had = new Set(cur.mode === "layout" ? (cur.layout?.tiles ?? []).flatMap((t) => (t.kind === "screen" ? [t.shareId] : [])) : []);
     if (next.mode === "layout") for (const t of next.layout?.tiles ?? []) if (t.kind === "screen" && !had.has(t.shareId)) this.rememberStageFor(t.shareId, screen, cur);
@@ -1869,14 +1909,33 @@ export class Session {
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     this.commitStage(stage, screen);
+    opts.claim?.revs.set(screen, this.stageRev(screen));
     this.recordHistory(stage, screen);
     return stage;
   }
 
+  /** Counts every change to a screen's stage or its lock (cast, expand, unlock, lapse), in this process. */
+  private stageRevs = new Map<string, number>();
+  stageRev(screen = "main") {
+    return this.stageRevs.get(screen) ?? 0;
+  }
+
+  /** Every screen's revision now, for work that will write later (see StageClaim). A screen not seen yet is at 0. */
+  stageClaim(): StageClaim {
+    return { revs: new Map(this.stageRevs) };
+  }
+
+  /** No claim (a person or upkeep acting now), or nothing has changed the screen since the claim was taken. */
+  private claimHolds(claim: StageClaim | undefined, screen: string) {
+    return !claim || (claim.revs.get(screen) ?? 0) === this.stageRev(screen);
+  }
+
   private commitStage(stage: Stage, screen: string) {
+    this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
     // A live app tile on this screen is driven by whoever the lock says drives.
     bus.changed("liveApps");
+    bus.changed("stageTiles");
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
@@ -1912,7 +1971,7 @@ export class Session {
     const lock = this.stage(screen).lock;
     if (!lock) return null;
     if (this.lockLapsed(lock)) {
-      this.unlockStage(screen);
+      this.dropLock(screen);
       return null;
     }
     return lock;
@@ -1932,8 +1991,8 @@ export class Session {
     return windows.every((d) => !this.deviceOnline(d.id) && now - d.lastSeen > Session.LOCK_GONE_MS);
   }
 
-  /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. */
-  unlockStage(screen = "main") {
+  /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. Only lapsing and `releaseLock` call it. */
+  private dropLock(screen: string) {
     const cur = this.stage(screen);
     if (!cur.lock) return;
     const { lock: _drop, ...rest } = cur;
@@ -1946,6 +2005,85 @@ export class Session {
     if (cur.lock) return;
     const now = Date.now();
     this.commitStage({ ...cur, lock: { by: person.name, personId: person.id, since: now, lastActive: now, drivers: [person.id] } }, screen);
+  }
+
+  /** A person's yes to the lock question counts this long after it was asked. */
+  static UNLOCK_ASK_MS = 3 * 60_000;
+  /** The question JamSesh asked the room about replacing a screen's lock: its id, which lock (its `since`), and when. */
+  private lockQuestions = new Map<string, { id: string; since: number; at: number }>();
+
+  /** JamSesh just asked the room whether to replace this screen's current lock (the brain's ask_to_replace_screen). */
+  askedAboutLock(screen: string) {
+    const lock = this.lockOf(screen);
+    if (lock) this.lockQuestions.set(screen, { id: newId("lq"), since: lock.since, at: Date.now() });
+  }
+
+  /**
+   * Every open yes-or-no question a person's plain answer could be meant for: host build approvals (anyone in the room
+   * may answer), show requests addressed to them (they own the lock), and lock questions put to the whole room (about a
+   * lock that hasn't changed, still in time). A spoken bare yes or no settles a question only when it is the only one
+   * open for that person, of any kind; with two, it settles none. Every voice path asks here.
+   */
+  openQuestionsFor(personId: string | null): ({ kind: "build"; id: string; label: string } | { kind: "show"; id: string; screen: string; label: string } | { kind: "lock"; id: string; screen: string })[] {
+    const now = Date.now();
+    const builds = this.buildRequests()
+      .filter((r) => r.status === "pending")
+      .map((r) => ({ kind: "build" as const, id: r.id, label: `${r.agentName}'s build` }));
+    const shows = this.showRequests()
+      .filter((r) => r.status === "pending" && !!personId && r.ownerId === personId)
+      .map((r) => ({ kind: "show" as const, id: r.id, screen: r.screen, label: r.label }));
+    const locks = [...this.lockQuestions.entries()]
+      .filter(([screen, q]) => now - q.at < Session.UNLOCK_ASK_MS && this.lockOf(screen)?.since === q.since)
+      .map(([screen, q]) => ({ kind: "lock" as const, id: q.id, screen }));
+    return [...builds, ...shows, ...locks];
+  }
+
+  /**
+   * The one way a lock is let go on purpose (lapsing is the other), for every caller: Unlock, the brain, anything later.
+   * - `owner`: the lock's owner, by their own window's credential or in their own words to JamSesh.
+   * - `hostWindow`: the host's own windows, which carry no person's credential, only for a lock held by no one in
+   *   particular or by the person at the host. A name a host window sends doesn't count.
+   * - `answeredAt`: a person's yes to the question asked about this very lock (`askedAboutLock`), said after it and in time,
+   *   when that is the only question open for them (`openQuestionsFor`); used once.
+   * Anything else leaves the lock as it is. Returns whether the screen is unlocked now.
+   */
+  releaseLock(screen: string, consent: { owner: string | null } | { hostWindow: true } | { answeredAt: number; by: string | null }, claim?: StageClaim): boolean {
+    // Work that decided earlier lets go only of the lock it saw.
+    if (!this.claimHolds(claim, screen)) return false;
+    const lock = this.lockOf(screen);
+    if (!lock) return true;
+    const q = this.lockQuestions.get(screen);
+    // An answer settles this lock's question only when it is the one question open for the person who said it.
+    const only = (by: string | null) => {
+      const open = this.openQuestionsFor(by);
+      return open.length === 1 && open[0].kind === "lock" && open[0].id === q?.id;
+    };
+    const ok =
+      "owner" in consent
+        ? !!consent.owner && consent.owner === lock.personId
+        : "hostWindow" in consent
+          ? !lock.personId || lock.personId === this.store.setting<string>("hostPersonId", "")
+          : !!q && q.since === lock.since && consent.answeredAt >= q.at && consent.answeredAt - q.at < Session.UNLOCK_ASK_MS && Date.now() - q.at < Session.UNLOCK_ASK_MS && only(consent.by);
+    if (!ok) return false;
+    this.lockQuestions.delete(screen);
+    this.dropLock(screen);
+    claim?.revs.set(screen, this.stageRev(screen));
+    return true;
+  }
+
+  /** The screen a caller means: none named is the main one; an id or a name that isn't there now is null, never some other screen. */
+  screenRef(ref?: unknown): string | null {
+    const r = this.screenOf(ref);
+    return "id" in r ? r.id : null;
+  }
+
+  /** `screenRef`, saying why not: no such screen, or which ones the name could mean (to ask which). */
+  screenOf(ref?: unknown): { id: string } | { error: string; choices?: string[] } {
+    if (ref === undefined || ref === null || ref === "" || ref === "main") return { id: "main" };
+    const m = typeof ref === "string" ? this.screenMatch(ref) : null;
+    if (m && "screen" in m) return { id: m.screen.id };
+    if (m) return { error: `Which screen: ${m.choices.join(" or ")}?`, choices: m.choices };
+    return { error: "That screen isn't connected any more." };
   }
 
   /** The owner did something with their screen: it counts as activity. */
@@ -2032,11 +2170,12 @@ export class Session {
   }
 
   /** Puts a queued item on its screen. A person showing it takes the screen's lock; with no person (the owner said yes) it goes up unlocked. */
-  showReady(id: string, person?: { id: string | null; name: string }): Stage | null {
+  showReady(id: string, who: { person: { id: string | null; name: string } } | { override: true } | { claim: StageClaim }): Stage | null {
     const item = this.readyToShow().find((r) => r.id === id);
     if (!item) return null;
+    if ("claim" in who && !this.claimHolds(who.claim, item.screen)) return null;
     this.dismissReady(id);
-    return person ? this.setStage(item.stage, person.name, item.screen, { person }) : this.setStage(item.stage, item.agentName, item.screen, { override: true });
+    return this.setStage(item.stage, "person" in who ? who.person.name : item.agentName, item.screen, "person" in who ? who : "claim" in who ? { override: true, claim: who.claim } : who);
   }
 
   dismissReady(id: string) {
@@ -2101,7 +2240,7 @@ export class Session {
     if (!lock || lock.since !== req.lockSince || lock.personId !== req.ownerId || (approve && !waiting)) return this.expireShowRequest(req);
     const done: ShowRequest = { ...req, status: approve ? "approved" : "denied", decidedBy: by, at: approve ? req.at : Date.now() };
     this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === id ? done : r)));
-    if (approve) this.showReady(req.readyId);
+    if (approve) this.showReady(req.readyId, { override: true });
     else this.touchLock(req.screen);
     this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: approve ? `${by} said yes: ${req.agentName}'s ${req.label} is on the big screen.` : `${by} is keeping their screen up. ${req.agentName}'s ${req.label} waits in the queue.`, relevance: "work", data: { showRequest: id } });
     bus.changed("showRequests");
@@ -2157,15 +2296,24 @@ export class Session {
   }
 
   /** Brings an earlier screen back. A person's tap takes the lock; anyone else is held off by one. */
-  restoreHistory(id: string, screen: string, person?: { id: string | null; name: string }, by = "JamSesh"): Stage | null {
+  restoreHistory(id: string, screen: string, who: { person: { id: string | null; name: string } } | { claim: StageClaim }, by = "JamSesh"): Stage | null {
     const entry = (this.stageHistory(screen)[screen] ?? []).find((e) => e.id === id);
     if (!entry) return null;
-    return this.setStage({ ...entry.stage, pinned: false }, person?.name ?? by, screen, person ? { person } : {});
+    return this.setStage({ ...entry.stage, pinned: false }, "person" in who ? who.person.name : by, screen, who);
   }
 }
 
-/** How a setStage call says who is acting: a person (who may replace a lock and takes one) or the hub's own upkeep. */
-export interface StageOpts {
+/**
+ * What a piece of work saw of the screens when it decided (`Session.stageClaim`): each screen's revision then. A write
+ * carrying it lands only on a screen still at that revision (compare-and-set), and moves the claim on, so the same
+ * work's next write still lands. Anything that decides and writes later than the moment it acts on (the brain, whose
+ * model takes seconds; an agent) carries one.
+ */
+export interface StageClaim {
+  revs: Map<string, number>;
+}
+
+interface StageOptsBase {
   person?: { id: string | null; name: string };
   /** Housekeeping that must happen whatever is locked: a share ending, an approved request, a timer. */
   override?: boolean;
@@ -2173,7 +2321,14 @@ export interface StageOpts {
   noLock?: boolean;
   /** The new stage keeps this lock: the owner's own share over their cast, and that cast coming back when it ends. */
   keepLock?: StageLock;
+  claim?: StageClaim;
 }
+
+/**
+ * How a setStage call says who is acting. Every write says one of: a person acting now (who may replace a lock and takes
+ * one), the hub's own upkeep acting now, or a claim for work decided earlier. There is no write without one.
+ */
+export type StageOpts = StageOptsBase & ({ person: { id: string | null; name: string } } | { override: true } | { claim: StageClaim });
 
 /** A few words for a stage, for the history strip and the ready queue. */
 export function stageLabel(stage: Partial<Stage> & { mode: string }, titleOf: (id: string) => string | undefined = () => undefined): string {

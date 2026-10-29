@@ -188,8 +188,10 @@ the client.
 - **Put on screen**: the hub's state lists the room's screens (id, name, role, size, stage). With
   two or more, a cast from someone's app (Work tab, tapping a tile) opens a picker with a live
   thumbnail of each screen (its stage drawn at the screen's own size and scaled down) and its name; the
-  chosen screen gets the cast (`POST /api/stage` takes `screen`, an id or a name; none, or one that
-  isn't there, is the main screen). With one screen nothing is asked. Each stage carries its
+  chosen screen gets the cast (`POST /api/stage` takes `screen`: an id, matched as an id only; or a
+  name, or the first word(s) of a name, that exactly one screen has. None named is the main screen,
+  one that isn't there is 404, and a name or start two screens share is 409 naming both, so the
+  person can say which). With one screen nothing is asked. Each stage carries its
   `screenId`.
 - Keeps hosting from the menu bar when its windows are closed. The menu shows that it's hosting,
   the current join code (refreshed every 5 seconds), who's connected, and **Open my window**,
@@ -314,14 +316,21 @@ in place of the picker. The menu bar's **Projects** submenu lists the recent pro
 ticked), **All projects…** (the picker) and **New project…** (the picker with the name field open).
 Choosing another project ends the session first: the hub saves a snapshot and the project's
 thumbnail and exits, and only then does the next one start. The app remembers the project it
-hosted last and relaunches into it.
+hosted last and relaunches into it. Every change of session (host, join, leave, a project, Quit, the
+setup's Reopen) waits its turn in one queue and acts only on the session it was asked in; arranging
+the screens waits too and acts only for the session there is. Reopen restarts only after the hub's
+save finished: a save that didn't, then or before, keeps the app from reopening until the person
+chooses **Reopen anyway**.
 
 **Migration.** The first time a hub or lobby starts with no `JAMSESH_DATA`, the sessions from before
 projects (`~/.jamsesh/host` and the `host-YYYY-MM-DD-HHMM` archives) are copied into projects named
 from each session's name, same names together. Nothing is moved or deleted: each database is copied
 privately and written out with `VACUUM INTO`, its event and document counts are compared with the
 copy (a mismatch removes the copy and is recorded), and the originals stay where they were. What
-happened is written to `projects/.migration.json`, and the migration doesn't run again. The old
+happened is written to `projects/.migration.json`, and the migration doesn't run again. One start
+migrates at a time: it holds an exclusive SQLite transaction on `projects/.migration-lock.db` (an
+advisory lock the system lets go when its holder exits or dies), and another start waits up to a
+minute, then fails rather than go on with unfinished projects. The old
 live session becomes `last-session` in its project, so opening that project the same day continues it.
 
 ## 4. Setup, pairing, and remote access
@@ -1778,7 +1787,13 @@ history strip brings the earlier one back. A restore from the strip is the excep
 off (409) while someone else holds the screen. Housekeeping (a share ending, a timer) is never held
 back. Brain stages are not locked.
 
-A person's lock stays until they unlock it, however long they talk through it. It also lets go when
+A person's lock stays until they unlock it, however long they talk through it. **Unlock** is shown
+to the lock's owner and goes through one check in the hub, whoever asks: the owner's own window (by
+its credential, never a name in the request), the host's own windows for a lock held by no one in
+particular or by the person at the host, or, through the brain, the owner telling JamSesh to unlock
+or replace it, or anyone's plain yes said after the brain's question about that very lock and within
+3 minutes (the owner's bare "yes" counts only that way). A screen named in a request that isn't
+connected any more is refused (404), never taken to mean the main screen. It also lets go when
 its owner is removed or has no live window for 10 minutes (a 30-second sweep applies it). A lock held
 by no one in particular (the host before anyone picked who they are) lets go after 20 minutes
 untouched. An agent's only way in is the 5-minute question below.
@@ -1794,7 +1809,12 @@ ready. Can I put it up?" (once more after a minute). One question is open per sc
 within 10 minutes of a no. The owner can answer by button (the owner, or the host's own window) or
 by voice: "yes, show it" or "keep mine up", plus a bare "yes" or "no" for 90 seconds after the
 question; only the owner's words count and the brain's voice handling applies them with or without
-a model. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
+a model. A spoken answer settles a question only when it is the only one open for that person, of any
+kind (host build approvals, their show requests, any lock question to the room); with two open a
+plain yes or no settles none, JamSesh asks which, and the cards still answer each by its id ("deny
+the build" names its kind and still counts). One line answers one question, once. Every stage write
+says who acts: a person now, the hub's upkeep now, or a claim for work decided earlier (the brain,
+an agent), which lands only on a screen nothing changed since; a share that has ended is never put up. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
 unanswered question goes stale after 5 minutes.
 
 **One item per built screen (3.5).** A new `jam_post_image` or `/api/upload` of the same agent and
@@ -1925,7 +1945,9 @@ registerDriveTarget(el, handler): Unsub       // see "Replaying input"
     [8.14](#814-the-tasks-board-and-triage-41)).
   - **Expand:** every tile of a multi-tile stage (board, spotlight, compare, parity, layout) has
     **Expand** in its header, on the big screen and in the Screen tab. The stage's `expanded` field
-    holds the tile key (an artifact id, or `t<n>` for a layout's nth tile); `POST /api/stage/expand
+    holds the tile key (an artifact id, or `t<n>` for a layout's nth tile). Only the hub makes keys:
+    the state's `stageTiles` lists each screen's tiles in drawing order (sent again whenever a stage
+    or the artifacts change), and windows draw from it; `POST /api/stage/expand
     {tile, screen?}` sets it (tile null collapses). The tile fills the presentation area, the others
     become a strip of thumbnails along the right edge (bottom on tall areas), and **Collapse**
     returns. On a phone, a chip per tile under the mirror does the same (Collapse first). The room

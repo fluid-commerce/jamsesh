@@ -861,14 +861,19 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.settings());
   }
 
-  // With several screens, the caller says which (an id or a name); none, or one that isn't there, is the main one.
-  const screenOf = () => s.findScreen(typeof body?.screen === "string" ? body.screen : undefined)?.id ?? "main";
+  // With several screens, the caller says which (an id or a name). None named is the main one; one that isn't there now
+  // (a display unplugged since the control was drawn) is an error, never some other screen.
+  const where = s.screenOf(body?.screen);
+  const screenOf = () => ("id" in where ? where.id : null);
+  // Not connected (404), or a name more than one screen starts with (409, naming them, so the person can say which).
+  const noScreen = () => bad("error" in where ? where.error : "", "choices" in where && where.choices ? 409 : 404);
 
   if (path === "/stage" && req.method === "POST") {
     const stage = body as Partial<Stage> & { mode: Stage["mode"] };
     if (!stage?.mode) return bad("mode is required");
     const who = actor();
     const screen = screenOf();
+    if (!screen) return noScreen();
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
   }
   // Driving the big screen (6.1): the lock's owner starts, passes control or drives together; `to` names the other person.
@@ -877,25 +882,34 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/drive/online" && req.method === "GET") return notAPerson() ?? json({ people: s.onlinePeople() });
   m = path.match(/^\/drive\/(start|stop|pass|together)$/);
   if (m && req.method === "POST") {
-    const r = s.drive(m[1] as "start", screenOf(), actor().id, typeof body?.to === "string" ? body.to : typeof body?.who === "string" ? body.who : null);
+    const screen = screenOf();
+    if (!screen) return noScreen();
+    const r = s.drive(m[1] as "start", screen, actor().id, typeof body?.to === "string" ? body.to : typeof body?.who === "string" ? body.who : null);
     return r.ok ? json({ drivers: r.drivers }) : bad(r.error, r.status);
   }
+  // Only the lock's owner unlocks it: their window's credential, never a name in the body. The host's own windows carry no
+  // person's credential; they may unlock a lock held by no one in particular or by the person at the host (Session.releaseLock).
   if (path === "/stage/unlock" && req.method === "POST") {
-    s.unlockStage(screenOf());
-    return json(s.stage(screenOf()));
+    const screen = screenOf();
+    if (!screen) return noScreen();
+    const lock = s.lockOf(screen);
+    const consent = paired ? { owner: paired.personId ?? null } : hostWindow ? { hostWindow: true as const } : { owner: null };
+    if (lock && !s.releaseLock(screen, consent)) return bad(`Only ${lock.by} can unlock this screen.`, 403);
+    return json(s.stage(screen));
   }
   if (path === "/stage/restore" && req.method === "POST") {
     const who = actor();
     const screen = screenOf();
+    if (!screen) return noScreen();
     const lock = s.lockOf(screen);
     if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
-    const stage = s.restoreHistory(String(body?.id ?? ""), screen, who);
+    const stage = s.restoreHistory(String(body?.id ?? ""), screen, { person: who });
     return stage ? json(stage) : bad("That screen is no longer in the history.", 404);
   }
   m = path.match(/^\/stage\/ready\/([\w-]+)$/);
   if (m && req.method === "POST") {
     if (body?.action === "dismiss") return (s.dismissReady(m[1]), json({ ok: true }));
-    const stage = s.showReady(m[1], actor());
+    const stage = s.showReady(m[1], { person: actor() });
     return stage ? json(stage) : bad("That item isn't waiting any more.", 404);
   }
   m = path.match(/^\/show-requests\/([\w-]+)$/);
@@ -915,8 +929,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (paired?.kind === "agent") return bad("Agents use jam_show; expanding a tile is for people.", 403);
     if (body?.tile !== null && (typeof body?.tile !== "string" || !body.tile.trim())) return bad("tile must be a tile key, or null to collapse");
     const tile: string | null = body.tile === null ? null : body.tile.trim();
-    const screen = typeof body?.screen === "string" && body.screen ? body.screen : "main";
-    if (screen !== "main" && !s.screens().some((sc) => sc.id === screen)) return bad("no such screen", 404);
+    const screen = screenOf();
+    if (!screen) return noScreen();
     if (tile !== null && !s.stageTileKeys(screen).some((t) => t.key === tile)) return bad("That isn't on the screen right now.", 404);
     return json(s.expandTile(tile, screen));
   }

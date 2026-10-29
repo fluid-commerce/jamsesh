@@ -72,9 +72,11 @@ export function CastPicker({ state }: { state: HubState }) {
     setReq(null);
   };
   const screens = state.screens ?? [];
+  // The picker closes now, but the cast resolves with what the hub said, not with the click.
   const put = (sc: ScreenInfo) => {
-    void putOnScreen({ ...req.stage, screen: sc.id });
-    close(true);
+    const r = req;
+    setReq(null);
+    void putOnScreen({ ...r.stage, screen: sc.id }).then(r.done);
   };
   return (
     <>
@@ -102,8 +104,8 @@ export function CastPicker({ state }: { state: HubState }) {
   );
 }
 
-/** Mounted once in people's apps (not on a big screen). */
-export function CastHost() {
+/** Mounted once per window: the picker in people's apps (`picker`), and on every window the note when a screen control fails. */
+export function CastHost({ picker = true }: { picker?: boolean }) {
   const { state } = useHub();
   const [note, setNote] = useState("");
   useEffect(() => {
@@ -117,7 +119,7 @@ export function CastHost() {
   }, [note]);
   return (
     <>
-      {state && <CastPicker state={state} />}
+      {picker && state && <CastPicker state={state} />}
       {note && (
         <div className="cast-note" role="alert">
           {note}

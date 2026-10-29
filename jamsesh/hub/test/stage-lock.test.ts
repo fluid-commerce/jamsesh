@@ -60,7 +60,7 @@ test("a person's cast is locked; unlocking leaves it up and ends the lock", () =
   s.setStage({ mode: "board" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   expect(s.stage().lock).toBeUndefined();
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  s.unlockStage();
+  (s as any).dropLock("main");
   expect(s.stage().mode).toBe("spotlight");
   expect(s.stage().lock).toBeUndefined();
 });
@@ -69,7 +69,7 @@ test("a locked screen refuses the brain and automatic changes, but people and ho
   const { s, chey, felipe } = room();
   const a = artifact(s, "Checkout");
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.setStage({ mode: "agents" }, "Room brain").mode).toBe("spotlight");
+  expect(s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() }).mode).toBe("spotlight");
   expect(s.stage().mode).toBe("spotlight");
   // Another person's deliberate cast replaces it and takes the lock.
   s.setStage({ mode: "agents" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
@@ -89,7 +89,7 @@ test("a locked screen doesn't revert to the board on the timer; unlocking starts
     s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
     await Bun.sleep(150);
     expect(s.stage().mode).toBe("spotlight");
-    s.unlockStage();
+    (s as any).dropLock("main");
     await Bun.sleep(150);
     expect(s.stage().mode).toBe("board");
   } finally {
@@ -197,8 +197,8 @@ test("the owner's spoken yes or no answers the question; nobody else's words do"
   await call(agent, "jam_show", { mode: "spotlight", artifactIds: [a.id], title: "Checkout" });
   const req = asked[0];
   const t = req.at + 5_000;
-  expect(showVerdict([said(chey, "yes, show it", t)], req)).toEqual({ approve: true, by: "Chey" });
-  expect(showVerdict([said(chey, "Keep mine up.", t)], req)).toEqual({ approve: false, by: "Chey" });
+  expect(showVerdict([said(chey, "yes, show it", t)], req)).toMatchObject({ approve: true, by: "Chey" });
+  expect(showVerdict([said(chey, "Keep mine up.", t)], req)).toMatchObject({ approve: false, by: "Chey" });
   expect(showVerdict([said(chey, "JamSesh, keep mine up", t)], req)?.approve).toBe(false);
   expect(showVerdict([said(chey, "no", t)], req)?.approve).toBe(false);
   // Not the owner, not a whole answer, a question, before it was asked, a stale bare yes.
@@ -240,7 +240,7 @@ test("the room brain's show tools don't replace a lock; its owner asking does", 
   expect(s.stage().items).toEqual([mine.id]);
   // Unlock needs a person's plain yes, named by its line, in answer to the question the brain asked.
   (s as any).gatewayKey = () => "";
-  await t1.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
+  await t1.ask_to_replace_screen.execute({});
   const asking = said(felipe, "show the checkout");
   expect(String(await tools([asking]).unlock_screen.execute({ line: asking.id }))).toContain("no line here plainly says to replace it");
   const yes = said(felipe, "yeah go ahead and replace it");
@@ -267,13 +267,15 @@ test("a finished variant set waits in the queue while a screen is locked", () =>
   expect(s.stage().items).toEqual([mine.id]);
   expect(s.readyToShow().map((r) => r.label)).toEqual(["Compare Nav"]);
   // Unlocked, the same landing shows the comparison.
-  s.unlockStage();
+  (s as any).dropLock("main");
   hub.brain.artifactsLanded(arts);
   expect(s.stage().mode).toBe("compare");
 });
 
 test("a share doesn't take a screen someone else locked, and shows over its own sharer's", async () => {
   const { hub, s, chey, felipe } = room();
+  // No model: the placement's own fallback, not a network call that can outlast the test.
+  (s as any).gatewayKey = () => "";
   const a = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   const sh = s.startShare("felipe-laptop", "screen");
@@ -299,9 +301,14 @@ test("the http routes: /stage locks for the window's person, restore and unlock 
     await post("/stage", { mode: "spotlight", items: [b.id], personId: felipe.id });
     expect(s.stage().lock?.by).toBe("Felipe");
     const earlier = s.stageHistory().main.find((e) => e.by === "Chey")!;
-    // Chey taps it in the strip while Felipe holds the screen: held off. Felipe unlocks, then Chey can.
+    // Chey taps it in the strip while Felipe holds the screen: held off. The host's window can't let go of Felipe's lock
+    // (naming Felipe doesn't make it his); his own window can, then Chey can.
     expect((await post("/stage/restore", { id: earlier.id, personId: chey.id })).status).toBe(409);
-    expect((await post("/stage/unlock", {})).status).toBe(200);
+    expect((await post("/stage/unlock", { personId: felipe.id })).status).toBe(403);
+    expect(s.stage().lock?.by).toBe("Felipe");
+    const felipes = hub.auth.issue({ kind: "browser", label: "Felipe's laptop", ip: "127.0.0.1", personId: felipe.id });
+    const asFelipe = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "10.0.0.8", authorization: `Bearer ${felipes.token}` }, body: JSON.stringify(body) });
+    expect((await asFelipe("/stage/unlock", {})).status).toBe(200);
     expect((await post("/stage/restore", { id: earlier.id, personId: chey.id })).status).toBe(200);
     expect(s.stage().items).toEqual([a.id]);
     expect(s.stage().lock?.by).toBe("Chey");
@@ -383,7 +390,7 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   s.setStage({ mode: "board" }, "JamSesh", "main", { override: true });
   s.setStage({ mode: "compare", items: [a.id, b.id] }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
-  s.setStage({ mode: "spotlight", items: [b.id], title: "Pricing" }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [b.id], title: "Pricing" }, "Room brain", "screen-2", { claim: s.stageClaim() });
   const main = s.stageHistory().main;
   expect(main.map((e) => [e.by, e.label])).toEqual([["Felipe", "Checkout and 1 more"], ["Chey", "Checkout"]]); // the board isn't kept
   expect(s.stageHistory()["screen-2"].map((e) => e.label)).toEqual(["Pricing"]);
@@ -394,14 +401,14 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   s.setStage({ mode: "compare", items: [a.id, b.id], title: "Cmp" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
   expect(s.historyBy("felipe")?.label).toBe("Checkout");
   const hit = s.historyBy("Felipe")!;
-  s.unlockStage();
-  const back = s.restoreHistory(hit.id, "main", undefined, "Room brain")!;
+  (s as any).dropLock("main");
+  const back = s.restoreHistory(hit.id, "main", { claim: s.stageClaim() }, "Room brain")!;
   expect(back.mode).toBe("spotlight");
   expect(back.by).toBe("Room brain");
   // A locked screen holds off a restore that isn't a person's.
   s.setStage({ mode: "agents" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.restoreHistory(s.previousScreens()[0].id, "main", undefined, "Room brain")!.mode).toBe("agents");
-  expect(s.restoreHistory("his-nope", "main")).toBeNull();
+  expect(s.restoreHistory(s.previousScreens()[0].id, "main", { claim: s.stageClaim() }, "Room brain")!.mode).toBe("agents");
+  expect(s.restoreHistory("his-nope", "main", { claim: s.stageClaim() })).toBeNull();
 });
 
 test("the brain brings back what a person had up, and says so when nothing matches", async () => {
@@ -410,7 +417,7 @@ test("the brain brings back what a person had up, and says so when nothing match
   const b = artifact(s, "Pricing");
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   s.setStage({ mode: "spotlight", items: [b.id], title: "Pricing" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
-  s.unlockStage();
+  (s as any).dropLock("main");
   const t = tools();
   expect(await t.restore_screen.execute({ by: "Chey" })).toContain("Brought back Checkout");
   expect(s.stage().items).toEqual([a.id]);
@@ -432,16 +439,16 @@ test("a direct request to JamSesh is a person's cast and locks to them; overhear
   expect(await tools([direct(chey, "JamSesh, show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] })).toBe("On screen.");
   expect(s.stage().lock).toMatchObject({ by: "Chey", personId: chey.id });
   expect(s.stage().by).toBe("Room brain");
-  s.unlockStage();
+  (s as any).dropLock("main");
   await tools([direct(felipe, "put up a custom view")]).build_custom_view.execute({ title: "x", html: "<p>x</p>" });
   expect(s.stage().lock?.by).toBe("Felipe");
-  s.unlockStage();
+  (s as any).dropLock("main");
   s.saveLayout("review");
-  s.setStage({ mode: "agents" }, "Room brain");
+  s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() });
   await tools([direct(chey, "bring back the review layout")]).show_saved_layout.execute({ name: "review" });
   expect(s.stage().mode).toBe("custom");
   expect(s.stage().lock?.by).toBe("Chey");
-  s.unlockStage();
+  (s as any).dropLock("main");
   // Overheard, or the brain acting alone: no lock.
   await tools([said(felipe, "show the checkout")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] });
   expect(s.stage().items).toEqual([a.id]);
@@ -519,7 +526,7 @@ test("locks, the queue and history are per screen: a lock on main doesn't hold t
   expect(s.stage().lock?.by).toBe("Chey");
   // Locking the second display holds only it; its queue and history are its own.
   s.setStage({ mode: "spotlight", items: [a.id], title: "Right" }, "Felipe", "screen-2", { person: { id: felipe.id, name: "Felipe" } });
-  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2").title).toBe("Right");
+  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2", { claim: s.stageClaim() }).title).toBe("Right");
   s.queueReady({ screen: "screen-2", agentId: "x", agentName: "Agent", label: "For the right", stage: { mode: "agents" } });
   expect(s.readyToShow().map((r) => r.screen)).toEqual(["screen-2"]);
   expect(s.stageHistory()["screen-2"].map((e) => e.by)).toEqual(["Felipe", "Room brain"]);
@@ -610,8 +617,8 @@ test("a stopped hub's screen timers stop too: none of them touches its store aft
   const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   const a = artifact(s, "Checkout");
-  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain");
-  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "main", { claim: s.stageClaim() });
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2", { claim: s.stageClaim() });
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   const timers = () => [(s as any).lockSweep, (s as any).stageRevert, (s as any).shareSweep, ...(s as any).screenReverts.values()].filter(Boolean);
   expect(timers().length).toBeGreaterThan(0);
@@ -648,7 +655,7 @@ test("unlock_screen takes only a whole plain yes: negations, questions and mixed
   (s as any).gatewayKey = () => "";
   const t0 = tools([said(felipe, "show something else")]);
   await t0.show_on_screen.execute({ mode: "agents" });
-  await t0.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
+  await t0.ask_to_replace_screen.execute({});
   for (const text of ["No, don't unlock it", "don't unlock it", "should I unlock it?", "Yes, keep mine up", "yes but not yet", "I wouldn't unlock it", "unlock it?", "no", "keep it up", "maybe go ahead"]) {
     const line = said(felipe, text);
     const r: any = await tools([line]).unlock_screen.execute({ line: line.id });
@@ -663,12 +670,11 @@ test("unlock_screen takes only a whole plain yes: negations, questions and mixed
 });
 
 test("a bystander's yes counts only as the answer to the brain's question, about that lock; the owner may ask to unlock directly", async () => {
-  const { hub, s, chey, felipe, tools, said } = room();
+  const { s, chey, felipe, tools, said } = room();
   const mine = artifact(s, "Pricing");
   const cast = () => s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   cast();
   (s as any).gatewayKey = () => "";
-  const brain = hub.brain as any;
   const yesTo = async (text = "yes, replace it", ts = Date.now()) => {
     const line = said(felipe, text, ts);
     return String(await tools([line]).unlock_screen.execute({ line: line.id }));
@@ -681,12 +687,16 @@ test("a bystander's yes counts only as the answer to the brain's question, about
   expect(await yesTo()).toContain("plainly says");
   // Asked: a yes said before the question doesn't answer it; one said too long after doesn't either.
   const before = Date.now() - 1000;
-  await t.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
+  const t1 = tools([said(felipe, "show the agents")]);
+  await t1.show_on_screen.execute({ mode: "agents" });
+  expect(await t1.ask_to_replace_screen.execute({})).toBe("Asked the room.");
   expect(await yesTo("yes, replace it", before)).toContain("plainly says");
-  const asked = brain.unlockAsked.get("main");
-  brain.unlockAsked.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
+  const questions = (s as any).lockQuestions as Map<string, { id: string; since: number; at: number }>;
+  const asked = questions.get("main")!;
+  expect(asked.since).toBe(s.stage().lock!.since);
+  questions.set("main", { ...asked, at: Date.now() - 4 * 60_000 });
   expect(await yesTo("yes, replace it", Date.now() - 4 * 60_000 + 10)).toContain("plainly says");
-  brain.unlockAsked.set("main", asked);
+  questions.set("main", asked);
   // The lock changed since the question (Chey cast again): the question was about the old lock.
   cast();
   expect(await yesTo()).toContain("plainly says");
@@ -694,7 +704,7 @@ test("a bystander's yes counts only as the answer to the brain's question, about
   // A question asked about this lock, then a yes: that works.
   const t2 = tools([said(felipe, "show the agents")]);
   await t2.show_on_screen.execute({ mode: "agents" });
-  await t2.say_to_room.execute({ text: "Chey has the screen locked. Want me to replace it?", kind: "problem" });
+  await t2.ask_to_replace_screen.execute({});
   expect(await yesTo()).toContain("Unlocked");
   cast();
   // Chey asking JamSesh to unlock her own screen does.
@@ -727,7 +737,7 @@ test("a show request answers only the lock it asked about: a later cast or an un
     s.dismissReady(first.item.id);
     const second = ask();
     expect(second.req.ownerId).toBe(felipe.id);
-    s.unlockStage();
+    (s as any).dropLock("main");
     s.setStage({ mode: "spotlight", items: [a.id], title: "Felipe again" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
     const post = (path: string, body: any) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
     expect((await post(`/show-requests/${second.req.id}`, { approve: true })).status).toBeGreaterThanOrEqual(404);
@@ -765,8 +775,302 @@ test("the owner's own share keeps their lock, and their cast comes back locked w
   // Let go of during the share: what comes back is unlocked.
   const again = s.startShare("felipe-laptop", "screen");
   s.placeShare(again);
-  s.unlockStage();
+  (s as any).dropLock("main");
   s.endShare(again.id);
   expect(s.stage().title).toBe("Felipe's cast");
   expect(s.stage().lock).toBeUndefined();
+});
+
+test("the lock question is its own fixed action: a problem said some other way opens no window for a bystander's yes", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const mine = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  (s as any).gatewayKey = () => "";
+  const t = tools([said(felipe, "show the agents")]);
+  // Asking without having been refused does nothing.
+  expect(String(await t.ask_to_replace_screen.execute({}))).toContain("Nothing here was refused");
+  await t.show_on_screen.execute({ mode: "agents" });
+  // Any other problem the brain voices (a different question, an unrelated complaint) doesn't count as asking.
+  await t.say_to_room.execute({ text: "I can't do that right now.", kind: "problem" });
+  await t.say_to_room.execute({ text: "Want me to show the agents instead?", kind: "problem" });
+  const early = said(felipe, "yes, replace it");
+  expect(String(await tools([early]).unlock_screen.execute({ line: early.id }))).toContain("plainly says");
+  // The fixed question names the lock, and only after it is delivered does a yes count (a new pass, refused again).
+  const t2 = tools([said(felipe, "show the agents")]);
+  await t2.show_on_screen.execute({ mode: "agents" });
+  expect(await t2.ask_to_replace_screen.execute({})).toBe("Asked the room.");
+  expect(s.store.recentEvents({ limit: 3 }).map((e) => e.text)).toContain("Chey has the screen locked. Want me to replace it?");
+  const yes = said(felipe, "yes, replace it");
+  expect(await tools([yes]).unlock_screen.execute({ line: yes.id })).toContain("Unlocked");
+});
+
+test("the owner's unrelated direct question doesn't clear their lock, but a request to change the screen does", async () => {
+  const { s, chey, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  const mine = artifact(s, "Pricing");
+  const direct = (text: string, data: Record<string, unknown> = {}) => ({ ...said(chey, text), data: { direct: true, ...data } }) as JamEvent;
+  const cast = () => s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  cast();
+  const show = (line: JamEvent) => tools([line]).show_on_screen.execute({ mode: "spotlight", artifactIds: [a.id] });
+  for (const q of ["JamSesh, what is Felipe's agent doing?", "JamSesh, how many agents are running", "JamSesh, did the build pass?", "JamSesh, thanks"]) {
+    expect([q, String(await show(direct(q)))]).toEqual([q, expect.stringContaining("locked")]);
+    expect(s.stage().lock?.by).toBe("Chey");
+  }
+  // Triage's reading wins when it exists: a line it called a question stays one.
+  expect(String(await show(direct("JamSesh, show me the status", { intent: "question" })))).toContain("locked");
+  expect(s.stage().items).toEqual([mine.id]);
+  expect(await show(direct("JamSesh, show the checkout"))).toBe("On screen.");
+  cast();
+  expect(await show(direct("JamSesh, anything on pricing?", { intent: "present" }))).toBe("On screen.");
+});
+
+// ---------- round 6: one consent gate for every unlock, and no stale screen targets ----------
+
+test("releaseLock is the one gate: the owner, the host's windows for the host's or nobody's lock, or a timely answer to the question", async () => {
+  const { s, chey, felipe } = room();
+  const a = artifact(s, "Checkout");
+  const lockAs = (p: { id: string | null; name: string }) => s.setStage({ mode: "spotlight", items: [a.id] }, p.name, "main", { person: p });
+  lockAs(chey);
+  // Someone else, nobody, or the host's window for a guest's lock: no.
+  expect(s.releaseLock("main", { owner: felipe.id })).toBe(false);
+  expect(s.releaseLock("main", { owner: null })).toBe(false);
+  expect(s.releaseLock("main", { hostWindow: true })).toBe(false);
+  // A yes with no question asked, or to a question about an earlier lock: no.
+  expect(s.releaseLock("main", { answeredAt: Date.now(), by: felipe.id })).toBe(false);
+  s.askedAboutLock("main");
+  await Bun.sleep(2);
+  lockAs(chey);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1, by: felipe.id })).toBe(false);
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Asked about this lock: a yes said before the question doesn't answer it; one after does, once.
+  s.askedAboutLock("main");
+  expect(s.releaseLock("main", { answeredAt: Date.now() - 5_000, by: felipe.id })).toBe(false);
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1, by: felipe.id })).toBe(true);
+  expect(s.stage().lock).toBeUndefined();
+  lockAs(chey);
+  // The question was used up.
+  expect(s.releaseLock("main", { answeredAt: Date.now() + 1, by: felipe.id })).toBe(false);
+  // The owner always can.
+  expect(s.releaseLock("main", { owner: chey.id })).toBe(true);
+  // The host's window: a lock held by nobody in particular, or by the person at the host.
+  lockAs({ id: null, name: "Host" });
+  expect(s.releaseLock("main", { hostWindow: true })).toBe(true);
+  s.store.setSetting("hostPersonId", chey.id);
+  lockAs(chey);
+  expect(s.releaseLock("main", { hostWindow: true })).toBe(true);
+});
+
+test("/stage/unlock: only the owner's own window, or the host's window for the host's own lock; a stale screen id is refused", async () => {
+  const { hub, s, chey, felipe } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const a = artifact(s, "Checkout");
+    const as = (who: { id: string }) => hub.auth.issue({ kind: "browser", label: "laptop", ip: "10.0.0.9", personId: who.id }).token;
+    const [cheys, felipes] = [as(chey), as(felipe)];
+    const post = (path: string, body: any, headers: Record<string, string>) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    const remote = (token: string) => ({ "x-forwarded-for": "10.0.0.9", authorization: `Bearer ${token}` });
+    const host = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    // Felipe's window, with or without Chey's name in the body; the host's window naming Chey: no.
+    const refused = await post("/stage/unlock", { personId: chey.id }, remote(felipes));
+    expect(refused.status).toBe(403);
+    expect(((await refused.json()) as any).error).toBe("Only Chey can unlock this screen.");
+    expect((await post("/stage/unlock", { personId: chey.id }, host())).status).toBe(403);
+    expect(s.stage().lock?.by).toBe("Chey");
+    // A screen that's gone: refused, and main isn't touched in its place.
+    for (const [path, body] of [["/stage/unlock", {}], ["/stage", { mode: "agents" }], ["/stage/restore", { id: "x" }], ["/stage/expand", { tile: null }]] as const) {
+      const r = await post(path, { ...body, screen: "screen-unplugged" }, remote(cheys));
+      expect([path, r.status]).toEqual([path, 404]);
+    }
+    expect(s.stage().mode).toBe("spotlight");
+    expect(s.stage().lock?.by).toBe("Chey");
+    // Chey's own window: yes. Leaving out the screen means the main one.
+    expect((await post("/stage/unlock", {}, remote(cheys))).status).toBe(200);
+    expect(s.stage().lock).toBeUndefined();
+    // The person at the host locks from the host's window, and the host's window lets go of it.
+    s.store.setSetting("hostPersonId", chey.id);
+    expect((await post("/stage", { mode: "spotlight", items: [a.id] }, host())).status).toBe(200);
+    expect(s.stage().lock?.personId).toBe(chey.id);
+    expect((await post("/stage/unlock", {}, host())).status).toBe(200);
+    expect(s.stage().lock).toBeUndefined();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the owner's bare yes to something else doesn't unlock; their yes to the lock question, or saying to unlock it, does", async () => {
+  const { s, chey, felipe, tools, said } = room();
+  const a = artifact(s, "Pricing");
+  const cast = () => s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  cast();
+  (s as any).gatewayKey = () => "";
+  const direct = (text: string) => ({ ...said(chey, text), data: { direct: true } }) as JamEvent;
+  // Chey answers some other question of JamSesh's with "yes" (and "go ahead", "show it"): the model cites it, nothing unlocks.
+  for (const text of ["yes", "JamSesh, go ahead", "sure, do it", "show it"]) {
+    const line = direct(text);
+    expect([text, String(await tools([line]).unlock_screen.execute({ line: line.id }))]).toEqual([text, expect.stringContaining("plainly says")]);
+  }
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Asked about her lock, her bare yes answers it.
+  const t = tools([said(felipe, "show the agents")]);
+  await t.show_on_screen.execute({ mode: "agents" });
+  await t.ask_to_replace_screen.execute({});
+  const yes = direct("yes");
+  expect(await tools([yes]).unlock_screen.execute({ line: yes.id })).toContain("Unlocked");
+  // With no question, her own words to unlock it do; overheard (not said to JamSesh), they don't.
+  cast();
+  const overheard = said(chey, "unlock it");
+  expect(String(await tools([overheard]).unlock_screen.execute({ line: overheard.id }))).toContain("plainly says");
+  const own = direct("replace mine");
+  expect(await tools([own]).unlock_screen.execute({ line: own.id })).toContain("Unlocked");
+});
+
+test("the brain refuses a screen that isn't there instead of changing the main one", async () => {
+  const { s, chey, tools, said } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const own = { ...said(chey, "JamSesh, show the agents on the left TV"), data: { direct: true } } as JamEvent;
+  const t = tools([own]);
+  for (const [name, args] of [["show_on_screen", { mode: "agents", screen: "Left TV" }], ["build_custom_view", { title: "x", html: "<p>x</p>", screen: "Left TV" }], ["expand_tile", { position: 1, screen: "Left TV" }], ["restore_screen", { screen: "Left TV" }], ["ask_to_replace_screen", { screen: "Left TV" }], ["unlock_screen", { line: own.id, screen: "Left TV" }]] as const)
+    expect([name, String(await t[name].execute(args))]).toEqual([name, expect.stringContaining("no screen by that name")]);
+  expect(s.stage().mode).toBe("spotlight");
+  expect(s.stage().lock?.by).toBe("Chey");
+});
+
+// ---------- round 7: one answer settles one question; screens by exact name or a unique start ----------
+
+test("with two questions open for the same owner, a spoken yes settles neither and JamSesh asks which; the card still does", async () => {
+  const { hub, s, chey, reg, said } = room();
+  s.onShowRequest = () => {};
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  const agent = reg("Felipe");
+  const [x, y] = [artifact(s, "Checkout", agent.id), artifact(s, "Pricing", agent.id)];
+  for (const screen of ["main", "screen-2"]) s.setStage({ mode: "spotlight", items: [x.id] }, "Chey", screen, { person: { id: chey.id, name: "Chey" } });
+  // Both of Chey's locks are old enough to ask about.
+  age(s, 6 * 60_000);
+  const side = s.stage("screen-2");
+  s.store.setSetting("screenStages", { "screen-2": { ...side, lock: { ...side.lock!, since: Date.now() - 6 * 60_000 } } });
+  const ask = (screen: string, art: typeof x, label: string) => s.askOwner(s.queueReady({ screen, agentId: agent.id, agentName: agent.name, label, stage: { mode: "spotlight", items: [art.id] } }))!;
+  const one = ask("main", y, "Pricing");
+  const two = ask("screen-2", y, "Pricing v2");
+  expect(s.openQuestionsFor(chey.id).map((q) => q.id)).toEqual([one.id, two.id]);
+  (hub.brain as any).decideByVoice([said(chey, "yes, show it")]);
+  expect(s.showRequests().filter((r) => r.status === "pending").map((r) => r.id)).toEqual([one.id, two.id]);
+  expect(s.stage().items).toEqual([x.id]);
+  expect(s.stage("screen-2").items).toEqual([x.id]);
+  const asked = s.store.recentEvents({ limit: 20 }).filter((e) => e.kind === "brain").map((e) => e.text);
+  expect(asked.some((t) => /which one\?/.test(t) && t.includes("Pricing") && t.includes("Pricing v2"))).toBe(true);
+  // The card names its question: that one is settled, and then her spoken yes has one question to answer, once.
+  expect(s.answerShowRequest(two.id, false, "Chey")?.status).toBe("denied");
+  const yes = said(chey, "yes, show it");
+  (hub.brain as any).decideByVoice([yes]);
+  expect(s.showRequests().find((r) => r.id === one.id)?.status).toBe("approved");
+  expect(s.stage().items).toEqual([y.id]);
+});
+
+test("one line answers one question: a lock question open too makes the owner's bare yes ambiguous, and a used line can't unlock", async () => {
+  const { hub, s, chey, felipe, reg, tools, said } = room();
+  s.onShowRequest = () => {};
+  (s as any).gatewayKey = () => "";
+  const agent = reg("Rae");
+  const mine = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  age(s, 6 * 60_000);
+  s.askOwner(s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "agents" } }));
+  const t = tools([said(felipe, "show the agents")]);
+  await t.show_on_screen.execute({ mode: "agents" });
+  expect(await t.ask_to_replace_screen.execute({})).toBe("Asked the room.");
+  // Chey now has two open: her show request and the room's lock question. Her yes says neither.
+  const hers = said(chey, "yes");
+  expect(String(await tools([hers]).unlock_screen.execute({ line: hers.id }))).toContain("more than one question open");
+  expect(s.stage().lock?.by).toBe("Chey");
+  // Felipe has only the lock question: his yes answers it. A line that already answered a show request can't.
+  const felipes = said(felipe, "yes, replace it");
+  (hub.brain as any).usedLine(felipes.id);
+  expect(String(await tools([felipes]).unlock_screen.execute({ line: felipes.id }))).toContain("already answered");
+  const again = said(felipe, "yes, replace it");
+  expect(await tools([again]).unlock_screen.execute({ line: again.id })).toContain("Unlocked");
+  // Once: the question is gone.
+  expect(s.openQuestionsFor(felipe.id)).toEqual([]);
+});
+
+test("screens are found by id or whole name, or the one name a word starts; a stale id never lands on a lookalike, and two matches ask", async () => {
+  const { hub, s } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  s.reportScreen("screen-3", { ...info, screenX: 3840 });
+  s.store.setSetting("screenNames", { "screen-2": { name: "Left TV" }, "screen-3": { name: "Left monitor" } });
+  expect(s.screens().map((sc) => sc.name)).toEqual(["Main screen", "Left TV", "Left monitor"]);
+  expect(s.screenRef("screen-2")).toBe("screen-2");
+  expect(s.screenRef("the left tv")).toBe("screen-2");
+  expect(s.screenRef("Left TV!")).toBe("screen-2");
+  // A stale id, part of a name, or a name inside another word: nothing.
+  expect(s.screenRef("screen-20")).toBeNull();
+  expect(s.screenRef("screen")).toBeNull();
+  expect(s.screenRef("TV")).toBeNull();
+  expect(s.screenRef("lef")).toBeNull();
+  // "left" starts two names: ask which.
+  expect(s.screenOf("left")).toEqual({ error: "Which screen: Left TV or Left monitor?", choices: ["Left TV", "Left monitor"] });
+  // Over HTTP a stale id is 404, an ambiguous name 409 with the choices; the brain asks.
+  const brainSays = String(await (hub.brain as any).tools([], { effects: 0 }).show_on_screen.execute({ mode: "agents", screen: "left" }));
+  expect(brainSays).toContain('"left" could be Left TV or Left monitor. Ask the room which one.');
+  const server = (await import("../src/http")).startHttp(hub, 0);
+  try {
+    const post = (body: any) => fetch(`http://127.0.0.1:${server.port}/api/stage`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` }, body: JSON.stringify(body) });
+    expect((await post({ mode: "agents", screen: "screen-20" })).status).toBe(404);
+    const which = await post({ mode: "agents", screen: "left" });
+    expect(which.status).toBe(409);
+    expect(((await which.json()) as any).error).toBe("Which screen: Left TV or Left monitor?");
+    expect(s.stage("screen-2").mode).not.toBe("agents");
+  } finally {
+    server.stop(true);
+  }
+});
+
+// ---------- round 8: every kind of question counts; names only when unique ----------
+
+test("a host build and a show request open together: a bare yes settles neither; naming the build answers only it", async () => {
+  const { hub, s, chey, reg, said } = room();
+  s.onShowRequest = () => {};
+  hub.host.onRequest = () => {};
+  const agent = reg("Felipe");
+  const mine = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  age(s, 6 * 60_000);
+  const show = s.askOwner(s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Checkout", stage: { mode: "agents" } }))!;
+  const build = hub.host.request({ agentId: agent.id, agentName: "Felipe's Claude", ownerName: "Felipe", repo: "https://github.com/acme/app.git", branch: "main", command: "true" });
+  if (typeof build === "string") throw new Error(build);
+  expect(s.openQuestionsFor(chey.id).map((q) => q.kind)).toEqual(["build", "show"]);
+  const brain = hub.brain as any;
+  brain.decideByVoice([said(chey, "yes")]);
+  expect(hub.host.pendingRequests().map((r) => r.id)).toEqual([build.id]);
+  expect(s.showRequests().find((r) => r.id === show.id)?.status).toBe("pending");
+  expect(s.stage().items).toEqual([mine.id]);
+  expect(s.store.recentEvents({ limit: 10 }).some((e) => e.kind === "brain" && /which one\?/.test(e.text) && e.text.includes("Felipe's Claude's build"))).toBe(true);
+  // "Deny the build" says which: only the build is settled, and that line answers nothing else.
+  const deny = said(chey, "deny the build");
+  brain.decideByVoice([deny]);
+  expect(hub.host.pendingRequests()).toEqual([]);
+  expect(s.showRequests().find((r) => r.id === show.id)?.status).toBe("pending");
+  // Now one question is open: her plain yes answers it.
+  brain.decideByVoice([said(chey, "yes, show it")]);
+  expect(s.showRequests().find((r) => r.id === show.id)?.status).toBe("approved");
+});
+
+test("ids match ids only, and a name two screens share is asked about", () => {
+  const { s } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  s.reportScreen("screen-3", { ...info, screenX: 3840 });
+  // Someone named a screen like an id, and two screens the same.
+  s.store.setSetting("screenNames", { "screen-2": { name: "screen-20" }, "screen-3": { name: "Left TV" }, main: { name: "Left TV" } });
+  expect(s.screenRef("screen-20")).toBeNull();
+  expect(s.screenRef("screen-2")).toBe("screen-2");
+  const two = s.screenOf("left tv");
+  expect("choices" in two && two.choices).toEqual(["Left TV (main)", "Left TV (screen-3)"]);
+  expect(s.screenRef("left")).toBeNull();
 });

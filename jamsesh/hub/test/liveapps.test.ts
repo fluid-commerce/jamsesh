@@ -453,6 +453,6 @@ test("on a locked big screen the screen's drivers drive the tile, like anything 
   // Off the locked screen the tile's own controller model applies again.
   const again = (await hub.live.startIos(undefined, "Maya")) as any;
   expect(s.state().liveApps.find((a) => a.id === again.id)?.viaScreen).toBeUndefined();
-  s.unlockStage("main");
+  (s as any).dropLock("main");
   expect(((await (await post(`/apps/${again.id}/control`, { action: "take" }, samHeaders)).json()) as any).result).toContain("driving");
 });

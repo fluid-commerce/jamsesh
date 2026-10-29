@@ -14,7 +14,7 @@ test("a closed big screen stops being routable at once; main too, until its wind
   s.reportScreen("main", info);
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   expect(s.screens().map((sc) => sc.id)).toEqual(["main", "screen-2"]);
-  s.setStage({ mode: "compare", title: "Nav", items: ["a", "b"] }, "x");
+  s.setStage({ mode: "compare", title: "Nav", items: ["a", "b"] }, "x", "main", { claim: s.stageClaim() });
   s.removeScreen("screen-2");
   s.removeScreen("screen-9");
   expect(s.screens().map((sc) => sc.id)).toEqual(["main"]);
@@ -42,10 +42,10 @@ test("screens carry the names the host app gave them, and are found by name", ()
   expect(s.findScreen("kitchen")).toBeUndefined();
   expect(s.findScreen("")).toBeUndefined();
   // Each screen has its own stage, stamped with its id.
-  s.setStage({ mode: "spotlight", title: "A" }, "Maya", "screen-2");
+  s.setStage({ mode: "spotlight", title: "A" }, "Maya", "screen-2", { claim: s.stageClaim() });
   expect(s.stage("screen-2").screenId).toBe("screen-2");
   expect(s.stage().screenId).toBeUndefined();
-  s.setStage({ mode: "board" }, "Maya");
+  s.setStage({ mode: "board" }, "Maya", "main", { claim: s.stageClaim() });
   expect(s.stage().screenId).toBe("main");
   expect(s.screens()[1].stage.title).toBe("A");
 });
@@ -75,14 +75,14 @@ test("a cast goes to the chosen screen, and the brain can name one", async () =>
     await post("/stage", { mode: "spotlight", title: "to the right", by: "Maya", screen: "right tv" });
     expect(s.stage("screen-2").title).toBe("to the right");
     expect(s.stage().title).not.toBe("to the right");
-    // No screen, or one that isn't there: the main screen.
+    // No screen named: the main one. One that isn't there is refused, never put on the main screen instead.
     await post("/stage", { mode: "spotlight", title: "default", by: "Maya" });
-    await post("/stage", { mode: "spotlight", title: "nowhere", by: "Maya", screen: "kitchen" });
-    expect(s.stage().title).toBe("nowhere");
+    expect((await post("/stage", { mode: "spotlight", title: "nowhere", by: "Maya", screen: "kitchen" })).status).toBe(404);
+    expect(s.stage().title).toBe("default");
     expect(s.stage("screen-2").title).toBe("to the right");
     // The brain: "put it on the left TV".
-    s.unlockStage(); // Maya's casts above locked the screens she cast to
-    s.unlockStage("screen-2");
+    (s as any).dropLock("main"); // Maya's casts above locked the screens she cast to
+    (s as any).dropLock("screen-2");
     const tools = hub.brain.tools([], { effects: 0 });
     await (tools as any).show_on_screen.execute({ mode: "agents", screen: "the Left TV" }, { toolCallId: "t", messages: [] });
     expect(s.stage().mode).toBe("agents");
@@ -101,8 +101,8 @@ test("after a restart, an extra display's brought-up view still returns to the b
   Session.STAGE_REVERT_MS = 300;
   try {
     const before = new Session(new Store(d2));
-    before.setStage({ mode: "compare", title: "Nav", items: ["a", "b"] }, "Room brain", "screen-2");
-    before.setStage({ mode: "compare", title: "Pinned", items: ["a"], pinned: true }, "Felipe", "screen-3");
+    before.setStage({ mode: "compare", title: "Nav", items: ["a", "b"] }, "Room brain", "screen-2", { claim: before.stageClaim() });
+    before.setStage({ mode: "compare", title: "Pinned", items: ["a"], pinned: true }, "Felipe", "screen-3", { claim: before.stageClaim() });
     // The hub restarts: the old process's timers are gone, and a new session opens the same store before the deadline.
     for (const t of (before as any).screenReverts.values()) clearTimeout(t);
     const after = new Session(new Store(d2));

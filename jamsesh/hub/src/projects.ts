@@ -12,7 +12,7 @@
 // This file takes the home directory as an argument and imports nothing from config, so tests and
 // the migration can point it at a temp directory.
 import { Database } from "bun:sqlite";
-import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,6 +42,8 @@ export interface SessionMeta {
   id: string;
   startedAt: number;
   lastActive: number;
+  /** A migrated copy: the old directory it was made from, so a retry finds it instead of copying again. */
+  migratedFrom?: string;
 }
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -198,7 +200,7 @@ export function openSession(home: string, slug: string, opts: { fresh?: boolean;
   const dir = join(dirOf(home, slug), "sessions", id);
   mkdirSync(dir, { recursive: true });
   const prior = readJson<Partial<SessionMeta>>(join(dir, "session.json"));
-  writeJson(join(dir, "session.json"), { id, startedAt: Number(prior?.startedAt) || now, lastActive: now } satisfies SessionMeta);
+  writeJson(join(dir, "session.json"), { id, startedAt: Number(prior?.startedAt) || now, lastActive: now, ...(prior?.migratedFrom ? { migratedFrom: prior.migratedFrom } : {}) } satisfies SessionMeta);
   writeProject(home, { ...project, lastUsed: now });
   return { project, sessionId: id, dir, resumed };
 }
@@ -207,7 +209,7 @@ export function openSession(home: string, slug: string, opts: { fresh?: boolean;
 export function touchSession(home: string, slug: string, sessionId: string, people: ProjectPerson[] = [], now = Date.now()) {
   const dir = join(dirOf(home, slug), "sessions", sessionId);
   const prior = readJson<Partial<SessionMeta>>(join(dir, "session.json"));
-  if (existsSync(dir)) writeJson(join(dir, "session.json"), { id: sessionId, startedAt: Number(prior?.startedAt) || now, lastActive: now } satisfies SessionMeta);
+  if (existsSync(dir)) writeJson(join(dir, "session.json"), { id: sessionId, startedAt: Number(prior?.startedAt) || now, lastActive: now, ...(prior?.migratedFrom ? { migratedFrom: prior.migratedFrom } : {}) } satisfies SessionMeta);
   const project = readProject(home, slug);
   if (!project) return;
   const seen = new Set<string>();
@@ -268,8 +270,8 @@ function counts(db: Database) {
 
 /**
  * Brings the old sessions into projects. Nothing is moved or deleted: each old directory is copied
- * into projects/<name>/sessions/ (the database through a private copy and VACUUM INTO, so the
- * original is never opened), counted against the copy, and left where it was. Sessions with the same
+ * into projects/<name>/sessions/ (the database as one consistent snapshot read with VACUUM INTO on a
+ * read-only connection, see `snapshot`), counted against the copy, and left where it was. Sessions with the same
  * name become one project. projects/.migration.json records each source; one copied and verified is
  * done, and any other is tried again at the next start. A copy is built under a hidden name and only
  * takes its real one once verified, so a failed or cut-off copy never shows as a session.
@@ -279,51 +281,59 @@ export function migrateLegacy(home: string, waitMs = 60_000): MigrationRecord[] 
   // overwrite each other's record. The other start waits, then finds the work done.
   const root = projectsDir(home);
   mkdirSync(root, { recursive: true });
-  const lock = join(root, MIGRATION_LOCK);
-  // Who holds it: this process and this attempt, so releasing never removes another start's lock.
-  const mine = `${process.pid} ${crypto.randomUUID()}`;
-  const until = Date.now() + waitMs;
-  for (;;) {
-    try {
-      const fd = openSync(lock, "wx");
-      writeSync(fd, mine);
-      closeSync(fd);
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      if (lockAbandoned(lock)) {
-        rmSync(lock, { force: true });
-        continue;
-      }
-      // Still busy after the wait: leave it to that start (this one tries again next time).
-      if (Date.now() > until) return readJson<{ records: MigrationRecord[] }>(join(root, MIGRATION_FILE))?.records ?? [];
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
-  }
+  const release = takeMigrationLock(join(root, MIGRATION_LOCK), waitMs);
   try {
     return migrateNow(home);
   } finally {
-    try {
-      if (readFileSync(lock, "utf8") === mine) rmSync(lock, { force: true });
-    } catch {}
+    release();
   }
 }
 
-const MIGRATION_LOCK = ".migration.lock";
+const MIGRATION_LOCK = ".migration-lock.db";
 
 /**
- * A lock left by a process that's gone. A live holder keeps it however long its migration takes (a
- * start that can't wait that long leaves the work to it). With no process id in it, it was being written,
- * or its writer died before finishing: abandoned once that's been a few seconds.
+ * The migration lock: an exclusive transaction on a small SQLite file, which holds the operating system's
+ * advisory lock on it. Only one process holds it at a time, the system lets go the moment its holder exits or
+ * dies, and nothing is ever unlinked to take it over, so no start can judge a live lock abandoned or remove
+ * another's. A live holder keeps it however long its migration takes; a start that can't wait that long fails
+ * rather than going on with unfinished projects. Returns the release.
  */
-function lockAbandoned(lock: string) {
+function takeMigrationLock(path: string, waitMs: number): () => void {
+  const db = new Database(path);
   try {
-    const pid = Number.parseInt(readFileSync(lock, "utf8"), 10);
-    if (!pid) return Date.now() - statSync(lock).mtimeMs > 5_000;
-    process.kill(pid, 0);
-    return false;
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(waitMs))}`);
+    db.exec("BEGIN EXCLUSIVE");
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ESRCH";
+    db.close();
+    if (/busy|locked/i.test(String((e as { code?: string }).code ?? (e as Error).message))) throw new Error("Another JamSesh start is still bringing the old sessions into projects. Try again in a minute.");
+    throw e;
+  }
+  return () => {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    db.close();
+  };
+}
+
+/**
+ * One consistent copy of a session's database, even while its hub still writes: SQLite's own VACUUM INTO, run as one
+ * read transaction on a read-only connection, so it holds exactly what was committed at one moment, the WAL included.
+ * Never a copy of the files: a checkpoint between copying the database and its WAL would lose committed rows. Read-only,
+ * the original is never written (its write-ahead index is shared with any live hub, as every reader's is).
+ */
+function snapshot(db: string, to: string) {
+  // With no write-ahead files beside it no hub has it open, but even a read-only connection to a WAL database leaves
+  // new ones there: that case reads a private copy instead, so the original folder is left exactly as it was.
+  const idle = !existsSync(`${db}-wal`) && !existsSync(`${db}-shm`);
+  const from = idle ? `${to}.source` : db;
+  if (idle) copyFileSync(db, from);
+  const source = new Database(from, { readonly: true });
+  try {
+    source.exec(`VACUUM INTO '${to.replace(/'/g, "''")}'`);
+  } finally {
+    source.close();
+    if (idle) for (const f of [from, `${from}-wal`, `${from}-shm`]) rmSync(f, { force: true });
   }
 }
 
@@ -347,7 +357,7 @@ function migrateNow(home: string): MigrationRecord[] {
     let project: ProjectMeta | null = null;
     let staging = "";
     try {
-      for (const f of ["jamsesh.db", "jamsesh.db-wal", "jamsesh.db-shm"]) if (existsSync(join(src, f))) copyFileSync(join(src, f), join(scratch, f));
+      snapshot(join(src, "jamsesh.db"), join(scratch, "jamsesh.db"));
       const work = new Database(join(scratch, "jamsesh.db"));
       try {
         const setting = (key: string) => {
@@ -359,32 +369,55 @@ function migrateNow(home: string): MigrationRecord[] {
           }
         };
         const name = cleanName(setting("sessionName")) || "Jam session";
-        project = byName.get(name.toLowerCase()) ?? null;
-        if (!project) {
-          project = made = createProject(home, name, statSync(src).mtimeMs);
-          byName.set(name.toLowerCase(), project);
-        }
         const span = work.query("SELECT MIN(ts) AS a, MAX(ts) AS b FROM events").get() as { a: number | null; b: number | null };
         const mtime = statSync(join(src, "jamsesh.db")).mtimeMs;
         const lastActive = Math.max(span.b ?? 0, mtime);
         const startedAt = span.a ?? statSync(src).birthtimeMs;
-        const sessions = join(dirOf(home, project.slug), "sessions");
-        const id = (existsSync(join(sessions, basenameOf(src))) ? `${basenameOf(src)}-copy` : basenameOf(src)).replace(/^host$/, "last-session");
-        const dest = join(sessions, id);
-        // Private to this attempt: nothing else ever writes or removes it.
-        staging = join(sessions, `.${id}.${process.pid}-${crypto.randomUUID().slice(0, 8)}.partial`);
-        mkdirSync(staging, { recursive: true });
-        cpSync(src, staging, { recursive: true, filter: (f) => !/jamsesh\.db(-wal|-shm)?$|host-link\.secret$/.test(f) });
-        work.exec(`VACUUM INTO '${join(staging, "jamsesh.db").replace(/'/g, "''")}'`);
         const was = counts(work);
-        const copy = new Database(join(staging, "jamsesh.db"), { readonly: true });
-        const after = counts(copy);
-        copy.close();
-        const verified = was.events === after.events && was.docs === after.docs;
-        if (!verified) throw new Error(`counts differ (${was.events}/${was.docs} vs ${after.events}/${after.docs}); the copy was removed`);
-        writeJson(join(staging, "session.json"), { id, startedAt, lastActive } satisfies SessionMeta);
-        renameSync(staging, dest);
-        staging = "";
+        // Published by an earlier attempt that stopped before recording it: adopt it if it still matches.
+        let dest = "";
+        let id = "";
+        let after = was;
+        const prior = publishedFrom(home, src);
+        if (prior) {
+          try {
+            const old = new Database(join(prior.dir, "jamsesh.db"), { readonly: true });
+            after = counts(old);
+            old.close();
+            if (after.events === was.events && after.docs === was.docs) {
+              project = readProject(home, prior.slug);
+              dest = prior.dir;
+              id = prior.id;
+            }
+          } catch {}
+        }
+        if (!dest) {
+          project = byName.get(name.toLowerCase()) ?? null;
+          if (!project) {
+            project = made = createProject(home, name, statSync(src).mtimeMs);
+            byName.set(name.toLowerCase(), project);
+          }
+          const sessions = join(dirOf(home, project.slug), "sessions");
+          // The name it will really have, so a collision is checked against where it is going.
+          const base = basenameOf(src).replace(/^host$/, "last-session");
+          id = base;
+          for (let n = 1; existsSync(join(sessions, id)); n++) id = n === 1 ? `${base}-copy` : `${base}-copy-${n}`;
+          dest = join(sessions, id);
+          // Private to this attempt: nothing else ever writes or removes it.
+          staging = join(sessions, `.${id}.${process.pid}-${crypto.randomUUID().slice(0, 8)}.partial`);
+          mkdirSync(staging, { recursive: true });
+          cpSync(src, staging, { recursive: true, filter: (f) => !/jamsesh\.db(-wal|-shm)?$|host-link\.secret$/.test(f) });
+          work.exec(`VACUUM INTO '${join(staging, "jamsesh.db").replace(/'/g, "''")}'`);
+          const copy = new Database(join(staging, "jamsesh.db"), { readonly: true });
+          after = counts(copy);
+          copy.close();
+          const verified = was.events === after.events && was.docs === after.docs;
+          if (!verified) throw new Error(`counts differ (${was.events}/${was.docs} vs ${after.events}/${after.docs}); the copy was removed`);
+          writeJson(join(staging, "session.json"), { id, startedAt, lastActive, migratedFrom: src } satisfies SessionMeta);
+          renameSync(staging, dest);
+          staging = "";
+        }
+        if (!project) throw new Error("the project of an earlier copy is gone");
         const names = (work.query("SELECT DISTINCT author_name AS n FROM events WHERE author_type = 'person' ORDER BY id DESC LIMIT 40").all() as { n: string }[]).map((r) => ({ name: r.n }));
         const cur = readProject(home, project.slug) ?? project;
         const seen = new Set(cur.people.map((p) => p.name.toLowerCase()));
@@ -411,6 +444,21 @@ function migrateNow(home: string): MigrationRecord[] {
   const all = [...done.values(), ...records];
   writeJson(marker, { at: Date.now(), records: all });
   return all;
+}
+
+/** A session already published from `src` (the process stopped before the migration was recorded). */
+function publishedFrom(home: string, src: string): { slug: string; id: string; dir: string } | null {
+  const root = projectsDir(home);
+  if (!existsSync(root)) return null;
+  for (const slug of readdirSync(root).filter(isSlug)) {
+    const sessions = join(dirOf(home, slug), "sessions");
+    if (!existsSync(sessions)) continue;
+    for (const id of readdirSync(sessions)) {
+      if (id.startsWith(".")) continue;
+      if (readJson<Partial<SessionMeta>>(join(sessions, id, "session.json"))?.migratedFrom === src) return { slug, id, dir: join(sessions, id) };
+    }
+  }
+  return null;
 }
 
 const basenameOf = (p: string) => p.split("/").filter(Boolean).pop() ?? p;

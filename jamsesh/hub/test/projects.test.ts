@@ -114,6 +114,31 @@ describe("migration from the single-session layout", () => {
     return home;
   }
   const bytes = (dir: string) => readdirSync(dir, { recursive: true }).map(String).sort().map((f) => `${f}:${statSync(join(dir, f)).size}`).join(",");
+  const lockFile = (home: string) => join(home, "projects", ".migration-lock.db");
+  /** Holds the migration lock as another start would: an exclusive transaction on the lock file. */
+  function holdLock(home: string) {
+    const db = new Database(lockFile(home));
+    db.exec("BEGIN EXCLUSIVE");
+    return db;
+  }
+  /** Another process that takes the lock, says so, then sits on it (a migration that takes long, or one about to be killed). */
+  function holderProcess(home: string) {
+    const code = `const { Database } = require("bun:sqlite"); const db = new Database(${JSON.stringify(lockFile(home))}); db.exec("BEGIN EXCLUSIVE"); console.log("held"); setInterval(() => {}, 1000);`;
+    return Bun.spawn(["bun", "-e", code], { stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+  }
+  async function waitForLine(p: ReturnType<typeof holderProcess>) {
+    const reader = p.stdout.getReader();
+    const { value } = await reader.read();
+    reader.releaseLock();
+    expect(new TextDecoder().decode(value)).toContain("held");
+  }
+  /** A whole start in its own process; its migration records. */
+  async function starter(home: string) {
+    const src = join(import.meta.dir, "..", "src", "projects.ts");
+    const p = Bun.spawn(["bun", "-e", `const { migrateLegacy } = await import(${JSON.stringify(src)}); console.log(JSON.stringify(migrateLegacy(${JSON.stringify(home)})));`], { stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+    await p.exited;
+    return JSON.parse((await new Response(p.stdout).text()).trim().split("\n").pop()!);
+  }
 
   test("copies each session into a project named from its name, and leaves the originals exactly as they were", () => {
     const home = oldHome();
@@ -195,44 +220,128 @@ describe("migration from the single-session layout", () => {
     expect(listProjects(home).map((p) => [p.name, p.sessions]).sort()).toEqual([["Billing", 1], ["Passport", 2]]);
     const passport = listProjects(home).find((p) => p.name === "Passport")!;
     expect(readdirSync(join(home, "projects", passport.slug, "sessions")).sort()).toEqual(["host-2026-05-01-0930", "last-session"]);
-    expect(existsSync(join(home, "projects", ".migration.lock"))).toBe(false);
   }, 30_000);
 
-  test("a lock left by a process that's gone doesn't block the migration", () => {
+  test("a start that outwaits a live migration fails instead of going on with unfinished projects", () => {
     const home = oldHome();
     mkdirSync(join(home, "projects"), { recursive: true });
-    // A pid that can't be running: far past any real pid.
-    writeFileSync(join(home, "projects", ".migration.lock"), "999999999");
-    expect(migrateLegacy(home).filter((r) => r.verified).length).toBe(3);
-    // A live holder that never lets go: this start gives up after its wait and leaves the work to it.
-    const other = oldHome();
-    mkdirSync(join(other, "projects"), { recursive: true });
-    writeFileSync(join(other, "projects", ".migration.lock"), String(process.pid));
-    expect(migrateLegacy(other, 200)).toEqual([]);
-    expect(listProjects(other)).toEqual([]);
+    // Another start holds the lock (here, another connection in this process).
+    const other = holdLock(home);
+    expect(() => migrateLegacy(home, 100)).toThrow(/still bringing the old sessions/);
+    // Nothing was listed as done, and the other start still holds its lock.
+    expect(existsSync(join(home, "projects", ".migration.json"))).toBe(false);
+    expect(() => migrateLegacy(home, 50)).toThrow(/still bringing the old sessions/);
+    other.close();
+    expect(migrateLegacy(home, 100).filter((r) => r.verified).length).toBe(3);
   });
 
-  test("a live migration keeps its lock however old: another start never takes it, and goes ahead once the holder is gone", async () => {
+  test("a start cut off after publishing a copy adopts it on retry: no duplicate, and `host` doesn't strand", () => {
+    const home = oldHome();
+    migrateLegacy(home);
+    const passport = listProjects(home).find((p) => p.name === "Passport")!;
+    const sessions = join(home, "projects", passport.slug, "sessions");
+    const before = readdirSync(sessions).sort();
+    expect(before).toEqual(["host-2026-05-01-0930", "last-session"]);
+    // The process stopped (or the project write failed) before the marker was written.
+    rmSync(join(home, "projects", ".migration.json"));
+    const again = migrateLegacy(home);
+    expect(again.length).toBe(3);
+    expect(again.every((r) => r.verified)).toBe(true);
+    expect(readdirSync(sessions).sort()).toEqual(before);
+    expect(again.find((r) => r.from === join(home, "host"))!.to).toBe(join(sessions, "last-session"));
+    // And once more, as the marker can be lost again.
+    rmSync(join(home, "projects", ".migration.json"));
+    expect(migrateLegacy(home).every((r) => r.verified)).toBe(true);
+    expect(readdirSync(sessions).sort()).toEqual(before);
+    // Using the session afterwards keeps the record of where it came from.
+    touchSession(home, passport.slug, "last-session");
+    rmSync(join(home, "projects", ".migration.json"));
+    migrateLegacy(home);
+    expect(readdirSync(sessions).sort()).toEqual(before);
+  });
+
+  test("a copy is named by where it's going: an occupied last-session sends `host` to a free name", () => {
+    const home = oldHome();
+    const first = migrateLegacy(home);
+    const passport = listProjects(home).find((p) => p.name === "Passport")!;
+    const sessions = join(home, "projects", passport.slug, "sessions");
+    // A different session already holds last-session (no record of coming from `host`); `host` is still to do.
+    const session = JSON.parse(readFileSync(join(sessions, "last-session", "session.json"), "utf8"));
+    delete session.migratedFrom;
+    writeFileSync(join(sessions, "last-session", "session.json"), JSON.stringify(session));
+    writeFileSync(join(home, "projects", ".migration.json"), JSON.stringify({ at: 1, records: first.filter((r) => r.from !== join(home, "host")) }));
+    const records = migrateLegacy(home);
+    expect(records.every((r) => r.verified)).toBe(true);
+    expect(readdirSync(sessions).sort()).toEqual(["host-2026-05-01-0930", "last-session", "last-session-copy"]);
+    expect(records.find((r) => r.from === join(home, "host"))!.to).toBe(join(sessions, "last-session-copy"));
+  });
+
+  test("a lock its holder left behind by dying is free at once; two starters racing for it migrate once", async () => {
     const home = oldHome();
     mkdirSync(join(home, "projects"), { recursive: true });
-    // A long migration in another process: alive, its lock an hour old.
-    const holder = Bun.spawn(["sleep", "30"]);
-    const lock = join(home, "projects", ".migration.lock");
-    const held = `${holder.pid} other-attempt`;
-    writeFileSync(lock, held);
+    // A start that took the lock and was killed mid-migration: the lock file stays, its hold doesn't.
+    const dead = holderProcess(home);
+    await waitForLine(dead);
+    dead.kill("SIGKILL");
+    await dead.exited;
+    expect(existsSync(join(home, "projects", ".migration-lock.db"))).toBe(true);
+    // Two starts at once against that leftover lock: each sees every session migrated, and nothing is copied twice.
+    const outs = await Promise.all([starter(home), starter(home)]);
+    for (const records of outs) {
+      expect(records.length).toBe(3);
+      expect(records.every((r: any) => r.verified)).toBe(true);
+    }
+    expect(listProjects(home).map((p) => [p.name, p.sessions]).sort()).toEqual([["Billing", 1], ["Passport", 2]]);
+    const passport = listProjects(home).find((p) => p.name === "Passport")!;
+    expect(readdirSync(join(home, "projects", passport.slug, "sessions")).sort()).toEqual(["host-2026-05-01-0930", "last-session"]);
+  }, 30_000);
+
+  test("a live migration keeps its lock however long it takes: another start never takes it, and goes ahead once the holder is gone", async () => {
+    const home = oldHome();
+    mkdirSync(join(home, "projects"), { recursive: true });
+    // A long migration in another process, holding the lock.
+    const holder = holderProcess(home);
+    await waitForLine(holder);
+    const lock = join(home, "projects", ".migration-lock.db");
     const hourAgo = new Date(Date.now() - 60 * 60_000);
     utimesSync(lock, hourAgo, hourAgo);
     const src = join(import.meta.dir, "..", "src", "projects.ts");
-    const second = Bun.spawn(["bun", "-e", `const { migrateLegacy } = await import(${JSON.stringify(src)}); console.log(JSON.stringify(migrateLegacy(${JSON.stringify(home)}, 300)));`], { stdout: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
-    await second.exited;
-    expect(JSON.parse((await new Response(second.stdout).text()).trim())).toEqual([]);
-    expect(readFileSync(lock, "utf8")).toBe(held);
+    const second = Bun.spawn(["bun", "-e", `const { migrateLegacy } = await import(${JSON.stringify(src)}); console.log(JSON.stringify(migrateLegacy(${JSON.stringify(home)}, 300)));`], { stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+    expect(await second.exited).not.toBe(0);
     expect(listProjects(home)).toEqual([]);
     // The holder dies without letting go: the next start takes over and migrates.
     holder.kill("SIGKILL");
     await holder.exited;
     expect(migrateLegacy(home, 300).filter((r) => r.verified).length).toBe(3);
-    expect(existsSync(lock)).toBe(false);
+  }, 30_000);
+
+  test("a session its hub is still writing, with rows only in the WAL and checkpoints mid-copy, comes over whole", async () => {
+    const home = tmp();
+    legacy(join(home, "host"), "Passport", ["Chey"], noon);
+    const store = join(import.meta.dir, "..", "src", "store.ts");
+    // The live hub: 50 committed rows left in the WAL, then a write and a full checkpoint every few milliseconds.
+    const code = `const { Store } = await import(${JSON.stringify(store)}); const st = new Store(${JSON.stringify(join(home, "host"))});
+      st.db.exec("PRAGMA wal_autocheckpoint = 0");
+      for (let i = 0; i < 50; i++) st.addEvent({ kind: "speech", authorType: "person", authorName: "Chey", text: "wal " + i });
+      console.log("ready");
+      setInterval(() => { st.addEvent({ kind: "speech", authorType: "person", authorName: "Chey", text: "more" }); st.db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); }, 3);`;
+    const writer = Bun.spawn(["bun", "-e", code], { stdout: "pipe", stderr: "pipe", env: { ...process.env, JAMSESH_SILENT: "1" } });
+    try {
+      const reader = writer.stdout.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("ready");
+      reader.releaseLock();
+      const records = migrateLegacy(home);
+      expect(records.map((r) => r.verified)).toEqual([true]);
+      const copy = new Database(join(records[0].to, "jamsesh.db"), { readonly: true });
+      // Every row committed before the migration began (the WAL-only ones too), and a sound database.
+      expect((copy.query("SELECT COUNT(*) AS n FROM events").get() as any).n).toBeGreaterThanOrEqual(51);
+      expect((copy.query("SELECT COUNT(*) AS n FROM events WHERE text LIKE 'wal %'").get() as any).n).toBe(50);
+      expect((copy.query("PRAGMA integrity_check").get() as any).integrity_check).toBe("ok");
+      copy.close();
+    } finally {
+      writer.kill();
+      await writer.exited;
+    }
   }, 30_000);
 
   test("a copy cut off part way never counts as a session", () => {

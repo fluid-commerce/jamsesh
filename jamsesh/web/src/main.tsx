@@ -57,7 +57,7 @@ createRoot(document.getElementById("root")!).render(
       </ErrorBoundary>
     )}
     {!isConnect && !isSetup && !isProjects && <BuildRequests big={isHost} screen={extraScreen ?? "main"} />}
-    {!isConnect && !isSetup && !isProjects && !isHost && <CastHost />}
+    {!isConnect && !isSetup && !isProjects && <CastHost picker={!isHost} />}
     {!isConnect && !isSetup && !isProjects && !isHost && <FontShare />}
   </StrictMode>,
 );

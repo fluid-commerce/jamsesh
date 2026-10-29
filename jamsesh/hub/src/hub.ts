@@ -589,7 +589,7 @@ export class Hub {
     if (others[0]) return void (others[0].lock ??= rec.lock);
     // Only the lock this recording took: not a later one (the owner cast again, or someone took the free screen after a release).
     const cur = this.session.lockOf(rec.screenId);
-    if (cur && cur.since === rec.lock.since && cur.personId === rec.lock.personId) this.session.unlockStage(rec.screenId);
+    if (cur && cur.since === rec.lock.since && cur.personId === rec.lock.personId) this.session.releaseLock(rec.screenId, { owner: rec.lock.personId });
   }
 
   /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
@@ -862,6 +862,8 @@ export class Hub {
   /** An approved build opened an app: stream it live and put it on the big screen (unless a person's screen is locked). */
   private async showLive(app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) {
     let r: Awaited<ReturnType<LiveApps["startIos"]>> = "";
+    // Decided now, put up after the app's window appears: a cast or unlock in between wins.
+    const claim = this.session.stageClaim();
     // A Mac app's window takes a moment to appear.
     for (let i = 0; i < (app.kind === "mac" ? 8 : 1); i++) {
       r = app.kind === "ios" ? await this.live.startIos(undefined, by) : await this.live.startMac({ name: app.name, bundle: app.bundle }, by);
@@ -869,7 +871,7 @@ export class Hub {
       await Bun.sleep(2000);
     }
     if (typeof r === "string") return void this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `Couldn't stream the app live: ${r}` });
-    this.session.setStage({ mode: "layout", title: r.name, layout: { tiles: [{ kind: "app", appId: r.id, label: r.name }] } }, "JamSesh", "main");
+    this.session.setStage({ mode: "layout", title: r.name, layout: { tiles: [{ kind: "app", appId: r.id, label: r.name }] } }, "JamSesh", "main", { claim });
   }
 
   private onBuildRequest(r: BuildRequest) {

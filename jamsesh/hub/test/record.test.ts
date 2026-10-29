@@ -558,16 +558,16 @@ test("a recording replacing its own keeps the screen locked; one that ends gives
 
   // Maya records the free screen; it is unlocked while she records, and Ben puts something up.
   expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
-  r.s.unlockStage("main");
+  (r.s as any).dropLock("main");
   r.s.setStage({ mode: "spotlight", items: ["b"] }, "Ben", "main", { person: { id: r.ben.id, name: "Ben" } });
   const bens = r.s.lockOf("main");
   expect(bens?.personId).toBe(r.ben.id);
   // Her recording ending (stopped, abandoned or swept) leaves Ben's lock alone.
   await r.hub.recordStop({ caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [] });
   expect(r.s.lockOf("main")).toEqual(bens);
-  r.s.unlockStage("main");
+  (r.s as any).dropLock("main");
   expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
-  r.s.unlockStage("main");
+  (r.s as any).dropLock("main");
   r.s.setStage({ mode: "spotlight", items: ["c"] }, "Ben", "main", { person: { id: r.ben.id, name: "Ben" } });
   r.s.deviceOnline = () => false;
   r.hub.sweepRecordings();

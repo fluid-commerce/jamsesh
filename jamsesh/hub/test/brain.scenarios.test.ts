@@ -209,7 +209,7 @@ describe("5. decisions", () => {
 
   t("'that one' means what's on screen", async () => {
     await runScenario("decision: 'that one' on screen", [5, 6], async (r) => {
-      r.hub.session.setStage({ mode: "spotlight", title: r.art.navB.title, items: [r.art.navB.id], pinned: false }, "Room brain");
+      r.hub.session.setStage({ mode: "spotlight", title: r.art.navB.title, items: [r.art.navB.id], pinned: false }, "Room brain", "main", { claim: r.hub.session.stageClaim() });
       r.say("jonathan", "yeah that one, I like it, let's build that in the desktop app");
       await r.settle();
       const ds = r.newDirectives();

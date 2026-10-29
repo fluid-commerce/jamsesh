@@ -481,8 +481,34 @@ fn open_screen(app: &AppHandle, origin: &str, s: &Screen) -> Result<(), String> 
     Ok(())
 }
 
+/// `arrange` for the session `ticket` was taken in, from outside a transition (a display plugged in, the menu, the
+/// setup window): in a quiet turn, so no Leave or project switch runs while windows move and the hub is told, and
+/// with the hub origin read inside it. A session that changed since the ticket gets nothing.
+pub async fn arrange_for(app: &AppHandle, ticket: crate::Ticket) -> Result<Vec<Screen>, String> {
+    let state = app.state::<Arc<App>>().inner().clone();
+    let Some(_turn) = state.switching.lock_quiet(ticket).await else { return Ok(Vec::new()) };
+    arrange_current(app).await
+}
+
+/// Arranges the screens of the hub hosting now, if any. The caller holds a turn.
+pub async fn arrange_current(app: &AppHandle) -> Result<Vec<Screen>, String> {
+    let state = app.state::<Arc<App>>().inner().clone();
+    let origin = {
+        let inner = state.inner.lock().await;
+        if inner.cfg.role.as_deref() != Some("host") {
+            return Ok(Vec::new());
+        }
+        inner.hub.as_ref().map(|h| h.origin())
+    };
+    match origin {
+        Some(origin) => arrange(app, &origin).await,
+        None => Ok(Vec::new()),
+    }
+}
+
 /// One window per screen, each on its own display; tells the hub the screens' names. Safe to run
-/// any time: windows already in place stay as they are.
+/// any time: windows already in place stay as they are. The caller holds a turn (`arrange_for`, or a transition
+/// starting this hub), so `origin` is the hub running now.
 pub async fn arrange(app: &AppHandle, origin: &str) -> Result<Vec<Screen>, String> {
     let state = app.state::<Arc<App>>().inner().clone();
     let ds = read_displays(app);
@@ -553,19 +579,11 @@ pub fn schedule(app: &AppHandle) {
         if state.screens.generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
             return;
         }
-        let origin = {
-            let inner = state.inner.lock().await;
-            if inner.cfg.role.as_deref() != Some("host") {
-                return;
-            }
-            inner.hub.as_ref().map(|h| h.origin())
-        };
-        if let Some(origin) = origin {
-            let _ = arrange(&app, &origin).await;
-            // The setup page, if open, shows the new displays.
-            if let Some(w) = app.get_webview_window("screens") {
-                let _ = w.eval("window.refresh && window.refresh()");
-            }
+        // The displays changed for whatever session runs now.
+        let _ = arrange_for(&app, state.switching.ticket()).await;
+        // The setup page, if open, shows the new displays.
+        if let Some(w) = app.get_webview_window("screens") {
+            let _ = w.eval("window.refresh && window.refresh()");
         }
     });
 }
@@ -603,6 +621,8 @@ pub fn moved(app: &AppHandle) {
 
 /// A big-screen window closed (the main one or an extra one): tell the hub, so the brain stops sending
 /// it things and a share only it showed stops. (Not when a window with the same label is open again by then.)
+/// A window closed by a Leave or a project switch belongs to the session that ended: its ticket is stale by the time
+/// this runs, so the next session's hub is never told to retire a screen of its own.
 pub fn closed(app: &AppHandle, label: &str) {
     let screen = match label.strip_prefix("bigscreen-") {
         Some(n) => format!("screen-{n}"),
@@ -610,12 +630,15 @@ pub fn closed(app: &AppHandle, label: &str) {
         None => return,
     };
     let (app, label) = (app.clone(), label.to_string());
+    let ticket = app.state::<Arc<App>>().switching.ticket();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         if app.get_webview_window(&label).is_some() {
             return;
         }
-        let origin = app.state::<Arc<App>>().inner.lock().await.hub.as_ref().map(|h| h.origin());
+        let state = app.state::<Arc<App>>().inner().clone();
+        let Some(_turn) = state.switching.lock_quiet(ticket).await else { return };
+        let origin = state.inner.lock().await.hub.as_ref().map(|h| h.origin());
         if let Some(origin) = origin {
             let body = serde_json::json!({ "screen": screen }).to_string();
             // As this app's window: only the host's own windows retire a screen.
@@ -659,20 +682,18 @@ pub async fn screens_preview(app: AppHandle, state: State<'_, Arc<App>>, picks: 
 /// Saves the picks for the displays there are now, and puts the windows where they say.
 #[tauri::command]
 pub async fn screens_save(app: AppHandle, state: State<'_, Arc<App>>, picks: Vec<Pick>) -> Result<SetupView, String> {
+    let ticket = state.switching.ticket();
+    // The setup is saved and the windows moved in one quiet turn, for the session it was asked in, or not at all.
+    let Some(_turn) = state.switching.lock_quiet(ticket).await else { return Err("The session changed while this was waiting. Try again.".into()) };
     let ds = read_displays(&app);
-    let (userless, origin) = {
-        let inner = state.inner.lock().await;
-        (inner.cfg.userless, inner.hub.as_ref().map(|h| h.origin()))
-    };
+    let userless = state.inner.lock().await.cfg.userless;
     let mut setup = Setup::load(&state.dir);
     let key = set_key(&ds);
     // Numbers come from what these displays had (in this set or the one they were part of).
     let saved = merge(&ds, &picks, setup.choices(&ds).0.as_ref(), userless);
     setup.sets.insert(key.clone(), saved);
     setup.save(&state.dir)?;
-    if let Some(origin) = origin {
-        arrange(&app, &origin).await?;
-    }
+    arrange_current(&app).await?;
     Ok(view(&ds, setup.sets.get(&key), true, userless))
 }
 

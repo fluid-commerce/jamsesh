@@ -191,7 +191,7 @@ test("a closed big-screen window stops being a screen at once, main too until it
   expect((await del("screen-2")).status).toBe(200);
   expect(ids()).not.toContain("screen-2");
   // Main counts only while its window reports (1.R5); its stage is kept for when it does again.
-  hub.session.setStage({ mode: "agents" }, "Room brain");
+  hub.session.setStage({ mode: "agents" }, "Room brain", "main", { claim: hub.session.stageClaim() });
   expect((await del("main", {})).status).toBe(403);
   expect(ids()).toContain("main");
   await del("main");

@@ -75,7 +75,7 @@ describe("4.2 banter is judged by topic", () => {
     s.store.setDigest("brief-parts", JSON.stringify({ goal: "Redesign the merchant app", decisions: [], questions: [], glossary: [{ term: "Passport", meaning: "customer login" }] }), 0);
     fact(s, "Checkout is one page.");
     const art = s.upsertArtifact({ kind: "frame", stage: "mockup", title: "Checkout / A: one page", agentId: r.britain.id });
-    s.setStage({ mode: "spotlight", title: "Checkout", items: [art.id], pinned: false }, "Britain");
+    s.setStage({ mode: "spotlight", title: "Checkout", items: [art.id], pinned: false }, "Britain", "main", { claim: s.stageClaim() });
     const card = projectCard(s);
     expect(card).toContain("Redesign the merchant app");
     expect(card).toContain("Checkout");
@@ -90,7 +90,7 @@ describe("4.2 banter is judged by topic", () => {
     const setup = () => {
       const r = room();
       const art = r.s.upsertArtifact({ kind: "frame", stage: "mockup", title: "Nav / B: sidebar", agentId: r.britain.id });
-      r.s.setStage({ mode: "spotlight", title: "Nav", items: [art.id], pinned: false }, "Britain");
+      r.s.setStage({ mode: "spotlight", title: "Nav", items: [art.id], pinned: false }, "Britain", "main", { claim: r.s.stageClaim() });
       return { ...r, art };
     };
     const tri = (id: number, over: object): Triage => ({ lines: [{ id, topic: "project", relevance: "discussion", intent: "none", confidence: 0.9, ...over } as any], actionable: false, introductions: [] });

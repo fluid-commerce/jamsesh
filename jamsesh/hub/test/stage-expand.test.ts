@@ -10,7 +10,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 test("expanding a tile marks it on the stage in place; collapsing and a new stage clear it", async () => {
   const s = new Session(new Store(dir));
-  const first = s.setStage({ mode: "compare", items: ["a", "b"], title: "Login" }, "Chey");
+  const first = s.setStage({ mode: "compare", items: ["a", "b"], title: "Login" }, "Chey", "main", { claim: s.stageClaim() });
   await Bun.sleep(5);
   const open = s.expandTile("b");
   expect(open.expanded).toBe("b");
@@ -25,18 +25,18 @@ test("expanding a tile marks it on the stage in place; collapsing and a new stag
   expect(s.expandTile(null).expanded).toBeUndefined();
   expect(s.stage().expanded).toBeUndefined();
   s.expandTile("a");
-  s.setStage({ mode: "spotlight", items: ["a"] }, "Chey");
+  s.setStage({ mode: "spotlight", items: ["a"] }, "Chey", "main", { claim: s.stageClaim() });
   expect(s.stage().expanded).toBeUndefined();
 });
 
 test("the join screen has nothing to expand; an extra screen keeps its own expanded tile", () => {
   const s = new Session(new Store(mkdtempSync(join(tmpdir(), "jam-expand2-"))));
-  s.setStage({ mode: "join" }, "Chey");
+  s.setStage({ mode: "join" }, "Chey", "main", { claim: s.stageClaim() });
   expect(s.expandTile("a").expanded).toBeUndefined();
   const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
   s.reportScreen("main", info);
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
-  s.setStage({ mode: "compare", items: ["a", "b"] }, "Chey", "screen-2");
+  s.setStage({ mode: "compare", items: ["a", "b"] }, "Chey", "screen-2", { claim: s.stageClaim() });
   expect(s.expandTile("b", "screen-2").expanded).toBe("b");
   expect(s.stage("screen-2").expanded).toBe("b");
   expect(s.stage().expanded).toBeUndefined();
@@ -59,7 +59,7 @@ test("a locked screen can still be expanded: the lock, its owner and its history
   expect(s.lockOf("screen-2")?.personId).toBe(chey.id);
   expect(s.stageHistory("screen-2").length).toBe(history);
   // Another person can look closer at a locked screen, but still can't replace it.
-  s.setStage({ mode: "board" }, "Agent", "screen-2");
+  s.setStage({ mode: "board" }, "Agent", "screen-2", { claim: s.stageClaim() });
   expect(s.stage("screen-2").mode).toBe("compare");
   expect(s.stage("screen-2").expanded).toBe("b");
   // The main screen is its own stage.

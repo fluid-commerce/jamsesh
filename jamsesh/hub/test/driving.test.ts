@@ -88,7 +88,7 @@ test("the drivers go with the lock: a new cast, an unlock or a lapse ends them",
   expect(s.driversOf()).toEqual([]);
   expect(s.drive("start", "main", chey.id)).toMatchObject({ ok: false, status: 403 });
   s.drive("start", "main", felipe.id);
-  s.unlockStage();
+  (s as any).dropLock("main");
   expect(s.driversOf()).toEqual([]);
   cast(chey);
   s.drive("start", "main", chey.id);

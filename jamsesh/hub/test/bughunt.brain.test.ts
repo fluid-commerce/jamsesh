@@ -53,7 +53,7 @@ test("R2: clear requests route, questions, negations and chit-chat do not", () =
 test("R2: 'let's go with B' still builds variant B", () => {
   const r = makeRoom();
   const s = r.hub.session;
-  s.setStage({ mode: "compare", title: "Nav", items: s.artifacts().filter((a) => a.group === "Nav").map((a) => a.id) }, "t");
+  s.setStage({ mode: "compare", title: "Nav", items: s.artifacts().filter((a) => a.group === "Nav").map((a) => a.id) }, "t", "main", { claim: s.stageClaim() });
   const ev = line(s, "ok let's go with B");
   r.hub.brain.ruleRoute([ev], ruleTriage([ev]), true);
   expect(s.directives().some((d) => d.mode === "implement" && /Nav \/ B/.test(d.text))).toBe(true);
@@ -115,7 +115,7 @@ test("R8: a restart ends live shares and re-arms the stage", () => {
   const s1 = new Session(new Store(dir));
   s1.touchDevice("d1", { label: "Mac", personId: s1.upsertPerson({ name: "Chey" }).id });
   const sh = s1.startShare("d1", "screen");
-  s1.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id, label: "x" }] } } as any, "t");
+  s1.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id, label: "x" }] } } as any, "t", "main", { claim: s1.stageClaim() });
   const s2 = new Session(new Store(dir));
   expect(s2.shares()).toHaveLength(0);
   expect(s2.stage().mode).toBe("board");
