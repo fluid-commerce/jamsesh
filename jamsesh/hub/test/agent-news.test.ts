@@ -298,34 +298,70 @@ test("two different features shipped in one window stay separate: two looks' wor
   expect(inbox.split("\n").filter((l) => l.includes("[coordinate]")).every((l) => !(l.includes("sidebar") && l.includes("dark mode")))).toBe(true);
 });
 
-test("a coordinate directive stays open on jam_update and closes only after a recorded exchange", async () => {
+test("a coordinate directive stays open on jam_update and closes only after a reply from the named counterpart on that directive", async () => {
   const { hub, s, desktop, mobile } = room();
   const ctx = (a: any) => ({ agentId: a.id, ip: "127.0.0.1", device: "host" });
-  const d = s.createDirective({ text: "Parity check, not a build task: compare the sidebar with desktop.", mode: "coordinate", targets: [mobile.id], requestedBy: "JamSesh", rationale: "Parity" });
-  const state = () => s.store.get("directives", d.id)!.progress[mobile.id] ?? s.store.get("directives", d.id)!.status;
+  const call = (a: any, tool: string, args: object) => hub.mcp.call(ctx(a), tool, args);
+  const other = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
+  const d = s.createDirective({ text: "Parity check, not a build task: compare the sidebar with desktop.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "Parity" });
+  const state = () => s.store.get("directives", d.id)!.progress[mobile.id];
   const refused = (p: Promise<unknown>) => p.then(() => "accepted", (e: Error) => e.message);
+  const done = () => refused(call(mobile, "jam_ack", { directiveId: d.id, status: "done", result: "same" }));
   // Reporting done or shipped against it posts the update but never closes it.
   for (const kind of ["done", "shipped"]) {
-    const r: any = await hub.mcp.call(ctx(mobile), "jam_update", { kind, text: "Our sidebar matches", directiveId: d.id, seen: "A sidebar" });
+    const r: any = await call(mobile, "jam_update", { kind, text: "Our sidebar matches", directiveId: d.id, seen: "A sidebar" });
     expect(JSON.stringify(r)).toContain("stays open");
     expect(state()).not.toBe("done");
   }
-  // jam_ack done with no exchange is refused, and so is one where only this agent has spoken.
-  expect(await refused(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" }))).toContain("send them what you found");
-  expect(state()).not.toBe("done");
-  s.sendMessage(mobile.id, desktop.id, "Mobile has the sidebar, collapsed to a bar");
-  expect(await refused(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" }))).toContain("wait for their reply");
-  expect(state()).not.toBe("done");
-  // A message from the brain or to someone else doesn't count as the counterpart's reply.
-  s.store.addEvent({ kind: "message", authorType: "brain", authorId: null, authorName: "JamSesh", text: "ok?", relevance: "work", data: { to: mobile.id } });
-  const other = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
-  s.sendMessage(desktop.id, other.id, "unrelated chat with a third agent");
-  expect(await refused(hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" }))).toContain("wait for their reply");
-  expect(state()).not.toBe("done");
-  // The counterpart replies: now it can close, through the explicit ack.
-  s.sendMessage(desktop.id, mobile.id, "Agreed, same on ours");
-  await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" });
+  expect(await done()).toContain("send them what you found");
+  // Only the target can ack it, or report on it.
+  expect(await refused(call(desktop, "jam_ack", { directiveId: d.id, status: "done" }))).toContain("isn't addressed to you");
+  expect(await refused(call(desktop, "jam_update", { kind: "done", text: "x", directiveId: d.id }))).toContain("isn't addressed to you");
+  // A message with no directive id, or to someone who isn't the counterpart, is not the exchange.
+  s.sendMessage(mobile.id, desktop.id, "no id on this one");
+  s.sendMessage(mobile.id, other.id, "about the directive", { directiveId: d.id });
+  expect(await done()).toContain("send them what you found");
+  await call(mobile, "jam_message", { to: desktop.name, text: "Mobile has the sidebar, collapsed to a bar", directiveId: d.id });
+  expect(await done()).toContain("wait for their reply");
+  // Chatter from others, the brain, or without the id isn't their reply.
+  s.sendMessage(other.id, mobile.id, "I think it matches", { directiveId: d.id });
+  s.store.addEvent({ kind: "message", authorType: "brain", authorId: null, authorName: "JamSesh", text: "ok?", relevance: "work", data: { to: mobile.id, directiveId: d.id } });
+  s.store.addEvent({ kind: "message", authorType: "agent", authorId: desktop.id, authorName: desktop.name, text: "untagged", relevance: "work", data: { to: mobile.id } });
+  expect(await done()).toContain("wait for their reply");
+  expect(hub.mcp.inboxText(desktop, false)).toContain(`reply with directiveId ${d.id}`);
+  // Flood of unrelated traffic after: no window can push the exchange out.
+  for (let i = 0; i < 450; i++) s.sendMessage(other.id, "all", `noise ${i}`);
+  // The counterpart replies on the directive (its inbox told it to).
+  await call(desktop, "jam_message", { to: mobile.name, text: "Agreed, same on ours", directiveId: d.id });
+  await call(mobile, "jam_ack", { directiveId: d.id, status: "done", result: "same" });
   expect(state()).toBe("done");
+  // Terminal and idempotent: a late ack or update doesn't reopen it, change its result or add an event.
+  const result = s.store.get("directives", d.id)!.result;
+  await call(mobile, "jam_ack", { directiveId: d.id, status: "acked" });
+  await call(mobile, "jam_ack", { directiveId: d.id, status: "done", result: "again" });
+  expect(state()).toBe("done");
+  expect(s.store.get("directives", d.id)!.status).toBe("done");
+  expect(s.store.get("directives", d.id)!.result).toBe(result);
+});
+
+test("an inline jam_ask answered on the directive counts as the exchange, and a reply that omits the id inherits it", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const ctx = (a: any) => ({ agentId: a.id, ip: "127.0.0.1", device: "host" });
+  const d = s.createDirective({ text: "Parity check: compare.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
+  const asking = hub.mcp.call(ctx(mobile), "jam_ask", { to: desktop.name, question: "Do you have the sidebar?", directiveId: d.id, waitSeconds: 5 });
+  await wait(30);
+  const q = s.store.recentEvents({ kinds: ["message"], limit: 5 }).find((e) => e.data.askId)!;
+  s.answer(desktop.id, q.data.askId, "Yes, same");
+  expect(JSON.stringify(await asking)).toContain("Yes, same");
+  await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d.id, status: "done", result: "same" });
+  expect(s.store.get("directives", d.id)!.progress[mobile.id]).toBe("done");
+  // A plain reply to a message that was about the directive is about it too.
+  const d2 = s.createDirective({ text: "Parity check: compare tabs.", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
+  s.sendMessage(desktop.id, mobile.id, "Tabs on yours?", { directiveId: d2.id });
+  s.sendMessage(mobile.id, desktop.id, "Yes");
+  s.sendMessage(desktop.id, mobile.id, "Good, matches");
+  await hub.mcp.call(ctx(mobile), "jam_ack", { directiveId: d2.id, status: "done", result: "same" });
+  expect(s.store.get("directives", d2.id)!.progress[mobile.id]).toBe("done");
 });
 
 test("a coordinate directive can always be dropped, and other modes close on jam_update as before", async () => {

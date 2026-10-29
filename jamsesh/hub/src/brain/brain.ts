@@ -707,6 +707,7 @@ export class Brain {
               text: `Work with ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ")}: ${goal} Ask them what you need with jam_ask, answer their questions with jam_answer, look at their frames with canvas_render, and post what you agreed and what still differs with jam_update.`,
               mode: "coordinate",
               targets: [a.id],
+              counterparts: others.map((o) => o.id),
               requestedBy: requester,
               sourceEventIds: sourceIds,
               rationale: "Paired so their work matches.",
@@ -946,6 +947,7 @@ export class Brain {
                 : `Parity check, not a build task: ${by} shipped this on ${[...made].join(" and ")}: ${seen}. Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
               mode: "coordinate",
               targets: [a.id],
+              counterparts: team.filter((o) => o.id !== a.id).map((o) => o.id),
               requestedBy: "JamSesh",
               rationale: `Parity: ${seen} shipped on ${[...made].join(" and ")}.`,
             });

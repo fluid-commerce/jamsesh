@@ -575,6 +575,7 @@ export class Session {
     mode: DirectiveMode;
     rationale?: string;
     targets: string[];
+    counterparts?: string[];
     priority?: number;
     requestedBy: string;
     sourceEventIds?: number[];
@@ -587,6 +588,7 @@ export class Session {
       mode: d.mode,
       rationale: d.rationale ?? "",
       targets: d.targets,
+      ...(d.counterparts?.length ? { counterparts: d.counterparts } : {}),
       status: "pending",
       progress: Object.fromEntries(d.targets.map((t) => [t, "pending" as const])),
       priority: d.priority ?? 1,
@@ -640,28 +642,36 @@ export class Session {
 
   /**
    * Why an agent can't finish a coordinate directive yet, or null. A comparison with another agent is
-   * the whole job, so "done" needs a recorded exchange since the directive was made: a message this
-   * agent sent to someone else, and one it got back. (Dropping it, "cancelled", is always allowed.)
+   * the whole job, so "done" needs a recorded exchange on that directive (messages and asks carry its
+   * id; an answer carries the id of the ask it answers), with no time window: a message this agent
+   * sent to one of the named counterparts, and a message or answer from one of them back to it.
+   * (Dropping it, "cancelled", is always allowed.)
    */
   exchangeGap(d: Directive, agentId: string): string | null {
     if (d.mode !== "coordinate") return null;
-    const msgs = this.store.recentEvents({ kinds: ["message"], limit: 400 }).filter((e) => e.ts >= d.ts && !e.data.inline);
-    const sent = msgs.some((e) => e.authorId === agentId && e.data.to && e.data.to !== agentId && e.data.to !== "brain");
-    const got = msgs.some((e) => e.authorId !== agentId && e.authorType !== "brain" && e.authorType !== "system" && (e.data.to === agentId || (e.data.to === "all" && e.authorType === "agent")));
+    const msgs = this.store.messagesAbout(d.id);
+    const other = (id: string | null) => !!id && id !== agentId && (d.counterparts?.length ? d.counterparts.includes(id) : !!this.agent(id));
+    const sent = msgs.some((e) => e.authorId === agentId && other(String(e.data.to)));
+    const got = msgs.some((e) => other(e.authorId) && e.data.to === agentId);
     if (sent && got) return null;
-    return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message"} (jam_ask works too) before you mark it done. If nobody can answer, jam_ack it cancelled and say why.`;
+    return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message or jam_ask, with directiveId " + d.id}. Their reply has to carry directiveId ${d.id} too. If nobody can answer, jam_ack it cancelled and say why.`;
   }
 
-  /** One agent's progress on a directive; the directive's status follows the slowest target. */
+  /** One agent's progress on a directive; the directive's status follows the slowest target. A target's done or cancelled is final. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
+    if (!d.targets.includes(agentId)) throw new Error("That directive isn't addressed to you.");
+    const mine = d.progress?.[agentId];
+    if (mine === "done" || mine === "cancelled") return d; // terminal: a late ack or update doesn't reopen it or add to its result
+    const rank = ["pending", "delivered", "acked"];
+    if (mine && rank.includes(mine) && rank.includes(status) && rank.indexOf(status) < rank.indexOf(mine)) return d; // never backwards
     if (status === "done") {
       const gap = this.exchangeGap(d, agentId);
       if (gap) throw new Error(gap);
     }
     // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
-    if (d.status === "cancelled" || d.progress?.[agentId] === "cancelled") return d;
+    if (d.status === "cancelled") return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
@@ -777,6 +787,11 @@ export class Session {
       return ev;
     }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
+    // A reply to a message that was about a directive is about it too, so an agent that doesn't pass the id still answers on the record.
+    if (target && !data.directiveId) {
+      const asked = this.store.lastLinkedMessage(target.id, from.id);
+      if (asked) data = { ...data, directiveId: asked.data.directiveId };
+    }
     const ev = this.store.addEvent({
       kind: "message",
       authorType: "agent",
@@ -796,7 +811,7 @@ export class Session {
   private asks = new Map<string, { resolve: (answer: string) => void; timer: ReturnType<typeof setTimeout> }>();
 
   /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
-  ask(fromId: string | null, to: string, question: string, waitMs: number): { askId: string; answer: Promise<string | null> } {
+  ask(fromId: string | null, to: string, question: string, waitMs: number, data: Record<string, any> = {}): { askId: string; answer: Promise<string | null> } {
     const target = this.agent(to) ?? this.store.all("agents").find((a) => a.name.toLowerCase() === to.toLowerCase());
     if (!target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
     const from = this.agent(fromId);
@@ -808,7 +823,7 @@ export class Session {
       authorName: from?.name ?? this.settings().brainName,
       text: question,
       relevance: "work",
-      data: { to: target.id, toName: target.name, askId },
+      data: { to: target.id, toName: target.name, askId, ...data },
     });
     this.wake(target.id);
     const answer = new Promise<string | null>((resolve) => {
@@ -831,7 +846,7 @@ export class Session {
       text,
       relevance: "work",
       // A waiting jam_ask returns the answer itself: the inbox doesn't repeat it.
-      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...(waiting ? { inline: true } : {}) },
+      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...(q.data.directiveId ? { directiveId: q.data.directiveId } : {}), ...(waiting ? { inline: true } : {}) },
     });
     if (waiting) waiting.resolve(text);
     else if (q.authorId) this.wake(q.authorId); // the asker stopped waiting; it gets the answer in its inbox
