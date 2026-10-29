@@ -1288,6 +1288,83 @@ and the join view are not kept; neither are shares). Showing the same thing agai
 top. People's apps show the earlier ones as a strip of chips that bring one back (`POST
 /api/stage/restore`), and the brain's `restore_screen` does the same by name.
 
+### 10.6 Driving the big screen (6.1)
+
+Whoever holds a screen's lock ([10.5](#105-locks-queue-history-and-versions)) can **drive** it from their own app:
+a cursor of their own on the big screen that scrolls, clicks and types in what is showing, while the
+host's real cursor never moves. Nothing is injected into the host's operating system; every event is
+replayed inside the page.
+
+**Who may drive.** The lock's owner, and anyone the owner handed control to. `StageLock.drivers` lists
+the people driving right now (person ids). A new cast, an unlock, or a lock that lapses replaces the
+lock, so the list goes with it and a stale driver's events are dropped at once. Agents never drive:
+an agent's credential is refused, and an agent has no person to hold a lock.
+
+- **Start** (`POST /api/drive/start {screen}`): the owner joins `drivers`. Anyone else gets 403.
+- **Pass control** (`POST /api/drive/pass {screen, to}`): `drivers` becomes just `to`. Only the owner
+  passes, and `to` must be a person with a window open right now (409 otherwise). The owner can start
+  again any time to take it back.
+- **Drive together** (`POST /api/drive/together {screen, to}`): `to` joins `drivers`; the owner keeps
+  driving. Both have cursors at once.
+- **Stop** (`POST /api/drive/stop {screen}`): the caller leaves `drivers`. The owner can also stop
+  someone else with `{who}`. The lock stays.
+
+**Wire format.** Events travel on the session WebSocket, not HTTP, so they cost no round trip:
+the driver's window sends `{type:"drive", screen, ev}` and the hub, if that window's person is in
+`drivers`, checks it and sends `{type:"drive", screen, personId, name, color, ev, t}` to every window.
+Windows that are not drivers are dropped silently and get `{type:"drive-denied", screen, why}` once
+a second at most. Events are capped at 120 per second per person.
+
+`ev` is one of (all positions are fractions 0..1 of the screen's stage area, so any window size works):
+
+| `k` | Fields |
+|---|---|
+| `move` | `x`, `y` |
+| `down`, `up` | `x`, `y`, `b` (button, 0 left), `n` (click count) |
+| `wheel` | `x`, `y`, `dx`, `dy` (pixels), `ctrl` (pinch) |
+| `key` | `key`, `code`, `down` (true or false), `mods` (`{shift, ctrl, alt, meta}`) |
+| `leave` | none: the cursor fades |
+
+**The cursor.** Drawn once per person in a layer above every tile (`web/src/host/DriveLayer.tsx`),
+from FigCraft's own collaborator pointer (`crates/ui-egui/src/live.rs`): a notched dart whose points
+are (0,0), (3.5,15.5), (7.5,8.5), (15.5,4) in the person's colour with a 1.5 px white edge, and a name
+tag at (+12,+16): 11 px semibold, 6 x 3 padding, 4 px corners, black or white text by luminance
+(`0.299 R + 0.587 G + 0.114 B > 170` is black). It glides: each frame the shown position moves
+`1 - exp(-dt * 20)` of the way to the reported one (dt capped at 0.1 s) and snaps within half a
+pixel. With Reduce Motion it jumps.
+
+**Replaying input** (host window only; windows that only mirror the stage draw cursors but replay
+nothing). The layer finds the tile under the cursor and hands it the event in the tile's local
+coordinates:
+
+- Live builds: the dev proxy adds a small script to the HTML it forwards. It accepts input messages
+  from the host's page (same host name only) and dispatches mouse events at the point, scrolls the
+  nearest scrollable parent for wheel, and types into the focused field.
+- The canvas: wheel pans, ctrl-wheel zooms, a click selects the frame or layer under the cursor
+  through FigCraft's own commands (`view.set`, `select.set`).
+- Anything else: a tile registers itself with `registerDriveTarget(el, handler)` and gets
+  `{k, lx, ly, ...}` with `lx`, `ly` as fractions of that tile (the device tiles of 6.3 use this).
+- Screen shares are not drivable.
+
+**The driver's side.** After putting something up, the owner's app shows **Drive**. It turns the
+stage mirror into a trackpad: with Pointer Lock the trackpad's relative motion moves the dart
+(the dart stays where it was left when the finger lifts, and the macOS pointer acceleration applies);
+where Pointer Lock is unavailable (WKWebView, phones) the pointer's position over the mirror maps
+straight to the stage. Esc releases the capture; **Stop driving** ends it. Keys go to the big screen
+only while the trackpad is captured, so typing elsewhere in the app is never sent by mistake.
+
+**Client API** (`web/src/shared/driving.ts`, used by 6.2's recorder and 6.3's tiles):
+
+```ts
+driverState(screen?): { screen, owner: Person | null, drivers: Person[], me: { canDrive, driving } }
+useDriverState(screen?)                       // the same, reactive
+startDriving(screen?): Promise<DriveHandle>   // POST /drive/start, then { send(ev), stop() }
+stopDriving(screen?) / passControl(to, screen?) / driveTogether(to, screen?)
+onCursor(fn: (c: DriveCursor) => void): Unsub // raw events from everyone: { screen, personId, name, color, ev, t }
+onGlide(fn: (g: Glide[]) => void): Unsub      // each frame on the big screen: the smoothed { personId, name, color, x, y, down } of every shown cursor, in stage fractions
+registerDriveTarget(el, handler): Unsub       // see "Replaying input"
+```
+
 ## 11. Client
 
 ### 11.1 Desktop layout
