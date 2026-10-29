@@ -93,7 +93,7 @@ export class Session {
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
-    for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
+    for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id, "ended", { lost: true });
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     const st = this.stage();
     if (this.revertsToBoard(st)) {
@@ -1036,9 +1036,10 @@ export class Session {
     }
     // The latest: page back until enough are relevant, so other workstreams' decisions can't crowd one out.
     const out: JamEvent[] = [];
+    // The newest that matter: page back until enough are relevant, so other workstreams' can't crowd one out.
     let beforeId: number | undefined;
     while (out.length < opts.limit) {
-      const page = this.store.recentEvents({ kinds: ["decision"], afterId: opts.afterId, beforeId, limit: 100 });
+      const page = this.store.recentEvents({ kinds: ["decision"], beforeId, limit: 100 });
       out.unshift(...page.filter(relevant));
       if (page.length < 100) break;
       beforeId = page[0].id;
@@ -1207,7 +1208,7 @@ export class Session {
     // An id is this device's own share, or a request made to its person; any other id starts a new share.
     const found = shareId ? this.store.get("shares", shareId) : undefined;
     // It also has to be the same kind of capture: a camera never takes over a screen share's record.
-    const ownShare = found?.deviceId === deviceId && (found.status === "live" || found.status === "ended");
+    const ownShare = found?.deviceId === deviceId && (found.status === "live" || (found.status === "ended" && !!found.lost));
     const askedOf = found?.status === "requested" && !!person && found.personId === person.id;
     const existing = found && found.kind === kind && (ownShare || askedOf) ? found : undefined;
     const id = existing?.id ?? newId("sh");
@@ -1217,7 +1218,6 @@ export class Session {
       if (old.id === id || old.kind !== kind) continue;
       if (old.status === "live" && (old.deviceId === deviceId || (person && old.personId === person.id))) {
         this.endShare(old.id);
-        bus.send({ type: "share-ended", shareId: old.id, deviceId: old.deviceId, text: "" });
       } else if (old.status === "requested" && person && old.personId === person.id) this.endShare(old.id);
     }
     const share: Share = {
@@ -1270,10 +1270,15 @@ export class Session {
     mine.set(screen, st);
   }
 
-  endShare(id: string, status: Share["status"] = "ended") {
+  /**
+   * Ends a share. A live one's window is always told, so its capture stops for good; `lost` marks an
+   * end the sharer didn't choose (their connection dropped), which their window may register again.
+   */
+  endShare(id: string, status: Share["status"] = "ended", opts: { note?: string; lost?: boolean } = {}) {
     const sh = this.store.get("shares", id);
     if (!sh) return;
-    this.store.put("shares", { ...sh, status });
+    this.store.put("shares", { ...sh, status, lost: opts.lost || undefined });
+    if (sh.status === "live" && !opts.lost) bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text: opts.note ?? "" });
     this.sharesShown.delete(id);
     this.offScreen.delete(id);
     const before = this.beforeShare.get(id);
@@ -1359,8 +1364,7 @@ export class Session {
         continue;
       }
       const text = placed ? `Your ${sh.kind} left the big screen, so sharing stopped.` : `Your ${sh.kind} wasn't put on the big screen, so sharing stopped.`;
-      this.endShare(sh.id);
-      bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text });
+      this.endShare(sh.id, "ended", { note: text });
     }
     this.wakeSweep(next);
   }

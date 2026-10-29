@@ -3,7 +3,7 @@ import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
 import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
-import { CONNECT_TIMEOUT_MS, JoinWatch, START_TIMEOUT_MS, friendlyReason, joinLabel, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, JoinWatch, START_TIMEOUT_MS, friendlyReason, joinLabel, FontTries, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -1132,7 +1132,7 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
   const live = join.state === "live";
   useEffect(() => {
     if (!live) return;
-    const tried = new Set<string>();
+    const tried = new FontTries();
     let gone = false;
     let busy = false;
     const tick = async () => {

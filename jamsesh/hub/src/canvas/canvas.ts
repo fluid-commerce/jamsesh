@@ -513,7 +513,14 @@ export class Canvas {
       await this.host!.command("collab.leave", {}).catch(() => {});
       await this.host!.command("collab.join", { link: this.localLink(link) });
       if (!(await waitLive(this.host!, 20_000))) throw new Error("The host lost the canvas session; restart JamSesh.");
+      this.backLive();
     });
+  }
+
+  /** The host is in the session again: a canvas marked failed is live again, under a new generation so people's canvases rejoin. */
+  private backLive() {
+    const { status, editLink, viewLink } = this.session.canvas;
+    if (status !== "live" && editLink && viewLink) this.announce(editLink, viewLink);
   }
 
   /**
@@ -562,6 +569,7 @@ export class Canvas {
     const ready = [...this.agents.values()].filter((a) => a.mcp.alive);
     const peers = await this.host.command("collab.peers").catch(() => null);
     if (!peers) return;
+    if (peers.status === "live" && this.session.canvas.status === "failed" && (await healthy(this.serverUrl))) this.backLive();
     if (peers.status !== "live" || (ready.length && (peers.peers?.length ?? 0) < ready.length)) await this.resync(`status ${peers.status}, ${peers.peers?.length ?? 0} peers for ${ready.length} agents`);
   }
 

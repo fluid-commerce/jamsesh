@@ -34,3 +34,54 @@ test("ending the track after registration renamed the share stops the renamed sh
     Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
   }
 });
+
+test("a share the host ended stays ended: its capture stops, and a missed end is refused on re-registering", async () => {
+  const media = (globalThis.navigator as any).mediaDevices;
+  const realFetch = globalThis.fetch;
+  const realNow = Date.now;
+  const posts: string[] = [];
+  let answer = (_body: any) => new Response(JSON.stringify({ error: "That share was ended." }), { status: 409 });
+  globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
+    if (init.method === "POST" && url === "/api/shares") return (posts.push(String(init.body)), answer(JSON.parse(String(init.body))));
+    return new Response("{}");
+  }) as any;
+  try {
+    const rtc = await import("../src/shared/rtc");
+    const { hub } = await import("../src/shared/hub");
+    hub.deviceId = "dev-1";
+    const start = async (id: string) => {
+      const fake = fakeStream();
+      Object.defineProperty(globalThis.navigator, "mediaDevices", { value: { getUserMedia: async () => fake.stream, getDisplayMedia: async () => fake.stream }, configurable: true });
+      await rtc.publish("screen", id);
+      return fake;
+    };
+    // The host ends it: the hub tells this window, and the capture stops without another call.
+    const told = await start("sh-told");
+    for (const fn of hub.messageListeners) fn({ type: "share-ended", shareId: "sh-told", deviceId: "dev-1", text: "The host stopped your screen share." });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(told.track.stopped).toBe(true);
+    expect(rtc.localPublication("sh-told")).toBeUndefined();
+    // The end was missed (this window was offline): past the 10-second re-registration wait, the hub refuses it.
+    const missed = await start("sh-missed");
+    (hub as any).snap = { ...hub.get(), connected: true, state: { shares: [] } };
+    Date.now = () => realNow() + 11_000;
+    await rtc.reregister();
+    expect(posts).toHaveLength(1);
+    expect(missed.track.stopped).toBe(true);
+    expect(rtc.localPublication("sh-missed")).toBeUndefined();
+    await rtc.reregister();
+    expect(posts).toHaveLength(1); // never again
+    // A share lost to a dropped connection is registered again and keeps capturing.
+    Date.now = realNow;
+    const lost = await start("sh-lost");
+    answer = (b) => Response.json({ id: "sh-lost-2", kind: b.kind, status: "live" });
+    Date.now = () => realNow() + 11_000;
+    await rtc.reregister();
+    expect(lost.track.stopped).toBe(false);
+    expect(rtc.localPublication("sh-lost-2")).toBeTruthy();
+  } finally {
+    Date.now = realNow;
+    globalThis.fetch = realFetch;
+    Object.defineProperty(globalThis.navigator, "mediaDevices", { value: media, configurable: true });
+  }
+});

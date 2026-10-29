@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
 // fails, instead of leaving a blank document up. It also loads fonts from the person's own Mac.
 import { expect, test } from "bun:test";
-import { friendlyReason, JoinWatch, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
+import { FontTries, friendlyReason, JoinWatch, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -66,7 +66,7 @@ test("fonts this Mac has are loaded into the canvas, each family asked for once"
     // This Mac has Helvetica Neue, not Söhne.
     return args.families.filter((f: string) => f === "Helvetica Neue").map((family: string) => ({ family, data: btoa(family) }));
   };
-  const tried = new Set<string>();
+  const tried = new FontTries();
   expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["Söhne"]);
   expect(loaded).toEqual(["Helvetica Neue"]);
   // Polling again doesn't ask the Mac for what it didn't have.
@@ -76,35 +76,71 @@ test("fonts this Mac has are loaded into the canvas, each family asked for once"
 
 test("in a browser there's no Mac to ask: the missing families are only listed", async () => {
   const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
-  expect(await loadLocalFonts(fc, null, new Set())).toEqual(["Helvetica Neue"]);
+  expect(await loadLocalFonts(fc, null, new FontTries())).toEqual(["Helvetica Neue"]);
   expect(loaded).toEqual([]);
 });
 
 test("a hung or failing collab.peers becomes a failed join, one read at a time", async () => {
   let calls = 0;
   let mode: "hang" | "reject" | "live" = "hang";
+  let settle: (v: any) => void = () => {};
   const fc = {
     execute: (cmd: string) => {
       expect(cmd).toBe("collab.peers");
       calls++;
-      if (mode === "hang") return new Promise<any>(() => {});
+      if (mode === "hang") return new Promise<any>((r) => (settle = r));
       if (mode === "reject") return Promise.reject(new Error("canvas gone"));
       return Promise.resolve({ status: "live" });
     },
   };
   const watch = new JoinWatch(20);
-  // Polls while one is still hanging don't start another.
+  // Polls while one is still running don't start another.
   const first = watch.poll(fc);
   expect(await watch.poll(fc)).toBeNull();
-  expect(await watch.poll(fc)).toBeNull();
   expect(calls).toBe(1);
-  expect(await first).toBeNull(); // one miss is a blip
+  expect(await first).toBeNull(); // timed out: one miss is a blip
+  // The timed-out read is still out: no new read goes on top of it, and the canvas counts as not answering.
   expect(await watch.poll(fc)).toEqual({ state: "failed", reason: "The canvas stopped answering." });
-  // A rejection counts the same; an answer resets the count.
+  expect(calls).toBe(1);
+  // Its late answer is ignored; once it is back, reads start again.
   mode = "live";
+  settle({ status: "live" });
+  await Bun.sleep(5);
   expect(await watch.poll(fc)).toEqual({ state: "live" });
+  expect(calls).toBe(2);
+  // A rejection counts as a miss; an answer resets the count.
   mode = "reject";
   expect(await watch.poll(fc)).toBeNull();
   expect((await watch.poll(fc))?.state).toBe("failed");
-  expect(calls).toBe(5);
+  expect(calls).toBe(4);
+});
+
+test("a font load that failed for a passing reason is tried again, with backoff; one the Mac lacks isn't", async () => {
+  const { fc, loaded } = fakeCanvas(["Helvetica Neue", "Söhne"]);
+  let down = true;
+  let asks = 0;
+  const invoke = async (_cmd: string, args: any) => {
+    asks++;
+    if (down) throw new Error("app busy");
+    return args.families.filter((f: string) => f === "Helvetica Neue").map((family: string) => ({ family, data: btoa(family) }));
+  };
+  const tries = new FontTries();
+  expect(await loadLocalFonts(fc, invoke, tries)).toEqual(["Helvetica Neue", "Söhne"]);
+  // Not again straight away…
+  await loadLocalFonts(fc, invoke, tries);
+  expect(asks).toBe(1);
+  // …but after the backoff, and then it loads.
+  down = false;
+  expect(tries.due("Helvetica Neue", Date.now() + 5_001)).toBe(true);
+  const realNow = Date.now;
+  Date.now = () => realNow() + 5_001;
+  try {
+    expect(await loadLocalFonts(fc, invoke, tries)).toEqual(["Söhne"]);
+  } finally {
+    Date.now = realNow;
+  }
+  expect(loaded).toEqual(["Helvetica Neue"]);
+  // Söhne isn't on this Mac: never asked for again.
+  await loadLocalFonts(fc, invoke, tries);
+  expect(asks).toBe(2);
 });

@@ -338,6 +338,29 @@ describe("share calls act only for the window that made them", () => {
     expect(again.id).toBe(screen.id);
   });
 
+  test("a share the host ends tells its window and can't be registered again; a share lost to a dropped connection can", async () => {
+    const sh = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen" })).json();
+    s.placeShare(s.store.get("shares", sh.id)!);
+    sent = [];
+    expect((await call(null, "DELETE", `/shares/${sh.id}`)).status).toBe(200);
+    const note = sent.find((m) => m.type === "share-ended" && m.shareId === sh.id);
+    expect(note).toMatchObject({ deviceId: "dev-felipe", text: "The host stopped your screen share." });
+    // Its window missed that and re-registers after the 10-second wait: refused, and nothing goes back on screen.
+    const again = await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen", shareId: sh.id });
+    expect(again.status).toBe(409);
+    expect(s.store.get("shares", sh.id)?.status).toBe("ended");
+    expect(s.shares().some((x) => x.status === "live" && x.deviceId === "dev-felipe" && x.kind === "screen")).toBe(false);
+    expect(JSON.stringify(s.stage())).not.toContain(sh.id);
+    // A dropped connection ends it without telling the (unreachable) window; coming back registers it again.
+    const cam = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera" })).json();
+    sent = [];
+    s.endShare(cam.id, "ended", { lost: true });
+    expect(sent.some((m) => m.type === "share-ended")).toBe(false);
+    const back = await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "camera", shareId: cam.id });
+    expect(back.status).toBe(200);
+    expect(s.store.get("shares", cam.id)?.status).toBe("live");
+  });
+
   test("the same person sharing from their second window replaces the first, over HTTP", async () => {
     const one = await (await call(felipeLaptop.token, "POST", "/shares", { deviceId: "dev-felipe", kind: "screen" })).json();
     const two = await (await call(felipePhone.token, "POST", "/shares", { deviceId: "dev-felipe-phone", kind: "screen" })).json();

@@ -161,7 +161,7 @@ test("the parity tool needs a named cross-platform feature, and its directives a
   // Nothing a person sees: refused.
   expect(await said({ feature: "Sidebar", seen: " ", shippedBy: [desktop.id], platforms: ["mobile"] })).toContain("names nothing a person sees");
   expect(s.directives()).toHaveLength(0);
-  const check = { feature: "Collapsible sidebar navigation", seen: "a left sidebar that collapses to icons", shippedBy: [desktop.id], platforms: ["mobile"] };
+  const check = { feature: "Collapsible sidebar navigation", seen: "the collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] };
   await tools.coordinate_parity.execute(check);
   const inbox = hub.mcp.inboxText(mobile, false);
   expect(inbox).toContain("[coordinate]");
@@ -193,4 +193,49 @@ test("other workstreams' decisions can't crowd out an older relevant one, or mov
   expect(JSON.stringify(hooksOf(hub).prompt(desktop, { prompt: "next" }))).toContain("Nav goes in a sidebar");
   // The driver acknowledges on its next call, so the decision is seen and not handed over again.
   expect(JSON.stringify(hooksOf(hub).prompt(desktop, { prompt: "again" }))).not.toContain("Nav goes in a sidebar");
+});
+
+test("a burst of more relevant decisions than one prompt carries is handed over a page at a time, none skipped", () => {
+  const { hub, s, desktop } = room();
+  const nav = s.claim(desktop.id, "Navigation").workstream;
+  for (let i = 0; i < 25; i++) s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text: `Nav rule ${i}.`, workstreamId: nav.id, relevance: "work", data: {} });
+  const handed = (prompt: string) => (JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt }, "127.0.0.1")).match(/Nav rule \d+\./g) ?? []).map((t) => Number(t.match(/\d+/)![0]));
+  const all = [...handed("one"), ...handed("two"), ...handed("three"), ...handed("four")];
+  expect(all).toEqual(Array.from({ length: 25 }, (_, i) => i));
+});
+
+test("a parity check needs what a person sees in the shipper's own words: an invented one is refused", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const tools = (hub.brain as any).parityTools([{ agent: desktop, text: "Moved the auth token refresh into a background worker and added retry with backoff." }]);
+  const r = await tools.coordinate_parity.execute({ feature: "Sync status badge", seen: "a new sync status badge in the toolbar", shippedBy: [desktop.id], platforms: ["mobile"] });
+  expect(r?.text ?? String(r)).toContain("shipper's own words");
+  expect(s.directives()).toHaveLength(0);
+  expect(hub.mcp.inboxText(mobile, false)).toBe("Nothing new.");
+  // Grounded in what they wrote: sent.
+  const ok = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped the collapsible sidebar navigation: the left sidebar collapses to icons." }]);
+  await ok.coordinate_parity.execute({ feature: "Collapsible sidebar", seen: "left sidebar collapses to icons", shippedBy: [desktop.id], platforms: ["mobile"] });
+  expect(hub.mcp.inboxText(mobile, false)).toContain("Parity check, not a build task");
+});
+
+test("two different features from one agent each get their look; the same feature again doesn't", async () => {
+  const { s, desktop, calls } = room();
+  s.postUpdate(desktop.id, "shipped", "Shipped the collapsible sidebar navigation");
+  await wait(60);
+  s.postUpdate(desktop.id, "shipped", "Shipped a dark mode toggle in settings");
+  await wait(60);
+  s.postUpdate(desktop.id, "shipped", "Shipped the collapsible sidebar navigation, now animated");
+  await wait(60);
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toContain("dark mode toggle");
+});
+
+test("parity checks are deduplicated by feature and agent, not by agent alone", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const tools = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped the collapsible sidebar navigation and a dark mode toggle in settings." }]);
+  const send = (feature: string, seen: string) => tools.coordinate_parity.execute({ feature, seen, shippedBy: [desktop.id], platforms: ["mobile"] });
+  await send("Collapsible sidebar navigation", "collapsible sidebar navigation");
+  await send("Collapsible sidebar navigation", "collapsible sidebar navigation");
+  await send("Dark mode toggle", "dark mode toggle in settings");
+  expect(s.directives().filter((d) => d.targets.includes(mobile.id))).toHaveLength(2);
+  expect(s.directives().filter((d) => d.targets.includes(desktop.id))).toHaveLength(2);
 });

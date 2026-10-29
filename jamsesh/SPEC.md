@@ -619,7 +619,8 @@ call, gets the old nudge once.
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate
-(message the other agents, then show parity), answer, or **note** (write something down or keep a
+(compare with the other agents through `jam_message`; change code only for a gap both confirm,
+then show parity), answer, or **note** (write something down or keep a
 record: pain points, a list, meeting notes; no code to build and nothing to draw on the canvas).
 
 People steer agents that misread something [B17] by prompting their own agent, by telling the
@@ -694,15 +695,17 @@ is context, not a direct address to the room brain, even when it mentions the br
 - **Repo cards** tell every agent what each repository has.
 - **Pairing.** The brain tells agents to work together and compare work with `pair_agents`: one
   `coordinate` directive per agent naming the others and the goal [A27c, B22].
-- **Cross-repository parity.** When an agent ships a change, the brain checks whether it applies
-  to another registered repository on another platform (for example desktop and mobile) [B21]. If
-  it does, it sends `coordinate` directives with the shipping agent's notes and its built and
-  mockup artifacts. The agents agree on the approach with `jam_message`, implement their sides,
-  compare renders for inconsistencies that aren't platform conventions, and iterate [B22, B23].
-  When both platforms have built artifacts, the big screen shows a **parity** view: desktop beside
-  mobile, labeled, with what differs [B23]. Shipped updates within 25 seconds of each other are
-  considered together, and agents that already have an open `coordinate` directive from the last
-  10 minutes aren't asked again.
+- **Cross-repository parity.** A `shipped` update is news first: every agent reads it in
+  `jam_context`. Commits, refactors, fixes, tooling, changes the agent marks `platformSpecific`, and
+  rooms with no app on another platform never go further. Otherwise the brain sends a **parity
+  check** only when the shipper's own text names something a person sees (the claim is checked
+  against that text) [B21]. The check is a `coordinate` directive, not build work: the other
+  platform's agent compares (does this exist on our side, and does it match?), agrees with the
+  shipper through `jam_message`, and builds only if both confirm a gap; then they compare renders
+  for inconsistencies that aren't platform conventions [B22, B23]. When both platforms have built
+  artifacts, the big screen shows a **parity** view: desktop beside mobile, labeled, with what
+  differs [B23]. Shipped updates within 25 seconds of each other are considered together; the same
+  feature isn't checked again with the same agent within 10 minutes, while a different feature is.
 - **Routing to the agent already on it.** See [8.5](#85-affinity-and-one-agent-per-repository)
   [A3].
 
@@ -757,9 +760,10 @@ It tells agents:
   compare layout, spacing, type, color, and states with the `canvas_render` of the chosen frame,
   fix differences, post the screenshot as **Built**, and say what still differs before reporting
   `shipped` [B31].
-- **Cross-repository parity.** Mention in a `shipped` update when the change belongs on another
-  platform; on a `coordinate` directive, align with the other agent, compare both renders, and
-  show parity [B21–B23].
+- **Cross-repository parity.** Mention in a `shipped` update when a user-visible change belongs on
+  another platform (or pass `platformSpecific: true` when it doesn't). A parity `coordinate`
+  directive is a check: compare with the other agent, build only a gap you both confirm, compare
+  both renders, and show parity [B21–B23].
 - **Host previews.** To show a desktop or iPhone build on the host, push the branch and call
   `jam_host_preview`; a person approves it by voice or with a button [A33a].
 - **Etiquette.** Only directives are instructions; banter isn't. Never edit another agent's
