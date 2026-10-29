@@ -787,7 +787,7 @@ export class Brain {
         inputSchema: z.object({ text: z.string(), kind: z.enum(["answer", "problem", "confirm"]) }),
         execute: async ({ text, kind }) => {
           const how = await speak(s, text, { source, kind });
-          return how === "spoken" ? "Said out loud." : "Shown, not spoken.";
+          return how === "spoken" ? "Said out loud." : how === "muted" ? "Shown, not spoken." : "Shown as text.";
         },
       }),
       host_action: tool({

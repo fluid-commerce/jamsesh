@@ -202,3 +202,34 @@ test("the chime's audio context is suspended when the room turns silent and resu
   playChime();
   expect(calls.at(-1)).toBe("resume");
 });
+
+// The real thing, in a real browser (muted): an authored silent tile can't be clicked away from its document and
+// loads no media. Skipped where Playwright isn't installed.
+test("in a browser, a silent tile with a _self link and a video stays put and loads no media", async () => {
+  let pw: any;
+  try {
+    pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
+  } catch {
+    return;
+  }
+  const tile = `<a id="l" href="data:text/html,<audio autoplay src=x.mp3></audio>" target="_self" style="display:block;padding:40px">play</a><video id="v" autoplay src="http://127.0.0.1:9/x.mp4"></video>`;
+  setSilent(true);
+  const markup = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
+  const browser = await pw.chromium.launch({ args: ["--mute-audio"] });
+  try {
+    const page = await browser.newPage();
+    const requested: string[] = [];
+    page.on("request", (r: any) => requested.push(r.url()));
+    await page.setContent(`<body style="margin:0">${markup.replace('style="', 'style="width:400px;height:300px;')}</body>`);
+    const frame = page.frames().find((f: any) => f !== page.mainFrame());
+    expect(frame).toBeDefined();
+    await page.mouse.click(50, 50);
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(400);
+    expect(frame.url()).toBe("about:srcdoc");
+    expect(requested.filter((u) => u.includes("x.mp4") || u.includes("x.mp3"))).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+}, 30000);

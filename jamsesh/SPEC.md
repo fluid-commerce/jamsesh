@@ -276,8 +276,8 @@ Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 
 **Silent mode.** With `JAMSESH_SILENT=1` the hub sends no audio (`speak` carries text only), no
 chimes, no voice samples and never falls back to the Mac's `say`; a reply the room would have heard
-is sent whole as text, recorded and labelled "Shown, not spoken" (`speak` returns `shown`; a reply
-that was text anyway keeps its usual "shown as text"); its state says `silent`. The page then plays nothing of
+is sent whole as text, recorded and labelled "Shown, not spoken" (`speak` returns `muted`; a reply
+that was text anyway stays `shown`, "Shown as text"); its state says `silent`. The page then plays nothing of
 its own: no clips (the audio element is never made), no chime, and nothing in a frame. A clip already
 playing stops the moment the page learns the room is silent, and the chime comes back when sound does.
 A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame cannot be

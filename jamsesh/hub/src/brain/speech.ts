@@ -123,7 +123,7 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   // Silent: the text still shows, but no speech is made or sent, and it doesn't count as the last thing said.
   if (silent()) {
     bus.send({ type: "speak", audio: null, mime: "", text: words });
-    return "shown";
+    return "muted";
   }
   lastSpokeAt = Date.now();
   let reason = "";
