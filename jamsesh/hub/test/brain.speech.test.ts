@@ -58,7 +58,10 @@ describe("speaking out loud", () => {
     const r = room();
     r.say("felipe", "Let's get the mobile agent to mock up two onboarding variants with illustrations.");
     await settleDirect(r);
-    expect(r.newDirectives().length).toBeGreaterThan(0);
+    // Overheard, so it waits on the Tasks board rather than going out. The pass starts after the settle above returns.
+    for (let i = 0; i < 80 && !r.hub.session.board.open().length; i++) await new Promise((res) => setTimeout(res, 500));
+    expect(r.hub.session.board.open().length).toBeGreaterThan(0);
+    expect(r.directives()).toHaveLength(0);
     expect(spoken(r).length).toBe(0);
     r.stop();
   }, 120_000);

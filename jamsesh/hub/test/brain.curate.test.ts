@@ -21,6 +21,12 @@ t("decisions, requirements and questions are curated; banter isn't; answers reso
     s.postUpdate(r.agents.mobile.id, "progress", "Mobile settings runs at http://192.168.1.20:5100; tokens live in theme/tokens.ts.", { workstream: "Mobile settings" }),
   ];
   await r.hub.brain.curate(batch1);
+  // What curation proposes waits on the Tasks board; the room accepts it here.
+  const accept = () => {
+    for (const c of s.board.open()) c.conflictsWith ? s.board.replace(c.id, "Chey") : s.board.add(c.id, "Chey");
+  };
+  expect(s.facts().filter((f) => f.status === "active")).toHaveLength(0);
+  accept();
   let facts = s.facts().filter((f) => f.status === "active");
   const has = (kind: string, re: RegExp) => facts.some((f) => f.kind === kind && re.test(f.text));
   console.log(facts.map((f) => `${f.kind}: ${f.text}`).join("\n"));
@@ -34,6 +40,7 @@ t("decisions, requirements and questions are curated; banter isn't; answers reso
     say("felipe", "Actually, change of plan: settings header goes with option B, the compact search, on desktop only."),
   ];
   await r.hub.brain.curate(batch2);
+  accept();
   const all = s.facts();
   facts = all.filter((f) => f.status === "active");
   console.log("--- after\n" + all.map((f) => `${f.status} ${f.kind}: ${f.text}`).join("\n"));

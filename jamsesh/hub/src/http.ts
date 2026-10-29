@@ -10,6 +10,7 @@ import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
+import { publicEvent } from "./session";
 import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
@@ -27,7 +28,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -596,6 +597,37 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "POST") {
     const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined);
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
+  }
+
+
+  // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
+  // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
+  if (path === "/triage" && req.method === "GET") {
+    // Agents don't see proposals nobody has accepted; they read the knowledge, the inbox and the changelog.
+    if (paired?.kind === "agent") return bad("That's for people; agents use their jam_ tools.", 403);
+    return json({ cards: s.board.shown(), stats: s.board.stats() });
+  }
+  if (path === "/changelog" && req.method === "GET") return json(s.changelog(Math.min(200, Number(url.searchParams.get("limit")) || 50)).map(publicEvent));
+  m = path.match(/^\/triage\/([\w-]+)(?:\/(send|add|merge|replace|dismiss))?$/);
+  if (m && req.method !== "GET") {
+    const who = actor();
+    if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
+    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind };
+    const verb = m[2];
+    const r = !verb
+      ? req.method === "PATCH"
+        ? s.board.edit(m[1], edit, who.name)
+        : { ok: false as const, error: "Use PATCH to edit a card.", status: 405 }
+      : verb === "send"
+        ? s.board.send(m[1], who.name, edit)
+        : verb === "add"
+          ? s.board.add(m[1], who.name, edit)
+          : verb === "merge"
+            ? typeof body?.factId === "string" ? s.board.merge(m[1], body.factId, who.name, typeof body?.text === "string" ? body.text : undefined) : { ok: false as const, error: "factId is required: the fact to merge into.", status: 400 }
+            : verb === "replace"
+              ? s.board.replace(m[1], who.name, typeof body?.factId === "string" ? body.factId : undefined, edit)
+              : s.board.dismiss(m[1], who.name);
+    return r.ok ? json(r) : bad(r.error, r.status);
   }
 
   if (path === "/upload" && req.method === "POST") {

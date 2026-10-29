@@ -14,9 +14,12 @@ import { brainNames, normName } from "../names";
 export { brainNames };
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import { aspect, type HostControl } from "../hostctl";
+import { forCuration } from "../board";
 
 const TRIAGE_DEBOUNCE_MS = 1400;
 const DIGEST_EVERY_MS = 75_000;
+/** Waiting cards are mentioned out loud at most this often. */
+const NAG_EVERY_MS = 20 * 60_000;
 
 const triageSchema = z.object({
   lines: z.array(
@@ -57,14 +60,39 @@ export class Brain {
     private host: HostControl,
   ) {
     this.digestTimer = setInterval(() => this.digest().catch(() => {}), 20_000);
+    // Tests drive nagTriage() with their own clock; the room's timer would only make noise in them.
+    if (process.env.NODE_ENV !== "test") this.nagTimer = setInterval(() => this.nagTriage(), 60_000).unref?.();
     this.refreshStatus();
   }
 
   private stopped = false;
+  private nagTimer: ReturnType<typeof setInterval> | undefined;
+  private lastNagAt = 0;
+
+  /**
+   * Every so often, say out loud that proposals have waited on the Tasks board. Never while people are mid-conversation
+   * (it tries again a minute later), and only once per NAG_EVERY_MS. Returns whether it spoke.
+   */
+  nagTriage(now = Date.now()) {
+    const s = this.session;
+    if (this.stopped || !s.settings().brainEnabled || now - this.lastNagAt < NAG_EVERY_MS) return false;
+    const waiting = s.board.waiting(now);
+    if (!waiting.length) return false;
+    const lastTalk = s.store.recentEvents({ kinds: ["speech"], limit: 1 })[0];
+    if (lastTalk && Math.abs(now - lastTalk.ts) < 20_000) return false;
+    this.lastNagAt = now;
+    for (const c of waiting) s.store.put("triage", { ...c, mentionedAt: now }, false);
+    const oldest = Math.floor((now - waiting[0].ts) / 60_000);
+    const tasks = waiting.filter((c) => c.type === "task").length;
+    const what = tasks === waiting.length ? "task" : tasks === 0 ? "context item" : "item";
+    void speak(s, `${waiting.length === 1 ? `One ${what} has` : `${waiting.length} ${what}s have`} been waiting in triage, the oldest for ${oldest} minutes.`, { source: "voice", kind: "problem" });
+    return true;
+  }
 
   stop() {
     this.stopped = true;
     clearInterval(this.digestTimer);
+    clearInterval(this.nagTimer);
     if (this.timer) clearTimeout(this.timer);
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.timer = null;
@@ -219,7 +247,7 @@ export class Brain {
     // What this pass actually did, so a pass that fails halfway isn't redone by the rules.
     const pass = { effects: 0 };
     try {
-      const tools = this.tools(batch, pass);
+      const tools = this.tools(batch, pass, "person", "overheard");
       await generateText({
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
@@ -396,6 +424,7 @@ export class Brain {
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,
       `## Open directives\n${open.map((d) => `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => s.agent(t)?.name).join(", ")}: ${d.text}`).join("\n") || "(none)"}`,
       digest ? `## Session brief\n${digest}` : "",
+      s.board.open().length ? `## Waiting on the Tasks board (proposals nobody has accepted yet; agents don't see them)\n${s.board.describe()}` : "",
       s.facts().some((f) => f.status === "active")
         ? `## Curated knowledge (respect decisions, requirements and constraints when routing)\n${s.facts().filter((f) => f.status === "active").slice(0, 40).map((f) => `- [${f.kind}${f.workstream ? `, ${f.workstream}` : ""}] ${f.text}`).join("\n")}`
         : "",
@@ -450,7 +479,7 @@ export class Brain {
    * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
    * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
    */
-  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person") {
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", route: "direct" | "overheard" = "direct") {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
@@ -464,6 +493,8 @@ export class Brain {
     const host = this.host;
     // A person who asked JamSesh directly (typed, or spoken to it by name) is putting this up on purpose: it's their cast and takes the lock.
     const asker = batch.find((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct && e.authorId);
+    // Whoever spoke to JamSesh directly, even a host window that hasn't said who it is: the board records them.
+    const speaker = batch.find((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
     const castBy = asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {};
     const all = {
       cancel_directive: tool({
@@ -505,6 +536,11 @@ export class Brain {
             (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6 && sameCounts(d.text, i.text),
           );
           if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
+          // Overheard work waits on the Tasks board for a person to send; what someone asked JamSesh for goes straight out.
+          if (route === "overheard") {
+            const card = s.proposeTask({ text: i.text, mode: i.mode, targets, workstream: i.workstream, by: requester, sourceEventIds: sourceIds });
+            return card ? `Proposed on the Tasks board for ${targets.map((t) => s.agent(t)?.name).join(", ")} (card ${card.id}). A person sends it; it isn't sent yet.` : "Nothing to propose.";
+          }
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
           const d = s.createDirective({
             text: i.text,
@@ -523,7 +559,13 @@ export class Brain {
         description: "Record a decision the team made, such as choosing a direction, so every agent sees it.",
         inputSchema: z.object({ text: z.string(), workstream: z.string().optional(), artifactIds: z.array(z.string()).optional() }),
         execute: async (i) => {
+          // A decision someone asked JamSesh to record is theirs on the spot; one it overheard, or an agent reported, waits for a person.
+          if (route !== "direct" || from !== "person") {
+            const card = s.proposeContext({ text: i.text, kind: "decision", workstream: i.workstream, by: requester, sourceEventIds: sourceIds, origin: from === "agent" ? "agent" : "overheard" });
+            return card ? `Proposed on the Tasks board (card ${card.id}); a person adds it.` : "Already known.";
+          }
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
+          s.board.rememberNow({ text: i.text, kind: "decision", workstream: i.workstream, by: requester, sourceEventIds: sourceIds });
           s.store.addEvent({
             kind: "decision",
             authorType: "brain",
@@ -891,6 +933,40 @@ export class Brain {
           return `On screen: ${key}.`;
         },
       }),
+      triage_card: tool({
+        description:
+          "Act on a proposal waiting on the Tasks board, when a person asks you to (\"send that one\", \"dismiss the second one\", \"add it, but for mobile only\", \"replace the old one\"). Cards are numbered in 'Waiting on the Tasks board'; \"that one\" or \"it\" is the card most recently proposed unless they were just talking about another. Task cards: send or dismiss. Context cards: add, replace (the saved fact it contradicts), merge (into a saved fact, by factId) or dismiss. Changes they ask for in the same breath (\"but for mobile only\", \"give it to Felipe's agent\") go in the other fields. Use edit to change a card without accepting it.",
+        inputSchema: z.object({
+          card: z.string().describe("The card's number on the board, its id, or 'last' for the newest"),
+          action: z.enum(["send", "add", "replace", "merge", "dismiss", "edit"]),
+          text: z.string().optional().describe("New wording"),
+          mode: z.enum(["explore", "implement", "coordinate", "answer", "note"]).optional(),
+          agent: z.string().optional().describe("Agent id or name to send a task to instead"),
+          workstream: z.string().optional(),
+          kind: z.enum(["decision", "requirement", "constraint", "preference", "question", "fact"]).optional(),
+          factId: z.string().optional().describe("For merge or replace: the saved fact"),
+        }),
+        execute: async (i) => {
+          if (!speaker) return refuse("Only a person who asked you directly can act on the Tasks board.");
+          const c = s.board.find(i.card);
+          if (!c) return refuse(`No card matches "${i.card}". Waiting now:\n${s.board.describe() || "(nothing)"}`);
+          const named = i.agent ? s.agent(i.agent) ?? s.agents().find((a) => a.name.toLowerCase() === i.agent!.toLowerCase()) : undefined;
+          if (i.agent && !named) return refuse(`No agent "${i.agent}".`);
+          const edit = { text: i.text, mode: i.mode, targets: named ? [named.id] : undefined, workstream: i.workstream, kind: i.kind };
+          const by = speaker.authorName;
+          const r =
+            i.action === "send" ? s.board.send(c.id, by, edit)
+            : i.action === "add" ? s.board.add(c.id, by, edit)
+            : i.action === "replace" ? s.board.replace(c.id, by, i.factId, edit)
+            : i.action === "merge" ? (i.factId ? s.board.merge(c.id, i.factId, by, i.text) : refuse("Which saved fact? Pass factId."))
+            : i.action === "edit" ? s.board.edit(c.id, edit, by)
+            : s.board.dismiss(c.id, by);
+          if (r instanceof Refusal) return r;
+          if (!r.ok) return refuse(r.error);
+          const to = r.card.targets.map((t) => s.agent(t)?.name).filter(Boolean).join(", ");
+          return i.action === "send" ? `Sent to ${to}.` : i.action === "edit" ? "Card updated." : `${{ add: "Added", replace: "Replaced the old fact", merge: "Merged into the fact", dismiss: "Dismissed" }[i.action]}.`;
+        },
+      }),
       no_action: tool({
         description: "Nothing to do: the lines are discussion, banter, or already handled.",
         inputSchema: z.object({ reason: z.string() }),
@@ -898,6 +974,8 @@ export class Brain {
       }),
     };
     if (from === "agent") for (const name of Object.keys(all)) if (!AGENT_TOOLS.has(name)) delete (all as Record<string, unknown>)[name];
+    // Only someone talking to JamSesh on purpose can send, add or dismiss what is waiting on the board.
+    if (route === "overheard") delete (all as Record<string, unknown>).triage_card;
     // A call counts as an effect of this pass unless it refused or changed nothing; after stop(), nothing runs.
     for (const [name, t] of Object.entries(all) as [string, { execute?: (...a: any[]) => any }][]) {
       const run = t.execute;
@@ -924,17 +1002,43 @@ export class Brain {
       s.updateSettings({ brainNotes: [...s.settings().brainNotes, "Talk less: only speak when someone asks you something."] });
       return void speak(s, "Got it. I'll keep quiet unless someone asks me something.", { source: speechSource([ev]), kind: "confirm" });
     }
+    if (this.triageByVoice(ev)) return;
     const before = s.directives().length;
     const stage = JSON.stringify(s.stage());
     const triage = ruleTriage([ev]);
-    this.ruleRoute([ev], triage);
+    this.ruleRoute([ev], triage, true);
     const refused = this.lockRefused;
     this.lockRefused = false;
     if (refused || s.directives().length !== before || JSON.stringify(s.stage()) !== stage || triage.lines.some((l) => l.intent === "decision")) return;
     void speak(s, `I'm on simple rules right now${s.gatewayKey() ? " because the AI Gateway isn't answering" : " because there's no gateway key"}, so I can bring things up, show how to join, and send work to agents, but not that.`, { source: speechSource([ev]), kind: "problem" });
   }
 
-  ruleRoute(batch: JamEvent[], triage: Triage) {
+  /**
+   * "JamSesh, send that one" / "dismiss the second one" / "add that", without a model: the verb and which card
+   * (the newest unless a number or "first/second/last" is said). Sending a context card adds it, and adding a task sends it.
+   */
+  private triageByVoice(ev: JamEvent): boolean {
+    const s = this.session;
+    if (ev.authorType !== "person") return false;
+    const names = nameForms(brainNames(s.settings())).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const t = ev.text.toLowerCase().replace(names.length ? new RegExp(`\\b(?:${names.join("|")})\\b`, "g") : /$^/, " ").replace(/[^a-z0-9\s]/g, " ").replace(/\b(hey|ok|okay|please|just|go ahead and)\b/g, " ").replace(/\s+/g, " ").trim();
+    const m = t.match(/^(send|dismiss|drop|ignore|skip|delete|add|save|accept|approve)(?: (?:it|that|this|that one|this one|the (first|second|third|fourth|fifth|last|newest|latest|oldest)(?: one)?|(?:number|card|task) (\d{1,2})))?$/);
+    if (!m || !(m[0].includes(" "))) return false;
+    const ordinal = { first: "1", second: "2", third: "3", fourth: "4", fifth: "5", oldest: "1" } as Record<string, string>;
+    const ref = m[3] ?? (m[2] ? ordinal[m[2]] ?? "last" : "last");
+    const card = s.board.find(ref);
+    const say = (text: string, kind: "answer" | "confirm" = "answer") => void speak(s, text, { source: speechSource([ev]), kind });
+    if (!card) return say(s.board.open().length ? "I don't have a card by that number." : "Nothing is waiting on the Tasks board."), true;
+    const by = ev.authorName;
+    const verb = /^(dismiss|drop|ignore|skip|delete)$/.test(m[1]) ? "dismiss" : card.type === "task" ? "send" : "add";
+    const r = verb === "dismiss" ? s.board.dismiss(card.id, by) : verb === "send" ? s.board.send(card.id, by) : s.board.add(card.id, by);
+    if (!r.ok) return say(r.error), true;
+    say(verb === "send" ? `Sent to ${r.card.targets.map((x) => s.agent(x)?.name).filter(Boolean).join(", ")}.` : verb === "add" ? "Added." : "Dismissed.", "confirm");
+    return true;
+  }
+
+  /** `direct`: someone asked JamSesh (so work goes straight out); otherwise it was overheard and waits on the Tasks board. */
+  ruleRoute(batch: JamEvent[], triage: Triage, direct = false) {
     if (this.stopped) return;
     const s = this.session;
     const agents = s.workers().filter((a) => a.status !== "offline");
@@ -962,14 +1066,18 @@ export class Brain {
         continue;
       }
       if (line.intent === "decision") {
-        s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, relevance: "work", data: { requestedBy: ev.authorName } });
+        if (direct) s.board.rememberNow({ text, kind: "decision", by: ev.authorName, sourceEventIds: [ev.id] });
+        else s.proposeContext({ text, kind: "decision", by: ev.authorName, sourceEventIds: [ev.id] });
+        if (direct) s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, relevance: "work", data: { requestedBy: ev.authorName } });
         // "Let's go with B": find variant B on screen (or among the latest set) and have its agent build it.
         const letter = variantLetter(text);
         const shown = s.stage().items.map((id) => s.artifacts().find((a) => a.id === id)).filter(Boolean) as Artifact[];
         const pool = shown.length ? shown : s.artifacts().slice(0, 12);
         const pick = letter ? pool.find((a) => new RegExp(`/\\s*${letter}\\b`).test(a.title)) : undefined;
         const owner = pick?.agentId ? s.agent(pick.agentId) : undefined;
-        if (pick && owner) s.createDirective({ text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement", targets: [owner.id], requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "The room chose this variant (routed by keyword; the brain has no model right now)." });
+        const build = pick && owner ? { text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement" as const, targets: [owner.id], by: ev.authorName, sourceEventIds: [ev.id] } : null;
+        if (build && direct) s.createDirective({ text: build.text, mode: build.mode, targets: build.targets, requestedBy: build.by, sourceEventIds: build.sourceEventIds, rationale: "The room chose this variant (routed by keyword; the brain has no model right now)." });
+        else if (build) s.proposeTask(build);
         continue;
       }
       if (line.intent !== "directive" || !agents.length) continue;
@@ -984,7 +1092,8 @@ export class Brain {
       const idlest = [...agents].sort((x, y) => s.openFor(x.id).length - s.openFor(y.id).length)[0];
       const pool = named.length ? named : best ? [best.agent] : [idlest];
       const targets = oneAgentPerRepo(s, pool.map((a) => a.id), text).kept;
-      s.createDirective({ text, mode, targets, requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "Routed by keyword (the brain has no gateway key)." });
+      if (direct) s.createDirective({ text, mode, targets, requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "Routed by keyword (the brain has no gateway key)." });
+      else s.proposeTask({ text, mode, targets, by: ev.authorName, sourceEventIds: [ev.id] });
     }
   }
 
@@ -997,13 +1106,11 @@ export class Brain {
   private shipConsidered = new Map<string, number>();
 
   /** Ships within a short window (desktop and mobile often land together) are considered once. */
-  agentUpdated(agent: Agent, kind: UpdateKind, text: string) {
+  agentUpdated(agent: Agent, kind: UpdateKind, text: string, ev?: JamEvent) {
     if (this.stopped) return;
     if (kind === "decision") {
-      // Agents don't make room decisions; the brain decides whether this one is the room's.
-      void this.consider(
-        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) reports a decision: ${text}\nDecide: is this a call other agents or the room must follow (a design direction, a shared behavior, an API or naming choice)? Then record_decision (with the workstream) and, only if another agent has to change something, a directive to it. If it only concerns ${agent.name}'s own work, call no_action.`,
-      );
+      // Agents don't make room decisions: what one reports waits on the Tasks board for a person to add, linked to the update.
+      this.session.proposeContext({ text, kind: "decision", workstream: ev?.workstreamId ? this.session.store.get("workstreams", ev.workstreamId)?.title : undefined, by: agent.name, origin: "agent", sourceEventIds: ev ? [ev.id] : [] });
       return;
     }
     if (kind === "question" || kind === "blocked") {
@@ -1106,7 +1213,7 @@ export class Brain {
       });
       // Curate first: the brief only moves past these events once their facts are stored, so a
       // failed pass is retried next time instead of losing them.
-      await this.curate(events);
+      await this.curate(events.filter(forCuration));
       s.store.setDigest("session", text.trim(), lastId);
       await this.workstreamBriefs(lastId);
     } catch (e) {
@@ -1155,18 +1262,8 @@ export class Brain {
       // Paraphrases of what's already known are duplicates, not new knowledge. Items that
       // differ in their specifics (option A versus B, 16 versus 24 px) never are.
       if ([...active, ...s.facts().filter((f) => f.status === "active")].some((f) => f.kind === a.kind && sameSpecifics(f.text, a.text) && similar(f.text, a.text) > 0.55)) continue;
-      s.store.put("facts", {
-        id: newId("fact"),
-        ts: now,
-        updatedAt: now,
-        kind: a.kind,
-        text: a.text,
-        workstream: a.workstream ?? "",
-        by: a.by ?? "",
-        status: "active",
-        note: "",
-        sourceEventIds: a.eventIds ?? [],
-      });
+      // What curation draws from the room waits on the Tasks board for a person to add (4.1).
+      s.proposeContext({ text: a.text, kind: a.kind, workstream: a.workstream, by: a.by || "JamSesh", sourceEventIds: a.eventIds });
     }
   }
 

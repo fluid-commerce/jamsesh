@@ -925,8 +925,11 @@ cancels the old directive (`cancel_directive`, which tells the agent why) and se
 
 ### 8.6 Decisions
 
-A decision ("I like B", "go with direction A") is recorded as a `decision` event, shown as a
-toast, and folded into the brief within seconds [B14]. Unless the room says otherwise, the brain
+A decision ("I like B", "go with direction A") that someone asks JamSesh to record is a
+`decision` event (and a saved fact), shown as a toast and folded into the brief within seconds
+[B14]. One JamSesh only overhears, or an agent reports, waits as a card until a person adds it
+(see [8.14](#814-the-tasks-board-and-triage-41)); the same goes for the implement directive below,
+which is proposed rather than sent. Unless the room says otherwise, the brain
 also sends an **implement** directive to the agent that owns the chosen work, naming the chosen
 artifact, and spotlights it. "That one" means what's on screen, or the latest artifact.
 
@@ -1071,6 +1074,92 @@ Every gateway call has a time limit (15 seconds for triage, 45 for everything el
 fails, the brain falls back to the rules for that batch, shows a notice at most every five
 minutes, and goes straight to rules for the next minute, so nothing said is lost and nobody waits
 on a failing gateway.
+
+### 8.14 The Tasks board and triage (4.1)
+
+Nothing JamSesh overhears reaches an agent or the shared knowledge until a person accepts it. What it
+holds is a **card** in the `triage` collection (`TriageCard`, `hub/src/board.ts`).
+
+**On purpose versus overheard.** A line is on purpose when a person typed it to JamSesh, recorded a prompt,
+or said its name (the event carries `data.direct`, set by `Brain.hear`, `Hub.typed` and the recorded-prompt
+path). Those passes (`Brain.direct`, `tools(…, route = "direct")`) work as before: `create_directive` sends,
+`record_decision` records an event and saves a fact at once. Everything else is **overheard** (`Brain.route`,
+the batched pass; `tools(…, "overheard")`, and the keyword rules when the gateway is down):
+
+| What | On purpose | Overheard, or reported by an agent |
+|---|---|---|
+| A task for agents | `createDirective` | a **task card** (`proposeTask`) |
+| A decision or fact | `record_decision` saves a decision event and a fact | a **context card** (`proposeContext`) |
+| A fact curation would add | n/a | a context card (the `add` list of `Brain.curate`; its update, resolve and supersede lists still apply to saved facts directly) |
+| An agent's `decision` update | n/a | a context card naming the agent, linked to the update event |
+| Agents' `shipped`, `done`, `progress`, `handoff` updates | n/a | the **changelog** (`Session.changelog()`, `GET /api/changelog`); curation skips them (`forCuration`) |
+| `jam_message` and `jam_ask` between agents, and `question` or `blocked` updates | unchanged: direct | unchanged |
+
+Agents never see a card: `jam_context`, the inbox and the hooks read only directives, facts and decisions.
+
+**Other workers' entry points** (so a feature that finds a task or a piece of context can use the board):
+
+```ts
+session.proposeTask({ text, mode, targets, workstream?, by, origin?: "overheard" | "agent" | "document", sourceEventIds?, note? }): TriageCard | null
+session.proposeContext({ text, kind, workstream?, by, origin?, sourceEventIds?, replaces?, note? }): TriageCard | null
+session.board.rememberNow({ text, kind, workstream?, by, sourceEventIds? }): Fact | null   // on purpose: saved at once
+```
+
+`note` is what the card shows as its source when there is no transcript line (a document with no request becomes a
+context card with `origin: "document"`). Both return `null` for empty text, and `proposeContext` returns `null` when
+a saved fact already says it. Repeats are folded in (below), so calling twice is safe.
+
+**Cards.** A card has `type` (`task` or `context`), `status` (`open`, then `sent`, `added`, `merged`, `replaced` or
+`dismissed`), the current wording and the `original`, who it came from, its `sources` (each with the transcript event id,
+author, text and time; at most 12), a `count`, and `edits` (who changed which fields, when). A task card has a mode,
+target agents and a workstream; a context card has a kind, a workstream and `conflictsWith`, a saved fact it
+disagrees with. Cards never expire. One that has waited 30 minutes reads "Waiting 40 min" on the board.
+
+**Repeats.** The same thing proposed again (stemmed-term overlap above 0.7, the same counts, the same variant letters
+and numbers) joins the open card: `count` goes up and the new source line is added. The same line twice (two
+microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context proposal a saved fact
+already states is dropped; one that is close to a fact but differs in its specifics (option A versus B, 16 versus 24
+px), or names a fact with `replaces`, is flagged `conflictsWith`.
+
+**Actions** (`POST /api/triage/<id>/<action>`, `PATCH /api/triage/<id>`; people only, like the other human routes: an
+agent's credential and a process on the host without the window key get 403, and a window must know its person):
+
+| Route | Does |
+|---|---|
+| `PATCH /triage/<id>` | Edit the wording, `mode`, `targets`, `workstream`, `kind`. Records who changed what. |
+| `POST /triage/<id>/send` | Task: apply any edits in the body, then `createDirective` (requested by the original speaker, with the card's source events). 400 with no agent. |
+| `POST /triage/<id>/add` | Context: save the (edited) fact. A decision also becomes a room decision event, so the agents of its workstream see it. |
+| `POST /triage/<id>/merge` | Context: `factId` and the combined `text` (default: the fact, then the card). The fact keeps both sources. |
+| `POST /triage/<id>/replace` | Context: supersede the fact it conflicts with (or `factId`) and add this one. 409 if no saved fact is left. |
+| `POST /triage/<id>/dismiss` | Task or context. |
+| `GET /triage` | `{ cards, stats }`: counts of proposed, open, accepted, edited and dismissed per type. |
+
+A card that has been acted on answers 409 ("That card was already sent by Felipe"), so two people clicking, or a
+replayed request, act once. The client never queues these calls while offline.
+
+**Spoken triage.** The brain's `triage_card` tool (only in on-purpose passes, only for a person who spoke to it) takes a
+card by number, id or "last" and an action (send, add, replace, merge, dismiss, edit), with changes in the same breath
+("add it, but for mobile only"). "That one" is the newest card. The situation prompt lists the open cards with
+numbers; the order is the board's (oldest first). Without a model, `triageByVoice` handles "send that one", "dismiss the
+second one", "add that", "send it" by rule (sending a context card adds it; adding a task sends it).
+
+**Mentioning waiting cards.** `Brain.nagTriage` (every minute, not under test) says out loud that cards have waited 30
+minutes or more ("3 items have been waiting in triage, the oldest for 47 minutes"), at most once every 20 minutes, never
+within 20 seconds of someone talking, and as text only in a room that asked for quiet.
+
+**The Tasks view** (`web/src/shared/Tasks.tsx`): a top-level **Tasks** tab in people's apps (count of waiting cards on the
+tab) and a **Tasks** button on the host (key `4`; Esc leaves it) that takes the big screen's place on the host's own
+window only. Four columns: **Triage** (open cards, oldest first, numbered for "the second one"), **Waiting** (directives
+`pending` or `delivered`), **Working** (`acked`), **Done** (`done`, the newest 30). Cancelled tasks aren't shown. At
+narrow widths (below 820 px of view width) the columns become tabs. Task cards offer Send, Edit and Dismiss; context
+cards Add, Edit, Merge into…, Dismiss, and Replace (with the saved fact and the new one side by side) when
+they conflict. Edit is in place (wording, agent, mode or kind, workstream); Send and Add apply it. A focused card takes
+the keys ↑ ↓, Enter (open), E, S (send or add) and D. Clicking a card opens a sheet: the wording, who asked and when,
+each agent's progress, the lines it came from (with the conversation around each, from `/api/history/events`), what
+people changed, and for a sent task what it produced: the frames and builds its agents put up since it was sent (each
+**Show on the big screen** or **Open**) and the links in its result. The Phase 3 viewer (`WorkViewer.tsx`) wasn't on the
+branch this was built from, so a produced frame opens on the big screen the existing way; opening it in the viewer is one
+call where `MadeItem` puts it up.
 
 ## 9. Room audio
 
@@ -1306,6 +1395,8 @@ top. People's apps show the earlier ones as a strip of chips that bring one back
     Esc closes. **Show on big screen** in the viewer is the deliberate second step and puts the item
     up as the person ("Chey put this up"); **All N side by side** puts the group up. Clicking never
     changes the big screen.
+  - **Tasks:** what's waiting for a person and what the agents are doing, in four columns (see
+    [8.14](#814-the-tasks-board-and-triage-41)).
   - **Expand:** every tile of a multi-tile stage (board, spotlight, compare, parity, layout) has
     **Expand** in its header, on the big screen and in the Screen tab. The stage's `expanded` field
     holds the tile key (an artifact id, or `t<n>` for a layout's nth tile); `POST /api/stage/expand

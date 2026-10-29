@@ -4,6 +4,7 @@ import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } fro
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
+import { Board, type ContextProposal, type TaskProposal } from "./board";
 import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
@@ -26,6 +27,7 @@ import type {
   Share,
   Stage,
   Workstream,
+ TriageCard,
  BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
@@ -69,6 +71,10 @@ export class Session {
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   onDirective: ((d: Directive) => void) | null = null;
+  /** A card landed on the Tasks board (4.1). */
+  onTriage: ((c: TriageCard) => void) | null = null;
+  /** The Tasks board's triage: proposals wait here until a person acts. */
+  readonly board = new Board(this);
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
   /** An agent wrote to the room brain (jam_message by its name). */
   onBrainMessage: ((ev: JamEvent) => void) | null = null;
@@ -193,6 +199,7 @@ export class Session {
       shares: this.shares(),
       annotations: this.annotations(),
       facts: this.facts(),
+      triage: this.board.shown(),
       buildRequests: this.buildRequests(),
       screens: this.screens(),
       readyToShow: this.readyToShow(),
@@ -272,6 +279,8 @@ export class Session {
         return { key, value: this.annotations() };
       case "facts":
         return { key, value: this.facts() };
+      case "triage":
+        return { key, value: this.board.shown() };
       case "settings":
         return { key, value: this.settings() };
       case "session":
@@ -1262,6 +1271,25 @@ export class Session {
   facts(): Fact[] {
     const all = this.store.all("facts").sort((a, b) => b.updatedAt - a.updatedAt);
     return [...all.filter((f) => f.status === "active"), ...all.filter((f) => f.status !== "active").slice(0, 30)];
+  }
+
+  /** An overheard task or an agent's task waits on the Tasks board (4.1). Null when it was empty or is already waiting. */
+  proposeTask(p: TaskProposal) {
+    return this.board.proposeTask(p);
+  }
+
+  /** Context nobody has approved (overheard, reported by an agent, from a document) waits on the Tasks board. Null when it's already known. */
+  proposeContext(p: ContextProposal) {
+    return this.board.proposeContext(p);
+  }
+
+  /** What agents shipped, newest first: their routine notices, which never become cards or facts. */
+  changelog(limit = 50): JamEvent[] {
+    return this.store
+      .recentEvents({ kinds: ["update"], limit: 600 })
+      .filter((e) => e.authorType === "agent" && ["shipped", "done"].includes(String(e.data?.updateKind)))
+      .slice(-limit)
+      .reverse();
   }
 
   // ---- saved layouts ----
