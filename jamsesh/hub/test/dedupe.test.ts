@@ -155,3 +155,25 @@ test("the same voice with an added word is another line, not a twin", async () =
   await r.pipeline.flush();
   expect(r.lines()).toEqual(["Move the header up a bit please.", "Move the header up a bit please then."]);
 });
+
+test("a nearer line with the same words in another voice doesn't stop the copy joining the line in its own voice", async () => {
+  const r = room();
+  const one = new Float32Array(256);
+  one[0] = 1;
+  const two = new Float32Array(256);
+  two[1] = 1;
+  const voices: Record<string, Float32Array> = { "lap-a": one, "lap-b": two, "lap-c": two };
+  (r.pipeline as any).voiceOf = (u: { deviceId: string }) => ({ embedding: voices[u.deviceId], reason: "" });
+  const hear = async (...a: Parameters<typeof r.hear>) => {
+    await r.hear(...a);
+    for (const g of (r.pipeline as any).open) for (const s of g.segments) s.embedding = voices[s.deviceId];
+    await r.pipeline.flush();
+  };
+  const t = base();
+  await hear("lap-a", t, 1, "Header up a bit.", 21);
+  await hear("lap-c", t + 2600, 1, "Header up a bit.", 22);
+  expect(r.lines()).toHaveLength(2);
+  // Nearest in time is lap-a's line, in the other voice; lap-c's, in this voice, is the twin.
+  await hear("lap-b", t + 1200, 1, "header up a bit", 23);
+  expect(r.lines()).toHaveLength(2);
+});

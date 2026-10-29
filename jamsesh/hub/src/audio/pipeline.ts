@@ -436,13 +436,16 @@ export class AudioPipeline {
     const mine = new Set(g.segments.map((s) => s.deviceId));
     const words = plainText(text);
     if (!words) return false;
+    // The nearest in time of every line that qualifies, voices included: a nearer one in another voice doesn't hide it.
     const twin = this.session.store
       .all("utterances")
       .filter((x) => x.location === g.location && x.id !== g.utteranceId && Math.abs(x.t0 - g.t0) < TWIN_MS && Math.abs(x.t1 - g.t1) < TWIN_MS + 1500 && !x.devices.some((d) => mine.has(d.deviceId)) && plainText(x.text) === words)
+      .filter((x) => {
+        const theirs = this.voiceOf(x).embedding;
+        return !best.embedding || !theirs || cosine(best.embedding, theirs) >= SAME_VOICE;
+      })
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
     if (!twin) return false;
-    const theirs = this.voiceOf(twin).embedding;
-    if (best.embedding && theirs && cosine(best.embedding, theirs) < SAME_VOICE) return false;
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
     // Its group is gone (a copy flushed late): the same words from another laptop then, so it isn't shown twice.
     if (!home) return true;
