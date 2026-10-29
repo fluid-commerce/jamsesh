@@ -180,11 +180,13 @@ function git(dir: string, args: string[]) {
  * hold people's notes and work they staged themselves, and those stay as they were. Does nothing without git or a
  * repository, and never throws.
  */
-export function commitPaths(dir: string, message: string, paths: string[]): boolean {
-  if (!gitAvailable() || !existsSync(join(dir, ".git"))) return false;
+export function commitPaths(dir: string, message: string, paths: string[]): "done" | "nothing" | "failed" {
+  if (!gitAvailable() || !existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+){0,2}$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && (existsSync(join(dir, p)) || git(dir, ["ls-files", "--error-unmatch", "--", p]))); // a file that is gone is committed only if git tracked it (a deletion)
-  if (!own.length) return false;
-  return git(dir, ["add", "--", ...own]) && git(dir, ["commit", "-q", "--only", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200), "--", ...own]);
+  if (!own.length) return "nothing";
+  if (!git(dir, ["add", "--", ...own])) return "failed";
+  if (git(dir, ["diff", "--cached", "--quiet", "--", ...own])) return "nothing"; // nothing of these differs from history
+  return git(dir, ["commit", "-q", "--only", "--allow-empty-message", "-m", message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200), "--", ...own]) ? "done" : "failed";
 }
 
 /**
@@ -624,6 +626,8 @@ export interface WikiState {
   /** Per session: an event too long for one source, and how far into it the sources written so far reach. */
   partial?: Record<string, { id: number; off: number }>;
   /** Sources that couldn't be written when they came in (a saved fact), to try again. */
+  /** Page files whose commit failed or was skipped: named again by the next commit, across restarts. */
+  owed?: string[];
   queued?: { kind: SourceKind; title: string; text: string; by: string; /** The source's id, fixed when queued, so a retry (or a restart after the source landed but the queue didn't save) finds it instead of making another. */ id?: string }[];
   /** Existing pages the model asked to change without having been shown them whole: the next ingest shows these first. */
   need?: string[];
@@ -669,6 +673,8 @@ function parseState(j: unknown): WikiState {
   };
   const own = pair<{ slug: string; rev: string }>(j.own, (x) => typeof x.slug === "string" && typeof x.rev === "string");
   const filing = pair<{ slug: string; rev: string; id: string }>(j.filing, (x) => typeof x.slug === "string" && typeof x.rev === "string" && isSourceId(x.id));
+  const owedRaw = j.owed;
+  if (owedRaw !== undefined && !(Array.isArray(owedRaw) && owedRaw.every((x) => typeof x === "string" && x.length < 200))) throw new Error("bad owed");
   const need = j.need;
   if (need !== undefined && !(Array.isArray(need) && need.every((x) => typeof x === "string"))) throw new Error("bad need");
   if (j.migrated !== undefined && typeof j.migrated !== "boolean") throw new Error("bad migrated");
@@ -683,6 +689,7 @@ function parseState(j: unknown): WikiState {
     ...(partial ? { partial } : {}),
     ...(queued ? { queued: queued as NonNullable<WikiState["queued"]> } : {}),
     ...(need ? { need: need as string[] } : {}),
+    ...(owedRaw ? { owed: owedRaw as string[] } : {}),
     ...(seen ? { seen } : {}),
     ...(own ? { own } : {}),
     ...(filing ? { filing } : {}),

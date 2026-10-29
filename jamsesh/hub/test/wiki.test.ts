@@ -2569,7 +2569,7 @@ test("a commit names only what changed in raw/, not the whole archive", () => {
   expect(rawPaths(dir)).toEqual([`raw/${fresh.id}.md`]); // the archive is already in history
 });
 
-test("project and network changes by a request past the shutdown deadline are refused, wherever it resumes", async () => {
+test("assertLive throws for work from a request past the deadline, after any await, and not for the room's own work", async () => {
   const { assertLive } = await import("../src/room-context");
   let over = false;
   await inRequest({ over: () => over }, async () => {
@@ -2635,4 +2635,25 @@ test("a page whose commit was skipped because git couldn't list raw/ is named by
   const tracked = Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString();
   expect(tracked).toContain("wiki/skipped.md");
   expect(tracked).toContain("wiki/later.md");
+});
+
+test("a page whose commit failed stays owed across a restart until a commit succeeds", () => {
+  if (!gitAvailable()) return;
+  const { w, dir, s } = room();
+  w.editPage("first", "# First\n\nA page.", { by: "Chey" });
+  const index = readFileSync(join(dir, ".git", "index"));
+  writeFileSync(join(dir, ".git", "index"), "not an index");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    w.editPage("owed-page", "# Owed\n\nMade while git was unwell.", { by: "Chey" });
+  } finally {
+    console.error = err;
+  }
+  expect(readState(dir).owed).toContain("wiki/owed-page.md"); // on disk, not only in memory
+  writeFileSync(join(dir, ".git", "index"), index);
+  const again = new WikiService(s, dir, s.sessionId); // a restart
+  again.editPage("after", "# After\n\nLater.", { by: "Chey" });
+  expect(Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString()).toContain("wiki/owed-page.md");
+  expect(readState(dir).owed).toBeUndefined();
 });

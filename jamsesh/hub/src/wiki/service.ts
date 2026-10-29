@@ -242,16 +242,24 @@ export class WikiService {
     bus.send({ type: "wiki", kind, touched, by, at: Date.now() });
   }
 
-  /** Page files whose commit was skipped because git couldn't say what changed in raw/: named again by the next commit, so none is left outside history. */
-  private owedPaths = new Set<string>();
-
-  /** One commit of the files named, the sources that changed, the index and the log, plus any paths an earlier commit skipped. */
+  /**
+   * One commit of the files named, the sources that changed, the index and the log, plus any page paths an earlier commit
+   * did not make (git was unwell, or couldn't list raw/). Those are kept in the state file until a commit succeeds or has
+   * nothing to add, so no page version is left out of history for good, even across a restart.
+   */
   private commitOwn(message: string, paths: string[]) {
-    for (const p of paths) this.owedPaths.add(p);
+    let st: WikiState | null = null;
+    try {
+      st = readState(this.dir);
+    } catch {}
+    const owed = new Set([...(st?.owed ?? []), ...paths]);
     const raw = rawPaths(this.dir);
-    if (!raw) return; // git couldn't list the sources: no half commit; these paths wait for the next one
-    commitPaths(this.dir, message, [...this.owedPaths, "index.md", "log.md", ...raw]);
-    this.owedPaths.clear();
+    const result = raw ? commitPaths(this.dir, message, [...owed, "index.md", "log.md", ...raw]) : "failed";
+    const left = result === "failed" ? [...owed].slice(-200) : [];
+    try {
+      const now = readState(this.dir);
+      if ((now.owed ?? []).join("\n") !== left.join("\n")) writeState(this.dir, { ...now, ...(left.length ? { owed: left } : { owed: undefined }) });
+    } catch {}
   }
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */

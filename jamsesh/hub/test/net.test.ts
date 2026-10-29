@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dnsHasTxt, needsRenewal, parseDohTxt, safeError, waitForTxt } from "../src/net/acme";
@@ -215,5 +215,55 @@ describe("Network config", () => {
     await expect(issueOne("apex", { domain: { fqdn: "jam.duckdns.org", sub: "jam" } as any, token: "t", store: new CertStore(join(dir, "tls2")), f: f as any, signal: ac.signal })).rejects.toThrow();
     expect(existsSync(join(dir, "tls2", "account.key"))).toBe(false);
     expect(seen).toEqual([]);
+  });
+});
+
+describe("port mapper state", () => {
+  test("silence or an error from the router is not a removal: NAT-PMP must confirm", async () => {
+    const { PortMapper } = await import("../src/net/router");
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const file = join(dir, "router-map.json");
+    // A record of a UPnP mapping with no router to answer: removal fails, the record stays.
+    writeFileSync(file, JSON.stringify({ method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" }));
+    class NoRouter extends PortMapper {
+      protected override async remove(): Promise<void> {
+        throw new Error("no router answered");
+      }
+    }
+    const m = new NoRouter(file);
+    expect(await m.settleOwed()).toBe(false);
+    expect(existsSync(file)).toBe(true);
+    // And no new mapping is made over it.
+    const status = await m.map(443, 4443, "10.0.0.2");
+    expect(status.method).toBe("none");
+    expect(status.error).toContain("earlier port mapping");
+    expect(JSON.parse(readFileSync(file, "utf8")).externalPort).toBe(443);
+  });
+  test("a damaged record is kept and blocks a new mapping instead of being forgotten", async () => {
+    const { PortMapper } = await import("../src/net/router");
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const file = join(dir, "router-map.json");
+    writeFileSync(file, "{ not json");
+    const m = new PortMapper(file);
+    expect(await m.settleOwed()).toBe(false);
+    expect((await m.map(443, 4443, "10.0.0.2")).method).toBe("none");
+    expect(readFileSync(file, "utf8")).toBe("{ not json");
+  });
+  test("concurrent cleanups share one attempt", async () => {
+    const { PortMapper } = await import("../src/net/router");
+    const dir = mkdtempSync(join(tmpdir(), "net-"));
+    const file = join(dir, "router-map.json");
+    writeFileSync(file, JSON.stringify({ method: "upnp", internalPort: 1, externalPort: 2, lanIp: "10.0.0.2" }));
+    let calls = 0;
+    class Slow extends PortMapper {
+      protected override async remove(): Promise<void> {
+        calls++;
+        await Bun.sleep(30);
+      }
+    }
+    const m = new Slow(file);
+    const [a, b] = await Promise.all([m.settleOwed(), m.settleOwed()]);
+    expect([a, b, calls]).toEqual([true, true, 1]);
+    expect(existsSync(file)).toBe(false);
   });
 });

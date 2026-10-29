@@ -195,10 +195,26 @@ export class PortMapper {
   /** A mapping whose removal failed: kept on disk (when there is a `statePath`) and tried again at the next start, so a port is never left open with nothing remembering it. */
   private owed?: Mapping;
 
+  /** The record on disk exists but can't be read: a port may be open with nothing to say which, so no new mapping is made over it. */
+  private damaged = false;
+  private settling?: Promise<boolean>;
+
   constructor(private statePath?: string) {
     try {
-      if (statePath && existsSync(statePath)) this.owed = JSON.parse(readFileSync(statePath, "utf8"));
-    } catch {}
+      if (statePath && existsSync(statePath)) {
+        const m = JSON.parse(readFileSync(statePath, "utf8"));
+        if (!m || typeof m.internalPort !== "number" || typeof m.externalPort !== "number" || (m.method !== "upnp" && m.method !== "nat-pmp")) throw new Error("bad record");
+        this.owed = m;
+      }
+    } catch {
+      this.damaged = true;
+    }
+  }
+
+  /** Writes the record of a mapping before it is made. Throws if it can't be written: no mapping without a way to find it again. */
+  private intend(m: Mapping) {
+    if (this.statePath) writeFileSync(this.statePath, JSON.stringify(m), { mode: 0o600 });
+    this.owed = m;
   }
 
   private remember(m: Mapping | undefined) {
@@ -210,17 +226,24 @@ export class PortMapper {
     } catch {}
   }
 
-  /** Takes down a mapping an earlier run could not (called at start, before a new mapping). True when none is owed any more. */
-  async settleOwed(): Promise<boolean> {
-    if (!this.owed) return true;
-    const m = this.owed;
-    try {
-      await this.remove(m);
-      this.remember(undefined);
-      return true;
-    } catch {
-      return false; // still owed: stays on disk for the next start
-    }
+  /** Takes down a mapping an earlier run could not (called at start, before a new mapping). True when none is owed any more. One at a time. */
+  settleOwed(): Promise<boolean> {
+    return (this.settling ??= (async () => {
+      try {
+        if (this.damaged) return false;
+        const m = this.owed;
+        if (!m) return true;
+        try {
+          await this.remove(m);
+          this.remember(undefined);
+          return true;
+        } catch {
+          return false; // still owed: stays on disk for the next start
+        }
+      } finally {
+        this.settling = undefined;
+      }
+    })());
   }
 
   get owing() {
@@ -229,7 +252,13 @@ export class PortMapper {
 
   /** Deletes one mapping at the router. Throws when the router did not confirm. */
   protected async remove(c: Mapping) {
-    if (c.method === "nat-pmp" && c.gateway) await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
+    if (c.method === "nat-pmp") {
+      const gateway = c.gateway ?? (await defaultGateway());
+      if (!gateway) throw new Error("no router to ask");
+      const raw = await pmpExchange(gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
+      const reply = raw && decodeNatPmp(raw);
+      if (!reply || reply.kind !== "map" || reply.result !== 0) throw new Error("the router did not confirm the removal"); // silence or an error is not a deletion
+    }
     else if (c.method === "upnp") {
       this.igd ??= await findIgd();
       if (!this.igd) throw new Error("no router answered");
@@ -241,7 +270,10 @@ export class PortMapper {
   /** Opens externalPort -> lanIp:internalPort. Never throws; the status says what happened. */
   async map(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
     this.unrenew();
-    await this.settleOwed(); // a mapping an earlier run couldn't remove goes first
+    // A mapping an earlier run couldn't remove goes first, and while it is still there no new one is made over its record.
+    if (!(await this.settleOwed())) {
+      return { method: "none", externalPort, error: "an earlier port mapping could not be removed", message: `${manualMessage(externalPort, lanIp, internalPort)} (An earlier automatic mapping is still open and will be retried at the next start.)` };
+    }
     const gateway = await defaultGateway();
     let status: RouterStatus | undefined;
 
@@ -249,8 +281,7 @@ export class PortMapper {
       try {
         const r = await pmpMap(gateway, internalPort, externalPort, LEASE);
         if (r.supported && r.result === 0) {
-          this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp };
-          this.remember(this.current);
+          this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp }; // (a NAT-PMP lease runs out by itself; only a UPnP mapping, which can be permanent, is written down)
           status = { method: "nat-pmp", externalPort: r.externalPort, routerIp: gateway, externalIp: r.externalIp, lifetimeSec: r.lifetimeSec, message: `Your router opened port ${r.externalPort} automatically (NAT-PMP).` };
         } else if (r.supported) {
           status = { method: "none", externalPort, routerIp: gateway, externalIp: r.externalIp, error: PMP_ERRORS[r.result] ?? `error ${r.result}`, message: manualMessage(externalPort, lanIp, internalPort) };
@@ -275,14 +306,15 @@ export class PortMapper {
               NewPortMappingDescription: "JamSesh",
               NewLeaseDuration: lease,
             });
+          this.intend({ method: "upnp", internalPort, externalPort, lanIp }); // written before the mapping exists; if it can't be written, no mapping is made
           let add = await map(LEASE);
           // Many routers accept only permanent mappings (error 725): ask again without a lease.
           if (!add.ok && String(add.errorCode) === "725") add = await map(0);
           if (add.ok) {
             this.current = { method: "upnp", internalPort, externalPort, lanIp };
-            this.remember(this.current); // on disk from the moment it exists: a crash leaves the port open but remembered
             status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: LEASE, message: `Your router opened port ${externalPort} automatically (UPnP).` };
           } else {
+            this.remember(undefined); // the router said no: nothing was opened
             status = { method: "none", externalPort, routerIp: gateway, externalIp, error: `UPnP error ${add.errorCode ?? "unknown"}`, message: manualMessage(externalPort, lanIp, internalPort) };
           }
         }

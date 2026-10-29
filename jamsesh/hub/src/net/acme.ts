@@ -74,7 +74,7 @@ export class CertStore {
   }
 }
 
-export type IssueOpts = { domain: Domain; token: string; store: CertStore; staging?: boolean; email?: string; f?: FetchFn; onProgress?: (msg: string) => void; propagationMs?: number; /** Aborted when the room closes: nothing more is created (account key, DNS records) once it is. */ signal?: AbortSignal };
+export type IssueOpts = { domain: Domain; token: string; store: CertStore; staging?: boolean; email?: string; f?: FetchFn; onProgress?: (msg: string) => void; propagationMs?: number; /** Aborted when the room closes: nothing more is created (account key, DNS records) once it is. */ signal?: AbortSignal; /** The fetch for tidying up after a challenge: not cancelled by the signal, since it undoes a record this run set. */ cleanupF?: FetchFn };
 
 /** Issues one cert (one order) for `names`, serialising on the single DuckDNS TXT slot. */
 export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle> {
@@ -86,6 +86,7 @@ export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle
     directoryUrl: o.staging ? acme.directory.letsencrypt.staging : acme.directory.letsencrypt.production,
     accountKey,
   });
+  let txtSet = false;
   const [key, csr] = await acme.crypto.createCsr({ commonName: names[0] });
   o.onProgress?.(`Requesting the ${kind === "apex" ? "main" : "wildcard"} certificate`);
   const cert = await client.auto({
@@ -97,13 +98,16 @@ export async function issueOne(kind: CertKind, o: IssueOpts): Promise<CertBundle
     challengeCreateFn: async (_authz, _ch, txt) => {
       o.signal?.throwIfAborted();
       const r = await setTxt(o.domain, o.token, txt, o.f);
+      txtSet = true;
       if (!r.ok) throw new Error(r.error ?? "DuckDNS refused the TXT record");
       o.onProgress?.("Waiting for DNS to publish the proof");
       if (!(await waitForTxt(o.domain.fqdn, txt, { f: o.f, timeoutMs: o.propagationMs, signal: o.signal }))) throw new Error("DNS didn't show the challenge record in time. Try again in a minute.");
     },
     challengeRemoveFn: async () => {
-      if (o.signal?.aborted) return; // a closed room changes no DNS record, not even to tidy one
-      await clearTxt(o.domain, o.token, o.f);
+      if (!txtSet) return; // nothing was published: nothing to take down
+      // Even when the room is closing: this undoes the one record this run set, through a fetch the signal doesn't cut.
+      const r = await clearTxt(o.domain, o.token, o.cleanupF ?? o.f);
+      if (!r.ok) o.onProgress?.("Couldn't clear the proof record from DNS; it is harmless and is replaced by the next issue");
     },
   });
   const notAfter = new X509Certificate(cert).validToDate.getTime();

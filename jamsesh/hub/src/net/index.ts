@@ -188,7 +188,7 @@ export class Network {
       try {
         for (const kind of todo) {
           if (this.closed) break;
-          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.f, signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.f, cleanupF: (u, init) => this.fetchFn(u, { ...init, signal: AbortSignal.timeout(8000) }), signal: this.abort.signal, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
           if (this.closed) break; // issued as the room closed: not kept
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };

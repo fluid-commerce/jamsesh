@@ -1,5 +1,5 @@
-// A small line diff for the wiki cards: unified-style hunks with two lines of context, cut to a readable size. Removed
-// lines are never hidden: past the cut the rest of them follow, and the counts cover the whole page.
+// A small line diff for the wiki cards: unified-style hunks with two lines of context, cut to a readable size. A cut is
+// said (how many changed lines are left out), the counts cover the whole page, and the whole change is one request away.
 const MAX_LINES = 700;
 const CONTEXT = 2;
 
