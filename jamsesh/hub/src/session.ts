@@ -27,7 +27,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
+ BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock, StageTileKey } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -201,6 +201,7 @@ export class Session {
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
       stageHistory: this.stageHistory(),
+      stageTiles: this.stageTiles(),
       digest: this.store.digest("session")?.text ?? "",
       totals: this.totals(),
       brain: this.brainStatus,
@@ -292,6 +293,8 @@ export class Session {
         return { key, value: this.showRequests().filter((r) => r.status === "pending") };
       case "stageHistory":
         return { key, value: this.stageHistory() };
+      case "stageTiles":
+        return { key, value: this.stageTiles() };
       default:
         return null;
     }
@@ -1481,8 +1484,14 @@ export class Session {
     return stage;
   }
 
-  /** The keys of the tiles a screen's stage shows, in the order the screen draws them (the web's `stageTiles` keeps the same rules). */
-  stageTileKeys(screen = "main"): { key: string; artifactId?: string }[] {
+  /** Every screen's tile keys (`stageTileKeys`), as windows get them: they draw tiles from these and never work keys out themselves. */
+  stageTiles(): Record<string, StageTileKey[]> {
+    const ids = new Set(["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]);
+    return Object.fromEntries([...ids].map((id) => [id, this.stageTileKeys(id)]));
+  }
+
+  /** The keys of the tiles a screen's stage shows, in the order the screen draws them. The one place keys are made. */
+  stageTileKeys(screen = "main"): StageTileKey[] {
     const st = this.stage(screen);
     const arts = this.artifacts();
     const known = new Set(arts.map((a) => a.id));
@@ -1501,7 +1510,7 @@ export class Session {
       case "parity":
         return byId((st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c) => c.items));
       case "layout":
-        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, artifactId: t.kind === "artifact" ? t.artifactId : undefined }));
+        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, layoutIndex: i, ...(t.kind === "artifact" ? { artifactId: t.artifactId } : {}) }));
       default:
         return [];
     }
@@ -1537,6 +1546,7 @@ export class Session {
 
   private commitStage(stage: Stage, screen: string) {
     this.expireAsksFor(screen, stage.lock);
+    bus.changed("stageTiles");
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");

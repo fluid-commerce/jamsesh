@@ -77,7 +77,7 @@ export function Stage({ state, interactive, tilePins = true, bar }: { state: Hub
   );
 }
 
-/** A tile of the current stage that can be expanded: its key (an artifact's id, or "t<n>" for a layout's nth tile), and how to draw it. */
+/** A tile of the current stage that can be expanded: the hub's key for it, and how to draw it. */
 interface StageTile {
   key: string;
   label: string;
@@ -86,31 +86,27 @@ interface StageTile {
   node: ReactElement;
 }
 
-/** The tiles of the stage's multi-tile modes, in reading order. Single-view modes (agents, custom, join) have nothing to expand. */
-export function stageTiles(state: HubState): StageTile[] {
-  const stage = state.stage;
-  const byId = new Map(state.artifacts.map((a) => [a.id, a]));
-  const art = (a: Artifact): StageTile => ({ key: a.id, label: a.title, kind: "artifact", art: a, node: <PinnedTile art={a} state={state} big /> });
-  const pick = (ids: string[]) => ids.map((id) => byId.get(id)).filter((a): a is Artifact => !!a).map(art);
-  switch (stage.mode) {
-    case "welcome":
-    case "board":
-      return state.artifacts.slice(0, BOARD_MAX).map(art);
-    case "spotlight":
-      return pick(stage.items);
-    case "compare":
-      // Drawn lettered, so counted that way.
-      return pick(stage.items).sort((x, y) => (x.art!.variant || x.label).localeCompare(y.art!.variant || y.label));
-    case "parity":
-      return pick((stage.columns?.length ? stage.columns : [{ label: "", items: stage.items }]).flatMap((c) => c.items));
-    case "layout":
-      return (stage.layout?.tiles ?? []).map((t, i) => ({ key: layoutKey(i), label: tileLabel(t, state), kind: t.kind, art: t.kind === "artifact" ? byId.get(t.artifactId) : undefined, node: <TileView tile={t} state={state} /> }));
-    default:
-      return [];
-  }
+/** The hub's tile list for the screen this stage is on. Keys and their order come from the hub only (Session.stageTileKeys). */
+const hubTiles = (state: HubState) => state.stageTiles?.[state.stage.screenId ?? "main"] ?? [];
+
+/** The hub's key for a tile this stage draws (an artifact, or a layout's nth tile); null when the hub lists none, so no Expand. */
+function tileKey(state: HubState, t: { artifactId: string } | { layoutIndex: number }): string | null {
+  return hubTiles(state).find((k) => ("layoutIndex" in t ? k.layoutIndex === t.layoutIndex : k.layoutIndex === undefined && k.artifactId === t.artifactId))?.key ?? null;
 }
 
-const layoutKey = (i: number) => `t${i}`;
+/** The tiles of the stage, in the hub's order, with what draws each. Single-view modes (agents, custom, join) have none. */
+export function stageTiles(state: HubState): StageTile[] {
+  const byId = new Map(state.artifacts.map((a) => [a.id, a]));
+  const layout = state.stage.mode === "layout" ? (state.stage.layout?.tiles ?? []) : [];
+  return hubTiles(state).flatMap(({ key, artifactId, layoutIndex }): StageTile[] => {
+    if (layoutIndex !== undefined) {
+      const t = layout[layoutIndex];
+      return t ? [{ key, label: tileLabel(t, state), kind: t.kind, art: t.kind === "artifact" ? byId.get(t.artifactId) : undefined, node: <TileView tile={t} state={state} /> }] : [];
+    }
+    const a = artifactId ? byId.get(artifactId) : undefined;
+    return a ? [{ key, label: a.title, kind: "artifact", art: a, node: <PinnedTile art={a} state={state} big /> }] : [];
+  });
+}
 
 function tileLabel(t: Tile, state: HubState): string {
   switch (t.kind) {
@@ -183,7 +179,7 @@ function Board({ state, onPick }: { state: HubState; onPick: (a: Artifact) => vo
       {items.map((a, i) => (
         <div key={a.id} style={{ gridArea: l.areas[i], minHeight: 0, display: "flex" }}>
           <div style={{ flex: 1, display: "flex", minWidth: 0 }}>
-            <TileKeyCtx.Provider value={a.id}>
+            <TileKeyCtx.Provider value={tileKey(state, { artifactId: a.id })}>
               <PinnedTile art={a} state={state} fresh={now - a.updatedAt < 45_000} big={i === 0 && n >= 3} onClick={() => onPick(a)} />
             </TileKeyCtx.Provider>
           </div>
@@ -213,7 +209,7 @@ function Columns({ title, caption, items, state, lettered, big }: { title: strin
       <Header title={title} caption={caption} />
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 18, gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
         {(lettered ? [...items].sort((a, b) => (a.variant || a.title).localeCompare(b.variant || b.title)) : items).map((a, i) => (
-          <TileKeyCtx.Provider key={a.id} value={a.id}>
+          <TileKeyCtx.Provider key={a.id} value={tileKey(state, { artifactId: a.id })}>
             <PinnedTile art={a} state={state} big={big || items.length <= 3} variant={lettered ? a.variant || String.fromCharCode(65 + i) : undefined} />
           </TileKeyCtx.Provider>
         ))}
@@ -236,7 +232,7 @@ function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Art
             </div>
             <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 14, gridTemplateColumns: `repeat(${Math.max(1, c.items.length)}, minmax(0, 1fr))` }}>
               {pick(c.items).map((a) => (
-                <TileKeyCtx.Provider key={a.id} value={a.id}>
+                <TileKeyCtx.Provider key={a.id} value={tileKey(state, { artifactId: a.id })}>
                   <PinnedTile art={a} state={state} />
                 </TileKeyCtx.Provider>
               ))}
@@ -305,7 +301,7 @@ function LayoutView({ state }: { state: HubState }) {
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 16, gridTemplateColumns: grid.columns, gridTemplateRows: grid.rows }}>
         {tiles.map((t, i) => (
           <div key={i} style={{ gridArea: grid.areas[i] ?? "auto", minHeight: 0, minWidth: 0, display: "flex" }}>
-            <TileKeyCtx.Provider value={layoutKey(i)}>
+            <TileKeyCtx.Provider value={tileKey(state, { layoutIndex: i })}>
               <TileView tile={t} state={state} />
             </TileKeyCtx.Provider>
           </div>

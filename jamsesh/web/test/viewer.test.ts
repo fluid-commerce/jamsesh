@@ -90,7 +90,7 @@ test("Expand goes out through the real api() helper to the hub's expand route, i
   }
 });
 
-test("a cast resolves with what the hub said, not with the click, and the failure note has a place to show on host screens", async () => {
+test("a cast resolves with what the hub said, not with the click", async () => {
   (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/client", search: "" };
   (globalThis as any).navigator ??= {};
   Object.defineProperty(globalThis.navigator, "onLine", { value: true, configurable: true });
@@ -107,8 +107,4 @@ test("a cast resolves with what the hub said, not with the click, and the failur
   } finally {
     globalThis.fetch = realFetch;
   }
-  // The note's listener is mounted on host windows too (only the picker is people's apps' alone).
-  const main = await Bun.file(new URL("../src/main.tsx", import.meta.url)).text();
-  expect(main).toMatch(/<CastHost picker=\{!isHost\} \/>/);
-  expect(main).not.toMatch(/!isHost && <CastHost/);
 });

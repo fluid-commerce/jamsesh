@@ -37,6 +37,8 @@ class Bus {
     this.dirty.clear();
     // The counts of what the state leaves out travel with the lists they count.
     if (keys.some((k) => k === "directives" || k === "artifacts" || k === "utterances") && !keys.includes("totals")) keys.push("totals");
+    // A screen's tiles follow the artifacts (the board shows the newest).
+    if (keys.includes("artifacts") && !keys.includes("stageTiles")) keys.push("stageTiles");
     for (const k of keys) {
       // One collection that can't be read (a store error) doesn't stop the others' patches.
       let patch: ReturnType<NonNullable<Bus["resolver"]>> = null;

@@ -152,3 +152,31 @@ test("full-size render: path tricks never leave the renders folder, a failed dra
   expect(readdirSync(join(hub.canvas.rendersDir, "full")).length).toBeLessThanOrEqual(60);
   expect(existsSync(join(hub.canvas.rendersDir, "..", "etc"))).toBe(false);
 });
+
+test("windows get each screen's tile keys from the hub: in the state, and again whenever the stage or the artifacts change", async () => {
+  const { bus } = await import("../src/bus");
+  // The tests above made other sessions; this hub's session answers the patches again.
+  bus.resolver = (k) => (s as any).resolve(k);
+  const patches: any[] = [];
+  const off = bus.on((m: any) => m.type === "patch" && m.key === "stageTiles" && patches.push(m.value));
+  try {
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "artifact", artifactId: a.id }, { kind: "feed" }] } }, "Chey");
+    expect(s.state().stageTiles.main).toEqual([{ key: "t0", layoutIndex: 0, artifactId: a.id }, { key: "t1", layoutIndex: 1 }]);
+    await Bun.sleep(80);
+    expect(patches.at(-1).main.map((t: any) => t.key)).toEqual(["t0", "t1"]);
+    // An extra screen's stage has its own list.
+    s.setStage({ mode: "compare", items: [b.id, a.id] }, "Chey", "screen-2");
+    await Bun.sleep(80);
+    expect(patches.at(-1)["screen-2"].map((t: any) => t.key)).toEqual([a.id, b.id]);
+    // The board shows the newest artifacts: a new one changes its tiles without any stage change.
+    s.setStage({ mode: "board" }, "JamSesh", "main", { override: true });
+    await Bun.sleep(80);
+    const n = patches.length;
+    const c = s.upsertArtifact({ kind: "screenshot", title: "Pricing" });
+    await Bun.sleep(80);
+    expect(patches.length).toBeGreaterThan(n);
+    expect(patches.at(-1).main[0].key).toBe(c.id);
+  } finally {
+    off?.();
+  }
+});

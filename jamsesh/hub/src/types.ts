@@ -306,6 +306,13 @@ export interface Stage {
 }
 
 /** A person's hold on a screen. It ends when they unlock, leave, or 20 minutes pass without them touching it. */
+/** A tile of a screen's stage that can be expanded: its key, and what it shows (an artifact, or the nth tile of a layout). */
+export interface StageTileKey {
+  key: string;
+  artifactId?: string;
+  layoutIndex?: number;
+}
+
 export interface StageLock {
   by: string;
   personId: string | null;
@@ -454,6 +461,8 @@ export interface HubState {
   showRequests: ShowRequest[];
   /** What each screen showed recently, newest first (3.6). */
   stageHistory: Record<string, StageHistoryEntry[]>;
+  /** Each screen's expandable tiles, in the order the screen draws them. The hub alone decides their keys; windows draw from this. */
+  stageTiles: Record<string, StageTileKey[]>;
   digest: string;
   /** How much the session holds in all; the lists above carry only the newest, /api/history/<what> pages the rest. */
   totals: { events: number; utterances: number; directives: number; artifacts: number };
