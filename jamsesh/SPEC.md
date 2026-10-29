@@ -164,9 +164,10 @@ the client.
 - **Put on screen**: the hub's state lists the room's screens (id, name, role, size, stage). With
   two or more, a cast from someone's app (Work tab, tapping a tile) opens a picker with a live
   thumbnail of each screen (its stage drawn at the screen's own size and scaled down) and its name; the
-  chosen screen gets the cast (`POST /api/stage` takes `screen`: an id, a whole name, or the first
-  word(s) of exactly one screen's name; none named is the main screen, one that isn't there is 404,
-  and a start two names share is 409 naming both, so the person can say which). With one screen nothing is asked. Each stage carries its
+  chosen screen gets the cast (`POST /api/stage` takes `screen`: an id, matched as an id only; or a
+  name, or the first word(s) of a name, that exactly one screen has. None named is the main screen,
+  one that isn't there is 404, and a name or start two screens share is 409 naming both, so the
+  person can say which). With one screen nothing is asked. Each stage carries its
   `screenId`.
 - Keeps hosting from the menu bar when its windows are closed. The menu shows that it's hosting,
   the current join code (refreshed every 5 seconds), who's connected, and **Open my window**,
@@ -1343,9 +1344,12 @@ ready. Can I put it up?" (once more after a minute). One question is open per sc
 within 10 minutes of a no. The owner can answer by button (the owner, or the host's own window) or
 by voice: "yes, show it" or "keep mine up", plus a bare "yes" or "no" for 90 seconds after the
 question; only the owner's words count and the brain's voice handling applies them with or without
-a model. A spoken answer settles a question only when it is the only one open for that person (their
-show requests and any lock question to the room); with two open it settles none, JamSesh asks which,
-and the cards still answer each by its id. One line answers one question, once. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
+a model. A spoken answer settles a question only when it is the only one open for that person, of any
+kind (host build approvals, their show requests, any lock question to the room); with two open a
+plain yes or no settles none, JamSesh asks which, and the cards still answer each by its id ("deny
+the build" names its kind and still counts). One line answers one question, once. Every stage write
+says who acts: a person now, the hub's upkeep now, or a claim for work decided earlier (the brain,
+an agent), which lands only on a screen nothing changed since; a share that has ended is never put up. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
 unanswered question goes stale after 5 minutes.
 
 **One item per built screen (3.5).** A new `jam_post_image` or `/api/upload` of the same agent and

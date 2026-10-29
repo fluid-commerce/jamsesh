@@ -867,15 +867,9 @@ fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "userless" => {
-                let on = {
-                    let mut inner = state.inner.lock().await;
-                    inner.cfg.userless = !inner.cfg.userless;
-                    if let Err(e) = state.save(&inner.cfg) {
-                        warn(&app, "Settings not saved", e);
-                    }
-                    inner.cfg.userless
-                };
-                set_userless(&app, ticket, on, hub_origin.as_deref());
+                if let Err(e) = toggle_userless_for(&app, &state, ticket).await {
+                    warn(&app, "Settings not saved", e);
+                }
                 refresh_tray(&app).await;
             }
             "setup" => open_setup(&app),
@@ -1038,18 +1032,29 @@ async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Opt
 
 /// Switches between a host someone uses (one big screen plus their window) and a user-less one
 /// (a big screen on every display).
-fn set_userless(app: &AppHandle, ticket: Ticket, on: bool, origin: Option<&str>) {
-    let Some(origin) = origin else { return };
-    // The displays' defaults differ (a user-less host also presents on the laptop's own display).
-    let a = app.clone();
-    tauri::async_runtime::spawn(async move { drop(screens::arrange_for(&a, ticket).await) });
-    if on {
-        if let Some(w) = app.get_webview_window("client") {
-            let _ = w.close();
+/// In a quiet turn for the session `ticket` was taken in, the setting, the windows and the arrangement change together,
+/// or (the session changed since) none of them. Returns the setting as it is now.
+async fn toggle_userless_for(app: &AppHandle, state: &App, ticket: Ticket) -> Result<bool, String> {
+    let Some(_turn) = state.switching.lock_quiet(ticket).await else { return Ok(state.inner.lock().await.cfg.userless) };
+    let (on, origin) = {
+        let mut inner = state.inner.lock().await;
+        let next = Config { userless: !inner.cfg.userless, ..inner.cfg.clone() };
+        state.save(&next)?;
+        inner.cfg = next;
+        (inner.cfg.userless, inner.hub.as_ref().map(|h| h.origin()))
+    };
+    if let Some(origin) = origin {
+        if on {
+            if let Some(w) = app.get_webview_window("client") {
+                let _ = w.close();
+            }
+        } else {
+            let _ = open_window(app, "client", &host::window_url(&origin, "/client"), "JamSesh");
         }
-    } else {
-        let _ = open_window(app, "client", &host::window_url(origin, "/client"), "JamSesh");
+        // The displays' defaults differ (a user-less host also presents on the laptop's own display).
+        let _ = screens::arrange_current(app).await;
     }
+    Ok(on)
 }
 
 #[tauri::command]
@@ -1060,13 +1065,7 @@ async fn get_userless(state: State<'_, Arc<App>>) -> Result<bool, String> {
 #[tauri::command]
 async fn toggle_userless(app: AppHandle, state: State<'_, Arc<App>>) -> Result<bool, String> {
     let ticket = state.switching.ticket();
-    let (on, origin) = {
-        let mut inner = state.inner.lock().await;
-        inner.cfg.userless = !inner.cfg.userless;
-        state.save(&inner.cfg)?;
-        (inner.cfg.userless, inner.hub.as_ref().map(|h| h.origin()))
-    };
-    set_userless(&app, ticket, on, origin.as_deref());
+    let on = toggle_userless_for(&app, &state, ticket).await?;
     refresh_tray(&app).await;
     Ok(on)
 }
@@ -1131,7 +1130,7 @@ fn resume_launch(cfg: &Config) -> Launch {
 #[tauri::command]
 async fn relaunch(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
     let ticket = state.switching.ticket();
-    let Err(e) = reopen(&app, &state, ticket).await else { return Ok(()) };
+    let Err(e) = reopen(&app, &state, ticket, false).await else { return Ok(()) };
     // Ask; "Reopen anyway" is the person leaving that save behind, for the session they were asked about.
     let ticket = state.switching.ticket();
     let (handle, st) = (app.clone(), state.inner().clone());
@@ -1143,8 +1142,7 @@ async fn relaunch(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), Stri
         .show(move |anyway| {
             if anyway {
                 tauri::async_runtime::spawn(async move {
-                    st.switching.set_unsaved(None);
-                    if let Err(e) = reopen(&handle, &st, ticket).await {
+                    if let Err(e) = reopen(&handle, &st, ticket, true).await {
                         warn(&handle, "The session didn't finish saving", e);
                     }
                 });
@@ -1153,22 +1151,29 @@ async fn relaunch(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), Stri
     Err(e)
 }
 
-/// One Reopen: the last turn for the session `ticket` was taken in (a second Reopen queued behind it does nothing),
-/// the hub's acknowledged stop, then a restart, unless a save didn't finish, now or before (`Turns::unsaved`): then
-/// the app stays, back at the start, and says why.
-async fn reopen(app: &AppHandle, state: &App, ticket: Ticket) -> Result<(), String> {
+/// One Reopen: the last turn for the session `ticket` was taken in (a second Reopen queued behind it, or a dialog
+/// answered after the session changed, does nothing). An earlier save that didn't finish (`Turns::unsaved`) stops it
+/// before anything is stopped, unless the person chose to leave it behind (`discard`, cleared only inside this valid
+/// turn). Then the hub's acknowledged stop, and a restart only if that save finished; if not, the app stays, back at
+/// the start, and says why.
+async fn reopen(app: &AppHandle, state: &App, ticket: Ticket, discard: bool) -> Result<(), String> {
     let Some(turn) = state.switching.quit_for(ticket).await else { return Ok(()) };
-    let stopped = stop_hub(state).await;
-    let Some(e) = state.switching.unsaved() else {
-        state.switching.ended.store(true, std::sync::atomic::Ordering::SeqCst);
-        app.request_restart();
-        return Ok(());
-    };
-    turn.keep_running();
-    if stopped.is_err() {
-        leave_now(app, state).await;
+    if discard {
+        state.switching.set_unsaved(None);
     }
-    Err(e)
+    if let Some(e) = state.switching.unsaved() {
+        // The running session, if any, is left exactly as it is.
+        turn.keep_running();
+        return Err(e);
+    }
+    if let Err(e) = stop_hub(state).await {
+        turn.keep_running();
+        leave_now(app, state).await;
+        return Err(e);
+    }
+    state.switching.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.request_restart();
+    Ok(())
 }
 
 fn main() {
@@ -1404,6 +1409,18 @@ mod tests {
         drop(again);
         turns.set_unsaved(None);
         assert!(turns.unsaved().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_old_reopen_dialog_never_clears_a_later_failed_save() {
+        let turns = Turns::new();
+        // The dialog was shown for the session then; the person hosted again, and that session's save failed too.
+        let dialog = turns.ticket();
+        drop(turns.lock(turns.ticket()).await.unwrap());
+        turns.set_unsaved(Some("The newer session's save didn't finish.".into()));
+        // "Reopen anyway" on the old dialog: its turn is refused, so it clears nothing (reopen clears only inside it).
+        assert!(turns.quit_for(dialog).await.is_none());
+        assert_eq!(turns.unsaved().as_deref(), Some("The newer session's save didn't finish."));
     }
 
     #[tokio::test]

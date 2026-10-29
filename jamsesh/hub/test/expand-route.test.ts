@@ -29,7 +29,7 @@ const b = s.upsertArtifact({ kind: "screenshot", title: "Checkout / B" });
 const frame = s.upsertArtifact({ kind: "frame", title: "Dashboard", nodeId: "12", image: "/renders/12-abcdef.png", width: 1440, height: 900 });
 
 test("the expand route: a person's window expands and collapses; strangers, agents and malformed calls don't", async () => {
-  s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey");
+  s.setStage({ mode: "compare", items: [a.id, b.id] }, "Chey", "main", { claim: s.stageClaim() });
   expect((await expand({ tile: b.id })).status).toBe(200);
   expect(s.stage().expanded).toBe(b.id);
   // Repeated: same answer, same state.
@@ -63,7 +63,7 @@ test("expanding restarts the wait before a brought-up stage returns to the board
   Session.STAGE_REVERT_MS = 120;
   try {
     const s2 = new Session(new Store(mkdtempSync(join(tmpdir(), "jam-expand-timer-"))));
-    s2.setStage({ mode: "spotlight", items: ["a"] }, "Room brain");
+    s2.setStage({ mode: "spotlight", items: ["a"] }, "Room brain", "main", { claim: s2.stageClaim() });
     await Bun.sleep(80);
     s2.expandTile("a");
     await Bun.sleep(80);
@@ -71,7 +71,7 @@ test("expanding restarts the wait before a brought-up stage returns to the board
     await Bun.sleep(100);
     expect(s2.stage().mode).toBe("board");
     // A pinned stage never reverts, expanded or not.
-    s2.setStage({ mode: "spotlight", items: ["a"], pinned: true }, "Chey");
+    s2.setStage({ mode: "spotlight", items: ["a"], pinned: true }, "Chey", "main", { claim: s2.stageClaim() });
     s2.expandTile("a");
     await Bun.sleep(200);
     expect(s2.stage().mode).toBe("spotlight");
@@ -81,7 +81,7 @@ test("expanding restarts the wait before a brought-up stage returns to the board
 });
 
 test("by voice: the second tile, a named artifact, a count that's too big, and collapse", () => {
-  s.setStage({ mode: "compare", items: [b.id, a.id] }, "Room brain");
+  s.setStage({ mode: "compare", items: [b.id, a.id] }, "Room brain", "main", { claim: s.stageClaim() });
   // Drawn as A then B, so "the second one" is B.
   expect(s.stageTileKeys().map((t) => t.key)).toEqual([a.id, b.id]);
   expect(s.expandWhich({ position: 2 })).toMatchObject({ ok: true });
@@ -95,10 +95,10 @@ test("by voice: the second tile, a named artifact, a count that's too big, and c
   expect(s.expandWhich({})).toMatchObject({ ok: true });
   expect(s.stage().expanded).toBeUndefined();
   // A layout is counted by tile, and a tile can be found by its artifact.
-  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "web", url: "http://x.test" }, { kind: "artifact", artifactId: b.id }] } }, "Room brain");
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "web", url: "http://x.test" }, { kind: "artifact", artifactId: b.id }] } }, "Room brain", "main", { claim: s.stageClaim() });
   expect(s.expandWhich({ artifactId: b.id })).toMatchObject({ ok: true });
   expect(s.stage().expanded).toBe("t1");
-  s.setStage({ mode: "agents" }, "Room brain");
+  s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() });
   expect(s.expandWhich({ position: 1 })).toMatchObject({ ok: false });
   // Another screen is its own stage.
   expect(s.expandWhich({ position: 1 }, "main")).toMatchObject({ ok: false });
@@ -160,12 +160,12 @@ test("windows get each screen's tile keys from the hub: in the state, and again 
   const patches: any[] = [];
   const off = bus.on((m: any) => m.type === "patch" && m.key === "stageTiles" && patches.push(m.value));
   try {
-    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "artifact", artifactId: a.id }, { kind: "feed" }] } }, "Chey");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "artifact", artifactId: a.id }, { kind: "feed" }] } }, "Chey", "main", { claim: s.stageClaim() });
     expect(s.state().stageTiles.main).toEqual([{ key: "t0", layoutIndex: 0, artifactId: a.id }, { key: "t1", layoutIndex: 1 }]);
     await Bun.sleep(80);
     expect(patches.at(-1).main.map((t: any) => t.key)).toEqual(["t0", "t1"]);
     // An extra screen's stage has its own list.
-    s.setStage({ mode: "compare", items: [b.id, a.id] }, "Chey", "screen-2");
+    s.setStage({ mode: "compare", items: [b.id, a.id] }, "Chey", "screen-2", { claim: s.stageClaim() });
     await Bun.sleep(80);
     expect(patches.at(-1)["screen-2"].map((t: any) => t.key)).toEqual([a.id, b.id]);
     // The board shows the newest artifacts: a new one changes its tiles without any stage change.

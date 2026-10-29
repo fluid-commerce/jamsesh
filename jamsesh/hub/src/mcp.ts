@@ -607,6 +607,7 @@ export class McpEndpoint {
       }
       case "jam_show": {
         const agent = this.requireAgent(ctx);
+        const claim = s.stageClaim();
         const known = new Set(s.artifacts().map((a) => a.id));
         const items = (args.artifactIds ?? []).filter((i: string) => known.has(i));
         const columns = (args.columns ?? []).map((c: any) => ({ label: String(c.label ?? ""), items: (c.artifactIds ?? []).filter((i: string) => known.has(i)) }));
@@ -627,7 +628,7 @@ export class McpEndpoint {
           bus.send({ type: "toast", tone: "info", text: `${agent.name} would like to show ${args.title || "their work"}`, detail: `${why}, so it wasn't swapped in.` });
           return text(`${why}, so I didn't replace it. The room got a note that you'd like to show this; try again in a minute or ask them.`);
         }
-        s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items, columns: columns.length ? columns : undefined }, agent.name);
+        s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items, columns: columns.length ? columns : undefined }, agent.name, "main", { claim });
         return text("On the big screen.");
       }
       case "jam_artifacts": {

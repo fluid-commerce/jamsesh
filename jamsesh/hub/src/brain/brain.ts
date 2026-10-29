@@ -4,9 +4,9 @@
 import { generateText, isStepCount, Output, tool } from "ai";
 import { z } from "zod";
 import { bus } from "../bus";
-import type { Session, UpdateKind } from "../session";
+import type { Session, StageClaim, UpdateKind } from "../session";
 import { shortRepo } from "../session";
-import type { Agent, Artifact, JamEvent, Relevance, Share, Tile } from "../types";
+import type { Agent, Artifact, JamEvent, Relevance, Share, Stage, Tile } from "../types";
 import { describeError, model } from "./llm";
 import { chime, speak, type SpeechSource } from "./speech";
 import { newId } from "../store";
@@ -120,20 +120,28 @@ export class Brain {
     this.timer = setTimeout(() => this.flush(), TRIAGE_DEBOUNCE_MS);
   }
 
-  /** Decides every waiting host request a person clearly answered in these lines; true when a line was only that answer. */
+  /**
+   * Decides every question a person clearly answered in these lines (host build approvals, show requests); true when a
+   * line was only an answer. A line answers one question, once. A bare answer from someone with more than one question
+   * open (`openQuestionsFor`, every kind) settles none, and JamSesh asks which; an answer naming its build still counts.
+   */
   private decideByVoice(batch: JamEvent[]) {
     let only = false;
-    const pending = this.host.pendingRequests();
-    for (const req of pending) {
-      const v = verdictFor(batch, req, pending, brainNames(this.session.settings()));
-      if (!v) continue;
-      this.host.decide(req.id, v.approve, v.by, v.at);
-      only ||= v.only;
-    }
-    // The owner of a locked screen answering an agent's request to put something up. Spoken, an answer settles a
-    // request only when it is the one question open for that owner; with two, it settles none and JamSesh asks which.
     const s = this.session;
     const unclear = new Set<string>();
+    const pending = this.host.pendingRequests();
+    for (const req of pending) {
+      const v = verdictFor(batch, req, pending, brainNames(s.settings()));
+      if (!v || this.answerLines.has(v.line)) continue;
+      only ||= v.only;
+      if (!v.named && s.openQuestionsFor(v.personId).length > 1) {
+        if (v.personId) unclear.add(v.personId);
+        continue;
+      }
+      this.usedLine(v.line);
+      this.host.decide(req.id, v.approve, v.by, v.at);
+    }
+    // The owner of a locked screen answering an agent's request to put something up.
     for (const req of s.showRequests().filter((r) => r.status === "pending")) {
       const v = showVerdict(batch, req, brainNames(s.settings()));
       if (!v || this.answerLines.has(v.line)) continue;
@@ -149,7 +157,7 @@ export class Brain {
     for (const owner of unclear) {
       const open = s.openQuestionsFor(owner);
       const where = (screen: string) => (screen === "main" ? "the main screen" : (s.findScreen(screen)?.name ?? "another screen"));
-      const which = open.map((q) => (q.kind === "show" ? `${q.label} on ${where(q.screen)}` : `replacing ${where(q.screen)}`)).join(", or ");
+      const which = open.map((q) => (q.kind === "build" ? q.label : q.kind === "show" ? `${q.label} on ${where(q.screen)}` : `replacing ${where(q.screen)}`)).join(", or ");
       void speak(s, `${s.person(owner)?.name ?? "Sorry"}, which one? ${which}. Use the card for the one you mean.`, { source: speechSource(batch), kind: "problem" });
     }
     return only;
@@ -343,12 +351,13 @@ export class Brain {
     // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
     s.rememberStageFor(share.id);
     // The owner's own share over their cast keeps their lock, and the cast comes back with it (SPEC 10.5).
-    // Decided now, applied maybe 45 s later: only onto the very screen and lock it was decided for (compare-and-set),
-    // only while the share is live and the brain runs. Anything newer (another cast, an unlock, the share ending) wins.
-    const rev = s.stageRev("main");
+    // Decided now, applied maybe 45 s later, by the model's set_layout or the fallback: either way under one claim, so
+    // only onto the very screen and lock it was decided for, and setStage drops a share that has ended. Anything newer
+    // (another cast, an unlock, the share ending) wins.
+    const claim = s.stageClaim();
     const fallback = () => {
-      if (this.stopped || s.store.get("shares", share.id)?.status !== "live") return;
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined, ifRev: rev });
+      if (this.stopped) return;
+      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined, claim });
     };
     if (!m) return fallback();
     const pass = { effects: 0 };
@@ -358,7 +367,7 @@ export class Brain {
         model: m,
         system: this.system(),
         prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
-        tools: { set_layout: this.tools([], pass).set_layout },
+        tools: { set_layout: this.tools([], pass, "person", claim).set_layout },
         stopWhen: isStepCount(2),
       });
       if (!pass.effects && !this.stopped) fallback();
@@ -465,12 +474,12 @@ export class Brain {
    * something up (see `asksForScreen`), in which case their lock is let go first. Anything else the owner says
    * nearby, or asks about something else, isn't consent.
    */
-  private lockBlock(screen: string, batch: JamEvent[]): string | null {
+  private lockBlock(screen: string, batch: JamEvent[], claim: StageClaim): string | null {
     const s = this.session;
     const lock = s.lockOf(screen);
     if (!lock) return null;
     const asks = batch.filter((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
-    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen) && s.releaseLock(screen, { owner: lock.personId })) return null;
+    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen) && s.releaseLock(screen, { owner: lock.personId }, claim)) return null;
     this.unlockRefused.set(screen, lock.since);
     return `${lock.by} has this screen locked, so you can't replace it. Ask the room with ask_to_replace_screen (it asks the one question about this screen). If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
@@ -480,7 +489,7 @@ export class Brain {
    * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
    * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
    */
-  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person") {
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim()) {
     const s = this.session;
     this.unlockRefused.clear();
     const sourceIds = batch.map((e) => e.id);
@@ -501,7 +510,16 @@ export class Brain {
     const host = this.host;
     // A person who asked JamSesh directly (typed, or spoken to it by name) is putting this up on purpose: it's their cast and takes the lock.
     const asker = batch.find((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct && e.authorId);
-    const castBy = asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {};
+    // Every stage write of this pass carries the claim taken when the pass began (see StageClaim): nothing it decided
+    // lands on a screen someone changed while the model thought.
+    const castBy = asker ? { person: { id: asker.authorId!, name: asker.authorName }, claim } : { claim };
+    // The pass's stage writes: whether it went up (a screen changed meanwhile, or a share that ended, refuses it).
+    const put = (next: Partial<Stage> & { mode: Stage["mode"] }, screen: string) => {
+      const before = s.stageRev(screen);
+      s.setStage(next, "Room brain", screen, castBy);
+      return s.stageRev(screen) !== before;
+    };
+    const MOVED_ON = "The screen changed while you were deciding (someone put something else up, or the share ended), so nothing was replaced. Look at the screen again before showing anything.";
     const all = {
       cancel_directive: tool({
         description:
@@ -597,10 +615,10 @@ export class Brain {
           if ((i.mode === "spotlight" || i.mode === "compare") && !items.length) return refuse("Those artifact ids don't exist. Use ids from the Recent artifacts list, or search_artifacts.");
           const screen = screenId(i.screen);
           if (!screen) return noScreen();
-          const held = this.lockBlock(screen, batch);
+          const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.setStage(
+          const up = put(
             {
               mode: i.mode,
               title: i.title ?? "",
@@ -611,10 +629,9 @@ export class Brain {
               follow: i.mode === "canvas" ? i.follow ?? null : null,
               page: i.mode === "canvas" ? i.page ?? null : null,
             },
-            "Room brain",
             screen,
-            castBy,
           );
+          if (!up) return refuse(MOVED_ON);
           return "On screen.";
         },
       }),
@@ -629,7 +646,7 @@ export class Brain {
         execute: async (i) => {
           const screen = screenId(i.screen);
           if (!screen) return noScreen();
-          const r = s.expandWhich({ artifactId: i.artifactId, position: i.position }, screen);
+          const r = s.expandWhich({ artifactId: i.artifactId, position: i.position }, screen, claim);
           if (!r.ok) return refuse(r.error);
           this.lastRoomStageAt = Date.now();
           return r.stage.expanded ? "Expanded." : "Back to all tiles.";
@@ -660,9 +677,9 @@ export class Brain {
         execute: async (i) => {
           const screen = screenId(i.screen);
           if (!screen) return noScreen();
-          const held = this.lockBlock(screen, batch);
+          const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
-          s.setStage({ mode: "custom", title: i.title, html: i.html, pinned: false }, "Room brain", screen, castBy);
+          if (!put({ mode: "custom", title: i.title, html: i.html, pinned: false }, screen)) return refuse(MOVED_ON);
           return "Showing the custom view.";
         },
       }),
@@ -780,10 +797,10 @@ export class Brain {
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
           const screen = screenId(i.screen);
           if (!screen) return noScreen();
-          const held = this.lockBlock(screen, batch);
+          const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.setStage({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, "Room brain", screen, castBy);
+          if (!put({ mode: "layout", title: i.title ?? "", caption: i.caption ?? "", layout: { tiles, grid }, pinned: i.pin ?? false }, screen)) return refuse(MOVED_ON);
           return `On screen: ${tiles.length} tile(s).${i.tiles.length !== tiles.length ? ` ${i.tiles.length - tiles.length} didn't resolve and were left out (local URLs must be registered dev servers). If the room asked for something that isn't available, tell them briefly.` : ""}`;
         },
       }),
@@ -909,7 +926,7 @@ export class Brain {
           if (ev && this.answerLines.has(ev.id)) return refuse("That line already answered another question.");
           if (ev && said && !ownWords && s.openQuestionsFor(ev.authorId ?? null).length > 1)
             return refuse(`${ev.authorName} has more than one question open, so that yes doesn't say which. Ask them which screen they meant, by name.`);
-          if (!ev || !said || !s.releaseLock(id, ownWords ? { owner: ev.authorId! } : { answeredAt: ev.ts, by: ev.authorId ?? null }))
+          if (!ev || !said || !s.releaseLock(id, ownWords ? { owner: ev.authorId! } : { answeredAt: ev.ts, by: ev.authorId ?? null }, claim))
             return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with ask_to_replace_screen first.`);
           this.usedLine(ev.id);
           return `Unlocked ${lock.by}'s screen.`;
@@ -921,10 +938,10 @@ export class Brain {
         execute: async ({ id }) => {
           const item = s.readyToShow().find((r) => r.id === id);
           if (!item) return refuse("That item isn't waiting any more.");
-          const held = this.lockBlock(item.screen, batch);
+          const held = this.lockBlock(item.screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.showReady(id);
+          if (!s.showReady(id, { claim })) return refuse("The screen changed since; look again.");
           return `On screen: ${item.label}.`;
         },
       }),
@@ -937,10 +954,10 @@ export class Brain {
           if (!id) return noScreen();
           const entry = by ? s.historyBy(by, id) : s.previousScreens(id)[0];
           if (!entry) return refuse(by ? `Nothing ${by} had up is in the history.` : "There's no earlier screen in the history.");
-          const held = this.lockBlock(id, batch);
+          const held = this.lockBlock(id, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.restoreHistory(entry.id, id, undefined, "Room brain");
+          if (!s.restoreHistory(entry.id, id, { claim }, "Room brain")) return refuse("That screen is no longer in the history.");
           return `Brought back ${entry.label}, which ${entry.by} had up.`;
         },
       }),
@@ -959,10 +976,10 @@ export class Brain {
           const all = s.savedLayouts();
           const key = Object.keys(all).find((k) => k.toLowerCase() === name.toLowerCase()) ?? Object.keys(all).find((k) => k.toLowerCase().includes(name.toLowerCase()));
           if (!key) return refuse(`No saved layout called ${name}. Saved: ${Object.keys(all).join(", ") || "none"}.`);
-          const held = this.lockBlock("main", batch);
+          const held = this.lockBlock("main", batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();
-          s.setStage({ ...all[key] }, "Room brain", "main", castBy);
+          if (!put({ ...all[key] }, "main")) return refuse(MOVED_ON);
           return `On screen: ${key}.`;
         },
       }),
@@ -1012,6 +1029,7 @@ export class Brain {
   ruleRoute(batch: JamEvent[], triage: Triage) {
     if (this.stopped) return;
     const s = this.session;
+    const claim = s.stageClaim();
     const agents = s.workers().filter((a) => a.status !== "offline");
     for (const line of triage.lines) {
       const ev = batch.find((e) => e.id === line.id);
@@ -1023,17 +1041,17 @@ export class Brain {
         this.lockRefused = true;
         continue;
       }
-      if (held) s.releaseLock("main", { owner: ev.authorId });
+      if (held) s.releaseLock("main", { owner: ev.authorId }, claim);
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
-        s.setStage({ mode: "join", title: "", items: [] }, "Room brain");
+        s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", { claim });
         continue;
       }
       if (line.intent === "present") {
         const words = text.toLowerCase().replace(/^.*?(bring up|show( me)?|pull up|put up)\s+/, "").split(/[^a-z0-9]+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
         const hit = s.artifacts().find((a) => words.some((w) => a.title.toLowerCase().includes(w)));
-        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) }, "Room brain");
-        else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain");
-        else s.setStage({ mode: "board" }, "Room brain");
+        if (hit) s.setStage({ mode: hit.group ? "compare" : "spotlight", title: hit.group || hit.title, items: s.artifacts().filter((a) => a.group === hit.group).map((a) => a.id) }, "Room brain", "main", { claim });
+        else if (/agent|everyone|split/.test(text.toLowerCase())) s.setStage({ mode: "agents", title: "What everyone is doing" }, "Room brain", "main", { claim });
+        else s.setStage({ mode: "board" }, "Room brain", "main", { claim });
         continue;
       }
       if (line.intent === "decision") {
@@ -1176,7 +1194,8 @@ export class Brain {
     // Someone's live screen or camera is up: a new variant set doesn't push it off.
     const liveShares = new Set(s.shares().filter((sh) => sh.status === "live").map((sh) => sh.id));
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && liveShares.has(t.shareId))) return;
-    if (stage.mode === "welcome" && !held) s.setStage({ mode: "board" }, "JamSesh");
+    const claim = s.stageClaim();
+    if (stage.mode === "welcome" && !held) s.setStage({ mode: "board" }, "JamSesh", "main", { claim });
     const groups = new Map<string, Artifact[]>();
     for (const a of arts) if (a.group && a.variant) groups.set(a.group, s.artifacts().filter((x) => x.group === a.group && x.variant));
     for (const [group, items] of groups) {
@@ -1189,7 +1208,7 @@ export class Brain {
           const compare = { mode: "compare" as const, title: group, caption: compareCaption(items), items: items.map((i) => i.id) };
           // A person's cast stays up: the comparison waits in the queue.
           if (held) s.queueReady({ screen: "main", agentId: "", agentName: "JamSesh", label: `Compare ${group}`, stage: compare });
-          else s.setStage(compare, "JamSesh");
+          else s.setStage(compare, "JamSesh", "main", { claim });
           return;
         }
       }
@@ -1467,7 +1486,7 @@ function answerOf(text: string, brainName: string | string[]) {
  * else, so negations, questions and other sentences that contain the word don't count. Prompts
  * typed to agents never count. `only`: the line was nothing but the answer.
  */
-export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
+export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName: string | string[] = "JamSesh"): Verdict | null {
   if (pending.length !== 1) return null;
   const asked = pending[0].createdAt;
   for (const e of [...batch].reverse()) {
@@ -1482,10 +1501,14 @@ export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[]
     const casual = justAsked || addressesBrain(e.text, brainName);
     const yes = EXPLICIT_YES.has(answer) || (casual && GENERIC_YES.has(answer));
     const no = EXPLICIT_NO.has(answer) || (casual && GENERIC_NO.has(answer));
-    if (yes !== no) return { approve: yes, by: e.authorName, at: e.ts, only: true };
+    // "Approve the build", "don't build it" say which kind of question they answer; a bare "yes" or "go ahead" doesn't.
+    if (yes !== no) return { approve: yes, by: e.authorName, at: e.ts, only: true, line: e.id, personId: e.authorId ?? null, named: /\b(?:approved?|denied|deny|reject(?:ed)?|build)\b/.test(answer) };
   }
   return null;
 }
+
+/** A spoken answer to a build request: who, which line, and whether it named the request (or was a plain yes or no). */
+type Verdict = { approve: boolean; by: string; at: number; only: boolean; line: number; personId: string | null; named: boolean };
 
 const SHOW_YES = new Set(["yes show it", "yeah show it", "yep show it", "show it", "yes put it up", "put it up", "go ahead and show it", "yes go ahead", "yeah go ahead", "okay show it", "sure show it", "yes please show it", "replace mine", "yes replace it", "yes replace mine"]);
 const SHOW_NO = new Set(["keep mine up", "keep mine", "keep it up", "keep mine there", "no keep mine up", "no keep mine", "no keep it up", "no leave it", "leave it", "leave mine", "leave mine up", "dont show it", "no dont show it", "not yet keep mine up"]);
@@ -1559,7 +1582,7 @@ const NAMING_FILLER = new Set(["the", "build", "for", "of", "request", "one", "s
  * this request and no other (its agent, owner, repository or branch) and otherwise be only "approve"
  * or "deny" ("approve Sam's build", "deny the ios one"); anything else is left for the brain to ask.
  */
-export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
+export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], brainName: string | string[] = "JamSesh"): Verdict | null {
   if (!pending.some((p) => p.id === req.id)) return null;
   if (pending.length === 1) return buildVerdict(batch, pending, brainName);
   const mine = requestWords(req);
@@ -1573,7 +1596,7 @@ export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], 
     const answer = words.filter((w) => !mine.has(w) && !NAMING_FILLER.has(w)).join(" ");
     const yes = EXPLICIT_YES.has(answer);
     const no = EXPLICIT_NO.has(answer);
-    if (yes !== no) return { approve: yes, by: e.authorName, at: e.ts, only: true };
+    if (yes !== no) return { approve: yes, by: e.authorName, at: e.ts, only: true, line: e.id, personId: e.authorId ?? null, named: true };
   }
   return null;
 }

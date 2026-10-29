@@ -82,7 +82,7 @@ test("a new share fills the screen alone and the screen comes back when it ends"
   const { s } = room();
   const brain = new Brain(s, {} as any);
   clearInterval((brain as any).digestTimer);
-  s.setStage({ mode: "layout", title: "Review", layout: { tiles: [{ kind: "artifact", artifactId: "a1" }, { kind: "artifact", artifactId: "a2" }] } }, "Room brain");
+  s.setStage({ mode: "layout", title: "Review", layout: { tiles: [{ kind: "artifact", artifactId: "a1" }, { kind: "artifact", artifactId: "a2" }] } }, "Room brain", "main", { claim: s.stageClaim() });
   const sh = s.startShare("felipe-laptop", "screen");
   await brain.placeShare(sh);
   expect(s.stage().layout?.tiles).toEqual([{ kind: "screen", shareId: sh.id, label: sh.label }]);
@@ -99,12 +99,12 @@ test("a share that no host screen shows stops after the grace period, and the sh
   const keep = s.startShare("felipe-laptop", "camera");
   s.store.put("shares", { ...keep, startedAt: Date.now() - 120_000 });
   // Both were up; then the screen share was taken down.
-  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }, { kind: "screen", shareId: keep.id }] } }, "x");
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }, { kind: "screen", shareId: keep.id }] } }, "x", "main", { claim: s.stageClaim() });
   s.sweepShares();
-  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: keep.id }] } }, "x");
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: keep.id }] } }, "x", "main", { claim: s.stageClaim() });
   Session.SHARE_GRACE_MS = 30;
   try {
-    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: keep.id }] } }, "x"); // reschedule with the short grace
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: keep.id }] } }, "x", "main", { claim: s.stageClaim() }); // reschedule with the short grace
     expect(s.store.get("shares", sh.id)?.status).toBe("live"); // not cut at once
     await Bun.sleep(120);
   } finally {
@@ -119,7 +119,7 @@ test("a share that no host screen shows stops after the grace period, and the sh
 test("a share on an extra screen is not cut, and a brand-new share gets time to be placed", async () => {
   const { s } = room();
   const sh = s.startShare("felipe-laptop", "screen");
-  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "screen-2");
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "screen-2", { claim: s.stageClaim() });
   s.sweepShares();
   expect(s.store.get("shares", sh.id)?.status).toBe("live");
   const fresh = s.startShare("felipe-laptop", "camera");
@@ -140,11 +140,11 @@ test("a share that never went up says so when it stops", async () => {
 test("a share shown and then taken down gets the 5-second grace, not the placement window", async () => {
   const { s } = room();
   const sh = s.startShare("felipe-laptop", "screen"); // brand new: its placement window is still open
-  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x");
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "main", { claim: s.stageClaim() });
   // Taken down at once, with no sweep in between: the brief appearance still counts.
   Session.SHARE_GRACE_MS = 30;
   try {
-    s.setStage({ mode: "board" }, "x");
+    s.setStage({ mode: "board" }, "x", "main", { claim: s.stageClaim() });
     expect(s.store.get("shares", sh.id)?.status).toBe("live");
     await Bun.sleep(120);
   } finally {

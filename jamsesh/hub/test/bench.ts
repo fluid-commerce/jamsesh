@@ -112,7 +112,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     agents: { desktop, mobile, design },
     art: { navA, navB, onbA },
     stageNav: () => {
-      s.setStage({ mode: "compare", title: "Nav", items: [navA.id, navB.id], pinned: false }, "JamSesh");
+      s.setStage({ mode: "compare", title: "Nav", items: [navA.id, navB.id], pinned: false }, "JamSesh", "main", { claim: s.stageClaim() });
     },
     say: (who, text) => hub.typed(room.people[who].id, text),
     prompt: (agent, text) => {

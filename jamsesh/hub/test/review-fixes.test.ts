@@ -45,8 +45,8 @@ test("the revert timer leaves a live share on the screen; once the share ends, r
     const sh = s.startShare("felipe-laptop", "screen");
     s.rememberStageFor(sh.id);
     // What the brain's placement makes: an unpinned layout with the share as its tile (main and an extra screen).
-    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "JamSesh");
-    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "JamSesh", "screen-2");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "JamSesh", "main", { claim: s.stageClaim() });
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "JamSesh", "screen-2", { claim: s.stageClaim() });
     await Bun.sleep(150); // the revert timers fire on their own, nothing is called by hand
     expect(s.store.get("shares", sh.id)?.status).toBe("live");
     expect(s.stage().mode).toBe("layout");
@@ -56,7 +56,7 @@ test("the revert timer leaves a live share on the screen; once the share ends, r
 
     // The share ends; the screen goes back to what it showed, and a brought-up screen reverts again.
     s.endShare(sh.id);
-    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "feed" }] } }, "JamSesh");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "feed" }] } }, "JamSesh", "main", { claim: s.stageClaim() });
     expect(s.stage().mode).toBe("layout");
     await Bun.sleep(150);
     expect(s.stage().mode).toBe("board");
@@ -65,12 +65,15 @@ test("the revert timer leaves a live share on the screen; once the share ends, r
   }
 });
 
-test("a share that is not on the stage does not hold a revert", async () => {
+test("a share that isn't live is never put up, alone or beside other tiles, and holds no revert", async () => {
   const { s } = room();
   const was = Session.STAGE_REVERT_MS;
   Session.STAGE_REVERT_MS = 40;
   try {
-    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: "sh-gone" }] } }, "JamSesh");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: "sh-gone" }] } }, "JamSesh", "main", { claim: s.stageClaim() });
+    expect(s.stage().mode).toBe("welcome");
+    s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: "sh-gone" }, { kind: "feed" }] } }, "JamSesh", "main", { claim: s.stageClaim() });
+    expect(s.stage().layout?.tiles).toEqual([{ kind: "feed" }]);
     await Bun.sleep(120);
     expect(s.stage().mode).toBe("board");
   } finally {

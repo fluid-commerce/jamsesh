@@ -487,6 +487,12 @@ fn open_screen(app: &AppHandle, origin: &str, s: &Screen) -> Result<(), String> 
 pub async fn arrange_for(app: &AppHandle, ticket: crate::Ticket) -> Result<Vec<Screen>, String> {
     let state = app.state::<Arc<App>>().inner().clone();
     let Some(_turn) = state.switching.lock_quiet(ticket).await else { return Ok(Vec::new()) };
+    arrange_current(app).await
+}
+
+/// Arranges the screens of the hub hosting now, if any. The caller holds a turn.
+pub async fn arrange_current(app: &AppHandle) -> Result<Vec<Screen>, String> {
+    let state = app.state::<Arc<App>>().inner().clone();
     let origin = {
         let inner = state.inner.lock().await;
         if inner.cfg.role.as_deref() != Some("host") {
@@ -673,6 +679,8 @@ pub async fn screens_preview(app: AppHandle, state: State<'_, Arc<App>>, picks: 
 #[tauri::command]
 pub async fn screens_save(app: AppHandle, state: State<'_, Arc<App>>, picks: Vec<Pick>) -> Result<SetupView, String> {
     let ticket = state.switching.ticket();
+    // The setup is saved and the windows moved in one quiet turn, for the session it was asked in, or not at all.
+    let Some(_turn) = state.switching.lock_quiet(ticket).await else { return Err("The session changed while this was waiting. Try again.".into()) };
     let ds = read_displays(&app);
     let userless = state.inner.lock().await.cfg.userless;
     let mut setup = Setup::load(&state.dir);
@@ -681,7 +689,7 @@ pub async fn screens_save(app: AppHandle, state: State<'_, Arc<App>>, picks: Vec
     let saved = merge(&ds, &picks, setup.choices(&ds).0.as_ref(), userless);
     setup.sets.insert(key.clone(), saved);
     setup.save(&state.dir)?;
-    arrange_for(&app, ticket).await?;
+    arrange_current(&app).await?;
     Ok(view(&ds, setup.sets.get(&key), true, userless))
 }
 

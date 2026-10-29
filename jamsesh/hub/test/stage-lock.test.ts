@@ -69,7 +69,7 @@ test("a locked screen refuses the brain and automatic changes, but people and ho
   const { s, chey, felipe } = room();
   const a = artifact(s, "Checkout");
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.setStage({ mode: "agents" }, "Room brain").mode).toBe("spotlight");
+  expect(s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() }).mode).toBe("spotlight");
   expect(s.stage().mode).toBe("spotlight");
   // Another person's deliberate cast replaces it and takes the lock.
   s.setStage({ mode: "agents" }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
@@ -390,7 +390,7 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   s.setStage({ mode: "spotlight", items: [a.id], title: "Checkout" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   s.setStage({ mode: "board" }, "JamSesh", "main", { override: true });
   s.setStage({ mode: "compare", items: [a.id, b.id] }, "Felipe", "main", { person: { id: felipe.id, name: "Felipe" } });
-  s.setStage({ mode: "spotlight", items: [b.id], title: "Pricing" }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [b.id], title: "Pricing" }, "Room brain", "screen-2", { claim: s.stageClaim() });
   const main = s.stageHistory().main;
   expect(main.map((e) => [e.by, e.label])).toEqual([["Felipe", "Checkout and 1 more"], ["Chey", "Checkout"]]); // the board isn't kept
   expect(s.stageHistory()["screen-2"].map((e) => e.label)).toEqual(["Pricing"]);
@@ -402,13 +402,13 @@ test("each screen keeps what it showed and who put it up; restoring brings one b
   expect(s.historyBy("felipe")?.label).toBe("Checkout");
   const hit = s.historyBy("Felipe")!;
   (s as any).dropLock("main");
-  const back = s.restoreHistory(hit.id, "main", undefined, "Room brain")!;
+  const back = s.restoreHistory(hit.id, "main", { claim: s.stageClaim() }, "Room brain")!;
   expect(back.mode).toBe("spotlight");
   expect(back.by).toBe("Room brain");
   // A locked screen holds off a restore that isn't a person's.
   s.setStage({ mode: "agents" }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
-  expect(s.restoreHistory(s.previousScreens()[0].id, "main", undefined, "Room brain")!.mode).toBe("agents");
-  expect(s.restoreHistory("his-nope", "main")).toBeNull();
+  expect(s.restoreHistory(s.previousScreens()[0].id, "main", { claim: s.stageClaim() }, "Room brain")!.mode).toBe("agents");
+  expect(s.restoreHistory("his-nope", "main", { claim: s.stageClaim() })).toBeNull();
 });
 
 test("the brain brings back what a person had up, and says so when nothing matches", async () => {
@@ -444,7 +444,7 @@ test("a direct request to JamSesh is a person's cast and locks to them; overhear
   expect(s.stage().lock?.by).toBe("Felipe");
   (s as any).dropLock("main");
   s.saveLayout("review");
-  s.setStage({ mode: "agents" }, "Room brain");
+  s.setStage({ mode: "agents" }, "Room brain", "main", { claim: s.stageClaim() });
   await tools([direct(chey, "bring back the review layout")]).show_saved_layout.execute({ name: "review" });
   expect(s.stage().mode).toBe("custom");
   expect(s.stage().lock?.by).toBe("Chey");
@@ -526,7 +526,7 @@ test("locks, the queue and history are per screen: a lock on main doesn't hold t
   expect(s.stage().lock?.by).toBe("Chey");
   // Locking the second display holds only it; its queue and history are its own.
   s.setStage({ mode: "spotlight", items: [a.id], title: "Right" }, "Felipe", "screen-2", { person: { id: felipe.id, name: "Felipe" } });
-  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2").title).toBe("Right");
+  expect(s.setStage({ mode: "agents" }, "Room brain", "screen-2", { claim: s.stageClaim() }).title).toBe("Right");
   s.queueReady({ screen: "screen-2", agentId: "x", agentName: "Agent", label: "For the right", stage: { mode: "agents" } });
   expect(s.readyToShow().map((r) => r.screen)).toEqual(["screen-2"]);
   expect(s.stageHistory()["screen-2"].map((e) => e.by)).toEqual(["Felipe", "Room brain"]);
@@ -617,8 +617,8 @@ test("a stopped hub's screen timers stop too: none of them touches its store aft
   const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   const a = artifact(s, "Checkout");
-  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain");
-  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "main", { claim: s.stageClaim() });
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Room brain", "screen-2", { claim: s.stageClaim() });
   s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
   const timers = () => [(s as any).lockSweep, (s as any).stageRevert, (s as any).shareSweep, ...(s as any).screenReverts.values()].filter(Boolean);
   expect(timers().length).toBeGreaterThan(0);
@@ -1028,4 +1028,49 @@ test("screens are found by id or whole name, or the one name a word starts; a st
   } finally {
     server.stop(true);
   }
+});
+
+// ---------- round 8: every kind of question counts; names only when unique ----------
+
+test("a host build and a show request open together: a bare yes settles neither; naming the build answers only it", async () => {
+  const { hub, s, chey, reg, said } = room();
+  s.onShowRequest = () => {};
+  hub.host.onRequest = () => {};
+  const agent = reg("Felipe");
+  const mine = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [mine.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  age(s, 6 * 60_000);
+  const show = s.askOwner(s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Checkout", stage: { mode: "agents" } }))!;
+  const build = hub.host.request({ agentId: agent.id, agentName: "Felipe's Claude", ownerName: "Felipe", repo: "https://github.com/acme/app.git", branch: "main", command: "true" });
+  if (typeof build === "string") throw new Error(build);
+  expect(s.openQuestionsFor(chey.id).map((q) => q.kind)).toEqual(["build", "show"]);
+  const brain = hub.brain as any;
+  brain.decideByVoice([said(chey, "yes")]);
+  expect(hub.host.pendingRequests().map((r) => r.id)).toEqual([build.id]);
+  expect(s.showRequests().find((r) => r.id === show.id)?.status).toBe("pending");
+  expect(s.stage().items).toEqual([mine.id]);
+  expect(s.store.recentEvents({ limit: 10 }).some((e) => e.kind === "brain" && /which one\?/.test(e.text) && e.text.includes("Felipe's Claude's build"))).toBe(true);
+  // "Deny the build" says which: only the build is settled, and that line answers nothing else.
+  const deny = said(chey, "deny the build");
+  brain.decideByVoice([deny]);
+  expect(hub.host.pendingRequests()).toEqual([]);
+  expect(s.showRequests().find((r) => r.id === show.id)?.status).toBe("pending");
+  // Now one question is open: her plain yes answers it.
+  brain.decideByVoice([said(chey, "yes, show it")]);
+  expect(s.showRequests().find((r) => r.id === show.id)?.status).toBe("approved");
+});
+
+test("ids match ids only, and a name two screens share is asked about", () => {
+  const { s } = room();
+  const info = { width: 1920, height: 1080, dpr: 1, screenY: 0, at: Date.now() };
+  s.reportScreen("main", { ...info, screenX: 0 });
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  s.reportScreen("screen-3", { ...info, screenX: 3840 });
+  // Someone named a screen like an id, and two screens the same.
+  s.store.setSetting("screenNames", { "screen-2": { name: "screen-20" }, "screen-3": { name: "Left TV" }, main: { name: "Left TV" } });
+  expect(s.screenRef("screen-20")).toBeNull();
+  expect(s.screenRef("screen-2")).toBe("screen-2");
+  const two = s.screenOf("left tv");
+  expect("choices" in two && two.choices).toEqual(["Left TV (main)", "Left TV (screen-3)"]);
+  expect(s.screenRef("left")).toBeNull();
 });

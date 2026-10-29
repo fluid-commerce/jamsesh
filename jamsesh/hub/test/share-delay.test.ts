@@ -74,3 +74,38 @@ test("with nothing newer, the fallback does put the share up, keeping its sharer
   expect(s.stage().mode).toBe("layout");
   expect(s.stage().lock?.by).toBe("Felipe");
 });
+
+test("the presenter's own set_layout, answering late, lands only on the screen it saw and never shows an ended share", async () => {
+  // This time the presenter answers by calling its tool, after the room moved on.
+  let act: () => Promise<unknown> = async () => {};
+  mock.module("ai", () => ({
+    ...ai,
+    generateText: (o: any) =>
+      new Promise((done) => {
+        act = async () => {
+          const said = await o.tools.set_layout.execute({ tiles: [{ kind: "screen", ref: o.prompt.match(/share id (\S+)\)/)[1] }] });
+          done({});
+          return said;
+        };
+      }),
+  }));
+  const late = room();
+  late.s.setStage({ mode: "spotlight", items: [late.a.id] }, "Felipe", "main", { person: { id: late.felipe.id, name: "Felipe" } });
+  (late.s as any).dropLock("main");
+  const sh = late.s.startShare("felipe-laptop", "screen");
+  const placing = late.hub.brain.placeShare(sh);
+  // Something else goes up (unlocked) while the presenter thinks.
+  late.s.setStage({ mode: "agents" }, "Room brain", "main", { override: true });
+  const said = String(await act());
+  await placing;
+  expect(late.s.stage().mode).toBe("agents");
+  expect(said).toContain("The screen changed while you were deciding");
+
+  const ended = room();
+  const sh2 = ended.s.startShare("felipe-laptop", "screen");
+  const placing2 = ended.hub.brain.placeShare(sh2);
+  ended.s.endShare(sh2.id);
+  await act();
+  await placing2;
+  expect(ended.s.stage().mode).not.toBe("layout");
+});

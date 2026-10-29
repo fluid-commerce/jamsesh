@@ -575,13 +575,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!screen) return noScreen();
     const lock = s.lockOf(screen);
     if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
-    const stage = s.restoreHistory(String(body?.id ?? ""), screen, who);
+    const stage = s.restoreHistory(String(body?.id ?? ""), screen, { person: who });
     return stage ? json(stage) : bad("That screen is no longer in the history.", 404);
   }
   m = path.match(/^\/stage\/ready\/([\w-]+)$/);
   if (m && req.method === "POST") {
     if (body?.action === "dismiss") return (s.dismissReady(m[1]), json({ ok: true }));
-    const stage = s.showReady(m[1], actor());
+    const stage = s.showReady(m[1], { person: actor() });
     return stage ? json(stage) : bad("That item isn't waiting any more.", 404);
   }
   m = path.match(/^\/show-requests\/([\w-]+)$/);
