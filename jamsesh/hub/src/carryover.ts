@@ -3,7 +3,7 @@
 // written while a session runs and when it ends (ProjectKeeper), and a new session of the project
 // is seeded from it, each carried item marked with the session it came from. Phase 7's wiki ingests
 // this same file.
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { projectsDir } from "./projects";
 import type { Session } from "./session";
@@ -113,46 +113,119 @@ export function snapshotContext(s: Session, sessionId: string): ProjectContext {
  * overwrites it (an older session left open doesn't undo a newer one). Returns whether it wrote.
  */
 export function writeProjectContext(home: string, slug: string, sessionId: string, s: Session): boolean {
+  return saveProjectContext(home, slug, sessionId, s) === "written";
+}
+
+/**
+ * `writeProjectContext` with the reason it didn't write: "skipped" is a choice (nothing settled, or a newer session
+ * owns the file), "failed" is a save that should have happened and didn't (a lock that stayed held, a snapshot the
+ * reader couldn't take, a file that couldn't be written), which the keeper reports so shutdown doesn't call it clean.
+ */
+export function saveProjectContext(home: string, slug: string, sessionId: string, s: Session): CommitOutcome {
   const ctx = snapshotContext(s, sessionId);
   const empty = !ctx.facts.length && !ctx.workstreams.length && !ctx.brief && !ctx.goal;
-  return commitContext(home, slug, ctx, { allowEmpty: !empty || retiredHere(s) });
+  return commitContextOutcome(home, slug, ctx, { allowEmpty: !empty || retiredHere(s) });
 }
+
+export type CommitOutcome = "written" | "skipped" | "failed";
 
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+const LOCK_STALE_MS = 10_000;
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: the process exists but isn't ours to signal.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+const readLock = (lock: string): { token: string; pid: number } | null => {
+  try {
+    const [pid, token] = readFileSync(lock, "utf8").trim().split(" ");
+    return token && Number.isInteger(Number(pid)) ? { pid: Number(pid), token } : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Takes the lock file (O_EXCL) and returns the token that proves ownership, or null when it stays held. The owner's
+ * pid and token are written in it. A lock is taken over only when it is old AND its owner is gone (the process is dead,
+ * or it is this process, which can't be mid-write: the write is synchronous); a writer that is only paused (stopped,
+ * or starved for longer than the threshold) keeps its lock. An old lock with nothing readable in it is an owner that
+ * died between creating and filling it. The takeover moves the lock aside and puts it back if it wasn't the one judged
+ * stale, so a lock somebody else just took is not removed.
+ */
+export function acquireLock(lock: string, waitMs = 2000): string | null {
+  const token = crypto.randomUUID();
+  const until = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const fd = openSync(lock, "wx");
+      try {
+        writeSync(fd, `${process.pid} ${token}`);
+      } finally {
+        closeSync(fd);
+      }
+      return token;
+    } catch {
+      try {
+        const held = readLock(lock);
+        const old = Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS;
+        if (old && (held ? held.pid === process.pid || !alive(held.pid) : true)) {
+          const aside = `${lock}.stale-${crypto.randomUUID().slice(0, 8)}`;
+          renameSync(lock, aside);
+          const moved = readLock(aside);
+          if (held && moved && moved.token !== held.token) {
+            // Not the lock we judged: a live one was taken between the check and the move. Give it back.
+            try {
+              linkSync(aside, lock);
+            } catch {}
+          }
+          rmSync(aside, { force: true });
+        }
+      } catch {}
+      if (Date.now() > until) return null;
+      sleepSync(25);
+    }
+  }
+}
+
+/** Removes the lock only if it is still ours. */
+export function releaseLock(lock: string, token: string) {
+  if (readLock(lock)?.token === token) rmSync(lock, { force: true });
+}
+
 /**
  * The compare-and-replace, under a lock file made with O_EXCL so two hub processes (two sessions of one project)
- * can't both pass the activeAt check and the older one rename last. A lock left by a process that died is taken
- * over after 10 seconds. The snapshot is checked against the reader's schema first: a file the next session
- * couldn't read is never written. A file that can't be read is kept beside the new one.
+ * can't both pass the activeAt check and the older one rename last (see `acquireLock` for who may take a lock over).
+ * The snapshot is checked against the reader's schema first: a file the next session couldn't read is never written.
+ * A file that can't be read is kept beside the new one. The lock is checked again just before the rename.
  */
 export function commitContext(home: string, slug: string, ctx: ProjectContext, opts: { allowEmpty?: boolean; waitMs?: number } = {}): boolean {
+  return commitContextOutcome(home, slug, ctx, opts) === "written";
+}
+
+export function commitContextOutcome(home: string, slug: string, ctx: ProjectContext, opts: { allowEmpty?: boolean; waitMs?: number } = {}): CommitOutcome {
   if (!contextSchema.safeParse(ctx).success) {
     console.error("project context: the snapshot doesn't fit the file's limits; not written");
-    return false;
+    return "failed";
   }
   const empty = !ctx.facts.length && !ctx.workstreams.length && !ctx.brief && !ctx.goal;
   const file = contextFile(home, slug);
   mkdirSync(join(projectsDir(home), slug), { recursive: true });
   const lock = `${file}.lock`;
-  const until = Date.now() + (opts.waitMs ?? 2000);
-  for (;;) {
-    try {
-      closeSync(openSync(lock, "wx"));
-      break;
-    } catch {
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > 10_000) rmSync(lock, { force: true });
-      } catch {}
-      if (Date.now() > until) return false;
-      sleepSync(25);
-    }
-  }
+  const token = acquireLock(lock, opts.waitMs);
+  if (!token) return "failed";
   try {
     if (existsSync(file)) {
-      if (empty && !opts.allowEmpty) return false;
+      if (empty && !opts.allowEmpty) return "skipped";
       const cur = readProjectContext(home, slug);
-      if (cur && cur.fromSession !== ctx.fromSession && cur.activeAt > ctx.activeAt) return false;
+      if (cur && cur.fromSession !== ctx.fromSession && cur.activeAt > ctx.activeAt) return "skipped";
       if (!cur) renameSync(file, `${file}.unreadable-${Date.now()}`);
     }
     const tmp = `${file}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
@@ -162,10 +235,14 @@ export function commitContext(home: string, slug: string, ctx: ProjectContext, o
     } finally {
       closeSync(fd);
     }
+    if (readLock(lock)?.token !== token) {
+      rmSync(tmp, { force: true });
+      return "failed";
+    }
     renameSync(tmp, file);
-    return true;
+    return "written";
   } finally {
-    rmSync(lock, { force: true });
+    releaseLock(lock, token);
   }
 }
 
