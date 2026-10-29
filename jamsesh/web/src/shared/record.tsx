@@ -92,13 +92,13 @@ export function RecordTidy({ notes, brain, busy, locked = busy, error, onChange,
               <button type="button" className="btn small" onClick={() => setConfirm(false)}>
                 Keep them
               </button>
-              <button type="button" className="btn small danger" onClick={onDiscard} disabled={busy}>
+              <button type="button" className="btn small danger" onClick={onDiscard} disabled={locked}>
                 Discard
               </button>
             </>
           ) : (
             <>
-              <button type="button" className="btn small ghost" onClick={() => setConfirm(true)} disabled={busy}>
+              <button type="button" className="btn small ghost" onClick={() => setConfirm(true)} disabled={locked}>
                 Discard
               </button>
               <button type="button" className="btn primary" onClick={onSend} disabled={busy || !live.length}>

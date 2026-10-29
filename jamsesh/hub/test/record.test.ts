@@ -1214,6 +1214,36 @@ test("a send that fails part-way and is retried after ownership changed still se
   expect(ds.find((d) => d.targets[0] === juno.id)!.text).toContain("fix B");
 }, 60_000);
 
+test("speech already published to the room during a Stop that then fails is not read into the retry's notes", async () => {
+  const r = room();
+  const base = Date.now() - 20_000;
+  r.at(base);
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const published = line(r.hub, "already in the room", r.maya.id, "mayaLaptop", base + 800);
+  r.s.store.put("utterances", { ...published, eventId: 99 });
+  line(r.hub, "still the recording's", r.maya.id, "mayaLaptop", base + 1500);
+  r.at(base + 4000);
+  const done = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  const text = done.ok ? done.notes.map((n) => n.text).join(" ") : "";
+  expect(text).toContain("still the recording's");
+  expect(text).not.toContain("already in the room");
+}, 30_000);
+
+test("every note's destination is fixed before the first wait: an ownership change during a crop doesn't move a later note", async () => {
+  const r = room();
+  const atlas = r.reg("Ben", "acme/web");
+  const juno = r.reg("Ana", "acme/api");
+  const a = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "A", agentId: atlas.id, image: "/renders/a.png" });
+  const b = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "B", agentId: juno.id, image: "/renders/b.png" });
+  const recordingId = await r.stopped();
+  const notes = [a, b].map((x, i) => ({ id: `n${i}`, text: `fix ${x.title}`, t0: 1, t1: 2, pin: { target: { kind: "artifact", ref: x.id, label: x.title }, x: 0.5, y: 0.5, kind: "click" } }));
+  (r.hub as any).cropFor = async () => (await Bun.sleep(150), r.s.upsertArtifact({ ...b, agentId: atlas.id }), null);
+  const out = (await (await r.post("/record/send", { recordingId, personId: r.maya.id, notes })).json()) as any;
+  expect(out.sent.map((x: any) => x.agentName).sort()).toEqual([atlas.name, juno.name].sort());
+  expect(r.s.directives().find((d) => d.targets[0] === juno.id)!.text).toContain("fix B");
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

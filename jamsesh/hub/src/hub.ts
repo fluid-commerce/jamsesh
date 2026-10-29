@@ -82,7 +82,7 @@ interface Rec {
 }
 /** What a recording came to, kept on the hub: how it ended and, for a close that made something, what it made. The hub is the only source of truth for it. */
 type Outcome = { kind: EndReason | "unknown"; result?: unknown };
-type Ended<R> = { kind: "done"; value: R } | { kind: "busy" } | { kind: "ended"; outcome?: Outcome };
+type Ended<R> = { kind: "done"; value: R } | { kind: "ended"; outcome?: Outcome };
 
 type StopAnswer = { ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number };
 type SendProgress = { brain?: boolean; owners?: Map<string, string | null> };
@@ -372,7 +372,8 @@ export class Hub {
     // The bound is the start of the recording that followed this one, written on this recording when that start happened: it holds
     // however that successor ends, and nothing is dropped from it to make room.
     const upto = () => Math.min(w.t1 + 300, rec?.nextT0 ?? Infinity);
-    const heard = () => s.store.all("utterances").filter((u) => u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
+    // (Lines already published to the room are not this recording's: a retry after a failed Stop must not read them again.)
+    const heard = () => s.store.all("utterances").filter((u) => !u.eventId && u.t0 >= w.t0 && u.t0 < upto() && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
     try {
@@ -538,8 +539,8 @@ export class Hub {
   /**
    * The one way a recording ends. Every route calls it: Stop, a cancel, the disconnect sweep, the cap and a
    * replacing Start. A close that waits for the last words gives `gather` (the wait) and `commit` (what it makes: synchronous, run once,
-   * and only if nothing ended the recording during the wait). It goes live -> ending -> ended; a call while ending shares that close if it
-   * is the same kind and is refused (busy) if it is another. If `gather` or `commit` fails the recording is live again with the error
+   * and only if nothing ended the recording during the wait). It goes live -> ending -> ended; a Stop sent again while ending
+   * shares its result. If `gather` or `commit` fails the recording is live again with the error
    * kept, and the caller may try again. Without them (cancel, disconnect, cap, replaced) it ends at once, even while ending, and a wait
    * that finishes after that makes nothing (`abort` hands what it gathered back, so words aren't lost). The outcome is stored by `teardown`.
    */
@@ -554,10 +555,8 @@ export class Hub {
       return Promise.resolve({ kind: "done", value: undefined as R });
     }
     if (rec.state === "ended") return Promise.resolve({ kind: "ended", outcome: rec.outcome });
-    if (rec.state === "ending") {
-      const cur = rec.ending!;
-      return cur.reason === reason ? (cur.promise as Promise<Ended<R>>) : Promise.resolve({ kind: "busy" });
-    }
+    // A Stop sent again while one is under way shares its result.
+    if (rec.state === "ending") return rec.ending!.promise as Promise<Ended<R>>;
     rec.state = "ending";
     rec.error = undefined;
     let released = false;
@@ -639,7 +638,6 @@ export class Hub {
       (lines) => this.stopNotes(w, rec, person, lines, t0, t1),
       (lines) => this.release(rec, person?.id ?? w.personId, w.deviceId, t0, lines, w.typed, t1),
     );
-    if (out.kind === "busy") return { ok: false, reason: "That recording is being closed another way.", status: 409 };
     if (out.kind === "ended") return { ok: false, reason: "That recording has already ended.", status: 409 };
     const kept = this.outcomes.get(rec.id);
     if (kept) kept.caller = w.caller;
@@ -751,8 +749,9 @@ export class Hub {
     const loose: { n: RecordNote; crop: string | null }[] = [];
     // Who each note goes to is decided the first time and kept: a retry after a part-way failure must not send a note somewhere else.
     const owners = (done.owners ??= new Map());
+    // Every note's destination is fixed before anything waits (a crop is made with a wait in it).
+    for (const n of notes) if (!owners.has(n.id)) owners.set(n.id, ownerOf(s, n.pin?.target) ?? null);
     for (const n of notes) {
-      if (!owners.has(n.id)) owners.set(n.id, ownerOf(s, n.pin?.target) ?? null);
       const owner = owners.get(n.id) ?? undefined;
       let crop: string | null = null;
       if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin);
