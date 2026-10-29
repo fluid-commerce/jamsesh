@@ -104,10 +104,12 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       setState("error");
       return setMsg(`The host couldn't get ready for your read, so nothing was recorded. ${e instanceof Error ? e.message : ""}`.trim());
     }
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
+      const live = stream;
       const chunks: Blob[] = [];
-      const mr = new MediaRecorder(stream);
+      const mr = new MediaRecorder(live);
       mr.ondataavailable = (e) => chunks.push(e.data);
       const t0 = Date.now();
       const tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
@@ -115,7 +117,7 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
       mr.onstop = async () => {
         clearInterval(tick);
         clearTimeout(auto);
-        stream.getTracks().forEach((t) => t.stop());
+        live.getTracks().forEach((t) => t.stop());
         setState("saving");
         try {
           const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
@@ -135,12 +137,15 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
           setMsg(String(e));
         }
       };
+      // A recorder that fails mid-read ends the read the same way a stop does (the microphone is let go in onstop).
+      mr.onerror = () => mr.state === "recording" && mr.stop();
       rec.current = { stop: () => mr.state === "recording" && mr.stop() };
       mr.start();
       setSecs(0);
       setState("recording");
     } catch (e) {
-      // No microphone, so nothing was read: the room is heard again at once.
+      // No microphone, or the recorder wouldn't start: let the microphone go, and the room is heard again at once.
+      stream?.getTracks().forEach((t) => t.stop());
       void endRead(me.id, false);
       setState("error");
       setMsg(e instanceof Error ? e.message : String(e));

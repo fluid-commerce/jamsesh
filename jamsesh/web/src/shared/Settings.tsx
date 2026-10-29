@@ -273,7 +273,7 @@ function PersonRow({ p, mine }: { p: Person; mine: boolean }) {
             title="Forget your voice on this host and on this device"
             onClick={() =>
               api(`/people/${p.id}/voiceprint`, undefined, "DELETE")
-                .then(() => forgetCopy(p.id))
+                .then(() => forgetCopy(p.id).catch((e) => alert(`Your voice was forgotten on this host, but this device still has a copy: ${e?.message ?? e}. Clear this site's data to remove it.`)))
                 .catch((e) => alert(e.message))
             }
           >

@@ -68,6 +68,11 @@ function write(key: string, value: unknown) {
     /* private window or full storage: the copy simply isn't kept */
   }
 }
+/** Deleting is not allowed to fail quietly: a copy that stays can bring a forgotten voice back. */
+function erase(key: string) {
+  localStorage.removeItem(key);
+  if (localStorage.getItem(key) !== null) throw new Error("this browser kept the copy");
+}
 
 /** A browser keeps a copy and a choice per person: two people on one browser never share either. */
 function browserStore(personId: string): CopyStore {
@@ -80,13 +85,13 @@ function browserStore(personId: string): CopyStore {
     consent: async () => read<boolean>(consentKey),
     setConsent: async (on) => {
       write(consentKey, on);
-      if (!on) write(copyKey, null);
+      if (!on) erase(copyKey);
     },
     get: async () => read<Carried>(copyKey),
     put: async (copy) => write(copyKey, copy),
     // Already this host's: a browser's copy never leaves the host's own address.
     share: async () => read<Carried>(copyKey),
-    forget: async () => write(copyKey, null),
+    forget: async () => erase(copyKey),
   };
 }
 
@@ -112,8 +117,8 @@ export const carryChoice = (personId: string) => quiet(() => storeFor(personId).
 export const carryAllowed = async (personId: string) => (await carryChoice(personId)) === true;
 /** Saying no forgets the copy. Throws when the choice couldn't be saved, so the checkbox can say so. */
 export const setCarryAllowed = (personId: string, on: boolean) => storeFor(personId).setConsent(on);
-/** Their voice was reset: this device's copy goes too, so it can't bring the old voice back. */
-export const forgetCopy = (personId: string) => quiet(() => storeFor(personId).forget(), undefined);
+/** Their voice was reset: this device's copy goes too, so it can't bring the old voice back. Throws when it couldn't be deleted. */
+export const forgetCopy = (personId: string) => storeFor(personId).forget();
 export const localCopy = (personId: string) => quiet(() => storeFor(personId).get(), null);
 
 const tagged = (c: Carried, here: string): Carried => ({ ...c, host: here || c.host });
@@ -141,7 +146,7 @@ export async function pushCopy(personId: string, here = currentHostKey()): Promi
     return true;
   } catch (e) {
     // Made before they reset their voice on this host: it must not come back, here or anywhere.
-    if ((e as { status?: number }).status === 409) await forgetCopy(personId);
+    if ((e as { status?: number }).status === 409) await forgetCopy(personId).catch(() => {});
     return false;
   }
 }

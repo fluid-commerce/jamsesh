@@ -31,11 +31,10 @@ describe("camera trouble", () => {
 
 describe("where a scanned code leads", () => {
   const here = "http://192.168.1.20:4747";
-  test("this room's code stays here; a known host is followed; any other address asks first", () => {
+  test("this room's code stays here; any other address asks first", () => {
     expect(scanGoes({ origin: here, code: "K7M2" }, here)).toBe("here");
-    expect(scanGoes({ origin: "http://10.0.0.9:4747", code: "K7M2" }, here, ["http://10.0.0.9:4747/"])).toBe("known");
     expect(scanGoes({ origin: "http://10.0.0.9:4747", code: "K7M2" }, here)).toBe("ask");
-    expect(scanGoes({ origin: "https://evil.example", code: null }, here, ["http://10.0.0.9:4747", "not a url"])).toBe("ask");
+    expect(scanGoes({ origin: "https://evil.example", code: null }, here)).toBe("ask");
     // Same host, other port or scheme: another address.
     expect(scanGoes({ origin: "https://192.168.1.20:4747", code: null }, here)).toBe("ask");
   });

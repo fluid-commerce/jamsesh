@@ -185,3 +185,28 @@ test("Reset and a failed read reach the host, never queued; saving the choice ca
   (globalThis as any).__TAURI_INTERNALS__ = { invoke: async () => Promise.reject("Couldn't save your voice in the app: disk full") };
   await expect(setCarryAllowed("p1", true)).rejects.toBe("Couldn't save your voice in the app: disk full");
 });
+
+test("a copy that can't be deleted is an error, so Reset can say so", async () => {
+  store.set(key("p1"), JSON.stringify(copy()));
+  const remove = (globalThis as any).localStorage.removeItem;
+  // A browser that refuses the delete (blocked storage) or silently keeps the copy.
+  (globalThis as any).localStorage.removeItem = () => {
+    throw new Error("blocked");
+  };
+  await expect(forgetCopy("p1")).rejects.toThrow("blocked");
+  (globalThis as any).localStorage.removeItem = () => {};
+  await expect(forgetCopy("p1")).rejects.toThrow("kept the copy");
+  (globalThis as any).localStorage.removeItem = remove;
+  expect(await localCopy("p1")).not.toBeNull();
+  // The Mac app's person declined the delete in its dialog.
+  (globalThis as any).__TAURI_INTERNALS__ = { invoke: async () => Promise.reject("You kept the copy on this Mac.") };
+  await expect(forgetCopy("p1")).rejects.toBe("You kept the copy on this Mac.");
+  // And a stale copy the host refused (409) doesn't throw out of the sync when it can't be deleted.
+  delete (globalThis as any).__TAURI_INTERNALS__;
+  (globalThis as any).localStorage.removeItem = () => {
+    throw new Error("blocked");
+  };
+  reply = () => ({ status: 409, body: { error: "reset", reset: true } });
+  expect(await pushCopy("p1", H)).toBe(false);
+  (globalThis as any).localStorage.removeItem = remove;
+});
