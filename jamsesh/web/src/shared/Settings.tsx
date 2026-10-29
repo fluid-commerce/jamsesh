@@ -295,7 +295,7 @@ function RemovedChats() {
   if (!list.length) return null;
   const allow = (id: string) => api(`/removed-chats/${id}/allow`, {}).then(() => (setError(""), load())).catch((e) => setError(e.message));
   return (
-    <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in, or their person tells that chat to connect to jamsesh again.">
+    <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in here.">
       {list.map((c) => (
         <div key={c.id} className="row" style={{ padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 14 }}>
           <span className="grow ellipsis">
