@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import qrcode from "qrcode-generator";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
+import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -587,8 +588,26 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
 
 type PageRow = { id: number; name: string; children: number; current: boolean; divider?: boolean };
 
-/** Pages of the shared canvas: switch between them, and (when editing) add one. */
-function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameElement | null>; canAdd: boolean; page?: string }) {
+/** Pages of the shared canvas: switch between them, and (when editing) add one. Also how the
+ * canvas's join is going, a way to reconnect it, and the fonts it shows in a substitute. */
+function PageBar({
+  frame,
+  canAdd,
+  page,
+  join,
+  substituted,
+  onReconnect,
+  onPage,
+}: {
+  frame: React.RefObject<HTMLIFrameElement | null>;
+  canAdd: boolean;
+  page?: string;
+  join: JoinState;
+  substituted: string[];
+  onReconnect: () => void;
+  /** The page shown, whenever it's read. */
+  onPage?: (name: string) => void;
+}) {
   const [pages, setPages] = useState<PageRow[]>([]);
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState("");
@@ -597,14 +616,21 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
   const refresh = async () => {
     try {
       const list = await fc()?.execute("page.list", {});
-      if (Array.isArray(list)) setPages(list.filter((p: PageRow) => !p.divider));
+      if (!Array.isArray(list)) return;
+      const rows = list.filter((p: PageRow) => !p.divider);
+      setPages(rows);
+      const on = rows.find((p) => p.current);
+      if (on) onPage?.(on.name);
     } catch {}
   };
+  // Pages others add arrive with the session's changes: the list follows them (and is read again
+  // the moment the canvas (re)joins, and when the menu opens).
+  const live = join.state === "live";
   useEffect(() => {
-    const t = setInterval(refresh, 2500);
+    const t = setInterval(refresh, 2000);
     refresh();
     return () => clearInterval(t);
-  }, []);
+  }, [live]);
   // A layout can ask for a specific page.
   useEffect(() => {
     wanted.current = page;
@@ -617,7 +643,6 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
     if (target) wanted.current = undefined;
   }, [pages]);
   const current = pages.find((p) => p.current);
-  if (!pages.length) return null;
   const go = async (id: number) => {
     await fc()?.execute("page.select", { id }).catch(() => {});
     setOpen(false);
@@ -631,13 +656,42 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
     setOpen(false);
     refresh();
   };
+  const label = joinLabel(join);
+  const fonts = substituted.length ? `${substituted.join(", ")} ${substituted.length === 1 ? "isn't" : "aren't"} on this computer: text in ${substituted.length === 1 ? "it" : "them"} is shown in a substitute font.` : "";
   return (
     <div className="page-bar">
-      <button className="page-current" onClick={() => setOpen(!open)} aria-expanded={open} title="Canvas pages">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
-        <span className="ellipsis">{current?.name ?? "Pages"}</span>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}><path d="m6 9 6 6 6-6" /></svg>
-      </button>
+      {live && pages.length > 0 && (
+        <button
+          className="page-current"
+          onClick={() => {
+            if (!open) refresh();
+            setOpen(!open);
+          }}
+          aria-expanded={open}
+          title="Canvas pages"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
+          <span className="ellipsis">{current?.name ?? "Pages"}</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}><path d="m6 9 6 6 6-6" /></svg>
+        </button>
+      )}
+      {label && (
+        <div className={`canvas-join ${join.state === "failed" ? "bad" : ""}`} role="status" title={label}>
+          <i className="canvas-join-dot" aria-hidden />
+          <span className="ellipsis">{label}</span>
+          {join.state !== "loading" && (
+            <button className="canvas-join-retry" onClick={onReconnect}>
+              Reconnect
+            </button>
+          )}
+        </div>
+      )}
+      {live && fonts && (
+        <div className="canvas-fonts" title={fonts} aria-label={fonts}>
+          <span aria-hidden className="canvas-fonts-aa">Aa</span>
+          <span className="ellipsis">{substituted.length === 1 ? `${substituted[0]} substituted` : `${substituted.length} fonts substituted`}</span>
+        </div>
+      )}
       {open && (
         <>
           <div style={{ position: "fixed", inset: 0 }} onClick={() => setOpen(false)} />
@@ -659,12 +713,24 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
                 <input placeholder="New page…" value={adding} onChange={(e) => setAdding(e.target.value)} />
               </form>
             )}
+            <button
+              role="menuitem"
+              className="page-item page-reconnect"
+              onClick={() => {
+                setOpen(false);
+                onReconnect();
+              }}
+            >
+              Reconnect canvas
+            </button>
           </div>
         </>
       )}
     </div>
   );
 }
+
+const figcraftIn = (iframe: HTMLIFrameElement | null) => (iframe?.contentWindow as any)?.figcraft as { execute: (c: string, p?: unknown) => Promise<any> } | undefined;
 
 export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string }) {
   const frame = useRef<HTMLIFrameElement>(null);
@@ -695,9 +761,12 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     return () => clearInterval(t);
   }, [follow]);
   const [link, setLink] = useState<string | null>(null);
+  // The canvas generation the link was fetched for: the host publishing the canvas again makes it old.
+  const [linkGen, setLinkGen] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const { state, epoch } = useHub();
   const status = state?.session.canvas.status;
+  const generation = state?.session.canvas.generation ?? 0;
   // A failed fetch tries again by itself (and right away when the hub comes back), instead of leaving the error up.
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -707,10 +776,11 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     const failed = () => {
       if (!gone) retry = setTimeout(() => setAttempt((n) => n + 1), 4000);
     };
+    const gen = generation;
     api<{ link: string | null; reason: string | null }>(`/canvas-link?kind=${kind}`)
       .then((r) => {
         if (gone) return;
-        if (r.link) (setLink(r.link), setErr(null));
+        if (r.link) (setLink(r.link), setLinkGen(gen), setErr(null));
         else (setErr(r.reason ?? "The canvas isn't live yet."), failed());
       })
       .catch((e) => (setErr(String(e.message ?? e)), failed()));
@@ -718,14 +788,134 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
       gone = true;
       clearTimeout(retry);
     };
-  }, [kind, status, epoch, attempt, link]);
-  if (!link) return <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>{err ?? (status === "failed" ? state?.session.canvas.reason : "Connecting to the canvas…")}</div>;
+  }, [kind, status, epoch, attempt, link, generation]);
+
+  // Rejoin: fetch the link again and start a fresh canvas on it. `why` shows meanwhile.
+  const [mount, setMount] = useState(0);
+  const [why, setWhy] = useState<string | null>(null);
+  // The page the person was on comes back with the rejoined canvas.
+  const lastPage = useRef<string | undefined>(undefined);
+  const [resume, setResume] = useState<string | undefined>(undefined);
+  const rejoin = (reason: string) => {
+    setWhy(reason);
+    setResume(lastPage.current);
+    setLink(null);
+    setLinkGen(null);
+    setMount((n) => n + 1);
+  };
+  const stale = link !== null && linkGen !== null && generation !== linkGen;
+  useEffect(() => {
+    if (stale) rejoin("The canvas moved; rejoining…");
+  }, [stale]);
+
+  // How the canvas's own join is going (it joins inside the iframe, where a failure can't be seen):
+  // read every 2 s, shown on the page bar, and a failed join is retried by itself (3 s, 6 s, 12 s, then every 30 s).
+  const [join, setJoin] = useState<JoinState>({ state: "loading" });
+  const failures = useRef(0);
+  useEffect(() => {
+    if (!link) return;
+    setJoin({ state: "loading" });
+    const started = Date.now();
+    let since = started;
+    let last = "loading";
+    let gone = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      const fc = figcraftIn(frame.current);
+      let j: JoinState;
+      if (!fc) j = Date.now() - started > START_TIMEOUT_MS ? { state: "failed", reason: "The canvas didn't start." } : { state: "loading" };
+      else {
+        const peers = await fc.execute("collab.peers", {}).catch(() => null);
+        if (!peers) return;
+        j = joinStateOf(peers);
+      }
+      if (gone) return;
+      if (j.state !== last) ((last = j.state), (since = Date.now()));
+      if (j.state === "connecting" && Date.now() - since > CONNECT_TIMEOUT_MS) j = { state: "failed", reason: "The canvas server didn't answer." };
+      setJoin(j);
+      if (j.state === "live") ((failures.current = 0), setWhy(null));
+      if (j.state === "failed" && !retry) {
+        retry = setTimeout(() => {
+          failures.current += 1;
+          rejoin("Rejoining the canvas…");
+        }, rejoinDelay(failures.current));
+      }
+    };
+    tick();
+    const t = setInterval(tick, 2000);
+    return () => {
+      gone = true;
+      clearInterval(t);
+      clearTimeout(retry);
+    };
+  }, [link, mount]);
+
+  // Fonts the canvas lacks: in the Mac app, from this Mac's own font folders; elsewhere they're
+  // only listed (the canvas draws them in a substitute).
+  const [substituted, setSubstituted] = useState<string[]>([]);
+  const live = join.state === "live";
+  useEffect(() => {
+    if (!live) return;
+    const tried = new Set<string>();
+    let gone = false;
+    let busy = false;
+    const tick = async () => {
+      const fc = figcraftIn(frame.current);
+      if (!fc || busy) return;
+      busy = true;
+      try {
+        const left = await loadLocalFonts(fc, macInvoke(), tried);
+        if (!gone) setSubstituted(left);
+      } catch {
+      } finally {
+        busy = false;
+      }
+    };
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      gone = true;
+      clearInterval(t);
+    };
+  }, [live, link, mount]);
+
+  const reconnect = () => {
+    failures.current = 0;
+    rejoin("Reconnecting to the canvas…");
+  };
+  if (!link)
+    return (
+      <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>
+        {err ?? (status === "failed" ? state?.session.canvas.reason : why ?? "Connecting to the canvas…")}
+      </div>
+    );
   const gl = new URLSearchParams(location.search).has("webgl") ? "&webgl" : "";
   const src = `/canvas/?canvas&control${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;
   return (
     <>
-      <iframe ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />
-      <PageBar frame={frame} canAdd={kind === "edit"} page={page} />
+      <iframe key={`${mount}:${link}`} ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />
+      <PageBar
+        key={mount}
+        frame={frame}
+        canAdd={kind === "edit"}
+        page={page ?? resume}
+        join={join}
+        substituted={substituted}
+        onReconnect={reconnect}
+        onPage={(name) => {
+          lastPage.current = name;
+        }}
+      />
+      {join.state === "failed" && (
+        <div className="canvas-down" role="alert">
+          <strong>The canvas isn't connected</strong>
+          <span>{join.reason}</span>
+          <span className="canvas-down-note">Trying again by itself.</span>
+          <button className="btn small" onClick={reconnect}>
+            Reconnect now
+          </button>
+        </div>
+      )}
     </>
   );
 }
