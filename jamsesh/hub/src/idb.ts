@@ -230,7 +230,10 @@ export class Companion {
       }
       const messages: Uint8Array[] = [];
       let buf = new Uint8Array();
-      let status = "0";
+      // A call worked only if the companion answered (HTTP 200) and said so (grpc-status 0). A call cut off before
+      // it said anything (the companion crashed mid-tap) may or may not have happened: that's a failure, never a success.
+      let answered = false;
+      let status: string | null = null;
       let message = "";
       let done = false;
       const finish = (err?: Error) => {
@@ -238,6 +241,7 @@ export class Companion {
         done = true;
         clearTimeout(timer);
         if (err) reject(err);
+        else if (!answered || status === null) reject(new Error(`${method}: the Simulator's companion stopped before saying whether it worked.`));
         else if (status !== "0") reject(new Error(message || `gRPC status ${status}`));
         else resolve({ messages, cancel });
       };
@@ -248,6 +252,7 @@ export class Companion {
       };
       const timer = setTimeout(() => (cancel(), finish(new Error(`${method} timed out`))), opts.timeoutMs ?? 10_000);
       req.on("response", (h) => {
+        answered = h[":status"] === 200;
         if (h["grpc-status"] != null) status = String(h["grpc-status"]);
         if (h["grpc-message"] != null) message = decodeURIComponent(String(h["grpc-message"]));
       });
