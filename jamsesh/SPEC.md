@@ -256,6 +256,7 @@ the app, not a terminal command.
 
 ```text
 project.json        name, created, lastUsed, people [{name, color}]
+context.json        what the latest session settled, carried into the next (12.7)
 thumbnail.png       the canvas, small (480 px), saved every 5 minutes while a session runs and when it ends
 sessions/<id>/      one session: a hub data directory (jamsesh.db, renders, snapshots) plus session.json
                     {id, startedAt, lastActive}
@@ -1463,6 +1464,47 @@ When to make a new page [A19b]:
 - Throwaway work goes on a `Scratch` page.
 - When the brain routes work that doesn't fit an existing workstream, it names a new workstream,
   and with it a new page; follow-ups to existing work stay on that work's page.
+
+### 12.6 Attachments
+
+The message box ("Ask JamSesh" and "Say to the room") takes images, screenshots and files by the
+paperclip button, paste, or drag and drop. Each file uploads when it is added (`POST
+/api/attachments`, form field `file`, one per request) and shows as a thumbnail or chip with a
+remove button; Send waits for uploads and carries the ids (`/api/say` `attachments`, at most six).
+A failed send keeps the words and files.
+
+- **Allowed.** Images (PNG, JPEG, GIF, WebP, up to 12 MB), PDFs (20 MB) and text files (1 MB).
+  The type comes from the bytes, never the name or the browser's claim: SVG, HTML, executables,
+  binary and non-UTF-8 files are refused (415). Text must have a text name or none. Oversize is 413.
+- **Stored once.** `<session>/attachments/blobs/<sha256 prefix>.<ext>` holds the bytes (the same file
+  uploaded twice is one blob); `<id>.json` holds each upload's record (name, who, time). The stored
+  name is made by the hub from the hash and sniffed type; only ids of the form `att_<16 hex>` reach
+  a path, and a shown name keeps only its last path part.
+- **Fetching.** `GET /api/attachments/<id>` for any paired device or agent credential of the session
+  (unpaired: 401). Served with the sniffed type, `nosniff`, a sandboxing CSP, inline for images and
+  text (as `text/plain`) and as a download for PDFs. Uploading is for people only (agents: 403).
+- **Brain.** A direct message's images and PDFs go to the router model as image and file parts,
+  text files as text marked as material, not instructions. A message with files and no words is
+  not a request to the brain.
+- **Tasks.** A directive created from an event carries that event's attachments
+  (`Directive.attachments`). `jam_inbox`, the briefing, `jam_context` and `jam_directives` list each
+  file with its fetch URL; agents fetch it with their credential.
+- **Documents with no request.** A text file or PDF sent with no words becomes proposed context
+  (`Session.proposeContext`; the Tasks board's Triage, 4.1) instead of reaching the brain.
+- **Feed.** Pictures show as thumbnails that open full size, files as chips.
+
+### 12.7 Context carries over
+
+A project keeps `projects/<slug>/context.json` (version 1): the active facts (decisions,
+requirements and the rest), unfinished workstreams, the session brief text, and people's titles,
+each fact and workstream with the session that first settled it. `ProjectKeeper` rewrites it
+every five minutes and when the session ends; a session with nothing settled never empties it. A
+new session of the project is seeded from it once (`seedFromProject`): facts and workstreams come in
+as active with `carriedFrom {sessionId, at}`, the brief shows in the agents' briefing and
+`jam_context` until the session writes its own, and people without a title get theirs back. A
+resumed session, or the session that wrote the file, is not seeded again. The file is plain JSON
+so Phase 7's wiki can ingest it. Today's brief is one text; goal and glossary sections arrive with
+the brain's structured brief.
 
 ## 13. Host control and permissions
 

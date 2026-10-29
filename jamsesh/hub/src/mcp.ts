@@ -4,6 +4,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { sizeLabel } from "./attachments";
 import { bus } from "./bus";
 import { config } from "./config";
 import { ownTarget } from "./devproxy";
@@ -623,7 +624,7 @@ export class McpEndpoint {
         const want = String(args.status ?? "").toLowerCase();
         const all = s.directives().filter((d) => (!q.length || q.every((w) => `${d.text} ${d.result ?? ""}`.toLowerCase().includes(w))) && (!want || (want === "open" ? d.status !== "done" && d.status !== "cancelled" : d.status === want)));
         const { shown, more } = pageOf(all, args);
-        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id))).join("\n") + more || "No directives yet.");
+        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id), s.hubUrl)).join("\n") + more || "No directives yet.");
       }
       case "jam_ask_room": {
         const agent = this.requireAgent(ctx);
@@ -687,7 +688,7 @@ export class McpEndpoint {
     const ws = s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
     const settled = s.facts().filter((f) => f.status === "active").length;
     const mine = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled" && d.targets.includes(agent.id));
-    const brief = s.store.digest("session")?.text.trim();
+    const brief = s.store.digest("session")?.text.trim() || carriedBrief(s);
     return [
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
@@ -698,7 +699,7 @@ export class McpEndpoint {
       "",
       `## Session brief\n${brief ? clip(brief, 600) : "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
       ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
-      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
+      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300) + attachmentLine(d, s.hubUrl)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
       this.unreadLine(agent),
       "",
       "## Fetch more when you need it",
@@ -755,7 +756,7 @@ export class McpEndpoint {
 
   context(agent: Agent, workstream?: string, minutes = 10) {
     const s = this.hub.session;
-    const brief = s.store.digest("session")?.text;
+    const brief = s.store.digest("session")?.text || carriedBrief(s);
     const ws = workstream
       ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === workstream.toLowerCase())
       : s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
@@ -783,8 +784,8 @@ export class McpEndpoint {
       ws ? `## Workstream: ${ws.title}\n${ws.brief || "(no brief yet)"}` : "",
       knowledge(s, ws?.title),
       `## Decisions as said in the room\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
-      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
-      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
+      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s), s.hubUrl)).join("\n") || "(none: check jam_inbox for new ones)"}`,
+      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s), s.hubUrl)).join("\n") || "(none)"}`,
       `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
       `## Recently shipped by other agents (information, nothing for you to do unless a directive says so)\n${shippedLines.join("\n") || "(nothing yet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
@@ -804,7 +805,7 @@ export class McpEndpoint {
     const out: string[] = [];
     for (const d of directives) {
       out.push(
-        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
+        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${attachmentLine(d, s.hubUrl)}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
     for (const m of messages) {
@@ -885,8 +886,20 @@ export function clip(s: string, n: number) {
   return s.length <= n ? s : `${s.slice(0, n - 1).trimEnd()}…`;
 }
 
-function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined) {
-  return `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => agent(t)?.name ?? t).join(", ")}: ${d.text}`;
+function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined, base = "") {
+  return `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => agent(t)?.name ?? t).join(", ")}: ${d.text}${attachmentLine(d, base)}`;
+}
+
+/** The files that came with a task: where to fetch each one with your credential. */
+/** The earlier session's brief, until this session's own is written. */
+function carriedBrief(s: Hub["session"]) {
+  const c = s.store.setting<{ brief?: string } | null>("carried", null);
+  return c?.brief ? `${c.brief}\n(Carried over from the project's earlier session.)` : "";
+}
+
+function attachmentLine(d: Directive, base: string) {
+  if (!d.attachments?.length) return "";
+  return `\n  attachments (fetch with your credential, for example curl -H "authorization: Bearer $JAMSESH_TOKEN"): ${d.attachments.map((a) => `${a.name} (${a.type}, ${sizeLabel(a.size)}) ${base}/api/attachments/${a.id}`).join("; ")}`;
 }
 
 void config;

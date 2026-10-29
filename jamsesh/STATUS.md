@@ -32,6 +32,17 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Host starts at the picker; choosing a project opens its session in the same window | Not tested | Built and compiles; needs the app run on a Mac (the picker's `open_project` call only exists inside the app). |
 | Menu bar Projects submenu; switching ends the session cleanly, then opens the other | Not tested | Needs the app run on a Mac. |
 
+## Attachments and carry-over (phase 4.6, 4.7)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Upload checks (type by bytes, sizes, path tricks, foreign devices, agents, repeats) and fetching | Simulated | Hub tests over real HTTP on a throwaway hub. |
+| Message box: button, paste, drag states, image and file chips, refused file, feed thumbnails | Simulated | Looked at in headless Chromium, desktop and 390 px, against a throwaway hub; paste and drag were dispatched as events, not a real clipboard or Finder drag. |
+| The brain seeing images and PDFs | Not tested | The message is built and unit tested; a real gateway call with an image needs a room with a key. |
+| Agents fetching a task's files with their credential | Simulated | Fetch tested with an agent token; no real agent run. |
+| Document with no request becomes proposed context | Simulated | Goes through a stub until the Tasks board lands. |
+| Context carried between two sessions of a project | Simulated | Temp `JAMSESH_HOME` tests, and a real hub process started twice on a project (second with a new session). |
+
 ## Room and brain
 
 | Capability | Status | Notes |

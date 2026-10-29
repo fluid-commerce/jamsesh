@@ -2783,3 +2783,179 @@ html.in-app .app-header {
   height: 100%;
   padding: 18px;
 }
+
+/* =====================================================================================
+   Attachments: the message box tray and the feed
+   ===================================================================================== */
+.say {
+  position: relative;
+}
+.say.dragging {
+  outline: 2px dashed var(--decision);
+  outline-offset: -4px;
+  border-radius: 14px;
+}
+.say-drop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.say-attach {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  transition: background 0.15s, color 0.15s;
+}
+.say-attach:hover:not(:disabled) {
+  background: var(--panel-3);
+  color: var(--text);
+}
+.say-phone .say-attach {
+  width: 44px;
+  height: 44px;
+}
+.say-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.say-file {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 6px 30px 6px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.say-file.pic {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  overflow: visible;
+}
+.say-file.pic img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 11px;
+  display: block;
+}
+.say-file.uploading {
+  opacity: 0.65;
+}
+.say-file.error {
+  border-color: rgba(255, 107, 94, 0.5);
+}
+.say-file-text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+.say-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+.say-file-meta {
+  font-size: 12px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.say-file.error .say-file-meta {
+  color: var(--warn);
+  white-space: normal;
+}
+.say-file-badge {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: rgba(12, 13, 15, 0.55);
+  color: var(--text);
+  font-weight: 700;
+}
+.say-file-x {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.say-file.pic .say-file-x {
+  top: -6px;
+  right: -6px;
+  transform: none;
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+  color: var(--text);
+}
+.say-file-x:hover {
+  color: var(--text);
+}
+.feed-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.feed-files:first-child {
+  margin-top: 0;
+}
+.feed-pic img {
+  display: block;
+  max-width: 220px;
+  max-height: 140px;
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  object-fit: cover;
+}
+.feed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.feed-chip:hover {
+  background: var(--panel-3);
+}

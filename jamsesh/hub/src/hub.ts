@@ -13,6 +13,8 @@ import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
+import { Attachments, type AttachmentRef } from "./attachments";
+import { seedFromProject } from "./carryover";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
@@ -79,6 +81,8 @@ export class Hub {
   autosave: Autosave;
   /** Records the project this session belongs to (people, last used, thumbnail); idle without a project. */
   keeper: ProjectKeeper;
+  /** Images and files added to messages (SPEC 12.6). */
+  attachments: Attachments;
   auth: Auth;
   awake: KeepAwake;
   /** Reachability from anywhere (DuckDNS, certificates, router); team-level, so it survives sessions. */
@@ -132,6 +136,10 @@ export class Hub {
     this.brain.autosave = this.autosave;
     this.keeper = new ProjectKeeper(this, opts.dataDir ? undefined : config.home, opts.dataDir ? null : config.project);
     this.brain.pages = () => this.canvas.pageCache;
+    this.attachments = new Attachments(join(dir, "attachments"));
+    this.brain.attachments = this.attachments;
+    // A new session of a project starts from what the last one settled (SPEC 12.7).
+    if (!opts.dataDir && config.project) seedFromProject(config.home, config.project.slug, config.project.sessionId, this.session);
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
@@ -265,20 +273,29 @@ export class Hub {
     s.store.updateEvent(u.eventId, { text: u.text, authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
   }
 
-  /** Typed into the room (the client view's box, or the host's). Treated like speech; direct goes straight to the brain. */
-  typed(personId: string | null, text: string, direct = false) {
+  /**
+   * Typed into the room (the client view's box, or the host's). Treated like speech; direct goes
+   * straight to the brain. Attached files ride on the event. A document sent with no words isn't a
+   * request: it becomes proposed context instead of reaching the brain.
+   */
+  typed(personId: string | null, text: string, direct = false, attached: AttachmentRef[] = []) {
     const p = this.session.person(personId);
+    const words = text.trim();
+    const names = attached.map((a) => a.name).join(", ");
+    const document = !words && attached.some((a) => a.kind !== "image");
     const ev = this.session.store.addEvent({
       kind: "speech",
       authorType: "person",
       authorId: p?.id ?? null,
       authorName: p?.name ?? "Someone",
-      text: text.trim(),
+      text: words || (attached.length ? `Shared ${names}` : ""),
       relevance: direct ? "work" : null,
-      data: { typed: true, direct },
+      data: { typed: true, direct, ...(attached.length ? { attachments: attached, ...(words ? {} : { noWords: true }) } : {}), ...(document ? { proposedContext: true } : {}) },
     });
-    if (direct) this.brain.direct(ev);
-    else this.brain.hear(ev);
+    if (document) this.session.proposeContext({ text: this.attachments.brainInput(attached).text.slice(0, 600) || `${names} (shared without a request)`, by: ev.authorName, sourceEventId: ev.id, attachments: attached });
+    else if (direct) this.brain.direct(ev);
+    // Pictures with no words have nothing to triage; the feed shows them.
+    else if (words) this.brain.hear(ev);
     return ev;
   }
 
