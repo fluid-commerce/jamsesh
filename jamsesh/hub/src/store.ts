@@ -74,6 +74,22 @@ export class Store {
   /** The team store (people, devices, voiceprints, team settings); null when this is the team store. */
   team: Store | null = null;
 
+  /**
+   * Set by Hub.shutdown: "events" once the wiki has taken its last look at the conversation, "all" once the hub has
+   * stopped. Every write comes through here, so one refused past that point is refused everywhere: it throws (code
+   * ESEALED) rather than land where nothing will read it.
+   */
+  private sealed: "events" | "all" | null = null;
+
+  seal(what: "events" | "all") {
+    if (this.sealed !== "all") this.sealed = what;
+    if (what === "all") this.team?.seal("all");
+  }
+
+  private writable(event = false) {
+    if (this.sealed === "all" || (event && this.sealed === "events")) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
+  }
+
   constructor(dir: string, file = "jamsesh.db") {
     this.db = new Database(join(dir, file), { create: true });
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
@@ -132,6 +148,7 @@ export class Store {
 
   put<K extends CollectionName>(c: K, doc: Collections[K] & { id: string }, broadcast = true): Collections[K] {
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.put(c, doc, broadcast);
+    this.writable();
     this.map(c).set(doc.id, doc);
     this.db
       .query("INSERT OR REPLACE INTO docs (collection, id, json, updated) VALUES (?, ?, ?, ?)")
@@ -148,6 +165,7 @@ export class Store {
 
   remove(c: CollectionName, id: string): void {
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.remove(c, id);
+    this.writable();
     this.map(c).delete(id);
     this.db.query("DELETE FROM docs WHERE collection = ? AND id = ?").run(c, id);
     bus.changed(c);
@@ -163,6 +181,7 @@ export class Store {
   }
 
   saveReply(key: string, r: { status: number; type: string; body: string }): void {
+    this.writable();
     this.db.query("INSERT OR REPLACE INTO replies (key, status, type, body, at) VALUES (?, ?, ?, ?, ?)").run(key, r.status, r.type, r.body.slice(0, 200_000), Date.now());
     if (Math.random() < 0.02) this.db.query("DELETE FROM replies WHERE at < ?").run(Date.now() - REPLAY_MS);
   }
@@ -175,6 +194,7 @@ export class Store {
 
   setSetting(key: string, value: unknown): void {
     if (this.team && TEAM_SETTINGS.has(key)) return this.team.setSetting(key, value);
+    this.writable();
     this.db.query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, JSON.stringify(value));
   }
 
@@ -191,6 +211,7 @@ export class Store {
     data?: Record<string, any>;
     ts?: number;
   }): JamEvent {
+    this.writable(true);
     const ts = e.ts ?? Date.now();
     const row = this.db
       .query(
@@ -225,6 +246,7 @@ export class Store {
   }
 
   updateEvent(id: number, fields: Partial<Pick<JamEvent, "text" | "relevance" | "workstreamId" | "authorId" | "authorName" | "data">>) {
+    this.writable(true);
     const cur = this.event(id);
     if (!cur) return;
     const next = { ...cur, ...fields, data: { ...cur.data, ...(fields.data ?? {}) } };
@@ -237,6 +259,7 @@ export class Store {
 
   /** Deletes everything one agent put in the room, or that was addressed to it. Returns the ids. */
   deleteAgentEvents(agentId: string): number[] {
+    this.writable(true);
     const where = "author_id = ?1 OR json_extract(data, '$.agentId') = ?1 OR json_extract(data, '$.to') = ?1";
     const rows = this.db.query(`SELECT id, text, author_name FROM events WHERE ${where}`).all(agentId) as { id: number; text: string; author_name: string }[];
     for (const r of rows) this.db.query("INSERT INTO events_fts(events_fts, rowid, text, author_name) VALUES ('delete', ?, ?, ?)").run(r.id, r.text, r.author_name);
@@ -317,6 +340,7 @@ export class Store {
   }
 
   setDigest(scope: string, text: string, throughEvent: number) {
+    this.writable();
     this.db
       .query("INSERT OR REPLACE INTO digests (scope, text, updated, through_event) VALUES (?, ?, ?, ?)")
       .run(scope, text, Date.now(), throughEvent);
@@ -327,6 +351,7 @@ export class Store {
 
   addVoiceSample(personId: string, embedding: Float32Array): void {
     if (this.team) return this.team.addVoiceSample(personId, embedding);
+    this.writable();
     this.db.query("INSERT INTO voiceprints (person_id, ts, embedding) VALUES (?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)));
     // Keep the 40 most recent samples per person.
     this.db
@@ -347,6 +372,7 @@ export class Store {
 
   clearVoiceprint(personId: string): void {
     if (this.team) return this.team.clearVoiceprint(personId);
+    this.writable();
     this.db.query("DELETE FROM voiceprints WHERE person_id = ?").run(personId);
   }
 }

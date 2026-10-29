@@ -94,6 +94,8 @@ export class AudioPipeline {
   voiceprints: Voiceprints;
   /** Called with each new or updated room line. */
   onLine: ((u: Utterance, isNew: boolean) => void) | null = null;
+  /** Counts a transcription as work in flight (Hub.track), so shutdown waits for its line. */
+  track: <T>(work: Promise<T>) => Promise<T> = (work) => work;
 
   constructor(
     private session: Session,
@@ -190,10 +192,10 @@ export class AudioPipeline {
   private schedule(g: Group) {
     if (g.timer) clearTimeout(g.timer);
     const wait = Math.max(0, g.t1 + this.settleMs(g.location) - Date.now());
-    g.timer = setTimeout(() => this.finalize(g).catch((e) => console.error("audio:", e)), Math.max(wait, 150));
+    g.timer = setTimeout(() => this.track(this.finalize(g)).catch((e) => console.error("audio:", e)), Math.max(wait, 150));
   }
 
-  /** Waits for every open group to finish (tests). */
+  /** Finishes every open group now and waits for it (tests, and shutdown). */
   async flush() {
     const groups = [...this.open];
     // Stop every timer first: one that fires while an earlier group is transcribing

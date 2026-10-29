@@ -69,6 +69,7 @@ export function sameOrigin(req: Request) {
   }
 }
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
+const CLOSING = "The room is closing. Try again once it is open.";
 
 /** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
 function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
@@ -119,7 +120,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
       if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
       // Saving the session for the last time: reading still works, but nothing is added (a message arriving now would miss the final save).
-      if (hub.closing && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" && !path.endsWith("/healthz")) return bad("The room is closing. Try again once it is open.", 503);
+      // One that came in before is in flight until it is answered, body and all: shutdown waits for it (Hub.begin).
+      const writes = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS" && !path.endsWith("/healthz");
+      if (hub.closing && writes) return bad(CLOSING, 503);
+      const done = writes ? hub.begin() : null;
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
         if (path.endsWith("/healthz")) return new Response("ok");
@@ -250,8 +254,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         return webApp(path);
       } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === "ESEALED") return bad(CLOSING, 503); // past shutdown's wait: refused, not lost silently
         console.error("http:", path, e);
         return bad(e instanceof Error ? e.message : String(e), 500);
+      } finally {
+        done?.();
       }
     },
     websocket: {

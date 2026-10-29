@@ -96,6 +96,10 @@ export class Hub {
   peopleOnline = 0;
   /** The hub is saving its last state: nothing new is taken in (http.ts answers 503), so nothing arrives after the wiki's final capture. */
   closing = false;
+  /** Work under way that may still add to the room: requests being answered, speech being transcribed, the brain's pass. Shutdown waits for it. */
+  private inflight = new Set<Promise<void>>();
+  /** How long shutdown waits for work in flight before sealing the store; anything later is refused. */
+  static SHUTDOWN_WAIT_MS = 10_000;
   uploadsDir: string;
 
   constructor(private opts: HubOptions = {}) {
@@ -129,6 +133,7 @@ export class Hub {
     this.brain = new Brain(this.session, this.host);
     this.transcriber = new Transcriber(this.session);
     this.audio = new AudioPipeline(this.session, this.transcriber);
+    this.audio.track = (work) => this.track(work);
     this.canvas = new Canvas(this.session);
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
@@ -227,19 +232,55 @@ export class Hub {
     }
   }
 
+  /** Marks work as in flight until it settles (see `inflight`); returns an end to call when it is done. */
+  begin(): () => void {
+    let end!: () => void;
+    const work = new Promise<void>((res) => (end = res));
+    this.inflight.add(work);
+    return () => {
+      this.inflight.delete(work);
+      end();
+    };
+  }
+
+  track<T>(work: Promise<T>): Promise<T> {
+    return work.finally(this.begin());
+  }
+
+  /** Waits until nothing is in flight, including work that starts while waiting, for at most `ms`. False if something still runs. */
+  private async quiet(ms: number): Promise<boolean> {
+    const end = Date.now() + ms;
+    while (this.inflight.size) {
+      const left = end - Date.now();
+      if (left <= 0) return false;
+      let timer!: ReturnType<typeof setTimeout>;
+      await Promise.race([Promise.allSettled([...this.inflight]), new Promise((res) => (timer = setTimeout(res, left)))]);
+      clearTimeout(timer);
+    }
+    return true;
+  }
+
   /** Stops, saving a final snapshot first when there is a canvas to save. */
   async shutdown() {
-    // First of all, close every way in: requests that would add something are refused, and the brain and the transcriber stop making events.
+    // First of all, close every way in: requests that would add something are refused, and the brain takes no new pass.
     this.closing = true;
     this.brain.stop();
+    // Then what is already under way finishes: requests being answered, speech still waiting to be transcribed (now, not
+    // on its timer), the brain's pass. The local whisper stops only after it.
+    void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
+    void this.track(this.brain.idle());
+    if (!(await this.quiet(Hub.SHUTDOWN_WAIT_MS))) console.warn("Still working at shutdown: anything it adds now is refused.");
     this.transcriber.stop();
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);
-    // The last stretch of conversation goes into the wiki's sources first, on its own (it never waits behind a slow ingest); it is read in if the model answers in time, or at the next start.
+    // The conversation is sealed (a late event is refused, not missed), then its last stretch goes into the wiki's sources, on its own (it never
+    // waits behind a slow ingest); it is read in if the model answers in time, or at the next start.
+    this.store.seal("events");
     await Promise.race([Promise.resolve().then(() => this.wiki.captureFinal()).catch((e) => console.error("wiki:", e instanceof Error ? e.message : e)), Bun.sleep(5000)]);
     await Promise.race([this.wiki.flush().catch(() => null), Bun.sleep(15_000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
     this.stop();
+    this.store.seal("all");
   }
 
   stop() {

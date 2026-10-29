@@ -187,6 +187,10 @@ export class Brain {
 
   /** One pass at a time: passes queue here, and none can release another's turn. Stopped: queued passes don't run. */
   private queue: Promise<unknown> = Promise.resolve();
+  /** Settles when the pass running now (if any) is done; stopped, nothing queued after it runs. */
+  idle(): Promise<unknown> {
+    return this.queue;
+  }
   private exclusive<T>(fn: () => Promise<T>): Promise<T | undefined> {
     const guarded = () => (this.stopped ? Promise.resolve(undefined) : fn());
     const run = this.queue.then(guarded, guarded);
