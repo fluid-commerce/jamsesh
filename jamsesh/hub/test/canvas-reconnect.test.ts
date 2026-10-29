@@ -158,3 +158,34 @@ test("a failed canvas server restart marks the canvas failed instead of leaving 
   await first;
   expect(canvas.recovering).toBe(false);
 });
+
+test("a resync that works after a failed one makes the canvas live again, under a new generation", async () => {
+  const session = { canvas: { status: "live", generation: 3, editLink: "figcraft://join?host=10.0.0.2:47900&file=a&token=t", viewLink: "figcraft://join?host=10.0.0.2:47900&file=a&token=v" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; } };
+  let live = false;
+  const host = { alive: true, command: async (cmd: string) => (cmd === "collab.peers" ? { status: live ? "live" : "failed", reason: "gone" } : {}) };
+  const canvas: any = { host, polling: false, stopped: false, recovering: false, session, agents: new Map(), port: 47900 };
+  for (const k of ["resync", "recover", "backLive", "announce", "localLink", "loopLink"]) canvas[k] = (Canvas.prototype as any)[k];
+  await canvas.resync("test: first try");
+  expect(session.canvas.status).toBe("failed");
+  live = true;
+  await canvas.resync("test: second try");
+  expect(session.canvas.status).toBe("live");
+  expect(session.canvas.generation).toBe(4);
+  expect(session.canvas.reason).toBeNull();
+  // A resync while live leaves the generation alone: people's canvases don't rejoin for nothing.
+  await canvas.resync("test: routine");
+  expect(session.canvas.generation).toBe(4);
+}, 60_000);
+
+test("the watchdog makes a failed canvas live again once the server answers and the host is in the session", async () => {
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("ok") });
+  try {
+    const session = { canvas: { status: "failed", generation: 1, editLink: "e", viewLink: "v", reason: "x" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; } };
+    const canvas: any = { host: { alive: true, command: async () => ({ status: "live", peers: [] }) }, polling: false, stopped: false, recovering: false, session, agents: new Map(), serverUrl: `http://127.0.0.1:${server.port}`, revive: async () => {}, resync: async () => {} };
+    for (const k of ["watchdog", "backLive", "announce"]) canvas[k] = (Canvas.prototype as any)[k];
+    await canvas.watchdog();
+    expect(session.canvas).toMatchObject({ status: "live", generation: 2, reason: null });
+  } finally {
+    server.stop(true);
+  }
+});
