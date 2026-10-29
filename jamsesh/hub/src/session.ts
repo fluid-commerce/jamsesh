@@ -1295,6 +1295,24 @@ export class Session {
     return true;
   }
 
+  /** Expand one tile of the stage to fill the presentation area, or collapse back (`key` null). In place: the stage keeps its age, its revert timer and its lock. */
+  expandTile(key: string | null, screen = "main"): Stage {
+    const cur = this.stage(screen);
+    const tile = typeof key === "string" ? key.trim().slice(0, 80) : "";
+    if (cur.mode === "join" || (tile ? cur.expanded === tile : !cur.expanded)) return cur;
+    const { expanded: _drop, ...rest } = cur;
+    const stage: Stage = tile ? { ...rest, expanded: tile } : rest;
+    if (screen !== "main") {
+      this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
+      bus.changed("screens");
+      return stage;
+    }
+    this.store.setSetting("stage", stage);
+    bus.send({ type: "stage", stage });
+    if (this.bigScreens.size > 1) bus.changed("screens");
+    return stage;
+  }
+
   setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main") {
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...next, since: Date.now(), by };
     if (screen !== "main") {

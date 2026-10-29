@@ -1175,7 +1175,21 @@ tile, in every view, takes pins (see [11.5](#115-annotations)) [A7c].
   - **Canvas:** the live canvas, editable, with the page bar [A19a].
   - **Screen:** the big screen, live; clicking changes it [B11].
   - **Work:** every artifact grouped by variant set, filtered by All, Mockups, or Built, with
-    **Show on big screen** per group.
+    **Show on big screen** per group. Clicking an item opens a full-size viewer on your own screen
+    (a dark overlay; images at full size, live builds in a frame, Space for actual size): the left
+    and right arrows, on-screen arrows, a thumbnail strip, or a swipe step through its group, and
+    Esc closes. **Show on big screen** in the viewer is the deliberate second step and puts the item
+    up as the person ("Chey put this up"); **All N side by side** puts the group up. Clicking never
+    changes the big screen.
+  - **Expand:** every tile of a multi-tile stage (board, spotlight, compare, parity, layout) has
+    **Expand** in its header, on the big screen and in the Screen tab. The stage's `expanded` field
+    holds the tile key (an artifact id, or `t<n>` for a layout's nth tile); `POST /api/stage/expand
+    {tile, screen?}` sets it (tile null collapses). The tile fills the presentation area, the others
+    become a strip of thumbnails along the right edge (bottom on tall areas), and **Collapse**
+    returns. Expanding changes the stage in place (same age, lock and revert timer); a new stage
+    clears it. Expanded tiles are drawn at the screen's real size: frames come from
+    `/renders/full/<artifact id>.png?size=N` (the hub draws 1600, 2400, 3200 or 4096 px on demand and
+    keeps them), desktop builds get the real viewport instead of a scaled 1440 page.
   - **Pins:** every pin in the session (see [11.5](#115-annotations)).
   - **Agents:** every agent with its workstreams, what the session has settled (curated facts by
     workstream), the session brief, and the dev servers on the host.

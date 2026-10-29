@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "../host/HostView";
 import { api, deviceId, hub, pref, setPref, useHub, type Artifact, type HubState, type Stage as StageState } from "../shared/hub";
 import { fadeOut, playChime } from "../shared/sound";
@@ -10,6 +10,8 @@ import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout }
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
 import { Stage } from "../host/Stage";
 import { InviteButton } from "./Invite";
+import { WorkViewer } from "./WorkViewer";
+import { groupArtifacts, settle, type WorkFilter } from "./viewerNav";
 import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
@@ -551,17 +553,18 @@ function PinSlot({ target, personId }: { target: { kind: "canvas" | "artifact" |
 }
 
 function WorkGallery({ state, personId }: { state: HubState; personId: string }) {
-  const [filter, setFilter] = useState<"all" | "mockup" | "built">("all");
-  const groups = useMemo(() => {
-    const items = state.artifacts.filter((a) => filter === "all" || a.stage === filter);
-    const map = new Map<string, Artifact[]>();
-    for (const a of items) map.set(a.group || a.title, [...(map.get(a.group || a.title) ?? []), a]);
-    // Variants read A, B, C, not in the order they happened to land.
-    for (const list of map.values()) if (list.length > 1 && list.every((a) => a.variant)) list.sort((x, y) => x.variant.localeCompare(y.variant));
-    return [...map.entries()];
-  }, [state.artifacts, filter]);
-  const show = (items: Artifact[], title: string) =>
-    api("/stage", { mode: items.length > 1 ? "compare" : "spotlight", items: items.map((i) => i.id), title, pinned: false, by: "Someone in the room" });
+  const [filter, setFilter] = useState<WorkFilter>("all");
+  const groups = useMemo(() => groupArtifacts(state.artifacts, filter), [state.artifacts, filter]);
+  // The viewer holds an item by id, so a newer version arriving or a neighbour being removed doesn't move it.
+  const [viewing, setViewing] = useState<{ group: string; id: string } | null>(null);
+  const name = state.people.find((p) => p.id === personId)?.name ?? "Someone in the room";
+  const items = viewing ? groups.find(([g]) => g === viewing.group)?.[1] ?? [] : [];
+  const index = viewing ? settle(items, viewing.id, 0) : 0;
+  const close = useCallback(() => setViewing(null), []);
+  const goTo = useCallback((i: number) => items[i] && setViewing((v) => v && { group: v.group, id: items[i].id }), [items]);
+  // Putting work on the big screen is a deliberate act, shown to the room under the person's name.
+  const show = (shown: Artifact[], title: string) =>
+    api("/stage", { mode: shown.length > 1 ? "compare" : "spotlight", items: shown.map((i) => i.id), title, caption: `${name} put this up`, pinned: false, by: name });
   return (
     <div className="tab-pane scrollbars-thin">
       <div className="row between wrap-row" style={{ marginBottom: 16 }}>
@@ -575,24 +578,25 @@ function WorkGallery({ state, personId }: { state: HubState; personId: string })
         </div>
       </div>
       {groups.length === 0 && <div className="empty-note">Nothing yet. Frames appear here as agents and people design on the canvas.</div>}
-      {groups.map(([title, items]) => (
+      {groups.map(([title, list]) => (
         <div key={title} style={{ marginBottom: 28 }}>
           <div className="row between wrap-row" style={{ marginBottom: 10 }}>
             <strong style={{ fontWeight: 600 }}>{title}</strong>
-            <button className="btn small" onClick={() => show(items.slice(0, 6), title)}>
+            <button className="btn small" onClick={() => show(list.slice(0, 6), title)}>
               Show on big screen
             </button>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
-            {items.map((a) => (
+            {list.map((a) => (
               <div key={a.id} data-jam-target={JSON.stringify({ kind: "artifact", ref: a.id, label: a.title })} style={{ height: 300, display: "flex", position: "relative" }}>
-                <ArtifactTile art={a} state={state} variant={a.variant || undefined} live={false} onClick={() => show([a], a.title)} />
+                <ArtifactTile art={a} state={state} variant={a.variant || undefined} live={false} onClick={() => setViewing({ group: title, id: a.id })} />
                 <PinSlot target={{ kind: "artifact", ref: a.id, label: a.title }} personId={personId} />
               </div>
             ))}
           </div>
         </div>
       ))}
+      {viewing && items.length > 0 && <WorkViewer items={items} index={index} state={state} name={name} onIndex={goTo} onClose={close} onShow={(shown) => show(shown, shown.length > 1 ? viewing.group : shown[0].title)} />}
     </div>
   );
 }

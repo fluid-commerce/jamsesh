@@ -1,6 +1,6 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { PairedDevice } from "./auth";
 import { bus } from "./bus";
@@ -222,6 +222,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
           return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
         }
+        // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
+        const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
+        if (full) return fullRender(hub, full[1], Number(url.searchParams.get("size")));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
@@ -515,6 +518,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const stage = body as Partial<Stage> & { mode: Stage["mode"] };
     if (!stage?.mode) return bad("mode is required");
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
+  }
+
+  // Expand one tile to fill the presentation area, or collapse (`tile` null). `screen` picks an extra big screen.
+  if (path === "/stage/expand" && req.method === "POST") {
+    const tile = typeof body?.tile === "string" && body.tile.trim() ? body.tile : null;
+    const screen = typeof body?.screen === "string" && body.screen ? body.screen : "main";
+    if (screen !== "main" && !s.screens().some((sc) => sc.id === screen)) return bad("no such screen", 404);
+    return json(s.expandTile(tile, screen));
   }
 
   // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
@@ -820,6 +831,34 @@ function file(p: string, root: string, cache = false): Response {
   else headers["cache-control"] = "no-cache";
   if (full.endsWith(".webmanifest")) headers["content-type"] = "application/manifest+json";
   return new Response(Bun.file(full), { headers });
+}
+
+const FULL_SIZES = [1600, 2400, 3200, 4096];
+const fullInflight = new Map<string, Promise<string | null>>();
+
+/** One frame, drawn at the next size up from `size` and kept beside the stored render. */
+async function fullRender(hub: Hub, artifactId: string, size: number): Promise<Response> {
+  const art = hub.session.store.get("artifacts", artifactId);
+  const px = FULL_SIZES.find((n) => n >= size) ?? FULL_SIZES[FULL_SIZES.length - 1];
+  const base = art?.image?.match(/\/renders\/([\w.-]+)\.png$/)?.[1];
+  if (!art || art.kind !== "frame" || !art.nodeId || !base) return new Response("not found", { status: 404 });
+  const dir = join(hub.canvas.rendersDir, "full");
+  const name = `${base}@${px}.png`;
+  let job = fullInflight.get(name);
+  if (!job) {
+    job = (async () => {
+      if (existsSync(join(dir, name))) return name;
+      const r = await hub.canvas.renderNode(art.nodeId!, px).catch(() => null);
+      const img = r?.content.find((c) => c.type === "image") as { data: string } | undefined;
+      if (!img) return null;
+      mkdirSync(dir, { recursive: true });
+      await Bun.write(join(dir, name), Buffer.from(img.data, "base64"));
+      return name;
+    })().finally(() => fullInflight.delete(name));
+    fullInflight.set(name, job);
+  }
+  const done = await job;
+  return done ? file(join(dir, done), dir) : new Response("not found", { status: 404 });
 }
 
 const NOT_THE_HOST_WINDOW = "On the host, do this from the JamSesh window. A host started from a terminal printed a one-time host link: open that (restart the host for a new one).";

@@ -62,6 +62,15 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Phone microphone | Not tested | Needs the host's HTTPS address (remote access). |
 | Canvas sizing on high-density screens | Simulated | Correct in WebKit (Safari, iPhone, the Mac app). Real Chrome on a Retina Mac not checked. |
 
+## Big screen: viewer and expand
+
+| Capability | Status | Notes |
+|---|---|---|
+| Work tab viewer (arrows, Esc, Show on big screen as the person) | Simulated | Headless Chromium at 1440 and 390 px wide against a throwaway hub; keys and click-does-not-cast checked. |
+| Expand / Collapse on a bento | Simulated | Headless Chromium at 1920x1080 and 3840x2160. Phone mirror has no Expand control yet. |
+| Full-size frame render (`/renders/full`) | Not tested | Needs a running canvas; screenshots uploaded without one show their stored image. |
+| Expand on a second display | Not tested | Needs a real second screen. |
+
 ## Remote access
 
 | Capability | Status | Notes |
