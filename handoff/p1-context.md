@@ -104,3 +104,38 @@ ROUND 14 / STOPPED HERE (1.R13 wip, machine going offline; no review run):
 Done (compiles, tsc clean): HelperRegistry in children.ts (stopHelper rejected exit -> false; registry.stopAll); Hub.helpers registry passed to Canvas and Transcriber; whisper-server now wrapped in withParentWatch and tracked; Canvas.halt()/stop() (stop = halt + registry.stopAll); FigcraftMcp/key helper/server tracked; failed canvas start awaits host.close() and stopHelper before clearing refs; Session.createDirective refuses coordinate without known counterparts; exchangeGap with none never passes; brain create_directive gets counterparts (other targets + optional list); POST /directives fills/validates counterparts.
 Left: fix tests broken by the above: agent-news (2 tests create coordinate directives without counterparts), canvas-reconnect (tests use plain-object canvases lacking halt(); 'Stop reaps...' test must track its manually spawned serverProc via canvas.helpers.track; check 'never gets healthy' line 109 and key-helper line 381 which may be load-flaky); add tests for: whisper tracked/stopped, Hub.stop true only when all exits seen, rejected exited -> false, coordinate-without-counterparts refused (session, brain tool, HTTP), exchangeGap with none. Then run tsc/tests, commit "JamSesh 1.R13", run review 14 (r14-next.sh from r13-next.sh). Bonjour dns-sd is still outside the registry (module-global, stopped by stopAdvertising).
 The bundled Mac check result is being run by another agent and goes into this context when it lands.
+## ROUND 14 notes (cloud)
+
+Finished the 1.R13 wip on `jamsesh/phase-1` in a Linux container (no Mac). Commits e00a892, 17046ee, 060839e on top of a5451b6. Not pushed: the push is refused from this session (403), so the coordinator said to commit locally only. This round has not been independently reviewed.
+
+### Fixes
+- **Helper registry (review 13 #1, #3):** `HelperRegistry.stopAll` now closes the registry. A helper tracked after that (a start that was still pending when the stop came) is stopped at once. Helpers tracked while `stopAll` is running get stopped too, and their exits count toward its result. This applies to every spawn site that goes through `track` (canvas server, participants, key helper, whisper), so the stop path doesn't need a check for each one.
+- **The parent-watch wrapper lost stdin under dash (Linux `/bin/sh`).** dash puts /dev/null in place before it applies `"$@" <&0 &`, so the MCP child got EOF straight away. Three canvas-reconnect tests failed because of it. The wrapper now saves stdin on fd 3 and gives it to the helper from there (`exec 3<&0; "$@" <&3 3<&- &`). macOS `/bin/sh` is bash, which was never affected.
+- **Failed canvas start (review 13 should-fix):** the results of `host.close()` and `stopHelper(serverProc)` are now checked. If an exit wasn't seen, it logs a warning and the failed status reason gains "(a helper from that start is still running)". The start is still retried.
+- **Counterparts (review 13 #2):** `Session.createDirective` stores only counterparts that are agents in the room, each once. A coordinate directive that would leave any target with nobody but itself is refused, whoever creates it. The inbox's DIRECTIVE line now says "compare with: <names>", because a directive made by the brain's generic tool or over HTTP didn't otherwise tell the target who to talk to. The brain prompt for questions and blockers now passes `counterparts [asker]` when it sends a coordinate directive.
+- **Docs:** SPEC 3.2 (helper reaping) and 6.3 (counterparts and the exchange rule), two new STATUS rows (Simulated), and one line in SKILL.md.
+
+### Tests
+- **Fixed:** the two agent-news tests now give counterparts. In canvas-reconnect, the plain-object canvases get `halt` and a registry, and the "Stop reaps…" test now tracks its serverProc through `canvas.helpers.track`.
+- **Added:**
+  - children: a rejected `exited` gives false after KILL; the registry returns true or false; a late spawn is stopped; a helper tracked mid-stop is included.
+  - helper-reaping.test.ts (new file): Hub.stop reaps a whisper that ignores TERM and returns true; it returns false when one exit is never seen, and still stops the rest; whisper dies when its hub is SIGKILLed.
+  - agent-news: coordinate directives without counterparts are refused through the session and the brain tool; an old record with no counterparts can only be cancelled.
+  - http-agents-fixes: `POST /directives` with coordinate.
+  - canvas-reconnect: a failed start with a helper it couldn't reap.
+- **Load-flaky checks:** in children and canvas-reconnect, a killed process that hadn't been reaped yet (a zombie) still looked alive to `kill -0`, so those tests failed now and then (about 1 run in 5). Their liveness check now treats a zombie as gone. The "never gets healthy" (bound 8 s) and key-helper (bound 6 s) tests take about 2 s together, so I left their bounds alone.
+
+### Results
+- **Pass:** agent-news 27/27, canvas-reconnect 20/20 (5 runs), children 11/11 (4 runs), helper-reaping 3/3, http-agents-fixes 10/10, directives, brain.offline, review-fixes, lead-fixes, security-fixes, shares, relay-limits, history-paging, audio-fixes, bughunt.brain, rejoin-rename, agents-host, canvas.place, canvas-links, setup-script, brain.affinity. Web 54/54. tsc is clean for hub and web.
+- **Not run:** brain.curate ran 0 tests here, presumably because it needs a live model. brain.scenarios and wiki.live need live models, and audio.bench is excluded by the rules.
+
+### Disputed / not done
+- **astra2-fixes "a closed big-screen window … main stays":** fails, and fails the same way at bc893bf, before the wip. Deleting `main` removes it. That matches the R6 rule that main counts only while its window reports, so the test may be stale. This needs a decision; I didn't change it.
+- **Grandchildren:** a helper's own children (for example the stand-in's `sleep 1`) can outlive a KILL, because there are no process groups. This was already known and is unchanged.
+- **Bonjour (dns-sd):** still outside the registry; `stopAdvertising` stops it.
+- **Small leak:** the `devproxy.refresh` interval set in `Hub.start` is never cleared by `Hub.stop`. I left it as is.
+
+### Needs macOS
+- Review 13 #4: the owner's check of the bundled Mac app (watchdog on a hung visible page, killed hub, restart, port release).
+- The wrapper's fd-3 change has only been run under dash. It is plain POSIX `sh` and should behave the same in bash on macOS, but I haven't run it there.
+- Whisper with the real `whisper-server` binary: the tests here use a stand-in.

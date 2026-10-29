@@ -108,3 +108,46 @@ ROUND 15 notes (fourteenth review, /tmp/claude-501/p2-review14.md, 3 must-fixes,
 Could not verify: real Claude Code mcp CLI and ~/.claude.json being edited while Claude Code runs (this is the one place a rollback writes that file), Tauri dialog, room switch.
 
 STOPPED HERE (round 16, commit "JamSesh 2.21 (wip)"): done: every setup write goes through safe_write (resolves symlinks, refuses instruction files and targets outside home, mktemp beside target then mv); a journal records prior content and the hash setup wrote, and rollback restores only paths whose hash still equals it (others listed as changed by someone else); ~/.claude.json rollback is a key-level edit of mcpServers.jamsesh, verified from the file, not `mcp get`. setup-script.test.ts 44/44 with tests for each scenario. Left: grep audit that no other > >> cp mv writes a destination (scratch files in the saved folder and the flock file remain), run join-only-when-told/devtile and hub tsc, update SPEC/STATUS, write ROUND 16 notes, run review 16. Nothing running from me.
+# ROUND 16 notes (cloud)
+
+Branch jamsesh/phase-2, worktree /home/user/p2. Commits on top of e17d0e8 "JamSesh 2.21 (wip)":
+- e6bfd79 JamSesh 2.21: setup refuses a folder in a file's place and a linked lock, the ~/.claude.json key edit passes the same guard, lock test checks the whole transaction
+- 425c43c JamSesh 2.21: SPEC and STATUS describe safe_write, the journaled rollback and the key-level ~/.claude.json edit
+Not pushed: the session can't push to this repo (403); the coordinator said to commit locally only.
+
+## Review 15 against the wip diff
+1. Symlinked destinations / instruction files: every setup write goes through safe_write (resolve, guard, mktemp beside the target, mv). Tested for four link-to-CLAUDE.md/AGENTS.md cases, a link outside home, symlinked settings and Codex config on success and failure. Done.
+2. Rollback touches only files it wrote, and only if they still hold its hash: journal in the saved folder. Tested ("someone else changed" and "never written, never touched"). Done.
+3. ~/.claude.json concurrent edits: key-level edit, retried if the file changed between read and rename; a conflict is reported and the saved copy kept. Residual window between the final compare and rename is documented in SPEC (no atomic compare-and-swap). Done.
+4. Scoped read-back: read from the user-scope mcpServers.jamsesh key in the file; test with a same-name project entry. Done.
+- Design note "extend the lock-test marker across the whole transaction": the test's stub was written with literal "\n" (double-escaped in a template literal), so it never ran and the test failed on Linux. Rewritten: every CLI call checks that only its own run's .saved folder exists.
+- Trailing whitespace in setup-script.test.ts: removed.
+
+## Grep audit (>, >>, cp, mv, curl -o/-D, perl writes) in the setup script and hook.sh
+Setup script, all fine except the fixes below: safe_write's own mktemp/cat/chmod/mv; the journal (path, before, beforesha, after) and downloads/generated files (hook.sh.new, launcher.md, settings.new, config.new, codex-prompt.md, mcp_before.json) in the private mktemp -d saved folder; the rollback's mktemp+cp -p+mv onto a journaled real path (that path passed guard when written, and is replaced only if its hash is still setup's); the flock file; mcp_key's File::Temp + rename of ~/.claude.json; mkdir -p of the skill/command/prompt folders (folders only; a linked folder that leads outside home makes the file write refused by guard).
+Fixed:
+- A folder in a destination's place: mv -f would move the file inside it (the same in the rollback). guard refuses it; sha returns "folder", so the rollback lists it as changed by someone else. Tests added.
+- mcp_key set/del did not pass guard: a ~/.claude.json linked to an instruction file could be rewritten by the rollback. Now guarded, and the reason is no longer sent to /dev/null. Test added (contrived: CLAUDE.md holding JSON).
+- setup.lock opened with >> through a link would create or follow it: a link is now refused before anything is written. Test added.
+- The unused "append" mode of safe_write is removed.
+hook.sh (installed on machines, not part of setup): writes hub-down, chats/<sid>, acks/<id>, outbox files (mktemp + mv), and curl -D to .headers.$$, all inside ~/.jamsesh (mode 700, made by setup). Every name from the room or Claude Code is cut to [A-Za-z0-9_-] first. Justified, not changed: same-user processes are the documented trust boundary. No source/eval of room text in either script (only Perl eval blocks around decode_json); tokens go only through files and stdin.
+
+## Tests (each file alone, JAMSESH_SILENT=1 JAMSESH_OFFLINE=1)
+- hub/test/setup-script.test.ts: 48 pass, 0 fail (44 before plus 4 new). Before the fixes it had 2 to 3 failures on Linux: the broken lock-test stub; "can't be put back" depended on chmod 555 home, which root ignores (now a folder in ~/.claude.json's place); the four-setup instruction-file test hit the 5 s default timeout (now 60 s). The full file takes 50 to 105 s here.
+- hub/test/join-only-when-told.test.ts: 20 pass, 0 fail.
+- hub/test/devtile.test.ts: 9 pass, 0 fail.
+- tsc --noEmit: hub OK, web OK.
+- Web tests were not run (no web change in this round).
+
+## Disputed
+None.
+
+## Unverified
+- A real Claude Code mcp add-json/remove, and Claude Code writing ~/.claude.json while setup runs (tests use a stateful fake CLI).
+- The Tauri "Connect my agents" dialog, and a real room switch.
+- No independent review this round (review 16 not run: no reviewer available in the cloud).
+
+## macOS-only
+- The tests ran on Linux as root. The script keeps to tools that also exist on macOS: perl for stat, hashes, flock and realpath; mktemp with a template; no GNU-only flags (no mv -T, stat -c, sed -i). It has not been run on a Mac this round.
+- On a Mac, the read-only-home variant of "can't be put back" would also work; the folder variant is used so the test is portable.
+- Rust/Tauri (the app's setup runner, SetupGuard) not built or tested here.

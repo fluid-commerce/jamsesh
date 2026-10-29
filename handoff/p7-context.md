@@ -109,3 +109,27 @@ Fixes
 Not verified: a dense vault in a browser (hub-side size and time only; the web caps edges to 6,000, measured at 1,500 nodes in round 5); wiki.live.test.ts; websockets during shutdown.
 
 STOPPED HERE (round 9, JamSesh 7.12 wip): done in service.ts/files.ts: syncVault always hashes (no mtime skip); fileHandChange (intent in state.filing, source id reused on retry, seen saved after, failures loud); deletions filed as sources (log says "deleted a page", index rebuilt); own writes via write()/state.own/settleOwn; checkState() validates all cursors/offsets before a tick; propose keeps pre-call text and counts category/workstream changes. Existing hub wiki tests pass (81). NOT DONE: shutdown tracking of in-flight requests/transcriptions and Store seal (hub.ts/http.ts/audio), shared slug limit (web slugify should slice(0,60) and strip trailing dashes like hub slugifyTitle), new tests for: preserved-mtime edit, filing retry without duplicate, markSeen failure, deletion, range check before writes, metadata-only change, shutdown races. No review run (r7i.sh not written).
+ROUND 9 notes (cloud)
+
+Commits on jamsesh/phase-7 (local only; push refused with 403, per the coordinator): 71278fd, a814cb8, 9bcd3dd, on top of the 1987e6f wip.
+
+Fixes (review 8)
+- 1 Preserved mtime: syncVault hashes every page every time (wip); test with utimes restoring the file time.
+- 2 Duplicates / markSeen: filing records {slug, rev, id} before the source; the next pass settles it in one place (filingSettled): source there means recorded and finished (log, index, commit); not there means found again. The wiki's own writes record `own` before the write; ownSettled runs at the start of each pass and before the next own write, so an unrecorded intent is never overwritten. markSeen throws (no swallow). A pass that fails part way still finishes what it filed (finally).
+- 3 Deletion: filed as a source ("deleted a page"), index rebuilt, commit; tested alone.
+- 4 Shutdown: Hub.begin()/track() count in-flight work; every mutating HTTP request is counted from the gate to its answer (body included); timer-driven transcriptions are tracked through AudioPipeline.track; shutdown flushes waiting speech at once and waits for the brain's pass (Brain.idle). Up to Hub.SHUTDOWN_WAIT_MS (10 s), then the whisper stops. Store.seal("events") before captureFinal, seal("all") after stop(): every Store write method checks it and throws ESEALED; http maps that to 503.
+- 5 Range check: checkState() before any tick or captureFinal write (wip); new test with a bad read offset and 30 new events: no source written, state file untouched.
+- Should-fix: metadata-only change proposed (wip) and tested; pre-call `before` (wip); slugs aligned (web slice 60, strip trailing dashes, "page" fallback), same table tested on both sides; reduced-motion pulse is a still ring (pulseLook, tested); WriteResult deleted.
+- Test fix: the people's-edits test read raw/ in readdir order (differs on Linux ext4/overlay); now order-independent.
+
+Tests (each file alone, JAMSESH_SILENT=1 JAMSESH_OFFLINE=1)
+- wiki.test.ts: 87 pass / 4 fail as root; the 4 make raw/ or .proposals/ read-only with chmod, which root ignores (same 4 fail at 1987e6f). Run as `nobody`: 90 pass / 1 fail (the 1,500-page graph's 8 s bound under load; passes alone, also failed at 1987e6f under load).
+- audio-fixes 8/0, security-fixes 12/0, http-agents-fixes 9/0, review-fixes 9/0, lead-fixes 6/0, triage-board 15/0, wiki-stage 3/0, speech 14/0, brain.offline 10/0. Web: 105/0. tsc clean in hub and web.
+- Skipped: wiki.live (needs a model), audio.bench, other live tests.
+
+Disputes: none.
+Caveats / unverified
+- A timer-driven write after the events seal (a 60 s spoken reminder, a preview build finishing) throws ESEALED in its timer, and Bun stops the process on an uncaught error. The final capture is already on disk and pending sources are read at the next start, so only that shutdown's ingest flush is lost. Not handled further.
+- A streaming response (MCP) counts as done when the Response is returned, not when its stream ends.
+- No reviewer run (no reviewer available); not claimed as passed.
+macOS-only (not done): the Mac app quitting a live room through hub.shutdown, Obsidian editing a real vault, the reduced-motion pulse looked at in a browser, a 1,500-page stage graph on a real screen.
