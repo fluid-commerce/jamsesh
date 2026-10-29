@@ -340,6 +340,30 @@ describe("9. cross-platform parity", () => {
       expect(ds.length).toBeGreaterThanOrEqual(1);
       expect(ds.every((d) => d.mode === "coordinate" || d.mode === "implement")).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.mobile.id)).toBe(true);
+      // What the other platform's agent actually reads.
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toMatch(/\[coordinate\][^\n]*sidebar/i);
+      expect(r.hub.mcp.inboxText(r.agents.design, false)).toBe("Nothing new.");
+    });
+  }, T);
+
+  t("a fix or a platform-specific ship stays news", async () => {
+    await runScenario("parity: fix and platform-only -> none", [9], async (r) => {
+      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Fixed the sidebar crash when the window is resized below 600px.");
+      await r.hub.mcp.call({ agentId: r.agents.mobile.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text: "Shipped haptic feedback on the tab bar.", platformSpecific: true });
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toBe("Nothing new.");
+      expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toBe("Nothing new.");
+    });
+  }, T);
+
+  t("no app on another platform: nothing to coordinate", async () => {
+    await runScenario("parity: mobile offline -> none", [9], async (r) => {
+      r.hub.session.touchAgent(r.agents.mobile.id, { status: "offline" });
+      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Shipped the collapsible sidebar navigation in the desktop app.");
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.hub.mcp.inboxText(r.agents.design, false)).toBe("Nothing new.");
     });
   }, T);
 
@@ -362,6 +386,7 @@ describe("9. cross-platform parity", () => {
       expect(ds.every((d) => d.mode === "coordinate" || d.mode === "implement")).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.desktop.id)).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.mobile.id)).toBe(true);
+      expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toMatch(/\[coordinate\][^\n]*onboarding/i);
     });
   }, T);
 

@@ -29,7 +29,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -411,6 +411,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const upload = path === "/attachments" && req.method === "POST";
   const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
+  /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
+  const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+
   if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
   if (path === "/clock") return json({ now: Date.now() });
 
@@ -431,7 +434,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // On the host, only its own windows act as a person: not another process that reaches loopback.
     if (isLocal(ip) && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
     // Except where personId names someone else: the speaker a line is corrected to, the person asked to share.
-    if (paired?.personId && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
+    // A window that hasn't said who it is yet is nobody in particular, not whoever the request names.
+    if (paired && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
   }
 
   if (path === "/me") {
@@ -441,14 +445,25 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
+    const cur = s.store.get("devices", String(body.deviceId));
+    // The first window to register a device owns it until that pairing is gone. Only it, or the host's
+    // own window, changes whose it is: another window can't take it over or speak and share as it.
+    const owner = cur?.pairedId && (cur.pairedId === "host" || hub.auth.live(cur.pairedId)) ? cur.pairedId : (caller ?? undefined);
+    if (owner && owner !== caller && !hostWindow) return bad("That device belongs to another window.", 403);
+    if (paired?.kind === "browser") {
+      // So this is the browser's own device. The browser becomes the person it first says it is; after that a
+      // request can't make it someone else (only a person who was removed frees it to pick again), and its
+      // devices are that person's. Owner-only answers rest on this.
+      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) hub.auth.update(paired.id, { personId: String(body.personId) });
+      if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
+    }
     // The person using the host's own window: agents on the host Mac work for them.
-    if (hostWindow && body.kind !== "host" && body.personId) {
+    if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
-    const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
-    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
+    const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
+    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location, pairedId: owner }));
   }
 
   if (path === "/audio" && req.method === "POST") {
@@ -518,6 +533,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     }
   }
 
+  // What a person puts on a screen is theirs until they unlock it (3.1). A paired window is the person its credential is
+  // bound to, whatever the body says. The host's own windows are the room's (the big screen is shared), so they may name
+  // who is acting, else the person at the host. `by` is only a fallback name for a window that hasn't picked who it is.
+  const actor = () => {
+    const id = String((paired ? paired.personId : body?.personId || s.store.setting<string>("hostPersonId", "")) ?? "");
+    const p = id ? s.person(id) : undefined;
+    return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
+  };
   if (path === "/say" && req.method === "POST") {
     // Only people speak as people: agents post through MCP, and a window speaks as its own person.
     if (paired?.kind === "agent") return bad("Agents post with jam_update and jam_message, not as a person.", 403);
@@ -530,7 +553,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       throw e;
     }
     if (!body?.text?.trim() && !attached.length) return bad("text is required");
-    return json(hub.typed(body.personId ?? null, String(body.text ?? ""), !!body.direct, attached));
+    // Spoken as the credential's person; a window with none speaks as nobody in particular.
+    return json(hub.typed(actor().id, String(body.text ?? ""), !!body.direct, attached));
   }
 
   // An image, screenshot or file for a message: one per request, as form field 'file'. People add them; people and agents of the session fetch them.
@@ -573,12 +597,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.settings());
   }
 
-  // What a person puts on a screen is theirs until they unlock it (3.1). `by` is only a fallback name for a window that hasn't picked who it is.
-  const actor = () => {
-    const id = String(paired?.personId || body?.personId || s.store.setting<string>("hostPersonId", "") || "");
-    const p = id ? s.person(id) : undefined;
-    return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
-  };
   // With several screens, the caller says which (an id or a name); none, or one that isn't there, is the main one.
   const screenOf = () => s.findScreen(typeof body?.screen === "string" ? body.screen : undefined)?.id ?? "main";
 
@@ -612,8 +630,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const asked = s.showRequests().find((r) => r.id === m![1]);
     const who = actor();
     // The lock's owner answers; so does the host's own window, where the room is looking at the question.
-    if (asked && !hostWindow && asked.ownerId !== who.id) return bad(`Only ${asked.ownerName} can answer that.`, 403);
+    if (asked && !hostWindow && (!who.id || asked.ownerId !== who.id)) return bad(`Only ${asked.ownerName} can answer that.`, 403);
     const done = s.answerShowRequest(m[1], !!body?.approve, who.name);
+    if (done?.status === "expired") return bad("The screen changed since that question, so it no longer applies. The item is still waiting.", 409);
     return done ? json(done) : bad("That question has already been answered.", 404);
   }
 
@@ -622,9 +641,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // Agents steer the screen with jam_show; expanding is for people looking at it.
     if (paired?.kind === "agent") return bad("Agents use jam_show; expanding a tile is for people.", 403);
     if (body?.tile !== null && (typeof body?.tile !== "string" || !body.tile.trim())) return bad("tile must be a tile key, or null to collapse");
-    const tile: string | null = body.tile;
+    const tile: string | null = body.tile === null ? null : body.tile.trim();
     const screen = typeof body?.screen === "string" && body.screen ? body.screen : "main";
     if (screen !== "main" && !s.screens().some((sc) => sc.id === screen)) return bad("no such screen", 404);
+    if (tile !== null && !s.stageTileKeys(screen).some((t) => t.key === tile)) return bad("That isn't on the screen right now.", 404);
     return json(s.expandTile(tile, screen));
   }
 
@@ -634,6 +654,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const r = s.removeAgent(rm[1], { purge: !!body?.purge });
     return r.removed ? json(r) : bad("no such agent", 404);
   }
+  // Chats the room removed (kept out of jam_join), and letting one back in: people only.
+  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : json(s.removedChats().map(({ id, name, ownerName, at }) => ({ id, name, ownerName, at })));
+  const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
+  if (rc && req.method === "POST") return s.allowRejoin({ id: rc[1] }) ? json({ ok: true }) : bad("No removed chat with that id.", 404);
 
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
@@ -646,7 +670,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
   m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
   if (m && req.method === "POST") {
-    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined);
+    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
   }
 
@@ -696,12 +720,36 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
 
-  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/joined" && req.method === "POST") return json({ joined: hub.chatJoined(body) });
-  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/tool" && req.method === "POST") return json(hub.onTool(body, ip, hub.auth.machineOf(paired?.id)));
-  // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
-  if (path === "/hooks/listen" && req.method === "POST") return new Response(await hub.onListen(body, ip, hub.auth.machineOf(paired?.id)), { headers: { "content-type": "text/plain; charset=utf-8" } });
+  // Claude Code's hooks. They speak for an agent, so only an agent's credential sends them, or the
+  // host's own loopback, which is the host's agents (the app's relay hands any process there that
+  // credential anyway; relayed requests never count as loopback). A hook only reaches a chat that
+  // joined from the same machine as its credential, so no other device can read or drain its inbox
+  // or post prompts as its person.
+  const hook = path.match(/^\/hooks\/(prompt|joined|stop|tool|listen)$/)?.[1];
+  if (hook && req.method === "POST") {
+    if (paired && paired.kind !== "agent") return bad("Hooks are for agents' credentials.", 403);
+    const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
+    if (!machine) return bad("This device isn't paired with this JamSesh host.", 401);
+    const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine) });
+    // What the hook script passed on to the agent since its last call (see Hub.offer).
+    const promptId = req.headers.get("x-jam-prompt-id") ?? "";
+    if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;
+    b.jamAcks = (req.headers.get("x-jam-ack") ?? "").split(",").map((x) => x.trim()).filter((x) => /^[\w-]{1,40}$/.test(x)).slice(0, 50);
+    // A chat that isn't (or is no longer) in the room: the script stops sending for it.
+    const joined = !!hub.hookAgent(b, ip, machine);
+    const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
+    if (hook === "listen") {
+      // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
+      const r = joined ? await hub.listen(b, ip, machine) : { text: "", delivery: null };
+      if (r.delivery) headers["x-jam-delivery"] = r.delivery;
+      return new Response(r.text, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+    }
+    const out: any = !joined ? {} : hook === "prompt" ? hub.onPrompt(b, ip, machine) : hook === "tool" ? hub.onTool(b, ip, machine) : hub.onStop(b, ip, machine);
+    const { jamDelivery, ...rest } = out;
+    if (jamDelivery) headers["x-jam-delivery"] = jamDelivery;
+    return Response.json(rest, { headers });
+  }
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");
@@ -733,9 +781,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // ---- shares (screens and cameras) ----
+  // Every share call acts for the window that made it: a share starts from that window's own
+  // device and ends or is declined only by it (or, for a request, by the person asked). The host's
+  // own window is the one separate authority: it can end or decline any share in its room.
   if (path === "/shares" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", body.shareId, body.label);
+    if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
+    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
     hub.brain.placeShare(share);
     return json(share);
   }
@@ -747,7 +799,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
   m = path.match(/^\/shares\/([\w-]+)(\/decline)?$/);
   if (m && (req.method === "DELETE" || (req.method === "POST" && m[2]))) {
-    s.endShare(m[1], m[2] ? "declined" : "ended");
+    const sh = s.store.get("shares", m[1]);
+    if (!sh) return json({ ok: true }); // already gone: a repeated call
+    const decline = !!m[2] && sh.status === "requested";
+    const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
+    const asked = decline && !!paired?.personId && sh.personId === paired.personId;
+    if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
+    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended");
     return json({ ok: true });
   }
 
@@ -872,7 +930,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // The big screen reports its size so the brain can plan layouts for its shape.
-  if (path === "/display" && req.method === "POST" && isLocal(ip)) {
+  // A big-screen window reports or retires its display: only the host's own windows (not another process on the host).
+  if (path === "/display" && (req.method === "POST" || req.method === "DELETE") && !hostWindow) return bad("Only the host's own screens report themselves.", 403);
+  if (path === "/display" && req.method === "POST") {
     const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0);
     const info = { width: n(body?.width), height: n(body?.height), dpr: n(body?.dpr) || 1, screenX: n(body?.screenX), screenY: n(body?.screenY), at: Date.now() };
     const screen = /^[\w-]{1,32}$/.test(String(body?.screen ?? "")) ? String(body.screen) : "main";
@@ -881,12 +941,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ ok: true });
   }
   // The host app names the room's screens ("Left TV") after setting them up.
-  if (path === "/screens/config" && req.method === "POST" && isLocal(ip)) {
+  if (path === "/screens/config" && req.method === "POST") {
+    if (!hostWindow) return bad("Only the host app names the screens.", 403);
     s.configureScreens(Array.isArray(body?.screens) ? body.screens : []);
     return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
   }
   // A user-less big-screen window closed: it stops being a place to put things (main always stays).
-  if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
+  if (path === "/display" && req.method === "DELETE") {
     const screen = String(body?.screen ?? "");
     if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);
     return json({ ok: true });

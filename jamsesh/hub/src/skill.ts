@@ -29,8 +29,8 @@ Your person asked you to join their JamSesh room. Do this and nothing more until
    and a one-line focus. If you were given a "JamSesh chat id", pass it as \`chat\`. What it returns is the
    host's instructions for working in the room: follow them.
 2. **There are no \`jamsesh\` tools.** Look for a host on this computer: read \`~/.jamsesh/client.env\`
-   (\`JAMSESH_HUB\`, \`JAMSESH_TOKEN\`) and check \`curl -fs --max-time 3 "$JAMSESH_HUB/healthz"\`. If it
-   answers, fetch \`curl -fs -H "authorization: Bearer $JAMSESH_TOKEN" "$JAMSESH_HUB/skill.md"\`, follow it, and
+   (its \`JAMSESH_HUB\` line) and check \`curl -fs --max-time 3 "$JAMSESH_HUB/healthz"\`. If it
+   answers, fetch \`curl -fs -H @"$HOME/.jamsesh/auth.header" "$JAMSESH_HUB/skill.md"\`, follow it, and
    ask your person to choose **Connect my agents** in the JamSesh app so the tools are there next time.
 3. **No host is running** (the tools fail to connect, or the file or the address is missing). Say one line:
    "No JamSesh host is running on this computer. Open the JamSesh app and host or join a session, then tell me

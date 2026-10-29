@@ -30,7 +30,8 @@ interface Snapshot {
   /** Bumps on every (re)connect, so views can refetch what the socket doesn't carry. */
   epoch: number;
   toasts: Toast[];
-  /** Feed lines the hub deleted (an agent removed with its messages), newest last. */
+  /** Feed lines the hub deleted (an agent removed with its messages), newest last. All of them, never
+   * capped: a window that already showed a line must be able to forget it, however big the purge. */
   removed: number[];
   thinking: string | null;
   levels: Record<string, number>;
@@ -312,7 +313,7 @@ class HubClient {
       }
       case "events-removed": {
         const gone = new Set(m.ids);
-        this.set({ removed: [...this.snap.removed, ...m.ids].slice(-500) });
+        this.set({ removed: [...this.snap.removed, ...m.ids] });
         if (s) this.set({ state: { ...s, events: s.events.filter((e) => !gone.has(e.id)) } });
         return;
       }
@@ -363,9 +364,10 @@ export function useHub() {
 }
 
 /** Calls that must never wait in the outbox: they only make sense live. */
-// Not worth replaying later, or unsafe to: approvals must be live, and a screen size is only worth
-// reporting now.
-const NEVER_QUEUE = /^\/(audio|stage\/expand|pair|invite|triage\/|hooks\/|agents\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
+// Not worth replaying later, or unsafe to: approvals and answers must be live, a screen size is only
+// worth reporting now, and a screen control (a cast, unlock, show, restore) replayed after reconnecting
+// could undo a later decision, such as clearing a newer lock.
+const NEVER_QUEUE = /^\/(audio|stage($|\/)|show-requests\/|pair|invite|triage\/|hooks\/|agents\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {
@@ -490,3 +492,4 @@ export function ago(ts: number, now = Date.now()) {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;
 }
+

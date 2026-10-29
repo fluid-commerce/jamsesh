@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
+import { hooksOf } from "./hooks";
 import type { Agent, Artifact, Directive, JamEvent, Person, Stage, TriageCard } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -65,19 +66,28 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
   const inflight = { n: 0 };
   const brain = hub.brain as any;
   const origConsider = brain.consider.bind(brain);
-  brain.consider = async (note: string) => {
+  brain.consider = async (...args: unknown[]) => {
     inflight.n++;
     try {
-      return await origConsider(note);
+      return await origConsider(...args);
     } finally {
       inflight.n--;
     }
   };
   // Trace every router tool call so failures show what the model actually did.
+  // Every pass (triage, route, direct) runs through brain.exclusive; count them so settle() sees a flushed batch as busy.
+  const origExclusive = brain.exclusive.bind(brain);
+  brain.exclusive = async (fn: () => Promise<unknown>) => {
+    inflight.n++;
+    try {
+      return await origExclusive(fn);
+    } finally {
+      inflight.n--;
+    }
+  };
   const trace: string[] = [];
   const origTools = brain.tools.bind(brain);
-  brain.tools = (batch: JamEvent[], pass: { effects: number }, ...rest: unknown[]) => {
-    const tools = origTools(batch, pass, ...rest);
+  const traced = (tools: Record<string, any>) => {
     for (const [name, t] of Object.entries<any>(tools)) {
       const exec = t.execute;
       t.execute = async (input: any, o: any) => {
@@ -87,6 +97,10 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     }
     return tools;
   };
+  // Forward the person/agent scope: an agent's words get the reduced tool set in production too.
+  brain.tools = (batch: JamEvent[], pass: { effects: number }, ...rest: unknown[]) => traced(origTools(batch, pass, ...rest));
+  const origParity = brain.parityTools.bind(brain);
+  brain.parityTools = (batch: unknown) => traced(origParity(batch));
   const origErr = console.error;
   console.error = (...a: any[]) => {
     trace.push(`console.error ${a.map(String).join(" ").slice(0, 200)}`);
@@ -104,7 +118,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     },
     say: (who, text) => hub.typed(room.people[who].id, text),
     prompt: (agent, text) => {
-      hub.onPrompt({ agentId: room.agents[agent].id, prompt: text }, "127.0.0.1");
+      hooksOf(hub).prompt(room.agents[agent], { prompt: text });
     },
     async settle(timeoutMs = 90_000) {
       const t0 = Date.now();

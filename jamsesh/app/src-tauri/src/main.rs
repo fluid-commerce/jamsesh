@@ -15,8 +15,8 @@ mod watchdog;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use projects::Launch;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -51,14 +51,16 @@ struct Config {
     /// The project this Mac hosted last (its slug), so relaunching continues it.
     #[serde(default)]
     project: Option<String>,
+    /// Hosting, but only the Projects picker is up (no session has begun): relaunching opens the
+    /// picker again rather than the last project.
+    #[serde(default)]
+    lobby: bool,
 }
 
 #[derive(Default)]
 struct Inner {
     cfg: Config,
     hub: Option<host::Hub>,
-    /// The hub running is only the Projects picker: no session has begun.
-    lobby: bool,
     relay: Option<proxy::Proxy>,
     /// Join mode: the host's dev-server ports, mirrored on this Mac (see `Proxy::mirror`).
     mirrors: std::collections::HashMap<u16, proxy::Proxy>,
@@ -76,6 +78,8 @@ struct App {
     dir: PathBuf,
     /// Heartbeats from the windows' pages (see watchdog.rs).
     beats: Arc<std::sync::Mutex<watchdog::Beats>>,
+    /// Held for the whole of a change of session (hosting, a project switch, joining, leaving), so two never overlap.
+    switching: Mutex<()>,
 }
 
 /// Whether windows get Web Inspector; set once at launch from the saved config or the environment.
@@ -172,7 +176,7 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
     inner.hub = Some(hub);
     // Hosting begins at the Projects picker: one window, no session until a project is chosen.
     if let Launch::Lobby { new_project } = launch {
-        inner.lobby = true;
+        inner.cfg.lobby = true;
         inner.cfg.role = Some("host".into());
         state.save(&inner.cfg);
         drop(inner);
@@ -182,7 +186,7 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
         refresh_tray(app).await;
         return Ok(());
     }
-    inner.lobby = false;
+    inner.cfg.lobby = false;
     // Remember which project this was, for the menu bar and for relaunching into it.
     let current = proxy::get_as_window(port, "/api/projects").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok());
     if let Some(slug) = current.as_ref().and_then(|v| v["current"].as_str()) {
@@ -345,7 +349,11 @@ fn open_remote_setup(app: &AppHandle, origin: &str) {
         return;
     }
     if let Ok(url) = host::window_url(origin, "/setup?app").parse::<url::Url>() {
-        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)).devtools(devtools()).title("Remote access").inner_size(900.0, 820.0).build();
+        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url))
+            .devtools(devtools())
+            .title("Remote access")
+            .inner_size(900.0, 820.0)
+            .build();
     }
 }
 
@@ -372,7 +380,14 @@ fn open_setup(app: &AppHandle) {
         .build();
 }
 
+/// Stop hosting or leave: waits its turn behind any project switch, hosting or joining under way.
 async fn leave(app: &AppHandle, state: &App) {
+    let _turn = state.switching.lock().await;
+    leave_now(app, state).await;
+}
+
+/// `leave` for a caller that already holds `state.switching` (a switch cleaning up after itself).
+async fn leave_now(app: &AppHandle, state: &App) {
     let mut inner = state.inner.lock().await;
     if let Some(r) = inner.relay.take() {
         r.stop();
@@ -380,13 +395,17 @@ async fn leave(app: &AppHandle, state: &App) {
     for (_, m) in inner.mirrors.drain() {
         m.stop();
     }
-    if let Some(mut h) = inner.hub.take() {
-        tauri::async_runtime::spawn_blocking(move || h.stop());
-    }
+    let hub = inner.hub.take();
     inner.cfg.role = None;
-    inner.lobby = false;
+    inner.cfg.lobby = false;
     state.save(&inner.cfg);
     drop(inner);
+    // The session saves before anything else starts.
+    if let Some(mut h) = hub
+        && let Ok(Err(e)) = tauri::async_runtime::spawn_blocking(move || h.stop()).await
+    {
+        app.dialog().message(e).title("The session didn't finish saving").kind(MessageDialogKind::Warning).show(|_| {});
+    }
     // Every window the session opened, including a user-less host's extra screens.
     for (label, w) in app.webview_windows() {
         if label == "client" || label.starts_with("bigscreen") {
@@ -475,7 +494,15 @@ async fn refresh_tray(app: &AppHandle) {
     let (role, label, hub_port, relay_port, userless, lobby, project) = {
         let inner = state.inner.lock().await;
         let label = inner.cfg.host_name.clone().or(inner.cfg.host_url.clone()).unwrap_or_default();
-        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port), inner.cfg.userless, inner.lobby, inner.cfg.project.clone())
+        (
+            inner.cfg.role.clone(),
+            label,
+            inner.hub.as_ref().map(|h| h.port),
+            inner.relay.as_ref().map(|r| r.port),
+            inner.cfg.userless,
+            inner.cfg.lobby,
+            inner.cfg.project.clone(),
+        )
     };
     let recent = if role.as_deref() == Some("host") { projects::recent(8) } else { Vec::new() };
     let st = match relay_port {
@@ -606,7 +633,7 @@ async fn projects_menu_action(app: &AppHandle, state: &App, id: &str) {
         Some(slug) => {
             let inner = state.inner.lock().await;
             // The project that's open already: nothing to end.
-            if !inner.lobby && inner.cfg.project.as_deref() == Some(slug) {
+            if !inner.cfg.lobby && inner.cfg.project.as_deref() == Some(slug) {
                 return;
             }
             Launch::Project(slug.to_string())
@@ -626,7 +653,7 @@ fn on_menu(app: &AppHandle, id: &str) {
         let (role, hub_origin, relay, lobby) = {
             let inner = state.inner.lock().await;
             let relay = inner.relay.as_ref().map(|r| r.window_url("/client"));
-            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.lobby)
+            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.cfg.lobby)
         };
         match id.as_str() {
             "open" => match (role.as_deref(), hub_origin, relay) {
@@ -718,13 +745,35 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 
 #[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
+    let _turn = state.switching.lock().await;
     start_hosting(&app, &state, Launch::Lobby { new_project: false }).await
 }
 
+/// Whether a page may open a project: only the host's own Projects picker, in the "client" window and
+/// served by the hub this Mac runs. A joined host's pages come through the relay at 127.0.0.1 too, on
+/// another port, and must never stop it or start a hub here.
+fn picker_may_open(label: &str, page: &url::Url, role: Option<&str>, hub_origin: Option<&str>) -> bool {
+    label == "client" && role == Some("host") && hub_origin.is_some_and(|o| page.origin().ascii_serialization() == o) && page.path() == "/projects"
+}
+
 /// Opens a project: ends the session running now (the hub saves and exits first, so nothing is lost),
-/// then starts the project's session, or today's again. Called from the picker and the menu bar.
+/// then starts the project's session, or today's again. Called from the picker (this command) and the menu bar.
 #[tauri::command]
-async fn open_project(app: AppHandle, state: State<'_, Arc<App>>, slug: Option<String>, name: Option<String>) -> Result<(), String> {
+async fn open_project(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, Arc<App>>,
+    slug: Option<String>,
+    name: Option<String>,
+) -> Result<(), String> {
+    let allowed = {
+        let inner = state.inner.lock().await;
+        let page = webview.url().map_err(|e| e.to_string())?;
+        picker_may_open(webview.label(), &page, inner.cfg.role.as_deref(), inner.hub.as_ref().map(|h| h.origin()).as_deref())
+    };
+    if !allowed {
+        return Err("Projects are opened from this Mac's own Projects window.".into());
+    }
     let launch = match (slug, name) {
         (Some(slug), _) if !slug.is_empty() => Launch::Project(slug),
         (_, Some(name)) if !name.trim().is_empty() => Launch::New(name),
@@ -734,9 +783,12 @@ async fn open_project(app: AppHandle, state: State<'_, Arc<App>>, slug: Option<S
 }
 
 async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<(), String> {
+    // One transition at a time (switches, hosting, joining, leaving), from stopping the old hub to
+    // cleaning up after a failed start: so the hub here is always this switch's own.
+    let _turn = state.switching.lock().await;
     let (hub, relay, mirrors) = {
         let mut inner = state.inner.lock().await;
-        inner.lobby = false;
+        inner.cfg.lobby = false;
         (inner.hub.take(), inner.relay.take(), inner.mirrors.drain().map(|(_, m)| m).collect::<Vec<_>>())
     };
     if let Some(r) = relay {
@@ -745,9 +797,14 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
     for m in mirrors {
         m.stop();
     }
-    // Wait for the old session to save and stop before the next one opens its files.
+    // Wait for the old session to save and stop before the next one opens its files. A save that
+    // didn't finish is said, and the next project isn't opened over it.
     if let Some(mut h) = hub {
-        let _ = tauri::async_runtime::spawn_blocking(move || h.stop()).await;
+        let stopped = tauri::async_runtime::spawn_blocking(move || h.stop()).await.unwrap_or_else(|e| Err(e.to_string()));
+        if let Err(e) = stopped {
+            leave_now(app, state).await;
+            return Err(e);
+        }
     }
     for (label, w) in app.webview_windows() {
         if label.starts_with("bigscreen") {
@@ -756,13 +813,14 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
     }
     let started = start_hosting(app, state, launch).await;
     if started.is_err() {
-        leave(app, state).await;
+        leave_now(app, state).await;
     }
     started
 }
 
 #[tauri::command]
 async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>) -> Result<(), String> {
+    let _turn = state.switching.lock().await;
     start_joining(&app, &state, &url, name).await
 }
 
@@ -845,6 +903,14 @@ fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
     }
 }
 
+/// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
+fn resume_launch(cfg: &Config) -> Launch {
+    if cfg.lobby {
+        return Launch::Lobby { new_project: false };
+    }
+    cfg.project.clone().map_or(Launch::Last, Launch::Project)
+}
+
 /// Screen Recording takes effect after a relaunch.
 #[tauri::command]
 fn relaunch(app: AppHandle) {
@@ -897,6 +963,7 @@ fn main() {
                 tray_shown: std::sync::Mutex::new(String::new()),
                 screens: Default::default(),
                 beats: Default::default(),
+                switching: Mutex::new(()),
             });
             app.manage(state.clone());
             DEVTOOLS.store(cfg.devtools || std::env::var_os("JAMSESH_DEVTOOLS").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
@@ -913,7 +980,10 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let resumed = match (cfg.role.as_deref(), cfg.host_url.clone()) {
-                    (Some("host"), _) => start_hosting(&handle, &state, cfg.project.clone().map_or(Launch::Last, Launch::Project)).await,
+                    (Some("host"), _) => {
+                        let _turn = state.switching.lock().await;
+                        start_hosting(&handle, &state, resume_launch(&cfg)).await
+                    }
                     (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
                     _ => Err(String::new()),
                 };
@@ -949,10 +1019,45 @@ fn main() {
             if let Ok(mut inner) = state.inner.try_lock()
                 && let Some(mut h) = inner.hub.take()
             {
-                h.stop();
+                let _ = h.stop();
             }
         }
         RunEvent::Reopen { .. } => on_menu(app, "reopen"),
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_hosts_own_projects_picker_opens_a_project() {
+        let hub = Some("http://127.0.0.1:4801");
+        let at = |u: &str| u.parse::<url::Url>().unwrap();
+        assert!(picker_may_open("client", &at("http://127.0.0.1:4801/projects?new=1"), Some("host"), hub));
+        // A joined host's page, relayed at 127.0.0.1 on the relay's port, can't: nor while joined at all.
+        assert!(!picker_may_open("client", &at("http://127.0.0.1:4790/projects"), Some("host"), hub));
+        assert!(!picker_may_open("client", &at("http://127.0.0.1:4790/projects"), Some("join"), None));
+        assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/projects"), Some("join"), hub));
+        // Nor the big screens, a session page, another host name, or a Mac that isn't hosting.
+        assert!(!picker_may_open("bigscreen", &at("http://127.0.0.1:4801/projects"), Some("host"), hub));
+        assert!(!picker_may_open("remote", &at("http://127.0.0.1:4801/projects"), Some("host"), hub));
+        assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/client"), Some("host"), hub));
+        assert!(!picker_may_open("client", &at("http://localhost:4801/projects"), Some("host"), hub));
+        assert!(!picker_may_open("client", &at("http://127.0.0.1:4801/projects"), None, None));
+    }
+
+    #[test]
+    fn a_relaunch_at_the_projects_picker_opens_the_picker() {
+        let mut cfg = Config { role: Some("host".into()), project: Some("passport".into()), lobby: true, ..Default::default() };
+        assert_eq!(resume_launch(&cfg), Launch::Lobby { new_project: false });
+        cfg.lobby = false;
+        assert_eq!(resume_launch(&cfg), Launch::Project("passport".into()));
+        cfg.project = None;
+        assert_eq!(resume_launch(&cfg), Launch::Last);
+        // Configs from before this field read as not at the picker.
+        let old: Config = serde_json::from_str(r#"{"role":"host","project":"passport"}"#).unwrap();
+        assert_eq!(resume_launch(&old), Launch::Project("passport".into()));
+    }
 }

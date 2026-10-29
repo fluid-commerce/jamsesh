@@ -2,13 +2,14 @@
 // out loud ("approve", "deny"), or with these buttons from any window.
 import { useState } from "react";
 import { api, pref, useHub, type BuildRequest, type ShowRequest } from "./hub";
-import { useShowAsks } from "./StageControls";
+import { stageAction, useShowAsks } from "./StageControls";
 
-export function BuildRequests({ big }: { big?: boolean }) {
+export function BuildRequests({ big, screen = "main" }: { big?: boolean; screen?: string }) {
   const { state } = useHub();
-  const waiting = (state?.buildRequests ?? []).filter((r) => r.status === "pending");
-  // An agent wants a screen someone locked: the big screen shows the question, and so does its owner's own window.
-  const asks = useShowAsks(big);
+  // Build requests are the host's: one place on the big screen (the main one), not one per display.
+  const waiting = screen === "main" ? (state?.buildRequests ?? []).filter((r) => r.status === "pending") : [];
+  // An agent wants a screen someone locked: that screen shows the question, and so does its owner's own window.
+  const asks = useShowAsks(big, screen);
   if (!waiting.length && !asks.length) return null;
   return (
     <div className={`build-requests ${big ? "big" : ""}`} role="region" aria-label="Host build requests">
@@ -71,7 +72,8 @@ function AskCard({ r }: { r: ShowRequest }) {
   const answer = async (approve: boolean) => {
     setBusy(true);
     setErr("");
-    await api(`/show-requests/${r.id}`, { approve, personId: pref("personId") }, "POST", { queue: false }).catch(() => setErr("Not connected to the host. Say it out loud, or try again when you're back."));
+    // Live only, and the hub's own reason when it refuses (the screen changed since the question, say).
+    setErr(await stageAction(`/show-requests/${r.id}`, { approve, personId: pref("personId") }));
     setBusy(false);
   };
   return (

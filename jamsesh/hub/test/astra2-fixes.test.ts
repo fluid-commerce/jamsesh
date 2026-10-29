@@ -174,14 +174,19 @@ test("A10: revoking a device closes its dev sockets and its token stops at once"
 });
 
 test("a closed big-screen window stops being a screen at once; main stays, and only the host can say so", async () => {
+  // The host's own big-screen windows carry the window key; any other process on the host doesn't.
+  const win = () => ({ cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
   const json = { "content-type": "application/json" };
-  const report = (screen: string) => fetch(`${base}/api/display`, { method: "POST", headers: json, body: JSON.stringify({ screen, width: 1920, height: 1080 }) });
+  const report = (screen: string, h: Record<string, string> = win()) => fetch(`${base}/api/display`, { method: "POST", headers: { ...json, ...h }, body: JSON.stringify({ screen, width: 1920, height: 1080 }) });
+  const ids = () => hub.session.screens().map((x) => x.id);
+  expect((await report("screen-3", {})).status).toBe(403);
+  expect(ids()).not.toContain("screen-3");
   await report("main");
   await report("screen-2");
-  const ids = () => hub.session.screens().map((x) => x.id);
   expect(ids()).toContain("screen-2");
-  const del = (screen: string, h: Record<string, string> = {}) => fetch(`${base}/api/display`, { method: "DELETE", headers: { ...json, ...h }, body: JSON.stringify({ screen }) });
+  const del = (screen: string, h: Record<string, string> = win()) => fetch(`${base}/api/display`, { method: "DELETE", headers: { ...json, ...h }, body: JSON.stringify({ screen }) });
   await del("screen-2", { "x-forwarded-for": "9.9.9.9" });
+  expect((await del("screen-2", {})).status).toBe(403);
   expect(ids()).toContain("screen-2");
   expect((await del("screen-2")).status).toBe(200);
   expect(ids()).not.toContain("screen-2");

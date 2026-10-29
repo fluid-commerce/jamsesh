@@ -269,7 +269,8 @@ export class Store {
 
   /** Deletes everything one agent put in the room, or that was addressed to it. Returns the ids. */
   deleteAgentEvents(agentId: string): number[] {
-    const where = "author_id = ?1 OR json_extract(data, '$.agentId') = ?1 OR json_extract(data, '$.to') = ?1";
+    // Only what the agent itself authored: messages others sent it and prompts its person wrote stay.
+    const where = "author_id = ?1";
     const rows = this.db.query(`SELECT id, text, author_name FROM events WHERE ${where}`).all(agentId) as { id: number; text: string; author_name: string }[];
     for (const r of rows) this.db.query("INSERT INTO events_fts(events_fts, rowid, text, author_name) VALUES ('delete', ?, ?, ?)").run(r.id, r.text, r.author_name);
     this.db.query(`DELETE FROM events WHERE ${where}`).run(agentId);

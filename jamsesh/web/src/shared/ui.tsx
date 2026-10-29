@@ -6,7 +6,7 @@ import { useArtSrc } from "./frames";
 import { FeedAttachments } from "./attach";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { VersionBadge } from "./StageControls";
-import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, JoinWatch, START_TIMEOUT_MS, friendlyReason, joinLabel, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -444,6 +444,13 @@ function toneStyle(tone: string) {
 
 const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "join", "update", "message", "artifact"]);
 
+/** Where the next page of history starts: the oldest event this window has at all, shown or not (the state's window may hold none the feed shows). */
+export function historyCursor(ids: Iterable<number>): number | undefined {
+  let oldest: number | undefined;
+  for (const id of ids) if (oldest === undefined || id < oldest) oldest = id;
+  return oldest;
+}
+
 /** How close to the bottom still counts as "at the bottom" (px). */
 const AT_BOTTOM = 40;
 /** Start loading older lines when the reader is this close to the top (px). */
@@ -478,7 +485,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
   const last = events[events.length - 1]?.id ?? 0;
-  const first = events[0]?.id;
+  const first = historyCursor(seen.current.keys());
   const everything = !!state && state.totals.events <= state.events.length;
   const exhausted = big || older.done || everything;
   const fresh = following.current ? 0 : events.filter((e) => e.id > readTo.current).length;
@@ -561,7 +568,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
     <div className="feed-wrap">
       <div ref={box} className="feed" onScroll={onScroll} style={{ fontSize: big ? 17 : 14 }}>
         {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
-        {!exhausted && events.length > 0 && (
+        {!exhausted && first != null && (
           <button className="feed-older" disabled={older.loading} onClick={() => void loadOlder()}>
             {older.loading ? "Loading earlier lines" : older.failed ? "Couldn't load earlier lines. Try again" : older.more ? `${older.more} earlier ${older.more === 1 ? "line" : "lines"}` : "Earlier lines"}
           </button>
@@ -676,8 +683,8 @@ function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState
             <button className="btn small" disabled={busy} onClick={() => void remove(false)}>
               Remove
             </button>
-            <button className="btn small" disabled={busy} onClick={() => void remove(true)} title="Also deletes what it posted and what was sent to it">
-              Remove and delete its messages
+            <button className="btn small" disabled={busy} onClick={() => void remove(true)} title="Also deletes what it posted: its updates, messages and long documents. Messages sent to it and its artifacts stay.">
+              Remove and delete its posts
             </button>
             <button className="btn small ghost" disabled={busy} onClick={() => setAsking(false)}>
               Cancel
@@ -773,6 +780,35 @@ export function openTasksFor(state: HubState, agentId: string) {
     .sort((x, y) => x.ts - y.ts);
 }
 
+/** Moves this agent's stalled task to someone else; the other targets of the same task keep it. */
+export function reassignTask(directiveId: string, agentId: string) {
+  return api(`/directives/${directiveId}/reassign`, { personId: readPref("personId"), agentId });
+}
+
+function ReassignButton({ directiveId, agentId }: { directiveId: string; agentId: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <>
+      {error && <span style={{ color: "var(--warn)" }}>{error}</span>}
+      <button
+        className="btn small"
+        style={{ flex: "none" }}
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError("");
+          reassignTask(directiveId, agentId)
+            .catch((e) => setError(e?.message || "Couldn't reassign it"))
+            .finally(() => setBusy(false));
+        }}
+      >
+        Reassign
+      </button>
+    </>
+  );
+}
+
 export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubState; compact?: boolean }) {
   const now = useNow(5000);
   const color = colorFor(state, { agentId: agent.id });
@@ -803,14 +839,10 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
         {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
         {paused.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--warn)", marginTop: 2 }}>Paused while offline: {paused.map((w) => w.title).join(", ")}</div>}
         {tasks.slice(0, compact ? 1 : 3).map((d) => (
-          <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
+          <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt?.[agent.id] ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
             <span className="chip mono" style={{ flex: "none" }}>{ago(d.ts, now)}</span>
             <span className="ellipsis grow">{d.progress?.[agent.id] === "acked" ? "On it" : "Not picked up"}: {stripMd(d.text)}</span>
-            {d.reassignOfferedAt && (
-              <button className="btn small" style={{ flex: "none" }} onClick={() => api(`/api/directives/${d.id}/reassign`, { personId: readPref("personId") }).catch(() => {})}>
-                Reassign
-              </button>
-            )}
+            {d.reassignOfferedAt?.[agent.id] && <ReassignButton directiveId={d.id} agentId={agent.id} />}
           </div>
         ))}
         {tasks.length > (compact ? 1 : 3) && <div style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>and {tasks.length - (compact ? 1 : 3)} more open</div>}
@@ -1122,14 +1154,15 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     let last = "loading";
     let gone = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
+    const watch = new JoinWatch();
     const tick = async () => {
       const fc = figcraftIn(frame.current);
       let j: JoinState;
       if (!fc) j = Date.now() - started > START_TIMEOUT_MS ? { state: "failed", reason: "The canvas didn't start." } : { state: "loading" };
       else {
-        const peers = await fc.execute("collab.peers", {}).catch(() => null);
-        if (!peers) return;
-        j = joinStateOf(peers);
+        const read = await watch.poll(fc);
+        if (!read) return;
+        j = read;
       }
       if (gone) return;
       if (j.state !== last) ((last = j.state), (since = Date.now()));
