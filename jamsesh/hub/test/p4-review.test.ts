@@ -33,7 +33,8 @@ const { createProject, openSession } = await import("../src/projects");
 const { buildBrief } = await import("../src/brief");
 const { applyCuration } = await import("../src/brain/curation");
 const { askedFor, acceptedEvent } = await import("../src/brain/brain");
-const { pdfText, pdfTextRuns, MAX_UPLOAD_BYTES } = await import("../src/attachments");
+const { pdfText, MAX_UPLOAD_BYTES } = await import("../src/attachments");
+const { drawnText: pdfTextRuns } = await import("../src/pdfworker");
 const { samePolarity } = await import("../src/similarity");
 
 const wasOffline = config.offline;
@@ -330,6 +331,17 @@ test("the built-in PDF reader gets the words from plain and compressed pages, an
   expect(pdfTextRuns(pdf("BT /F1 12 Tf [(Prices ) -20 (include tax) ] TJ 0 -14 Td (\\(always\\)) Tj ET", true))).toBe("Prices include tax (always)");
   expect(pdfTextRuns(pdf("0 0 m 100 100 l S"))).toBe("");
   expect(pdfTextRuns(new TextEncoder().encode("%PDF-1.4 garbage << /Filter /FlateDecode >> stream\nnot zlib\nendstream"))).toBe("");
+  // Only strings a text operator draws: one used as anything else, or outside BT…ET, isn't wording.
+  expect(pdfTextRuns(pdf("(Outside text) Tj BT /F1 12 Tf (Not drawn) 5 Ts (Shown) Tj (Also not) Tz ET"))).toBe("Shown");
+  expect(pdfTextRuns(pdf("BT 0 0 (Quoted) \" ET"))).toBe("Quoted");
+});
+
+test("the built-in reader runs in a worker: the hub gets the words, and a broken file gives nothing", async () => {
+  const r = room();
+  const good = r.hub.attachments.save(pdf("BT /F1 24 Tf 72 700 Td (Prices always include tax) Tj ET", true), "pricing.pdf", "Chey");
+  expect(await pdfText(r.hub.attachments.file(good.id)!.path, 4000, false)).toBe("Prices always include tax");
+  const broken = r.hub.attachments.save(new TextEncoder().encode("%PDF-1.4 << /Filter /FlateDecode >> stream\nnot zlib\nendstream"), "broken.pdf", "Chey");
+  expect(await pdfText(r.hub.attachments.file(broken.id)!.path, 4000, false)).toBe("");
 });
 
 test("a PDF sent with no words becomes a card with its text, which a person can add as a fact", async () => {
@@ -443,4 +455,153 @@ test("an artifact records the task its agent was on, and none when the agent had
   // A later version keeps what it was first made for.
   r.s.setDirectiveFor(two.id, r.desktop.id, "done");
   expect(r.s.upsertArtifact({ id: footer.id, kind: "screenshot", title: "Footer / A", agentId: r.desktop.id }).directiveId).toBe(two.id);
+});
+
+// ---------- second review ----------
+
+test("a paired browser with no person speaks as nobody and can't act on cards as someone it names", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  try {
+    const nobody = r.hub.auth.issue({ kind: "browser", label: "A laptop", ip: "10.0.0.9" });
+    const cheyDev = r.hub.auth.issue({ kind: "browser", label: "Chey's laptop", ip: "10.0.0.5", personId: r.chey.id });
+    const call = (t: { token: string }, path: string, body: object) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", "content-type": "application/json", authorization: `Bearer ${t.token}` }, body: JSON.stringify(body) });
+    const said = await (await call(nobody, "/say", { personId: r.chey.id, text: "Send the header task" })).json();
+    expect(said.authorName).not.toBe("Chey");
+    expect(said.authorId).toBeNull();
+    const card = r.s.proposeTask({ text: "Make three header variants", mode: "explore", targets: [r.desktop.id], by: "Felipe" })!;
+    for (const verb of ["send", "dismiss"]) expect((await call(nobody, `/triage/${card.id}/${verb}`, { personId: r.chey.id })).status).toBe(403);
+    expect(r.s.board.get(card.id)!.status).toBe("open");
+    // A browser bound to Chey is Chey, whoever the body names.
+    expect((await (await call(cheyDev, "/say", { personId: r.felipe.id, text: "hello" })).json()).authorName).toBe("Chey");
+    expect((await call(cheyDev, `/triage/${card.id}/dismiss`, { personId: r.felipe.id })).status).toBe(200);
+    expect(r.s.board.get(card.id)!.resolvedBy).toBe("Chey");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("reading or summarizing an attached file offers no tool that makes work, and never the Tasks board", () => {
+  const r = room();
+  const offered = (words: string) => Object.keys(r.tools([], "direct", words)).sort();
+  for (const words of ["Read this attached brief and tell me its goal", "Summarize the tasks in this PDF", "What does this say?", "Look at this and check it", "Review the attached spec"]) {
+    expect(offered(words)).not.toContain("create_directive");
+    expect(offered(words)).not.toContain("triage_card");
+    expect(offered(words)).not.toContain("pair_agents");
+  }
+  for (const words of ["Send this to Felipe's agent", "Ask Felipe's Claude to build this", "Build what this spec describes", "Make the screens in this mockup"]) expect(offered(words)).toContain("create_directive");
+  expect(offered("Send the second card")).not.toContain("triage_card");
+});
+
+test("an overheard question gets a spoken answer but isn't direct, and isn't accepted material", () => {
+  const r = room();
+  const ev = r.said(r.felipe, "what colour is the header?");
+  r.hub.brain.applyTriage([ev], { lines: [{ id: ev.id, topic: "project", joking: false, relevance: "work", intent: "question", confidence: 0.9 }], actionable: true, introductions: [] } as any);
+  const after = r.s.store.event(ev.id)!;
+  expect(after.data.direct).toBeUndefined();
+  expect(after.data.asked).toBe(true);
+  expect(acceptedEvent(after)).toBe(false);
+  const { speechSource } = require("../src/brain/brain");
+  expect(speechSource([after])).toBe("voice");
+  // Overheard tools stay overheard: no acting on cards, nothing sent.
+  expect(Object.keys(r.tools([after], "overheard"))).not.toContain("triage_card");
+});
+
+test("the same words for another platform or workstream are another fact, on the board and in curation", () => {
+  const r = room();
+  const desk = r.s.board.rememberNow({ text: "Header uses option A on desktop", kind: "decision", by: "Chey" })!;
+  const mobile = r.s.proposeContext({ text: "Header uses option A on mobile", kind: "decision", by: "Felipe" });
+  expect(mobile).not.toBeNull();
+  expect(r.s.proposeContext({ text: "Header uses option A on desktop", kind: "decision", workstream: "Settings", by: "Felipe" })).not.toBeNull();
+  const ev = r.said(r.felipe, "header uses option A on mobile too");
+  const hold = { add: (f: any) => void r.s.proposeContext({ text: f.text, kind: f.kind, by: "Felipe", sourceEventIds: f.sourceEventIds }), retire: () => {} };
+  const out = applyCuration(r.s, { add: [{ kind: "decision", text: "Header uses option A on mobile", eventIds: [ev.id] }], update: [], resolve: [], supersede: [] }, [ev], hold);
+  expect(out.merged).toHaveLength(0);
+  expect(r.s.store.get("facts", desk.id)!.sourceEventIds).not.toContain(ev.id);
+});
+
+test("curation can't propose retiring a fact without a line from the room behind it", () => {
+  const r = room();
+  const q = r.s.board.rememberNow({ text: "Is there a dark accent color?", kind: "question", by: "Chey" })!;
+  const old = r.s.board.rememberNow({ text: "Header uses option A", kind: "decision", by: "Chey" })!;
+  const ev = r.said(r.chey, "the dark accent is E85A3A");
+  const hold = { add: () => {}, retire: (f: any, status: any, reason: string, sources: number[]) => void r.s.board.proposeRetire({ fact: f, status, reason, by: "Chey", sourceEventIds: sources }) };
+  const out = applyCuration(r.s, { add: [], update: [], resolve: [{ id: q.id, reason: "answered" }], supersede: [{ id: old.id, reason: "replaced", eventIds: [999999] }] }, [ev], hold);
+  expect(out.dropped.map((d) => d.why)).toEqual(["no source event", "no source event"]);
+  expect(r.s.board.open()).toHaveLength(0);
+  expect(r.s.board.proposeRetire({ fact: old, status: "superseded", reason: "x", by: "Chey" })).toBeNull();
+  applyCuration(r.s, { add: [], update: [], resolve: [{ id: q.id, reason: "answered", eventIds: [ev.id] }], supersede: [] }, [ev], hold);
+  expect(r.s.board.open()).toEqual([expect.objectContaining({ retire: "resolved", conflictsWith: q.id })]);
+});
+
+test("retiring the last carried fact empties the project's file, so the next session doesn't bring it back", () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const p = createProject(home, "Settings");
+  mkdirSync(join(home, "projects", p.slug), { recursive: true });
+  writeFileSync(contextFile(home, p.slug), JSON.stringify({ version: 1, updatedAt: 1, activeAt: 1, fromSession: "old", brief: "", goal: "", glossary: [], facts: [{ kind: "decision", text: "Use the top tabs", workstream: "", by: "Chey", note: "", ts: 1, session: "old" }], workstreams: [], people: [] }));
+  const a = room();
+  expect(seedFromProject(home, p.slug, "a", a.s)).toBe(1);
+  const carried = a.s.facts()[0];
+  a.s.store.put("facts", { ...carried, status: "superseded", updatedAt: Date.now() + 5 });
+  expect(writeProjectContext(home, p.slug, "a", a.s)).toBe(true);
+  const ctx = readProjectContext(home, p.slug)!;
+  expect(ctx.facts).toEqual([]);
+  expect(ctx.activeAt).toBeGreaterThan(1);
+  const b = room();
+  seedFromProject(home, p.slug, "b", b.s);
+  expect(b.s.facts().map((f) => f.text)).not.toContain("Use the top tabs");
+});
+
+test("a session reopened with facts of its own isn't seeded from another session's file", () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const p = createProject(home, "Settings");
+  mkdirSync(join(home, "projects", p.slug), { recursive: true });
+  writeFileSync(contextFile(home, p.slug), JSON.stringify({ version: 1, updatedAt: 1, fromSession: "b", brief: "", goal: "", glossary: [], facts: [{ kind: "decision", text: "Header uses option B", workstream: "", by: "Felipe", note: "", ts: 1, session: "b" }], workstreams: [], people: [] }));
+  const a = room();
+  a.s.board.rememberNow({ text: "Header uses option A", kind: "decision", by: "Chey" });
+  expect(seedFromProject(home, p.slug, "a", a.s)).toBe(0);
+  expect(a.s.facts().map((f) => f.text)).toEqual(["Header uses option A"]);
+});
+
+test("a card for an unreadable file can't be merged with only its placeholder or the fact's own words", () => {
+  const r = room();
+  const fact = r.s.board.rememberNow({ text: "Settings has a sidebar", kind: "fact", by: "Chey" })!;
+  const card = r.s.proposeContext({ text: "sketch.pdf (no text to read: write what to keep)", needsWording: true, kind: "fact", by: "Chey", origin: "document" })!;
+  expect(r.s.board.merge(card.id, fact.id, "Chey").ok).toBe(false);
+  expect(r.s.board.merge(card.id, fact.id, "Chey", `Settings has a sidebar. ${card.original}`).ok).toBe(false);
+  expect(r.s.board.merge(card.id, fact.id, "Chey", "Settings has a sidebar. ").ok).toBe(false);
+  expect(r.s.board.replace(card.id, "Chey", fact.id).ok).toBe(false);
+  expect(r.s.store.get("facts", fact.id)!.text).toBe("Settings has a sidebar");
+  expect(r.s.board.merge(card.id, fact.id, "Chey", "Settings has a sidebar. The sketch puts it on the left.").ok).toBe(true);
+});
+
+test("a curation pass that gives nothing back keeps its batch for the next try, after a wait", async () => {
+  const r = room();
+  for (let i = 0; i < 8; i++) r.said(r.felipe, `the header should use option ${i}`);
+  calls.length = 0;
+  answer = async (c) => (c.system?.includes("curate") ? { output: null } : c.system?.includes("running brief") ? { output: { goal: "g", glossary: [] } } : { text: "" });
+  await r.hub.brain.digest(true);
+  expect(r.s.store.digest("session")).toBeNull();
+  expect((r.hub.brain as any).digestRetryAt).toBeGreaterThan(Date.now());
+  // Not forced: it waits out the retry.
+  const before = calls.length;
+  await r.hub.brain.digest();
+  expect(calls.length).toBe(before);
+  answer = async (c) => (c.system?.includes("curate") ? { output: { add: [], update: [], resolve: [], supersede: [] } } : c.system?.includes("running brief") ? { output: { goal: "g", glossary: [] } } : { text: "" });
+  await r.hub.brain.digest(true);
+  expect(r.s.store.digest("session")!.throughEvent).toBe(r.s.store.lastEventId());
+  expect((r.hub.brain as any).digestRetryAt).toBe(0);
+});
+
+test("Send rechecks the agents: one removed or turned observer while the card waited doesn't get it", () => {
+  const r = room();
+  const card = r.s.proposeTask({ text: "Make three header variants", mode: "explore", targets: [r.desktop.id, r.mobile.id], by: "Chey" })!;
+  r.s.removeAgent(r.mobile.id);
+  const sent = r.s.board.send(card.id, "Chey");
+  expect(sent.ok).toBe(true);
+  expect(r.s.store.get("directives", (sent as any).directiveId)!.targets).toEqual([r.desktop.id]);
+  const lone = r.s.proposeTask({ text: "Fix the footer", mode: "implement", targets: [r.desktop.id], by: "Chey" })!;
+  r.s.removeAgent(r.desktop.id);
+  expect(r.s.board.send(lone.id, "Chey")).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.board.get(lone.id)!.status).toBe("open");
 });

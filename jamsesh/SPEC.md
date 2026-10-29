@@ -874,7 +874,8 @@ The brain keeps context current so new legs of work start informed [B27, A16d]:
   change and writes nothing; `Brain.applyCuration(decision, events)` writes the facts and returns
   what it added, merged and dropped. `Brain.curate` is both in a row. The Tasks board wraps the
   first to turn new facts into proposed context cards.
-- A batch that fails to curate is retried on the next pass.
+- A batch that fails to curate, or comes back with no result, is retried: the digest cursor doesn't move past it, and
+  the next try waits 30 s, doubling up to 10 minutes.
 
 ### 7.4 What agents read
 
@@ -1173,7 +1174,8 @@ holds is a **card** in the `triage` collection (`TriageCard`, `hub/src/board.ts`
 
 **On purpose versus overheard.** A line is on purpose when a person typed it to JamSesh, recorded a prompt,
 or said its name (the event carries `data.direct`, set by `Brain.hear`, `Hub.typed` and the recorded-prompt
-path). Those passes (`Brain.direct`, `tools(…, route = "direct")`) work as before: `create_directive` sends,
+path). A question the triage hears asked in the room carries `data.asked` instead: its answer is spoken, but it is
+overheard like any other line and never counts as accepted. Those passes (`Brain.direct`, `tools(…, route = "direct")`) work as before: `create_directive` sends,
 `record_decision` records an event and saves a fact at once. Everything else is **overheard** (`Brain.route`,
 the batched pass; `tools(…, "overheard")`, and the keyword rules when the gateway is down):
 
@@ -1217,8 +1219,9 @@ and numbers) joins the open card: `count` goes up and the new source line is add
 microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context proposal a saved fact
 already states is dropped; one that is close to a fact but differs in its specifics (option A versus B, 16 versus 24
 px) or negates it ("must not use option A"), or names a fact with `replaces`, is flagged `conflictsWith`; a named
-replacement is never dropped as already known. Repeats must also agree on polarity (`hub/src/similarity.ts`, shared with
-curation), and a task repeat on mode, target agents and workstream; a context repeat on kind and workstream.
+replacement is never dropped as already known. Repeats must also agree on polarity and on the platforms named
+(`hub/src/similarity.ts`, shared with curation), and a task repeat on mode, target agents and workstream; a context
+repeat, and "already known", on kind and workstream.
 
 **Actions** (`POST /api/triage/<id>/<action>`, `PATCH /api/triage/<id>`; people only, like the other human routes: an
 agent's credential and a process on the host without the window key get 403, and a window must know its person):
@@ -1238,18 +1241,21 @@ action gets the first result again, so a retried click acts once. What an action
 retired fact and its replacement, the room decision event) and the card's own resolution are one transaction
 (`Store.atomic`): a failed write leaves none of them, and the hub's messages go out only after it commits. A cancel card
 that finds its task already done or cancelled answers 409. A context card with `needsWording` (a file with no text to
-read) can't be added, merged or used to replace until a person writes the wording. The client never queues these calls
+read) can't be added, merged or used to replace until a person writes the wording (a merge whose text is only the
+placeholder or only the fact is refused). Send sends only to the card's agents still in the session and not
+observers; with none left it answers 409 and the card stays open. The client never queues these calls
 while offline.
 
 **Curation and the board.** `Brain.applyCuration` passes a `CurationHold` to `applyCuration`: only a restatement (the
 same words, citing an event of this batch) joins a saved fact directly; an update with no cited event is dropped, and any
-other update becomes a Replace card for that fact; new facts become context cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
+other update becomes a Replace card for that fact; a resolve or supersede with no cited event of the batch is dropped
+(a Retire card always shows a room line behind it); new facts become context cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
 curator would resolve or supersede with nothing to take its place becomes a **Retire** card (`retire` on the card;
 accepting it only changes the fact's status). Overheard, the brain's `cancel_directive` marks a waiting task card
 `overruled` for a person to dismiss; asked directly, it dismisses it. A document sent with no request is a context card
 with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
-poppler's `pdftotext` when installed, else the plain text runs JamSesh reads itself, `pdfText`); with nothing readable
-it gets `needsWording`. Agents'
+poppler's `pdftotext` when installed, else JamSesh's own reader in a worker with a 5 s limit, which takes only the
+strings drawn by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`; `pdfText`); with nothing readable it gets `needsWording`. Agents'
 credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.json`) holds only
 accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
 
@@ -1724,8 +1730,10 @@ try again to send.") until it is removed or retried; it is never dropped from a 
 - **Brain.** A direct message's files go to the router model in a message of their own before the
   request: images and PDFs as parts, text files fenced in random `<attached-…>` markers and labelled as
   material, never instructions. In that pass only the tools the person's own words ask for are
-  offered (`askedFor`: "cancel" for `cancel_directive`, a work verb for `create_directive`, "show" for
-  the screen and so on; host control, naming and behaviour notes never), so a file's text can't
+  offered, and each is checked again when it runs (`askedFor`). Reading, summarizing or asking about a
+  file gets answering and searching only; `create_directive` needs an explicit request for work ("send",
+  "ask X to", "build", "make"), `cancel_directive` "cancel" or "stop", the screen tools "show"; the Tasks
+  board, host control, naming and behaviour notes are never offered with a file, so a file's text can't
   cancel or send anything. A message with files and no words is not a request to the brain.
 - **Tasks.** A directive created from an event carries that event's attachments
   (`Directive.attachments`). `jam_inbox`, the briefing, `jam_context` and `jam_directives` list each
@@ -1746,7 +1754,9 @@ as active with `carriedFrom {sessionId, at}`, the brief shows in the agents' bri
 resumed session, or the session that wrote the file, is not seeded again. The file is checked whole
 (every field's type, the fact kinds and workstream statuses, sizes): one malformed value and nothing is seeded. Each
 file carries `activeAt`, when its session last did something; a session less recently active than that doesn't
-overwrite it (two sessions of a project open at once: the one used last owns the file). An unreadable file is moved
+overwrite it (two sessions of a project open at once: the one used last owns the file). Changes to carried items
+count as activity, and a session that retired what it carried writes the file even when nothing is left, so a
+retired fact doesn't come back. A session that already has facts or workstreams of its own is never seeded. An unreadable file is moved
 aside (`context.json.unreadable-<time>`) before a new one is written. The file is plain JSON
 so Phase 7's wiki can ingest it. Today's brief is one text; goal and glossary sections arrive with
 the brain's structured brief.

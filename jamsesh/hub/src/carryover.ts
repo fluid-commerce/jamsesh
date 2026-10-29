@@ -63,12 +63,18 @@ export function readProjectContext(home: string, slug: string): ProjectContext |
   return { ...r.data, activeAt: r.data.activeAt ?? r.data.updatedAt };
 }
 
-/** When this session last did something: its newest event, fact or workstream change. */
+/** Whether this session changed an item since it was carried in (a person retired or rewrote it here). */
+const changedHere = (x: { updatedAt: number; carriedFrom?: { at: number } }) => !x.carriedFrom || x.updatedAt > x.carriedFrom.at;
+
+/** When this session last did something: its newest event, or a fact or workstream it made or changed. */
 export function lastActive(s: Session) {
   const newest = s.store.recentEvents({ limit: 1 })[0]?.ts ?? 0;
-  const changed = [...s.store.all("facts"), ...s.store.all("workstreams")].filter((x) => !x.carriedFrom).reduce((m, x) => Math.max(m, x.updatedAt || 0), 0);
+  const changed = [...s.store.all("facts"), ...s.store.all("workstreams")].filter(changedHere).reduce((m, x) => Math.max(m, x.updatedAt || 0), 0);
   return Math.max(newest, changed);
 }
+
+/** This session retired what it was carried: settled-on-nothing is then what it settled, and the file says so. */
+const retiredCarried = (s: Session) => [...s.store.all("facts"), ...s.store.all("workstreams")].some((x) => x.carriedFrom && changedHere(x) && x.status !== "active" && x.status !== "paused");
 
 /** What this session has settled right now: its accepted facts (a proposal on the Tasks board is not one yet), live workstreams, brief and people's titles. */
 export function snapshotContext(s: Session, sessionId: string): ProjectContext {
@@ -109,7 +115,8 @@ export function writeProjectContext(home: string, slug: string, sessionId: strin
   const empty = !ctx.facts.length && !ctx.workstreams.length && !ctx.brief && !ctx.goal;
   const file = contextFile(home, slug);
   if (existsSync(file)) {
-    if (empty) return false;
+    // An empty session never empties the file, unless it retired what it carried in: then nothing settled is the news.
+    if (empty && !retiredCarried(s)) return false;
     const cur = readProjectContext(home, slug);
     if (cur && cur.fromSession !== sessionId && cur.activeAt > ctx.activeAt) return false;
     if (!cur) renameSync(file, `${file}.unreadable-${Date.now()}`);
@@ -125,10 +132,12 @@ export function writeProjectContext(home: string, slug: string, sessionId: strin
  * A new session starts from the project's context file: facts and workstreams come in marked
  * `carriedFrom`, the brief is kept for the briefing until the brain writes a new one, and people
  * without a title get the one they had. Done once per session; a session that is resumed, or that
- * already has its own context, is left alone. Returns how many items came in.
+ * already has facts or workstreams of its own, is left alone. Returns how many items came in.
  */
 export function seedFromProject(home: string, slug: string, sessionId: string, s: Session): number {
   if (s.store.setting("carried", null)) return 0;
+  // A session reopened with context of its own keeps it: another session's file never mixes into it.
+  if (s.store.all("facts").some((f) => !f.carriedFrom) || s.store.all("workstreams").some((w) => !w.carriedFrom)) return 0;
   const ctx = readProjectContext(home, slug);
   if (!ctx || ctx.fromSession === sessionId) return 0;
   const now = Date.now();

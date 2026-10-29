@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { Session } from "../session";
 import { newId } from "../store";
 import type { Fact, JamEvent } from "../types";
-import { restates, samePolarity, sameSpecifics, similar } from "../similarity";
+import { restates, similar } from "../similarity";
 import { model } from "./llm";
 
 const kinds = ["decision", "requirement", "constraint", "preference", "question", "fact"] as const;
@@ -130,12 +130,16 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold?
   const retiring: { f: Fact; status: "superseded" | "resolved"; reason: string; sources: number[] }[] = [];
   for (const r of c.resolve) {
     const f = s.store.get("facts", r.id);
-    if (f && f.status === "active" && hold) retiring.push({ f, status: "resolved", reason: r.reason, sources: cite(r.eventIds) });
+    // Retiring something a person accepted has to show what in the room supports it.
+    if (f && f.status === "active" && hold && !cite(r.eventIds).length) result.dropped.push({ text: r.reason, why: "no source event" });
+    else if (f && f.status === "active" && hold) retiring.push({ f, status: "resolved", reason: r.reason, sources: cite(r.eventIds) });
     else if (f && f.status === "active") s.store.put("facts", { ...f, status: "resolved", note: r.reason, updatedAt: now, sourceEventIds: union(f.sourceEventIds, cite(r.eventIds)) });
   }
   for (const r of c.supersede) {
     const f = s.store.get("facts", r.id);
-    if (f && f.status === "active" && hold) retiring.push({ f, status: "superseded", reason: r.reason, sources: cite(r.eventIds) });
+    // Retiring something a person accepted has to show what in the room supports it.
+    if (f && f.status === "active" && hold && !cite(r.eventIds).length) result.dropped.push({ text: r.reason, why: "no source event" });
+    else if (f && f.status === "active" && hold) retiring.push({ f, status: "superseded", reason: r.reason, sources: cite(r.eventIds) });
     else if (f && f.status === "active") s.store.put("facts", { ...f, status: "superseded", note: r.reason, updatedAt: now, sourceEventIds: union(f.sourceEventIds, cite(r.eventIds)) });
   }
   for (const a of c.add) {
@@ -154,7 +158,8 @@ export function applyCuration(s: Session, c: Curation, events: JamEvent[], hold?
     }
     // Paraphrases of what's already known are duplicates, not new knowledge. Items that differ in their
     // specifics (option A versus B, 16 versus 24 px) never are. The event is added to the fact's sources.
-    const same = s.facts().find((f) => f.status === "active" && f.kind === a.kind && sameSpecifics(f.text, a.text) && samePolarity(f.text, a.text) && similar(f.text, a.text) > 0.55);
+    // Scope counts: the same words for another workstream or platform are another fact.
+    const same = s.facts().find((f) => f.status === "active" && f.kind === a.kind && f.workstream.toLowerCase() === streamOf(a.workstream).toLowerCase() && restates(f.text, a.text, 0.55));
     if (same) {
       const merged = { ...same, sourceEventIds: union(same.sourceEventIds, sources), updatedAt: now };
       s.store.put("facts", merged);

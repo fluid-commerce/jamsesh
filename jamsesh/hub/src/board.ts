@@ -168,7 +168,7 @@ export class Board {
     // A named replacement changes that fact however close the wording is, so it is never "already known".
     const named = p.replaces ? active.find((f) => f.id === p.replaces) : undefined;
     // Already known, in other words: nothing for a person to decide. "Not option A" is not "option A" again.
-    if (!named && active.some((f) => f.kind === kind && restates(f.text, text, 0.55))) return null;
+    if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text, 0.55))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const same = this.match("context", text, (c) => !c.retire && c.kind === kind && sameName(c.workstream, workstream) && (!named || c.conflictsWith === named.id));
     if (same) return this.repeat(same, sources);
@@ -186,6 +186,8 @@ export class Board {
   proposeRetire(p: { fact: Fact; status: "superseded" | "resolved"; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
     const open = this.all().find((c) => c.status === "open" && c.retire && c.conflictsWith === p.fact.id);
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
+    // Only with a line from the room behind it: a person sees what supports retiring the fact.
+    if (sources.every((x) => x.eventId == null)) return null;
     if (open) return this.repeat(open, sources);
     const text = clean(p.reason) || (p.status === "resolved" ? "Answered or done" : "Replaced by a newer decision");
     const now = this.stamp();
@@ -206,7 +208,7 @@ export class Board {
   rememberNow(p: ContextProposal): Fact | null {
     const text = clean(p.text);
     const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
-    if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && restates(f.text, text, 0.55))) return null;
+    if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && sameName(f.workstream, clean(p.workstream)) && restates(f.text, text, 0.55))) return null;
     const now = Date.now();
     return this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] });
   }
@@ -305,18 +307,21 @@ export class Board {
       });
     }
     if (!card.targets.length) return fail("Pick an agent to send it to first.");
+    // The card may have waited while an agent left or became an observer: only agents that can still take it get it.
+    const targets = this.validTargets(card.targets, card.mode);
+    if (!targets.length) return fail("The agent it was for isn't in the session any more, or only watches. Pick another with Edit.", 409);
     const ws = card.workstream ? this.s.store.all("workstreams").find((w) => w.title.toLowerCase() === card.workstream.toLowerCase()) : undefined;
     return this.commit(() => {
       const d = this.s.createDirective({
         text: card.text,
         mode: card.mode,
-        targets: card.targets,
+        targets,
         requestedBy: card.by,
         sourceEventIds: card.sources.map((x) => x.eventId).filter((x): x is number => x != null),
         workstreamId: ws?.id ?? null,
         rationale: `${card.origin === "agent" ? `${card.by} reported this` : card.origin === "document" ? "From a document" : `Heard from ${card.by}`}; ${by} sent it from the Tasks board${card.edits.length ? " after editing it" : ""}.`,
       });
-      return { ok: true as const, card: this.done(card, "sent", by, { directiveId: d.id }), directiveId: d.id };
+      return { ok: true as const, card: this.done({ ...card, targets }, "sent", by, { directiveId: d.id }), directiveId: d.id };
     });
   }
 
@@ -363,7 +368,8 @@ export class Board {
     if (!f || f.status !== "active") return fail("That fact isn't saved any more.", 404);
     const joined = text !== undefined ? clean(text) : clean(`${f.text.replace(/[.\s]+$/, "")}. ${c.text}`);
     if (!joined) return fail("The wording can't be empty.");
-    if (c.needsWording && text === undefined) return fail("Write the merged wording first: the card only has the file's name.");
+    // The card only has the file's name: the merged wording has to say something of its own, not the name or the fact alone.
+    if (c.needsWording && (text === undefined || joined.includes(c.original) || joined.replace(/[.\s]+$/, "") === clean(f.text).replace(/[.\s]+$/, ""))) return fail("Write what to keep from the file into the merged wording first.");
     const ids = [...new Set([...f.sourceEventIds, ...c.sources.map((x) => x.eventId).filter((x): x is number => x != null)])];
     return this.commit(() => {
       this.s.store.put("facts", { ...f, text: joined, sourceEventIds: ids, note: `Merged with a proposal from ${c.by}`, updatedAt: Date.now() });

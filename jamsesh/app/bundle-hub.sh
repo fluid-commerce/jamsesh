@@ -9,7 +9,7 @@ OUT="$ROOT/app/resources"
 JAM="${JAMSESH_HOME:-$HOME/.jamsesh}"
 rm -rf "$OUT" && mkdir -p "$OUT"/{hub,bin,skill,models,node_modules}
 
-(cd hub && bun build --compile src/index.ts --outfile "$OUT/hub/jamsesh-hub" >/dev/null)
+(cd hub && bun build --compile src/index.ts src/pdfworker.ts --outfile "$OUT/hub/jamsesh-hub" >/dev/null)
 (cd web && bunx vite build >/dev/null) && cp -R web/dist "$OUT/web"
 cp -R "$JAM/web-canvas" "$OUT/canvas"
 cp skill/SKILL.md "$OUT/skill/"

@@ -53,6 +53,9 @@ export class Brain {
   private pending: JamEvent[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private lastDigestAt = 0;
+  /** A digest pass that didn't finish (no output, curation gave nothing back, an error) waits this long before the next try. */
+  private digestRetryAt = 0;
+  private digestFailures = 0;
   private digestTimer: ReturnType<typeof setInterval>;
   private lastRoomStageAt = 0;
   /** The rules just told the room a locked screen stays up, so they shouldn't also say they can't do it. */
@@ -220,13 +223,14 @@ export class Brain {
       const i = batch.findIndex((e) => e.id === line.id);
       const ev = batch[i];
       if (!ev) continue;
-      // A question to the brain is addressed to it even without its name, so its answer is spoken.
+      // A question to the room gets its answer spoken (`asked`), but it isn't addressed to JamSesh (`direct`):
+      // it acts and is accepted like anything else overheard.
       const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
       const art = line.reactionTo && ev.authorType === "person" && line.relevance !== "banter" ? s.store.get("artifacts", line.reactionTo) : undefined;
       // Only about something up now or posted a few minutes ago.
       const reacting = art && (onScreen.has(art.id) || Date.now() - art.updatedAt < 10 * 60_000) ? art : undefined;
-      const updated = s.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, topic: line.topic, ...(asked ? { direct: true } : {}), ...(reacting ? { reactionTo: reacting.id } : {}) } });
-      if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, direct: true } };
+      const updated = s.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, topic: line.topic, ...(asked ? { asked: true } : {}), ...(reacting ? { reactionTo: reacting.id } : {}) } });
+      if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, asked: true } };
       if (reacting) s.addReaction(reacting.id, updated ?? ev);
       // A later line can show an earlier one was about the project all along.
       for (const id of line.rescues ?? []) {
@@ -1072,6 +1076,8 @@ export class Brain {
       if (!run) continue;
       t.execute = async (...a: any[]) => {
         if (this.stopped) return "JamSesh has stopped. Do nothing.";
+        // Checked again when it runs: with a file in the pass, an action needs the person's own words asking for it.
+        if (own !== undefined && !askedFor(name, own)) return `${name} wasn't asked for in ${batch[batch.length - 1]?.authorName ?? "the person"}'s own words; the attached file can't ask for it. Answer with say_to_room instead.`;
         const out = await run(...a);
         if (out instanceof Refusal) return out.text;
         if (!NO_EFFECT.has(name)) pass.effects++;
@@ -1323,7 +1329,7 @@ export class Brain {
   async digest(force = false) {
     const s = this.session;
     if (this.stopped || !s.settings().brainEnabled) return;
-    if (!force && Date.now() - this.lastDigestAt < DIGEST_EVERY_MS) return;
+    if (!force && (Date.now() - this.lastDigestAt < DIGEST_EVERY_MS || Date.now() < this.digestRetryAt)) return;
     const prev = s.store.digest("session");
     const lastId = s.store.lastEventId();
     if (!force && prev && lastId - prev.throughEvent < 6) return;
@@ -1348,16 +1354,26 @@ export class Brain {
         system: DIGEST_SYSTEM,
         prompt: `Previous brief parts:\n${parts ? JSON.stringify(parts) : "(none, the session just started)"}\n\nSession: ${s.settings().sessionName}\nWorkstreams: ${s.store.all("workstreams").filter((w) => w.status === "active").map((w) => w.title).join(", ") || "(none)"}\nPeople: ${s.people().map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ")}\nAgents: ${s.agents().map((a) => `${a.name} (${a.platform}, ${shortRepo(a.repo)})`).join(", ")}\n\nAccepted knowledge:\n${facts.map((f) => `- [${f.kind}${f.workstream ? `, ${f.workstream}` : ""}] ${f.text}`).join("\n") || "(none yet)"}\n\nNew accepted events:\n${accepted.map((e) => `- [${e.kind}] ${e.authorName}: ${e.text.slice(0, 400)}`).join("\n") || "(none)"}`,
       });
-      if (!output) return;
-      // Curate first: the brief only moves past these events once their facts are stored, so a
-      // failed pass is retried next time instead of losing them.
-      await this.curate(events.filter(forCuration));
+      if (!output) return this.digestFailed("the brief came back empty");
+      // Curate first: the cursor only moves past these events once curation has finished with them, so a
+      // pass that fails or comes back with nothing is retried (with a growing wait) instead of losing them.
+      const toCurate = events.filter(forCuration);
+      if (toCurate.length && !(await this.curate(toCurate))) return this.digestFailed("curation came back empty");
+      this.digestFailures = 0;
+      this.digestRetryAt = 0;
       s.store.setDigest("brief-parts", JSON.stringify(output), lastId);
       s.store.setDigest("session", buildBrief(s).full, lastId);
       await this.workstreamBriefs(lastId);
     } catch (e) {
-      console.error("digest:", describeError(e));
+      this.digestFailed(describeError(e));
     }
+  }
+
+  /** The batch stays for the next pass: 30 s, then doubling up to 10 minutes. */
+  private digestFailed(why: string) {
+    this.digestFailures++;
+    this.digestRetryAt = Date.now() + Math.min(10 * 60_000, 30_000 * 2 ** (this.digestFailures - 1));
+    console.error(`digest: ${why}; trying again in ${Math.round((this.digestRetryAt - Date.now()) / 1000)} s`);
   }
 
   /**
@@ -1418,9 +1434,9 @@ const STOPWORDS = new Set(["the", "and", "for", "option", "options", "variant", 
 export function speechSource(batch: JamEvent[]): SpeechSource {
   const ev = batch[batch.length - 1];
   if (!ev) return "ambient";
-  if (ev.data?.typed) return ev.data.direct ? "typed" : "ambient";
+  if (ev.data?.typed) return ev.data.direct || ev.data.asked ? "typed" : "ambient";
   if (ev.data?.recorded) return "recorded";
-  if (ev.data?.direct) return "voice";
+  if (ev.data?.direct || ev.data?.asked) return "voice";
   return "ambient";
 }
 
@@ -1517,36 +1533,34 @@ const refuse = (text: string) => new Refusal(text);
 /** Tools that never change anything, so calling them isn't an effect of the pass. */
 const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
 
-/** Work words: a request that something be made, looked at or written down. */
-const WORK = /\b(?:build|make|implement|design|mock|draw|sketch|explore|try|fix|update|change|add|review|look|read|check|summar|write|note|send|give|ask|tell|pair|compare|create|do|work|use|apply|follow|turn|prototype|code|spec|plan|draft|copy|rewrite|edit|go through)\w*/i;
-const SHOW = /\b(?:show|put|bring|display|open|screen|tv|present|compare|side by side|expand|layout|view|up)\b/i;
 /**
- * What a person's own words have to ask for before a tool is offered in a pass that also reads attached files
- * (SPEC 12.6). Answering and doing nothing are always there; a tool not listed is never offered with a file.
+ * A request for work in the person's own words: send it, ask or tell an agent to, have one do it, build, make,
+ * implement, fix or mock it up. Reading, summarizing, looking or checking is not a request for work.
+ */
+const WORK = /\b(?:send|assign|hand (?:it|this|that) (?:to|off)|(?:ask|tell|get|have) (?:\w+(?:'s)? ){0,3}(?:agent|claude|codex|\w+) to|build|make|implement|fix|mock(?:\s|-)?up|prototype|code (?:it|this|that) up)\b/i;
+const SHOW = /\b(?:show|put|bring|display|screen|tv|present|side by side|expand|layout)\b/i;
+/**
+ * The tools a pass that also reads attached files may offer, and what the person's own words (never the files')
+ * must ask for first (SPEC 12.6). A question about a file gets answering and searching only; a tool not listed
+ * (acting on the Tasks board, the host, names and behaviour notes) is never offered with a file.
  */
 const ASKS: Record<string, RegExp> = {
   no_action: /(?:)/,
   say_to_room: /(?:)/,
   search_artifacts: /(?:)/,
   create_directive: WORK,
-  record_decision: /\b(?:decid|decision|record|remember|note|keep|save|go(?:ing)? with|chose|choose|settle|agreed)\w*/i,
-  pair_agents: /\b(?:pair|together|align|coordinate|compare|match|parity)\w*/i,
-  ask_agent: /\b(?:ask|check with|find out)\b/i,
-  cancel_directive: /\b(?:cancel|stop|halt|abort|scrap|call (?:it |that )?off|kill|never ?mind|drop (?:it|that|the))\b/i,
+  record_decision: /\b(?:record|remember|note (?:down|that)|save (?:it|this|that) as|(?:we|i)(?:'ve| have)? decided|decision is)\b/i,
+  pair_agents: /\b(?:pair|work together|align|coordinate)\b/i,
+  ask_agent: /\b(?:ask|check with) (?:\w+(?:'s)? ){0,3}(?:agent|claude|codex|\w+)\b/i,
+  cancel_directive: /\b(?:cancel|stop|halt|abort|scrap|call (?:it |that )?off|never ?mind|drop (?:it|that|the))\b/i,
   show_on_screen: SHOW,
   expand_tile: SHOW,
-  build_custom_view: SHOW,
   set_layout: SHOW,
   show_ready: SHOW,
   restore_screen: SHOW,
   show_saved_layout: SHOW,
-  save_layout: /\bsave\b/i,
-  save_snapshot: /\b(?:save|snapshot)\b/i,
-  triage_card: /\b(?:send|add|dismiss|replace|merge|card|task)\w*/i,
-  request_share: /\b(?:share|screen|camera)\b/i,
 };
 export const askedFor = (tool: string, own: string) => !!ASKS[tool]?.test(own);
-/** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
 /** Platforms with a user-facing app, where a shipped feature can be a parity question. */
 const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
 /** A shipped note that could be a feature: not a commit, refactor, fix, dependency or tooling change, and not marked one platform's. */
@@ -1556,6 +1570,7 @@ export function parityCandidate(text: string) {
   if (/\b(refactor(ed|ing)?|a fix for|fix(ed|es)? (a |the )?(bug|crash|regression)|dependenc(y|ies)|tooling|linter|typos?|ci pipeline)\b/.test(t)) return false;
   return !/\b(platform[- ]specific|(desktop|mobile|web|ios|android|mac|windows)[- ]only|only (on|for|in) (the )?(desktop|mobile|web|ios|android)( app)?|deliberately|on purpose)\b/.test(t);
 }
+/** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
 export const AGENT_TOOLS = new Set(["create_directive", "record_decision", "ask_agent", "pair_agents", "no_action", "say_to_room"]);
 
 const EXPLICIT_YES = new Set(["approve", "approved", "approve it", "approve that", "approve the build", "approve the request", "yes approve", "yes approve it", "i approve", "i approve it"]);

@@ -406,7 +406,8 @@ function MergePanel({ card, facts, personId, onDone }: { card: TriageCard; facts
       .slice(0, 6)
       .map((x) => x.f);
   }, [facts, q, card.text]);
-  const choose = (f: Fact) => (setFact(f), setText(`${f.text.replace(/[.\s]+$/, "")}. ${card.text}`));
+  // A file JamSesh couldn't read has only its name on the card: the person writes the rest after the fact.
+  const choose = (f: Fact) => (setFact(f), setText(card.needsWording ? `${f.text.replace(/[.\s]+$/, "")}. ` : `${f.text.replace(/[.\s]+$/, "")}. ${card.text}`));
   return (
     <div className="tk-merge" onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), onDone())}>
       {!fact ? (
@@ -433,7 +434,7 @@ function MergePanel({ card, facts, personId, onDone }: { card: TriageCard; facts
       {err && <p className="tk-err">{err}</p>}
       <div className="tk-actions">
         {fact && (
-          <button className="btn small primary" disabled={busy || !text.trim()} onClick={() => run(async () => (await api(`/triage/${card.id}/merge`, { personId, factId: fact.id, text }), onDone()))}>
+          <button className="btn small primary" disabled={busy || !text.trim() || (!!card.needsWording && (text.includes(card.original) || text.trim().replace(/[.\s]+$/, "") === fact.text.replace(/[.\s]+$/, "")))} onClick={() => run(async () => (await api(`/triage/${card.id}/merge`, { personId, factId: fact.id, text }), onDone()))}>
             Merge
           </button>
         )}

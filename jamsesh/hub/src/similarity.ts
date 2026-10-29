@@ -33,7 +33,15 @@ export function samePolarity(a: string, b: string) {
   return n(a) === n(b);
 }
 
-/** The same statement said again: close wording, the same specifics and counts, and not negated one way only. */
+const PLATFORMS = /\b(desktop|mobile|web|ios|iphone|ipad|android|tablet|phone|mac|macos|windows|linux|watch|tv)\b/gi;
+
+/** "on desktop" and "on mobile" are two statements, not one said twice: the platforms named must agree. */
+export function sameScope(a: string, b: string) {
+  const p = (t: string) => [...new Set((t.match(PLATFORMS) ?? []).map((x) => x.toLowerCase()))].sort().join();
+  return p(a) === p(b);
+}
+
+/** The same statement said again: close wording, the same specifics, counts and platforms, and not negated one way only. */
 export function restates(a: string, b: string, threshold: number) {
-  return similar(a, b) > threshold && sameSpecifics(a, b) && sameCounts(a, b) && samePolarity(a, b);
+  return similar(a, b) > threshold && sameSpecifics(a, b) && sameCounts(a, b) && samePolarity(a, b) && sameScope(a, b);
 }

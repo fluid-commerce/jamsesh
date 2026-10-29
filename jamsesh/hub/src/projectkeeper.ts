@@ -34,7 +34,12 @@ export class ProjectKeeper {
     const s = this.hub.session;
     const people = this.hub.store.speakers().map((name) => ({ name, color: s.personByName(name)?.color }));
     touchSession(this.home, p.slug, p.sessionId, people);
-    writeProjectContext(this.home, p.slug, p.sessionId, s);
+    // The context file is a copy of what the session's own store holds: failing to write it doesn't stop the rest.
+    try {
+      writeProjectContext(this.home, p.slug, p.sessionId, s);
+    } catch (e) {
+      console.error("project context:", e instanceof Error ? e.message : e);
+    }
     const png = await this.hub.canvas.thumbnail().catch(() => null);
     if (png?.length) saveThumbnail(this.home, p.slug, png);
   }
