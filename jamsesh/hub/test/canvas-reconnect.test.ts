@@ -197,7 +197,7 @@ function startable(steps: { server?: () => Promise<void>; host?: () => Promise<v
   const log: string[] = [];
   const session = { canvas: { status: "off" } as any, setCanvas(info: any) { this.canvas = { ...this.canvas, ...info }; } };
   const canvas: any = { session, stopped: false, startFailures: 0, startRetry: null, timers: [], poller: null, agents: new Map(), host: null, serverProc: null };
-  for (const k of ["start", "stop"]) canvas[k] = (Canvas.prototype as any)[k];
+  for (const k of ["start", "stop", "checkRunning"]) canvas[k] = (Canvas.prototype as any)[k];
   canvas.poll = () => {};
   canvas.reapIdleAgents = () => {};
   canvas.watchdog = async () => {};
@@ -299,3 +299,89 @@ setInterval(() => { for (let i = 0; i < 50; i++) process.stderr.write("line " + 
     rmSync(dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("Stop while a start step is still pending: nothing goes live, and what that step started is cleaned up", async () => {
+  for (const step of ["server", "host"] as const) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { canvas, session, log } = startable({ [step]: () => gate });
+    const started = canvas.start();
+    await Bun.sleep(5);
+    canvas.stop();
+    release();
+    await started;
+    expect(session.canvas.status).not.toBe("live");
+    expect(session.canvas.status).not.toBe("failed"); // stopped, not failed: no retry either
+    expect(canvas.timers).toEqual([]);
+    expect(canvas.startRetry).toBeNull();
+    expect(log).toContain("server stopped");
+    if (step === "server") expect(log).not.toContain("host");
+    else expect(log).toContain("host closed");
+  }
+});
+
+test("Stop while the port is being chosen: the server is never spawned", async () => {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { config } = await import("../src/config");
+  const dir = mkdtempSync(join(tmpdir(), "jam-canvas-stop-"));
+  mkdirSync(join(dir, "bin"));
+  const marker = join(dir, "spawned");
+  const bin = join(dir, "bin", "figcraft-server");
+  writeFileSync(bin, `#!/bin/sh\ntouch "${marker}"\nexec sleep 60\n`);
+  chmodSync(bin, 0o755);
+  const was = { bin: config.figcraftServerBin, data: config.dataDir };
+  (config as any).figcraftServerBin = bin;
+  (config as any).dataDir = dir;
+  const settings = new Map<string, unknown>();
+  const session: any = { canvas: { status: "off" }, setCanvas(i: any) { this.canvas = { ...this.canvas, ...i }; }, store: { setting: (k: string, d: unknown) => settings.get(k) ?? d, setSetting: (k: string, v: unknown) => void settings.set(k, v) } };
+  const canvas: any = new Canvas(session);
+  canvas.choosePort = async () => {
+    canvas.stop(); // the hub stops while this is pending
+    return 1;
+  };
+  try {
+    await canvas.start();
+    await Bun.sleep(200);
+    expect(existsSync(marker)).toBe(false);
+    expect(canvas.serverProc).toBeNull();
+    expect(canvas.timers).toEqual([]);
+  } finally {
+    (config as any).figcraftServerBin = was.bin;
+    (config as any).dataDir = was.data;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a key helper that hangs is killed and reaped, and the start fails instead of waiting forever", async () => {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { config } = await import("../src/config");
+  const dir = mkdtempSync(join(tmpdir(), "jam-canvas-key-"));
+  mkdirSync(join(dir, "bin"));
+  const pidFile = join(dir, "pid");
+  const bin = join(dir, "bin", "figcraft-server");
+  // Says a lot on stderr, then never answers.
+  writeFileSync(bin, `#!/bin/sh\necho $$ > "${pidFile}"\nyes noise | head -c 200000 >&2\nexec sleep 60\n`);
+  chmodSync(bin, 0o755);
+  const was = { bin: config.figcraftServerBin, data: config.dataDir, ms: Canvas.KEY_TIMEOUT_MS };
+  (config as any).figcraftServerBin = bin;
+  (config as any).dataDir = dir;
+  Canvas.KEY_TIMEOUT_MS = 300;
+  const session: any = { canvas: { status: "off" }, setCanvas() {}, store: { setting: (_k: string, d: unknown) => d, setSetting() {} } };
+  const canvas: any = new Canvas(session);
+  try {
+    const t0 = Date.now();
+    await expect(canvas.serverKey()).rejects.toThrow("didn't answer");
+    expect(Date.now() - t0).toBeLessThan(3000);
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(() => process.kill(pid, 0)).toThrow(); // gone
+  } finally {
+    (config as any).figcraftServerBin = was.bin;
+    (config as any).dataDir = was.data;
+    Canvas.KEY_TIMEOUT_MS = was.ms;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
