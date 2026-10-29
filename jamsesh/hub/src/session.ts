@@ -1494,8 +1494,10 @@ export class Session {
     // The person at the host also has the host's own window, which carries no person of its own.
     const atHost = lock.personId === this.store.setting<string>("hostPersonId", "");
     const windows = this.store.all("devices").filter((d) => d.personId === lock.personId || (atHost && d.kind === "host"));
+    // No window of theirs on record (the device list was cleared, or they never had one here): quiet lets go.
+    if (!windows.length) return now - lock.lastActive >= Session.LOCK_GONE_MS;
     // A window with a live connection is here, however long since it last reported itself.
-    return windows.length > 0 && windows.every((d) => !this.deviceOnline(d.id) && now - d.lastSeen > Session.LOCK_GONE_MS);
+    return windows.every((d) => !this.deviceOnline(d.id) && now - d.lastSeen > Session.LOCK_GONE_MS);
   }
 
   /** Lets go of a screen's lock; what it shows stays. It returns to the board on the usual timer from here. */

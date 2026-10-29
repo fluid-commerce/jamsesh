@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -419,7 +419,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // On the host, only its own windows act as a person: not another process that reaches loopback.
     if (isLocal(ip) && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
     // Except where personId names someone else: the speaker a line is corrected to, the person asked to share.
-    if (paired?.personId && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
+    // A window that hasn't said who it is yet is nobody in particular, not whoever the request names.
+    if (paired && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
   }
 
   if (path === "/me") {
@@ -429,7 +430,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
+    // A browser becomes the person it first says it is; after that a request can't make it someone else
+    // (only a person who was removed frees it to pick again). Owner-only answers rest on this.
+    if (paired?.kind === "browser" && body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId)))
+      hub.auth.update(paired.id, { personId: String(body.personId) });
     // The person using the host's own window: agents on the host Mac work for them.
     if (hostWindow && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
@@ -521,9 +525,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.settings());
   }
 
-  // What a person puts on a screen is theirs until they unlock it (3.1). `by` is only a fallback name for a window that hasn't picked who it is.
+  // What a person puts on a screen is theirs until they unlock it (3.1). A paired window is the person its credential is
+  // bound to, whatever the body says. The host's own windows are the room's (the big screen is shared), so they may name
+  // who is acting, else the person at the host. `by` is only a fallback name for a window that hasn't picked who it is.
   const actor = () => {
-    const id = String(paired?.personId || body?.personId || s.store.setting<string>("hostPersonId", "") || "");
+    const id = String((paired ? paired.personId : body?.personId || s.store.setting<string>("hostPersonId", "")) ?? "");
     const p = id ? s.person(id) : undefined;
     return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
   };
@@ -560,7 +566,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const asked = s.showRequests().find((r) => r.id === m![1]);
     const who = actor();
     // The lock's owner answers; so does the host's own window, where the room is looking at the question.
-    if (asked && !hostWindow && asked.ownerId !== who.id) return bad(`Only ${asked.ownerName} can answer that.`, 403);
+    if (asked && !hostWindow && (!who.id || asked.ownerId !== who.id)) return bad(`Only ${asked.ownerName} can answer that.`, 403);
     const done = s.answerShowRequest(m[1], !!body?.approve, who.name);
     return done ? json(done) : bad("That question has already been answered.", 404);
   }
@@ -570,9 +576,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // Agents steer the screen with jam_show; expanding is for people looking at it.
     if (paired?.kind === "agent") return bad("Agents use jam_show; expanding a tile is for people.", 403);
     if (body?.tile !== null && (typeof body?.tile !== "string" || !body.tile.trim())) return bad("tile must be a tile key, or null to collapse");
-    const tile: string | null = body.tile;
+    const tile: string | null = body.tile === null ? null : body.tile.trim();
     const screen = typeof body?.screen === "string" && body.screen ? body.screen : "main";
     if (screen !== "main" && !s.screens().some((sc) => sc.id === screen)) return bad("no such screen", 404);
+    if (tile !== null && !s.stageTileKeys(screen).some((t) => t.key === tile)) return bad("That isn't on the screen right now.", 404);
     return json(s.expandTile(tile, screen));
   }
 
@@ -798,7 +805,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ ok: true });
   }
   // The host app names the room's screens ("Left TV") after setting them up.
-  if (path === "/screens/config" && req.method === "POST" && isLocal(ip)) {
+  if (path === "/screens/config" && req.method === "POST") {
+    if (!hostWindow) return bad("Only the host app names the screens.", 403);
     s.configureScreens(Array.isArray(body?.screens) ? body.screens : []);
     return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
   }
