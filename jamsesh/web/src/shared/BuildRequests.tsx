@@ -2,7 +2,7 @@
 // out loud ("approve", "deny"), or with these buttons from any window.
 import { useState } from "react";
 import { api, pref, useHub, type BuildRequest, type ShowRequest } from "./hub";
-import { useShowAsks } from "./StageControls";
+import { stageAction, useShowAsks } from "./StageControls";
 
 export function BuildRequests({ big, screen = "main" }: { big?: boolean; screen?: string }) {
   const { state } = useHub();
@@ -72,7 +72,8 @@ function AskCard({ r }: { r: ShowRequest }) {
   const answer = async (approve: boolean) => {
     setBusy(true);
     setErr("");
-    await api(`/show-requests/${r.id}`, { approve, personId: pref("personId") }, "POST", { queue: false }).catch(() => setErr("Not connected to the host. Say it out loud, or try again when you're back."));
+    // Live only, and the hub's own reason when it refuses (the screen changed since the question, say).
+    setErr(await stageAction(`/show-requests/${r.id}`, { approve, personId: pref("personId") }));
     setBusy(false);
   };
   return (
