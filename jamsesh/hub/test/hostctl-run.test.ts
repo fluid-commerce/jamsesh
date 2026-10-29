@@ -286,6 +286,14 @@ test("one credential check for commands, open and repos: parsed the way a shell 
     "open https://example.com/cb#access_token=abc&x=1",
     "curl https://example.com/x?token=abc",
     `curl https://${"a".repeat(3000)}@example.com/`,
+    "env HOME=/x curl -u me:pw https://example.com", // wrappers
+    "nice -n 5 curl --user me:pw https://example.com",
+    "xargs curl -H 'Cookie: a=b'",
+    "bash -c \"curl -u me:pw https://example.com\"",
+    "sh -lc 'wget --password=hunter2 https://example.com'",
+    "make test # curl -u me:pw https://example.com", // text in a comment
+    "make # Authorization: Bearer abcdefghijklmnop",
+    "make # TOKEN=abc",
   ])
     expect([bad, credentialProblem(bad)]).toEqual([bad, CREDENTIALS_REFUSED]);
   for (const ok of [
@@ -312,6 +320,11 @@ test("one credential check for commands, open and repos: parsed the way a shell 
   expect(credentialProblem("ssh://git:pw@github.com/a/b.git", { single: true, allowGitUser: true })).not.toBeNull();
   expect(repoProblem("https://github.com/a/b\t.git")).not.toBeNull();
   expect(repoProblem("https://github.com/a/b.git?token=abc")).not.toBeNull();
+  expect(repoProblem("git@github.com:ghp_abcdefghijklmnopqrstuvwxyz0123/b.git")).not.toBeNull(); // a token in a remote path
+  expect(repoProblem("git@github.com:acme/b.git")).toBeNull();
+  expect(openProblem("build/token=abc")).not.toBeNull(); // a credential assignment as an open path
+  expect(openProblem("build/app.html?api_key=abc")).not.toBeNull();
+  expect(openProblem("build/App.app")).toBeNull();
   expect(openProblem("https://tok\t@example.com/")).not.toBeNull();
   expect(openProblem("https://example.com/?token=abc")).not.toBeNull();
   expect(commandProblem("git push https://tok@github.com/a/b")).toBe(CREDENTIALS_REFUSED);
@@ -449,3 +462,12 @@ for (const [stuckStep, argvMatch] of [["list", "simctl list"], ["boot", "simctl 
     }
   }, 20_000);
 }
+
+test("a shell request is refused at filing for every wrapper and comment trick", () => {
+  const hc: any = Object.create(HostControl.prototype);
+  hc.requests = new Map();
+  hc.onRequest = () => {};
+  for (const c of ["env X=1 curl -u me:pw https://example.com", "make # curl -u me:pw x", "bash -c 'curl --user a:b https://x'"]) expect([c, hc.requestShell(c, "brain")]).toEqual([c, CREDENTIALS_REFUSED]);
+  expect(hc.requests.size).toBe(0);
+  expect(typeof hc.requestShell("make test", "brain")).toBe("object");
+});

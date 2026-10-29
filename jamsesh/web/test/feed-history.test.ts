@@ -56,3 +56,19 @@ test("lines that arrived while the client was disconnected are announced when th
   expect(seen).toEqual([6, 7, 8]);
   off();
 });
+
+test("an HTTP state answer that was in flight while the socket delivered newer state is ignored", async () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: { events: [{ id: 2, kind: "speech", text: "a", data: {} }], utterances: [] } });
+  const realFetch = globalThis.fetch;
+  (globalThis as any).fetch = async () => {
+    h.handle({ type: "event", event: { id: 3, kind: "speech", text: "newer", data: {} } }); // the socket moves on while the request is out
+    return new Response(JSON.stringify({ events: [{ id: 2, kind: "speech", text: "a", data: {} }], utterances: [] }), { headers: { "content-type": "application/json" } });
+  };
+  try {
+    await hub.refreshState();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([2, 3]); // not regressed to [2]
+});

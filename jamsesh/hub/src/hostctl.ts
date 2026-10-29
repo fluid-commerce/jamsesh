@@ -241,7 +241,7 @@ const CRED_ASSIGN = /^-{0,2}[\w.-]*?(token|secret|password|passwd|api[_-]?key|ap
 const KEY_ASSIGN = /^-{0,2}([\w.]*[_.-])?key=./i;
 
 /** Splits shell text into commands, each a list of words, the way a shell does: quotes and backslashes are honoured, and unquoted `; | & ( ) < >` and newlines separate. */
-export function shellCommands(text: string): string[][] {
+export function shellCommands(text: string, o: { comments?: boolean } = {}): string[][] {
   const cmds: string[][] = [[]];
   let cur = "";
   let has = false;
@@ -276,7 +276,7 @@ export function shellCommands(text: string): string[][] {
         has = true;
       }
     } else if (c === " " || c === "\t") endWord();
-    else if (c === "#" && !has) {
+    else if (c === "#" && !has && o.comments !== false) {
       while (i + 1 < text.length && text[i + 1] !== "\n") i++;
     } else if (c === "\n" || c === ";" || c === "|" || c === "&" || c === "(" || c === ")") endCmd();
     else if (c === "<" || c === ">") endWord();
@@ -305,6 +305,23 @@ function urlValueProblem(url: string, o: { allowGitUser?: boolean }): boolean {
   return false;
 }
 
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+
+/** One simple command's words. A curl-style command anywhere in it (after env, sudo, time, nice, xargs...) makes its credential flags count; `sh -c "..."` is checked as a command of its own. */
+function wordsProblem(words: string[], o: { allowGitUser?: boolean }): boolean {
+  const base = (w: string) => (w ?? "").split("/").pop()!.toLowerCase();
+  const curlish = words.some((w) => CURLISH.has(base(w)));
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (SHELLS.has(base(w)) && /^-[a-z]*c[a-z]*$/i.test(words[i + 1] ?? "") && words[i + 2] && credentialProblem(words[i + 2], o)) return true;
+    if (HEADER.test(w) || /^bearer\s+\S{8,}/i.test(w)) return true;
+    if (curlish && i > 0 && CRED_FLAG.test(w)) return true;
+    if (CRED_ASSIGN.test(w) || KEY_ASSIGN.test(w)) return true;
+    for (const m of w.matchAll(/[a-z][a-z0-9+.-]*:\/\/\S*/gi)) if (urlValueProblem(m[0], o)) return true;
+  }
+  return false;
+}
+
 /**
  * The one credential check for anything stored, shown to the room, logged or run: a command, an
  * `open` value, a repository, a URL. Returns the refusal message, or null.
@@ -322,16 +339,13 @@ export function credentialProblem(text: string, o: { single?: boolean; allowGitU
   if (TOKEN_FORMATS.some((r) => r.test(text))) return CREDENTIALS_REFUSED;
   if (o.single) {
     if (/\s/.test(text) || CONTROL.test(text)) return "That has whitespace or control characters in it.";
+    if (text.split(/[/?&#:]/).some((seg) => CRED_ASSIGN.test(seg) || KEY_ASSIGN.test(seg) || HEADER.test(seg))) return CREDENTIALS_REFUSED;
     return /^[a-z][a-z0-9+.-]*:\/\//i.test(text) && urlValueProblem(text, o) ? CREDENTIALS_REFUSED : null;
   }
-  for (const words of shellCommands(text)) {
-    const argv0 = (words[0] ?? "").split("/").pop()!.toLowerCase();
-    const curlish = CURLISH.has(argv0);
-    for (const w of words.slice(1).concat(words[0] ?? [])) {
-      if (HEADER.test(w) || /^bearer\s+\S{8,}/i.test(w)) return CREDENTIALS_REFUSED;
-      if (curlish && CRED_FLAG.test(w)) return CREDENTIALS_REFUSED;
-      if (CRED_ASSIGN.test(w) || KEY_ASSIGN.test(w)) return CREDENTIALS_REFUSED;
-      for (const m of w.matchAll(/[a-z][a-z0-9+.-]*:\/\/\S*/gi)) if (urlValueProblem(m[0], o)) return CREDENTIALS_REFUSED;
+  // Both readings: with comments stripped as a shell does, and with `#` as ordinary text (a comment can hide a credential from the room's view of the command, or be pasted into a script).
+  for (const cmds of [shellCommands(text), shellCommands(text, { comments: false })]) {
+    for (const words of cmds) {
+      if (wordsProblem(words, o)) return CREDENTIALS_REFUSED;
     }
   }
   return null;
@@ -343,7 +357,7 @@ export const urlProblem = credentialProblem;
 /** A remote a build may clone: https, ssh:// or git@, with no credentials in it. */
 export function repoProblem(repo: string): string | null {
   if (typeof repo !== "string" || !/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(repo)) return "I need the repository's remote URL (https or git@) to build it.";
-  if (repo.startsWith("git@")) return (repo.split(":")[0].match(/@/g) ?? []).length === 1 ? null : CREDENTIALS_REFUSED;
+  if (repo.startsWith("git@")) return (repo.split(":")[0].match(/@/g) ?? []).length === 1 ? credentialProblem(repo, { single: true, allowGitUser: true }) : CREDENTIALS_REFUSED;
   return urlProblem(repo, { single: true, allowGitUser: true });
 }
 
