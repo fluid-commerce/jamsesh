@@ -1408,30 +1408,72 @@ There are three ways to address the brain directly instead of talking in the roo
 
 - Say its name: "JamSesh, put the mobile build next to the mockup" [A8d, A10].
 - Type in the **Ask <name>** box (`Say to the room` switches it to a plain room line) [A8a].
-- Press **Record** (or `R`), talk while pointing, and press **Stop** [A8b, A9].
+- Press **Record** (or `R`), talk while pointing, and press **Stop**; the notes you tidy go to the agents that own the work, and to the brain when no agent does [A8b, A9].
 
 The room can give the brain other names to answer to ("call it Computah"): the display name plus
 up to 8 **aliases** (`brainAliases`, 40 characters each, kept as trimmed, unique strings). Saying
 any of them addresses the brain, and the transcriber is primed with them so they're spelled right.
 
-### 11.3 Record a prompt
+### 11.3 Record: talk and point, and it becomes notes
 
-The mic is already recording. **Record** marks a window of it as a prompt for the brain [A8b]:
+One feature, one name: **Record** (or `R`), on your own screen or, when you are driving it, the big
+screen [A8b, A9]. The mic is already running; Record marks a window of it and watches the pointer.
 
-- Start marks the time in host time and tells the host; lines from that device in the window are
-  held for the prompt instead of being triaged one by one. Stop sends the window.
-- The host waits up to 7 seconds for the last words to be transcribed, then sends the brain one
-  prompt: the words, plus where the person pointed. A window that is never stopped (the person
-  closes the window) ends on its own after 2 minutes.
-- While recording, the screen edges glow, a trail follows the pointer, and a timer and level bars
-  show. Afterward a toast shows what was sent and how many things were pointed at.
+- **On your own screen.** Press **Record**, then look through a mockup, a build, the canvas, or the
+  picture viewer (the Work tab's viewer has its own **Record** button, since it covers the header) and
+  talk. Nothing on the big screen changes. Start marks the time in host time and tells the host
+  (`POST /api/record/start`); lines from that device in the window are held instead of being triaged
+  one by one.
+- **On the big screen.** When you are driving a screen (6.1 puts a dart on it), **Record** records the
+  dart instead of your own pointer, and locks the screen for as long as it runs. A free screen's lock
+  is taken (and given back at the end); a screen someone else holds refuses with their name, unless
+  they are one of the lock's `drivers` (10.6: handed control, or **Drive together**); the owner who passed control starts driving again by recording. Record taking a free lock makes its taker a driver. Each driver presses
+  their own **Record** and is recorded on their own, with their own mic and dart. The lock goes back
+  only when the last recording on the screen ends, and only if Record took it. While any recording
+  runs, the screen's lock is kept fresh (`touchLock`, which keeps `drivers`, so a refresh never cuts anyone off).
+- **The rainbow trail.** While recording, a trail follows the pointer (on the big screen, the dart)
+  and fades out behind it over about a second. The spectrum runs along the path by distance travelled,
+  with the whole spectrum (red at the head to violet at the tail) shown across every stroke however short, drifting slowly; it is drawn on a canvas overlay at display rate, and
+  runs only while something is fading (an idle recording costs nothing). With reduced motion it is
+  shorter (under half a second), thinner and fainter, in a calm band of colour. On the big screen the
+  overlay also shows a chip, "Recording · <name>", and every recording driver has their own trail.
+  Model: `web/src/shared/trailmodel.ts`; drawing: `trail.tsx`; big screen: `ScreenRecording.tsx`.
+- **What it produces.** Stop (`POST /api/record/stop`) waits up to 7 seconds for the last words, then
+  returns **notes**, one per thing said, each pinned to the spot being pointed at while it was said.
+  Nothing is sent yet. A note keeps the item, the position in it, the page of a build, the scroll
+  position, the canvas frame or node id and canvas point, the big screen it was on, and who said it.
+  Alignment (`hub/src/record.ts`): a pointer moment counts as "while saying it" from 0.4 s before the
+  words to 0.3 s after; pointing up to 2.5 s before speaking, or up to 0.8 s after, still counts;
+  further apart is a note with no pin. A line that crosses to a different spot is split there, in
+  proportion to when each word was said, and a sliver under two words joins its neighbour. A line
+  never takes another driver's pointer; an unattributed voice may use anyone's.
+- **Tidy, then send.** Stopping opens **Your notes**: edit what it misheard, **Join up** two notes,
+  **Delete** one, or **Discard** all. Each note says where it is pinned and who gets it. **Send**
+  (`POST /api/record/send`) pins each note on its item as an annotation (kept, numbered, and shown on
+  tiles and in the picture viewer), and sends each agent that owns something pinned one directive
+  listing its notes with the pinned locations (item, node, page, position, scroll, canvas point,
+  screen) and, for pictures, a **crop of the spot** (made with the system's image tool; skipped where
+  it can't be made). An item's owner is the agent that made the artifact or frame (a canvas note finds
+  its frame by node id, a build by its dev server URL); observers own nothing. Notes on nothing an
+  agent owns, or on nothing at all, go to the room brain as one prompt, and the sender is told how
+  many went where. A repeated send (a lost reply, a double click) does nothing twice: the hub keeps
+  the result by recording id and each pin by its note id.
+- **Who can.** People only: the three routes are human-only (an agent's credential is refused), a
+  window acts as its own person, another person can't stop your recording or send your notes, and a
+  big screen refuses someone who isn't driving it. A recording whose Stop never comes ends on its own
+  at 10 minutes, or about 30 seconds after its window disconnects, and gives back any lock it took.
+  If the page closes mid-recording, what was said goes to the brain as one prompt, as it always did
+  (`POST /api/prompt-window`, kept for that).
 
-**Pointer context** [A9]: while recording, the client watches the pointer over every tile and the
-canvas, including the canvas, artifacts, dev servers, and shared screens, and distills it into up
-to 40 marks: clicks, drags, and dwells of 300 ms or more. Each mark records the tile, the position
-in it, the canvas frame under the pointer (with its page coordinates), and the words said at that
-moment. The brain gets "held on frame "Nav / B" at top center while saying 'make this one…'".
-Each mark also becomes a pin.
+**Pointer context** [A9]: while recording, the client watches the pointer over every tile, the
+canvas, artifacts, dev servers and shared screens, and distills it into up to 40 marks: clicks, drags
+and dwells of 300 ms or more. Each mark records the tile, the position in it (inside the picture
+itself when a viewer letterboxes it), the scroll position and, for a same-origin build, its page, plus
+the canvas frame under the pointer with its page coordinates. A dart on the big screen arrives with
+its target resolved from this window's own copy of the stage (the mirror carries the same tiles, so a
+fraction of the stage area is the same spot everywhere); with no mirror showing, the dart makes no marks
+and the words become unpinned notes. The dart comes from 6.1's `onCursor` stream (10.6); the trail on the
+big screen follows the drawn dart through `onGlide`, at the dart's own `scale`.
 
 ### 11.4 Mute
 
@@ -1883,10 +1925,10 @@ in [`docs/spec-gaps.md`](docs/spec-gaps.md). Paths are under `jamsesh/` unless t
 | A7c | Annotations are app-wide | 10.3, 11.5 | `web/src/shared/annotate.tsx`, `web/src/host/Stage.tsx` | Partial |
 | A7d | All pins go to the brain as one prompt to divide up | 11.5 | `web/src/shared/annotate.tsx`, `hub/src/hub.ts` | Implemented |
 | A8a | Type a prompt to the brain | 11.2 | `web/src/client/ClientView.tsx`, `hub/src/http.ts` | Implemented |
-| A8b | Record a prompt between Record and Stop | 11.3 | `web/src/shared/annotate.tsx`, `hub/src/hub.ts` | Implemented |
+| A8b | Record: talk and point, tidy the notes, send them to the agents that own the work | 11.3 | `web/src/shared/annotate.tsx`, `web/src/shared/record.tsx`, `hub/src/record.ts`, `hub/src/hub.ts` | Implemented |
 | A8c | The mic is always recording unless muted | 9.1 | `web/src/client/ClientView.tsx`, `web/src/host/HostView.tsx` | Partial |
 | A8d | Saying "hey JamSesh" addresses the brain | 8.2 | `hub/src/brain/brain.ts` | Partial |
-| A9 | Recording watches the pointer and turns it into context | 11.3 | `web/src/shared/pointer.ts`, `hub/src/hub.ts` | Partial |
+| A9 | Recording watches the pointer (and a driver's dart) and pins what is said to where it was pointed | 11.3 | `web/src/shared/pointer.ts`, `web/src/shared/trail.tsx`, `hub/src/record.ts` | Partial |
 | A10 | The brain can be renamed and listens for its name | 8.2 | `hub/src/brain/brain.ts`, `web/src/shared/Settings.tsx` | Implemented |
 | A11 | The brain adapts to feedback about its demeanor | 8.9 | `hub/src/brain/brain.ts`, `hub/src/brain/speech.ts` | Implemented |
 | A12 | People can mute at any time | 9.1, 11.4 | `web/src/shared/mic.ts`, `web/src/client/ClientView.tsx` | Implemented |

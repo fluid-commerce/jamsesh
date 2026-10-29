@@ -1,6 +1,6 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, normalize, sep } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
 import { embed, learningNote, voiceprintStatus } from "./audio/voiceprint";
@@ -18,7 +18,8 @@ import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, BuildRequest, Platform, ShowRequest, Utterance } from "./types";
+import type { Agent, Annotation, Artifact, BuildRequest, NotePin, Platform, RecordMark, RecordNote, ShowRequest, Utterance } from "./types";
+import { alignNotes, describeNote, ownerOf } from "./record";
 import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
 
@@ -184,32 +185,34 @@ export class Hub {
     this.transcriber.stop();
     this.devproxy.stop();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
+    for (const r of this.recs.values()) (clearInterval(r.keep), clearTimeout(r.cap));
+    clearInterval(this.recSweep);
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
-  private promptMode = new Map<string, { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> }>();
+  private promptMode = new Map<string, { t0: number; t1?: number; max: number; timer?: ReturnType<typeof setTimeout> }>();
   /** A prompt window stays open this long at most (SPEC 11.3). */
   static PROMPT_MAX_MS = 2 * 60_000;
 
-  promptStart(deviceId: string, t0: number) {
+  promptStart(deviceId: string, t0: number, max = Hub.PROMPT_MAX_MS) {
     // A new recording on a laptop whose last one never got its Stop: that one's held words go to the room.
     this.releasePrompt(deviceId);
-    const w: { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> } = { t0 };
+    const w: { t0: number; t1?: number; max: number; timer?: ReturnType<typeof setTimeout> } = { t0, max };
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
-    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), Hub.PROMPT_MAX_MS + 1000);
+    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), max + 1000);
     w.timer.unref?.();
     this.promptMode.set(deviceId, w);
   }
 
   /** Closes a window that never got Stop and hands what it held back to the room as ordinary speech. */
-  private releasePrompt(deviceId: string, only?: { t0: number; t1?: number }) {
+  private releasePrompt(deviceId: string, only?: { t0: number; t1?: number; max: number }) {
     const w = this.promptMode.get(deviceId);
     if (!w || (only && w !== only) || w.t1 !== undefined) return;
     clearTimeout(w.timer);
     this.promptMode.delete(deviceId);
     for (const u of this.session.store.all("utterances")) {
-      if (u.eventId || u.t1 < w.t0 - 500 || u.t0 > w.t0 + Hub.PROMPT_MAX_MS || !this.fromRecorder(u, deviceId)) continue;
+      if (u.eventId || u.t1 < w.t0 - 500 || u.t0 > w.t0 + w.max || !this.fromRecorder(u, deviceId)) continue;
       this.roomLine(u, true);
     }
   }
@@ -231,7 +234,7 @@ export class Hub {
 
   private inPrompt(u: Utterance) {
     // Inside the recording only: once Stop is pressed, or past the window's cap, what the person says is ordinary speech.
-    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
+    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && u.t0 <= w.t0 + w.max && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
     return false;
   }
 
@@ -282,11 +285,8 @@ export class Hub {
     return ev;
   }
 
-  /**
-   * Record-to-prompt finished: everything this device heard in the window, plus where
-   * the person pointed while talking, goes to the brain as one prompt.
-   */
-  async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+  /** What this device heard in a closed recording window, once the last words are transcribed (about 7 s at most). */
+  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }): Promise<Utterance[]> {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
@@ -297,7 +297,8 @@ export class Hub {
     // SPEC 11.3: answer within about 7 s, before the client gives up waiting.
     // Words still in transcription after that reach the feed as ordinary room speech (the window is closed by then).
     const deadline = Date.now() + 7000;
-    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && this.fromRecorder(u, w.deviceId, w.personId));
+    const max = open?.max ?? Hub.PROMPT_MAX_MS;
+    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.t0 <= w.t0 + max && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
     while (Date.now() < deadline) {
@@ -312,7 +313,17 @@ export class Hub {
       clearTimeout(open.timer);
       this.promptMode.delete(w.deviceId);
     }
-    lines.sort((a, b) => a.t0 - b.t0);
+    return lines.sort((a, b) => a.t0 - b.t0);
+  }
+
+  /**
+   * Record-to-prompt finished: everything this device heard in the window, plus where
+   * the person pointed while talking, goes to the brain as one prompt.
+   */
+  async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+    const s = this.session;
+    const lines = await this.windowLines(w);
+    this.recordEnd(w.deviceId);
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
@@ -336,6 +347,209 @@ export class Hub {
     for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
     this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
     return { ok: true, eventId: ev.id, text: said, pointed: marks };
+  }
+
+  // ---------- Record (6.2): talk and point, and it becomes notes ----------
+
+  /** A recording runs this long at most; the screen's lock is kept fresh until then. */
+  static RECORD_MAX_MS = 10 * 60_000;
+  private recs = new Map<string, { id: string; personId: string | null; screenId: string | null; tookLock: boolean; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number }>();
+  /** Which person each recording's notes were handed to, so another person's window can't send them. */
+  private recSweep = (() => {
+    const t = setInterval(() => this.sweepRecordings(), 15_000);
+    t.unref?.();
+    return t;
+  })();
+  private noteOwners = new Map<string, string | null>();
+  /** What a send already did, so a repeated send (a lost reply, a double click) does nothing twice. */
+  private sentRecs = new Map<string, unknown>();
+
+  /** Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last recording there ends. */
+  recordStart(deviceId: string, personId: string | null, t0: number, screen?: string | null): { ok: true; id: string } | { ok: false; reason: string; status: number } {
+    const s = this.session;
+    const person = s.person(personId);
+    let screenId: string | null = null;
+    let tookLock = false;
+    if (screen) {
+      const sc = screen === "main" ? { id: "main" } : s.findScreen(screen);
+      if (!sc) return { ok: false, reason: "That screen isn't connected.", status: 404 };
+      if (!person) return { ok: false, reason: "Pick who you are before recording the big screen.", status: 403 };
+      screenId = sc.id;
+      const lock = s.lockOf(screenId);
+      if (!lock) {
+        s.holdScreen(screenId, person);
+        tookLock = true;
+      } else if (!s.driversOf(screenId).includes(person.id)) {
+        // Recording a screen is driving it: its owner starts driving again, anyone else must have been given control.
+        if (lock.personId !== person.id) return { ok: false, reason: `${lock.by} is driving the big screen. Ask them to pass control or drive together first.`, status: 409 };
+        s.drive("start", screenId, person.id);
+      }
+    }
+    this.recordEnd(deviceId);
+    const id = newId("rec");
+    this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
+    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, personId: person?.id ?? null, screenId, tookLock, missed: 0 };
+    // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
+    (rec.cap = setTimeout(() => this.abandonRecording(deviceId, rec), Hub.RECORD_MAX_MS + 1000)).unref?.();
+    // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
+    if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
+    this.recs.set(deviceId, rec);
+    s.setRecording({ id, deviceId, personId: rec.personId, personName: person?.name ?? "Someone", screenId, since: Date.now() });
+    return { ok: true, id };
+  }
+
+  private abandonRecording(deviceId: string, only: unknown) {
+    if (this.recs.get(deviceId) !== only) return;
+    this.releasePrompt(deviceId);
+    this.recordEnd(deviceId);
+  }
+
+  /** Ends recordings whose window has been gone for two checks in a row (this runs every 15 s). */
+  sweepRecordings() {
+    for (const [deviceId, rec] of [...this.recs]) {
+      rec.missed = this.session.deviceOnline(deviceId) ? 0 : rec.missed + 1;
+      if (rec.missed >= 2) this.abandonRecording(deviceId, rec);
+    }
+  }
+
+  /** Forgets a device's recording and, if it was the last on its screen and took the lock, gives the screen back. */
+  private recordEnd(deviceId: string) {
+    const rec = this.recs.get(deviceId);
+    if (!rec) return;
+    clearInterval(rec.keep);
+    clearTimeout(rec.cap);
+    this.recs.delete(deviceId);
+    this.session.setRecording(null, deviceId);
+    if (!rec.screenId) return;
+    const others = [...this.recs.values()].filter((r) => r.screenId === rec.screenId);
+    if (rec.tookLock && !others.length) this.session.unlockStage(rec.screenId);
+    // Whoever is left inherits the duty of letting go.
+    else if (rec.tookLock && others.length) others[0].tookLock = true;
+  }
+
+  /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
+  async recordStop(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
+    const s = this.session;
+    const rec = this.recs.get(w.deviceId);
+    if (rec && rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
+    const person = s.person(w.personId ?? rec?.personId);
+    const lines = await this.windowLines({ ...w, personId: person?.id ?? w.personId });
+    this.recordEnd(w.deviceId);
+    const marks = (Array.isArray(w.pointer) ? w.pointer : []).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
+    const notes = alignNotes(lines, marks, { screenId: rec?.screenId });
+    const typed = w.typed?.trim();
+    if (typed) notes.unshift({ id: "typed", text: typed, t0: w.t0, t1: w.t0, personId: person?.id ?? null, pin: null, ...(rec?.screenId ? { screenId: rec.screenId } : {}) });
+    if (!notes.length) return { ok: false, reason: "Nothing was heard in that recording." };
+    for (const n of notes) {
+      const owner = ownerOf(s, n.pin?.target);
+      n.ownerId = owner;
+      n.ownerName = owner ? s.agent(owner)?.name ?? null : null;
+    }
+    const recordingId = rec?.id ?? newId("rec");
+    this.noteOwners.set(recordingId, person?.id ?? null);
+    if (this.noteOwners.size > 200) this.noteOwners.delete(this.noteOwners.keys().next().value!);
+    return { ok: true, recordingId, notes };
+  }
+
+  /** A picture of the spot: a slice of the item's image around the pin, made with the system's own image tool. Null when it can't be. */
+  private async cropFor(art: Artifact | undefined, pin: NotePin, tag: string): Promise<string | null> {
+    if (!art?.image || process.platform !== "darwin") return null;
+    try {
+      const rel = normalize(decodeURIComponent(art.image.replace(/^\/renders\//, "").split("?")[0]));
+      if (rel.startsWith("..") || rel.includes(`${sep}..`)) return null;
+      const src = join(this.canvas.rendersDir, rel);
+      const f = Bun.file(src);
+      if (!(await f.exists())) return null;
+      const size = imageSize(await f.bytes());
+      if (!size?.width || !size.height) return null;
+      const w = Math.min(size.width, Math.max(240, Math.round(size.width * 0.45)));
+      const h = Math.min(size.height, Math.max(180, Math.round(size.height * 0.35)));
+      const left = Math.max(0, Math.min(size.width - w, Math.round(pin.x * size.width - w / 2)));
+      const top = Math.max(0, Math.min(size.height - h, Math.round(pin.y * size.height - h / 2)));
+      const name = `crop-${tag}.png`;
+      mkdirSync(this.uploadsDir, { recursive: true });
+      const p = Bun.spawn(["sips", "-s", "format", "png", "-c", String(h), String(w), "--cropOffset", String(top), String(left), src, "--out", join(this.uploadsDir, name)], { stdout: "ignore", stderr: "ignore" });
+      return (await p.exited) === 0 ? `/renders/uploads/${name}` : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The tidied notes go out: each one becomes a pin on its item, and the notes for each agent's builds
+   * and frames go to that agent as one directive. Notes on nothing an agent owns go to the room brain.
+   */
+  async recordSend(w: { personId: string | null; recordingId: string; notes: RecordNote[] }) {
+    const s = this.session;
+    const person = s.person(w.personId);
+    if (!person) return { ok: false as const, reason: "Pick who you are before sending notes.", status: 403 };
+    const known = this.noteOwners.get(w.recordingId);
+    if (known && known !== person.id) return { ok: false as const, reason: "Those notes belong to someone else.", status: 403 };
+    const done = this.sentRecs.get(w.recordingId);
+    if (done) return done as { ok: true };
+    const clamp = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
+    const notes: RecordNote[] = (Array.isArray(w.notes) ? w.notes : [])
+      .slice(0, 80)
+      .map((n, i) => ({
+        id: String(n?.id ?? `n${i}`).slice(0, 60),
+        text: String(n?.text ?? "").trim().slice(0, 2000),
+        t0: Number(n?.t0) || 0,
+        t1: Number(n?.t1) || 0,
+        personId: person.id,
+        screenId: typeof n?.screenId === "string" ? n.screenId : null,
+        pin: n?.pin?.target?.kind && typeof n.pin.target.ref === "string" ? { ...n.pin, x: clamp(n.pin.x), y: clamp(n.pin.y) } : null,
+      }))
+      .filter((n) => n.text);
+    if (!notes.length) return { ok: false as const, reason: "There are no notes to send." };
+
+    const pins: Annotation[] = [];
+    const byAgent = new Map<string, { n: RecordNote; crop: string | null }[]>();
+    const loose: { n: RecordNote; crop: string | null }[] = [];
+    for (const n of notes) {
+      const owner = ownerOf(s, n.pin?.target);
+      let crop: string | null = null;
+      if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin, `${w.recordingId}-${notes.indexOf(n)}`);
+      if (n.pin) {
+        const have = s.store.all("annotations").find((a) => a.recordingId === w.recordingId && a.noteId === n.id);
+        const ann = have ?? s.addAnnotation({ personId: person.id, target: n.pin.target, x: n.pin.x, y: n.pin.y, text: n.text, source: "pin", scroll: n.pin.scroll ?? null, screenId: n.screenId ?? null, recordingId: w.recordingId, noteId: n.id, crop });
+        pins.push(ann);
+        if (ann.target.kind === "canvas" && ann.target.canvasX != null) this.canvas.comment(ann).catch(() => {});
+      }
+      const item = { n, crop };
+      if (owner) byAgent.set(owner, [...(byAgent.get(owner) ?? []), item]);
+      else loose.push(item);
+    }
+
+    const sent: { agentId: string; agentName: string; notes: number; directiveId: string }[] = [];
+    for (const [agentId, items] of byAgent) {
+      const lines = items.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
+      const d = s.createDirective({
+        text: `Notes from ${person.name}'s recording (${items.length}). Each is what they said while pointing at the spot described:\n${lines.join("\n")}`,
+        mode: "implement",
+        rationale: "Notes pinned to this agent's work from a recording.",
+        targets: [agentId],
+        requestedBy: person.name,
+      });
+      sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: d.id });
+    }
+    if (loose.length) {
+      const lines = loose.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
+      const ev = s.store.addEvent({
+        kind: "speech",
+        authorType: "person",
+        authorId: person.id,
+        authorName: person.name,
+        text: `Notes from ${person.name}'s recording (${loose.length}):\n${lines.join("\n")}`,
+        relevance: "work",
+        data: { direct: true, typed: true, recorded: true, recordingId: w.recordingId },
+      });
+      this.brain.direct(ev, "These notes were pinned to things no agent owns (or to nothing). Decide who should handle each, send one directive per agent quoting the note and where it was pinned, and say so if there is no one.");
+    }
+    for (const a of pins) s.store.patch("annotations", a.id, { status: "sent" });
+    const result = { ok: true as const, sent, brain: loose.length, pins: pins.map((p) => p.id) };
+    this.sentRecs.set(w.recordingId, result);
+    if (this.sentRecs.size > 200) this.sentRecs.delete(this.sentRecs.keys().next().value!);
+    return result;
   }
 
   /** All open annotations (or the given ones) go to the brain as one prompt. */

@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send)|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -764,6 +764,23 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/prompt-window" && req.method === "POST") {
     if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
     return json(await hub.promptWindow({ deviceId: body.deviceId, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
+  }
+
+  // ---- Record: talk and point, review the notes, send them to the agents that own the work ----
+  if (path === "/record/start" && req.method === "POST") {
+    if (!body?.deviceId) return bad("deviceId is required");
+    const r = hub.recordStart(String(body.deviceId), body.personId ?? null, Number(body.t0) || Date.now(), typeof body.screen === "string" ? body.screen : null);
+    return r.ok ? json(r) : bad(r.reason, r.status);
+  }
+  if (path === "/record/stop" && req.method === "POST") {
+    if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+    const r = await hub.recordStop({ deviceId: String(body.deviceId), personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
+    return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
+  }
+  if (path === "/record/send" && req.method === "POST") {
+    if (!body?.recordingId || !Array.isArray(body?.notes)) return bad("recordingId and notes are required");
+    const r = await hub.recordSend({ personId: body.personId ?? null, recordingId: String(body.recordingId), notes: body.notes });
+    return r.ok ? json(r) : "status" in r && r.status ? bad(r.reason, r.status) : json(r);
   }
 
   // ---- snapshots ----

@@ -1,6 +1,6 @@
 # What's tested
 
-Status of each major capability as of October 27, 2026. **Tested live** means exercised end to end
+Status of each major capability as of October 29, 2026. **Tested live** means exercised end to end
 with the real pieces (real Claude Code or Codex, the live brain on the AI Gateway, real network
 connections). **Simulated** means covered by automated tests or emulation, not the real thing.
 **Not tested** means built but not exercised yet.
@@ -87,6 +87,17 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Canvas: wheel pans, pinch zooms, drag pans, click selects | Simulated | Against a real figcraft-server; click uses FigCraft's own `ui.pointer`. Typing on the canvas isn't driven. |
 | Trackpad with Pointer Lock (relative motion) | Not tested for real | Headless Chromium refuses Pointer Lock; the relative path ran against a stand-in. Needs the Mac app (WKWebView may lack Pointer Lock; it then falls back to mapping over the mirror). |
 | Real trackpad feel, latency over Wi-Fi | Not tested | Loopback latency was under 1 ms; about 55 moves a second. |
+## Record (6.2)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Record on your own screen: rainbow trail, notes pinned where you pointed, tidy list, send to owning agents | Simulated | Headless Chromium against a throwaway hub with injected, timestamped utterances (no audio played); trail frames mid-motion, the tidy list, the sent toast and the pins in the picture viewer were looked at. |
+| Rainbow trail with reduced motion | Simulated | Frame checked with `prefers-reduced-motion`: shorter, thinner, fainter. Frame rate on a real Retina display not measured. |
+| Record on the big screen: lock taken and given back, refused when someone else drives, each driver recorded, trail and chip on the screen | Simulated | Two headless windows (driver and big screen) with a stand-in for the dart bridge; 6.1's real dart not connected yet. |
+| Note alignment (pauses, edges, splitting a long line, several drivers) | Simulated | Unit tests of the timing rules. Not tuned against real speech timing. |
+| Tidy then send through the web client's own `api()` | Simulated | Real hub over HTTP; a lost reply and a repeat send checked. |
+| Crop of the spot in a directive | Simulated | Made with macOS `sips` on the host; skipped elsewhere. Only for pictures, not the live canvas. |
+| Speech from a real mic into the notes | Not tested | Needs a room: real transcription timing against real pointer movement. |
 
 ## Phones and browsers
 

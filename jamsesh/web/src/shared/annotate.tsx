@@ -7,7 +7,11 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { createPortal } from "react-dom";
 import "./annotate.css";
 import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, type QueuedResult } from "./hub";
-import { PointerRecorder, canvasHit, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark, type TrailSample } from "./pointer";
+import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
+import { driverState, onCursor } from "./driving";
+import { RecordTidy } from "./record";
+import { sendSummary, type RecordNote, type SendReply } from "./notes";
+import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
 export type PinTarget = Pick<JamTarget, "kind" | "ref" | "label">;
@@ -723,101 +727,52 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
   );
 }
 
-// ---------- record a prompt ----------
+// ---------- Record: talk and point, and it becomes notes (6.2) ----------
 
-type RecState = { phase: "idle" } | { phase: "live"; t0: number } | { phase: "sending" };
-type RecResult = { ok: boolean; text: string; pointed: string[]; reason?: string; note?: string; out?: boolean };
+type RecState = { phase: "idle" } | { phase: "live"; t0: number; screen: string | null } | { phase: "sending" };
+type RecResult = { ok: boolean; title: string; text: string; pills: string[]; note?: string; out?: boolean };
+type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null };
 /** The laptop mic, as far as recording needs it. */
 type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void; flush?: () => Promise<void> };
 
-function Trail({ feed }: { feed: React.RefObject<{ push: ((s: TrailSample) => void) | null }> }) {
-  const cv = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const c = cv.current;
-    if (!c) return;
-    const ctx = c.getContext("2d")!;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const size = () => {
-      c.width = innerWidth * dpr;
-      c.height = innerHeight * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-    size();
-    addEventListener("resize", size);
-    const pts: { x: number; y: number; at: number }[] = [];
-    let anchor = { x: -99, y: -99, at: 0 };
-    let raf = 0;
-    if (feed.current)
-      feed.current.push = (s) => {
-        const at = performance.now();
-        pts.push({ x: s.x, y: s.y, at });
-        if (Math.hypot(s.x - anchor.x, s.y - anchor.y) > 6) anchor = { x: s.x, y: s.y, at };
-      };
-    const warn = getComputedStyle(document.documentElement).getPropertyValue("--warn").trim() || "#ff6b5e";
-    const draw = () => {
-      const now = performance.now();
-      ctx.clearRect(0, 0, innerWidth, innerHeight);
-      while (pts.length && now - pts[0].at > 1500) pts.shift();
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.strokeStyle = warn;
-      for (let i = 1; i < pts.length; i++) {
-        const k = 1 - (now - pts[i].at) / 1500;
-        if (pts[i].at - pts[i - 1].at > 400) continue;
-        ctx.globalAlpha = Math.max(0, k) * 0.7;
-        ctx.lineWidth = 1.5 + 3.5 * k;
-        ctx.beginPath();
-        ctx.moveTo(pts[i - 1].x, pts[i - 1].y);
-        ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.stroke();
-      }
-      const last = pts[pts.length - 1];
-      if (last && now - last.at < 4000) {
-        const held = now - anchor.at;
-        ctx.globalAlpha = 0.9;
-        ctx.strokeStyle = warn;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(last.x, last.y, 11, 0, 7);
-        ctx.stroke();
-        if (held > 300) {
-          // The hold has registered as a dwell: draw it filling up.
-          ctx.lineWidth = 3;
-          ctx.beginPath();
-          ctx.arc(last.x, last.y, 18, -Math.PI / 2, -Math.PI / 2 + Math.min(1, (held - 300) / 1200) * Math.PI * 2);
-          ctx.stroke();
-        }
-      }
-      ctx.globalAlpha = 1;
-      raf = requestAnimationFrame(draw);
-    };
-    raf = requestAnimationFrame(draw);
-    return () => {
-      cancelAnimationFrame(raf);
-      removeEventListener("resize", size);
-    };
-  }, [feed]);
-  return <canvas ref={cv} className="rec-trail" />;
+const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+/** The big screen this person is driving right now, or null. */
+const drivenScreen = (state: HubState | null, me: string) => (state ? ["main", ...(state.screens ?? []).map((x) => x.id)].find((id) => driverState(id, state, me).me.driving) ?? null : null);
+
+/** Whichever Record button is mounted registers here, so another screen (the picture viewer, which covers the header) can start and stop it too. */
+const recordControl = { toggle: null as null | (() => void) };
+const recordingNow = store(false);
+
+/** A Record button for places the header's isn't visible. */
+export function RecordHere() {
+  const live = recordingNow.use();
+  return (
+    <button type="button" className={`btn small rec-here ${live ? "live" : ""}`} onClick={() => recordControl.toggle?.()} aria-pressed={live} title={live ? "Stop and tidy your notes (R)" : "Record: talk and point, and it becomes notes (R)"}>
+      <span className="rec-dot" />
+      {live ? "Stop" : "Record"}
+      <kbd>R</kbd>
+    </button>
+  );
 }
 
-const short = (p: string) => {
-  const s = p.replace(/\s*\(node \d+\)/, "");
-  return s.length > 72 ? `${s.slice(0, 69)}…` : s;
-};
-const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
-
 /**
- * Press `R` (or the button) to start talking to the room's brain. Where you point while you talk
- * is captured too; stopping posts one prompt. The mic keeps running the whole time.
+ * Press `R` (or the button) to record: talk and point at what you're looking at, on your own screen or,
+ * when you're driving it, the big screen. Stopping lists what you said as notes pinned to the spots you
+ * pointed at; you tidy them, then they go to the agent that owns each build or frame.
  * `text` is optional typed text to send along (for rooms where nobody has a mic).
  */
 export function RecordPrompt({ personId, brainName, text, mic }: { personId: string; brainName: string; text?: string; mic?: MicLike }) {
   const { levels } = useHub();
+  // Driving a big screen (6.1) makes Record record that screen: the dart is the pointer.
+  const { state: hubState } = useHub();
+  const driving = drivenScreen(hubState, personId);
   const [rec, setRec] = useState<RecState>({ phase: "idle" });
   const [now, setNow] = useState(0);
   const [result, setResult] = useState<RecResult | null>(null);
+  const [review, setReview] = useState<Review | null>(null);
   const recorder = useRef<PointerRecorder | null>(null);
-  const feed = useRef<{ push: ((s: TrailSample) => void) | null }>({ push: null });
+  const offDart = useRef<(() => void) | null>(null);
+  const feed = useRef<TrailFeed>({ push: null });
   const recRef = useRef(rec);
   recRef.current = rec;
   const typed = useRef(text);
@@ -831,29 +786,53 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     return () => clearInterval(id);
   }, [rec.phase]);
 
+  const fail = (reason: string, title = "Nothing recorded") => setResult({ ok: false, title, text: reason, pills: [] });
+
   const starting = useRef(false);
   const unmuted = useRef(false);
   const start = async () => {
-    if (recRef.current.phase !== "idle" || starting.current) return;
-    // Recording while muted would capture nothing: switch the mic on for the recording, or say why it can't be.
-    if (mic && !mic.status.on && !typed.current) {
-      starting.current = true;
-      const ok = await mic.ensureOn();
-      starting.current = false;
-      if (!ok) {
-        setResult({ ok: false, text: "", pointed: [], reason: mic.status.error ? `Your mic is off and wouldn't turn on: ${mic.status.error}` : "Your mic is off, so there's nothing to record. Unmute it and try again." });
-        return;
+    if (recRef.current.phase !== "idle" || starting.current || review) return;
+    starting.current = true;
+    try {
+      // Recording while muted would capture nothing: switch the mic on for the recording, or say why it can't be.
+      if (mic && !mic.status.on && !typed.current) {
+        const ok = await mic.ensureOn();
+        if (!ok) return fail(mic.status.error ? `Your mic is off and wouldn't turn on: ${mic.status.error}` : "Your mic is off, so there's nothing to record. Unmute it and try again.");
+        unmuted.current = true;
       }
-      unmuted.current = true;
+      const t0 = hub.now();
+      const screen = drivenScreen(hub.get().state, who.current);
+      // The big screen answers first: it only records for someone driving it, and locks it while it does.
+      if (screen) {
+        try {
+          await api("/record/start", { deviceId: hub.deviceId, personId, t0, screen }, undefined, { queue: false });
+        } catch (e) {
+          if (unmuted.current) (unmuted.current = false, mic?.stop());
+          return fail(e instanceof Error ? e.message : "Couldn't record the big screen.");
+        }
+      } else {
+        api("/record/start", { deviceId: hub.deviceId, personId, t0 }, undefined, { queue: false }).catch(() => {});
+      }
+      const r = (recorder.current = new PointerRecorder());
+      if (screen) {
+        // The pointer being recorded is the dart; the trail is drawn on the big screen.
+        r.start({ dom: false });
+        let down = false;
+        offDart.current = onCursor((c) => {
+          if (c.screen !== screen || c.personId !== who.current || (c.ev.k !== "move" && c.ev.k !== "down" && c.ev.k !== "up")) return;
+          if (c.ev.k !== "move") down = c.ev.k === "down";
+          r.feedDart(dartAt(screen, c.ev.x, c.ev.y, down, hub.now()));
+        });
+      } else {
+        r.onSample = (s) => feed.current.push?.(s.x, s.y);
+        r.start();
+      }
+      setResult(null);
+      setNow(Date.now());
+      setRec({ phase: "live", t0, screen });
+    } finally {
+      starting.current = false;
     }
-    const t0 = hub.now();
-    const r = (recorder.current = new PointerRecorder());
-    r.onSample = (s) => feed.current.push?.(s);
-    r.start();
-    setResult(null);
-    setNow(Date.now());
-    setRec({ phase: "live", t0 });
-    api("/prompt-window/start", { deviceId: hub.deviceId, t0 }, undefined, { queue: false }).catch(() => {});
   };
 
   const stop = async () => {
@@ -862,28 +841,24 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     if (cur.phase !== "live" || !r) return;
     const t1 = hub.now();
     setRec({ phase: "sending" });
+    offDart.current?.();
+    offDart.current = null;
     try {
       const pointer = await r.stop();
       // The sentence still being spoken has to reach the hub before it closes the window.
       await mic?.flush?.().catch(() => {});
       // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
-      const res = await api<{ ok: boolean; text?: string; pointed?: string[]; reason?: string; queued?: boolean }>(
-        "/prompt-window",
-        {
-          deviceId: hub.deviceId,
-          personId,
-          t0: cur.t0,
-          t1,
-          pointer,
-          ...(typed.current ? { text: typed.current } : {}),
-        },
+      const res = await api<{ ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[]; queued?: boolean }>(
+        "/record/stop",
+        { deviceId: hub.deviceId, personId, t0: cur.t0, t1, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
         undefined,
         { queue: false, timeoutMs: 15_000 },
       );
       if (res.queued) throw new OfflineError(NOT_SENT);
-      setResult({ ok: !!res.ok, text: res.text ?? "", pointed: res.pointed ?? [], reason: res.reason, note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
+      if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
+      else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
     } catch (e) {
-      setResult({ ok: false, text: "", pointed: [], reason: e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't send that." });
+      fail(e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't finish that recording.");
     }
     setRec({ phase: "idle" });
     if (unmuted.current) {
@@ -893,7 +868,28 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     }
   };
 
+  const send = async () => {
+    if (!review || review.busy) return;
+    const notes = review.notes.filter((n) => n.text.trim());
+    setReview({ ...review, busy: true, error: null });
+    try {
+      const res = await api<SendReply & { queued?: boolean }>("/record/send", { recordingId: review.recordingId, personId, notes }, undefined, { queue: false, timeoutMs: 25_000 });
+      if (res.queued) throw new OfflineError(NOT_SENT);
+      if (!res.ok) throw new Error(res.reason || "Couldn't send those notes.");
+      const sum = sendSummary(res, brainName);
+      setReview(null);
+      setResult({ ok: true, title: "Notes sent", text: sum.text, pills: [] });
+    } catch (e) {
+      // The notes stay on screen: sending again is safe, the hub never does it twice.
+      setReview((r) => (r ? { ...r, busy: false, error: `${e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't send those notes."} Your notes are still here.` } : r));
+    }
+  };
+
   const toggle = () => (recRef.current.phase === "live" ? void stop() : start());
+  recordControl.toggle = toggle;
+  useEffect(() => {
+    recordingNow.set(rec.phase === "live");
+  }, [rec.phase]);
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
@@ -905,13 +901,15 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   });
 
   // Leaving mid-recording (the button remounts when the layout changes, the page closes) must still
-  // close the hub's prompt window, or it keeps swallowing this laptop's speech. Send what was collected.
+  // close the hub's recording, or it keeps swallowing this laptop's speech and holding the big screen's
+  // lock. Nobody is left to tidy notes, so what was said goes to the brain as one prompt, as it always did.
   useEffect(() => {
     const release = (unloading: boolean): boolean => {
       const cur = recRef.current;
       const r = recorder.current;
       if (cur.phase !== "live" || !r) return false;
       recRef.current = { phase: "idle" };
+      offDart.current?.();
       const send = (pointer: PointerMark[]) => {
         const body = { deviceId: hub.deviceId, personId: who.current, t0: cur.t0, t1: hub.now(), pointer, ...(typed.current ? { text: typed.current } : {}) };
         if (unloading) {
@@ -948,7 +946,12 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
 
   return (
     <>
-      <button className={`rec-btn ${live ? "live" : ""} ${rec.phase === "sending" ? "busy" : ""}`} onClick={toggle} aria-pressed={live} title={live ? "Stop and send (R)" : `Talk to ${brainName} and point (R)`}>
+      <button
+        className={`rec-btn ${live ? "live" : ""} ${rec.phase === "sending" ? "busy" : ""}`}
+        onClick={toggle}
+        aria-pressed={live}
+        title={live ? "Stop and tidy your notes (R)" : driving ? "Record the big screen: talk and point with your dart (R)" : `Talk and point; it becomes notes for ${brainName} and the agents (R)`}
+      >
         {rec.phase === "sending" ? <span className="rec-spin" /> : <span className="rec-dot" />}
         {live ? (
           <>
@@ -961,7 +964,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
             Stop
           </>
         ) : rec.phase === "sending" ? (
-          "Sending…"
+          "Listening back…"
         ) : (
           <>
             Record
@@ -969,7 +972,18 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
           </>
         )}
       </button>
-      {live && createPortal(<><div className="rec-edge" /><Trail feed={feed} /></>, document.body)}
+      {live && !rec.screen && createPortal(<><div className="rec-edge" /><RainbowTrail feed={feed} /></>, document.body)}
+      {review && (
+        <RecordTidy
+          notes={review.notes}
+          brain={brainName}
+          busy={review.busy}
+          error={review.error}
+          onChange={(notes) => setReview((r) => (r ? { ...r, notes } : r))}
+          onSend={() => void send()}
+          onDiscard={() => setReview(null)}
+        />
+      )}
       {result &&
         createPortal(
           <div className={`rec-toast ${result.ok ? "" : "err"} ${result.out ? "out" : ""}`} role="status">
@@ -977,14 +991,13 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
               <Icon d={result.ok ? I.check : "M12 8v5m0 3.5v.01"} size={15} />
             </span>
             <div>
-              <h4>{result.ok ? `Sent to ${brainName}` : "Nothing sent"}</h4>
-              <p>{result.ok ? `“${result.text.length > 180 ? `${result.text.slice(0, 177)}…` : result.text}”` : result.reason || "Nothing was heard in that recording."}</p>
+              <h4>{result.title}</h4>
+              <p>{result.text}</p>
               {result.note && <p style={{ color: "var(--dim)", marginTop: 4 }}>{result.note}</p>}
-              {result.ok && result.pointed.length > 0 && (
+              {result.pills.length > 0 && (
                 <ul>
-                  <li style={{ color: "var(--text)" }}>pointed at {result.pointed.length === 1 ? "1 thing" : `${result.pointed.length} things`}</li>
-                  {result.pointed.slice(0, 3).map((p, i) => (
-                    <li key={i}>{short(p)}</li>
+                  {result.pills.map((p, i) => (
+                    <li key={i}>{p}</li>
                   ))}
                 </ul>
               )}

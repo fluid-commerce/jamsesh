@@ -15,6 +15,7 @@ import { StageBar } from "../shared/StageControls";
 import { DriveSurface } from "../shared/DriveSurface";
 import { useDriverState } from "../shared/driving";
 import { DriveLayer } from "./DriveLayer";
+import { ScreenRecording } from "../shared/ScreenRecording";
 import { cast } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
@@ -82,6 +83,7 @@ export function Stage({ state, interactive, tilePins = true, bar, drive }: { sta
     <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }} data-drive-screen={screen}>
       {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} drive={drive === "trackpad"} />}
       <div className="stage-body" style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <ScreenRecording state={state} screen={screen} />
         <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
           <TilePins.Provider value={tilePins}>
             <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
