@@ -286,9 +286,9 @@ export class Canvas {
   }
 
   /** The current render of one frame (for agents comparing against their build). */
-  async renderNode(nodeId: string, maxSize = 1600): Promise<ToolResult> {
+  async renderNode(nodeId: string, maxSize = 1600, scale?: number): Promise<ToolResult> {
     if (!this.host) throw new Error("canvas isn't running");
-    const shot = () => this.host!.call("screenshot", { ids: [Number(nodeId)], maxSize });
+    const shot = () => this.host!.call("screenshot", { ids: [Number(nodeId)], maxSize, ...(scale ? { scale } : {}) });
     let r = await shot();
     if (!r.isError) return r;
     // The host may be a moment behind the agent that just made the frame.

@@ -1,6 +1,6 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
 import { bus } from "./bus";
@@ -229,6 +229,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
           return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
         }
+        // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
+        const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
+        if (full) return fullRender(hub, full[1], Number(url.searchParams.get("size")));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
@@ -562,6 +565,17 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return done ? json(done) : bad("That question has already been answered.", 404);
   }
 
+  // Expand one tile to fill the presentation area, or collapse (`tile` null). `screen` picks an extra big screen.
+  if (path === "/stage/expand" && req.method === "POST") {
+    // Agents steer the screen with jam_show; expanding is for people looking at it.
+    if (paired?.kind === "agent") return bad("Agents use jam_show; expanding a tile is for people.", 403);
+    if (body?.tile !== null && (typeof body?.tile !== "string" || !body.tile.trim())) return bad("tile must be a tile key, or null to collapse");
+    const tile: string | null = body.tile;
+    const screen = typeof body?.screen === "string" && body.screen ? body.screen : "main";
+    if (screen !== "main" && !s.screens().some((sc) => sc.id === screen)) return bad("no such screen", 404);
+    return json(s.expandTile(tile, screen));
+  }
+
   // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
   const rm = path.match(/^\/agents\/([\w-]+)\/remove$/);
   if (rm && req.method === "POST") {
@@ -871,6 +885,38 @@ function file(p: string, root: string, cache = false): Response {
   else headers["cache-control"] = "no-cache";
   if (full.endsWith(".webmanifest")) headers["content-type"] = "application/manifest+json";
   return new Response(Bun.file(full), { headers });
+}
+
+export const FULL_SIZES = [1600, 2400, 3200, 4096];
+const FULL_KEEP = 60;
+const fullInflight = new Map<string, Promise<string | null>>();
+
+/** One frame, drawn at exactly one of FULL_SIZES and kept beside the stored render (the newest FULL_KEEP files stay). */
+export async function fullRender(hub: Hub, artifactId: string, size: number): Promise<Response> {
+  if (!FULL_SIZES.includes(size)) return new Response(`size must be one of ${FULL_SIZES.join(", ")}`, { status: 400 });
+  const art = hub.session.store.get("artifacts", artifactId);
+  const base = art?.image?.match(/^\/renders\/([\w-]+)\.png$/)?.[1];
+  if (!art || art.kind !== "frame" || !art.nodeId || !base) return new Response("not found", { status: 404 });
+  const dir = join(hub.canvas.rendersDir, "full");
+  const name = `${base}@${size}.png`;
+  let job = fullInflight.get(name);
+  if (!job) {
+    job = (async () => {
+      if (existsSync(join(dir, name))) return name;
+      // The canvas draws at 1x unless asked: `maxSize` only caps, so the scale that fills `size` is asked for.
+      const long = Math.max(art.width ?? 0, art.height ?? 0);
+      const r = await hub.canvas.renderNode(art.nodeId!, size, long > 0 ? Math.min(8, size / long) : 4).catch(() => null);
+      const img = r?.isError ? undefined : (r?.content.find((c) => c.type === "image") as { data: string } | undefined);
+      if (!img) return null;
+      mkdirSync(dir, { recursive: true });
+      await Bun.write(join(dir, name), Buffer.from(img.data, "base64"));
+      for (const f of readdirSync(dir).map((n) => ({ n, t: statSync(join(dir, n)).mtimeMs })).sort((x, y) => y.t - x.t).slice(FULL_KEEP)) rmSync(join(dir, f.n), { force: true });
+      return name;
+    })().finally(() => fullInflight.delete(name));
+    fullInflight.set(name, job);
+  }
+  const done = await job;
+  return done ? file(join(dir, done), dir) : new Response("not found", { status: 404 });
 }
 
 const NOT_THE_HOST_WINDOW = "On the host, do this from the JamSesh window. A host started from a terminal printed a one-time host link: open that (restart the host for a new one).";

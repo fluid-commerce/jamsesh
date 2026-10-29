@@ -67,8 +67,8 @@ export function CastPicker({ state }: { state: HubState }) {
   };
   return (
     <>
-      <div className="scrim" onClick={() => close(false)} />
-      <div className="modal-wrap">
+      <div className="scrim cast-scrim" onClick={() => close(false)} />
+      <div className="modal-wrap cast-wrap">
         <div className="modal cast-modal" role="dialog" aria-label="Put on screen">
           <h2 className="cast-title">Put on screen</h2>
           <div className="cast-grid">

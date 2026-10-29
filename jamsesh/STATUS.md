@@ -85,6 +85,15 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Phone microphone | Not tested | Needs the host's HTTPS address (remote access). |
 | Canvas sizing on high-density screens | Simulated | Correct in WebKit (Safari, iPhone, the Mac app). Real Chrome on a Retina Mac not checked. |
 
+## Big screen: viewer and expand
+
+| Capability | Status | Notes |
+|---|---|---|
+| Work tab viewer (arrows, Esc, Show on big screen as the person) | Simulated | Headless Chromium at 1440 and 390 px wide against a throwaway hub; keys and click-does-not-cast checked. |
+| Expand / Collapse on a bento | Simulated | Headless Chromium at 1920x1080 and 3840x2160. Phone Screen tab has a chip per tile (390 px). |
+| Full-size frame render (`/renders/full`) | Tested live | Against a real figcraft-server: 1440x900 frame came back 1600, 3200 and 4096 px wide. Not yet seen on a TV. |
+| Expand on a second display | Not tested | Needs a real second screen. |
+
 ## Remote access
 
 | Capability | Status | Notes |

@@ -1376,6 +1376,57 @@ export class Session {
   }
 
   /**
+   * Expand one tile of a screen's stage to fill the presentation area, or collapse back (`key` null). In place: the stage keeps its age,
+   * its history entry and its lock, and a lock doesn't refuse it, since looking closer isn't replacing what the owner put up. Someone is
+   * looking at it, so a stage that returns to the board by itself starts its wait again.
+   */
+  expandTile(key: string | null, screen = "main"): Stage {
+    const cur = this.stage(screen);
+    const tile = typeof key === "string" ? key.trim().slice(0, 80) : "";
+    if (cur.mode === "join" || (tile ? cur.expanded === tile : !cur.expanded)) return cur;
+    const { expanded: _drop, ...rest } = cur;
+    const stage: Stage = tile ? { ...rest, expanded: tile } : rest;
+    this.commitStage(stage, screen);
+    return stage;
+  }
+
+  /** The keys of the tiles a screen's stage shows, in the order the screen draws them (the web's `stageTiles` keeps the same rules). */
+  stageTileKeys(screen = "main"): { key: string; artifactId?: string }[] {
+    const st = this.stage(screen);
+    const arts = this.artifacts();
+    const known = new Set(arts.map((a) => a.id));
+    const byId = (ids: string[]) => ids.filter((id) => known.has(id)).map((id) => ({ key: id, artifactId: id }));
+    switch (st.mode) {
+      case "welcome":
+      case "board":
+        return arts.slice(0, 5).map((a) => ({ key: a.id, artifactId: a.id }));
+      case "spotlight":
+        return byId(st.items);
+      case "compare":
+        return byId(st.items).sort((x, y) => {
+          const [p, q] = [arts.find((a) => a.id === x.key)!, arts.find((a) => a.id === y.key)!];
+          return (p.variant || p.title).localeCompare(q.variant || q.title);
+        });
+      case "parity":
+        return byId((st.columns?.length ? st.columns : [{ label: "", items: st.items }]).flatMap((c) => c.items));
+      case "layout":
+        return (st.layout?.tiles ?? []).map((t, i) => ({ key: `t${i}`, artifactId: t.kind === "artifact" ? t.artifactId : undefined }));
+      default:
+        return [];
+    }
+  }
+
+  /** Expand "the second one" or a named artifact's tile, or collapse (neither given). Says why when it can't. */
+  expandWhich(ref: { artifactId?: string; position?: number }, screen = "main"): { ok: true; stage: Stage } | { ok: false; error: string } {
+    if (ref.artifactId === undefined && ref.position === undefined) return { ok: true, stage: this.expandTile(null, screen) };
+    const tiles = this.stageTileKeys(screen);
+    if (!tiles.length) return { ok: false, error: "The screen isn't showing tiles to expand." };
+    const hit = ref.artifactId !== undefined ? tiles.find((t) => t.artifactId === ref.artifactId) : tiles[Math.trunc(ref.position ?? 0) - 1];
+    if (!hit) return { ok: false, error: ref.artifactId !== undefined ? "That isn't on the screen right now." : `The screen has ${tiles.length} tile${tiles.length === 1 ? "" : "s"}.` };
+    return { ok: true, stage: this.expandTile(hit.key, screen) };
+  }
+
+  /**
    * Put something on a screen. A screen a person locked refuses everything except people (and `override`,
    * for the hub's own housekeeping: a share ending, a request the owner approved): the stage comes back
    * unchanged, and callers that want to explain why ask `lockOf` first. A person's cast takes the lock.

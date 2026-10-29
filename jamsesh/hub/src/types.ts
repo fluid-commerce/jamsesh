@@ -279,6 +279,8 @@ export interface Stage {
   /** Canvas mode: follow a person's viewport, or open a page. */
   follow?: string | null;
   page?: string | null;
+  /** The key of the tile filling the presentation area (the rest become a strip of thumbnails); unset when none is. */
+  expanded?: string;
   pinned: boolean;
   since: number;
   by: string;
