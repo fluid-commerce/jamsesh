@@ -1,4 +1,5 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
+import { checkImage } from "./image";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
@@ -410,22 +411,22 @@ export class Hub {
   async savePhoto(personId: string, bytes: Uint8Array) {
     const p = this.session.person(personId);
     if (!p) throw new Error("No such person.");
-    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
-    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
-    if (!isJpeg && !isPng) throw new Error("Send a JPEG or PNG.");
-    const file = `${personId}-${Date.now()}.${isJpeg ? "jpg" : "png"}`;
+    // A whole PNG or JPEG, checked before anything is written.
+    const img = checkImage(bytes);
+    if (typeof img === "string") throw new BadImage(img);
+    const file = `${personId}-${Date.now()}.${img.kind === "jpeg" ? "jpg" : "png"}`;
     await Bun.write(join(this.uploadsDir, file), bytes);
     return this.session.setPhoto(personId, `/renders/uploads/${file}`);
   }
 
   async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string }): Promise<Artifact> {
-    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
-    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
-    if (!isJpeg && !isPng) throw new Error("Upload a PNG or JPEG.");
-    if (bytes.length > 12 * 1024 * 1024) throw new Error("Images must be under 12 MB.");
-    const file = `${newId("up")}.${isJpeg ? "jpg" : "png"}`;
+    if (bytes.length > 12 * 1024 * 1024) throw new BadImage("Images must be under 12 MB.");
+    // A whole PNG or JPEG, checked before anything is written: a broken one leaves no file behind.
+    const img = checkImage(bytes);
+    if (typeof img === "string") throw new BadImage(img);
+    const file = `${newId("up")}.${img.kind === "jpeg" ? "jpg" : "png"}`;
     await Bun.write(join(this.uploadsDir, file), bytes);
-    const size = imageSize(bytes);
+    const size = img;
     const art = this.session.upsertVersion(
       {
         kind: "screenshot",
@@ -738,21 +739,8 @@ export class Hub {
   }
 }
 
+/** An image that isn't a whole PNG or JPEG (or is too big): the sender's error. */
+export class BadImage extends Error {}
+
 /** One handover by a hook or the listener, waiting for the hook script to acknowledge it (Hub.offer). */
 type Delivery = { id: string; at: number; via: "hook" | "listen"; directives: string[]; msgUpTo: number; decisionUpTo: number };
-
-function imageSize(b: Uint8Array): { width: number; height: number } | null {
-  if (b[0] === 0x89 && b[1] === 0x50) {
-    const v = new DataView(b.buffer, b.byteOffset);
-    return { width: v.getUint32(16), height: v.getUint32(20) };
-  }
-  let i = 2;
-  while (i + 9 < b.length) {
-    if (b[i] !== 0xff) return null;
-    const marker = b[i + 1];
-    const len = (b[i + 2] << 8) | b[i + 3];
-    if (marker >= 0xc0 && marker <= 0xc3) return { height: (b[i + 5] << 8) | b[i + 6], width: (b[i + 7] << 8) | b[i + 8] };
-    i += 2 + len;
-  }
-  return null;
-}

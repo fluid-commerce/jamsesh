@@ -1,5 +1,6 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
+import { checkImage } from "./image";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
@@ -404,8 +405,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   if (req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE") {
     try {
       body = await readBody(req);
-    } catch {
-      // 408: the sender's outbox retries it, and idempotent() doesn't remember it (nothing ran).
+    } catch (e) {
+      // A form that arrived whole but isn't one: the sender's error.
+      if (e instanceof BadForm) return bad(e.message);
+      // Didn't arrive whole, 408: the sender's outbox retries it, and idempotent() doesn't remember it (nothing ran).
       return new Response(JSON.stringify({ error: "The request didn't arrive whole. Try again." }), { status: 408, headers: { "content-type": "application/json" } });
     }
   }
@@ -702,13 +705,25 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const form = body?.__form as FormData | undefined;
     const bytes: unknown = body?.__files?.file;
     if (!(form instanceof FormData) || !(bytes instanceof Uint8Array)) return bad("send the image as form field 'file'");
-    const agent = s.agent(String(form!.get("agent") ?? "")) ?? null;
+    const img = checkImage(bytes);
+    if (typeof img === "string") return bad(img);
+    // An agent posts as itself only from its own machine (its credential's, or the host's own windows for the host's
+    // agents); the host's window may post for any. Anyone else naming an agent is refused.
+    const named = String(form.get("agent") ?? "");
+    const agent = named ? s.agent(named) ?? null : null;
+    if (named && !agent) return bad("No such agent.", 404);
+    const machine = hostWindow ? "host" : paired ? hub.auth.machineOf(paired.id) : null;
+    if (agent && !hostWindow && agent.machine !== machine) return bad("That agent is on another machine; post as yourself.", 403);
+    // A replaced artifact must be one this agent (or, for the host window, anyone) posted.
+    const replaces = String(form.get("replaces") ?? "") || undefined;
+    const old = replaces ? s.store.get("artifacts", replaces) : undefined;
+    if (replaces && old && !hostWindow && (!agent || old.agentId !== agent.id)) return bad("That screenshot isn't yours to replace.", 403);
     const art = await hub.saveUpload(agent, bytes, {
       title: String(form!.get("title") ?? "Screenshot"),
       stage: form!.get("stage") === "mockup" ? "mockup" : "built",
       note: String(form!.get("note") ?? ""),
       platform: (form!.get("platform") as any) ?? undefined,
-      replaces: String(form!.get("replaces") ?? "") || undefined,
+      replaces,
     });
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
@@ -840,11 +855,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   // ---- profile photos ----
   m = path.match(/^\/people\/([\w-]+)\/photo$/);
   if (m && req.method === "POST") {
+    // A photo is its own person's to set (their window, or the host's window for the host's person).
+    const refused = own(m[1]);
+    if (refused) return bad(refused.replace("A voice is only for its own person to give.", "A photo is only for its own person to set."), 403);
     const sent: unknown = body?.__raw ?? body?.__files?.file;
     const bytes = sent instanceof Uint8Array ? sent : new Uint8Array();
-    // What the sender got wrong (no file, not a JPEG or PNG) is a 400, not the host's error.
-    const isImage = (bytes[0] === 0xff && bytes[1] === 0xd8) || (bytes[0] === 0x89 && bytes[1] === 0x50);
-    if (!isImage) return bad("Send a JPEG or PNG.");
+    // What the sender got wrong (no file, not a whole JPEG or PNG) is a 400, not the host's error.
+    const img = checkImage(bytes);
+    if (typeof img === "string") return bad(img);
     return json(await hub.savePhoto(m[1], bytes));
   }
 
@@ -1039,8 +1057,10 @@ function originOf(req: Request, url: URL) {
 async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
   // Reading fails (throws) when the body didn't arrive whole; api() then stops the request.
+  // The bytes first: failing here means the body didn't arrive whole. Then what they say.
+  const raw = new Uint8Array(await req.arrayBuffer());
   if (type.includes("application/json")) {
-    const text = await req.text();
+    const text = new TextDecoder().decode(raw);
     try {
       const parsed = JSON.parse(text);
       // The internal fields of a form or raw body can't come from JSON.
@@ -1051,15 +1071,19 @@ async function readBody(req: Request): Promise<any> {
     }
   }
   if (type.includes("multipart/form-data")) {
-    const form = await req.formData();
+    const form = await new Response(raw, { headers: { "content-type": type } }).formData().catch(() => {
+      throw new BadForm("That form couldn't be read.");
+    });
     // A form's files are read into memory here too, so no route awaits bytes after the credential check.
     const files: Record<string, Uint8Array> = {};
     for (const [k, v] of form.entries() as Iterable<[string, unknown]>) if (v instanceof Blob && !(k in files)) files[k] = new Uint8Array(await v.arrayBuffer());
     return { __form: form, __files: files };
   }
-  const raw = new Uint8Array(await req.arrayBuffer());
   return raw.length ? { __raw: raw } : null;
 }
+
+/** A body that arrived whole but is a broken form (400, unlike one that didn't arrive whole). */
+class BadForm extends Error {}
 
 function file(p: string, root: string, cache = false): Response {
   const full = normalize(p);

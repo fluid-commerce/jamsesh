@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { encodeWav } from "../src/audio/wav";
+import { deflateSync } from "node:zlib";
+import { readdirSync, existsSync as exists } from "node:fs";
 import { voiceprintStatus } from "../src/audio/voiceprint";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r7-"));
@@ -331,15 +333,6 @@ test("a form's file bytes are all read before the credential is checked again (p
   }
 });
 
-test("JSON can't pose as a form or raw body: an upload or photo sent as JSON is refused, not a 500", async () => {
-  const p = hub.session.upsertPerson({ name: "Jo" });
-  const lap = browser("Jo's laptop");
-  expect((await call(lap.token, "POST", "/devices", { deviceId: "d-jo", personId: p.id })).status).toBe(200);
-  const spoof = { __files: { file: [1, 2, 3] }, __form: {}, __raw: { 0: 1 } };
-  expect((await call(lap.token, "POST", "/upload", spoof)).status).toBe(400);
-  expect((await call(lap.token, "POST", `/people/${p.id}/photo`, spoof)).status).toBeLessThan(500);
-});
-
 test("a request whose body doesn't arrive whole runs nothing, and the same key sent again whole runs (not a replayed failure)", async () => {
   const p = hub.session.upsertPerson({ name: "Cy" });
   const lap = browser("Cy's laptop");
@@ -358,4 +351,106 @@ test("a request whose body doesn't arrive whole runs nothing, and the same key s
   expect(again.status).toBe(200);
   expect(again.headers.get("x-jam-idem-replay")).toBeNull();
   expect(hub.session.store.voiceResetAt(p.id)).toBeGreaterThan(before);
+});
+
+// ---- images: whole before anything is written; a photo is its own person's; an agent posts from its own machine
+
+/** A real w x h grey PNG. */
+function png(w = 2, h = 2) {
+  const chunk = (type: string, data: Uint8Array) => {
+    const out = new Uint8Array(12 + data.length);
+    const v = new DataView(out.buffer);
+    v.setUint32(0, data.length);
+    out.set(new TextEncoder().encode(type), 4);
+    out.set(data, 8);
+    v.setUint32(8 + data.length, Bun.hash.crc32(out.subarray(4, 8 + data.length)) >>> 0);
+    return out;
+  };
+  const ihdr = new Uint8Array(13);
+  const iv = new DataView(ihdr.buffer);
+  iv.setUint32(0, w);
+  iv.setUint32(4, h);
+  ihdr.set([8, 0, 0, 0, 0], 8);
+  const rows = new Uint8Array(h * (w + 1)).fill(128);
+  for (let y = 0; y < h; y++) rows[y * (w + 1)] = 0;
+  const parts = [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(rows))), chunk("IEND", new Uint8Array())];
+  const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0));
+  let at = 0;
+  for (const p of parts) (out.set(p, at), (at += p.length));
+  return out;
+}
+const formOf = (bytes: Uint8Array, fields: Record<string, string> = {}) => {
+  const f = new FormData();
+  f.append("file", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: "image/png" }), "a.png");
+  for (const [k, v] of Object.entries(fields)) f.append(k, v);
+  return f;
+};
+const post = (token: string | null, path: string, body: BodyInit, headers: Record<string, string> = {}) =>
+  fetch(`${base}/api${path}`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers }, body });
+const uploads = () => (exists(hub.uploadsDir) ? readdirSync(hub.uploadsDir).length : 0);
+
+test("a photo is its own person's: another person's laptop can't set it; a broken image is a 400 and writes nothing", async () => {
+  const p = hub.session.upsertPerson({ name: "Pat" });
+  const q = hub.session.upsertPerson({ name: "Quin" });
+  const pat = browser("Pat's laptop");
+  const quin = browser("Quin's laptop");
+  expect((await call(pat.token, "POST", "/devices", { deviceId: "d-pat", personId: p.id })).status).toBe(200);
+  expect((await call(quin.token, "POST", "/devices", { deviceId: "d-quin", personId: q.id })).status).toBe(200);
+  const agent = hub.auth.issue({ kind: "agent", label: "Agent", ip: "10.0.0.30" });
+  for (const token of [quin.token, agent.token]) expect((await post(token, `/people/${p.id}/photo`, png(), { "content-type": "image/png" })).status).toBe(403);
+  const before = uploads();
+  const whole = png();
+  for (const broken of [whole.slice(0, 2), whole.slice(0, whole.length - 5), whole.slice(0, 40), new Uint8Array([0xff, 0xd8, 0xff, 0xe0])]) expect((await post(pat.token, `/people/${p.id}/photo`, broken, { "content-type": "image/png" })).status).toBe(400);
+  // JSON posing as a raw body or form: refused as bad input.
+  expect((await call(pat.token, "POST", `/people/${p.id}/photo`, { __raw: { 0: 0x89 }, __files: { file: [0x89] } })).status).toBe(400);
+  expect(uploads()).toBe(before);
+  expect((await post(pat.token, `/people/${p.id}/photo`, whole, { "content-type": "image/png" })).status).toBe(200);
+  expect(hub.session.person(p.id)?.photo).toBeTruthy();
+  expect(hub.session.person(q.id)?.photo).toBeFalsy();
+});
+
+test("an agent posts a screenshot as itself only from its own machine; another's screenshot isn't its to replace", async () => {
+  const mine = hub.auth.issue({ kind: "agent", label: "My agent", ip: "10.0.0.31" });
+  const theirs = hub.auth.issue({ kind: "agent", label: "Their agent", ip: "10.0.0.32" });
+  const a = hub.session.registerAgent({ ownerName: "Me", harness: "claude-code", repo: "r", cwd: "/a", machine: hub.auth.machineOf(mine.device.id)!, platform: "desktop" }).agent;
+  const b = hub.session.registerAgent({ ownerName: "Them", harness: "claude-code", repo: "r", cwd: "/b", machine: hub.auth.machineOf(theirs.device.id)!, platform: "desktop" }).agent;
+  const posted = await post(theirs.token, "/upload", formOf(png(), { agent: b.id, title: "Theirs" }));
+  expect(posted.status).toBe(200);
+  const theirShot = (await posted.json()).id;
+  const before = uploads();
+  // Naming the other machine's agent, or replacing its screenshot: refused, nothing written.
+  expect((await post(mine.token, "/upload", formOf(png(), { agent: b.id }))).status).toBe(403);
+  expect((await post(mine.token, "/upload", formOf(png(), { agent: a.id, replaces: theirShot }))).status).toBe(403);
+  expect((await post(mine.token, "/upload", formOf(png(), { agent: "agent_nobody" }))).status).toBe(404);
+  // A truncated image: 400, and no file is left behind.
+  expect((await post(mine.token, "/upload", formOf(png().slice(0, 30), { agent: a.id }))).status).toBe(400);
+  expect(uploads()).toBe(before);
+  // Its own agent: taken. The host's window may post for any agent.
+  expect((await post(mine.token, "/upload", formOf(png(), { agent: a.id }))).status).toBe(200);
+  const win = `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
+  expect((await fetch(`${base}/api/upload`, { method: "POST", headers: { cookie: win }, body: formOf(png(), { agent: b.id, replaces: theirShot }) })).status).toBe(200);
+});
+
+test("a form that arrived whole but is broken is a 400 (the sender's error), not a 408 to retry", async () => {
+  const lap = browser("Form laptop");
+  const r = await post(lap.token, "/upload", "--x\r\nnot a form at all", { "content-type": "multipart/form-data; boundary=zzz" });
+  expect(r.status).toBe(400);
+});
+
+test("a photo or upload whose laptop is disconnected while it's on its way saves nothing", async () => {
+  for (const path of ["photo", "upload"] as const) {
+    const p = hub.session.upsertPerson({ name: `Rev ${path}` });
+    const lap = browser("Rev's laptop");
+    expect((await call(lap.token, "POST", "/devices", { deviceId: `d-rev-${path}`, personId: p.id })).status).toBe(200);
+    const encoded = new Response(formOf(png()));
+    const bytes = new Uint8Array(await encoded.arrayBuffer());
+    const before = uploads();
+    const h = holdBody(lap.token, path === "photo" ? `/people/${p.id}/photo` : "/upload", { "content-type": encoded.headers.get("content-type")! });
+    await h.reached;
+    hub.auth.revoke(lap.device.id);
+    h.send(bytes);
+    expect([path, (await h.response).status]).toEqual([path, 401]);
+    expect(uploads()).toBe(before);
+    expect(hub.session.person(p.id)?.photo).toBeFalsy();
+  }
 });

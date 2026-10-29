@@ -451,6 +451,8 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
   if (!res.ok) {
     // A proxy answering 502/503/504 while the hub restarts is a connection problem.
     if (queueable && [502, 503, 504].includes(res.status)) return save();
+    // 408: the body didn't reach the host whole and nothing ran; the outbox sends it again with the same key.
+    if (queueable && res.status === 408) return save();
     // The relay moved to another host while this was on its way: the change is still wanted. It
     // waits in the outbox, with the same idempotency key and host stamp, until its own host is back.
     if (res.status === 409 && /different JamSesh host/i.test(text)) {
