@@ -43,7 +43,8 @@ export async function uploadAttachment(file: File, signal?: AbortSignal): Promis
     throw new Error("This laptop isn't connected to the session.");
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `Upload failed (${res.status})`);
+  // The hub's "do this from the host window" line is for the host's own terminal setup, not for a person adding a file.
+  if (!res.ok) throw new Error(body.error && !/^On the host, do this/.test(body.error) ? body.error : `Upload failed (${res.status})`);
   return body as AttachmentRef;
 }
 
@@ -200,15 +201,17 @@ export function AttachButton({ onFiles, disabled }: { onFiles: (f: File[]) => vo
 /** What's waiting to go: a thumbnail for pictures, a chip for files, with a way to take each back out (or try a failed one again). */
 export function AttachTray({ items, onRemove, onRetry }: { items: Pending[]; onRemove: (key: string) => void; onRetry?: (key: string) => void }) {
   if (!items.length) return null;
+  // Thumbnails stay together in one row, ahead of the file chips (each group keeps its order).
+  const ordered = [...items.filter((i) => i.preview), ...items.filter((i) => !i.preview)];
   return (
     <ul className="say-files" aria-label="Attached files">
-      {items.map((i) => (
+      {ordered.map((i) => (
         <li key={i.key} className={`say-file ${i.preview ? "pic" : ""} ${i.status}`} title={i.error ?? i.name}>
           {i.preview ? <img src={i.preview} alt={i.name} /> : <DocIcon />}
           {!i.preview && (
             <span className="say-file-text">
               <span className="say-file-name">{i.name}</span>
-              <span className="say-file-meta">{i.status === "error" ? i.error : i.status === "uploading" ? "Adding…" : sizeLabel(i.size)}</span>
+              <span className="say-file-meta">{i.status === "error" ? "Didn't attach" : i.status === "uploading" ? "Adding…" : sizeLabel(i.size)}</span>
             </span>
           )}
           {i.preview && i.status !== "ready" && <span className="say-file-badge">{i.status === "error" ? "!" : "…"}</span>}

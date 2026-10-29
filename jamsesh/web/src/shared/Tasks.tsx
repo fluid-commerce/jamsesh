@@ -18,6 +18,8 @@ const COLS: { id: ColId; label: string; hint: string }[] = [
   { id: "done", label: "Done", hint: "Finished" },
 ];
 const KINDS = ["decision", "requirement", "constraint", "preference", "question", "fact"] as const;
+/** "requirement" -> "Requirement": the stored kind stays as it is, only the label is cased. */
+const kindWord = (k: string) => k.charAt(0).toUpperCase() + k.slice(1);
 const MODES = ["explore", "implement", "coordinate", "answer", "note"] as const;
 const MODE_WORDS: Record<string, string> = { explore: "Explore", implement: "Build", coordinate: "Coordinate", answer: "Answer", note: "Write down", present: "Present" };
 /** Cards waiting this long get the "Waiting 40 min" label (the hub mentions them out loud too). */
@@ -239,7 +241,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     >
       <div className="tk-top">
         <span className="tk-num mono" title={`Say “the ${["first", "second", "third", "fourth", "fifth"][index - 1] ?? `number ${index}`} one”`}>{index}</span>
-        <span className={`tk-tag kind ${card.cancels ? "cancel" : task ? card.mode : card.kind}`}>{card.cancels ? "Cancel" : task ? MODE_WORDS[card.mode] : card.retire ? `Retire ${card.kind}` : card.kind}</span>
+        <span className={`tk-tag kind ${card.cancels ? "cancel" : task ? card.mode : card.kind}`}>{card.cancels ? "Cancel" : task ? MODE_WORDS[card.mode] : card.retire ? `Retire ${card.kind}` : kindWord(card.kind)}</span>
         <span className="grow" />
         <Waited ts={card.ts} now={now} />
       </div>
@@ -278,7 +280,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
                 <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value })}>
                   {KINDS.map((k) => (
                     <option key={k} value={k}>
-                      {k}
+                      {kindWord(k)}
                     </option>
                   ))}
                 </select>
@@ -434,7 +436,7 @@ function MergePanel({ card, facts, personId, onDone }: { card: TriageCard; facts
             {ranked.map((f) => (
               <li key={f.id}>
                 <button onClick={() => choose(f)}>
-                  <span className="tk-tag kind">{f.kind}</span>
+                  <span className="tk-tag kind">{kindWord(f.kind)}</span>
                   <span>{f.text}</span>
                 </button>
               </li>

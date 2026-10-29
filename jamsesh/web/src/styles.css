@@ -3282,6 +3282,9 @@ html.in-app .app-header {
   background: var(--panel-2);
   color: var(--muted);
 }
+.say-file:not(.pic) {
+  max-width: min(100%, 260px);
+}
 .say-file.pic {
   width: 56px;
   height: 56px;
@@ -3323,7 +3326,6 @@ html.in-app .app-header {
 }
 .say-file.error .say-file-meta {
   color: var(--warn);
-  white-space: normal;
 }
 .say-file-badge {
   position: absolute;
