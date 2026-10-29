@@ -909,6 +909,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   // ---- Record: talk and point, review the notes, send them to the agents that own the work ----
   // A recording is on the caller's own window's device, and its notes go out only from that window.
+  // Where a recording stands, and what it came to once it has ended: the only thing a page may treat as "ended".
+  m = path.match(/^\/record\/([\w-]+)$/);
+  if (m && req.method === "GET" && !["start", "stop", "send", "cancel"].includes(m[1])) {
+    if (!caller) return notAPerson()!;
+    const deviceId = url.searchParams.get("deviceId");
+    if (!deviceId || s.store.get("devices", deviceId)?.pairedId !== caller) return bad("Ask from the window that recorded.", 403);
+    return json({ ok: true, ...hub.recordStatus(deviceId, m[1], caller) });
+  }
   if (path.startsWith("/record/") && req.method === "POST") {
     if (!caller) return notAPerson()!;
     const ownDevice = (id: unknown) => typeof id === "string" && s.store.get("devices", id)?.pairedId === caller;
@@ -923,8 +931,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (path === "/record/cancel") {
       if (!body?.deviceId || typeof body?.token !== "string" || !/^[\w-]{8,64}$/.test(body.token)) return bad("deviceId and token are required");
       if (!ownDevice(body.deviceId)) return bad("Cancel from the window that started it.", 403);
-      hub.recordCancel(String(body.deviceId), body.token);
-      return json({ ok: true });
+      return json({ ok: true, ...hub.recordCancel(String(body.deviceId), body.token, caller) });
     }
     if (path === "/record/stop") {
       if (!body?.deviceId || !body?.recordingId) return bad("deviceId and recordingId are required");

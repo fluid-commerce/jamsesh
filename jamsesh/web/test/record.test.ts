@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { closeUnattended, pointerOrNone, stopWithRetry, newRecordToken, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { closeRecording, newRecordToken, pointerOrNone, reapOrphans, type RecStatus, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -36,50 +36,61 @@ test("a send is told in words: who got how many, and what went to the brain", ()
   expect(sendSummary({ ok: true, sent: [], brain: 3 }, "Computah").text).toBe("3 notes to Computah");
 });
 
-test("a recording that began after its page was gone is closed by id, with the words alone; a failed close is swallowed", async () => {
-  const calls: [string, object][] = [];
-  await closeUnattended(async (path, body) => void calls.push([path, body]), "dev1", "p1", "rec9");
-  expect(calls).toEqual([["/prompt-window", { deviceId: "dev1", personId: "p1", recordingId: "rec9", pointer: [] }]]);
-  await closeUnattended(async () => { throw new Error("offline"); }, "dev1", null, "rec9");
-});
-
 test("a recording token is made before Start, is unique, and is one the hub accepts", () => {
   const a = newRecordToken();
   expect(a).toMatch(/^[\w-]{8,64}$/);
   expect(newRecordToken()).not.toBe(a);
 });
 
-test("a Stop is sent again until confirmed: a lost reply is retried with backoff, a refusal is final, and running out of tries cancels", async () => {
-  const waits: number[] = [];
-  const wait = async (ms: number) => void waits.push(ms);
-  let n = 0;
-  const flaky = async () => (++n < 3 ? Promise.reject(new Error("offline")) : "ok");
-  expect(await stopWithRetry(flaky, async () => { throw new Error("must not cancel"); }, 4, wait)).toBe("ok");
-  expect(waits).toEqual([1000, 2000]);
-  // A 4xx is the hub's answer: no retry, no cancel.
-  let calls = 0;
-  await expect(stopWithRetry(async () => (calls++, Promise.reject(Object.assign(new Error("ended"), { status: 409 }))), async () => { throw new Error("no"); }, 4, wait)).rejects.toThrow("ended");
-  expect(calls).toBe(1);
-  // Never confirmed: cancelled by token, then the failure is reported.
-  let cancelled = 0;
-  await expect(stopWithRetry(() => Promise.reject(new Error("offline")), async () => void cancelled++, 3, wait)).rejects.toThrow("offline");
-  expect(cancelled).toBe(1);
+// ---- closing a recording: only the hub's word ends it ----
+const noWait = async () => {};
+const endedStop: RecStatus = { state: "ended", outcome: { kind: "stop", result: { ok: true, recordingId: "r1", notes: [{ id: "n" }] } } };
+
+test("a Stop whose reply was lost is recovered by asking: the committed notes come back, and no cancel is sent", async () => {
+  let cancels = 0;
+  const out = await closeRecording({ stop: () => Promise.reject(new Error("offline")), status: async () => endedStop, cancel: async () => (cancels++, endedStop) }, noWait);
+  expect(out).toMatchObject({ ended: true, result: { ok: true, recordingId: "r1" } });
+  expect(cancels).toBe(0);
 });
 
-test("a Stop and a cancel that both fail leave the recording marked as possibly still running, so the page keeps its id", async () => {
-  const wait = async () => {};
-  const err = await stopWithRetry(() => Promise.reject(new Error("offline")), () => stopWithRetry(() => Promise.reject(new Error("still offline")), async () => {}, 2, wait), 2, wait).catch((e) => e);
-  expect(err.unended).toBe(true);
-  expect(err.message).toBe("still offline");
-  // A cancel that gets through (on its second try) ends it: the Stop's own failure is what is reported, and it is not "unended".
-  let n = 0;
-  const e2 = await stopWithRetry(() => Promise.reject(new Error("offline")), () => stopWithRetry(async () => (++n < 2 ? Promise.reject(new Error("blip")) : "ok"), async () => {}, 3, wait), 2, wait).catch((e) => e);
-  expect(e2.message).toBe("offline");
-  expect(e2.unended).toBeUndefined();
+test("a cancel that lands after a committed finish returns that finish's notes, not an empty ending", async () => {
+  const out = await closeRecording({ stop: () => Promise.reject(new Error("offline")), status: () => Promise.reject(new Error("offline")), cancel: async () => endedStop }, noWait);
+  expect(out).toMatchObject({ ended: true, result: { recordingId: "r1" } });
 });
 
-test("a pointer that can't be read becomes no marks, so the Stop still goes out", async () => {
-  expect(await pointerOrNone(async () => { throw new Error("bad gesture"); })).toEqual([]);
-  expect(await pointerOrNone(async () => "nope" as any)).toEqual([]);
-  expect(await pointerOrNone(async () => [1, 2])).toEqual([1, 2]);
+test("a 403 Stop is not an ending: the hub is asked, and a recording it still has live is cancelled", async () => {
+  const calls: string[] = [];
+  const out = await closeRecording(
+    {
+      stop: () => Promise.reject(Object.assign(new Error("someone else's"), { status: 403 })),
+      status: async () => (calls.push("status"), { state: "live" as const }),
+      cancel: async () => (calls.push("cancel"), { state: "ended" as const, outcome: { kind: "cancel" } }),
+    },
+    noWait,
+  );
+  expect(calls).toEqual(["status", "cancel"]);
+  expect(out).toEqual({ ended: true });
+});
+
+test("nothing acknowledged is not ended: the page keeps its id; a status it can't read doesn't count as ended either", async () => {
+  const out = await closeRecording({ stop: () => Promise.reject(new Error("offline")), status: () => Promise.reject(new Error("offline")), cancel: () => Promise.reject(new Error("offline")) }, noWait);
+  expect(out.ended).toBe(false);
+});
+
+test("another close under way is waited for, not cancelled over", async () => {
+  let asks = 0;
+  const out = await closeRecording({ stop: () => Promise.reject(new Error("busy")), status: async () => (++asks < 3 ? { state: "ending" as const } : endedStop), cancel: async () => { throw new Error("must not cancel"); } }, noWait);
+  expect(out.ended && (out as any).result?.recordingId).toBe("r1");
+  expect(asks).toBe(3);
+});
+
+test("a recording a page let go of is reaped later: asked after, cancelled if still live, forgotten once the hub says ended, kept if the hub can't be reached", async () => {
+  const orphans = new Map([["a", { token: "ta" }], ["b", { token: "tb" }], ["c", { token: "tc" }]]);
+  const cancelled: string[] = [];
+  await reapOrphans(orphans, {
+    status: async (id) => (id === "a" ? { state: "ended" } : id === "b" ? { state: "live" } : Promise.reject(new Error("offline"))),
+    cancel: async (t) => (cancelled.push(t), { state: "ended" }),
+  });
+  expect(cancelled).toEqual(["tb"]);
+  expect([...orphans.keys()]).toEqual(["c"]);
 });

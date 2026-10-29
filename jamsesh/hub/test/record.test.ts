@@ -142,7 +142,8 @@ function room() {
   const tick: { t: number | null } = { t: null };
   hub.clock = () => tick.t ?? Date.now();
   const at = (t: number | null) => void (tick.t = t);
-  return { hub, s, maya, ben, reg, post, server, stopped, at };
+  const get = (path: string, h: Record<string, string> = win()) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { headers: h });
+  return { hub, s, maya, ben, reg, post, get, server, stopped, at };
 }
 
 let n = 0;
@@ -939,9 +940,9 @@ test("a Stop sent again after its reply was lost gets the first answer and ends 
   // An outright failure leaves the recording stoppable.
   const b = r.hub.recordStart("mayaLaptop", r.maya.id);
   if (!b.ok) throw new Error("start");
-  const real = (r.hub as any).stopRecording.bind(r.hub);
+  const real = (r.hub as any).stopNotes.bind(r.hub);
   let failed = false;
-  (r.hub as any).stopRecording = (...args: any[]) => (failed ? real(...args) : ((failed = true), Promise.reject(new Error("database is locked"))));
+  (r.hub as any).stopNotes = (...args: any[]) => (failed ? real(...args) : ((failed = true), (() => { throw new Error("database is locked"); })()));
   expect((await r.post("/record/stop", { ...body, recordingId: b.id })).status).toBeGreaterThanOrEqual(500);
   expect((await r.post("/record/stop", { ...body, recordingId: b.id })).status).toBe(200);
 }, 60_000);
@@ -977,7 +978,7 @@ test("a cancel while a Stop is in flight ends the recording at once, and it stay
   const tok = "rt_ffffffffffffffff";
   const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
   if (!a.ok) throw new Error("start");
-  (r.hub as any).stopRecording = async () => (await Bun.sleep(100), Promise.reject(new Error("database is locked")));
+  (r.hub as any).windowLines = async () => (await Bun.sleep(100), Promise.reject(new Error("database is locked")));
   const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "x" });
   const failed = stopping.then(() => "ok", (e) => String(e));
   expect((r.hub as any).recs.get("mayaLaptop").state).toBe("ending");
@@ -993,9 +994,9 @@ test("a Stop that fails with nothing else happening puts the recording back to l
   const a = r.hub.recordStart("mayaLaptop", r.maya.id);
   if (!a.ok) throw new Error("start");
   const rec = (r.hub as any).recs.get("mayaLaptop");
-  const real = (r.hub as any).stopRecording.bind(r.hub);
+  const real = (r.hub as any).stopNotes.bind(r.hub);
   let n = 0;
-  (r.hub as any).stopRecording = (...args: any[]) => (++n === 1 ? Promise.reject(new Error("database is locked")) : real(...args));
+  (r.hub as any).stopNotes = (...args: any[]) => (++n === 1 ? (() => { throw new Error("database is locked"); })() : real(...args));
   const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "x" });
   await expect(stop()).rejects.toThrow("locked");
   expect(rec.state).toBe("live");
@@ -1031,6 +1032,70 @@ test("a Stop whose pointer can't be read still ends the recording: junk marks ar
     expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
   }
 }, 30_000);
+
+test("a cancel that lands while a close is still waiting wins: the close makes nothing (no notes, no prompt) and says it ended", async () => {
+  for (const via of ["stop", "window"] as const) {
+    const r = room();
+    const tok = "rt_gggggggggggggggg";
+    const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+    if (!a.ok) throw new Error("start");
+    const real = (r.hub as any).windowLines.bind(r.hub);
+    (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(150), real(...args));
+    const closing: Promise<any> =
+      via === "stop"
+        ? r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" })
+        : r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bigger" });
+    r.hub.recordCancel("mayaLaptop", tok, "host");
+    const out = await closing;
+    expect(out).toMatchObject({ ok: false, status: 409 });
+    expect((r.hub as any).noteRecs.size).toBe(0);
+    expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(0);
+    expect(r.hub.recordStatus("mayaLaptop", a.id, "host")).toMatchObject({ state: "ended", outcome: { kind: "cancel" } });
+  }
+}, 30_000);
+
+test("simultaneous prompt-window closes of one recording make exactly one prompt", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const win = () => r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bigger" });
+  const [one, two] = await Promise.all([win(), win()]);
+  expect(one.ok && two.ok).toBe(true);
+  expect(two.eventId).toBe(one.eventId);
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
+});
+
+test("the hub is the source of truth: a committed Stop whose reply was lost is recovered by asking, and a cancel after it returns it and undoes nothing", async () => {
+  const r = room();
+  const tok = "rt_hhhhhhhhhhhhhhhh";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" });
+  // The reply never arrived. The page asks over HTTP.
+  const asked = (await (await r.get(`/record/${a.id}?deviceId=mayaLaptop`)).json()) as any;
+  expect(asked.state).toBe("ended");
+  expect(asked.outcome).toMatchObject({ kind: "stop", result: { ok: true, recordingId: a.id } });
+  expect(asked.outcome.result.notes.map((n: any) => n.text)).toEqual(["make it bigger"]);
+  // A cancel after the finish answers with the same outcome and the notes stay sendable.
+  const cancelled = (await (await r.post("/record/cancel", { deviceId: "mayaLaptop", token: tok })).json()) as any;
+  expect(cancelled.outcome.kind).toBe("stop");
+  expect(cancelled.outcome.result.notes.length).toBe(1);
+  expect((r.hub as any).noteRecs.has(a.id)).toBe(true);
+  // Not for another window or an unknown id: the former is refused, the latter is simply "ended" (nothing runs under it).
+  expect((await r.get(`/record/${a.id}?deviceId=nobodyLaptop`)).status).toBe(403);
+  expect(await (await r.get("/record/rec_nope?deviceId=mayaLaptop")).json()).toMatchObject({ state: "ended", outcome: { kind: "unknown" } });
+});
+
+test("a Stop refused with 403 leaves the recording live, and asking says so: only the hub's answer ends it", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const refused = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: "someone-else", pointer: [], typed: "x" });
+  expect(refused).toMatchObject({ ok: false, status: 403 });
+  const asked = (await (await r.get(`/record/${a.id}?deviceId=mayaLaptop`)).json()) as any;
+  expect(asked.state).toBe("live");
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
+});
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();

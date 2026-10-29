@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { closeUnattended, newRecordToken, pointerOrNone, stopWithRetry, sendSummary, type RecordNote, type SendReply } from "./notes";
+import { closeRecording, newRecordToken, pointerOrNone, reapOrphans, sendSummary, type RecStatus, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -731,9 +731,22 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
 
 type RecState = { phase: "idle" } | { phase: "live"; t0: number; id: string; screen: string | null; token: string } | { phase: "sending" };
 type RecResult = { ok: boolean; title: string; text: string; pills: string[]; note?: string; out?: boolean };
+type StopReply = { ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[] };
 type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null };
 /** The laptop mic, as far as recording needs it. */
 type MicLike = { status: { on: boolean; error: string | null }; ensureOn: () => Promise<boolean>; stop: () => void; flush?: () => Promise<void> };
+
+/**
+ * Recordings a Record button let go of when it unmounted or the page closed. The hub is told with a keepalive cancel; if that never
+ * arrives they are asked after (and cancelled) by whichever button is mounted next, and the hub's disconnect sweep ends the rest.
+ */
+const orphans = new Map<string, { token: string }>();
+const askStatus = (id: string) => api<RecStatus>(`/record/${id}?deviceId=${encodeURIComponent(hub.deviceId)}`, undefined, "GET", { queue: false, timeoutMs: 10_000 });
+const askCancel = (token: string) => api<RecStatus>("/record/cancel", { deviceId: hub.deviceId, token }, undefined, { queue: false, timeoutMs: 15_000 });
+const letGo = (token: string, id?: string) => {
+  if (id) orphans.set(id, { token });
+  fetch("/api/record/cancel", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: hub.deviceId, token }) }).catch(() => {});
+};
 
 const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
 /** The big screen this person is driving right now, or null. */
@@ -829,10 +842,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
         if (unmuted.current) (unmuted.current = false, mic?.stop());
         return fail(e instanceof Error ? e.message : screen ? "Couldn't record the big screen." : "Couldn't start recording.");
       }
-      // The page went away while the hub was answering: nothing is left to stop this recording, so it is closed here.
+      // The page went away while the hub was answering: nothing is left to stop this recording, so it is handed back to the hub.
       if (!alive.current) {
         if (unmuted.current) (unmuted.current = false, mic?.stop());
-        void closeUnattended((path, body) => api(path, body, undefined, { queue: false, timeoutMs: 15_000 }), hub.deviceId, who.current, id);
+        letGo(token, id);
         return;
       }
       const r = (recorder.current = new PointerRecorder());
@@ -872,11 +885,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       // The sentence still being spoken has to reach the hub before it closes the window.
       await mic?.flush?.().catch(() => {});
       // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
-      // The recording's id is kept until the hub confirms the Stop: a lost request or reply is sent again (the hub answers it once),
-      // and if it never gets through the recording is cancelled by its token.
-      const res = await stopWithRetry(
-        async () => {
-          const r = await api<{ ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[]; queued?: boolean }>(
+      // The recording's id is kept until the hub says it ended: a lost request or reply is recovered by asking it, and the notes with it.
+      const closed = await closeRecording<StopReply>({
+        stop: async () => {
+          const r = await api<StopReply & { queued?: boolean }>(
             "/record/stop",
             { deviceId: hub.deviceId, personId, recordingId: cur.id, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
             undefined,
@@ -885,18 +897,19 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
           if (r.queued) throw new OfflineError(NOT_SENT);
           return r;
         },
-        // The cancel is retried the same way; only when the hub confirms it is the recording let go.
-        () => stopWithRetry(() => api("/record/cancel", { deviceId: hub.deviceId, token: cur.token }, undefined, { queue: false, timeoutMs: 15_000 }), async () => {}),
-      );
-      if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
-      else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
-    } catch (e) {
-      // Neither the Stop nor the cancel got through: the recording id is kept, still live, so Stop can be pressed again.
-      if ((e as { unended?: boolean })?.unended && hub.get().state?.recordings?.some((x) => x.id === cur.id) !== false) {
+        status: () => askStatus(cur.id),
+        cancel: () => askCancel(cur.token),
+      });
+      // Neither the Stop nor the cancel was acknowledged: the recording may still be running, so the id is kept and Stop can be pressed again.
+      if (!closed.ended) {
         fail("Couldn't stop that recording. Check your connection and press Stop again.", "Still recording");
         setRec(cur);
         return;
       }
+      const res: StopReply = closed.result ?? { ok: false, reason: "That recording ended before its notes could be read." };
+      if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
+      else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
+    } catch (e) {
       fail(e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't finish that recording.");
     }
     pointerCache.current = null;
@@ -956,40 +969,25 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   // close the hub's recording, or it keeps swallowing this laptop's speech and holding the big screen's
   // lock. Nobody is left to tidy notes, so what was said goes to the brain as one prompt, as it always did.
   useEffect(() => {
-    const release = (unloading: boolean): boolean => {
+    // Leaving: the recording (or a Start still in flight) is handed to the hub with a keepalive cancel by its token, then asked after.
+    const letGoNow = () => {
       const cur = recRef.current;
-      const r = recorder.current;
-      if (cur.phase !== "live" || !r) return false;
-      recRef.current = { phase: "idle" };
-      offDart.current?.();
-      const send = (pointer: PointerMark[]) => {
-        const body = { deviceId: hub.deviceId, personId: who.current, recordingId: cur.id, pointer, ...(typed.current ? { text: typed.current } : {}) };
-        if (unloading) {
-          fetch("/api/prompt-window", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
-        } else {
-          api("/prompt-window", body, undefined, { queue: false, timeoutMs: 15_000 }).catch(() => {});
-        }
-      };
-      // The page is going away: no time to distill the pointer, so send the words alone.
-      if (unloading) (void r.stop().catch(() => {}), send([]));
-      else void r.stop().then(send, () => send([]));
-      return true;
+      if (cur.phase === "live") {
+        recRef.current = { phase: "idle" };
+        offDart.current?.();
+        void recorder.current?.stop();
+        letGo(cur.token, cur.id);
+      } else if (pendingToken.current) letGo(pendingToken.current);
     };
-    const cancelPending = (unloading: boolean) => {
-      const token = pendingToken.current;
-      if (!token) return;
-      // Start is still in flight: the hub ends it by the token if it began, or refuses it if it comes later.
-      if (unloading) fetch("/api/record/cancel", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceId: hub.deviceId, token }) }).catch(() => {});
-      else api("/record/cancel", { deviceId: hub.deviceId, token }, undefined, { queue: false, timeoutMs: 15_000 }).catch(() => {});
-    };
-    const onHide = () => (cancelPending(true), release(true));
     alive.current = true;
-    window.addEventListener("pagehide", onHide);
+    window.addEventListener("pagehide", letGoNow);
+    void reapOrphans(orphans, { status: askStatus, cancel: askCancel });
+    const again = setInterval(() => orphans.size && void reapOrphans(orphans, { status: askStatus, cancel: askCancel }), 10_000);
     return () => {
       alive.current = false;
-      cancelPending(false);
-      window.removeEventListener("pagehide", onHide);
-      if (!release(false)) void recorder.current?.stop();
+      clearInterval(again);
+      window.removeEventListener("pagehide", letGoNow);
+      letGoNow();
     };
   }, []);
 
