@@ -14,8 +14,9 @@ export function startLobby(port = config.port) {
     port,
     hostname: "127.0.0.1",
     async fetch(incoming) {
-      const req = await buffered(incoming);
-      if (!req) return json({ error: "That request is too large." }, 413);
+      const got = await buffered(incoming);
+      if (!(got instanceof Request)) return json({ error: got.message }, got.status);
+      const req = got;
       const url = new URL(req.url);
       const path = url.pathname;
       const hostWindow = windows.matches(cookie(req, "jam_window"));

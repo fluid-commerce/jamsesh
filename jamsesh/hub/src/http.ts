@@ -1,11 +1,10 @@
 // HTTP, WebSocket and MCP on one port.
 import type { Server, ServerWebSocket } from "bun";
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
 import { BODY_LIMITS, buffered, readBytes } from "./body";
+import { methodAllowed } from "./methods";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
 import { voiceprintStatus, learningNote } from "./audio/voiceprint";
@@ -77,32 +76,6 @@ function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
   return agent ? { ...state, triage: [] } : state;
 }
 
-/** Whether every address a URL's host stands for is a public one (http or https only): the frame check fetches only those. */
-export async function isPublicUrl(u: URL, resolve: (host: string) => Promise<string[]> = async (h) => (await lookup(h, { all: true })).map((a) => a.address)): Promise<boolean> {
-  if (!/^https?:$/.test(u.protocol)) return false;
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  if (/^(localhost|.*\.localhost|.*\.local|.*\.lan|.*\.internal)$/i.test(host)) return false;
-  let addrs: string[];
-  try {
-    addrs = isIP(host) ? [host] : await resolve(host);
-  } catch {
-    return false;
-  }
-  return addrs.length > 0 && addrs.every((a) => !privateAddress(a));
-}
-
-function privateAddress(a: string): boolean {
-  const v6 = a.toLowerCase();
-  const mapped = v6.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return privateAddress(mapped[1]);
-  // The URL parser writes a mapped address in hex (::ffff:7f00:1).
-  const hex = v6.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (hex) return privateAddress(`${parseInt(hex[1], 16) >> 8}.${parseInt(hex[1], 16) & 255}.${parseInt(hex[2], 16) >> 8}.${parseInt(hex[2], 16) & 255}`);
-  if (v6.includes(":")) return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("ff");
-  const [p, q] = a.split(".").map(Number);
-  return p === 0 || p === 10 || p === 127 || (p === 100 && q >= 64 && q <= 127) || (p === 169 && q === 254) || (p === 172 && q >= 16 && q <= 31) || (p === 192 && q === 168) || (p === 192 && q === 0) || p >= 224;
-}
-
 function isLocal(ip: string) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
@@ -144,8 +117,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     async fetch(incoming, srv) {
       const peer = srv.requestIP(incoming)?.address ?? "0.0.0.0";
       // Every body is read here, bounded, before any route (or the closing check below) looks at the request.
-      const req = await buffered(incoming);
-      if (!req) return bad("That request is too large.", 413);
+      const got = await methodAllowed(incoming) ?? (await buffered(incoming));
+      if (!(got instanceof Request)) return got instanceof Response ? got : bad(got.message, got.status);
+      const req = got;
       const url = new URL(req.url);
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
       // Mac app's relay (which carries agents' traffic) all mark their requests.
@@ -159,7 +133,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
       if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
       // Once the final save has begun nothing is written: every route that changes something is turned away here, after its body was read.
-      if (hub.closing && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad("The session is saving and closing.", 503);
+      if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
         if (path.endsWith("/healthz")) return new Response("ok");
@@ -429,8 +403,8 @@ function wantsHtml(req: Request) {
 
 /** POST /api/pair {code, kind, label}: browsers get an HttpOnly cookie, agents get the token. */
 async function pairRoute(hub: Hub, req: Request, url: URL, ip: string): Promise<Response> {
-  const raw = await readBytes(req, BODY_LIMITS.json);
-  if (!raw) return bad("That request is too large.", 413);
+  const raw = await readBytes(req, BODY_LIMITS.json, 15_000);
+  if (!raw || raw === "timeout") return bad("That request is too large.", 413);
   let body: any = {};
   try {
     body = JSON.parse(new TextDecoder().decode(raw)) ?? {};
@@ -459,6 +433,8 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   const code = url.searchParams.get("c") ?? url.searchParams.get("code");
   const md = (t: string, status = 200) => new Response(t, { status, headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" } });
   if (!code) return md(agentIntro(origin));
+  // Pairing makes a credential and keeps it: not while the final save is under way.
+  if (hub.closing) return md("# Closing\n\nThis session is saving and closing. Ask your person for the next one.", 503);
   const r = hub.auth.pair({ code, kind: "agent", label: url.searchParams.get("name") ?? "Agent", ip });
   if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh screen right now, then fetch ${origin}/agent?c=<code> again.`, 403);
   return md(agentGuide(origin, r.token));
@@ -470,10 +446,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
   const upload = path === "/attachments" && req.method === "POST";
   const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
-  // Past the cap before anything is parsed or any route looked at: no caller can make the hub hold a body it would refuse.
-  if (body?.__capped) return bad("That request is too large.", 413);
   // A request that was let in before the final save began and stalled while sending its body is turned away here, after the body.
-  if (hub.closing && req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") return bad("The session is saving and closing.", 503);
+  if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
@@ -540,7 +514,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
     segmentsInFlight.add(segKey);
     try {
-      const bytes: Uint8Array | null = body?.__raw ?? (await readBytes(req, BODY_LIMITS.media));
+      const got = body?.__raw ?? (await readBytes(req, BODY_LIMITS.media));
+      const bytes: Uint8Array | null = got === "timeout" ? null : got;
       if (!bytes) return bad("That recording is too large.", 413);
       const seg = await hub.audio.ingest({
         deviceId,
@@ -941,42 +916,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(Object.keys(s.saveLayout(String(body.name))));
   }
 
-  // Whether a public page refuses to be shown in a frame (X-Frame-Options, CSP frame-ancestors).
-  // Browsers can't tell from inside the page, so the host reads the headers. Public sites only.
-  if (path === "/frame-check" && req.method === "GET") {
-    if (paired?.kind === "agent") return bad("not for agents", 403);
-    const target = (() => {
-      try {
-        return new URL(url.searchParams.get("url") ?? "");
-      } catch {
-        return null;
-      }
-    })();
-    if (!target) return json({ blocked: false, checked: false });
-    try {
-      // Redirects are followed by hand: every hop must be a public address, not just the one that was asked for.
-      let hop: URL = target;
-      let res: Response | null = null;
-      for (let i = 0; i < 4; i++) {
-        if (!(await isPublicUrl(hop))) return json({ blocked: false, checked: false });
-        res = await fetch(hop, { redirect: "manual", signal: AbortSignal.timeout(5000), headers: { "user-agent": "Mozilla/5.0 JamSesh frame check" } });
-        const next = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
-        if (!next) break;
-        res.body?.cancel().catch(() => {});
-        hop = new URL(next, hop);
-        res = null;
-      }
-      if (!res) return json({ blocked: false, checked: false });
-      res.body?.cancel().catch(() => {});
-      const xfo = (res.headers.get("x-frame-options") ?? "").toLowerCase();
-      const ancestors = (res.headers.get("content-security-policy") ?? "").match(/frame-ancestors([^;]*)/i)?.[1]?.trim().toLowerCase();
-      const blocked = /deny|sameorigin/.test(xfo) || (ancestors !== undefined && !/(^|\s)\*(\s|$)/.test(ancestors));
-      return json({ blocked, checked: true });
-    } catch {
-      return json({ blocked: false, checked: false });
-    }
-  }
-
   // A person opens a page in a browser on the host, for sites that refuse to show inside a tile.
   if (path === "/host/open-url" && req.method === "POST") {
     if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can open pages on the host.", 403);
@@ -1094,47 +1033,32 @@ function originOf(req: Request, url: URL) {
   return `${proto}://${host}`;
 }
 
-/** A multipart body read to at most `max` bytes, then parsed: `{ __tooBig: true }` past that, whatever the headers said. */
+/** A multipart upload (its body already read and bounded by the front door), parsed unless it is past `max`. */
 export async function readCapped(req: Request, max: number): Promise<{ __form: FormData } | { __tooBig: true } | null> {
-  // Even a declared length past the cap is read up to the cap and then cut off: a reply to a body nobody reads
-  // can leave the sender hanging.
   const type = req.headers.get("content-type") ?? "";
   if (!type.includes("multipart/form-data") || !req.body) return null;
-  const reader = req.body.getReader();
-  const chunks: Uint8Array<ArrayBuffer>[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    // Past the cap nothing more is kept; the rest is read and dropped so the sender gets its answer on a clean connection.
-    if (size <= max) chunks.push(value as Uint8Array<ArrayBuffer>);
-    else chunks.length = 0;
-  }
-  if (size > max) return { __tooBig: true };
+  const bytes = await req.arrayBuffer();
+  if (bytes.byteLength > max) return { __tooBig: true };
   try {
-    return { __form: await new Response(new Blob(chunks), { headers: { "content-type": type } }).formData() };
+    return { __form: await new Response(bytes, { headers: { "content-type": type } }).formData() };
   } catch {
     return null;
   }
 }
 
+/** The parsed body of a request the front door already read (bounded): JSON, or the raw bytes or form of a file. */
 async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  const json = type.includes("application/json");
-  const media = type.includes("multipart/form-data") || type.includes("audio/") || type.includes("image/") || type.includes("octet-stream");
-  if (!json && !media) return null;
-  const bytes = await readBytes(req, json ? BODY_LIMITS.json : BODY_LIMITS.media);
-  if (!bytes) return { __capped: true };
-  if (json) {
+  if (type.includes("application/json")) {
     try {
-      return JSON.parse(new TextDecoder().decode(bytes));
+      return JSON.parse(await req.text());
     } catch {
       return {};
     }
   }
-  if (type.includes("multipart/form-data")) return { __form: await new Response(new Blob([bytes as BlobPart]), { headers: { "content-type": type } }).formData().catch(() => new FormData()) };
-  return { __raw: bytes };
+  if (type.includes("multipart/form-data")) return { __form: await req.formData().catch(() => new FormData()) };
+  if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
+  return null;
 }
 
 function file(p: string, root: string, cache = false): Response {

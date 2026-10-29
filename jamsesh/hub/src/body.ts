@@ -1,33 +1,66 @@
-// One bounded way into every request body: the whole body is read up to a cap before any route sees it.
-// Past the cap nothing more is kept (the rest is read and dropped, so the sender gets its answer on a clean connection).
+// One bounded way into every request body: the whole body is read up to a cap, within a time limit and a shared memory
+// budget, before any route sees it. Past the cap nothing more is kept (the rest is read and dropped, so the sender gets its
+// answer on a clean connection).
 
-/** The most a request body may be: JSON is small; audio, pictures and forms carry media. */
-export const BODY_LIMITS = { json: 2 * 1024 * 1024, media: 32 * 1024 * 1024 };
+/** The most a request body may be: JSON is small; only the routes that take files carry media. */
+export const BODY_LIMITS = { json: 2 * 1024 * 1024, other: 1024 * 1024, media: 32 * 1024 * 1024, photo: 8 * 1024 * 1024 };
+/** Routes that take a file or a recording. */
+const MEDIA_ROUTES = /^\/api\/(audio|attachments|upload|people\/[\w-]+\/(voice|photo))$/;
+export const READ_MS = { small: 15_000, media: 90_000 };
+/** What all bodies being read at once may hold in all: each read reserves its cap until it is done. */
+const BUDGET = 96 * 1024 * 1024;
+let reserved = 0;
 
-/** The body's bytes; null when it passes `max`. */
-export async function readBytes(req: Request, max: number): Promise<Uint8Array | null> {
+export function limitFor(req: Request): number {
+  const path = new URL(req.url).pathname;
+  if (/^\/api\/people\/[\w-]+\/photo$/.test(path)) return BODY_LIMITS.photo;
+  if (MEDIA_ROUTES.test(path)) return BODY_LIMITS.media;
+  return (req.headers.get("content-type") ?? "").includes("application/json") ? BODY_LIMITS.json : BODY_LIMITS.other;
+}
+
+/** The body's bytes; null when it passes `max` or isn't finished within `ms` (the read is then dropped). */
+export async function readBytes(req: Request, max: number, ms = READ_MS.media): Promise<Uint8Array | null | "timeout"> {
   if (!req.body) return new Uint8Array();
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size <= max) chunks.push(value);
-    else chunks.length = 0;
+  let late = false;
+  const timer = setTimeout(() => {
+    late = true;
+    reader.cancel().catch(() => {});
+  }, ms);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size <= max) chunks.push(value);
+      else chunks.length = 0;
+    }
+  } catch {
+    return late ? "timeout" : null;
+  } finally {
+    clearTimeout(timer);
   }
+  if (late) return "timeout";
   return size > max ? null : new Uint8Array(await new Blob(chunks as BlobPart[]).arrayBuffer());
 }
 
 /**
- * The request with its body already read (so a later `req.json()` or `arrayBuffer()` is bounded too), or null when the body is
- * too large. Every route is reached through this, which is what keeps a body cap and a "closing" check from being per-route.
+ * The request with its body already read (so a later `req.json()` or `arrayBuffer()` is bounded too), or the refusal to send.
+ * Every route is reached through this, which is what keeps the body cap, the time limit and a "closing" check from being per-route.
  */
-export async function buffered(req: Request): Promise<Request | null> {
+export async function buffered(req: Request): Promise<Request | { status: number; message: string }> {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return req;
-  const json = (req.headers.get("content-type") ?? "").includes("application/json");
-  const bytes = await readBytes(req, json ? BODY_LIMITS.json : BODY_LIMITS.media);
-  if (!bytes) return null;
-  return new Request(req.url, { method: req.method, headers: req.headers, body: new Blob([bytes as BlobPart]) });
+  const max = limitFor(req);
+  if (reserved + max > BUDGET) return { status: 503, message: "The hub is busy receiving other requests. Try again in a moment." };
+  reserved += max;
+  try {
+    const bytes = await readBytes(req, max, max > BODY_LIMITS.json ? READ_MS.media : READ_MS.small);
+    if (bytes === "timeout") return { status: 408, message: "That request took too long to arrive." };
+    if (!bytes) return { status: 413, message: "That request is too large." };
+    return new Request(req.url, { method: req.method, headers: req.headers, body: new Blob([bytes as BlobPart]) });
+  } finally {
+    reserved -= max;
+  }
 }

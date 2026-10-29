@@ -223,7 +223,7 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
           <path d="m9.5 12.5 5 5m0-5-5 5" />
         </svg>
         <div className="fb-host" title={url}>{hostName(url)}</div>
-        <div className="fb-line">Can't be shown inside JamSesh.</div>
+        <div className="fb-line">This site can't be shown here.</div>
         <button className="btn small fb-open" onClick={open} disabled={phase === "busy"}>
           {phase === "busy" ? "Opening…" : phase === "done" ? "Opened. Open again" : "Open on the host"}
         </button>
@@ -258,14 +258,7 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
     if (detectBlocked) setState(NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
     setForced(false);
     if (!detectBlocked) return;
-    // The host reads the page's headers, which a browser can't see from inside the frame.
-    let live = true;
-    api<{ blocked: boolean }>(`/frame-check?url=${encodeURIComponent(raw)}`)
-      .then((r) => live && r.blocked && setState("blocked"))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
+    // The hub never fetches a shared page: a site that refuses framing is found by the frame not loading (the timeout above).
   }, [raw, detectBlocked]);
   // Sized in the resize callback itself, not through React state: state would land a frame late
   // and the frame would shake while the window is being resized.

@@ -496,14 +496,6 @@ test("one choke point: any route's body is read and capped before it runs, and s
   }
 });
 
-test("the frame check only fetches public addresses: private literals, private resolutions and mapped IPv6 are refused", async () => {
-  const { isPublicUrl } = await import("../src/http");
-  const via = (map: Record<string, string[]>) => async (h: string) => map[h] ?? [];
-  const pub = via({ "example.com": ["93.184.216.34"], "rebind.example": ["93.184.216.34", "10.0.0.5"], "inner.example": ["127.0.0.1"] });
-  expect(await isPublicUrl(new URL("https://example.com/"), pub)).toBe(true);
-  for (const u of ["http://127.0.0.1/", "http://10.1.2.3/", "http://169.254.169.254/", "http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://localhost/", "http://rebind.example/", "http://inner.example/", "ftp://example.com/", "http://nothing.example/"]) expect(await isPublicUrl(new URL(u), pub)).toBe(false);
-});
-
 test("a repeated document proposal puts its files on the card it joins", () => {
   const r = room();
   const card = r.s.proposeContext({ text: "Keep the greeting short.", kind: "fact", by: "Chey" })!;
@@ -514,16 +506,82 @@ test("a repeated document proposal puts its files on the card it joins", () => {
   expect(r.s.proposeContext({ text: "keep the greeting short", kind: "fact", by: "Felipe", attachments: [att] })!.attachments).toHaveLength(1);
 });
 
-test("share placement is counted work, and a stopped brain doesn't touch the stage afterwards", async () => {
+test("share placement runs the real path under the brain's count, and a stopped brain leaves the stage alone", async () => {
   const r = room();
-  const brain = r.hub.brain as any;
-  let finished = false;
-  brain.placeShareRun = async () => {
-    await Bun.sleep(200);
-    finished = true;
-  };
-  void brain.placeShare({ id: "s1" });
-  expect(brain.busy()).toEqual(["the brain's requests"]);
-  expect(await r.hub.shutdown()).toBe(true);
-  expect(finished).toBe(true);
+  r.s.upsertPerson({ name: "Felipe" });
+  r.s.store.put("devices", { id: "dv1", personId: r.chey.id, label: "L", kind: "client", lastSeen: Date.now() } as any);
+  const share = r.s.startShare("dv1", "screen", "sh1", "Chey's screen");
+  const placing = r.hub.brain.placeShare(share);
+  expect((r.hub.brain as any).busy()).toEqual(["the brain's requests"]);
+  await placing;
+  expect(JSON.stringify(r.s.stage())).toContain(share.id);
+  const before = JSON.stringify(r.s.stage());
+  r.hub.brain.stop();
+  const second = r.s.startShare("dv1", "camera", "sh2", "Camera");
+  await r.hub.brain.placeShare(second);
+  expect(JSON.stringify(r.s.stage())).toBe(before);
 });
+
+// ---------- round 17 ----------
+
+test("the PDF reader follows the catalog's page tree: a page object no tree names isn't read", () => {
+  const obj = (n: number, body: string) => `${n} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}\nendstream\nendobj\n`;
+  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n${obj(4, "BT (VISIBLE) Tj ET")}8 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 9 0 R >>\nendobj\n${obj(9, "BT (UNREFERENCED) Tj ET")}trailer\n<< /Root 1 0 R >>\n%%EOF`;
+  expect(drawnText(new TextEncoder().encode(doc))).toBe("VISIBLE");
+});
+
+test("HEAD and OPTIONS never act, and a GET can't pair an agent while the session is closing", async () => {
+  const r = room();
+  const card = r.s.proposeContext({ text: "A card to leave alone", kind: "decision", by: "Chey" })!;
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    r.hub.auth.windows.adopt("bb".repeat(32));
+    const headers = { cookie: `jam_window=${"bb".repeat(32)}`, "content-type": "application/json" };
+    const base = `http://127.0.0.1:${server.port}`;
+    for (const method of ["HEAD", "OPTIONS", "PUT", "TRACE"]) {
+      const res = await fetch(`${base}/api/triage/${card.id}/dismiss`, { method, headers });
+      expect([204, 405]).toContain(res.status);
+      expect(r.s.board.get(card.id)!.status).toBe("open");
+    }
+    const shutting = r.hub.shutdown();
+    const code = r.hub.auth.current().code;
+    const pair = await fetch(`${base}/agent?c=${code}`, { headers: { "x-forwarded-for": "9.9.9.9" } });
+    expect(pair.status).toBe(503);
+    await shutting;
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a body that never finishes is dropped at the deadline, and bodies in flight share a memory budget", async () => {
+  const { buffered, READ_MS } = await import("../src/body");
+  const old = { ...READ_MS };
+  const stalled = (url: string) => {
+    let first = true;
+    const body = new ReadableStream<Uint8Array>({
+      pull: (c) =>
+        new Promise((res) => {
+          if (first) return (first = false), c.enqueue(new Uint8Array(10)), res();
+          setTimeout(() => (c.enqueue(new Uint8Array(10)), res()), 1500);
+        }),
+    });
+    return new Request(url, { method: "POST", headers: { "content-type": url.includes("/audio") ? "audio/wav" : "application/json" }, body, duplex: "half" } as any);
+  };
+  try {
+    READ_MS.small = 200;
+    expect(await buffered(stalled("http://x/api/say"))).toMatchObject({ status: 408 });
+    READ_MS.media = 1000;
+    // Three media reads reserve the 96 MB budget while they are arriving; a fourth is turned away at once.
+    const open = [1, 2, 3].map(() => buffered(stalled("http://x/api/audio")));
+    await Bun.sleep(50);
+    expect(await buffered(new Request("http://x/api/audio", { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array(10) }))).toMatchObject({ status: 503 });
+    expect((await Promise.all(open)).every((o) => "status" in o && o.status === 408)).toBe(true);
+    // Once they are done the budget is free again.
+    expect(await buffered(new Request("http://x/api/audio", { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array(10) }))).toBeInstanceOf(Request);
+    // And non-media routes take 1 MB of anything but JSON.
+    expect(await buffered(new Request("http://x/api/say", { method: "POST", headers: { "content-type": "text/plain" }, body: new Uint8Array(2 * 1024 * 1024) }))).toMatchObject({ status: 413 });
+  } finally {
+    Object.assign(READ_MS, old);
+  }
+}, 20_000);

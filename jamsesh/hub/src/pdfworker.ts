@@ -39,14 +39,25 @@ function objects(src: string): Map<number, { at: number; body: string }> {
 export function drawnText(bytes: Uint8Array, limit = 200_000): string {
   const src = latin(bytes.subarray(0, 25 * 1024 * 1024));
   const objs = objects(src);
-  // Only the content streams pages point at (/Contents, one or an array): a stream no page draws isn't wording.
+  // Only the content streams of pages the catalog's page tree reaches (an object an edit left behind, or a page no tree names,
+  // isn't wording), in page order.
   const pages: number[][] = [];
-  for (const o of objs.values()) {
-    if (!/\/Type\s*\/Page(?![s\w])/.test(o.body)) continue;
+  const rootRef = [...src.matchAll(/\/Root\s+(\d+)\s+\d+\s+R/g)].at(-1)?.[1];
+  const catalog = rootRef ? Number(rootRef) : [...objs].find(([, o]) => /\/Type\s*\/Catalog\b/.test(o.body))?.[0];
+  const seen = new Set<number>();
+  const walk = (n: number, depth: number) => {
+    const o = objs.get(n);
+    if (!o || seen.has(n) || depth > 32) return;
+    seen.add(n);
+    const kids = /\/Kids\s*\[([^\]]*)\]/.exec(o.body);
+    if (kids) return void [...kids[1].matchAll(/(\d+)\s+\d+\s+R/g)].forEach((k) => walk(Number(k[1]), depth + 1));
+    if (!/\/Type\s*\/Page(?![s\w])/.test(o.body)) return;
     const c = /\/Contents\s*(?:(\d+)\s+\d+\s+R|\[([^\]]*)\])/.exec(o.body);
     if (c?.[1]) pages.push([Number(c[1])]);
     else if (c?.[2]) pages.push([...c[2].matchAll(/(\d+)\s+\d+\s+R/g)].map((r) => Number(r[1])));
-  }
+  };
+  const tree = catalog !== undefined ? /\/Pages\s+(\d+)\s+\d+\s+R/.exec(objs.get(catalog)?.body ?? "")?.[1] : undefined;
+  if (tree) walk(Number(tree), 0);
   const out: string[] = [];
   let size = 0;
   // The text render mode belongs to a page's graphics state: its content streams share it in order, and the next page starts fresh.
