@@ -2,6 +2,7 @@
 // canvas server again when it stops (it crashed, or something killed it).
 import { expect, test } from "bun:test";
 import { Canvas } from "../src/canvas/canvas";
+import { withParentWatch } from "../src/children";
 
 test("each announcement of the canvas is a new generation, so people's canvases fetch their link again", () => {
   const session = {
@@ -387,7 +388,7 @@ test("a key helper that hangs is killed and reaped, and the start fails instead 
 });
 
 /** A figcraft-cli stand-in: records its pid, then either answers the MCP handshake or never does. */
-async function fakeCli(answers: boolean) {
+async function fakeCli(answers: boolean, ignoreTerm = false) {
   const { mkdtempSync, writeFileSync, chmodSync, mkdirSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -396,6 +397,7 @@ async function fakeCli(answers: boolean) {
   writeFileSync(script, `import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(join(dir, "pid"))}, String(process.pid));
 const answers = ${answers};
+${ignoreTerm ? 'process.on("SIGTERM", () => {});' : ""}
 let buf = "";
 for await (const chunk of Bun.stdin.stream()) {
   buf += new TextDecoder().decode(chunk);
@@ -460,3 +462,50 @@ test("Stop while the host participant's MCP handshake is pending closes and reap
     rmSync(cli.dir, { recursive: true, force: true });
   }
 }, 20_000);
+
+test("a participant that ignores SIGTERM is still gone after close()", async () => {
+  const { rmSync, readFileSync } = await import("node:fs");
+  const { FigcraftMcp } = await import("../src/canvas/figcraft-mcp");
+  const cli = await fakeCli(true, true);
+  const mcp = new FigcraftMcp(cli.bin, ["mcp"]);
+  try {
+    await mcp.init();
+    const pid = Number(readFileSync(cli.pidFile, "utf8"));
+    mcp.close();
+    expect(await waitFor(() => !isAlive(pid), 12_000)).toBe(true);
+  } finally {
+    rmSync(cli.dir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("Stop reaps a canvas server that ignores SIGTERM, and a key helper still running when Stop comes", async () => {
+  const { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, readFileSync, existsSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { config } = await import("../src/config");
+  const dir = mkdtempSync(join(tmpdir(), "jam-canvas-term-"));
+  mkdirSync(join(dir, "bin"));
+  const bin = join(dir, "bin", "figcraft-server");
+  // Records its pid per mode (serve / key), ignores TERM, never finishes.
+  writeFileSync(bin, `#!/bin/sh\ntrap '' TERM\nmode=serve; for a in "$@"; do [ "$a" = key ] && mode=key; done\necho $$ > "${dir}/$mode.pid"\nwhile :; do sleep 1; done\n`);
+  chmodSync(bin, 0o755);
+  const was = { bin: config.figcraftServerBin, data: config.dataDir };
+  (config as any).figcraftServerBin = bin;
+  (config as any).dataDir = dir;
+  const session: any = { canvas: { status: "off" }, setCanvas() {}, store: { setting: (_k: string, d: unknown) => d, setSetting() {} } };
+  const canvas: any = new Canvas(session);
+  try {
+    const key = canvas.serverKey().catch((e: Error) => e);
+    canvas.serverProc = Bun.spawn(withParentWatch([bin, "--listen", "127.0.0.1:1"]), { stdout: "ignore", stderr: "ignore" });
+    expect(await waitFor(() => existsSync(join(dir, "key.pid")) && existsSync(join(dir, "serve.pid")))).toBe(true);
+    const pids = ["key", "serve"].map((m) => Number(readFileSync(join(dir, `${m}.pid`), "utf8").trim()));
+    expect(pids.every(isAlive)).toBe(true);
+    canvas.stop();
+    expect(await waitFor(() => pids.every((p) => !isAlive(p)), 12_000)).toBe(true);
+    await key;
+  } finally {
+    (config as any).figcraftServerBin = was.bin;
+    (config as any).dataDir = was.data;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 40_000);

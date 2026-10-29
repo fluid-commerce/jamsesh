@@ -78,3 +78,30 @@ test("a helper that ignores SIGTERM is killed after the grace", async () => {
   expect(alive(hung)).toBe(false);
   expect(alive(p.pid)).toBe(false);
 });
+
+test("a helper that ignores SIGTERM dies after the grace when the hub is killed outright", async () => {
+  const code = `
+    import { withParentWatch } from ${JSON.stringify(import.meta.dir + "/../src/children")};
+    const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 500), { stdio: ["ignore", "ignore", "ignore"] });
+    await Bun.sleep(700);
+    const kids = Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim();
+    console.log(JSON.stringify({ wrapper: p.pid, hung: Number(kids.split("\\n")[0]) }));
+    await Bun.sleep(300000);
+  `;
+  const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit" });
+  const { value } = await hub.stdout.getReader().read();
+  const { wrapper, hung } = JSON.parse(new TextDecoder().decode(value)) as { wrapper: number; hung: number };
+  expect(alive(hung)).toBe(true);
+  hub.kill("SIGKILL");
+  expect(await until(() => !alive(hung) && !alive(wrapper), 8000)).toBe(true);
+});
+
+test("the wrapper itself kills a TERM-resistant helper after its own grace", async () => {
+  const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], process.pid, 400), { stdio: ["ignore", "ignore", "ignore"] });
+  await Bun.sleep(500);
+  const hung = Number(Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim().split("\n")[0]);
+  expect(alive(hung)).toBe(true);
+  p.kill(); // plain TERM to the wrapper, no stopHelper
+  await p.exited;
+  expect(alive(hung)).toBe(false);
+});

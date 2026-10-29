@@ -1,7 +1,7 @@
 // A client for one headless `figcraft-cli mcp` process: newline-delimited
 // JSON-RPC 2.0 over stdio.
 import type { Subprocess } from "bun";
-import { withParentWatch } from "../children";
+import { stopHelper, withParentWatch } from "../children";
 
 export type McpContent =
   | { type: "text"; text: string }
@@ -140,6 +140,6 @@ export class FigcraftMcp {
   }
 
   close() {
-    if (!this.closed) this.proc.kill();
+    if (!this.closed) void stopHelper(this.proc).catch(() => {}); // TERM, then KILL for one that ignores it
   }
 }

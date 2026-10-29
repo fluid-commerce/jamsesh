@@ -8,16 +8,19 @@
  * Returns the argv to spawn. Stopping the returned process (SIGTERM) stops the helper too, and the
  * wrapper exits only once the helper has (so its port is free); `stopHelper` covers a helper that ignores SIGTERM.
  */
-export function withParentWatch(cmd: string[], parentPid = process.pid): string[] {
+export function withParentWatch(cmd: string[], parentPid = process.pid, graceMs = 3_000): string[] {
+  const ticks = Math.max(1, Math.round(graceMs / 100));
   const script = [
     'parent=$1; shift',
     '"$@" <&0 &', // a backgrounded command would otherwise lose stdin (the MCP child reads it)
     "child=$!",
-    "trap 'kill $child 2>/dev/null; wait $child 2>/dev/null; exit 0' TERM INT HUP",
+    // TERM first; a helper that ignores it gets KILL after the grace, so nothing the wrapper stops outlives it.
+    `stop() { kill $child 2>/dev/null; i=0; while kill -0 $child 2>/dev/null && [ $i -lt ${ticks} ]; do sleep 0.1; i=$((i+1)); done; kill -0 $child 2>/dev/null && kill -9 $child 2>/dev/null; wait $child 2>/dev/null; }`,
+    "trap 'stop; exit 0' TERM INT HUP",
     'while kill -0 $child 2>/dev/null && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d \' \')" = "$parent" ]; do',
     "  sleep 1 & wait $!",
     "done",
-    "if kill -0 $child 2>/dev/null; then kill $child 2>/dev/null; wait $child 2>/dev/null; exit 0; fi",
+    "if kill -0 $child 2>/dev/null; then stop; exit 0; fi",
     "wait $child; exit $?",
   ].join("\n");
   return ["/bin/sh", "-c", script, "jamsesh-child", String(parentPid), ...cmd];

@@ -137,7 +137,8 @@ export class Canvas {
     for (const t of this.timers.splice(0)) clearInterval(t);
     this.host?.close();
     for (const a of this.agents.values()) a.mcp.close();
-    this.serverProc?.kill();
+    this.keyProc?.kill();
+    if (this.serverProc) void stopHelper(this.serverProc).catch(() => {}); // TERM, then KILL, and reaped
   }
 
   private async startServer() {
@@ -194,9 +195,12 @@ export class Canvas {
   /** How long `figcraft-server key` may take before the start counts as failed. */
   static KEY_TIMEOUT_MS = 10_000;
 
+  private keyProc: { kill(): void } | null = null;
+
   private async serverKey(): Promise<string> {
     this.checkRunning();
-    const p = Bun.spawn([config.figcraftServerBin, "--data", this.serverDir, "key"], { stdout: "pipe", stderr: "ignore" });
+    const p = Bun.spawn(withParentWatch([config.figcraftServerBin, "--data", this.serverDir, "key"]), { stdout: "pipe", stderr: "ignore" });
+    this.keyProc = p;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), Canvas.KEY_TIMEOUT_MS)));
@@ -208,8 +212,9 @@ export class Canvas {
     } finally {
       clearTimeout(timer);
       // Never left running: killed if it's still going, and reaped either way.
-      if (p.exitCode == null) p.kill("SIGKILL");
+      if (p.exitCode == null) await stopHelper(p, 500).catch(() => {});
       await p.exited.catch(() => {});
+      if (this.keyProc === p) this.keyProc = null;
     }
   }
 
