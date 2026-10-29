@@ -1,7 +1,20 @@
 // A soft two-note chime, synthesized (no audio files): "heard you".
+import { hub } from "./hub";
+
 let ctx: AudioContext | null = null;
 
+/** The hub runs silent (JAMSESH_SILENT=1): nothing in the page may make a sound. */
+export function roomSilent(state: { session?: { silent?: boolean } } | null | undefined) {
+  return !!state?.session?.silent;
+}
+
+/** True when this page may play sound right now. */
+export function soundAllowed() {
+  return !roomSilent(hub.snap.state);
+}
+
 export function playChime() {
+  if (!soundAllowed()) return;
   try {
     ctx ??= new AudioContext();
     const t = ctx.currentTime + 0.01;

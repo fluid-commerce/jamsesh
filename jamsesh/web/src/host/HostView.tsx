@@ -6,7 +6,7 @@ import { SettingsDrawer } from "../shared/Settings";
 import { AgentRow, Avatar, Meter, RoomFeed, Toasts, useNow } from "../shared/ui";
 import { Stage } from "./Stage";
 import { CodeRing, JoinCard, useJoinCode } from "./JoinCard";
-import { fadeOut, playChime } from "../shared/sound";
+import { fadeOut, playChime, soundAllowed } from "../shared/sound";
 import { AnnotateToggle } from "../shared/annotate";
 import { InviteButton } from "../client/Invite";
 import { MicNotice } from "../shared/MicNotice";
@@ -64,7 +64,7 @@ export function HostView() {
     const off = mic.onChange(setMicStatus);
     // Play the brain's replies on the room speaker.
     const onSpeak = (m: { audio: string | null; mime: string }) => {
-      if (!m.audio) return;
+      if (!m.audio || !soundAllowed()) return;
       const prev = audioRef.current;
       // Replaced, not finished: the new reply's echo suppression stays on.
       if (prev) (prev.onpause = null), prev.pause();

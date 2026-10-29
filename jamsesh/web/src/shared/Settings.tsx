@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
+import { soundAllowed } from "./sound";
 
 export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: boolean }) {
   const { state, levels } = useHub();
@@ -422,6 +423,10 @@ function VoicePicker({ voice, model, onChange }: { voice: string; model: string;
   const [err, setErr] = useState("");
   const listed = voicesFor(model);
   const preview = async () => {
+    if (!soundAllowed()) {
+      setErr("This room is silent, so voice samples are off.");
+      return setPhase("error");
+    }
     setPhase("busy");
     try {
       const r = await api<{ audio: string; mime: string }>("/voice-preview", { voice: chosen }, undefined, { queue: false, timeoutMs: 30000 });
