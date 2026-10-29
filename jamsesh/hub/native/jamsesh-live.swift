@@ -167,6 +167,23 @@ func mouse(_ type: CGEventType, _ p: CGPoint, _ pid: pid_t) {
   CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.postToPid(pid)
 }
 
+/// The button the hub told us is down: where, for whom, and when we last heard. A button never stays down once the hub is gone or quiet.
+var held: (p: CGPoint, pid: pid_t, at: Date)?
+let heldLock = NSLock()
+func setHeld(_ h: (p: CGPoint, pid: pid_t, at: Date)?) {
+  heldLock.lock()
+  held = h
+  heldLock.unlock()
+}
+/// Lets go of the held button (if any) where it was last.
+func releaseHeld() {
+  heldLock.lock()
+  let h = held
+  held = nil
+  heldLock.unlock()
+  if let h { mouse(.leftMouseUp, h.p, h.pid) }
+}
+
 /// While nobody watches the tile the hub says "pause": frames are dropped before they are encoded, "resume" starts them again.
 var paused = false
 let pauseLock = NSLock()
@@ -194,10 +211,20 @@ func handle(_ line: String) {
     usleep(40_000)
     mouse(.leftMouseUp, p, pid)
   case "down":
-    if let (p, pid) = point(fx, fy) { mouse(.leftMouseDown, p, pid) }
+    releaseHeld()
+    if let (p, pid) = point(fx, fy) {
+      mouse(.leftMouseDown, p, pid)
+      setHeld((p, pid, Date()))
+    }
   case "move":
-    if let (p, pid) = point(fx, fy) { mouse(.leftMouseDragged, p, pid) }
+    if let (p, pid) = point(fx, fy) {
+      mouse(.leftMouseDragged, p, pid)
+      heldLock.lock()
+      if held != nil { held = (p, pid, Date()) }
+      heldLock.unlock()
+    }
   case "up":
+    setHeld(nil)
     if let (p, pid) = point(fx, fy) { mouse(.leftMouseUp, p, pid) }
   case "scroll":
     guard let (p, pid) = point(fx, fy) else { return }
@@ -232,8 +259,27 @@ func handle(_ line: String) {
 
 Thread.detachNewThread {
   while let line = readLine() { handle(line) }
+  releaseHeld()
   exit(0)  // the hub closed our stdin: it's done with us
 }
+
+// A press the hub never finished (it was killed, or the network behind it dropped) is let go after a few quiet seconds.
+Thread.detachNewThread {
+  while true {
+    sleep(1)
+    heldLock.lock()
+    let stale = held.map { Date().timeIntervalSince($0.at) > 6 } ?? false
+    heldLock.unlock()
+    if stale { releaseHeld() }
+  }
+}
+signal(SIGTERM, SIG_IGN)
+let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+term.setEventHandler {
+  releaseHeld()
+  exit(0)
+}
+term.resume()
 
 // ---- capture ----
 final class Output: NSObject, SCStreamOutput, SCStreamDelegate {

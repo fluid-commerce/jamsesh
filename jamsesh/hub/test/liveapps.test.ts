@@ -488,3 +488,96 @@ while read -r line; do echo "$line" >> "${log}"; done
   // A tile that is gone takes no more commands.
   expect(hub.live.subscribe(r.id, () => {})).toBeNull();
 });
+
+// ---- a Mac button is never left down ----
+function pressHelper(name: string) {
+  const fake = join(dir, name);
+  const log = join(dir, `${name}-input`);
+  writeFileSync(
+    fake,
+    `#!/bin/bash
+[ "$1" = "--apps" ] && { echo '[{"pid":41,"bundle":"com.example.fake","name":"Fake App"}]'; exit 0; }
+echo '{"event":"window","w":800,"h":600}' >&2
+while read -r line; do echo "$line" >> "${log}"; done
+`,
+  );
+  chmodSync(fake, 0o755);
+  const sent = async () => {
+    await Bun.sleep(250);
+    return existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((m) => m.t !== "pause" && m.t !== "resume") : [];
+  };
+  return { fake, sent };
+}
+const who = (p: { id: string; name: string }) => ({ personId: p.id, name: p.name, host: false });
+
+test("a Mac button held when control passes, is released, or the tile stops is let go at the last position", async () => {
+  hub.live.stopAll();
+  const { fake, sent } = pressHelper("fake-press-control");
+  const r = await hub.live.startMac({ name: "Fake App" }, "Maya", [fake]);
+  if (typeof r === "string") throw new Error(r);
+  hub.live.control(r.id, "take", who(sam));
+  await hub.live.input(r.id, who(sam), { t: "down", x: 0.2, y: 0.3 });
+  await hub.live.input(r.id, who(sam), { t: "move", x: 0.4, y: 0.5 });
+  // Control passes to Maya: Sam's button comes up where his pointer last was, before Maya can do anything.
+  hub.live.control(r.id, "pass", who(sam), { personId: maya.id, name: "Maya" });
+  expect((await sent()).map((m) => `${m.t} ${m.x},${m.y}`)).toEqual(["down 0.2,0.3", "move 0.4,0.5", "up 0.4,0.5"]);
+  // Sam's own up, arriving late, is refused and adds nothing.
+  expect(await hub.live.input(r.id, who(sam), { t: "up", x: 0.4, y: 0.5 })).toContain("Maya is driving");
+  expect((await sent()).length).toBe(3);
+  // A release by the holder.
+  await hub.live.input(r.id, who(maya), { t: "down", x: 0.1, y: 0.1 });
+  hub.live.control(r.id, "release", who(maya));
+  expect((await sent()).map((m) => m.t)).toEqual(["down", "move", "up", "down", "up"]);
+  // The tile stopping lets go too.
+  hub.live.control(r.id, "take", who(maya));
+  await hub.live.input(r.id, who(maya), { t: "down", x: 0.6, y: 0.6 });
+  hub.live.stop(r.id);
+  await Bun.sleep(300);
+  expect((await sent()).map((m) => m.t)).toEqual(["down", "move", "up", "down", "up", "down", "up"]);
+});
+
+test("a Mac press whose up never arrives (the connection dropped) is released after a quiet moment; a press that finishes is not released twice", async () => {
+  hub.live.stopAll();
+  const { fake, sent } = pressHelper("fake-press-idle");
+  const r = await hub.live.startMac({ name: "Fake App" }, "Maya", [fake]);
+  if (typeof r === "string") throw new Error(r);
+  hub.live.pressIdleMs = 450;
+  try {
+    hub.live.control(r.id, "take", who(sam));
+    await hub.live.input(r.id, who(sam), { t: "down", x: 0.5, y: 0.5 });
+    // Moves keep the press alive.
+    for (let i = 0; i < 3; i++) (await Bun.sleep(100), await hub.live.input(r.id, who(sam), { t: "move", x: 0.5 + i / 10, y: 0.5 }));
+    expect((await sent()).map((m) => m.t)).toEqual(["down", "move", "move", "move"]);
+    await Bun.sleep(500);
+    expect((await sent()).map((m) => m.t)).toEqual(["down", "move", "move", "move", "up"]);
+    // A finished press and a tap leave nothing to release.
+    await hub.live.input(r.id, who(sam), { t: "down", x: 0.1, y: 0.1 });
+    await hub.live.input(r.id, who(sam), { t: "up", x: 0.1, y: 0.1 });
+    await hub.live.input(r.id, who(sam), { t: "swipe", x: 0.1, y: 0.1, x2: 0.9, y2: 0.9 });
+    await Bun.sleep(700);
+    const all = (await sent()).map((m) => m.t);
+    expect(all.filter((t) => t === "down").length).toBe(all.filter((t) => t === "up").length);
+  } finally {
+    hub.live.pressIdleMs = 4000;
+    hub.live.stop(r.id);
+  }
+});
+
+test("on a locked screen a press by a driver who stopped driving is released when another driver's input arrives", async () => {
+  hub.live.stopAll();
+  const { fake, sent } = pressHelper("fake-press-screen");
+  const r = await hub.live.startMac({ name: "Fake App" }, "Maya", [fake]);
+  if (typeof r === "string") throw new Error(r);
+  s.touchDevice("samLaptop", { personId: sam.id, location: "room", micOn: false });
+  s.deviceOnline = () => true;
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "app", appId: r.id }] } }, "Maya", "main", { person: { id: maya.id, name: "Maya" } });
+  s.drive("start", "main", maya.id);
+  s.drive("together", "main", maya.id, sam.id);
+  await hub.live.input(r.id, who(maya), { t: "down", x: 0.3, y: 0.3 });
+  s.drive("pass", "main", sam.id, sam.id);
+  // Maya is out; Sam's input first lets go of her press.
+  expect(await hub.live.input(r.id, who(sam), { t: "move", x: 0.8, y: 0.8 })).toBeNull();
+  expect((await sent()).map((m) => `${m.t} ${m.x},${m.y}`)).toEqual(["down 0.3,0.3", "up 0.3,0.3", "move 0.8,0.8"]);
+  s.unlockStage("main");
+  hub.live.stop(r.id);
+});
