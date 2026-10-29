@@ -350,3 +350,28 @@ test("after a pruned line takes a late copy, still later copies join it too: one
     expect([mode, copies(r)]).toEqual([mode, ["lap-a", "lap-b", "lap-c"]]);
   }
 });
+
+test("an adopted late copy never stands in for its line's voice: a correction teaches the line's own sample, or nothing after a Reset", async () => {
+  const r = room(["lap-a", "lap-b"]);
+  const t0 = t();
+  await r.hear("lap-a", t0, mix(55, [A(3), 1]), "Put the pricing page up.");
+  await r.pipeline.flush();
+  const line = r.lines()[0];
+  // The line's own sample, kept with its event (as the hub does).
+  const own = Float32Array.from({ length: 256 }, (_, i) => (i === 0 ? 1 : 0));
+  const ev = r.session.store.addEvent({ kind: "speech", authorType: "person", text: line.text, authorId: null, authorName: "Ana", data: { embedding: [...own], heardAt: Date.now() - 1000 } } as any);
+  r.session.store.put("utterances", { ...line, eventId: ev.id });
+  (r.pipeline as any).finalized = [];
+  await r.hear("lap-b", t0 + 200, mix(56, [A(3), 0.7]), "Put the pricing page up.");
+  await r.pipeline.flush();
+  const adopted = (r.pipeline as any).finalized.find((g: any) => g.adopted);
+  expect(adopted).toBeDefined();
+  for (const s of adopted.segments) s.embedding = Float32Array.from({ length: 256 }, (_, i) => (i === 1 ? 1 : 0));
+  const voice = (r.pipeline as any).voiceOf(r.session.store.get("utterances", line.id));
+  expect([...voice.embedding.slice(0, 2)]).toEqual([1, 0]);
+  expect(r.pipeline.voiceFor(line.id).embedding).toBeNull();
+  // After a Reset scrubbed the event's sample, the line has none: the adopted copy doesn't bring one back.
+  r.session.store.updateEvent(ev.id, { data: { embedding: null } });
+  r.pipeline.forgetVoice(r.ana.id);
+  expect((r.pipeline as any).voiceOf(r.session.store.get("utterances", line.id)).embedding).toBeNull();
+});
