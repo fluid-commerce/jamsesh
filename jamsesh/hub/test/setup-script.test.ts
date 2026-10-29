@@ -399,7 +399,7 @@ describe("agent setup script", () => {
 
   test("Codex: the table an earlier JamSesh wrote, without markers, is moved into the markers when it carries that install's credential and host", async () => {
     const box = sandbox();
-    const { dir } = earlierInstall(box); // stored credential "old-room", host http://old-host:4747
+    earlierInstall(box); // stored credential "old-room", host http://old-host:4747
     mkdirSync(join(box.home, ".codex"), { recursive: true });
     const config = join(box.home, ".codex/config.toml");
     writeFileSync(config, `model = "gpt"\n\n${OLD_TABLE("http://old-host:4747/mcp", "old-room")}\n[mcp_servers.other]\nurl = "http://x"\n\n[profiles.a]\nk = 1\n`);
@@ -409,7 +409,6 @@ describe("agent setup script", () => {
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`# >>> jamsesh\n[mcp_servers.jamsesh]\nurl = "${origin}/mcp"`);
     expect(Bun.TOML.parse(toml)).toMatchObject({ model: "gpt", mcp_servers: { other: { url: "http://x" } }, profiles: { a: { k: 1 } } });
-    expect(dir).toBeTruthy();
   });
 
   test("Codex: a hand-written table with the earlier shape but another credential, another host, or no earlier install is refused untouched", async () => {
@@ -628,7 +627,7 @@ describe("agent setup script", () => {
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
     const r = await run(box);
     expect(r.code).not.toBe(0);
-    expect(r.stderr).toContain("couldn't put the jamsesh entry");
+    expect(r.stderr).toMatch(/ERROR: JamSesh couldn't read .*the rollback is incomplete/);
     expect(r.stderr).toContain("couldn't put your earlier connection back completely");
     expect(r.stderr).not.toContain("was put back");
     expect(readdirSync(box.home).filter((f) => f.startsWith(".claude.jamsesh-"))).toEqual([]);
@@ -984,6 +983,33 @@ describe("agent setup script", () => {
       expect(existsSync(box.log) ? readFileSync(box.log, "utf8") : "").not.toMatch(/mcp (remove|add-json)/);
       connectionIntact(dir, files);
     }
+  });
+
+  test("a rollback that can't read ~/.claude.json is incomplete: ERROR, saved folder kept, non-zero", async () => {
+    const box = sandbox();
+    // No earlier entry. The CLI corrupts the config and fails.
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *add-json*) printf '{ broken' > "$HOME/.claude.json"; exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toMatch(/ERROR: JamSesh couldn't read .*\.claude\.json/);
+    expect(r.stderr).not.toContain("so none is registered");
+    expect(readdirSync(join(box.home, ".jamsesh")).some((f) => f.startsWith(".saved"))).toBe(true);
+    expect(readFileSync(join(box.home, ".claude.json"), "utf8")).toBe("{ broken");
+  });
+
+  test("Claude Code's settings.json saved between the read and the write is not overwritten", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    // A perl that, after the settings editor has read the file and made its edit, lets the person save it.
+    writeFileSync(join(box.bin, "perl"), `#!/bin/sh\n/usr/bin/perl "$@" || exit $?\ncase "$*" in *settings.json*) printf '{"saved":"by the person"}' > "$HOME/.claude/settings.json" ;; esac\n`, { mode: 0o755 });
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{}");
+    const { dir, files } = earlierInstall(box);
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("Claude Code settings changed while setting up; run Connect my agents again");
+    expect(readFileSync(join(box.home, ".claude/settings.json"), "utf8")).toBe('{"saved":"by the person"}');
+    connectionIntact(dir, files);
   });
 
   test("a CLI that exits 0 without registering the entry fails the setup and puts the earlier entry back", async () => {

@@ -163,15 +163,63 @@ test("two long folders that share their first 300 characters are two Codex chats
   expect((await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: b })).isError).toBeFalsy();
 });
 
-test("an agent from before the hashed id keeps its record, and its removal still holds", async () => {
-  const fresh = () => ({ agentId: null as string | null, ip: "relayed", device: cred.device.id, origin: base, sessionId: crypto.randomUUID(), harness: "codex" });
-  const machine = win.device.id;
-  const old = s.registerAgent({ ownerName: "Chey", harness: "codex", repo: "app", cwd: "/w/legacy", machine: hub.auth.machineOf(cred.device.id) ?? machine, chatId: `codex:${hub.auth.machineOf(cred.device.id) ?? machine}:/w/legacy` }).agent;
-  const again: any = await hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/legacy" });
-  expect(again.isError).toBeFalsy();
-  expect(s.store.all("agents").filter((x: any) => x.cwd === "/w/legacy")).toHaveLength(1);
-  s.removeAgent(old.id);
-  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "codex", repo: "app", cwd: "/w/legacy" })).rejects.toThrow("removed this chat");
+test("when the store opens, records and removals under the old readable ids get today's keys from their stored harness, machine and real folder", async () => {
+  const { chatKey } = await import("../src/chatkey");
+  const data = join(dir, "legacy");
+  const real = mkdtempSync(join(dir, "legacy-real-"));
+  const link = join(dir, "legacy-link");
+  require("node:fs").symlinkSync(real, link);
+  const one = new Hub({ canvas: false, whisper: false, dataDir: data });
+  const prefix = `/w/${"e".repeat(320)}`;
+  const legacy = (machine: string, cwd: string) => `codex:${machine}:${cwd}`.slice(0, 300);
+  const put = (cwd: string, machine = "host") => {
+    const a = one.session.registerAgent({ ownerName: "Chey", harness: "codex", repo: "app", cwd, machine, chatId: `tmp-${cwd}` }).agent;
+    one.session.store.put("agents", { ...one.session.store.get("agents", a.id)!, chatId: legacy(machine, cwd) }, false);
+    return a;
+  };
+  const longA = put(`${prefix}/one`);
+  const longB = put(`${prefix}/two`);
+  expect(one.session.agent(longA.id)!.chatId).toBe(one.session.agent(longB.id)!.chatId); // the old collision (a, b share it)
+  const dotted = put("/w/./dotted");
+  const linked = put(link);
+  for (const a of [longA, dotted, linked]) one.session.removeAgent(a.id);
+  // Make the removal records look like the old ones: readable ids, the folder as typed.
+  one.session.store.setSetting(
+    "removedChats",
+    one.session.removedChats().map((r) => ({ ...r, chatId: legacy(r.machine, r.cwd!) })),
+  );
+  // One that never stored its folder or machine can match nothing.
+  one.session.store.setSetting("removedChats", [...one.session.removedChats(), { id: "rc_blank", agentId: "a_none", chatId: "codex:host:/w/blank", machine: "", harness: "codex", name: "x", ownerName: "Chey", at: 1 }]);
+  one.stop();
+
+  const two = new Hub({ canvas: false, whisper: false, dataDir: data });
+  const agents = two.session.store.all("agents");
+  const removal = (id: string) => two.session.removedChats().find((r) => r.agentId === id)!;
+  const B = agents.find((x: any) => x.id === longB.id)!;
+  expect(removal(longA.id).chatId).toBe(chatKey("codex", "host", `${prefix}/one`));
+  expect(B.chatId).toBe(chatKey("codex", "host", `${prefix}/two`));
+  expect(removal(longA.id).chatId).not.toBe(B.chatId);
+  expect(removal(dotted.id).cwd).toBe("/w/dotted");
+  expect(removal(linked.id).cwd).toBe(require("node:fs").realpathSync(real));
+  const blank = two.session.removedChats().find((r) => r.id === "rc_blank")!;
+  expect(blank.chatId).toBe("codex:host:/w/blank");
+
+  const host = () => ({ agentId: null as string | null, ip: "127.0.0.1", device: "host", sessionId: crypto.randomUUID(), harness: "codex" });
+  const joinAt = (cwd: string) => two.mcp.call(host(), "jam_join", { owner: "Chey", harness: "codex", repo: "app", cwd });
+  // Removed ones stay out, by whichever spelling; the neighbour that shares their first 300 characters is let in.
+  await expect(joinAt(`${prefix}/one`)).rejects.toThrow("removed this chat");
+  await expect(joinAt("/w/dotted")).rejects.toThrow("removed this chat");
+  await expect(joinAt("/w/./dotted")).rejects.toThrow("removed this chat");
+  await expect(joinAt(real)).rejects.toThrow("removed this chat");
+  await expect(joinAt(link)).rejects.toThrow("removed this chat");
+  expect((await joinAt(`${prefix}/two`)).isError).toBeFalsy();
+  // The record that was never removed kept its identity: one agent, not a second.
+  expect(two.session.store.all("agents").filter((x: any) => x.cwd === `${prefix}/two`)).toHaveLength(1);
+  // Opening again changes nothing more.
+  two.stop();
+  const three = new Hub({ canvas: false, whisper: false, dataDir: data });
+  expect(three.session.removedChats().find((r) => r.agentId === longA.id)!.chatId).toBe(chatKey("codex", "host", `${prefix}/one`));
+  three.stop();
 });
 
 test("over the MCP protocol: a connection that initializes as Codex stays Codex whatever jam_join says", async () => {

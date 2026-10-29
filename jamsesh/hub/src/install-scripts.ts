@@ -457,21 +457,25 @@ on_exit() {
   if [ "$mcp_touched" = 1 ]; then
     # Read from the file itself, never from the CLI's exit status: the entry is put back only if it is
     # absent (setup removed it) or is the one setup registered; anything else is someone else's.
-    now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"
-    if [ "$now" != "$mcp_before" ] && [ -n "$now" ] && [ "$now" != "$mcp_ours" ]; then
+    # A read that fails (the file is unreadable or no longer valid JSON) is not an empty entry: the rollback
+    # is incomplete, whatever it would have looked like.
+    if ! now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"; then
+      mcp_result=unreadable
+    elif [ "$now" != "$mcp_before" ] && [ -n "$now" ] && [ "$now" != "$mcp_ours" ]; then
       mcp_result=foreign
     else
       if [ "$now" != "$mcp_before" ]; then
         if [ -n "$mcp_before" ]; then mcp_key set "$CLAUDEJSON" "$SAVED/mcp_before.json"; else mcp_key del "$CLAUDEJSON"; fi
       fi
-      now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"
-      if [ "$now" = "$mcp_before" ]; then
+      if ! now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"; then
+        mcp_result=unreadable
+      elif [ "$now" = "$mcp_before" ]; then
         if [ -n "$mcp_before" ]; then mcp_result=restored; else mcp_result=removed; fi
       else
         mcp_result=failed
       fi
     fi
-    case "$mcp_result" in foreign|failed) restored=0 ;; esac
+    case "$mcp_result" in foreign|failed|unreadable) restored=0 ;; esac
   fi
   { [ -z "$bad" ] && [ -z "$foreign" ]; } || restored=0
   if [ "$restored" = 1 ]; then
@@ -486,6 +490,7 @@ on_exit() {
     [ -z "$bad" ] || echo "JamSesh couldn't put these files back:$bad (the earlier copies are in $SAVED)." >&2
     [ -z "$foreign" ] || echo "Changed by someone else while setup ran, so not put back:$foreign" >&2
     [ "$mcp_result" != foreign ] || echo "The jamsesh entry in $CLAUDEJSON was changed by someone else while setup ran, so it was left as it is." >&2
+    [ "$mcp_result" != unreadable ] || echo "ERROR: JamSesh couldn't read $CLAUDEJSON to check or put back the jamsesh entry (it is unreadable or isn't valid JSON), so the rollback is incomplete. The earlier entry is in $SAVED/mcp_before.json." >&2
     [ "$mcp_result" != failed ] || echo "JamSesh couldn't put the jamsesh entry in $CLAUDEJSON back as it was (the earlier one is in $SAVED/mcp_before.json)." >&2
     echo "Setup didn't finish, and JamSesh couldn't put your earlier connection back completely." >&2
   fi
@@ -503,13 +508,14 @@ conf() { sed -n "s/^$1=//p" "$DIR/client.env" 2>/dev/null | head -n 1 | sed -e "
 # a guessed name only made duplicates.
 NAME="$(curl -fsS --max-time 5 "\${AUTH[@]}" "$HUB/api/me" 2>/dev/null | perl -MJSON::PP -0777 -ne 'my $m = eval { decode_json($_) }; print $m->{person}{name} // "" if ref $m eq "HASH" && ref $m->{person} eq "HASH"' || true)"
 [ -n "$NAME" ] || NAME="\${JAMSESH_NAME:-}"
+client_sha="$(sha "$DIR/client.env")"
 if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)"; fi
 
 {
   printf 'JAMSESH_HUB=%s\\n' "$(q "$HUB")"
   printf 'JAMSESH_NAME=%s\\n' "$(q "$NAME")"
   echo 'JAMSESH_ACTIVE=1'
-} | safe_write "$DIR/client.env" 600
+} | EXPECT_SHA="$client_sha" EXPECT_LABEL="JamSesh settings" safe_write "$DIR/client.env" 600
 # The hook is fetched to a private temporary file and checked before it replaces the installed one, so
 # a download cut short never leaves Claude Code's hooks running half a script.
 hooktmp="$SAVED/hook.sh.new"
@@ -600,8 +606,9 @@ Join the JamSesh room session and work as part of it.
 5. Then do the work. When you're idle, just stop: JamSesh wakes you when the room has something.
 CMD
   # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
+  settings_sha="$(sha "$HOME/.claude/settings.json")"
   perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" > "$SAVED/settings.new" <<'PL'
-use strict; use warnings; use JSON::PP; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
+use strict; use warnings; use JSON::PP; use Cwd qw(abs_path);
 my ($hook, $path) = @ARGV;
 # A symlinked settings file is edited at its target, and keeps its mode (it may hold secrets).
 $path = abs_path($path) // $path if -l $path;
@@ -658,7 +665,7 @@ for my $pair (['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 
 }
 print JSON::PP->new->pretty->canonical->encode($data);
 PL
-  safe_write "$HOME/.claude/settings.json" keep:600 < "$SAVED/settings.new"
+  EXPECT_SHA="$settings_sha" EXPECT_LABEL="Claude Code settings" safe_write "$HOME/.claude/settings.json" keep:600 < "$SAVED/settings.new"
   ok "Claude Code: MCP server, skill, /jamsesh command, hooks (a chat joins only when told to)"
   configured=$((configured + 1))
 else

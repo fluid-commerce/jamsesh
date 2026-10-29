@@ -4,6 +4,7 @@ import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } fro
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
+import { canonicalCwd, chatKey, isChatKey } from "./chatkey";
 import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
@@ -91,6 +92,7 @@ export class Session {
     if (me) me.lastActive = Date.now();
     else sessions.push({ id: this.sessionId, name: store.setting("sessionName", "Jam session"), startedAt: Date.now(), lastActive: Date.now() });
     store.setSetting("sessions", sessions.slice(-200));
+    this.migrateChatKeys();
     // Agents outlive a hub restart: they reconnect on their next call, and directives wait in their inbox.
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
@@ -103,6 +105,37 @@ export class Session {
       this.stageRevert.unref?.();
     }
     bus.resolver = (key) => this.resolve(key);
+  }
+
+  /**
+   * Chats without an id of their own used to be keyed by their readable `harness:machine:folder`, cut at 300
+   * characters, with the folder as typed. When the store opens, each such record and removal gets the key it
+   * would get now, from its stored harness, machine and folder (the real path where this computer can see it),
+   * so only current keys are ever compared. A record that doesn't store those is left as it is: it matches
+   * nothing, and in particular never anything by a shared prefix.
+   */
+  private migrateChatKeys() {
+    const keyed = (h: string | undefined): h is string => !!h && h !== "claude-code";
+    const redo = (harness: string | undefined, machine: string | undefined, cwd: string | undefined) => {
+      if (!keyed(harness) || !machine || !cwd) return null;
+      const folder = canonicalCwd(cwd, machine === "host");
+      return folder ? { folder, key: chatKey(harness, machine, folder) } : null;
+    };
+    for (const a of this.store.all("agents")) {
+      if (!keyed(a.harness) || !a.chatId || isChatKey(a.chatId, a.harness)) continue;
+      const n = redo(a.harness, a.machine, a.cwd);
+      if (n) this.store.put("agents", { ...a, chatId: n.key, cwd: n.folder }, false);
+    }
+    const removed = this.removedChats();
+    let changed = false;
+    const next = removed.map((r) => {
+      if (!keyed(r.harness) || (r.chatId && isChatKey(r.chatId, r.harness))) return r;
+      const n = redo(r.harness, r.machine, r.cwd);
+      if (!n) return r;
+      changed = true;
+      return { ...r, chatId: n.key, cwd: n.folder };
+    });
+    if (changed) this.store.setSetting("removedChats", next);
   }
 
   /** Every address people can join from: the room's LAN, Tailscale, and a public URL if one is set. */
@@ -445,8 +478,6 @@ export class Session {
     name?: string;
     /** The chat joining (see Agent.chatId). */
     chatId?: string;
-    /** How earlier versions spelled this chat's id: records kept under it are still this chat. */
-    legacyChatId?: string;
     role?: "worker" | "observer";
     broadcasts?: boolean;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
@@ -463,11 +494,10 @@ export class Session {
     // A chat is its own agent: one that names its chat resumes only that chat's record from the same
     // machine (or an older record from before chats were told apart), and a chat that doesn't never
     // takes a named chat's.
-    const isChat = (a: Agent) => a.chatId === info.chatId || (!!info.legacyChatId && a.chatId === info.legacyChatId);
-    const sameChat = (a: Agent) => (info.chatId ? !a.chatId || isChat(a) : !a.chatId);
+    const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
       // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
-      (info.chatId ? agents.find((a) => isChat(a) && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
+      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
       agents.find((a) => sameChat(a) && a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
@@ -576,11 +606,10 @@ export class Session {
    * `folder`: a join that can't name its chat (a Claude Code chat without its chat id, on a fresh MCP
    * session) is refused if a chat removed from that machine, folder and harness hasn't been let back.
    */
-  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }, legacyChatId?: string): RemovedChat | undefined {
+  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }): RemovedChat | undefined {
     return this.removedChats().find(
       (r) =>
         (!!chatId && r.chatId === chatId) ||
-        (!!legacyChatId && r.chatId === legacyChatId) ||
         (!!agentId && r.agentId === agentId) ||
         (!!folder?.cwd && r.machine === folder.machine && r.cwd === folder.cwd && r.harness === folder.harness),
     );

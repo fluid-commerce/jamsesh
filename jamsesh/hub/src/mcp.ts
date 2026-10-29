@@ -1,13 +1,11 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
-import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { isAbsolute, normalize } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { bus } from "./bus";
+import { canonicalCwd, chatKey } from "./chatkey";
 import { config } from "./config";
 import { ownTarget } from "./devproxy";
 import type { Hub } from "./hub";
@@ -272,20 +270,8 @@ const JAM_TOOLS = [
 ];
 
 /** The harness a connection belongs to, from the client name it gave at initialize. */
+export { canonicalCwd };
 export const harnessOfClient = (name: string | undefined) => (/claude/i.test(name ?? "") ? "claude-code" : /codex/i.test(name ?? "") ? "codex" : "other");
-
-/** A folder as one spelling: absolute, normalized, without a trailing slash, and (on this computer's own file system) its real path. */
-export function canonicalCwd(cwd: string, real: boolean) {
-  const c = cwd.trim();
-  if (!c || !isAbsolute(c)) return "";
-  let out = normalize(c).replace(/(.)\/+$/, "$1");
-  if (real) {
-    try {
-      out = realpathSync(out);
-    } catch {}
-  }
-  return out;
-}
 
 const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 
@@ -439,12 +425,10 @@ export class McpEndpoint {
         const claudeChat = harness === "claude-code" && typeof args.chat === "string" ? args.chat.trim().slice(0, 80) : "";
         // The key is a hash of the whole folder path, so two long paths that share a beginning stay two chats;
         // the readable folder is the agent's own `cwd`.
-        const keyed = harness !== "claude-code";
-        const chatId = claudeChat || (keyed ? `${harness}:${createHash("sha256").update(`${harness}:${machine}:${cwd}`).digest("hex")}` : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
-        const legacyChatId = !claudeChat && keyed ? `${harness}:${machine}:${cwd}`.slice(0, 300) : undefined;
+        const chatId = claudeChat || (harness !== "claude-code" ? chatKey(harness, machine, cwd) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
         // A chat the room removed stays out until a person lets it back in. A Claude Code join without its chat
         // id can't show it isn't the removed one: a removal in this folder counts.
-        if (s.rejoinBlocked(chatId, ctx.agentId, claudeChat ? undefined : { machine, cwd, harness }, legacyChatId))
+        if (s.rejoinBlocked(chatId, ctx.agentId, claudeChat ? undefined : { machine, cwd, harness }))
           throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
         // Rejoining keeps the stored role unless the caller names one (the session settles it).
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
@@ -458,7 +442,6 @@ export class McpEndpoint {
           cwd,
           machine,
           chatId, // see above
-          legacyChatId,
           platform: args.platform,
           focus: args.focus,
           name: args.name,
