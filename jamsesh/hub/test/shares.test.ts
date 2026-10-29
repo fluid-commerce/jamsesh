@@ -17,6 +17,8 @@ function room() {
   const s = new Session(new Store(mkdtempSync(join(dir, "s-"))));
   const felipe = s.upsertPerson({ name: "Felipe" });
   s.touchDevice("felipe-laptop", { label: "Felipe's laptop", personId: felipe.id, kind: "client" });
+  // The host's big screen window is open and reporting.
+  s.reportScreen("main", { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() });
   return { s, felipe };
 }
 
@@ -255,6 +257,36 @@ test("an extra display gets back what it showed when its share ends", () => {
   s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "screen-2");
   s.endShare(sh.id);
   expect(s.stage("screen-2")).toMatchObject({ mode: "compare", title: "Nav", items: ["a1", "a2"] });
+});
+
+test("a share shown only on the main screen stops once its window closes, or stops reporting", async () => {
+  const { s } = room();
+  await withGrace(30, async () => {
+    const sh = s.startShare("felipe-laptop", "screen");
+    s.placeShare(sh);
+    s.sweepShares();
+    expect(s.store.get("shares", sh.id)?.status).toBe("live");
+    s.removeScreen("main"); // the app says the big screen window closed
+    await Bun.sleep(120);
+    expect(s.store.get("shares", sh.id)?.status).toBe("ended");
+    expect(sent.find((m) => m.type === "share-ended" && m.shareId === sh.id)).toMatchObject({ text: expect.stringContaining("left the big screen") });
+    // A browser big screen that went quiet: its last report is past the 3-minute cutoff.
+    s.reportScreen("main", { ...display, screenX: 0, at: Date.now() });
+    const cam = s.startShare("felipe-laptop", "camera");
+    s.placeShare(cam);
+    s.sweepShares();
+    expect(s.store.get("shares", cam.id)?.status).toBe("live");
+    s.reportScreen("main", { ...display, screenX: 0, at: Date.now() - 4 * 60_000 });
+    s.sweepShares(); // starts its grace
+    await Bun.sleep(120);
+    expect(s.store.get("shares", cam.id)?.status).toBe("ended");
+    // The window opening again makes main a place to show things again.
+    s.reportScreen("main", { ...display, screenX: 0, at: Date.now() });
+    const again = s.startShare("felipe-laptop", "screen");
+    s.placeShare(again);
+    s.sweepShares();
+    expect(s.store.get("shares", again.id)?.status).toBe("live");
+  });
 });
 
 describe("share calls act only for the window that made them", () => {

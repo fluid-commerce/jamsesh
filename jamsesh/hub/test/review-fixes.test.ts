@@ -31,6 +31,8 @@ function room() {
   const s = new Session(new Store(mkdtempSync(join(dir, "s-"))));
   const felipe = s.upsertPerson({ name: "Felipe" });
   s.touchDevice("felipe-laptop", { label: "Felipe's laptop", personId: felipe.id, kind: "client" });
+  // The host's big screens are open and reporting.
+  for (const [id, screenX] of [["main", 0], ["screen-2", 1920]] as const) s.reportScreen(id, { width: 1920, height: 1080, dpr: 1, screenX, screenY: 0, at: Date.now() });
   return { s, felipe };
 }
 

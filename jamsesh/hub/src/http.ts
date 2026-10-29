@@ -741,7 +741,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     s.reportScreen(screen, info);
     return json({ ok: true });
   }
-  // A user-less big-screen window closed: it stops being a place to put things (main always stays).
+  // A big-screen window closed: it stops being a place to put things until a window for it reports again.
   if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
     const screen = String(body?.screen ?? "");
     if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);

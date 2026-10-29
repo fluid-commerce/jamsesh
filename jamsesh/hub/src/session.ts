@@ -989,10 +989,10 @@ export class Session {
   /** How often a share that is up gets looked at again, so a display that stops reporting is noticed. */
   static SHARE_CHECK_MS = 15_000;
 
-  /** Shares on a display that is there now: the main one, and extra displays still reporting (not closed or gone quiet). */
+  /** Shares on a display that is there now: one whose window still reports (not closed or gone quiet), the main one included. */
   private shownShareIds(): Set<string> {
     const ids = new Set<string>();
-    const screens = new Set(["main", ...this.screens().map((sc) => sc.id)]);
+    const screens = new Set(this.screens().map((sc) => sc.id));
     for (const screen of screens) {
       const st = this.stage(screen);
       if (st.mode === "layout") for (const t of st.layout?.tiles ?? []) if (t.kind === "screen") ids.add(t.shareId);
@@ -1113,9 +1113,9 @@ export class Session {
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,
-   *  not 3 minutes later. The main screen always stays. */
+   *  not 3 minutes later. The main screen's stage stays, and it counts again once its window reports. */
   removeScreen(id: string) {
-    if (id === "main" || !this.bigScreens.delete(id)) return;
+    if (!this.bigScreens.delete(id)) return;
     clearTimeout(this.screenReverts.get(id));
     this.screenReverts.delete(id);
     bus.changed("screens");
