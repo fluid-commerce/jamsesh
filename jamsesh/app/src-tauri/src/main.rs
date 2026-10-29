@@ -15,8 +15,8 @@ mod watchdog;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use projects::Launch;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
@@ -352,7 +352,11 @@ fn open_remote_setup(app: &AppHandle, origin: &str) {
         return;
     }
     if let Ok(url) = host::window_url(origin, "/setup?app").parse::<url::Url>() {
-        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)).devtools(devtools()).title("Remote access").inner_size(900.0, 820.0).build();
+        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url))
+            .devtools(devtools())
+            .title("Remote access")
+            .inner_size(900.0, 820.0)
+            .build();
     }
 }
 
@@ -482,7 +486,15 @@ async fn refresh_tray(app: &AppHandle) {
     let (role, label, hub_port, relay_port, userless, lobby, project) = {
         let inner = state.inner.lock().await;
         let label = inner.cfg.host_name.clone().or(inner.cfg.host_url.clone()).unwrap_or_default();
-        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port), inner.cfg.userless, inner.cfg.lobby, inner.cfg.project.clone())
+        (
+            inner.cfg.role.clone(),
+            label,
+            inner.hub.as_ref().map(|h| h.port),
+            inner.relay.as_ref().map(|r| r.port),
+            inner.cfg.userless,
+            inner.cfg.lobby,
+            inner.cfg.project.clone(),
+        )
     };
     let recent = if role.as_deref() == Some("host") { projects::recent(8) } else { Vec::new() };
     let st = match relay_port {
@@ -739,7 +751,13 @@ fn picker_may_open(label: &str, page: &url::Url, role: Option<&str>, hub_origin:
 /// Opens a project: ends the session running now (the hub saves and exits first, so nothing is lost),
 /// then starts the project's session, or today's again. Called from the picker (this command) and the menu bar.
 #[tauri::command]
-async fn open_project(app: AppHandle, webview: tauri::Webview, state: State<'_, Arc<App>>, slug: Option<String>, name: Option<String>) -> Result<(), String> {
+async fn open_project(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, Arc<App>>,
+    slug: Option<String>,
+    name: Option<String>,
+) -> Result<(), String> {
     let allowed = {
         let inner = state.inner.lock().await;
         let page = webview.url().map_err(|e| e.to_string())?;

@@ -226,7 +226,12 @@ pub fn resolve(ds: &[Display], saved: Option<&Saved>, userless: bool) -> Vec<Scr
         v.sort_by_key(|&i| !ds[i].raw.primary);
         v
     };
-    let main = by_pref.iter().copied().find(|&i| roles[i] == Role::Main).or_else(|| by_pref.iter().copied().find(|&i| roles[i] == Role::Extra)).unwrap_or(by_pref[0]);
+    let main = by_pref
+        .iter()
+        .copied()
+        .find(|&i| roles[i] == Role::Main)
+        .or_else(|| by_pref.iter().copied().find(|&i| roles[i] == Role::Extra))
+        .unwrap_or(by_pref[0]);
     for (i, r) in roles.iter_mut().enumerate() {
         if i == main {
             *r = Role::Main;
@@ -416,7 +421,12 @@ fn read_displays(app: &AppHandle) -> Vec<Display> {
             let s = if m.scale_factor() > 0.0 { m.scale_factor() } else { 1.0 };
             Raw {
                 name: m.name().cloned().unwrap_or_else(|| "Display".into()),
-                rect: Rect { x: m.position().x as f64 / s, y: m.position().y as f64 / s, w: m.size().width as f64 / s, h: m.size().height as f64 / s },
+                rect: Rect {
+                    x: m.position().x as f64 / s,
+                    y: m.position().y as f64 / s,
+                    w: m.size().width as f64 / s,
+                    h: m.size().height as f64 / s,
+                },
                 scale: s,
                 primary: Some((m.position().x, m.position().y)) == primary,
             }
@@ -909,7 +919,11 @@ mod tests {
         assert_eq!(v.displays[0].role, Role::Unused);
         assert_eq!(v.displays[1].role, Role::Main);
         assert_eq!(v.displays[1].id, "main");
-        let picks = vec![Pick { key: ds[0].key.clone(), role: Role::Extra, name: Some("  Desk  ".into()) }, Pick { key: ds[1].key.clone(), role: Role::Main, name: Some("".into()) }, Pick { key: "gone".into(), role: Role::Main, name: None }];
+        let picks = vec![
+            Pick { key: ds[0].key.clone(), role: Role::Extra, name: Some("  Desk  ".into()) },
+            Pick { key: ds[1].key.clone(), role: Role::Main, name: Some("".into()) },
+            Pick { key: "gone".into(), role: Role::Main, name: None },
+        ];
         let saved = merge(&ds, &picks, None, false);
         assert_eq!(saved.len(), 2);
         assert_eq!(saved[&ds[0].key].name.as_deref(), Some("Desk"));
