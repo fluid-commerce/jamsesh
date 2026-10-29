@@ -546,6 +546,62 @@ textarea:focus {
   min-height: 0;
 }
 
+.feed-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.feed-wrap > .feed {
+  flex: 1;
+  /* The feed holds the reader's place itself when lines are added above them. */
+  overflow-anchor: none;
+}
+
+/* Floats over the bottom of the feed while the reader is reading back. */
+.feed-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px 0 10px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  animation: fadein 0.2s ease both;
+  cursor: pointer;
+}
+
+.feed-latest:hover {
+  background: var(--panel-2);
+}
+
+.feed-older {
+  align-self: center;
+  flex: none;
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.feed-older:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
 .feed::-webkit-scrollbar {
   display: none;
 }

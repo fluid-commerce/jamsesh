@@ -368,24 +368,139 @@ function toneStyle(tone: string) {
 
 const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "update", "message", "artifact"]);
 
+/** How close to the bottom still counts as "at the bottom" (px). */
+const AT_BOTTOM = 40;
+/** Start loading older lines when the reader is this close to the top (px). */
+const NEAR_TOP = 160;
+
+/**
+ * The room's conversation. The reader's own scroll position rules: new lines are followed only
+ * while the reader is at the bottom; scrolling up stops following and shows a "Latest" pill with
+ * the count of what came in meanwhile. Older lines than the live state carries load from the hub
+ * as the reader reaches the top. The big screens (`big`) always follow and keep a short tail.
+ * The feed scrolls its own box (scrollTop), never its ancestors.
+ */
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   const { state } = useHub();
-  const end = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
-  const events = (state?.events ?? []).filter((e) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind))));
-  const last = events[events.length - 1]?.id;
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  // Every line this window has seen, so lines the live state trims (or the reader loaded) stay put.
+  const seen = useRef(new Map<number, JamEvent>());
+  const following = useRef(true);
+  const [away, setAway] = useState(false);
+  // The newest line the reader had reached when they scrolled away: what's after it is "new".
+  const readTo = useRef(0);
+  // Where the box was before older lines went in above, to hold the reader's place.
+  const holdPlace = useRef<{ height: number; top: number } | null>(null);
+  const busy = useRef(false);
+  const [older, setOlder] = useState<{ loading: boolean; failed: boolean; done: boolean; more: number | null }>({ loading: false, failed: false, done: false, more: null });
+
+  for (const e of state?.events ?? []) seen.current.set(e.id, e);
+  const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
+  const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
+  const events = big ? all.slice(-140) : all;
+  const last = events[events.length - 1]?.id ?? 0;
+  const first = events[0]?.id;
+  const everything = !!state && state.totals.events <= state.events.length;
+  const exhausted = big || older.done || everything;
+  const fresh = following.current ? 0 : events.filter((e) => e.id > readTo.current).length;
+
+  const toBottom = (smooth = false) => {
+    const el = box.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  };
+
+  const onScroll = () => {
+    const el = box.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM;
+    if (atBottom !== following.current) {
+      following.current = atBottom;
+      setAway(!atBottom);
+    }
+    if (atBottom) readTo.current = last;
+    if (!big && el.scrollTop < NEAR_TOP) void loadOlder();
+  };
+
+  const loadOlder = async () => {
+    const el = box.current;
+    if (!el || exhausted || busy.current || holdPlace.current || first == null) return;
+    busy.current = true;
+    setOlder((o) => ({ ...o, loading: true, failed: false }));
+    try {
+      const kinds = [...FEED_KINDS].join(",");
+      const r = await api<{ items: JamEvent[]; more: number }>(`/history/events?before=${first}&limit=60&kinds=${kinds}`);
+      holdPlace.current = { height: el.scrollHeight, top: el.scrollTop };
+      for (const e of r.items) seen.current.set(e.id, e);
+      setOlder({ loading: false, failed: false, done: r.more === 0 || r.items.length === 0, more: r.more });
+    } catch {
+      setOlder((o) => ({ ...o, loading: false, failed: true }));
+    } finally {
+      busy.current = false;
+    }
+  };
+
+  // After lines are added above the reader, put the box back where they were looking.
+  useLayoutEffect(() => {
+    const el = box.current;
+    const h = holdPlace.current;
+    if (!el || !h) return;
+    holdPlace.current = null;
+    el.scrollTop = h.top + (el.scrollHeight - h.height);
+  });
+
+  // New lines: follow them while the reader is at the bottom, otherwise leave the box alone.
+  useLayoutEffect(() => {
+    if (following.current) {
+      readTo.current = last;
+      toBottom();
+    }
   }, [last]);
+
+  // A taller or shorter box (keyboard, resize) keeps the reader at the bottom if they were there.
+  useEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => following.current && toBottom());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // A short feed that doesn't fill its box has no scrolling to trigger the load.
+  useEffect(() => {
+    const el = box.current;
+    if (el && !big && !exhausted && first != null && el.scrollHeight <= el.clientHeight + NEAR_TOP) void loadOlder();
+  }, [first, exhausted]);
+
   if (!state) return null;
+  const jump = () => {
+    following.current = true;
+    readTo.current = last;
+    setAway(false);
+    toBottom(true);
+  };
   return (
-    <div className="feed" style={{ flex: 1, fontSize: big ? 17 : 14 }}>
-      {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
-      {events.slice(-140).map((e) => (
-        <FeedLine key={e.id} e={e} state={state} editable={editable} condensed={big} onSpeaker={(ev, x, y) => setPop({ ev, x, y })} />
-      ))}
-      <div ref={end} />
-      {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
+    <div className="feed-wrap">
+      <div ref={box} className="feed" onScroll={onScroll} style={{ fontSize: big ? 17 : 14 }}>
+        {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
+        {!exhausted && events.length > 0 && (
+          <button className="feed-older" disabled={older.loading} onClick={() => void loadOlder()}>
+            {older.loading ? "Loading earlier lines" : older.failed ? "Couldn't load earlier lines. Try again" : older.more ? `${older.more} earlier ${older.more === 1 ? "line" : "lines"}` : "Earlier lines"}
+          </button>
+        )}
+        {events.map((e) => (
+          <FeedLine key={e.id} e={e} state={state} editable={editable} condensed={big} onSpeaker={(ev, x, y) => setPop({ ev, x, y })} />
+        ))}
+        {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
+      </div>
+      {away && !big && (
+        <button className="feed-latest" onClick={jump} aria-label={fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+          {fresh ? `Latest · ${fresh} new` : "Latest"}
+        </button>
+      )}
     </div>
   );
 }
