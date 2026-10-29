@@ -554,7 +554,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
   m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
   if (m && req.method === "POST") {
-    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
+    let moved;
+    try {
+      moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" && body.to ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
+    } catch (e) {
+      return bad(e instanceof Error ? e.message : String(e));
+    }
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
   }
 

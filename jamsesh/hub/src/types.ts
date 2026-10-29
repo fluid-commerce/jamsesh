@@ -191,6 +191,8 @@ export interface DevServer {
   url: string;
   platform: Platform | null;
   createdAt: number;
+  /** Goes up each time it is registered again (same id), so a check of an earlier registration is told apart. */
+  generation?: number;
   up: boolean;
   /** Why it isn't answering, in words for the tile ("Chey's Context Gatherer stopped this build"). */
   problem?: string;

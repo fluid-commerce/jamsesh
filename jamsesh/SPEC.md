@@ -262,7 +262,12 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   credential file in one step with a mode 600 one (so a looser old mode never carries over), keeps
   `~/.claude/settings.json`'s own mode, quotes the hook path (homes with spaces work), and edits
   Codex's `config.toml` by its table headers (a `[` inside a value or a multi-line string is not a
-  header). The address in the setup script comes from `X-Forwarded-Host` only when a relay or
+  header; comments and one-line strings are skipped when looking for multi-line strings). Reinstalling
+  removes only JamSesh's own hook commands (its `~/.jamsesh/hook.sh` with one of its verbs), keeping a
+  person's hooks even in the same group. Edited files are written through a new private temporary
+  file in the same folder (created exclusively, mode 600), then given the file's mode and moved into
+  place. The MCP server's instructions say to join only when the person asks, in the launcher skill's
+  words. The address in the setup script comes from `X-Forwarded-Host` only when a relay or
   tunnel on the host sent it and it is plainly a host and port; every value in the script is one
   single-quoted shell word.
 - Each paired device has a kind: **browser** (a person's window, browser, or Mac app) or
@@ -600,8 +605,10 @@ items marked delivered (and the message and decision marks moved). While a hando
 acknowledgement nothing more is handed over; after 60 seconds everything unacknowledged is offered
 again under a new id, and a listener that calls again without acknowledging the last listener's
 answer gets it again at once. `jam_inbox` and `jam_wait` answer the agent directly and mark what they
-return, including anything a lost hook answer held. Room decisions ride the same deliveries; `Stop`
-doesn't keep an agent working for decisions alone. Room-wide messages (to everyone) skip the
+return, including anything a lost hook answer held. Room decisions ride the same deliveries, read
+forward from the agent's decision cursor ten at a time, so a bigger burst arrives over successive
+handovers and the cursor only passes what was handed over; `Stop` doesn't keep an agent working for
+decisions alone. Room-wide messages (to everyone) skip the
 sender and observers that opted out (6.3b).
 
 An install made before this version has no `PostToolUse` or listener hook. The hub remembers per
@@ -624,7 +631,9 @@ ack it, report where it is, or say it's stuck. An answer starts the clock again.
 10 minutes after the ask, or the agent is offline, the room sees "<agent> hasn't reported on ...
 Reassign it from the agent's tile" (an event and a toast), and the tile shows a **Reassign**
 button. Reassigning (`POST /api/directives/<id>/reassign`, people only) cancels the task for its
-agent and sends it to the best-matching free worker (or the one named), saying who it came from.
+agent and sends it to the best-matching free worker, saying who it came from. A named recipient
+(`to`) gets it or the request is refused with why (no such agent, an observer, offline, or already
+on the task); it never falls back to someone else.
 The hub checks every minute (`Session.tick`), each target of a task on its own: two targets going
 quiet in the same minute each get one nudge and, later, one offer.
 
@@ -666,7 +675,9 @@ with product work (`explore`, `implement`, `coordinate`: it's dropped from the t
 brain is told so); `answer` and `note` directives and direct messages still reach it. With
 `broadcasts: false`, room-wide messages (to everyone) don't reach it. Observers are left out of
 affinity routing and the brain's agent list (listed separately, as not to be given work). Joining
-again without `role` leaves the role as it was.
+again without `role` leaves the role as it was. An observer can't take a workstream: `jam_claim`
+refuses, and a `jam_update` with a `workstream` posts untagged. A worker's update that takes up a
+workstream for the first time is announced like a claim (as work nobody asked for, when it is).
 
 ### 6.4 Prompts as context
 

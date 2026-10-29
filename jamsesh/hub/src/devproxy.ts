@@ -78,6 +78,7 @@ export class DevProxy {
       url: `http://${config.publicHost}:${hostPort}`,
       platform: opts.platform ?? this.session.agent(opts.agentId)?.platform ?? null,
       createdAt: existing?.createdAt ?? Date.now(),
+      generation: (existing?.generation ?? 0) + 1,
       up: false,
     };
     await this.listen(d);
@@ -203,8 +204,11 @@ export class DevProxy {
    * if it stays down a few minutes its tile clears itself.
    */
   async refresh(now = Date.now()) {
-    for (const d of this.session.devservers()) {
-      const up = await this.check(d);
+    for (const checked of this.session.devservers()) {
+      const up = await this.check(checked);
+      // Registered again (or removed) while it was being checked: that result is about a server that's gone.
+      const d = this.session.store.get("devservers", checked.id);
+      if (!d || (d.generation ?? 0) !== (checked.generation ?? 0) || d.target !== checked.target) continue;
       if (up) {
         if (!d.up || d.problem || d.downSince) this.session.store.patch("devservers", d.id, { up: true, problem: undefined, downSince: undefined });
         continue;

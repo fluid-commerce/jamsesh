@@ -10,7 +10,7 @@ import { ownTarget } from "./devproxy";
 import type { Hub } from "./hub";
 import { shortRepo, type UpdateKind } from "./session";
 import type { Agent, Directive, JamEvent } from "./types";
-import { skillMarkdown } from "./skill";
+import { JOIN_RULE, skillMarkdown } from "./skill";
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type ToolOut = { content: Content[]; isError?: boolean };
@@ -336,7 +336,7 @@ export class McpEndpoint {
       {
         capabilities: { tools: {}, prompts: {} },
         instructions:
-          "You are connected to a JamSesh room session. Call jam_join first. Then follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, when idle: Claude Code stops (JamSesh wakes it when the room has something), Codex calls jam_wait (it returns after a few minutes with nothing; call it again), and verify mockups against the design system and builds against mockups.",
+          `These tools connect this chat to a live JamSesh room session with jam_join. ${JOIN_RULE} Until your person asks, don't call any JamSesh tool. Once you've joined, follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, when idle: Claude Code stops (JamSesh wakes it when the room has something), Codex calls jam_wait (it returns after a few minutes with nothing; call it again), and verify mockups against the design system and builds against mockups.`,
       },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.toolList() }));
@@ -477,7 +477,6 @@ export class McpEndpoint {
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
-        if (agent.role === "observer") throw new Error("You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.");
         const { workstream, conflict } = s.claim(agent.id, String(args.workstream), { force: !!args.force });
         if (conflict) return text(`"${workstream.title}" belongs to ${conflict.name} (${conflict.status}, ${conflict.activity}). Message them with jam_message to split the work, or pass force:true if the room reassigned it.`);
         return text(`You own "${workstream.title}".${workstream.brief ? `\n\nBrief so far:\n${workstream.brief}` : ""}`);

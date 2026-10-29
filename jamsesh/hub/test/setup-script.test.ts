@@ -314,4 +314,46 @@ describe("agent setup script", () => {
     expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
     expect(toml).toContain(`url = "${origin}/mcp"`);
   });
+
+  test("reinstalling takes out only JamSesh's own hook commands, keeping a person's hooks even in the same group", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const settings = join(box.home, ".claude/settings.json");
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    const mine = { type: "command", command: "~/bin/jamsesh-notify.sh --room jamsesh" };
+    writeFileSync(
+      settings,
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            { hooks: [{ type: "command", command: "/Users/old/.jamsesh/hook.sh stop" }, mine] },
+            { matcher: "", hooks: [{ type: "command", command: "'/Users/old/.jamsesh/hook.sh' listen", asyncRewake: true }] },
+          ],
+          PostToolUse: [{ hooks: [{ type: "command", command: "echo jamsesh is great" }] }],
+          SessionStart: [{ hooks: [{ type: "command", command: "/x/.jamsesh/hook.sh start" }] }],
+        },
+      }),
+    );
+    expect((await run(box)).code).toBe(0);
+    const hooks = JSON.parse(readFileSync(settings, "utf8")).hooks;
+    const cmds = (event: string) => hooks[event].flatMap((g: any) => g.hooks.map((h: any) => h.command));
+    expect(cmds("Stop")).toEqual([mine.command, `'${box.home}/.jamsesh/hook.sh' stop`, `'${box.home}/.jamsesh/hook.sh' listen`]);
+    expect(cmds("PostToolUse")).toEqual(["echo jamsesh is great", `'${box.home}/.jamsesh/hook.sh' tool`]);
+    expect(hooks.SessionStart).toBeUndefined();
+    // Reinstalling again changes nothing more.
+    expect((await run(box)).code).toBe(0);
+    expect(JSON.parse(readFileSync(settings, "utf8")).hooks).toEqual(hooks);
+  });
+
+  test("Codex: triple quotes in a comment don't hide JamSesh's table", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    writeFileSync(config, ['model = "gpt" # a comment with """ in it', "", "[mcp_servers.jamsesh]", 'url = "http://old/mcp"', "", "[keep]", 'a = "b\\" # [c]"', ""].join("\n"));
+    expect((await run(box)).code).toBe(0);
+    const toml = readFileSync(config, "utf8");
+    expect(toml).not.toContain("http://old/mcp");
+    expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
+    expect(toml).toContain('[keep]\na = "b\\" # [c]"');
+  });
 });

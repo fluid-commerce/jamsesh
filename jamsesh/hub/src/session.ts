@@ -36,6 +36,8 @@ export const AGENT_OFFLINE_MS = 20 * 60_000;
 /** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
 export const TASK_STALE_MS = 20 * 60_000;
 export const TASK_OFFER_MS = 10 * 60_000;
+/** Why an observer can't take a workstream (jam_claim and Session.claim say the same). */
+export const OBSERVER_CLAIM = "You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.";
 /** A person prompt this recent means the agent's own work was asked for. */
 const ASKED_WINDOW_MS = 30 * 60_000;
 
@@ -648,8 +650,12 @@ export class Session {
   postUpdate(agentId: string, kind: UpdateKind, text: string, extra: { workstream?: string; data?: Record<string, any> } = {}) {
     const agent = this.agent(agentId);
     if (!agent) throw new Error("Unknown agent; call jam_join first.");
-    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its brief.
-    const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
+    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its
+    // brief. An observer claims nothing, so its update stays untagged too. A workstream the update takes
+    // up for the first time is announced like any claim (work nobody asked for included).
+    const mine = (w: Workstream) => w.ownerAgentId === agentId && w.status === "active";
+    const already = !!extra.workstream && this.store.all("workstreams").some((w) => mine(w) && normalize(w.title) === normalize(extra.workstream!));
+    const claimed = extra.workstream && agent.role !== "observer" ? this.claim(agentId, extra.workstream, { quiet: already }) : undefined;
     const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
     const short = this.shelve(agent, text);
     const ev = this.store.addEvent({
@@ -676,6 +682,7 @@ export class Session {
 
   claim(agentId: string, title: string, opts: { quiet?: boolean; force?: boolean } = {}) {
     const agent = this.agent(agentId);
+    if (agent?.role === "observer") throw new Error(OBSERVER_CLAIM);
     const t = title.trim();
     const key = normalize(t);
     const existing = this.store.all("workstreams").find((w) => normalize(w.title) === key);
@@ -809,7 +816,12 @@ export class Session {
     if (!from.length) return undefined;
     const taken = new Set(d.targets);
     const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
-    const pick = (to ? live.find((a) => a.id === to) : undefined) ?? (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
+    // A named recipient is that agent or nobody: never someone the person didn't choose.
+    if (to && !live.some((a) => a.id === to)) {
+      const named = this.agent(to);
+      throw new Error(!named ? "There's no agent with that id." : named.role === "observer" ? `${named.name} only watches, so it can't take work.` : taken.has(named.id) ? `${named.name} already has this task.` : `${named.name} is offline, so it can't take it now.`);
+    }
+    const pick = to ? live.find((a) => a.id === to) : (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
     if (!pick) {
       bus.send({ type: "toast", tone: "warn", text: "Nobody else is free to take it", detail: d.text.slice(0, 100) });
       return undefined;
@@ -1010,7 +1022,19 @@ export class Session {
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
     const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
-    // Page back until enough are relevant: other workstreams' decisions can't crowd one out.
+    // After a cursor (what an agent was last handed), read forward oldest first: a burst bigger than
+    // the limit arrives over successive handovers, and the cursor never passes one it didn't hand over.
+    if (opts.afterId != null) {
+      const next: JamEvent[] = [];
+      for (let after = opts.afterId; next.length < opts.limit; ) {
+        const page = this.store.eventsAfter(after, ["decision"], 200);
+        for (const e of page) if (relevant(e) && next.length < opts.limit) next.push(e);
+        if (page.length < 200) break;
+        after = page[page.length - 1].id;
+      }
+      return next;
+    }
+    // The latest: page back until enough are relevant, so other workstreams' decisions can't crowd one out.
     const out: JamEvent[] = [];
     let beforeId: number | undefined;
     while (out.length < opts.limit) {

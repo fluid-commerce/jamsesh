@@ -179,7 +179,7 @@ export const OLD_BLOCKS = [
  * file (a shared CLAUDE.md/AGENTS.md) is edited at its target, so the link stays a link. A file
  * with no block isn't rewritten.
  */
-export const STRIP_BLOCK_PL = String.raw`use strict; use warnings; use Cwd qw(abs_path);
+export const STRIP_BLOCK_PL = String.raw`use strict; use warnings; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($path) = @ARGV;
 exit 0 unless -f $path;
 my $real = abs_path($path) // exit 0;
@@ -209,8 +209,10 @@ for my $old (@blocks) {
 exit 0 unless $changed;
 if ($text eq '' && !-l $path) { unlink $real; exit 0; }
 my $mode = (stat $real)[2] & 07777;
-my $tmp = "$real.jamsesh-tmp";
-open(my $o, '>:raw', $tmp) or die "JamSesh: can't write $tmp: $!\n";
+# A new private file next to it (created exclusively, mode 600): its contents are never readable to
+# others on the way, and a file left at a predictable name can't be written through.
+my ($o, $tmp) = File::Temp::tempfile('.jamsesh-strip-XXXXXXXX', DIR => File::Basename::dirname($real));
+binmode $o;
 print $o $text;
 close $o or die "JamSesh: can't write $tmp: $!\n";
 chmod $mode, $tmp;
@@ -289,7 +291,7 @@ DIR="$HOME/.jamsesh"
 mkdir -p "$DIR" && chmod 700 "$DIR"
 # Replaces a credential file in one step with a private one (mode 600), from standard input: an
 # existing file is never written in place, so a looser mode it had never carries over.
-private() { local t="$1.jamsesh-tmp.$$"; (umask 077 && cat > "$t") && chmod 600 "$t" && mv -f "$t" "$1"; }
+private() { local t; t="$(mktemp "$1.XXXXXXXX")" && cat > "$t" && chmod 600 "$t" && mv -f "$t" "$1"; }
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
 # Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
@@ -377,7 +379,7 @@ Join the JamSesh room session and work as part of it.
 CMD
   # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
   perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" <<'PL'
-use strict; use warnings; use JSON::PP; use Cwd qw(abs_path);
+use strict; use warnings; use JSON::PP; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($hook, $path) = @ARGV;
 # A symlinked settings file is edited at its target, and keeps its mode (it may hold secrets).
 $path = abs_path($path) // $path if -l $path;
@@ -397,26 +399,47 @@ if (-e $path) {
 }
 $data->{hooks} = {} unless ref $data->{hooks} eq 'HASH';
 my $hooks = $data->{hooks};
-my $plain = JSON::PP->new->allow_nonref;
+# Only JamSesh's own hook commands go: its hook script (~/.jamsesh/hook.sh, under any home, quoted or
+# not) with one of its verbs, and nothing else. A person's own hook stays, even in the same group,
+# and even if its path or arguments mention JamSesh.
+sub ours {
+  my ($h) = @_;
+  return 0 unless ref $h eq 'HASH' && defined $h->{command} && !ref $h->{command};
+  my $c = $h->{command};
+  my $p = $c =~ /^'((?:[^']|'\\\\'')*)' (start|prompt|tool|stop|listen)\\z/ ? $1 =~ s/'\\\\''/'/gr : $c =~ /^(\\S+) (start|prompt|tool|stop|listen)\\z/ ? $1 : '';
+  return $p =~ m{(^|/)\\.jamsesh/hook\\.sh\\z} ? 1 : 0;
+}
+sub without_ours {
+  my @groups;
+  for my $g (@_) {
+    if (ref $g eq 'HASH' && ref $g->{hooks} eq 'ARRAY') {
+      my @left = grep { !ours($_) } @{ $g->{hooks} };
+      next unless @left;
+      push @groups, @left == @{ $g->{hooks} } ? $g : { %$g, hooks => \\@left };
+    } else {
+      push @groups, $g;
+    }
+  }
+  return @groups;
+}
 # JamSesh no longer reminds every new session to join: take that hook out of earlier installs.
 if (ref $hooks->{SessionStart} eq 'ARRAY') {
-  my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } @{ $hooks->{SessionStart} };
+  my @kept = without_ours(@{ $hooks->{SessionStart} });
   if (@kept) { $hooks->{SessionStart} = \\@kept } else { delete $hooks->{SessionStart} }
 }
 for my $pair (['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 'stop']) {
   my ($event, $arg) = @$pair;
-  my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
+  my @kept = without_ours(ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
   push @kept, { hooks => [{ type => 'command', command => "$cmd $arg", timeout => 15 }] };
   # An idle agent is woken by a background listener that holds until the room has something for it.
   push @kept, { hooks => [{ type => 'command', command => "$cmd listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
   $hooks->{$event} = \\@kept;
 }
-my $tmp = "$path.jamsesh-tmp";
-umask 077;
-open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
-chmod $mode, $tmp;
+# Written to a new private file next to it (created exclusively, mode 600), then put in place.
+my ($out, $tmp) = File::Temp::tempfile('.settings.jamsesh-XXXXXXXX', DIR => File::Basename::dirname($path));
 print $out JSON::PP->new->pretty->canonical->encode($data);
 close $out or die "JamSesh: can't write $tmp: $!\\n";
+chmod $mode, $tmp;
 rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
 PL
   ok "Claude Code: MCP server, skill, /jamsesh command, hooks (a chat joins only when told to)"
@@ -429,7 +452,7 @@ if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/prompts"
   # The token comes from the header file, not this process's arguments or environment.
   perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" <<'PL'
-use strict; use warnings;
+use strict; use warnings; use File::Temp (); use File::Basename ();
 my ($hub, $header, $path) = @ARGV;
 my $token = '';
 if (open(my $h, '<', $header)) { ($token) = (<$h> // '') =~ /Bearer\\s+(\\S+)/; close $h; }
@@ -439,6 +462,31 @@ if (-e $path) {
   open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
   $text = do { local $/; <$in> };
   close $in;
+}
+# Where a line leaves us: inside a multi-line string (its opening quotes) or not (''). Comments and
+# one-line strings are skipped, so quotes in a comment or a value never start a multi-line string.
+sub scan {
+  my ($line, $long) = @_;
+  my ($i, $n) = (0, length $line);
+  while ($i < $n) {
+    if ($long) {
+      my $j = index($line, $long, $i);
+      return $long if $j < 0;
+      ($i, $long) = ($j + 3, '');
+      next;
+    }
+    my $c = substr($line, $i, 1);
+    return '' if $c eq '#';
+    my $three = substr($line, $i, 3);
+    if ($three eq '"' x 3 || $three eq "'" x 3) { ($long, $i) = ($three, $i + 3); next; }
+    if ($c eq '"') {
+      for ($i++; $i < $n; $i++) { my $d = substr($line, $i, 1); if ($d eq '\\\\') { $i++; next } if ($d eq '"') { $i++; last } }
+      next;
+    }
+    if ($c eq "'") { my $j = index($line, "'", $i + 1); $i = $j < 0 ? $n : $j + 1; next; }
+    $i++;
+  }
+  return $long;
 }
 # Takes out JamSesh's own tables ([mcp_servers.jamsesh] and its subtables) by their header lines, so
 # a "[" inside a value (an IPv6 address, a comment) or a multi-line string never ends a table early.
@@ -450,20 +498,15 @@ for my $line (split /(?<=\\n)/, $text) {
     $ours = $name =~ /^mcp_servers\\.jamsesh(\\.|\\z)/ ? 1 : 0;
   }
   $kept .= $line unless $ours;
-  # Inside a multi-line string nothing is a header: count the quote triples that open and close one.
-  for my $q ('"' x 3, "'" x 3) {
-    my $n = () = $line =~ /\\Q$q\\E/g;
-    $long = $long eq $q ? '' : $q if $n % 2 && (!$long || $long eq $q);
-  }
+  # Inside a multi-line string nothing is a header.
+  $long = scan($line, $long);
 }
 $text = $kept;
 $text =~ s/\\s+\\z//;
 (my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
 (my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
 $text .= ($text eq '' ? '' : "\\n\\n") . "[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n";
-my $tmp = "$path.jamsesh-tmp";
-umask 077;
-open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+my ($out, $tmp) = File::Temp::tempfile('.config.jamsesh-XXXXXXXX', DIR => File::Basename::dirname($path));
 print $out $text;
 close $out or die "JamSesh: can't write $tmp: $!\\n";
 chmod 0600, $tmp;

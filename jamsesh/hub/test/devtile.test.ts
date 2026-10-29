@@ -98,3 +98,31 @@ test("mentioning a localhost address that isn't shared gets the step to share it
   expect(s.shareNudge(agent.id, `now at http://localhost:${srv.port}`)).toBe("");
   srv.stop(true);
 });
+
+test("a check that was running when the build was registered again doesn't touch the new registration", async () => {
+  const { hub, s, agent } = room();
+  const old = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("old") });
+  const fresh = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("new") });
+  try {
+    const d = await hub.devproxy.register({ agentId: agent.id, name: "Web build", target: `127.0.0.1:${old.port}` });
+    // The check of the old registration is slow and finds it down; meanwhile the agent registers it again.
+    const real = hub.devproxy.check.bind(hub.devproxy);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    hub.devproxy.check = async (x) => (x.target.endsWith(`:${old.port}`) ? (await held, false) : real(x));
+    const t0 = Date.now();
+    const refreshing = hub.devproxy.refresh(t0 + hub.devproxy.goneMs + 60_000);
+    await Bun.sleep(20);
+    hub.devproxy.check = real;
+    const again = await hub.devproxy.register({ agentId: agent.id, name: "Web build", target: `127.0.0.1:${fresh.port}` });
+    expect(again.id).toBe(d.id);
+    release();
+    await refreshing;
+    const now = s.devservers().find((x) => x.id === d.id);
+    expect(now).toMatchObject({ up: true, target: `127.0.0.1:${fresh.port}` });
+    expect(now?.problem).toBeUndefined();
+  } finally {
+    old.stop(true);
+    fresh.stop(true);
+  }
+});
