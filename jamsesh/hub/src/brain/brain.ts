@@ -929,10 +929,10 @@ export class Brain {
     if ([...ids, ...others.map((o) => o.id)].every(recentCoordinate)) return;
     this.consider(
       `Shipped just now:\n${batch.map((b) => `- ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
-        `Most ships need nothing from anyone: the notice is already readable by every agent in jam_context ("Recently shipped"), and a directive lands in an inbox as work. Decide first: does another agent have to DO something because of this (the same user-visible change is missing on their platform, or their work now conflicts with it)? If not, call no_action. ` +
+        `The notice is already readable by every agent in jam_context ("Recently shipped"), so don't send a directive just to pass the news on: a directive lands in an inbox as work. But a user-visible feature or screen that shipped on one platform is a parity question for the others, and that is what 'coordinate' is for. Send one when the same user-facing change belongs in another platform's app. Otherwise call no_action: a commit, refactor, fix, dependency or tooling change, or a change that is deliberately one platform's. ` +
         (others.length
-          ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. Only when the same user-visible change clearly belongs in their apps, send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders. A commit, refactor, fix or tooling change on one branch is not a parity gap.`
-          : `Both platforms shipped. Only if they shipped the same feature and may differ in ways that aren't deliberate platform differences, send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message.`) +
+          ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. Send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders.`
+          : `Both platforms shipped. If they shipped the same feature, send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message and fix inconsistencies that aren't deliberate platform differences.`) +
         ` Don't send a coordinate directive to an agent that already has an open one.`,
     );
   }
