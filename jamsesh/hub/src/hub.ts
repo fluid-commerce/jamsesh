@@ -153,6 +153,8 @@ export class Hub {
   async start() {
     const tasks: Promise<unknown>[] = [this.net.start().catch((e) => console.error("net:", e))];
     if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal().then((ok) => console.log(ok ? "whisper: local whisper.cpp ready" : "whisper: no local model, using the gateway")));
+    // Not awaited: the first start downloads the model, and the room is heard by whisper or the gateway meanwhile.
+    if (this.opts.whisper !== false) void this.transcriber.startParakeet().then((ok) => console.log(ok ? "parakeet: ready" : `parakeet: ${this.transcriber.parakeet.status().detail}`));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
     this.autosave.start();

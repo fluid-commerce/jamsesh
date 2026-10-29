@@ -2,6 +2,7 @@
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
+import { cleanVocabulary } from "./audio/vocabulary";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
 import { newId, PALETTE, Store } from "./store";
@@ -134,6 +135,7 @@ export class Session {
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),
+      vocabulary: cleanVocabulary(s.setting<unknown>("vocabulary", [])),
       gatewayKeySet: keyInSettings || !!config.envGatewayKey,
       gatewayKeySource: keyInSettings ? "settings" : config.envGatewayKey ? "env" : "none",
     };
@@ -153,11 +155,12 @@ export class Session {
   }
 
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
+    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language", "vocabulary"] as const;
     for (const k of allowed) {
       if (patch[k] === undefined) continue;
       // The API is the contract: a paired browser can post anything.
       if (k === "brainAliases") this.store.setSetting(k, cleanNames(patch[k]));
+      else if (k === "vocabulary") this.store.setSetting(k, cleanVocabulary(patch[k]));
       else if (k === "brainName") {
         const n = typeof patch[k] === "string" ? patch[k].trim().slice(0, MAX_NAME) : "";
         if (n) this.store.setSetting(k, n);

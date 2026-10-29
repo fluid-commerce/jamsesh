@@ -1,15 +1,20 @@
-// Speech to text. Order: local whisper.cpp on the host, whisper servers that client
-// machines offer, then the gateway. A pool spreads work across whoever is free.
+// Speech to text. Order: Parakeet on the host (5.2), local whisper.cpp, whisper servers that client
+// machines offer, then the gateway. A pool spreads work across whoever is free. Every engine is
+// biased toward the room's vocabulary, and its text goes through the same correction pass.
 import { transcribe as aiTranscribe } from "ai";
 import { bus } from "../bus";
 import { config } from "../config";
 import type { Session } from "../session";
 import { describeError, gateway } from "../brain/llm";
+import { brainNames } from "../names";
+import { Parakeet } from "./parakeet";
+import { buildVocabulary, correctTranscript, hotwords, promptWith, type VocabEntry } from "./vocabulary";
 
 interface Engine {
   id: string;
   label: string;
-  kind: "local" | "worker";
+  /** parakeet takes hotwords and English only; whisper engines take a prompt. */
+  kind: "parakeet" | "local" | "worker";
   url: string;
   inflight: number;
   failures: number;
@@ -52,10 +57,14 @@ export function cleanTranscript(text: string, durationSec: number, snr = Infinit
   return t;
 }
 const CLEAN_VOICE_SNR = 15;
+const RANK = { parakeet: 0, local: 1, worker: 2 };
 
 export class Transcriber {
   private engines = new Map<string, Engine>();
   private localProc: ReturnType<typeof Bun.spawn> | null = null;
+  readonly parakeet = new Parakeet();
+  /** Project terms beyond the session's own names (the brief's glossary); the hub sets this. */
+  glossary: () => string[] = () => [];
 
   /** Why nothing is being heard, when that is the case (shown on the big screen and in Settings). */
   private trouble: string | null = null;
@@ -73,12 +82,47 @@ export class Transcriber {
   problem(): string | null {
     const mode = this.session.settings().transcription;
     if (this.trouble) return this.trouble;
-    const local = [...this.engines.values()].some((e) => e.failures < 3);
+    const local = this.pool().length > 0;
     if (mode !== "gateway" && local) return null;
     if (mode !== "local" && gateway(this.session)) return null;
+    const model = this.parakeet.status();
+    if (model.state === "downloading" || model.state === "starting") return `Speech can't be turned into text yet: ${model.detail.replace(/\.$/, "")}${model.progress !== null ? ` (${model.progress}%)` : ""}.`;
     return mode === "local"
-      ? "Speech can't be turned into text: no local whisper is running. Install whisper-cpp and a model, or let the gateway transcribe in Settings."
-      : "Speech can't be turned into text: no whisper model is installed and no gateway key is set. Add a gateway key in Settings or install whisper-cpp.";
+      ? `Speech can't be turned into text: no speech model is running on this host (${model.detail.replace(/\.$/, "")}). Let the gateway transcribe in Settings.`
+      : `Speech can't be turned into text: no speech model is running on this host and no gateway key is set. Add a gateway key in Settings.`;
+  }
+
+  /** The words every engine is biased toward: people, agents, the brain's names, the room's list, glossary, workstreams. */
+  vocabulary(): VocabEntry[] {
+    const s = this.session;
+    return buildVocabulary({
+      people: s.people().map((p) => p.name),
+      agents: s.agents().map((a) => a.name),
+      brain: brainNames(s.settings()),
+      custom: s.settings().vocabulary,
+      terms: this.glossary(),
+      workstreams: s.store.all("workstreams").filter((w) => w.status === "active").map((w) => w.title),
+    });
+  }
+
+  /** Healthy engines that can take this session's language, least busy first, then by preference. */
+  private pool() {
+    const english = this.language() === "en";
+    return [...this.engines.values()].filter((e) => e.failures < 3 && (e.kind !== "parakeet" || english)).sort((a, b) => a.inflight - b.inflight || RANK[a.kind] - RANK[b.kind]);
+  }
+
+  /**
+   * Starts Parakeet in the background: it downloads the model the first time (minutes), and the room
+   * uses whisper or the gateway meanwhile. Not when the session only uses the gateway, or offline.
+   */
+  async startParakeet() {
+    if (this.session.settings().transcription === "gateway") return false;
+    this.parakeet.onExit = () => this.engines.delete("parakeet");
+    const url = await this.parakeet.start(!config.offline);
+    if (!url) return false;
+    this.engines.set("parakeet", { id: "parakeet", label: "host Parakeet", kind: "parakeet", url, inflight: 0, failures: 0, lastOk: Date.now() });
+    this.trouble = null;
+    return true;
   }
 
   /** Says so once in a while, in the feed and on screen, instead of the room going silently deaf. */
@@ -107,6 +151,7 @@ export class Transcriber {
 
   stop() {
     this.localProc?.kill();
+    this.parakeet.stop();
   }
 
   /** A client machine offers its own whisper server for the room. */
@@ -119,24 +164,29 @@ export class Transcriber {
   }
 
   engineList() {
-    return [...this.engines.values()].map((e) => ({ id: e.id, label: e.label, kind: e.kind, inflight: e.inflight, healthy: e.failures < 3 }));
+    return [...this.engines.values()].sort((a, b) => RANK[a.kind] - RANK[b.kind]).map((e) => ({ id: e.id, label: e.label, kind: e.kind, inflight: e.inflight, healthy: e.failures < 3 }));
   }
 
   async transcribe(wav: Uint8Array, durationSec: number, hint = "", snr = Infinity, names: string[] = []): Promise<{ text: string; engine: string }> {
     const mode = this.session.settings().transcription;
+    const vocab = this.vocabulary();
+    // Engines primed with the room's words repeat them on near-silence, like whisper repeats names:
+    // a line made of nothing but those words is dropped like one made of names.
+    const known = [...names, ...vocab.map((v) => v.term)];
+    const finish = (text: string, engine: string) => ({ text: correctTranscript(cleanTranscript(text, durationSec, snr, known), vocab).text, engine });
+    const prompt = promptWith(hint, vocab);
     if (mode !== "gateway") {
-      const pool = [...this.engines.values()].filter((e) => e.failures < 3).sort((a, b) => a.inflight - b.inflight || (a.kind === "local" ? -1 : 1));
-      for (const e of pool) {
+      for (const e of this.pool()) {
         e.inflight++;
         try {
-          const text = await whisperServer(e.url, wav, hint, this.language());
+          const text = await inference(e.url, wav, this.language(), e.kind === "parakeet" ? { hotwords: hotwords(vocab) } : { prompt });
           e.failures = 0;
           this.trouble = null;
           e.lastOk = Date.now();
-          return { text: cleanTranscript(text, durationSec, snr, names), engine: e.label };
+          return finish(text, e.label);
         } catch (err) {
           e.failures++;
-          console.error(`whisper ${e.label}:`, describeError(err));
+          console.error(`transcription ${e.label}:`, describeError(err));
         } finally {
           e.inflight--;
         }
@@ -144,21 +194,28 @@ export class Transcriber {
       // Engines that failed get another chance after a minute.
       for (const e of this.engines.values()) if (e.failures >= 3 && Date.now() - e.lastOk > 60_000) e.failures = 2;
     }
-    const gw = mode === "local" ? null : gateway(this.session);
-    if (!gw) {
+    if (mode === "local" || !gateway(this.session)) {
       this.warn(this.problem() ?? "Speech can't be turned into text right now.");
       return { text: "", engine: "none" };
     }
     try {
-      const lang = this.language();
-      // Bounded, so a slow gateway can't hold a recorded prompt past its window.
-      const r = await aiTranscribe({ abortSignal: AbortSignal.timeout(20_000), model: gw.transcription(this.session.settings().models.transcribe), audio: wav, providerOptions: lang === "auto" ? undefined : { openai: { language: lang } } });
+      const text = await this.cloud(wav, prompt);
       this.trouble = null;
-      return { text: cleanTranscript(r.text, durationSec, snr, names), engine: "gateway" };
+      return finish(text, "gateway");
     } catch (err) {
       this.warn(`Transcription failed: ${describeError(err)}`);
       return { text: "", engine: "none" };
     }
+  }
+
+  /** The gateway's transcription (OpenAI's), primed with the same words as whisper. */
+  async cloud(wav: Uint8Array, prompt: string): Promise<string> {
+    const gw = gateway(this.session);
+    if (!gw) throw new Error("no gateway key");
+    const lang = this.language();
+    // Bounded, so a slow gateway can't hold a recorded prompt past its window.
+    const r = await aiTranscribe({ abortSignal: AbortSignal.timeout(20_000), model: gw.transcription(this.session.settings().models.transcribe), audio: wav, providerOptions: { openai: { ...(lang === "auto" ? {} : { language: lang }), ...(prompt ? { prompt } : {}) } } });
+    return r.text;
   }
 }
 
@@ -171,13 +228,15 @@ async function ping(url: string) {
   }
 }
 
-async function whisperServer(url: string, wav: Uint8Array, hint: string, language = "en"): Promise<string> {
+/** POST /inference to a whisper.cpp server or the Parakeet child (same shape; each reads its own field). */
+async function inference(url: string, wav: Uint8Array, language: string, vocab: { prompt?: string; hotwords?: string }): Promise<string> {
   const form = new FormData();
   form.append("file", new Blob([wav as Uint8Array<ArrayBuffer>], { type: "audio/wav" }), "clip.wav");
   form.append("response_format", "json");
   form.append("temperature", "0");
   form.append("language", language);
-  if (hint) form.append("prompt", hint);
+  if (vocab.prompt) form.append("prompt", vocab.prompt);
+  if (vocab.hotwords) form.append("hotwords", vocab.hotwords);
   const r = await fetch(`${url}/inference`, { method: "POST", body: form, signal: AbortSignal.timeout(20_000) });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   const j = (await r.json()) as { text?: string; error?: string };

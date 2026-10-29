@@ -376,6 +376,8 @@ export interface Settings {
   hostControl: boolean;
   /** Spoken language for transcription: an ISO code ("en" by default) or "auto". */
   language: string;
+  /** The room's words for transcription (5.2): "Term" or "Term: heard as, heard as" ("Chey: Shay"). */
+  vocabulary: string[];
   gatewayKeySet: boolean;
   gatewayKeySource: "settings" | "env" | "none";
 }

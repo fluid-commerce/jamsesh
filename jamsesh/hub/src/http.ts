@@ -634,7 +634,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), speechModel: hub.transcriber.parakeet.status(), vocabulary: hub.transcriber.vocabulary().map((v) => v.term), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";

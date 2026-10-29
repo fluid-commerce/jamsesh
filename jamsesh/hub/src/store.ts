@@ -46,6 +46,7 @@ const TEAM_SETTINGS = new Set<string>([
   "gatewayKey",
   "brainName",
   "brainAliases",
+  "vocabulary",
   "brainNotes",
   "brainEnabled",
   "voiceReplies",
