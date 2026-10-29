@@ -1,12 +1,11 @@
 // The session brief (4.4): fixed sections filled from state the hub already has (who owns what, repositories
-// and branches, live builds, what's in progress), plus the parts only the digest model can write (goal,
-// decisions, open questions, glossary). Built on demand, so a new dev server shows up without a model pass.
+// and branches, live builds, what's in progress), the decisions and open questions people accepted (facts), and
+// the parts the digest model writes (goal, glossary). Built on demand, so a new dev server shows up without a
+// model pass. Nothing here comes from talk nobody accepted: agents read this as settled.
 import type { Session } from "./session";
 
 export interface BriefParts {
   goal: string;
-  decisions: string[];
-  questions: string[];
   glossary: { term: string; meaning: string }[];
 }
 
@@ -25,8 +24,6 @@ export function briefParts(s: Session): BriefParts | null {
     const p = JSON.parse(raw);
     return {
       goal: typeof p.goal === "string" ? p.goal : "",
-      decisions: Array.isArray(p.decisions) ? p.decisions.filter((x: unknown) => typeof x === "string") : [],
-      questions: Array.isArray(p.questions) ? p.questions.filter((x: unknown) => typeof x === "string") : [],
       glossary: Array.isArray(p.glossary) ? p.glossary.filter((g: any) => g && typeof g.term === "string" && typeof g.meaning === "string") : [],
     };
   } catch {
@@ -76,8 +73,10 @@ export function buildBrief(s: Session): { full: string; short: string } {
     const bits = [mocked ? `${mocked} mocked` : "", built ? `${built} built` : "", tasks.length ? `${tasks.length} open task${tasks.length === 1 ? "" : "s"}: ${clip(tasks[0].text, 70)}` : ""].filter(Boolean);
     return `${w.title}: ${bits.join(", ") || firstSentence(w.brief) || "just started"}`;
   });
-  const decisions = parts?.decisions.length ? parts.decisions : s.facts().filter((f) => f.status === "active" && f.kind === "decision").slice(0, 8).map((f) => f.text);
-  const questions = parts?.questions.length ? parts.questions : s.facts().filter((f) => f.status === "active" && f.kind === "question").slice(0, 6).map((f) => f.text);
+  // Decisions and questions are the accepted facts only, never the model's reading of the room.
+  const accepted = s.facts().filter((f) => f.status === "active").sort((a, b) => a.ts - b.ts);
+  const decisions = accepted.filter((f) => f.kind === "decision").slice(-8).map((f) => `${f.text}${f.by ? ` (${f.by})` : ""}`);
+  const questions = accepted.filter((f) => f.kind === "question").slice(-6).map((f) => f.text);
   const glossary = parts?.glossary ?? [];
 
   const list = (label: string, items: string[]) => (items.length ? `${label}:\n${items.map((i) => `- ${i}`).join("\n")}` : "");

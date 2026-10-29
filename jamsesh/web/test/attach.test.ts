@@ -1,7 +1,7 @@
 // The message box's attachment helpers: the pre-upload check, the upload call itself (the real
 // fetch path, as the client makes it), and files from a paste or a drop.
 import { afterEach, expect, test } from "bun:test";
-import { checkFile, filesFrom, pastedName, uploadAttachment } from "../src/shared/attach";
+import { checkFile, composerState, filesFrom, pastedName, uploadAttachment, type Pending } from "../src/shared/attach";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -57,4 +57,20 @@ test("filesFrom reads a paste or a drop, and a pasted screenshot says what it is
   expect(filesFrom(null)).toEqual([]);
   expect(filesFrom({ files: [], items: [{ kind: "string", getAsFile: () => null }] } as any)).toEqual([]);
   expect(filesFrom({ files: [], items: [{ kind: "file", getAsFile: () => doc }] } as any)).toEqual([doc]);
+});
+
+test("the composer won't send while a file has failed: the person removes it or tries again first", () => {
+  const ready: Pending = { key: "a", name: "a.png", size: 3, status: "ready", ref: { id: "att_0123456789abcdef", name: "a.png", type: "image/png", kind: "image", size: 3 } };
+  const failed: Pending = { key: "b", name: "spec.pdf", size: 9, status: "error", error: "Upload failed (502)", file: new File([new Uint8Array([1])], "spec.pdf") };
+  const adding: Pending = { key: "c", name: "c.png", size: 3, status: "uploading" };
+  expect(composerState("look at this", [ready])).toEqual({ canSend: true, blocked: "" });
+  expect(composerState("", [ready])).toEqual({ canSend: true, blocked: "" });
+  expect(composerState("", [])).toEqual({ canSend: false, blocked: "" });
+  expect(composerState("look at this", [ready, adding]).canSend).toBe(false);
+  // Words alone would send, but a failed file is never dropped from the message silently.
+  const blocked = composerState("look at this", [ready, failed]);
+  expect(blocked.canSend).toBe(false);
+  expect(blocked.blocked).toBe("A file didn't attach. Remove it or try again to send.");
+  expect(composerState("x", [failed, { ...failed, key: "d" }]).blocked).toMatch(/^2 files didn't attach/);
+  expect(composerState("look at this", [ready], true).canSend).toBe(false);
 });

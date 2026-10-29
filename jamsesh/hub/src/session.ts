@@ -870,6 +870,24 @@ export class Session {
     return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
   }
 
+  /** The one task an agent is on (the one it picked up, else the one open for it); null when there's none or more than one to choose from. */
+  workingOn(agentId: string | null | undefined): string | null {
+    if (!agentId) return null;
+    const open = this.directives().filter((d) => d.targets.includes(agentId) && d.status !== "done" && d.status !== "cancelled" && d.mode !== "answer" && d.progress[agentId] !== "done" && d.progress[agentId] !== "cancelled");
+    const picked = open.filter((d) => d.progress[agentId] === "acked");
+    const only = picked.length ? picked : open;
+    return only.length === 1 ? only[0].id : null;
+  }
+
+  /** Cancels an open directive and tells each of its agents to stop, and why. */
+  cancelDirective(d: Directive, reason: string) {
+    this.setDirective(d.id, { status: "cancelled", progress: Object.fromEntries(d.targets.map((t) => [t, "cancelled" as const])) });
+    for (const t of d.targets) {
+      this.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Cancelled: "${d.text.slice(0, 120)}". ${reason} Stop that work; a new directive follows if there's something else to do.`, relevance: "work", data: { to: t, directiveId: d.id } });
+      this.wake(t);
+    }
+  }
+
   /** One agent's progress on a directive; the directive's status follows the slowest target. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
@@ -1074,6 +1092,7 @@ export class Session {
       page: a.page ?? existing?.page,
       ...(a.version ?? existing?.version ? { version: a.version ?? existing?.version } : {}),
       ...(a.versions ?? existing?.versions ? { versions: a.versions ?? existing?.versions } : {}),
+      directiveId: a.directiveId ?? existing?.directiveId ?? (existing ? null : this.workingOn(agent?.id)),
     };
     this.store.put("artifacts", art);
     if (!existing && opts.announce !== false) {

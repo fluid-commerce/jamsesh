@@ -19,7 +19,7 @@ import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
 import { TasksView, triageCount } from "../shared/Tasks";
-import { AttachButton, AttachTray, filesFrom, hasFiles, useAttachments } from "../shared/attach";
+import { AttachButton, AttachTray, composerState, filesFrom, hasFiles, useAttachments } from "../shared/attach";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
@@ -543,7 +543,7 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const files = useAttachments();
-  const canSend = (!!text.trim() || files.ids.length > 0) && !files.uploading && !busy;
+  const { canSend, blocked } = composerState(text, files.items, busy);
   return (
     <form
       className={`say ${phone ? "say-phone" : ""} ${dragging ? "dragging" : ""}`}
@@ -593,7 +593,12 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
           </button>
         ))}
       </div>
-      <AttachTray items={files.items} onRemove={files.remove} />
+      <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} />
+      {blocked && (
+        <p className="say-blocked" role="status">
+          {blocked}
+        </p>
+      )}
       <div className="say-row">
         <AttachButton onFiles={files.add} disabled={busy} />
         <input

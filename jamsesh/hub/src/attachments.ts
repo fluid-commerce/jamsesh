@@ -4,6 +4,7 @@
 // the name or the type the browser claims, and the stored file's name is made here, so nothing a
 // caller sends reaches a path.
 import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AttachmentKind, AttachmentRef } from "./types";
@@ -151,6 +152,75 @@ export class Attachments {
     }
     return { text: texts.join("\n\n"), parts };
   }
+}
+
+/** Where poppler's pdftotext may be: the PATH, or Homebrew's folders (an app started from the Dock has a short PATH). */
+const PDFTOTEXT = [Bun.which("pdftotext"), "/opt/homebrew/bin/pdftotext", "/usr/local/bin/pdftotext"].filter((p): p is string => !!p);
+
+/**
+ * The words in a PDF, for a card a person reviews: poppler's pdftotext when the machine has it (first 20 pages,
+ * 5 s at most), otherwise the plain text runs JamSesh can read itself. At most `max` characters; "" when there's
+ * no text to read (a scan, or fonts that only map glyphs).
+ */
+export async function pdfText(path: string, max = 4000): Promise<string> {
+  const tidy = (t: string) => t.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").replace(/[ \t]+/g, " ").replace(/\n\s*\n\s*/g, "\n\n").trim().slice(0, max);
+  const tool = PDFTOTEXT.find((p) => existsSync(p));
+  if (tool) {
+    try {
+      const run = Bun.spawn([tool, "-l", "20", "-enc", "UTF-8", "-q", path, "-"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+      const timer = setTimeout(() => run.kill(), 5000);
+      const out = await new Response(run.stdout).text();
+      clearTimeout(timer);
+      if ((await run.exited) === 0 && tidy(out)) return tidy(out);
+    } catch {
+      // Fall through to the built-in reader.
+    }
+  }
+  try {
+    return tidy(pdfTextRuns(new Uint8Array(readFileSync(path))));
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The literal text a PDF's pages draw (Tj, TJ, ' and "), from plain and Flate-compressed streams. Enough for the
+ * simple PDFs people export; text in hex strings or with custom font encodings comes back empty, never wrong.
+ */
+export function pdfTextRuns(bytes: Uint8Array, limit = 200_000): string {
+  const latin = (b: Uint8Array) => Array.from(b, (c) => String.fromCharCode(c)).join("");
+  const src = latin(bytes.subarray(0, 25 * 1024 * 1024));
+  const out: string[] = [];
+  let size = 0;
+  for (const m of src.matchAll(/<<(.{0,400}?)>>\s*stream\r?\n/gs)) {
+    const start = (m.index ?? 0) + m[0].length;
+    const end = src.indexOf("endstream", start);
+    if (end < 0 || size > limit) break;
+    let body = bytes.subarray(start, end);
+    if (/\/FlateDecode/.test(m[1])) {
+      try {
+        body = new Uint8Array(inflateSync(body, { maxOutputLength: 4 * 1024 * 1024 }));
+      } catch {
+        continue;
+      }
+    } else if (/\/Filter/.test(m[1])) continue;
+    const ops = latin(body);
+    if (!/\bBT\b/.test(ops)) continue;
+    for (const block of ops.match(/\bBT\b[\s\S]*?\bET\b/g) ?? []) {
+      const line = [...block.matchAll(/\((?:\\.|[^\\)])*\)|\b(?:T\*|Td|TD|Tm|')\b/g)]
+        .map((t) => (t[0].startsWith("(") ? unescapePdf(t[0].slice(1, -1)) : " "))
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (line) (out.push(line), (size += line.length));
+    }
+  }
+  return out.join("\n");
+}
+
+function unescapePdf(s: string) {
+  const map: Record<string, string> = { n: "\n", r: "", t: " ", b: "", f: "", "(": "(", ")": ")", "\\": "\\" };
+  return s.replace(/\\([0-7]{1,3}|.)/g, (_, c: string) => (/^[0-7]+$/.test(c) ? String.fromCharCode(parseInt(c, 8)) : map[c] ?? c));
 }
 
 /** A short "name (size)" line for lists and logs. */

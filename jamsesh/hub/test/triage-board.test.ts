@@ -392,20 +392,24 @@ test("curation: new facts wait as cards, a restatement still merges, and retirin
     },
     [a, b, c, d],
   );
-  // Nothing was taken away or added silently; the accepted fact was updated in place; the restatement merged into it.
+  // Nothing was taken away, added or rewritten silently: the restatement merged into the accepted fact, and the
+  // rewrite with new detail waits as a Replace card for it.
   expect(out.added).toHaveLength(0);
   expect(r.s.store.get("facts", old.id)!.status).toBe("active");
   expect(r.s.store.get("facts", q.id)!.status).toBe("active");
-  expect(r.s.store.get("facts", keep.id)!.text).toContain("remembered per window");
+  expect(r.s.store.get("facts", keep.id)!.text).toBe("Sidebar collapses to a 64 px icon rail under 1024 px");
+  expect(r.s.store.get("facts", keep.id)!.sourceEventIds).toContain(d.id);
   const cards = r.s.board.open();
-  expect(cards).toHaveLength(2);
-  const replace = cards.find((x) => !x.retire)!;
+  expect(cards).toHaveLength(3);
+  expect(structuredClone(cards.find((x) => x.conflictsWith === keep.id))).toMatchObject({ text: expect.stringContaining("remembered per window"), kind: "requirement" });
+  const replace = cards.find((x) => !x.retire && x.conflictsWith === old.id)!;
   const retire = cards.find((x) => x.retire)!;
   expect(replace).toMatchObject({ text: "Settings header uses option B, the compact search", conflictsWith: old.id });
   expect(retire).toMatchObject({ retire: "resolved", conflictsWith: q.id });
   expect(r.s.board.add(retire.id, "Chey")).toMatchObject({ ok: false });
   expect(r.s.board.replace(replace.id, "Chey").ok).toBe(true);
   expect(r.s.board.replace(retire.id, "Chey").ok).toBe(true);
+  expect(r.s.board.replace(cards.find((x) => x.conflictsWith === keep.id)!.id, "Chey").ok).toBe(true);
   expect(r.s.store.get("facts", old.id)!.status).toBe("superseded");
   expect(r.s.store.get("facts", q.id)!.status).toBe("resolved");
   expect(r.s.facts().filter((f) => f.status === "active").map((f) => f.text).sort()).toEqual(["Settings header uses option B, the compact search", "Sidebar collapses to a 64 px icon rail under 1024 px, remembered per window"]);

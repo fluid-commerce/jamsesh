@@ -214,11 +214,18 @@ describe("4.4 the session brief onboards", () => {
     const r = room();
     const { s } = r;
     s.claim(r.jon.id, "Checkout", { quiet: true });
-    s.store.setDigest("brief-parts", JSON.stringify({ goal: "Redesign the merchant app", decisions: ["Checkout is one page (Felipe)"], questions: ["Prices with tax?"], glossary: [{ term: "Passport", meaning: "customer login" }] }), 0);
+    // An older brief's model-written decisions and questions are ignored: those sections are the accepted facts.
+    s.store.setDigest("brief-parts", JSON.stringify({ goal: "Redesign the merchant app", decisions: ["Header uses option C (overheard)"], questions: ["Unaccepted question?"], glossary: [{ term: "Passport", meaning: "customer login" }] }), 0);
+    fact(s, "Checkout is one page.", { by: "Felipe" });
+    fact(s, "Prices with tax?", { kind: "question" });
     s.upsertArtifact({ kind: "frame", stage: "mockup", title: "Checkout / A: one page", agentId: r.jon.id });
     s.store.put("devservers", { id: "dev1", agentId: r.jon.id, name: "Checkout", target: "localhost:5173", hostPort: 5100, url: "http://192.168.1.20:5100", platform: "desktop", createdAt: 1, up: true } as any);
     const { full, short } = buildBrief(s);
     for (const part of ["GOAL: Redesign the merchant app", "OWNERS:", "Checkout: ", "REPOS:", "acme/desktop@main", "LIVE:", "http://192.168.1.20:5100", "IN PROGRESS:", "1 mocked", "DECISIONS:", "OPEN QUESTIONS:", "GLOSSARY:", "Passport: customer login"]) expect(full).toContain(part);
+    expect(full).toContain("Checkout is one page. (Felipe)");
+    expect(full).toContain("Prices with tax?");
+    expect(full).not.toContain("option C");
+    expect(full).not.toContain("Unaccepted question");
     expect(short).toContain("Redesign the merchant app");
     expect(short).toContain("http://192.168.1.20:5100");
     expect(short.length).toBeLessThanOrEqual(BRIEF_EXCERPT);

@@ -213,7 +213,8 @@
   color: var(--directive);
   background: var(--directive-bg);
 }
-.tk-tag.warn {
+.tk-tag.warn,
+.tk-tag.kind.cancel {
   color: var(--directive);
   background: var(--directive-bg);
 }
@@ -322,6 +323,9 @@
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
+.tk-versus.one {
+  grid-template-columns: 1fr;
+}
 .tk-versus > div {
   padding: 8px 9px;
   border-radius: var(--r-sm);
@@ -338,6 +342,43 @@
   line-height: 1.4;
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+/* A file that came with the card, and a later line that overruled it. */
+.tk-files {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.tk-files .feed-files {
+  display: flex;
+  margin-top: 0;
+  min-width: 0;
+  max-width: 100%;
+}
+.tk-files .feed-chip {
+  max-width: 100%;
+  min-width: 0;
+}
+.tk-files .say-file-name {
+  max-width: none;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.tk-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--directive);
+}
+.tk-overruled {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.tk-overruled .label {
+  color: var(--directive);
+  margin-right: 4px;
 }
 
 /* Editing in place. */

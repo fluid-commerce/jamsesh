@@ -1125,12 +1125,18 @@ the batched pass; `tools(…, "overheard")`, and the keyword rules when the gate
 |---|---|---|
 | A task for agents | `createDirective` | a **task card** (`proposeTask`) |
 | A decision or fact | `record_decision` saves a decision event and a fact | a **context card** (`proposeContext`) |
-| A fact curation would add | n/a | a context card (the `add` list of `Brain.curate`; its update, resolve and supersede lists still apply to saved facts directly) |
+| A fact curation would add, rewrite, resolve or supersede | n/a | a context card (only a restatement that cites a new event joins a saved fact directly) |
+| Cancelling a task (`cancel_directive`) | cancels it and tells its agents | a **cancel card** (`cancels` names the directive; Send cancels it); a proposal still waiting is only marked `overruled` |
+| Pairing agents (`pair_agents`) | a `coordinate` directive each | a task card each |
+| Asking an agent (`ask_agent`), acting on a card (`triage_card`) | available | not offered |
 | An agent's `decision` update | n/a | a context card naming the agent, linked to the update event |
 | Agents' `shipped`, `done`, `progress`, `handoff` updates | n/a | the **changelog** (`Session.changelog()`, `GET /api/changelog`); curation skips them (`forCuration`) |
 | `jam_message` and `jam_ask` between agents, and `question` or `blocked` updates | unchanged: direct | unchanged |
 
-Agents never see a card: `jam_context`, the inbox and the hooks read only directives, facts and decisions.
+Agents never see a card: `jam_context`, the inbox and the hooks read only directives, facts and decisions. The session
+brief's DECISIONS and OPEN QUESTIONS are the accepted facts; the digest model writes only the goal and glossary, and it
+and the workstream briefs read accepted material only (saved facts, sent tasks, room decisions, direct requests and
+agents' own reports; `acceptedEvent`), never overheard talk. Curation still reads the talk: that is where cards come from.
 
 **Other workers' entry points** (so a feature that finds a task or a piece of context can use the board):
 
@@ -1154,7 +1160,9 @@ disagrees with. Cards never expire. One that has waited 30 minutes reads "Waitin
 and numbers) joins the open card: `count` goes up and the new source line is added. The same line twice (two
 microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context proposal a saved fact
 already states is dropped; one that is close to a fact but differs in its specifics (option A versus B, 16 versus 24
-px), or names a fact with `replaces`, is flagged `conflictsWith`.
+px) or negates it ("must not use option A"), or names a fact with `replaces`, is flagged `conflictsWith`; a named
+replacement is never dropped as already known. Repeats must also agree on polarity (`hub/src/similarity.ts`, shared with
+curation), and a task repeat on mode, target agents and workstream; a context repeat on kind and workstream.
 
 **Actions** (`POST /api/triage/<id>/<action>`, `PATCH /api/triage/<id>`; people only, like the other human routes: an
 agent's credential and a process on the host without the window key get 403, and a window must know its person):
@@ -1169,17 +1177,28 @@ agent's credential and a process on the host without the window key get 403, and
 | `POST /triage/<id>/dismiss` | Task or context. |
 | `GET /triage` | `{ cards, stats }`: counts of proposed, open, accepted, edited and dismissed per type. |
 
-A card that has been acted on answers 409 ("That card was already sent by Felipe"), so two people clicking, or a
-replayed request, act once. The client never queues these calls while offline.
+A card that has been acted on answers 409 ("That card was already sent by Felipe"); the same person repeating the same
+action gets the first result again, so a retried click acts once. What an action makes (the directive, the fact, the
+retired fact and its replacement, the room decision event) and the card's own resolution are one transaction
+(`Store.atomic`): a failed write leaves none of them, and the hub's messages go out only after it commits. A cancel card
+that finds its task already done or cancelled answers 409. A context card with `needsWording` (a file with no text to
+read) can't be added, merged or used to replace until a person writes the wording. The client never queues these calls
+while offline.
 
-**Curation and the board.** `Brain.applyCuration` passes a `CurationHold` to `applyCuration`: updates and restatement
-merges still change saved facts directly (they consolidate what a person already accepted), new facts become context
-cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
+**Curation and the board.** `Brain.applyCuration` passes a `CurationHold` to `applyCuration`: only a restatement (the
+same words, citing an event of this batch) joins a saved fact directly; an update with no cited event is dropped, and any
+other update becomes a Replace card for that fact; new facts become context cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
 curator would resolve or supersede with nothing to take its place becomes a **Retire** card (`retire` on the card;
-accepting it only changes the fact's status). An overruled task card is dismissed by the brain's `cancel_directive`.
-A document sent with no request is a context card with `origin: "document"` and its `attachments`. Agents'
+accepting it only changes the fact's status). Overheard, the brain's `cancel_directive` marks a waiting task card
+`overruled` for a person to dismiss; asked directly, it dismisses it. A document sent with no request is a context card
+with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
+poppler's `pdftotext` when installed, else the plain text runs JamSesh reads itself, `pdfText`); with nothing readable
+it gets `needsWording`. Agents'
 credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.json`) holds only
 accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
+
+A frame or build records the task it was made for (`Artifact.directiveId`): the one its agent had picked up (or the
+only one open for it) when it first went up, none when there were several. A done task lists only those.
 
 **Spoken triage.** The brain's `triage_card` tool (only in on-purpose passes, only for a person who spoke to it) takes a
 card by number, id or "last" and an action (send, add, replace, merge, dismiss, edit), with changes in the same breath
@@ -1632,11 +1651,13 @@ The message box ("Ask JamSesh" and "Say to the room") takes images, screenshots 
 paperclip button, paste, or drag and drop. Each file uploads when it is added (`POST
 /api/attachments`, form field `file`, one per request) and shows as a thumbnail or chip with a
 remove button; Send waits for uploads and carries the ids (`/api/say` `attachments`, at most six).
-A failed send keeps the words and files.
+A failed send keeps the words and files. A file that failed to attach blocks Send ("A file didn't attach. Remove it or
+try again to send.") until it is removed or retried; it is never dropped from a message silently.
 
 - **Allowed.** Images (PNG, JPEG, GIF, WebP, up to 12 MB), PDFs (20 MB) and text files (1 MB).
   The type comes from the bytes, never the name or the browser's claim: SVG, HTML, executables,
-  binary and non-UTF-8 files are refused (415). Text must have a text name or none. Oversize is 413.
+  binary and non-UTF-8 files are refused (415). Text must have a text name or none. Oversize is 413;
+  the upload is read with a byte cap before it is parsed, whether or not it gives a length.
 - **Stored once.** `<session>/attachments/blobs/<sha256 prefix>.<ext>` holds the bytes (the same file
   uploaded twice is one blob); `<id>.json` holds each upload's record (name, who, time). The stored
   name is made by the hub from the hash and sniffed type; only ids of the form `att_<16 hex>` reach
@@ -1644,9 +1665,12 @@ A failed send keeps the words and files.
 - **Fetching.** `GET /api/attachments/<id>` for any paired device or agent credential of the session
   (unpaired: 401). Served with the sniffed type, `nosniff`, a sandboxing CSP, inline for images and
   text (as `text/plain`) and as a download for PDFs. Uploading is for people only (agents: 403).
-- **Brain.** A direct message's images and PDFs go to the router model as image and file parts,
-  text files as text marked as material, not instructions. A message with files and no words is
-  not a request to the brain.
+- **Brain.** A direct message's files go to the router model in a message of their own before the
+  request: images and PDFs as parts, text files fenced in random `<attached-…>` markers and labelled as
+  material, never instructions. In that pass only the tools the person's own words ask for are
+  offered (`askedFor`: "cancel" for `cancel_directive`, a work verb for `create_directive`, "show" for
+  the screen and so on; host control, naming and behaviour notes never), so a file's text can't
+  cancel or send anything. A message with files and no words is not a request to the brain.
 - **Tasks.** A directive created from an event carries that event's attachments
   (`Directive.attachments`). `jam_inbox`, the briefing, `jam_context` and `jam_directives` list each
   file with its fetch URL; agents fetch it with their credential.
@@ -1663,7 +1687,11 @@ every five minutes and when the session ends; a session with nothing settled nev
 new session of the project is seeded from it once (`seedFromProject`): facts and workstreams come in
 as active with `carriedFrom {sessionId, at}`, the brief shows in the agents' briefing and
 `jam_context` until the session writes its own, and people without a title get theirs back. A
-resumed session, or the session that wrote the file, is not seeded again. The file is plain JSON
+resumed session, or the session that wrote the file, is not seeded again. The file is checked whole
+(every field's type, the fact kinds and workstream statuses, sizes): one malformed value and nothing is seeded. Each
+file carries `activeAt`, when its session last did something; a session less recently active than that doesn't
+overwrite it (two sessions of a project open at once: the one used last owns the file). An unreadable file is moved
+aside (`context.json.unreadable-<time>`) before a new one is written. The file is plain JSON
 so Phase 7's wiki can ingest it. Today's brief is one text; goal and glossary sections arrive with
 the brain's structured brief.
 

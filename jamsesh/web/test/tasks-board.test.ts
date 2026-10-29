@@ -43,7 +43,10 @@ test("the buttons' api() calls: edit, send, a second send says who got there fir
   await api(`/triage/${card.id}`, { personId: chey.id, targets: [agent.id], mode: "implement" }, "PATCH");
   const sent = await api<{ directiveId: string }>(`/triage/${card.id}/send`, { personId: chey.id });
   expect(columnOf(s.store.get("directives", sent.directiveId)!)).toBe("waiting");
-  await expect(api(`/triage/${card.id}/send`, { personId: chey.id })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("already sent") });
+  // The same person's retried click answers with the same task; someone else is told who got there first.
+  expect((await api<{ directiveId: string }>(`/triage/${card.id}/send`, { personId: chey.id })).directiveId).toBe(sent.directiveId);
+  const felipe = s.upsertPerson({ name: "Felipe" });
+  await expect(api(`/triage/${card.id}/send`, { personId: felipe.id })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("already sent by Chey") });
   expect(s.board.get(card.id)).toMatchObject({ status: "sent", mode: "implement", targets: [agent.id] });
   expect(s.directives()).toHaveLength(1);
   // A triage call is never saved for later: offline, it fails where the person can see it.
@@ -77,6 +80,22 @@ test("columns follow directive status, and a done task lists what its agent put 
   expect(made.links).toEqual(["http://10.0.0.5:5100/x"]);
   s.setDirective(d.id, { status: "cancelled" });
   expect(columnOf(s.store.get("directives", d.id)!)).toBeNull();
+});
+
+test("a done task lists only what was made for it, not what its agent made for another task at the same time", () => {
+  const a = s.createDirective({ text: "Header variants", mode: "explore", targets: [agent.id], requestedBy: "Chey" });
+  const b = s.createDirective({ text: "Footer variants", mode: "explore", targets: [agent.id], requestedBy: "Chey" });
+  s.setDirectiveFor(b.id, agent.id, "acked");
+  s.setDirectiveFor(a.id, agent.id, "acked");
+  // Two tasks underway at once: a frame posted now belongs to neither for certain, so neither lists it.
+  const unsure = s.upsertArtifact({ kind: "screenshot", stage: "mockup", title: "Something", agentId: agent.id });
+  s.setDirectiveFor(a.id, agent.id, "done", "Done");
+  const footer = s.upsertArtifact({ kind: "screenshot", stage: "mockup", title: "Footer / A", agentId: agent.id });
+  s.setDirectiveFor(b.id, agent.id, "done", "Done");
+  const state = s.state();
+  expect(producedBy(s.store.get("directives", a.id)!, state).artifacts.map((x) => x.id)).toEqual([]);
+  expect(producedBy(s.store.get("directives", b.id)!, state).artifacts.map((x) => x.id)).toEqual([footer.id]);
+  expect(unsure.directiveId).toBeNull();
 });
 
 test("waiting is said in minutes and hours", () => {

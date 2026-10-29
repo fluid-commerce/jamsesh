@@ -3311,8 +3311,41 @@ html.in-app .app-header {
   border: 1px solid var(--line-2);
   color: var(--text);
 }
-.say-file-x:hover {
+.say-file-x:hover,
+.say-file-retry:hover {
   color: var(--text);
+}
+.say-file.error:has(.say-file-retry):not(.pic) {
+  padding-right: 52px;
+}
+.say-file-retry {
+  position: absolute;
+  top: 50%;
+  right: 28px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--warn);
+  font-size: 15px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.say-file.pic .say-file-retry {
+  top: auto;
+  bottom: -6px;
+  right: -6px;
+  transform: none;
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+}
+.say-blocked {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warn);
 }
 .feed-files {
   display: flex;

@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { join } from "node:path";
 import { projectsDir } from "./projects";
 import type { Session } from "./session";
+import { z } from "zod";
 import { newId } from "./store";
 import { buildBrief, glossaryOf, goalOf, hasBrief } from "./brief";
 import type { Fact, Workstream } from "./types";
@@ -14,6 +15,8 @@ import type { Fact, Workstream } from "./types";
 export interface ProjectContext {
   version: 1;
   updatedAt: number;
+  /** When the writing session last did something (its newest event, fact or workstream): a session less recent than this doesn't overwrite the file. */
+  activeAt: number;
   /** The session that wrote the file. */
   fromSession: string;
   /** The session brief as the brain last wrote it (goal, owners, repositories, terms). */
@@ -29,26 +32,42 @@ export interface ProjectContext {
 const MAX_FACTS = 300;
 const MAX_WORKSTREAMS = 40;
 
+const text = (max: number) => z.string().max(max);
+const when = z.number().finite().nonnegative();
+/** The whole file, every field: one bad value and the file isn't used at all (nothing half-read seeds a session). */
+const contextSchema = z.object({
+  version: z.literal(1),
+  updatedAt: when,
+  activeAt: when.optional(),
+  fromSession: text(200).min(1),
+  brief: text(40_000),
+  goal: text(2000),
+  glossary: z.array(z.object({ term: text(200).min(1), meaning: text(2000) })).max(300),
+  facts: z.array(z.object({ kind: z.enum(["decision", "requirement", "constraint", "preference", "question", "fact"]), text: text(4000).min(1), workstream: text(200), by: text(200), note: text(4000), ts: when, session: text(200) })).max(MAX_FACTS),
+  workstreams: z.array(z.object({ title: text(200).min(1), brief: text(8000), status: z.enum(["active", "paused", "done"]), session: text(200) })).max(MAX_WORKSTREAMS),
+  people: z.array(z.object({ name: text(200).min(1), role: text(200) })).max(500),
+});
+
 export const contextFile = (home: string, slug: string) => join(projectsDir(home), slug, "context.json");
 
+/** The project's context file, or null when there is none or any part of it is malformed. */
 export function readProjectContext(home: string, slug: string): ProjectContext | null {
+  let raw: unknown;
   try {
-    const c = JSON.parse(readFileSync(contextFile(home, slug), "utf8")) as Partial<ProjectContext>;
-    if (c?.version !== 1 || typeof c.fromSession !== "string") return null;
-    return {
-      version: 1,
-      updatedAt: Number(c.updatedAt) || 0,
-      fromSession: c.fromSession,
-      brief: typeof c.brief === "string" ? c.brief : "",
-      goal: typeof c.goal === "string" ? c.goal : "",
-      glossary: Array.isArray(c.glossary) ? c.glossary.filter((g) => g && typeof g.term === "string" && typeof g.meaning === "string") : [],
-      facts: Array.isArray(c.facts) ? c.facts.filter((f) => f && typeof f.text === "string") : [],
-      workstreams: Array.isArray(c.workstreams) ? c.workstreams.filter((w) => w && typeof w.title === "string") : [],
-      people: Array.isArray(c.people) ? c.people.filter((p) => p && typeof p.name === "string") : [],
-    };
+    raw = JSON.parse(readFileSync(contextFile(home, slug), "utf8"));
   } catch {
     return null;
   }
+  const r = contextSchema.safeParse(raw);
+  if (!r.success) return null;
+  return { ...r.data, activeAt: r.data.activeAt ?? r.data.updatedAt };
+}
+
+/** When this session last did something: its newest event, fact or workstream change. */
+export function lastActive(s: Session) {
+  const newest = s.store.recentEvents({ limit: 1 })[0]?.ts ?? 0;
+  const changed = [...s.store.all("facts"), ...s.store.all("workstreams")].filter((x) => !x.carriedFrom).reduce((m, x) => Math.max(m, x.updatedAt || 0), 0);
+  return Math.max(newest, changed);
 }
 
 /** What this session has settled right now: its accepted facts (a proposal on the Tasks board is not one yet), live workstreams, brief and people's titles. */
@@ -71,6 +90,7 @@ export function snapshotContext(s: Session, sessionId: string): ProjectContext {
     glossary: glossaryOf(s),
     version: 1,
     updatedAt: now,
+    activeAt: lastActive(s),
     fromSession: sessionId,
     brief: hasBrief(s) ? buildBrief(s).full : carried?.brief || "",
     facts,
@@ -79,16 +99,26 @@ export function snapshotContext(s: Session, sessionId: string): ProjectContext {
   };
 }
 
-/** Writes the project's context file. A session that has settled nothing never empties a file that has something. */
-export function writeProjectContext(home: string, slug: string, sessionId: string, s: Session) {
+/**
+ * Writes the project's context file. A session that has settled nothing never empties a file that has something,
+ * and a session that was last active before the one that wrote the file never overwrites it (an older session
+ * left open doesn't undo a newer one). Returns whether it wrote. A file that can't be read is kept beside it.
+ */
+export function writeProjectContext(home: string, slug: string, sessionId: string, s: Session): boolean {
   const ctx = snapshotContext(s, sessionId);
   const empty = !ctx.facts.length && !ctx.workstreams.length && !ctx.brief && !ctx.goal;
   const file = contextFile(home, slug);
-  if (empty && existsSync(file)) return;
+  if (existsSync(file)) {
+    if (empty) return false;
+    const cur = readProjectContext(home, slug);
+    if (cur && cur.fromSession !== sessionId && cur.activeAt > ctx.activeAt) return false;
+    if (!cur) renameSync(file, `${file}.unreadable-${Date.now()}`);
+  }
   mkdirSync(join(projectsDir(home), slug), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(ctx, null, 2));
   renameSync(tmp, file);
+  return true;
 }
 
 /**
@@ -106,13 +136,13 @@ export function seedFromProject(home: string, slug: string, sessionId: string, s
   const haveFact = new Set(s.store.all("facts").map((f) => f.text.trim().toLowerCase()));
   for (const f of ctx.facts) {
     if (haveFact.has(f.text.trim().toLowerCase())) continue;
-    s.store.put("facts", { id: newId("fact"), ts: f.ts || now, updatedAt: now, kind: f.kind, text: f.text, workstream: f.workstream ?? "", by: f.by ?? "", status: "active", note: f.note ?? "", sourceEventIds: [], carriedFrom: { sessionId: f.session || ctx.fromSession, at: now } }, false);
+    s.store.put("facts", { id: newId("fact"), ts: f.ts || now, updatedAt: now, kind: f.kind, text: f.text, workstream: f.workstream, by: f.by, status: "active", note: f.note, sourceEventIds: [], carriedFrom: { sessionId: f.session || ctx.fromSession, at: now } }, false);
     n++;
   }
   const haveWs = new Set(s.store.all("workstreams").map((w) => w.title.toLowerCase()));
   for (const w of ctx.workstreams) {
     if (haveWs.has(w.title.toLowerCase())) continue;
-    s.store.put("workstreams", { id: newId("w"), title: w.title, ownerAgentId: null, status: w.status === "paused" ? "paused" : "active", brief: w.brief ?? "", updatedAt: now, carriedFrom: { sessionId: w.session || ctx.fromSession, at: now } }, false);
+    s.store.put("workstreams", { id: newId("w"), title: w.title, ownerAgentId: null, status: w.status === "paused" ? "paused" : "active", brief: w.brief, updatedAt: now, carriedFrom: { sessionId: w.session || ctx.fromSession, at: now } }, false);
     n++;
   }
   for (const p of ctx.people) {

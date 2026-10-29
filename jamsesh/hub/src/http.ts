@@ -407,7 +407,9 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
 async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
-  const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
+  const upload = path === "/attachments" && req.method === "POST";
+  const body = upload ? (paired?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES)) : req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
   if (path === "/state") return json(forCaller(s.state(), paired?.kind === "agent"));
   if (path === "/clock") return json({ now: Date.now() });
@@ -534,7 +536,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // An image, screenshot or file for a message: one per request, as form field 'file'. People add them; people and agents of the session fetch them.
   if (path === "/attachments" && req.method === "POST") {
     if (paired?.kind === "agent") return bad("Agents share files with jam_post_image, not message attachments.", 403);
-    if (Number(req.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) return bad("That file is too big.", 413);
+    if (body?.__tooBig) return bad("That file is too big.", 413);
     const f = (body?.__form as FormData | undefined)?.get("file");
     if (!(f instanceof Blob)) return bad("send the file as form field 'file'");
     const who = s.person(paired?.personId ?? (isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : ""))?.name ?? "Someone";
@@ -948,6 +950,32 @@ function originOf(req: Request, url: URL) {
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
   const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
   return `${proto}://${host}`;
+}
+
+/** A multipart body read to at most `max` bytes, then parsed: `{ __tooBig: true }` past that, whatever the headers said. */
+export async function readCapped(req: Request, max: number): Promise<{ __form: FormData } | { __tooBig: true } | null> {
+  // Even a declared length past the cap is read up to the cap and then cut off: a reply to a body nobody reads
+  // can leave the sender hanging.
+  const type = req.headers.get("content-type") ?? "";
+  if (!type.includes("multipart/form-data") || !req.body) return null;
+  const reader = req.body.getReader();
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > max) {
+      await reader.cancel().catch(() => {});
+      return { __tooBig: true };
+    }
+    chunks.push(value as Uint8Array<ArrayBuffer>);
+  }
+  try {
+    return { __form: await new Response(new Blob(chunks), { headers: { "content-type": type } }).formData() };
+  } catch {
+    return null;
+  }
 }
 
 async function readBody(req: Request): Promise<any> {

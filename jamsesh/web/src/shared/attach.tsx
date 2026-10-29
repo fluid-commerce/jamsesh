@@ -56,6 +56,20 @@ export interface Pending {
   status: "uploading" | "ready" | "error";
   ref?: AttachmentRef;
   error?: string;
+  /** The file itself, while it can be tried again (an upload that failed on the way, not one turned away up front). */
+  file?: File;
+}
+
+/**
+ * Whether the composer can send: words or a ready file, nothing still adding, and no file that failed. A failed
+ * file is never dropped from a send: the person removes it or tries it again first. `blocked` says why not.
+ */
+export function composerState(text: string, items: Pending[], busy = false): { canSend: boolean; blocked: string } {
+  const failed = items.filter((i) => i.status === "error").length;
+  const uploading = items.some((i) => i.status === "uploading");
+  const ready = items.some((i) => i.status === "ready");
+  const blocked = failed ? `${failed === 1 ? "A file" : `${failed} files`} didn't attach. Remove ${failed === 1 ? "it" : "them"} or try again to send.` : "";
+  return { canSend: (!!text.trim() || ready) && !uploading && !failed && !busy, blocked };
 }
 
 /** The files waiting to go with a message: adding, uploading, removing. */
@@ -65,6 +79,14 @@ export function useAttachments(upload: typeof uploadAttachment = uploadAttachmen
   live.current = items;
   const patch = (key: string, p: Partial<Pending>) => setItems((cur) => cur.map((i) => (i.key === key ? { ...i, ...p } : i)));
 
+  const send = useCallback(
+    (key: string, f: File) =>
+      upload(f).then(
+        (ref) => patch(key, { status: "ready", ref, file: undefined }),
+        (e) => patch(key, { status: "error", error: e instanceof Error ? e.message : String(e), file: f }),
+      ),
+    [upload],
+  );
   const add = useCallback(
     (files: File[]) => {
       const room = MAX_FILES - live.current.filter((i) => i.status !== "error").length;
@@ -83,14 +105,20 @@ export function useAttachments(upload: typeof uploadAttachment = uploadAttachmen
       if (files.length > take.length) next.push({ key: `over-${Date.now()}`, name: `${files.length - take.length} more`, size: 0, status: "error", error: `Up to ${MAX_FILES} files per message.` });
       setItems((cur) => [...cur, ...next]);
       take.forEach((f, i) => {
-        if (next[i].status !== "uploading") return;
-        upload(f).then(
-          (ref) => patch(next[i].key, { status: "ready", ref }),
-          (e) => patch(next[i].key, { status: "error", error: e instanceof Error ? e.message : String(e) }),
-        );
+        if (next[i].status === "uploading") void send(next[i].key, f);
       });
     },
-    [upload],
+    [send],
+  );
+  /** Uploads a file that failed on the way again. */
+  const retry = useCallback(
+    (key: string) => {
+      const f = live.current.find((i) => i.key === key && i.status === "error")?.file;
+      if (!f) return;
+      patch(key, { status: "uploading", error: undefined });
+      void send(key, f);
+    },
+    [send],
   );
   const remove = useCallback((key: string) => {
     setItems((cur) => {
@@ -113,8 +141,10 @@ export function useAttachments(upload: typeof uploadAttachment = uploadAttachmen
     items,
     add,
     remove,
+    retry,
     clear,
     uploading: items.some((i) => i.status === "uploading"),
+    failed: items.filter((i) => i.status === "error").length,
     ids: items.flatMap((i) => (i.status === "ready" && i.ref ? [i.ref.id] : [])),
   };
 }
@@ -167,8 +197,8 @@ export function AttachButton({ onFiles, disabled }: { onFiles: (f: File[]) => vo
   );
 }
 
-/** What's waiting to go: a thumbnail for pictures, a chip for files, with a way to take each back out. */
-export function AttachTray({ items, onRemove }: { items: Pending[]; onRemove: (key: string) => void }) {
+/** What's waiting to go: a thumbnail for pictures, a chip for files, with a way to take each back out (or try a failed one again). */
+export function AttachTray({ items, onRemove, onRetry }: { items: Pending[]; onRemove: (key: string) => void; onRetry?: (key: string) => void }) {
   if (!items.length) return null;
   return (
     <ul className="say-files" aria-label="Attached files">
@@ -182,6 +212,11 @@ export function AttachTray({ items, onRemove }: { items: Pending[]; onRemove: (k
             </span>
           )}
           {i.preview && i.status !== "ready" && <span className="say-file-badge">{i.status === "error" ? "!" : "…"}</span>}
+          {i.status === "error" && i.file && onRetry && (
+            <button type="button" className="say-file-retry" aria-label={`Try ${i.name} again`} title="Try again" onClick={() => onRetry(i.key)}>
+              ↻
+            </button>
+          )}
           <button type="button" className="say-file-x" aria-label={`Remove ${i.name}`} onClick={() => onRemove(i.key)}>
             ×
           </button>

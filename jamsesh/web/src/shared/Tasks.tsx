@@ -5,6 +5,7 @@ import { cast } from "../client/CastPicker";
 import { WorkViewer } from "../client/WorkViewer";
 import { api, pref, setPref, type Agent, type Artifact, type Directive, type Fact, type HubState, type JamEvent, type TriageCard } from "./hub";
 import { agoWords } from "./StageControls";
+import { FeedAttachments } from "./attach";
 import { colorFor, Reactions, useNow } from "./ui";
 import "./tasks.css";
 
@@ -40,8 +41,8 @@ const overlap = (a: string, b: string) => {
 
 /** Everything a sent task made: the frames and builds its agents put up since, and the links in what they reported. */
 export function producedBy(d: Directive, state: HubState): { artifacts: Artifact[]; links: string[] } {
-  const end = d.status === "done" ? d.updatedAt + 3 * 60_000 : Infinity;
-  const artifacts = state.artifacts.filter((a) => a.agentId && d.targets.includes(a.agentId) && a.updatedAt >= d.ts && a.ts <= end).slice(0, 8);
+  // The hub records which task each frame or build was made for; two tasks at once never share one.
+  const artifacts = state.artifacts.filter((a) => a.directiveId === d.id).slice(0, 8);
   const links = [...new Set(d.result.match(/https?:\/\/[^\s)>\]"']+/g) ?? [])].filter((u) => !artifacts.some((a) => a.url === u));
   return { artifacts, links };
 }
@@ -187,7 +188,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
   const [merging, setMerging] = useState(false);
   const task = card.type === "task";
   const conflict = card.conflictsWith ? state.facts.find((f) => f.id === card.conflictsWith && f.status === "active") : undefined;
-  const [draft, setDraft] = useState<Draft>({ text: card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", workstream: card.workstream, kind: card.kind });
+  const [draft, setDraft] = useState<Draft>({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", workstream: card.workstream, kind: card.kind });
   const area = useRef<HTMLTextAreaElement>(null);
   const ref = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -195,7 +196,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
   }, [editing]);
   // A change that arrives while nobody is editing (a repeat joined, someone else edited) shows up in the card.
   useEffect(() => {
-    if (!editing) setDraft({ text: card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", workstream: card.workstream, kind: card.kind });
+    if (!editing) setDraft({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", workstream: card.workstream, kind: card.kind });
   }, [card, editing]);
 
   const edits = () => {
@@ -214,8 +215,11 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
       setEditing(false);
     });
   const save = () => run(async () => (await api(`/triage/${card.id}`, edits(), "PATCH"), setEditing(false)));
-  const primary = () => (task ? verb("send") : conflict ? verb("replace") : verb("add"));
-  const label = task ? "Send" : card.retire ? "Retire" : conflict ? "Replace" : "Add";
+  const cancelling = card.cancels ? state.directives.find((d) => d.id === card.cancels) : undefined;
+  // A file with nothing JamSesh could read only proposed its name: the person writes the fact first.
+  const unworded = !!card.needsWording && (!editing || !draft.text.trim() || draft.text.trim() === card.original);
+  const primary = () => (unworded ? setEditing(true) : task ? verb("send") : conflict ? verb("replace") : verb("add"));
+  const label = card.cancels ? "Cancel task" : task ? "Send" : card.retire ? "Retire" : conflict ? "Replace" : "Add";
   const sendReady = !task || (draft.agent || card.targets.length) ? true : false;
 
   const fieldKeys = (e: KeyboardEvent) => {
@@ -233,14 +237,14 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     >
       <div className="tk-top">
         <span className="tk-num mono" title={`Say “the ${["first", "second", "third", "fourth", "fifth"][index - 1] ?? `number ${index}`} one”`}>{index}</span>
-        <span className={`tk-tag kind ${task ? card.mode : card.kind}`}>{task ? MODE_WORDS[card.mode] : card.retire ? `Retire ${card.kind}` : card.kind}</span>
+        <span className={`tk-tag kind ${card.cancels ? "cancel" : task ? card.mode : card.kind}`}>{card.cancels ? "Cancel" : task ? MODE_WORDS[card.mode] : card.retire ? `Retire ${card.kind}` : card.kind}</span>
         <span className="grow" />
         <Waited ts={card.ts} now={now} />
       </div>
 
       {editing ? (
         <div className="tk-edit" onKeyDown={fieldKeys}>
-          <textarea ref={area} value={draft.text} rows={3} aria-label="Wording" onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
+          <textarea ref={area} value={draft.text} rows={3} aria-label="Wording" placeholder={card.needsWording ? "What should the room keep from this file?" : undefined} onChange={(e) => setDraft({ ...draft, text: e.target.value })} />
           <div className="tk-fields">
             {task ? (
               <>
@@ -295,6 +299,28 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
         </button>
       )}
 
+      {card.attachments?.length ? (
+        <div className="tk-files">
+          <FeedAttachments list={card.attachments} />
+          {card.needsWording && <span className="tk-hint">JamSesh couldn't read text in it. Open it and write what to keep.</span>}
+        </div>
+      ) : null}
+
+      {cancelling && !editing && (
+        <div className="tk-versus one" aria-label="The task this cancels">
+          <div>
+            <span className="label">Stops</span>
+            <p>{cancelling.text}</p>
+          </div>
+        </div>
+      )}
+
+      {card.overruled && (
+        <p className="tk-overruled" role="note">
+          <span className="label">Overruled</span> {card.overruled}
+        </p>
+      )}
+
       {conflict && !editing && (
         <div className="tk-versus" aria-label="This disagrees with a saved fact">
           <div>
@@ -328,7 +354,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
 
       {!merging && (
         <div className="tk-actions">
-          <button className="btn small primary" disabled={busy || !sendReady} onClick={primary} title={!sendReady ? "Choose an agent with Edit first" : task ? "Send to the agent (S)" : conflict ? "Put this in place of the saved fact (S)" : "Save as a fact (S)"}>
+          <button className="btn small primary" disabled={busy || !sendReady || (unworded && editing)} onClick={primary} title={unworded ? "Write what to keep first" : !sendReady ? "Choose an agent with Edit first" : card.cancels ? "Cancel the task and tell its agents why (S)" : task ? "Send to the agent (S)" : conflict ? "Put this in place of the saved fact (S)" : "Save as a fact (S)"}>
             {label}
           </button>
           {editing ? (
@@ -526,6 +552,14 @@ function Sheet({ state, open, personId, now, onClose }: { state: HubState; open:
               )}
             </section>
           )}
+
+          {card?.attachments?.length ? (
+            <section>
+              <h3 className="label">Files</h3>
+              <FeedAttachments list={card.attachments} />
+              {card.origin === "document" && <p className="tk-empty small">{card.needsWording ? "No text could be read from it. Open the file and write what to keep." : "The wording above is the start of what the file says. Edit it to what the room should keep."}</p>}
+            </section>
+          ) : null}
 
           {card && card.type === "context" && card.conflictsWith && <ConflictBlock state={state} card={card} />}
 

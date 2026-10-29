@@ -176,6 +176,8 @@ export interface Artifact {
   versions?: ArtifactVersion[];
   /** What people said about it right after it went up ("this is cool"), saved by the room brain (4.2). */
   reactions?: ArtifactReaction[];
+  /** The task it was made for: the one its agent was working on when it first went up, when that was only one. */
+  directiveId?: string | null;
 }
 
 export interface ArtifactReaction {
@@ -313,6 +315,12 @@ export interface TriageCard {
   retire?: "superseded" | "resolved";
   /** Files that came with it (a document sent with no request). */
   attachments?: AttachmentRef[];
+  /** Its wording is only a placeholder (a file with no text JamSesh could read): a person writes the fact before Add. */
+  needsWording?: boolean;
+  /** A task card that cancels this directive when a person sends it; its text is the reason the agents read. */
+  cancels?: string;
+  /** A later line in the room overruled this proposal; it waits for a person to dismiss it like any other. */
+  overruled?: string;
   sources: TriageSource[];
   /** How many times it was proposed: repeats join this card. */
   count: number;

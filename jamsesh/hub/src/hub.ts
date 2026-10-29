@@ -13,14 +13,14 @@ import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
-import { Attachments, type AttachmentRef } from "./attachments";
+import { Attachments, pdfText, type AttachmentRef } from "./attachments";
 import { seedFromProject } from "./carryover";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, BuildRequest, Platform, ShowRequest, Utterance } from "./types";
+import type { Agent, Annotation, Artifact, BuildRequest, JamEvent, Platform, ShowRequest, Utterance } from "./types";
 import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
 
@@ -292,11 +292,27 @@ export class Hub {
       relevance: direct ? "work" : null,
       data: { typed: true, direct, ...(attached.length ? { attachments: attached, ...(words ? {} : { noWords: true }) } : {}), ...(document ? { proposedContext: true } : {}) },
     });
-    if (document) this.session.proposeContext({ text: this.attachments.brainInput(attached).text.slice(0, 600) || `${names} (shared without a request)`, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
+    if (document) void this.proposeDocument(ev, attached).catch((e) => console.error("document card:", e instanceof Error ? e.message : e));
     else if (direct) this.brain.direct(ev);
     // Pictures with no words have nothing to triage; the feed shows them.
     else if (words) this.brain.hear(ev);
     return ev;
+  }
+
+  /**
+   * A document sent with no request becomes a context card with what it says: text files' text, PDFs' text
+   * (pdfText). A file with nothing readable gets a placeholder a person has to replace before the card is added.
+   */
+  async proposeDocument(ev: JamEvent, attached: AttachmentRef[]) {
+    const texts: string[] = [this.attachments.brainInput(attached.filter((a) => a.kind === "text")).text];
+    for (const a of attached.filter((x) => x.kind === "pdf")) {
+      const f = this.attachments.file(a.id);
+      const t = f ? await pdfText(f.path, 1200) : "";
+      if (t) texts.push(attached.length > 1 ? `${a.name}: ${t}` : t);
+    }
+    const read = texts.filter(Boolean).join("\n\n").replace(/^### .+\n/gm, "").trim().slice(0, 600);
+    const names = attached.map((a) => a.name).join(", ");
+    return this.session.proposeContext({ text: read || `${names} (no text to read: write what to keep)`, needsWording: !read, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
   }
 
   /**
