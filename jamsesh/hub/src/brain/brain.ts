@@ -847,7 +847,9 @@ export class Brain {
   shipWindowMs = 25_000;
   private shipped: { agent: Agent; text: string }[] = [];
   private shipTimer: ReturnType<typeof setTimeout> | null = null;
-  private shipConsidered = new Map<string, number>();
+  /** Shipped notes already considered, and parity checks already sent, in the last ten minutes: deduplicated by feature, not by agent. */
+  private shipConsidered: { agentId: string; text: string; at: number }[] = [];
+  private paritySent: { target: string; feature: string; at: number }[] = [];
 
   /** Ships within a short window (desktop and mobile often land together) are considered once. */
   agentUpdated(agent: Agent, kind: UpdateKind, text: string, data?: Record<string, any>) {
@@ -883,12 +885,13 @@ export class Brain {
 
   private shippedBatch(batch: { agent: Agent; text: string }[]) {
     const s = this.session;
-    // The same agent on the same branch was already considered a few minutes ago: it's information now
-    // (jam_context lists it under "Recently shipped"), not another round of coordination.
-    const key = (a: Agent) => `${a.id}@${a.branch}`;
-    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !(Date.now() - (this.shipConsidered.get(key(b.agent)) ?? 0) < 10 * 60_000));
+    // The same agent's note about the same thing was considered a few minutes ago: it's information now
+    // (jam_context lists it under "Recently shipped"). A different feature from it still gets its look.
+    const now = Date.now();
+    this.shipConsidered = this.shipConsidered.filter((c) => now - c.at < 10 * 60_000);
+    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !this.shipConsidered.some((c) => c.agentId === b.agent.id && similar(c.text, b.text) >= 0.6));
     if (!batch.length) return;
-    for (const b of batch) this.shipConsidered.set(key(b.agent), Date.now());
+    for (const b of batch) this.shipConsidered.push({ agentId: b.agent.id, text: b.text, at: now });
     // Parity needs an app on another platform in the room; without one there's nobody to coordinate with.
     const apps = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform));
     if (!batch.some((b) => apps.some((a) => a.platform !== b.agent.platform))) return;
@@ -897,7 +900,7 @@ export class Brain {
     void this.consider(
       `Shipped just now:\n${batch.map((b) => `- ${b.agent.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
         `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
-        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. coordinate_parity sends a parity check, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it when the shipper's text names something a person sees (a screen, control, flow or visible behavior), saying what that is in 'seen', with the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). When the text names nothing a person sees, call no_action.`,
+        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. coordinate_parity sends a parity check, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it when the shipper's text names something a person sees (a screen, control, flow or visible behavior), saying what that is in 'seen' in the shipper's own words, with the other platforms (or, when several platforms shipped the same feature, the shippers and no platforms). When the text names nothing a person sees, call no_action.`,
       "agent",
       this.parityTools(batch),
     );
@@ -906,13 +909,14 @@ export class Brain {
   /** The one thing a shipped-news pass can do: ask agents on different platforms to align one named feature. */
   private parityTools(batch: { agent: Agent; text: string }[]) {
     const s = this.session;
-    const open = (id: string) => s.directives().some((d) => d.mode === "coordinate" && d.targets.includes(id) && d.status !== "done" && d.status !== "cancelled" && Date.now() - d.ts < 10 * 60_000);
+    // One check per feature and agent in ten minutes; a different feature to the same agent still goes.
+    const sentAlready = (target: string, feature: string) => this.paritySent.some((p) => p.target === target && Date.now() - p.at < 10 * 60_000 && similar(p.feature, feature) >= 0.6);
     return {
       coordinate_parity: tool({
         description: "Send a parity check about one user-visible feature: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
           feature: z.string().describe("The user-visible feature or screen, as a person would name it"),
-          seen: z.string().describe("What a person sees of it, from the shipper's text (a screen, control, flow or visible behavior)"),
+          seen: z.string().describe("What a person sees of it, in the shipper's own words (a screen, control, flow or visible behavior); never something the update doesn't say"),
           shippedBy: z.array(z.string()).describe("Ids from 'Shipped just now' of the agents that shipped it"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
@@ -920,13 +924,17 @@ export class Brain {
           if (!seen.trim()) return refuse("The shipped text names nothing a person sees: call no_action.");
           const shippers = batch.map((b) => b.agent).filter((a) => shippedBy.includes(a.id));
           if (!shippers.length) return refuse("Name the shipping agents by id from 'Shipped just now'.");
+          // What a person sees has to come from what the shipper wrote, not be supplied for it.
+          if (!grounded(seen, batch.filter((b) => shippedBy.includes(b.agent.id)).map((b) => b.text).join(" ")))
+            return refuse("'seen' has to be in the shipper's own words: their update doesn't say that. If it names nothing a person sees, call no_action.");
           const made = new Set(shippers.map((a) => a.platform));
           const partners = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
           const team = [...shippers, ...partners];
           if (new Set(team.map((a) => a.platform)).size < 2) return refuse("That isn't a cross-platform feature: no app on another platform needs it.");
           const sent: string[] = [];
           for (const a of team) {
-            if (open(a.id)) continue;
+            if (sentAlready(a.id, feature)) continue;
+            this.paritySent.push({ target: a.id, feature, at: Date.now() });
             const mates = team.filter((o) => o.id !== a.id).map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ");
             const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
             s.createDirective({
@@ -940,7 +948,7 @@ export class Brain {
             });
             sent.push(a.name);
           }
-          return sent.length ? `Sent ${sent.join(", ")} a parity check.` : "Each of them already has an open coordinate directive.";
+          return sent.length ? `Sent ${sent.join(", ")} a parity check.` : "Each of them already has a parity check for this feature.";
         },
       }),
       no_action: tool({ description: "Nothing for other platforms to do.", inputSchema: z.object({ reason: z.string() }), execute: async () => "ok" }),
@@ -1208,6 +1216,14 @@ const refuse = (text: string) => new Refusal(text);
 /** Tools that never change anything, so calling them isn't an effect of the pass. */
 const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
 /** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
+/** Whether `claim` is in `source`'s words: at least two shared content words (all of them when it has fewer). */
+export function grounded(claim: string, source: string) {
+  const have = new Set(terms(source));
+  const want = [...new Set(terms(claim))];
+  const shared = want.filter((w) => have.has(w)).length;
+  return shared >= Math.min(2, want.length) && shared > 0;
+}
+
 /** Platforms with a user-facing app, where a shipped feature can be a parity question. */
 const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
 /** A shipped note that could be a feature: not a commit, refactor, fix, dependency or tooling change, and not marked one platform's. */
