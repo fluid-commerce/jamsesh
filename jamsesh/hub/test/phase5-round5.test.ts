@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { config } from "../src/config";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
-import { ownDownload, recordDownload, WHISPER_MODEL } from "../src/audio/whisper";
+import { LocalWhisper, mayReplace, ownDownload, recordDownload, WHISPER_MODEL } from "../src/audio/whisper";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { BadWav, decodeWav, encodeWav, resample } from "../src/audio/wav";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r5-"));
@@ -94,6 +96,25 @@ test("a rejected Whisper model is deleted only when it is the very file JamSesh 
     rmSync(own);
     writeFileSync(own, "model");
     expect(ownDownload(own)).toBe(false);
+    // Office review 7: provenance is the very file, not its name. Recorded, then replaced by another file: not ours.
+    recordDownload(true);
+    expect(ownDownload(own)).toBe(true);
+    rmSync(own);
+    writeFileSync(own, "someone else's model");
+    expect([ownDownload(own), mayReplace(own)]).toEqual([false, false]);
+    // An earlier build's name-only manifest proves nothing.
+    writeFileSync(join(models, "downloaded.json"), JSON.stringify([WHISPER_MODEL.name]));
+    expect(ownDownload(own)).toBe(false);
+    for (const junk of ["{", "null", "{}", JSON.stringify({ [WHISPER_MODEL.name]: { ino: "x" } })]) {
+      writeFileSync(join(models, "downloaded.json"), junk);
+      expect([junk, ownDownload(own)]).toEqual([junk, false]);
+    }
+    // Nothing there: free to write. Chosen by the person, even before it exists: never.
+    rmSync(own);
+    expect(mayReplace(own)).toBe(true);
+    process.env.JAMSESH_WHISPER_MODEL = own;
+    expect(mayReplace(own)).toBe(false);
+    delete process.env.JAMSESH_WHISPER_MODEL;
   } finally {
     if (was === undefined) delete process.env.JAMSESH_WHISPER_MODEL;
     else process.env.JAMSESH_WHISPER_MODEL = was;
@@ -112,4 +133,42 @@ test("a voice brought from another host by an earlier build is gone when the hos
   (first as any).db.close();
   expect(new Store(where).voiceSamples().map((x) => x.kind)).toEqual(["enrol"]);
   rmSync(where, { recursive: true, force: true });
+});
+
+test("a download never lands over a model file JamSesh didn't download, there before it started or put there meanwhile", async () => {
+  const models = join(config.home, "models");
+  mkdirSync(models, { recursive: true });
+  const own = join(models, WHISPER_MODEL.name);
+  if (!config.home.startsWith(tmpdir()) || existsSync(own)) throw new Error(`run with JAMSESH_HOME set to a throwaway folder (${config.home})`);
+  const body = new Uint8Array(4096).fill(7);
+  const pinned = { sha256: WHISPER_MODEL.sha256, bytes: WHISPER_MODEL.bytes };
+  Object.assign(WHISPER_MODEL, { sha256: createHash("sha256").update(body).digest("hex"), bytes: body.length });
+  const realFetch = globalThis.fetch;
+  let asked = 0;
+  let meanwhile: (() => void) | null = null;
+  globalThis.fetch = (async (url: any, init?: any) => (String(url) === WHISPER_MODEL.url ? (asked++, meanwhile?.(), new Response(body)) : realFetch(url, init))) as typeof fetch;
+  const download = () => (new LocalWhisper() as any).download() as Promise<string>;
+  try {
+    // Someone's file at the managed path (a wrong size, so it was passed over): refused before downloading.
+    writeFileSync(own, "a model someone put here");
+    await expect(download()).rejects.toThrow("JamSesh didn't download");
+    expect([asked, readFileSync(own, "utf8")]).toEqual([0, "a model someone put here"]);
+    // Put there while JamSesh downloaded: refused at the last moment, theirs kept, no partial file left.
+    rmSync(own);
+    meanwhile = () => writeFileSync(own, "appeared meanwhile");
+    await expect(download()).rejects.toThrow("JamSesh didn't download");
+    expect([asked, readFileSync(own, "utf8")]).toEqual([1, "appeared meanwhile"]);
+    expect(existsSync(`${own}.part`)).toBe(false);
+    // Nothing there: it lands and is recorded as JamSesh's own; its own may be replaced by a later download.
+    rmSync(own);
+    meanwhile = null;
+    expect(await download()).toBe(own);
+    expect(ownDownload(own)).toBe(true);
+    expect(await download()).toBe(own);
+    expect(ownDownload(own)).toBe(true);
+  } finally {
+    globalThis.fetch = realFetch;
+    Object.assign(WHISPER_MODEL, pinned);
+    for (const f of [own, `${own}.part`, join(models, "downloaded.json")]) rmSync(f, { force: true });
+  }
 });

@@ -134,7 +134,7 @@ export class LocalWhisper {
       this.set("starting", "Checking the speech model.");
       if (await verified(model)) return model;
       this.bad.add(model);
-      if (ownDownload(model)) (rmSync(model, { force: true }), recordDownload(false));
+      if (mayReplace(model)) (rmSync(model, { force: true }), recordDownload(false));
     }
     return null;
   }
@@ -197,9 +197,13 @@ export class LocalWhisper {
     mkdirSync(dir, { recursive: true });
     const dest = join(dir, WHISPER_MODEL.name);
     const part = `${dest}.part`;
+    // Before 574 MB of download: it could only land over someone else's file.
+    if (!mayReplace(dest)) throw new Error(KEPT_THEIRS(dest));
     this.set("downloading", `Downloading the speech model (${Math.round(WHISPER_MODEL.bytes / 1e6)} MB, once). The gateway covers the room meanwhile.`, 0);
     try {
       await downloadVerified(WHISPER_MODEL, part, (pct) => (this.progress = pct), () => this.stopped);
+      // Asked again at the last moment: someone may have put a file there while it downloaded.
+      if (!mayReplace(dest)) throw new Error(KEPT_THEIRS(dest));
       renameSync(part, dest);
       recordDownload(true);
       const st = statSync(dest);
@@ -218,25 +222,41 @@ export class LocalWhisper {
   }
 }
 
-/** The models JamSesh downloaded itself, by file name in ~/.jamsesh/models: the only files it ever deletes. */
-const manifest = () => join(config.home, "models", "downloaded.json");
+const KEPT_THEIRS = (path: string) => `A speech model JamSesh didn't download is at ${path}. It was left alone; move it away to let JamSesh download its own.`;
 
-function downloaded(): string[] {
+/**
+ * The model file JamSesh downloaded itself, by the identity of that very file (device, inode, size, birth and
+ * modification times) at ~/.jamsesh/models: the only file it ever deletes or replaces. A file put there later, even
+ * with the same name, is someone else's. Earlier builds recorded only a file name, which proves nothing: ignored.
+ */
+const manifest = () => join(config.home, "models", "downloaded.json");
+type Identity = { dev: number; ino: number; size: number; birth: number; mtime: number };
+
+const identity = (path: string): Identity | null => {
   try {
-    const names: unknown = JSON.parse(readFileSync(manifest(), "utf8"));
-    return Array.isArray(names) ? names.filter((n): n is string => typeof n === "string") : [];
+    const st = lstatSync(path);
+    return st.isFile() ? { dev: st.dev, ino: st.ino, size: st.size, birth: st.birthtimeMs, mtime: st.mtimeMs } : null;
   } catch {
-    return [];
+    return null;
+  }
+};
+
+function recorded(): Identity | null {
+  try {
+    const m: unknown = JSON.parse(readFileSync(manifest(), "utf8"));
+    const r = m && typeof m === "object" && !Array.isArray(m) ? (m as Record<string, unknown>)[WHISPER_MODEL.name] : null;
+    const ok = r && typeof r === "object" && (["dev", "ino", "size", "birth", "mtime"] as const).every((k) => Number.isFinite((r as Record<string, unknown>)[k]));
+    return ok ? (r as Identity) : null;
+  } catch {
+    return null;
   }
 }
 
-/** Records (or, once it's deleted, forgets) that JamSesh downloaded the pinned model itself. */
+/** Records the file now at the managed path as JamSesh's own download, or (false) forgets it. */
 export function recordDownload(on: boolean) {
-  const names = new Set(downloaded());
-  if (on) names.add(WHISPER_MODEL.name);
-  else names.delete(WHISPER_MODEL.name);
+  const own = on ? identity(join(config.home, "models", WHISPER_MODEL.name)) : null;
   const tmp = `${manifest()}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify([...names]));
+  writeFileSync(tmp, JSON.stringify(own ? { [WHISPER_MODEL.name]: own } : {}));
   renameSync(tmp, manifest());
 }
 
@@ -249,17 +269,30 @@ const real = (p: string) => {
 };
 
 /**
- * Whether JamSesh may delete a rejected model: only the exact file it downloaded (a plain file at its managed
- * path, recorded in the manifest), compared by real path, and never a file chosen with JAMSESH_WHISPER_MODEL.
+ * Whether `path` is the exact file JamSesh downloaded: a plain file at its managed path (compared by real path)
+ * whose identity is the one recorded when the download landed, and not a file chosen with JAMSESH_WHISPER_MODEL.
  */
 export function ownDownload(path: string) {
   const own = join(config.home, "models", WHISPER_MODEL.name);
   const chosen = process.env.JAMSESH_WHISPER_MODEL;
   if (chosen && real(chosen) === real(path)) return false;
+  if (real(path) !== real(own)) return false;
+  const now = identity(own);
+  const was = recorded();
+  return !!now && !!was && now.dev === was.dev && now.ino === was.ino && now.size === was.size && now.birth === was.birth && now.mtime === was.mtime;
+}
+
+/**
+ * THE ONE RULE FOR MODEL FILES: JamSesh deletes or writes over a model path only when nothing is there or what is
+ * there is its own download (ownDownload). Every removal and the download's rename go through here.
+ */
+export function mayReplace(path: string) {
+  const chosen = process.env.JAMSESH_WHISPER_MODEL;
+  if (chosen && real(chosen) === real(path)) return false;
   try {
-    if (!lstatSync(own).isFile()) return false;
+    lstatSync(path);
   } catch {
-    return false;
+    return true;
   }
-  return real(path) === real(own) && downloaded().includes(WHISPER_MODEL.name);
+  return ownDownload(path);
 }
