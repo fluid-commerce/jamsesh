@@ -612,6 +612,37 @@ test("install.sh downloads the model beside its name and keeps it only when it m
   expect(sh).toMatch(/model_ok "\$WHISPER_MODEL.part" \|\|[^\n]*\n\s*mv -f "\$WHISPER_MODEL.part" "\$WHISPER_MODEL"/);
 });
 
+test("only the pinned whisper-server build and speaker model are installed or bundled; anything else is refused", () => {
+  const script = join(import.meta.dir, "../../app/build-whisper.sh");
+  const commit = readFileSync(script, "utf8").match(/^COMMIT=(\w+)$/m)![1];
+  const where = join(dir, "pinned-bin");
+  mkdirSync(where, { recursive: true });
+  const check = () => Bun.spawnSync(["bash", script, "--check", where]).exitCode;
+  const bin = join(where, "whisper-server");
+  const stamp = join(where, "whisper-server.build");
+  const sha = () => new Bun.CryptoHasher("sha256").update(readFileSync(bin)).digest("hex");
+  // Nothing there, or a binary nobody stamped (copied in, or Homebrew's).
+  expect(check()).toBe(1);
+  writeFileSync(bin, "#!/bin/sh\necho built\n");
+  chmodSync(bin, 0o755);
+  expect(check()).toBe(1);
+  // Stamped by the pinned build: accepted.
+  writeFileSync(stamp, `tag=v1.8.4\ncommit=${commit}\nsha256=${sha()}\n`);
+  expect(check()).toBe(0);
+  // Changed since it was built, or built from another commit: refused.
+  writeFileSync(bin, "#!/bin/sh\necho swapped\n");
+  expect(check()).toBe(1);
+  writeFileSync(stamp, `tag=v1.8.4\ncommit=0000000000000000000000000000000000000000\nsha256=${sha()}\n`);
+  expect(check()).toBe(1);
+  // install.sh and bundle-hub.sh check the same speaker-model pin, and bundling refuses a file that isn't it.
+  const install = readFileSync(join(import.meta.dir, "../../install.sh"), "utf8");
+  const bundle = readFileSync(join(import.meta.dir, "../../app/bundle-hub.sh"), "utf8");
+  const pin = install.match(/^WESPEAKER_SHA256=(\w+)$/m)![1];
+  expect(bundle).toContain(`WESPEAKER_SHA256=${pin}`);
+  expect(bundle).toMatch(/build-whisper\.sh --check "\$JAM\/bin" \|\| \{ echo/);
+  expect(bundle).toMatch(/!= "\$WESPEAKER_SHA256" \]; then[\s\S]*?exit 1/);
+});
+
 test("a service on the whisper port that isn't whisper-server is never adopted", async () => {
   const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("<html>a dev server</html>") });
   servers.push(other);

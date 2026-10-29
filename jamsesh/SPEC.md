@@ -1374,7 +1374,7 @@ sample is all zeros, and at most 32 samples.
 
 **Why voice matching might be off.** `voiceprintStatus()` (in `/api/engines` and the state the
 screens read) says `ok`, `missing-model`, `missing-library` or `load-failed`, with a `reason` and a `fix`
-written as an action: for a missing model, where to download `wespeaker_en_voxceleb_resnet34.onnx`
+written as an action: for a missing model, where to download `wespeaker_en_voxceleb_resnet34_LM.onnx`
 and the exact path to save it as (`<JamSesh home>/models/wespeaker_en.onnx`; the app bundles it).
 The speaker menu shows the fix. When voiceprints exist but, over twelve lines, none was named by
 voice, the menu says so.

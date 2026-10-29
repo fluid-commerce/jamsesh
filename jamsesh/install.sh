@@ -17,7 +17,7 @@ step "Checking tools"
 command -v cargo >/dev/null || { echo "Install Rust first: https://rustup.rs" >&2; exit 1; }
 command -v bun >/dev/null || { echo "Install Bun first: curl -fsSL https://bun.sh/install | bash" >&2; exit 1; }
 ok "cargo $(cargo --version | cut -d' ' -f2), bun $(bun --version)"
-if [ -x "$HOME_DIR/bin/whisper-server" ]; then ok "whisper-server"
+if jamsesh/app/build-whisper.sh --check "$HOME_DIR/bin"; then ok "whisper-server"
 elif command -v cmake >/dev/null && [ "$(uname -s)" = Darwin ]; then jamsesh/app/build-whisper.sh "$HOME_DIR/bin" >/dev/null && ok "Built whisper-server"
 elif command -v whisper-server >/dev/null; then ok "whisper-server (Homebrew)"
 else warn "No whisper-server (needs cmake to build): transcription will use the gateway"; fi
@@ -54,10 +54,16 @@ if ! model_ok "$WHISPER_MODEL"; then
   mv -f "$WHISPER_MODEL.part" "$WHISPER_MODEL"
 fi
 ok "Whisper large-v3-turbo"
-if [ ! -f "$HOME_DIR/models/wespeaker_en.onnx" ]; then
-  curl -fL --progress-bar -o "$HOME_DIR/models/wespeaker_en.onnx.part" \
-    https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx \
-    && mv -f "$HOME_DIR/models/wespeaker_en.onnx.part" "$HOME_DIR/models/wespeaker_en.onnx"
+# The speaker model, pinned the same way (bundle-hub.sh ships only this file). A stale or different one is replaced.
+WESPEAKER="$HOME_DIR/models/wespeaker_en.onnx"
+WESPEAKER_URL=https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx
+WESPEAKER_SHA256=e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012
+sha_ok() { [ -f "$1" ] && [ "$(shasum -a 256 "$1" | cut -d' ' -f1)" = "$2" ]; }
+if ! sha_ok "$WESPEAKER" "$WESPEAKER_SHA256"; then
+  rm -f "$WESPEAKER.part"
+  curl -fL --progress-bar -o "$WESPEAKER.part" "$WESPEAKER_URL" || fail "Couldn't download the speaker model"
+  sha_ok "$WESPEAKER.part" "$WESPEAKER_SHA256" || { rm -f "$WESPEAKER.part"; fail "The speaker model download didn't match its checksum"; }
+  mv -f "$WESPEAKER.part" "$WESPEAKER"
 fi
 ok "Voiceprint model (WeSpeaker)"
 

@@ -14,7 +14,7 @@ let loadError = "";
 let loadCode: VoiceStatus["code"] = "ok";
 
 /** Where people get the speaker model; it is the file the app bundles as models/wespeaker_en.onnx. */
-const MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34.onnx";
+const MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx";
 
 function getExtractor(): Extractor | null {
   if (extractor !== undefined) return extractor;
@@ -57,7 +57,7 @@ export function voiceprintStatus(): VoiceStatus {
   const folder = join(config.home, "models");
   const fixes: Record<VoiceStatus["code"], string> = {
     ok: "",
-    "missing-model": `Download wespeaker_en_voxceleb_resnet34.onnx from ${MODEL_URL}, save it as ${join(folder, "wespeaker_en.onnx")}, then restart JamSesh. The JamSesh app already includes it.`,
+    "missing-model": `Download wespeaker_en_voxceleb_resnet34_LM.onnx from ${MODEL_URL}, save it as ${join(folder, "wespeaker_en.onnx")}, then restart JamSesh. The JamSesh app already includes it.`,
     "missing-library": "The voice library (sherpa-onnx-node) isn't installed next to the hub. Run JamSesh from the app, or install it in the hub's folder, then restart.",
     "load-failed": `The speaker model at ${config.speakerModel ?? join(folder, "wespeaker_en.onnx")} didn't load. Download it again from ${MODEL_URL} and restart JamSesh.`,
   };
