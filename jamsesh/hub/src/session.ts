@@ -4,6 +4,7 @@ import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { newId, PALETTE, Store } from "./store";
 import type {
+  EventKind,
   Agent,
   Annotation,
   Artifact,
@@ -146,7 +147,7 @@ export class Session {
       artifacts: this.artifacts().slice(0, 120),
       devservers: this.store.all("devservers"),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
-      utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0).slice(-200),
+      utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200),
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
@@ -154,8 +155,47 @@ export class Session {
       buildRequests: this.buildRequests(),
       screens: this.screens(),
       digest: this.store.digest("session")?.text ?? "",
+      totals: this.totals(),
       brain: this.brainStatus,
     };
+  }
+
+  totals(): HubState["totals"] {
+    return { events: this.store.countEvents(), utterances: this.store.all("utterances").length, directives: this.store.all("directives").length, artifacts: this.store.all("artifacts").length };
+  }
+
+  /**
+   * The part of a list that the live state leaves out: the page just older than `before` (the cursor
+   * the previous page ended on: an event's id, or "<time>|<id>" of an utterance, directive or artifact),
+   * plus how many are older still. Events and utterances come oldest first, the rest newest first.
+   */
+  history(what: string, o: { before?: number | string; limit?: number; kinds?: EventKind[] }): { items: any[]; more: number; total: number } | null {
+    const limit = Math.max(1, Math.min(200, Math.floor(o.limit ?? 50)));
+    // A cursor is "<time>|<id>" (the last item's), so items stamped the same millisecond aren't skipped.
+    const [t, id = ""] = String(o.before ?? "").split("|");
+    const beforeT = t !== "" && Number.isFinite(Number(t)) ? Number(t) : Infinity;
+    const page = <T extends { id: string }>(all: T[], at: (x: T) => number, newestFirst: boolean) => {
+      const key = (x: T) => at(x) * (newestFirst ? -1 : 1);
+      const order = (a: T, b: T) => key(a) - key(b) || (a.id < b.id ? -1 : 1) * (newestFirst ? -1 : 1);
+      const older = all.filter((x) => at(x) < beforeT || (at(x) === beforeT && id !== "" && x.id < id)).sort(order);
+      const items = newestFirst ? older.slice(0, limit) : older.slice(-limit);
+      return { items, more: older.length - items.length, total: all.length };
+    };
+    switch (what) {
+      case "events": {
+        const events = this.store.recentEvents({ limit, kinds: o.kinds, beforeId: beforeT === Infinity ? undefined : beforeT }).map(publicEvent);
+        const oldest = events[0]?.id;
+        return { items: events, more: oldest == null ? 0 : this.store.countEvents({ beforeId: oldest, kinds: o.kinds }), total: this.store.countEvents({ kinds: o.kinds }) };
+      }
+      case "utterances":
+        return page(this.store.all("utterances"), (u) => u.t0, false);
+      case "directives":
+        return page(this.store.all("directives"), (d) => d.ts, true);
+      case "artifacts":
+        return page(this.store.all("artifacts"), (a) => a.updatedAt, true);
+      default:
+        return null;
+    }
   }
 
   private resolve(key: string): { key: any; value: any } | null {
@@ -175,7 +215,9 @@ export class Session {
       case "devservers":
         return { key, value: this.store.all("devservers") };
       case "utterances":
-        return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0).slice(-200) };
+        return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200) };
+      case "totals":
+        return { key, value: this.totals() };
       case "digest":
         return { key, value: this.store.digest("session")?.text ?? "" };
       case "shares":
@@ -480,7 +522,7 @@ export class Session {
   // ---- directives ----
 
   directives(): Directive[] {
-    return this.store.all("directives").sort((a, b) => b.ts - a.ts);
+    return this.store.all("directives").sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : -1));
   }
 
   createDirective(d: {
@@ -689,7 +731,7 @@ export class Session {
   // ---- artifacts ----
 
   artifacts(): Artifact[] {
-    return this.store.all("artifacts").sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.store.all("artifacts").sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1));
   }
 
   upsertArtifact(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, opts: { announce?: boolean } = {}): Artifact {

@@ -235,18 +235,28 @@ export class Store {
     return row ? rowToEvent(row) : undefined;
   }
 
-  recentEvents(opts: { limit?: number; since?: number; kinds?: EventKind[]; afterId?: number } = {}): JamEvent[] {
+  recentEvents(opts: { limit?: number; since?: number; kinds?: EventKind[]; afterId?: number; beforeId?: number } = {}): JamEvent[] {
     const where: string[] = [];
     const args: any[] = [];
     if (opts.since) (where.push("ts >= ?"), args.push(opts.since));
     if (opts.afterId != null) (where.push("id > ?"), args.push(opts.afterId));
+    if (opts.beforeId != null) (where.push("id < ?"), args.push(opts.beforeId));
     if (opts.kinds?.length) (where.push(`kind IN (${opts.kinds.map(() => "?").join(",")})`), args.push(...opts.kinds));
     const sql = `SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`;
     args.push(opts.limit ?? 100);
     return (this.db.query(sql).all(...args) as any[]).map(rowToEvent).reverse();
   }
 
-  searchEvents(query: string, limit = 20): JamEvent[] {
+  /** How many events there are (before an id, of some kinds), for "N more" counts. */
+  countEvents(opts: { beforeId?: number; kinds?: EventKind[] } = {}): number {
+    const where: string[] = [];
+    const args: any[] = [];
+    if (opts.beforeId != null) (where.push("id < ?"), args.push(opts.beforeId));
+    if (opts.kinds?.length) (where.push(`kind IN (${opts.kinds.map(() => "?").join(",")})`), args.push(...opts.kinds));
+    return (this.db.query(`SELECT COUNT(*) AS n FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""}`).get(...args) as any).n;
+  }
+
+  searchEvents(query: string, limit = 20, offset = 0): JamEvent[] {
     const terms = query
       .replace(/["'*^():]/g, " ")
       .split(/\s+/)
@@ -258,9 +268,9 @@ export class Store {
         this.db
           .query(
             `SELECT events.* FROM events_fts JOIN events ON events.id = events_fts.rowid
-             WHERE events_fts MATCH ? ORDER BY rank LIMIT ?`,
+             WHERE events_fts MATCH ? ORDER BY rank LIMIT ? OFFSET ?`,
           )
-          .all(terms.join(" OR "), limit) as any[]
+          .all(terms.join(" OR "), limit, offset) as any[]
       ).map(rowToEvent);
     } catch {
       return [];

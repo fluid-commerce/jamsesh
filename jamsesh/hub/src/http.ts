@@ -8,7 +8,7 @@ import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { skillMarkdown } from "./skill";
-import type { BusMessage, Stage } from "./types";
+import type { BusMessage, EventKind, Stage } from "./types";
 
 type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
 
@@ -383,6 +383,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
+
+  // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt
+  let hm = path.match(/^\/history\/(events|utterances|directives|artifacts)$/);
+  if (hm && req.method === "GET") {
+    const q = url.searchParams;
+    const kinds = (q.get("kinds") ?? "").split(",").filter(Boolean) as EventKind[];
+    const r = s.history(hm[1], { before: q.get("before") ?? undefined, limit: q.has("limit") ? Number(q.get("limit")) : undefined, kinds });
+    return r ? json(r) : bad("unknown list", 404);
+  }
 
   // Things only people do: speak, record, pin, approve, steer the screen, share, invite. An agent's
   // credential is refused on all of them (agents talk to the room through MCP), and a person's
