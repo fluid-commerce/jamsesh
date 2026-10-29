@@ -388,8 +388,21 @@ const NEAR_TOP = 160;
  * as the reader reaches the top. The big screens (`big`) always follow and keep a short tail.
  * The feed scrolls its own box (scrollTop), never its ancestors.
  */
-/** How many lines the feed keeps in memory and renders while following the bottom. */
+/** How many lines the feed keeps in memory and renders, following the bottom or not. */
 const FEED_KEEP = 1500;
+
+/**
+ * Keeps at most `keep` lines, always. Following the bottom drops the oldest (they load again from
+ * the hub on scroll); a reader who scrolled away keeps the lines they are reading, so the newest
+ * are dropped instead and come back from the live state when they return to the bottom.
+ * True when anything was dropped.
+ */
+export function capFeed(seen: Map<number, unknown>, following: boolean, keep = FEED_KEEP): boolean {
+  if (seen.size <= keep) return false;
+  const ids = [...seen.keys()].sort((a, b) => a - b);
+  for (const id of following ? ids.slice(0, ids.length - keep) : ids.slice(keep)) seen.delete(id);
+  return true;
+}
 
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   const { state } = useHub();
@@ -410,11 +423,7 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   for (const e of state?.events ?? []) seen.current.set(e.id, e);
   const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
   // A long session keeps a bounded tail while the reader follows the bottom; older lines load again from the hub on scroll.
-  if (following.current && seen.current.size > FEED_KEEP) {
-    const ids = [...seen.current.keys()].sort((a, b) => a - b);
-    for (const id of ids.slice(0, ids.length - FEED_KEEP)) seen.current.delete(id);
-    trimmed.current = true;
-  }
+  if (capFeed(seen.current, following.current)) trimmed.current = true;
   const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
   const events = big ? all.slice(-140) : all;
   const last = events[events.length - 1]?.id ?? 0;

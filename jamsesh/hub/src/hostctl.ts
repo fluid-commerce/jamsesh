@@ -90,22 +90,71 @@ for (const p of se.processes.whose({ visible: true })()) {
 }
 JSON.stringify(out);`;
 
-async function run(cmd: string[], timeoutMs = 30_000): Promise<{ code: number; out: string }> {
-  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-  // Every wait is bounded: past the timeout the process is stopped (TERM, then KILL) and we stop waiting on its pipes and exit.
+/** How much of a command's output is kept: the tail (what ends up in a note), however much it prints. */
+const OUTPUT_TAIL = 16_384;
+
+async function tail(stream: ReadableStream<Uint8Array>, max = OUTPUT_TAIL): Promise<string> {
+  const dec = new TextDecoder();
+  let kept = "";
+  for await (const chunk of stream) {
+    kept += dec.decode(chunk, { stream: true });
+    if (kept.length > max * 2) kept = kept.slice(-max);
+  }
+  return kept.slice(-max);
+}
+
+export type RunResult = {
+  code: number;
+  out: string;
+  /** The command timed out (or its pipes failed) and stopHelper could not see it exit: it may still be running. */
+  stuck?: boolean;
+  /** Resolves only when the process's exit was observed. Never rejects. */
+  gone?: Promise<void>;
+};
+
+/** Runs argv (no shell) with a deadline. Every wait is bounded; a process that can't be stopped is reported as stuck, never as a finished failure. */
+export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<RunResult> {
+  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", ...(cwd ? { cwd } : {}) });
+  const gone = p.exited.then(() => undefined, () => new Promise<void>(() => {}));
   const finished = (async () => {
-    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    const [out, err] = await Promise.all([tail(p.stdout), tail(p.stderr)]);
     const code = await p.exited;
-    return { code, out: (out + (err ? `\n${err}` : "")).trim() };
+    return { code, out: (out + (err ? `\n${err}` : "")).trim().slice(-OUTPUT_TAIL) };
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)));
-  const r = await Promise.race([finished, late]);
-  clearTimeout(timer);
-  if (r) return r;
+  try {
+    const r = await Promise.race([finished, late]);
+    if (r) return r;
+  } catch (e) {
+    // A pipe or exit wait failed: fall through to stop the process.
+    finished.catch(() => {});
+    return stopAfter(p, gone, `failed: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    clearTimeout(timer);
+  }
   finished.catch(() => {});
-  await stopHelper(p, 1_000).catch(() => false);
-  return { code: -1, out: "timed out" };
+  return stopAfter(p, gone, "timed out");
+}
+
+async function stopAfter(p: Parameters<typeof stopHelper>[0], gone: Promise<void>, why: string): Promise<RunResult> {
+  const stopped = await stopHelper(p, 1_000).catch(() => false);
+  return stopped ? { code: -1, out: why } : { code: -1, out: `${why}; still running, couldn't stop it`, stuck: true, gone };
+}
+
+/** A remote a build may clone: https, ssh:// or git@, with no credentials in it (a token or user:password belongs in the host's git credential helper, not in room data or a process list). */
+export function repoProblem(repo: string): string | null {
+  if (typeof repo !== "string" || !/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(repo)) return "I need the repository's remote URL (https or git@) to build it.";
+  const authority = repo.startsWith("git@") ? repo.split(":")[0] : repo.replace(/^[a-z]+:\/\//, "").split("/")[0];
+  const at = authority.lastIndexOf("@");
+  const user = at >= 0 ? authority.slice(0, at) : "";
+  if (user && !(user === "git" && !repo.startsWith("https://"))) return "That repository URL has a username or token in it. Use the plain URL; the host's own git login does the authenticating.";
+  return null;
+}
+
+/** Any URL's credentials removed, for anything the room can see. */
+export function redactUrls(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, "$1***@");
 }
 
 const osa = (script: string) => run(["osascript", "-e", script]);
@@ -204,6 +253,9 @@ function pngSize(file: string): { width: number; height: number } | null {
 }
 
 export class HostControl {
+  /** Deadlines for fetching the code and for the approved build command. */
+  static GIT_MS = 5 * 60_000;
+  static BUILD_MS = 20 * 60_000;
   /** The host's displays, refreshed in the background so the brain can read them any time. */
   displays: Display[] = [];
   bigScreen: BigScreen | null = null;
@@ -421,7 +473,8 @@ export class HostControl {
 
   /** An agent (or the brain) asks to build on the host. Nothing runs until a person approves it. */
   request(r: Omit<BuildRequest, "id" | "status" | "createdAt">): BuildRequest | string {
-    if (!/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(r.repo)) return "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
+    const bad = repoProblem(r.repo);
+    if (bad) return bad.startsWith("That") ? bad : "Your repository needs a remote URL (https or git@) the host can clone. Push your branch and join with the remote URL.";
     if (!r.command.trim()) return "Give the build command.";
     return this.file(r);
   }
@@ -472,7 +525,7 @@ export class HostControl {
   private runShell(command: string, by: string): string {
     this.log(`Running on the host (approved by ${by}): ${command}`);
     void run(["/bin/zsh", "-lc", command], 60_000)
-      .then((r) => this.log(`Shell command finished with exit ${r.code}: ${command}${r.out.trim() ? `\n${r.out.slice(-600)}` : ""}`))
+      .then((r) => this.log(r.stuck ? `Shell command is still running and couldn't be stopped: ${command}` : `Shell command finished with exit ${r.code}: ${command}${r.out.trim() ? `\n${r.out.slice(-600)}` : ""}`))
       .catch((e) => this.log(`Shell command failed: ${e instanceof Error ? e.message : e}`));
     return `Running on the host: ${command}`;
   }
@@ -485,10 +538,11 @@ export class HostControl {
    */
   preview(o: { repo: string; branch?: string; command: string; open?: string; by: string }): string {
     if (!this.session.settings().hostControl) return "Host control is turned off in Settings.";
-    if (!/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~-]+$/.test(o.repo)) return "I need the repository's remote URL (https or git@) to build it on the host.";
+    const bad = repoProblem(o.repo);
+    if (bad) return bad;
     const name = o.repo.replace(/\.git$/, "").split(/[/:]/).pop() || "repo";
     const branch = o.branch?.trim() || "";
-    if (branch && !/^[\w./-]+$/.test(branch)) return "That branch name has characters I won't pass to git.";
+    if (branch && (!/^[\w./-]+$/.test(branch) || branch.startsWith("-"))) return "That branch name has characters I won't pass to git.";
     // The checkout is keyed by the full remote, so org-a/app and org-b/app never share one.
     const slug = `${name}${branch ? `-${branch.replace(/[^\w-]+/g, "-")}` : ""}-${createHash("sha1").update(o.repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
     if (this.builds.has(slug)) return `${name}${branch ? `@${branch}` : ""} is already building on the host.`;
@@ -496,39 +550,59 @@ export class HostControl {
     const label = `${name}${branch ? `@${branch}` : ""}`;
     this.builds.set(slug, { started: Date.now(), label });
     mkdirSync(join(config.home, "previews"), { recursive: true });
-    const q = (x: string) => `'${x.replace(/'/g, "'\\''")}'`;
-    const sync = existsSync(join(dir, ".git"))
-      ? `cd ${q(dir)} && git fetch --quiet origin${branch ? ` && git checkout --quiet ${q(branch)} && git reset --quiet --hard ${q(`origin/${branch}`)}` : " && git pull --quiet --ff-only"}`
-      : `git clone --quiet ${branch ? `--branch ${q(branch)} ` : ""}${q(o.repo)} ${q(dir)} && cd ${q(dir)}`;
-    this.log(`${o.by} started a preview build of ${label} on the host: ${o.command}`);
-    bus.send({ type: "toast", tone: "info", text: `Building ${label} on the host`, detail: o.command.slice(0, 80) });
+    this.log(`${o.by} started a preview build of ${label} on the host: ${redactUrls(o.command)}`);
+    bus.send({ type: "toast", tone: "info", text: `Building ${label} on the host`, detail: redactUrls(o.command).slice(0, 80) });
     void (async () => {
-      const r = await run(["/bin/zsh", "-lc", `${sync} && ${o.command}`], 20 * 60_000);
-      let result: string;
-      let ok = r.code === 0;
-      if (r.code) {
-        result = `The ${label} build failed (exit ${r.code}): ${r.out.slice(-600)}`;
-      } else if (o.open?.startsWith("simulator:")) {
-        const app = resolve(dir, o.open.slice("simulator:".length));
-        await this.simulator();
-        const inst = await run(["xcrun", "simctl", "install", "booted", app], 120_000);
-        const id = (await run(["/usr/bin/defaults", "read", join(app, "Info"), "CFBundleIdentifier"])).out.trim();
-        const launch = inst.code ? inst : await run(["xcrun", "simctl", "launch", "booted", id]);
-        ok = !launch.code && app.startsWith(`${dir}/`);
-        result = launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
-      } else if (o.open) {
-        const target = /^https?:\/\//.test(o.open) ? o.open : resolve(dir, o.open);
-        const inside = /^https?:\/\//.test(o.open) || target.startsWith(`${dir}/`);
-        const opened = inside ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout" };
-        ok = !opened.code;
-        result = opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
-      } else {
-        result = `${label} is built on the host (${dir}).`;
+      // One place releases the build lock. If a command couldn't be stopped, the lock stays until its exit is seen.
+      let release = () => void this.builds.delete(slug);
+      try {
+        // Fetching the code is argv only (no shell, the URL is never in a command string); the approved build command is the only shell text.
+        const git = (args: string[], cwd?: string) => run(["git", ...args], HostControl.GIT_MS, cwd);
+        const fetched = existsSync(join(dir, ".git"))
+          ? await (async () => {
+              let r = await git(["fetch", "--quiet", "origin"], dir);
+              if (!r.code && branch) r = await git(["checkout", "--quiet", branch], dir);
+              if (!r.code && branch) r = await git(["reset", "--quiet", "--hard", `origin/${branch}`], dir);
+              if (!r.code && !branch) r = await git(["pull", "--quiet", "--ff-only"], dir);
+              return r;
+            })()
+          : await git(["clone", "--quiet", ...(branch ? ["--branch", branch] : []), "--", o.repo, dir]);
+        const r = fetched.code || fetched.stuck ? fetched : await run(["/bin/zsh", "-lc", o.command], HostControl.BUILD_MS, dir);
+        let result: string;
+        let ok = r.code === 0 && !r.stuck;
+        if (r.stuck) {
+          release = () => void r.gone?.then(() => this.builds.delete(slug));
+          result = `The ${label} build is still running and couldn't be stopped (${redactUrls(r.out.slice(-300))}). It stays locked until it exits.`;
+        } else if (r.code) {
+          result = `The ${label} build failed (exit ${r.code}): ${redactUrls(r.out.slice(-600))}`;
+        } else if (o.open?.startsWith("simulator:")) {
+          const app = resolve(dir, o.open.slice("simulator:".length));
+          await this.simulator();
+          const inst = await run(["xcrun", "simctl", "install", "booted", app], 120_000);
+          const id = (await run(["/usr/bin/defaults", "read", join(app, "Info"), "CFBundleIdentifier"])).out.trim();
+          const launch = inst.code ? inst : await run(["xcrun", "simctl", "launch", "booted", id]);
+          ok = !launch.code && app.startsWith(`${dir}/`);
+          result = launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
+        } else if (o.open) {
+          const target = /^https?:\/\//.test(o.open) ? o.open : resolve(dir, o.open);
+          const inside = /^https?:\/\//.test(o.open) || target.startsWith(`${dir}/`);
+          const opened = inside ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout" };
+          ok = !opened.code;
+          result = opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
+        } else {
+          result = `${label} is built on the host (${dir}).`;
+        }
+        result = redactUrls(result);
+        this.log(result);
+        this.onBuilt(label, ok, result);
+        bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
+      } catch (e) {
+        const result = redactUrls(`The ${label} build couldn't run: ${e instanceof Error ? e.message : String(e)}`);
+        this.log(result);
+        this.onBuilt(label, false, result);
+      } finally {
+        release();
       }
-      this.builds.delete(slug);
-      this.log(result);
-      this.onBuilt(label, ok, result);
-      bus.send({ type: "toast", tone: ok ? "info" : "warn", text: result.slice(0, 120) });
     })();
     return `Building ${label} on the host. It opens when the build finishes, and the room sees a note either way.`;
   }

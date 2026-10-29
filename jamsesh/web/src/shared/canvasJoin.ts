@@ -8,9 +8,7 @@ export type JoinState =
   | { state: "connecting" }
   | { state: "live" }
   | { state: "reconnecting"; reason: string | null }
-  | { state: "failed"; reason: string }
-  /** The host published the canvas again: this one's link is old. */
-  | { state: "stale" };
+  | { state: "failed"; reason: string };
 
 /** The join state from the canvas's `collab.peers` (the open file's session, plus every session the canvas has). */
 export function joinStateOf(peers: any): JoinState {
@@ -152,7 +150,6 @@ export function joinLabel(j: JoinState): string | null {
     case "connecting":
       return "Connecting…";
     case "reconnecting":
-    case "stale":
     case "failed":
       return "Reconnecting…";
   }

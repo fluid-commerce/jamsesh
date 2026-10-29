@@ -23,7 +23,7 @@ test("a failed join is retried by itself, backing off to every 30 s", () => {
 
 test("the page bar says something whenever the canvas isn't live", () => {
   expect(joinLabel({ state: "live" })).toBeNull();
-  for (const j of [{ state: "loading" }, { state: "connecting" }, { state: "reconnecting", reason: null }, { state: "stale" }] as const) expect(joinLabel(j)).toBeTruthy();
+  for (const j of [{ state: "loading" }, { state: "connecting" }, { state: "reconnecting", reason: null }] as const) expect(joinLabel(j)).toBeTruthy();
   // The pill stays short: the reason is on the card over the canvas, said once.
   expect(joinLabel({ state: "failed", reason: "WebSocket error: 401" })).toBe("Reconnecting…");
 });
