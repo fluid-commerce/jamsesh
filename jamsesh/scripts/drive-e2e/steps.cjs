@@ -143,10 +143,10 @@ module.exports = async ({ mk, api, cfg, hubUrl, ok, log, sleep }) => {
   await drv.page.keyboard.press("Escape");
   await sleep(200);
   await drv.page.getByRole("button", { name: "Pass control" }).click();
-  await drv.page.getByRole("menuitem", { name: "Maya" }).click();
   await sleep(500);
-  const alert = await drv.page.locator(".drive-note").innerText().catch(() => "");
-  ok(/Maya/.test(alert) && /isn't in the room/.test(alert), "passing to someone offline says so: " + alert);
+  ok(await drv.page.getByRole("menuitem", { name: "Maya" }).isDisabled(), "someone offline is greyed out in the Pass control menu");
+  const away = await api("chey", "/drive/pass", { to: cfg.people.maya });
+  ok(away.status === 409 && /Maya/.test(away.body.error), "and the hub still refuses them: " + away.body.error);
   // Pass control to Felipe.
   await drv.page.getByRole("menuitem", { name: "Felipe" }).click();
   await sleep(800);
@@ -176,6 +176,9 @@ module.exports = async ({ mk, api, cfg, hubUrl, ok, log, sleep }) => {
   const two = await host.page.evaluate(() => [...document.querySelectorAll(".drive-cursor")].filter((e) => e.style.opacity === "1").map((e) => e.querySelector(".drive-tag").textContent));
   ok(two.includes("Chey") && two.includes("Felipe"), "drive together: two cursors at once: " + JSON.stringify(two));
   await host.page.screenshot({ path: S + "s4-together.png" });
+  await api("chey", "/stage", { mode: "spotlight", items: [cfg.art], title: "Checkout v2", personId: cfg.people.chey });
+  await sleep(800);
+  ok((await drv.page.locator(".drive-surface").count()) === 1 && (await fel.page.locator(".drive-surface").count()) === 0, "the owner re-casting keeps driving; Felipe is cut off");
   // The lock moves: Felipe casts something, Chey's driving ends everywhere.
   await api("felipe", "/stage", { mode: "spotlight", items: [cfg.art], title: "Checkout again", personId: cfg.people.felipe });
   await sleep(800);

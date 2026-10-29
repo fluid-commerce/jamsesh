@@ -2,7 +2,7 @@
 // the input they send replayed into the tile under each one. The dart and its name tag are FigCraft's own collaborator
 // pointer (crates/ui-egui/src/live.rs: `pointer`, `name_tag`, `text_on`) drawn again here as SVG, and it glides the same way.
 import { useEffect, useRef, useState } from "react";
-import { emitGlide, onCursor, targetAt, useDriverState, type DriveCursor, type DriveTarget, type Glide } from "../shared/driving";
+import { driveScale, emitGlide, onCursor, targetAt, useDriverState, type DriveCursor, type DriveTarget, type Glide } from "../shared/driving";
 
 /** live.rs GLIDE: the shown position covers 1 - exp(-dt * GLIDE) of the way to the reported one each frame. */
 const GLIDE = 20;
@@ -58,6 +58,26 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
   const driving = useDriverState(screen).drivers;
   const drivingIds = driving.map((d) => d.id).join(",");
 
+  // Over the canvas a driver has one cursor: FigCraft's collaborator cursors on the big screen's canvas are hidden while anyone drives
+  // (FigCraft can only hide them all), and come back when driving ends.
+  useEffect(() => {
+    if (!replay) return;
+    const set = (on: boolean) => {
+      for (const f of layer.current?.parentElement?.querySelectorAll("iframe") ?? []) {
+        try {
+          void (f.contentWindow as any)?.figcraft?.execute("view.multiplayerCursors", { on }).catch(() => {});
+        } catch {}
+      }
+    };
+    if (!drivingIds) return;
+    set(false);
+    const again = setInterval(() => set(false), 2000);
+    return () => {
+      clearInterval(again);
+      set(true);
+    };
+  }, [replay, drivingIds]);
+
   // Cursors of people who stopped driving (or lost the lock) go away with it.
   useEffect(() => {
     const live = new Set(drivingIds ? drivingIds.split(",") : []);
@@ -89,10 +109,11 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
         if (Math.hypot(tx - c.sx, ty - c.sy) < SNAP) (c.sx = tx), (c.sy = ty);
         else moving = true;
         const idle = Date.now() - c.seen > IDLE_MS;
-        el.style.transform = `translate(${c.sx}px,${c.sy}px)`;
+        const scale = driveScale(innerWidth, !!replay);
+        el.style.transform = `translate(${c.sx}px,${c.sy}px) scale(${scale})`;
         el.style.opacity = c.hidden || idle ? "0" : "1";
         el.dataset.down = c.down ? "1" : "0";
-        if (!c.hidden && !idle) out.push({ screen, personId: id, name: c.name, color: c.color, x: w ? c.sx / w : 0, y: h ? c.sy / h : 0, down: c.down });
+        if (!c.hidden && !idle) out.push({ screen, personId: id, name: c.name, color: c.color, x: w ? c.sx / w : 0, y: h ? c.sy / h : 0, down: c.down, scale });
       }
       if (out.length) emitGlide(out);
       if (moving || out.length) raf.current = requestAnimationFrame(frame);

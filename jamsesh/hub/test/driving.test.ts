@@ -101,6 +101,26 @@ test("the drivers go with the lock: a new cast, an unlock or a lapse ends them",
   expect(s.driversOf()).toEqual([]);
 });
 
+test("an owner who re-casts while driving keeps driving; handed-over drivers are cut off; a non-driving owner stays not driving", () => {
+  const { s, chey, felipe, cast } = room();
+  cast(chey);
+  s.drive("together", "main", chey.id, felipe.id);
+  cast(chey);
+  expect(s.driversOf()).toEqual([chey.id]);
+  s.drive("stop", "main", chey.id);
+  cast(chey);
+  expect(s.driversOf()).toEqual([]);
+  s.drive("start", "main", chey.id);
+  cast(felipe); // someone else's cast still ends it
+  expect(s.driversOf()).toEqual([]);
+});
+
+test("who is online, for the Pass control menu", () => {
+  const { s, chey, felipe, maya } = room();
+  expect(s.onlinePeople().sort()).toEqual([chey.id, felipe.id].sort());
+  expect(s.onlinePeople()).not.toContain(maya.id);
+});
+
 test("driving a second screen is its own thing", () => {
   const { s, chey, felipe, cast } = room();
   const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };

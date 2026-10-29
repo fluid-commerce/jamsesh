@@ -15,7 +15,7 @@ async function api(who, path, body) {
 
 (async () => {
   const browser = await chromium.launch({ args: ["--mute-audio", "--use-fake-ui-for-media-stream"] });
-  const mk = async (who, size = { width: 1440, height: 900 }, scale = 1) => {
+  const mk = async (who, size = { width: 1920, height: 1080 }, scale = 1) => {
     const local = who === "host";
     const origin = local ? `http://127.0.0.1:${cfg.port}` : hubUrl;
     const ctx = await browser.newContext({ viewport: size, permissions: [], deviceScaleFactor: scale });

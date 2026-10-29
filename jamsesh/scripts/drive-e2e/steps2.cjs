@@ -40,7 +40,7 @@ module.exports = async ({ mk, api, cfg, hubUrl, ok, log, sleep, browser }) => {
   await mv(90, 0); await sleep(150);
   log('  sent tail:', JSON.stringify(drv.frames.sent.slice(-4).map((f) => f.m.ev)));
   const b = pos();
-  ok(Math.abs(b.x - a.x - 0.1) < 0.02 && Math.abs(b.y - a.y) < 1e-6, `90 px of trackpad moves the dart a tenth of a 900 px stage: ${a.x.toFixed(3)} -> ${b.x.toFixed(3)}`);
+  ok(Math.abs(b.x - a.x - 90 / Math.max(sb.width, 900)) < 0.005 && Math.abs(b.y - a.y) < 1e-6, `90 px of trackpad moves the dart 90 / the stage width: ${a.x.toFixed(3)} -> ${b.x.toFixed(3)}`);
   await mv(-5000, -5000); await sleep(200);
   const c = pos();
   ok(c.x === 0 && c.y === 0, "the dart stops at the stage's edge");
@@ -75,5 +75,7 @@ module.exports = async ({ mk, api, cfg, hubUrl, ok, log, sleep, browser }) => {
   await sleep(500);
   const c3 = await fc("view.get", {});
   ok(Math.hypot(c3.cx - c2.cx, c3.cy - c2.cy) > 5, `a drag pans: centre moved ${Math.hypot(c3.cx - c2.cx, c3.cy - c2.cy).toFixed(1)}`);
+  const hidden = await fc("view.get", {});
+  ok(hidden.multiplayer_cursors === false, "FigCraft's collaborator cursors are hidden on the big screen while driving");
   await host.page.screenshot({ path: S + "c3-after.png" });
 };

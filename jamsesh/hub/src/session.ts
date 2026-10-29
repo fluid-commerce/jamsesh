@@ -1436,7 +1436,9 @@ export class Session {
     if (!opts.person && !opts.override && this.lockOf(screen)) return cur;
     const now = Date.now();
     const quiet = next.mode === "board" || next.mode === "welcome";
-    const lock: StageLock | undefined = opts.person && !opts.noLock && !quiet ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined;
+    // An owner who re-casts while driving keeps driving the new stage; anyone they handed control to is cut off.
+    const keeps = opts.person?.id && cur.lock?.personId === opts.person.id && cur.lock.drivers?.includes(opts.person.id);
+    const lock: StageLock | undefined = opts.person && !opts.noLock && !quiet ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now, ...(keeps ? { drivers: [opts.person.id!] } : {}) } : undefined;
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     this.commitStage(stage, screen);
@@ -1519,6 +1521,11 @@ export class Session {
   personOnline(personId: string) {
     const atHost = personId === this.store.setting<string>("hostPersonId", "");
     return this.store.all("devices").some((d) => (d.personId === personId || (atHost && d.kind === "host")) && this.deviceOnline(d.id));
+  }
+
+  /** The people with a window open right now. */
+  onlinePeople(): string[] {
+    return this.people().filter((p) => this.personOnline(p.id)).map((p) => p.id);
   }
 
   /** Who is driving a screen: always a subset of the lock's owner and whoever they handed control to. */

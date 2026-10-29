@@ -27,7 +27,16 @@ export interface Glide {
   x: number;
   y: number;
   down: boolean;
+  /** How much the dart is scaled (see driveScale). */
+  scale: number;
 }
+
+/**
+ * How much bigger than FigCraft's own size the dart and its tag are drawn, so they can be followed from across a room. A
+ * big screen scales with the screen's width (2x on a 1920-wide screen, never below 1x or above 3x); a mirror in someone's app stays at 1x.
+ * 6.2's trail uses the same factor.
+ */
+export const driveScale = (stageWidth: number, bigScreen: boolean): number => (bigScreen ? Math.min(3, Math.max(1, stageWidth / 960)) : 1);
 
 export interface DriverState {
   screen: string;
@@ -86,6 +95,8 @@ export async function startDriving(screen = "main"): Promise<DriveHandle> {
 
 export const stopDriving = async (screen = "main", who?: string) => void (await api("/drive/stop", { screen, ...(who ? { who } : {}) }));
 /** Hand driving to a named person; you stop driving until you start again. Only the screen's owner can. */
+/** The people with a window open now, for greying out who can't be handed control. */
+export const onlinePeople = async (): Promise<string[]> => (await api<{ people: string[] }>("/drive/online")).people;
 export const passControl = async (to: string, screen = "main") => void (await api("/drive/pass", { screen, to }));
 /** Let a second person drive alongside you, each with a cursor. */
 export const driveTogether = async (to: string, screen = "main") => void (await api("/drive/together", { screen, to }));

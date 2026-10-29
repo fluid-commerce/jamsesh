@@ -1,6 +1,6 @@
 // Beside the lock badge: start driving the screen you hold, hand it to someone, or drive together (SPEC 10.6).
-import { useState } from "react";
-import { driveTogether, driverState, passControl, startDriving, stopDriving } from "./driving";
+import { useEffect, useState } from "react";
+import { driveTogether, driverState, onlinePeople, passControl, startDriving, stopDriving } from "./driving";
 import { pref, type HubState } from "./hub";
 
 export function DriveControls({ state, screen }: { state: HubState; screen: string }) {
@@ -8,6 +8,16 @@ export function DriveControls({ state, screen }: { state: HubState; screen: stri
   const ds = driverState(screen, state, me);
   const [menu, setMenu] = useState<"pass" | "together" | null>(null);
   const [note, setNote] = useState("");
+  const [online, setOnline] = useState<string[] | null>(null);
+  // Who is here is asked when the menu opens; until it answers nobody is greyed out.
+  useEffect(() => {
+    if (!menu) return;
+    let live = true;
+    onlinePeople().then((p) => live && setOnline(p), () => {});
+    return () => {
+      live = false;
+    };
+  }, [menu]);
   if (!me) return null;
   const run = async (f: () => Promise<unknown>) => {
     setNote("");
@@ -47,7 +57,7 @@ export function DriveControls({ state, screen }: { state: HubState; screen: stri
       {menu && (
         <span className="drive-menu" role="menu">
           {others.map((p) => (
-            <button key={p.id} role="menuitem" className="btn small" onClick={() => run(() => (menu === "pass" ? passControl(p.id, screen) : driveTogether(p.id, screen)))}>
+            <button key={p.id} role="menuitem" className="btn small" disabled={!!online && !online.includes(p.id)} title={online && !online.includes(p.id) ? `${p.name} isn't in the room` : undefined} onClick={() => run(() => (menu === "pass" ? passControl(p.id, screen) : driveTogether(p.id, screen)))}>
               {p.name}
             </button>
           ))}

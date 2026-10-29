@@ -1331,7 +1331,7 @@ are (0,0), (3.5,15.5), (7.5,8.5), (15.5,4) in the person's colour with a 1.5 px 
 tag at (+12,+16): 11 px semibold, 6 x 3 padding, 4 px corners, black or white text by luminance
 (`0.299 R + 0.587 G + 0.114 B > 170` is black). It glides: each frame the shown position moves
 `1 - exp(-dt * 20)` of the way to the reported one (dt capped at 0.1 s) and snaps within half a
-pixel. With Reduce Motion it jumps.
+pixel. With Reduce Motion it jumps. On a big screen the dart and tag are scaled up by `driveScale` (the window's width over 960, so 2x on a 1920-wide screen, between 1x and 3x) with the tip fixed and proportions unchanged; mirrors in apps stay at 1x. While anyone drives, FigCraft's own collaborator cursors on the big screen's canvas are hidden (FigCraft can only hide all of them), so each person has one cursor. An owner who re-casts while driving keeps driving the new stage; anyone handed control is cut off. `GET /api/drive/online` lists who is here, and Pass control greys out the rest.
 
 **Replaying input** (host window only; windows that only mirror the stage draw cursors but replay
 nothing). The layer finds the tile under the cursor and hands it the event in the tile's local
@@ -1356,6 +1356,7 @@ only while the trackpad is captured, so typing elsewhere in the app is never sen
 **Client API** (`web/src/shared/driving.ts`, used by 6.2's recorder and 6.3's tiles):
 
 ```ts
+driveScale(width, bigScreen): number           // the dart's scale; 6.2's trail uses the same factor
 driverState(screen?): { screen, owner: Person | null, drivers: Person[], me: { canDrive, driving } }
 useDriverState(screen?)                       // the same, reactive
 startDriving(screen?): Promise<DriveHandle>   // POST /drive/start, then { send(ev), stop() }

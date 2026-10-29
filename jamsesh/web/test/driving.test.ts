@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { glide, textOn } from "../src/host/DriveLayer";
 import { travel } from "../src/shared/DriveSurface";
-import { driverState, targetAt, registerDriveTarget, anyoneDriving } from "../src/shared/driving";
+import { driveScale, driverState, targetAt, registerDriveTarget, anyoneDriving } from "../src/shared/driving";
 
 test("the dart's tag text is black on a light colour and white on a dark one (live.rs text_on)", () => {
   expect(textOn("#ffd54a")).toBe("#1e1e1e");
@@ -43,4 +43,12 @@ test("the smallest registered tile under a point takes the input", () => {
   expect(targetAt(root, 60, 60)?.el).toBe(big);
   expect(targetAt(root, 500, 500)).toBeNull();
   offs.forEach((f) => f());
+});
+
+test("the dart is 2x at a 1920 stage on the big screen, never below 1x or above 3x, and 1x in an app", () => {
+  expect(driveScale(1920, true)).toBe(2);
+  expect(driveScale(1000, true)).toBeCloseTo(1.04, 2);
+  expect(driveScale(400, true)).toBe(1);
+  expect(driveScale(7680, true)).toBe(3);
+  expect(driveScale(1920, false)).toBe(1);
 });

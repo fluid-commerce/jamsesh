@@ -584,6 +584,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
   }
   // Driving the big screen (6.1): the lock's owner starts, passes control or drives together; `to` names the other person.
+  if (path === "/drive/online" && req.method === "GET") return json({ people: s.onlinePeople() });
   m = path.match(/^\/drive\/(start|stop|pass|together)$/);
   if (m && req.method === "POST") {
     const r = s.drive(m[1] as "start", screenOf(), actor().id, typeof body?.to === "string" ? body.to : typeof body?.who === "string" ? body.who : null);
