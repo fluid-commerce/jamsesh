@@ -242,6 +242,14 @@ export class Mic {
   private stream: MediaStream | null = null;
   private listeners = new Set<Listener>();
   private ring: Float32Array[] = [];
+  /** The reset epoch each ring frame was captured under (hub.voiceEpoch then). */
+  private ringEpochs: number[] = [];
+  /**
+   * The reset epoch of the segment: the one its earliest frame was captured under. Epochs only go up, so this is
+   * the oldest in the segment, and audio from before a reset never carries a newer epoch (the hub would date it
+   * after the reset and teach it). Set with segStart, never at finish.
+   */
+  private segEpoch = -1;
   private seg: Float32Array[] | null = null;
   private segStart = 0;
   private segSpeechFrames = 0;
@@ -436,7 +444,8 @@ export class Mic {
     const isSpeech = db > this.noise + 10 && db > -58;
 
     this.ring.push(f);
-    if (this.ring.length > PREROLL_FRAMES) this.ring.shift();
+    this.ringEpochs.push(hub.get().voiceEpoch);
+    if (this.ring.length > PREROLL_FRAMES) (this.ring.shift(), this.ringEpochs.shift());
 
     // Someone talking over the brain: sustained and well above the room, which its echo is not.
     if (Date.now() < this.suppressUntil) {
@@ -453,6 +462,7 @@ export class Mic {
       if (this.run >= START_FRAMES) {
         this.seg = [...this.ring];
         this.segStart = ts - (this.ring.length - 1) * 20;
+        this.segEpoch = this.ringEpochs[0] ?? -1;
         this.segSpeechFrames = this.run;
         this.segLevels = [db];
         this.silence = 0;
@@ -489,7 +499,7 @@ export class Mic {
     const level = levels.slice(Math.floor(levels.length / 2)).reduce((a, b) => a + b, 0) / Math.max(1, levels.length - Math.floor(levels.length / 2));
     // The brain's own voice coming back through the speakers is not a person.
     if (isEchoSegment(level, this.noise, Date.now() < this.suppressUntil)) return;
-    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced, epoch: hub.get().voiceEpoch });
+    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced, epoch: this.segEpoch });
   }
 }
 
