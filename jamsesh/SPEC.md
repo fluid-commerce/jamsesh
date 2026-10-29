@@ -258,7 +258,11 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   those): the pairing guide has the agent write it to `~/.jamsesh/auth.header` with its file tool,
   `curl` reads that file (`-H @~/.jamsesh/auth.header`), the setup script reaches `bash` through a pipe,
   Codex's config is written from the file, and Claude Code gets it from a `headersHelper` script that
-  reads `~/.jamsesh/mcp-headers.json`. The setup makes `~/.jamsesh` mode 700 and replaces each
+  reads `~/.jamsesh/mcp-headers.json`. The hook is downloaded to a temporary file and checked (a bash
+  script that parses) before it replaces the installed one, so a failed download leaves the working
+  hook in place. `claude mcp` has no replace, so the old `jamsesh` entry is read first, removed, and put
+  back if the new one can't be added (its credential then also from the helper, never a command line).
+  The setup makes `~/.jamsesh` mode 700 and replaces each
   credential file in one step with a mode 600 one (so a looser old mode never carries over), keeps
   `~/.claude/settings.json`'s own mode, quotes the hook path (homes with spaces work), and edits
   Codex's `config.toml` by its table headers (a `[` inside a value or a multi-line string is not a
@@ -326,7 +330,11 @@ setup removes the `<!-- jamsesh:start -->` block an earlier install wrote: only 
 of the two blocks earlier installs wrote, as whole lines in the file's own line endings (an edited or
 indented block, or anything else between the markers, stays), plus the one blank line the old writer
 put before a block it appended at the end. Every other byte is kept, and a symlinked file is edited at
-its target, so the link stays a link. Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
+its target, so the link stays a link. Just before replacing the file, or deleting one that held only
+the block, it reads the file again and leaves it alone if it changed since it was first read. That
+re-read is the last step before the rename or unlink; POSIX has no atomic compare-and-swap for files,
+so a save landing in the microseconds between them is the one window left, which no plain file
+operation can close. Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
 which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
 harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect
@@ -383,6 +391,8 @@ asks the host whether the chat has joined, every time (the question carries the 
 so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
 have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the
 hub records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once.
+The hub keeps the ids it has seen for 20 minutes, longer than a queued prompt lives (ten), however
+many prompts arrive in between.
 
 **Prompts queued while the host is away belong to one room.** The joined answer carries the room's
 id (`room`, one per session), and the chat's marker (`~/.jamsesh/chats/<session id>`) keeps the room
@@ -657,7 +667,9 @@ quiet in the same minute each get one nudge and, later, one offer.
 A finished task stays finished: a late ack or report never reopens a directive that is done or
 cancelled, for one agent or as a whole. A person ending a whole task (`POST /api/directives/<id>`
 with `done` or `cancelled`) ends it for every target still on it. A product directive (anything but
-`answer` or `note`) whose targets are all observers is refused, since nobody would do it.
+`answer` or `note`) whose targets are all observers is refused, since nobody would do it: no task
+is saved, the API answers 400, and the brain's tools (create, pair, parity) pick working agents only
+and say so instead of reporting it sent.
 
 A directive sent to an agent that's offline (or silent for 20 minutes) shows a notice that it gets
 the work when it's back. If an explore or implement directive is still untouched after 45 seconds

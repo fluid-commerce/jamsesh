@@ -10,6 +10,7 @@ import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
+import { ONLY_OBSERVERS } from "./session";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
@@ -542,7 +543,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
     // Observers only watch: product work for observers alone would reach nobody.
     const mode = body.mode ?? "explore";
-    if (mode !== "answer" && mode !== "note" && targets.every((t: string) => s.agent(t)?.role === "observer")) return bad("Those agents only watch (observers), so nobody would do this. Pick a working agent.");
+    if (mode !== "answer" && mode !== "note" && targets.every((t: string) => s.agent(t)?.role === "observer")) return bad(ONLY_OBSERVERS);
     const p = s.person(body.personId);
     return json(s.createDirective({ text: body.text.trim(), mode, targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
   }

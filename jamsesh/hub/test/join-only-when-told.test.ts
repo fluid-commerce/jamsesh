@@ -140,7 +140,7 @@ describe("the install", () => {
       fetch: (req) => {
         const path = new URL(req.url).pathname;
         if (path === "/api/me") return Response.json({ person: { name: "Chey" } });
-        return new Response(path === "/launcher.md" ? "LAUNCHER" : "x");
+        return new Response(path === "/launcher.md" ? "LAUNCHER" : path === "/hook.sh" ? "#!/usr/bin/env bash\nexit 0\n" : "x");
       },
     });
     try {

@@ -495,13 +495,19 @@ export class Hub {
     return this.pendingContext(agent, "UserPromptSubmit", "Handle these alongside your person's prompt; jam_ack directives when you take them.");
   }
 
+  /**
+   * How long a prompt id is remembered: longer than hook.sh keeps a queued prompt (ten minutes), so a
+   * replay of a prompt the room already has is always recognised, however many prompts came between.
+   */
+  static PROMPT_ID_MS = 20 * 60_000;
+
   /** Whether a prompt with this id (from hook.sh) has reached the room already; remembers it if not. */
-  private promptSeen(id: unknown) {
+  private promptSeen(id: unknown, now = Date.now()) {
     if (typeof id !== "string" || !id) return false;
-    const seen = this.store.setting<string[]>("promptIds", []);
-    if (seen.includes(id)) return true;
-    this.store.setSetting("promptIds", [...seen, id].slice(-500));
-    return false;
+    const fresh = this.store.setting<{ id: string; at: number }[]>("promptIdsSeen", []).filter((p) => now - p.at < Hub.PROMPT_ID_MS);
+    const seen = fresh.some((p) => p.id === id);
+    this.store.setSetting("promptIdsSeen", seen ? fresh : [...fresh, { id, at: now }]);
+    return seen;
   }
 
   /**
