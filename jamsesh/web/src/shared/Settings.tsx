@@ -7,12 +7,15 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
   const { state, levels } = useHub();
   const [key, setKey] = useState("");
   const [saved, setSaved] = useState<string | null>(null);
-  const [engines, setEngines] = useState<{ transcription: { label: string; inflight: number; healthy: boolean }[]; voiceprints: { available: boolean; reason: string; enrolled: number } } | null>(null);
+  const [engines, setEngines] = useState<Engines | null>(null);
   useEffect(() => {
-    api("/engines").then(setEngines).catch(() => {});
+    const load = () => api("/engines").then(setEngines).catch(() => {});
+    void load();
+    // A first download takes minutes; keep its progress current while Settings is open.
+    const poll = setInterval(load, 4000);
     const close = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
+    return () => (clearInterval(poll), window.removeEventListener("keydown", close));
   }, [onClose]);
   if (!state) return null;
   const s = state.settings;
@@ -139,7 +142,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
 
           <Saved />
 
-          <Section title="Transcription" help="Local whisper runs first: on the host, then on laptops that offer theirs. The gateway is the fallback.">
+          <Section title="Transcription" help="Whisper runs on the host, then on laptops that offer theirs. The gateway is the fallback. The faster engine, when on, goes first.">
             <select value={s.transcription} onChange={(e) => update({ transcription: e.target.value as S["transcription"] })} style={{ marginBottom: 12 }}>
               <option value="auto">Local first, gateway fallback</option>
               <option value="local">Local only</option>
@@ -147,9 +150,42 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
             </select>
             {engines && (
               <div className="chip" style={{ display: "block", whiteSpace: "normal" }}>
-                {engines.transcription.length ? engines.transcription.map((e) => `${e.label}${e.healthy ? "" : " (failing)"}`).join(" · ") : "No local whisper; using the gateway."}
+                {engines.transcription.length ? engines.transcription.map((e) => `${e.label}${e.healthy ? "" : " (failing)"}`).join(" · ") : "No local engine; using the gateway."}
+                {[engines.whisperModel, engines.speechModel].map(
+                  (m) =>
+                    m &&
+                    !["ready", "off"].includes(m.state) && (
+                      <div key={m.engine} style={{ color: m.state === "failed" ? "var(--warn)" : "var(--dim)", marginTop: 4 }}>
+                        {m.engine}: {m.detail}
+                        {m.progress !== null && ` ${m.progress}%`}
+                      </div>
+                    ),
+                )}
               </div>
             )}
+            {host && (
+              <div className="row between" style={{ marginTop: 12 }}>
+                <span>Faster engine (English only, downloads 482 MB, uses about 2 GB memory)</span>
+                <Toggle on={s.fastEngine} onChange={(v) => update({ fastEngine: v })} label="Faster engine" />
+              </div>
+            )}
+            <div className="field" style={{ marginTop: 12 }}>
+              <span>Words to listen for</span>
+              <div className="empty-note" style={{ padding: "0 0 6px" }}>
+                People, agents and workstreams are included on their own. Add product names and how they get misheard, like "Chey: Shay".
+              </div>
+              <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+                {s.vocabulary.map((w) => (
+                  <span key={w} className="badge neutral" style={{ textTransform: "none", letterSpacing: 0, fontSize: 13, gap: 6 }}>
+                    {w}
+                    <button className="btn ghost small" style={{ padding: "0 4px", minHeight: 0 }} onClick={() => update({ vocabulary: s.vocabulary.filter((x) => x !== w) })} title={`Stop listening for ${w}`} aria-label={`Stop listening for ${w}`}>
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <NoteInput placeholder="A word, or a word: how it's misheard" onAdd={(w) => !s.vocabulary.some((x) => x.toLowerCase() === w.toLowerCase()) && update({ vocabulary: [...s.vocabulary, w] })} />
+            </div>
           </Section>
 
           <Section title="People" help="Each person's title weighs in when instructions conflict. Voice samples come from lines you label, and from people talking at their own laptops.">
@@ -379,6 +415,20 @@ function VoiceMatchingOff({ reason }: { reason: string }) {
       Voice matching is off on this host{reason ? `: ${reason}` : ""}. Lines are labelled by which laptop heard them, and corrections can't teach anyone's voice.
     </p>
   );
+}
+
+interface ModelStatus {
+  engine: string;
+  state: string;
+  detail: string;
+  progress: number | null;
+}
+
+interface Engines {
+  transcription: { label: string; inflight: number; healthy: boolean }[];
+  whisperModel?: ModelStatus;
+  speechModel?: ModelStatus;
+  voiceprints: { available: boolean; reason: string; enrolled: number };
 }
 
 function NoteInput({ onAdd, placeholder = "Add a note, for example: ask before building anything big" }: { onAdd: (n: string) => void; placeholder?: string }) {

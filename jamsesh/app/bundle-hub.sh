@@ -13,7 +13,9 @@ rm -rf "$OUT" && mkdir -p "$OUT"/{hub,bin,skill,models,node_modules}
 (cd web && bunx vite build >/dev/null) && cp -R web/dist "$OUT/web"
 cp -R "$JAM/web-canvas" "$OUT/canvas"
 cp skill/SKILL.md "$OUT/skill/"
-for b in figcraft-server figcraft-cli; do cp "$JAM/bin/$b" "$OUT/bin/"; done
+# whisper.cpp's server (MIT, see NOTICE), built once into the same folder as the FigCraft binaries.
+[ -x "$JAM/bin/whisper-server" ] || app/build-whisper.sh "$JAM/bin"
+for b in figcraft-server figcraft-cli whisper-server; do cp "$JAM/bin/$b" "$OUT/bin/"; done
 cp -R node_modules/sherpa-onnx-node "node_modules/sherpa-onnx-darwin-$(uname -m | sed 's/x86_64/x64/')" "$OUT/node_modules/"
 cp "$JAM/models/wespeaker_en.onnx" "$OUT/models/"
 du -sh "$OUT" | awk '{print "Hub bundle: " $1}'

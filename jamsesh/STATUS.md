@@ -63,6 +63,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Voice matching off: the reason and the fix (5.3) | Simulated | Missing model and a broken model file checked in a child process. The live host's actual cause is still unread. |
 | One line shown once across laptops with clocks 1.5 s apart, late and mis-heard copies; typed / said / overheard on every line (5.4) | Simulated | Same sim: 187 extra lines before, 2 after, across 96 lines. |
 | A real room with real microphones | Not tested | |
+| Room vocabulary and correction pass for every engine; whisper.cpp default, Parakeet opt-in (5.2) | Simulated | Bake-off on 50 synthetic clips (macOS voices, noise, a second voice), after correction: whisper with the vocabulary prompt 4.7% word error and 96% of names; Parakeet with hotwords 5.2% and 97%. The opt-in, its download, the child process, crash and hub-exit handling, the cloud fallback and the correction's false positives are covered by `hub/test/transcription.test.ts`. whisper-server is built and bundled by `app/bundle-hub.sh` (checked with a bundle run and a Metal transcription on a spare port); its model's first-session download and the discovery order are tested with fakes. Not yet checked in a full Tauri release build or on a fresh Mac. Real room clips not yet run; they decide the default. |
 
 ## Agent briefing and live builds
 

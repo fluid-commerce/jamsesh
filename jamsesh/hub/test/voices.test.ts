@@ -335,3 +335,9 @@ sim("each speech line records whether it was typed, said to JamSesh, or overhear
   const heard = s.store.recentEvents({ kinds: ["speech"], limit: 5 }).find((e) => e.text === u.text)!;
   expect(heard.data.source).toBe("overheard");
 });
+
+sim("people who read the join sentences are in the room's vocabulary", () => {
+  const dee = hubA.session.upsertPerson({ name: "Deedee" });
+  expect(hubA.enrollVoice(dee.id, wavOf("dee", ENROL_TEXT.dee))).toMatchObject({ ok: true });
+  expect(hubA.transcriber.vocabulary().map((v) => v.term)).toContain("Deedee");
+});

@@ -9,6 +9,8 @@ import { advertise, stopAdvertising } from "./bonjour";
 import { readWindowLinks } from "./auth";
 import { linkSecretFile } from "./projects";
 
+// The compiled hub is also the host's speech model process (audio/parakeet.ts); that never returns.
+if (process.argv[2] === "--stt-server") await (await import("./audio/stt-server")).runSttServer(process.argv[3] ?? "");
 const args = new Set(process.argv.slice(2));
 enterProject();
 // The Mac app starts a hub with no session first when hosting: only the Projects picker, until a project is chosen.

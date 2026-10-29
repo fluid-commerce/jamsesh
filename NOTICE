@@ -72,3 +72,36 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 jsQR (QR code reader, Apache-2.0, https://github.com/cozmo/jsQR) is bundled unmodified at
 jamsesh/app/ui/vendor/jsQR.js, with its license beside it; JamSesh uses it to read the big screen's
 QR code through the camera.
+
+whisper.cpp (JamSesh for Mac)
+-----------------------------
+The JamSesh Mac app bundles whisper-server from whisper.cpp v1.8.4
+(https://github.com/ggml-org/whisper.cpp), built by jamsesh/app/build-whisper.sh with ggml
+linked statically. Its speech model is not bundled: the app downloads ggml-large-v3-turbo-q5_0
+(OpenAI Whisper weights, MIT) on a Mac's first host session. The optional faster engine downloads
+NVIDIA's Parakeet TDT 0.6B v2 (CC-BY-4.0, https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) and
+runs it with sherpa-onnx (Apache-2.0).
+
+whisper.cpp's MIT licence:
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

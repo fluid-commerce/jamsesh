@@ -378,6 +378,10 @@ export interface Settings {
   hostControl: boolean;
   /** Spoken language for transcription: an ISO code ("en" by default) or "auto". */
   language: string;
+  /** The opt-in faster engine (Parakeet, English only, a 482 MB download and about 2 GB of memory). */
+  fastEngine: boolean;
+  /** The room's words for transcription (5.2): "Term" or "Term: heard as, heard as" ("Chey: Shay"). */
+  vocabulary: string[];
   gatewayKeySet: boolean;
   gatewayKeySource: "settings" | "env" | "none";
 }
