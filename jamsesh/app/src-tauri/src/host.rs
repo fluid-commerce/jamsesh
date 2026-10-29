@@ -6,6 +6,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::projects::Launch;
 use crate::proxy::{get_as_window, healthy, random_hex, window_key};
 
 /// The started hub's stdin: this app's window key, then a one-time link id per window (see
@@ -99,7 +100,7 @@ impl Hub {
 
     /// Starts this app's hub. A hub this app didn't start (one from a terminal) is never adopted:
     /// the app couldn't give its windows the window key, so they couldn't act as the host's person.
-    pub async fn start(log_dir: &Path, resources: Option<&Path>) -> Result<Hub, String> {
+    pub async fn start(log_dir: &Path, resources: Option<&Path>, launch: &Launch) -> Result<Hub, String> {
         // A hub left by this app's last launch stops on its own within seconds (it watches its parent).
         let mut running = None;
         for _ in 0..20 {
@@ -140,6 +141,18 @@ impl Hub {
                 c
             }
         };
+        match launch {
+            Launch::Lobby { .. } => {
+                cmd.env("JAMSESH_LOBBY", "1");
+            }
+            Launch::Last => {}
+            Launch::Project(slug) => {
+                cmd.env("JAMSESH_PROJECT", slug);
+            }
+            Launch::New(name) => {
+                cmd.env("JAMSESH_NEW_PROJECT", name);
+            }
+        }
         let child = cmd
             .env("PATH", path_env())
             // The hub exits on its own if this app goes away without stopping it.

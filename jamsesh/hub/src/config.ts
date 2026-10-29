@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
+import { createProject, defaultProject, findProject, migrateLegacy, openSession } from "./projects";
 
 const HOME = process.env.JAMSESH_HOME ?? join(homedir(), ".jamsesh");
 const REPO = resolve(import.meta.dir, "../../..");
@@ -58,7 +59,6 @@ export function lanAddress(): string {
 
 const envFile = readEnvFile(join(HOME, ".env"));
 const dataDir = process.env.JAMSESH_DATA ?? join(HOME, "host");
-mkdirSync(dataDir, { recursive: true });
 
 /** People, devices, voiceprints and team settings outlive sessions (`jamsesh new` keeps them). */
 const teamDir = process.env.JAMSESH_TEAM ?? (process.env.JAMSESH_DATA ? join(process.env.JAMSESH_DATA, "team") : join(HOME, "team"));
@@ -68,7 +68,12 @@ export const config = {
   home: HOME,
   teamDir,
   repo: REPO,
+  /** The session's directory. `enterProject` moves it into a project before the hub is built. */
   dataDir,
+  /** The project this run is a session of; null when JAMSESH_DATA chose the directory. */
+  project: null as { slug: string; name: string; sessionId: string; resumed: boolean } | null,
+  /** Only the Projects picker runs (JAMSESH_LOBBY=1): no session is opened. */
+  lobby: process.env.JAMSESH_LOBBY === "1",
   port: Number(process.env.JAMSESH_PORT ?? 4747),
   figcraftPort: Number(process.env.JAMSESH_FIGCRAFT_PORT ?? 47900),
   devPortStart: Number(process.env.JAMSESH_DEV_PORT_START ?? 5100),
@@ -108,3 +113,23 @@ export const config = {
 };
 
 export type Config = typeof config;
+
+/**
+ * The host's entry calls this before building the hub: the session lives inside a project (SPEC 3.6)
+ * unless JAMSESH_DATA chose the directory (tests). JAMSESH_PROJECT names an existing project (slug
+ * or name; one that isn't there is created), JAMSESH_NEW_PROJECT makes a new one,
+ * JAMSESH_NEW_SESSION=1 skips today's session; with none of them, the project used last.
+ * Sessions from before projects are copied in first (never moved).
+ */
+export function enterProject() {
+  if (process.env.JAMSESH_DATA) return;
+  migrateLegacy(HOME);
+  if (config.lobby) return;
+  const wanted = process.env.JAMSESH_PROJECT?.trim();
+  const named = process.env.JAMSESH_NEW_PROJECT?.trim();
+  const meta = named ? createProject(HOME, named) : wanted ? (findProject(HOME, wanted) ?? createProject(HOME, wanted)) : defaultProject(HOME);
+  const opened = openSession(HOME, meta.slug, { fresh: process.env.JAMSESH_NEW_SESSION === "1" });
+  config.project = { slug: meta.slug, name: meta.name, sessionId: opened.sessionId, resumed: opened.resumed };
+  config.dataDir = opened.dir;
+  mkdirSync(opened.dir, { recursive: true });
+}

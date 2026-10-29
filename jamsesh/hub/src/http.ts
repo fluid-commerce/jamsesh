@@ -2,7 +2,7 @@
 import type { Server, ServerWebSocket } from "bun";
 import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
-import type { PairedDevice } from "./auth";
+import type { HostWindows, PairedDevice } from "./auth";
 import { bus } from "./bus";
 import { voiceprintStatus, learningNote } from "./audio/voiceprint";
 import { describeError } from "./brain/llm";
@@ -10,6 +10,7 @@ import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
+import { projectsRoute } from "./projects-api";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
@@ -19,7 +20,7 @@ type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; 
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
 
 // Nothing to return means the thing was deleted (a queued edit to something gone): 410, not a crash.
-const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
+export const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
 const VOICE_NAME_MAX = 64;
@@ -54,7 +55,7 @@ function knownHost(req: Request, hub: Hub) {
 }
 
 /** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
-function sameOrigin(req: Request) {
+export function sameOrigin(req: Request) {
   const origin = req.headers.get("origin");
   if (!origin) return true; // not a browser
   try {
@@ -126,7 +127,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
         // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
         // which tiles open as localhost:<port>.
-        if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub, req, url);
+        if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub.auth.windows, req, url);
         // A new host link for `jamsesh host` on a hub that's already running (a terminal-started hub
         // only): the caller proves it's this Mac's user by the secret in a mode-600 file of the hub's.
         if (path === "/api/host-link" && local && req.method === "POST") {
@@ -141,6 +142,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (req.method !== "GET" && !(req.headers.get("content-type") ?? "").includes("application/json")) return bad("Send JSON.", 415);
           if (req.method !== "GET" && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
           const r = await hub.net.routes(req, url);
+          if (r) return r;
+        }
+        // The Projects picker's data: the host's own windows only (project names and who came).
+        if (path.startsWith("/api/projects")) {
+          const r = await projectsRoute(req, url, { local, hostWindow });
           if (r) return r;
         }
         if (path === "/api/pair" && req.method === "POST") return pairRoute(hub, req, url, ip);
@@ -340,7 +346,7 @@ async function proxyHttp(req: Request, url: URL, port: number): Promise<Response
 }
 
 /** The web app: hashed assets cached forever, every other path gets index.html. */
-function webApp(path: string): Response {
+export function webApp(path: string): Response {
   if (!config.webDist) return new Response("The JamSesh web app isn't built. Run: cd jamsesh && bun run build:web", { status: 503 });
   const rel = path.replace(/^\//, "");
   const candidate = join(config.webDist, rel);
@@ -825,19 +831,19 @@ function file(p: string, root: string, cache = false): Response {
 const NOT_THE_HOST_WINDOW = "On the host, do this from the JamSesh window. A host started from a terminal printed a one-time host link: open that (restart the host for a new one).";
 
 /** GET /host-window?once=…&next=/path: a one-time host link (see HostWindows in auth.ts). */
-async function hostWindowRoute(hub: Hub, req: Request, url: URL): Promise<Response> {
+export async function hostWindowRoute(windows: HostWindows, req: Request, url: URL): Promise<Response> {
   const next = url.searchParams.get("next") ?? "/host";
   const target = next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/host";
   const name = (req.headers.get("host") ?? "").replace(/:\d+$/, "");
   // The key lives on 127.0.0.1 only: send localhost (shared with dev tiles) and others there first.
   if (name !== "127.0.0.1") return new Response(null, { status: 302, headers: { location: `http://127.0.0.1:${url.port || config.port}${url.pathname}${url.search}`, "cache-control": "no-store" } });
-  const key = await hub.auth.windows.takeSoon(url.searchParams.get("once"));
+  const key = await windows.takeSoon(url.searchParams.get("once"));
   const headers = new Headers({ location: target, "cache-control": "no-store", "referrer-policy": "no-referrer" });
   if (key) headers.append("set-cookie", `jam_window=${key}; Path=/; HttpOnly; SameSite=Strict`);
   return new Response(null, { status: 302, headers });
 }
 
-function cookie(req: Request, name: string) {
+export function cookie(req: Request, name: string) {
   return req.headers.get("cookie")?.match(new RegExp(`(?:^|; )${name}=([^;]+)`))?.[1] ?? null;
 }
 

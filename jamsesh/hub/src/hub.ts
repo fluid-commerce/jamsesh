@@ -12,6 +12,7 @@ import { DevProxy } from "./devproxy";
 import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
+import { ProjectKeeper } from "./projectkeeper";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
@@ -76,6 +77,8 @@ export class Hub {
   devproxy: DevProxy;
   mcp: McpEndpoint;
   autosave: Autosave;
+  /** Records the project this session belongs to (people, last used, thumbnail); idle without a project. */
+  keeper: ProjectKeeper;
   auth: Auth;
   awake: KeepAwake;
   /** Reachability from anywhere (DuckDNS, certificates, router); team-level, so it survives sessions. */
@@ -126,6 +129,7 @@ export class Hub {
 
     this.autosave = new Autosave(this, dir);
     this.brain.autosave = this.autosave;
+    this.keeper = new ProjectKeeper(this, opts.dataDir ? undefined : config.home, opts.dataDir ? null : config.project);
     this.brain.pages = () => this.canvas.pageCache;
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
@@ -151,6 +155,7 @@ export class Hub {
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
     this.autosave.start();
+    this.keeper.start();
     setInterval(() => this.devproxy.refresh(), 30_000);
     setInterval(() => this.session.tick(), 60_000).unref?.();
     await Promise.all(tasks);
@@ -164,6 +169,7 @@ export class Hub {
   /** Stops, saving a final snapshot first when there is a canvas to save. */
   async shutdown() {
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
+    await Promise.race([this.keeper.save().catch(() => null), Bun.sleep(4000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
     this.stop();
   }
@@ -171,6 +177,7 @@ export class Hub {
   stop() {
     this.awake.stop();
     this.autosave.stop();
+    this.keeper.stop();
     this.brain.stop();
     this.canvas.stop();
     this.transcriber.stop();

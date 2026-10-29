@@ -215,15 +215,66 @@ Developers can run the host from a checkout without the app:
 | Command | What it does |
 |---|---|
 | `./jamsesh/install.sh` | Builds the FigCraft binaries, the WebAssembly canvas, and the web app; installs whisper.cpp and its model and the speaker model; links `jamsesh` into `~/.local/bin`. |
-| `jamsesh host [--no-open]` | Runs the hub (`JAMSESH_PORT`, default 4747) and opens the big screen in a full-screen Chrome app window, or reopens it if a hub is already running. |
+| `jamsesh host [--no-open] [--project NAME] [--new-session]` | Runs the hub (`JAMSESH_PORT`, default 4747) and opens the big screen in a full-screen Chrome app window, or reopens it if a hub is already running. `--project` opens (or creates) that project; with none it opens the project used last. `--new-session` skips today's session in it ([3.6](#36-projects)). |
 | `jamsesh join <host>` | Connects this computer's agents to a host (pairs with a code, then installs the agent setup). |
 | `jamsesh on` / `jamsesh off` | Turns this computer's agent hooks on or off. The MCP server stays registered. |
 | `jamsesh status` | Shows the local host's health and this computer's hub, name, and hook state. |
 | `jamsesh key` | Stores the gateway key in `~/.jamsesh/.env` (mode 600) after checking it against the gateway. |
-| `jamsesh new` | Archives the current session (`~/.jamsesh/host` → `~/.jamsesh/host-YYYY-MM-DD-HHMM`) and starts the next one fresh. Refuses while a host is running. People, devices, voiceprints, and team settings carry over. |
+| `jamsesh new` | Says how to begin a new session (`jamsesh host --new-session`). Sessions live in projects now and nothing is archived by moving it. |
 
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.
+
+### 3.6 Projects
+
+A **project** holds many sessions. It is what the host opens, so starting new work is a choice in
+the app, not a terminal command.
+
+**Storage.** `~/.jamsesh/projects/<slug>/` (`JAMSESH_HOME` moves `~/.jamsesh`):
+
+```text
+project.json        name, created, lastUsed, people [{name, color}]
+thumbnail.png       the canvas, small (480 px), saved every 5 minutes while a session runs and when it ends
+sessions/<id>/      one session: a hub data directory (jamsesh.db, renders, snapshots) plus session.json
+                    {id, startedAt, lastActive}
+```
+
+The folder is also where the project's wiki lives (`WIKI.md`, `wiki/`, `raw/`), which is why sessions
+sit in `sessions/` and nothing else shares that name. The team store (`~/.jamsesh/team`: people,
+devices, voiceprints, settings) stays shared by every project.
+
+**Opening.** Opening a project begins a new session in it, or continues today's: the newest session
+whose last activity was on today's date. A project created by name needs nothing else. The hub reads
+`JAMSESH_PROJECT` (slug or name; a name that isn't there is created), `JAMSESH_NEW_PROJECT` (always
+makes one), `JAMSESH_NEW_SESSION=1` (never continues), else the project used last, else a project
+called "My project". `JAMSESH_DATA` still names a data directory outright (tests), and then no
+project is involved. `people` is everyone who spoke or typed in any of its sessions, newest first.
+
+**The picker.** `/projects` in the web app: a full-window chooser, recent first, each card with its
+canvas thumbnail (a lettered tile before there is one), last-used date, session count, the people
+who came, and "Continues today" when opening it would resume today's session. **New project**
+takes a name. Arrow keys move between cards, Enter opens, N starts a new project, Escape cancels.
+Only the host's own windows can use it (`/api/projects`, `/api/projects/<slug>/thumbnail.png`,
+`POST /api/projects` to create; `POST /api/projects/open` from a terminal-run hub creates the
+project and answers with the `jamsesh host --project` command, because only the Mac app can swap
+the hub).
+
+**In the Mac app.** Choosing **Host** starts the hub as a lobby (`JAMSESH_LOBBY=1`): the picker
+only, on 127.0.0.1, with no session and no big screen. Choosing a project (the page calls the app's
+`open_project` command) stops the lobby, starts the hub on the project and opens the usual windows
+in place of the picker. The menu bar's **Projects** submenu lists the recent projects (the open one
+ticked), **All projects…** (the picker) and **New project…** (the picker with the name field open).
+Choosing another project ends the session first: the hub saves a snapshot and the project's
+thumbnail and exits, and only then does the next one start. The app remembers the project it
+hosted last and relaunches into it.
+
+**Migration.** The first time a hub or lobby starts with no `JAMSESH_DATA`, the sessions from before
+projects (`~/.jamsesh/host` and the `host-YYYY-MM-DD-HHMM` archives) are copied into projects named
+from each session's name, same names together. Nothing is moved or deleted: each database is copied
+privately and written out with `VACUUM INTO`, its event and document counts are compared with the
+copy (a mismatch removes the copy and is recorded), and the originals stay where they were. What
+happened is written to `projects/.migration.json`, and the migration doesn't run again. The old
+live session becomes `last-session` in its project, so opening that project the same day continues it.
 
 ## 4. Setup, pairing, and remote access
 
@@ -681,7 +732,7 @@ It tells agents:
 
 ### 7.1 Storage
 
-The session lives in SQLite (WAL) in the hub's data directory (`~/.jamsesh/host`). Team-level data
+The session lives in SQLite (WAL) in the hub's data directory (`~/.jamsesh/projects/<project>/sessions/<id>`, see [3.6](#36-projects); before projects it was `~/.jamsesh/host`). Team-level data
 that outlives a session (people, devices, voiceprints, pairings, the gateway key, the brain's name
 and behavior notes, models, and host-control settings) lives in a separate team store
 (`~/.jamsesh/team`) [B39].

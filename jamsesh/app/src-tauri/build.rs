@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "start_info",
     "nearby_hosts",
     "host_here",
+    "open_project",
     "join",
     "perm_status",
     "perm_request",

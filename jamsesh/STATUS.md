@@ -19,6 +19,17 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Big screen on a second display, same-Space full screen | Not tested | Needs a second display. |
 | Opening the app on another Mac | Not tested | Ad-hoc signed: needs **Open Anyway** once in Privacy & Security. Permissions reset if the app is rebuilt. |
 
+## Projects (phase 3.7)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Project storage, opening (new session, or today's), people, last used | Simulated | Unit tests on temp `JAMSESH_HOME` dirs; real hub processes started on a project, restarted (continues today's session) and with `JAMSESH_NEW_SESSION`. |
+| Migration of old sessions into projects | Simulated | Tested on temp copies built with the real store: grouped by name, originals byte-identical, counts verified, damaged database skipped, runs once. Not run on a real `~/.jamsesh`. |
+| Projects picker page (0, 1 and 8 projects, long names, keyboard) | Simulated | Looked at in headless Chromium against a throwaway lobby hub with seeded projects. |
+| Canvas thumbnail saved every 5 minutes and when the session ends | Not tested | The keeper is tested with a fake canvas; the real call reuses the frame screenshot request and needs a room with a canvas. |
+| Host starts at the picker; choosing a project opens its session in the same window | Not tested | Built and compiles; needs the app run on a Mac (the picker's `open_project` call only exists inside the app). |
+| Menu bar Projects submenu; switching ends the session cleanly, then opens the other | Not tested | Needs the app run on a Mac. |
+
 ## Room and brain
 
 | Capability | Status | Notes |
