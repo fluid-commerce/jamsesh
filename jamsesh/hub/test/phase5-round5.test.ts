@@ -72,3 +72,15 @@ test("only files inside the managed models folder are deleted, not a sibling tha
   expect(inManagedFolder(models)).toBe(false);
   expect(inManagedFolder(join(models, "..", "elsewhere.bin"))).toBe(false);
 });
+
+test("a voice brought from another host by an earlier build is gone when the host opens its store", async () => {
+  const { Store } = await import("../src/store");
+  const where = mkdtempSync(join(tmpdir(), "jam-p5r5-store-"));
+  const first = new Store(where);
+  const e = new Uint8Array(new Float32Array(256).fill(0.0625).buffer);
+  (first as any).db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run("p_a", 1, e, "carried");
+  (first as any).db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run("p_a", 2, e, "enrol");
+  (first as any).db.close();
+  expect(new Store(where).voiceSamples().map((x) => x.kind)).toEqual(["enrol"]);
+  rmSync(where, { recursive: true, force: true });
+});

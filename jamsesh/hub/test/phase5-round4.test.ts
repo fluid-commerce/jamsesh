@@ -1,5 +1,5 @@
-// Phase 5, fourth review: one rule for who a browser may become (so whose voice it reads and writes), and a
-// reset that nothing heard or sealed before it can undo. Synthetic embeddings only; nothing makes sound.
+// Phase 5, fourth review: one rule for who a browser may become (so whose voice it reads aloud for or resets),
+// and a reset that nothing heard before it can undo. Synthetic embeddings only; nothing makes sound.
 import "./voices.env";
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -30,12 +30,11 @@ const unit = (seed: number) => {
   const n = Math.hypot(...v);
   return Float32Array.from(v.map((x) => x / n));
 };
-const VOICE = ["GET", "PUT", "DELETE"] as const;
-const voiceStatuses = async (token: string, personId: string) => {
-  const out: number[] = [];
-  for (const m of VOICE) out.push((await call(token, m, `/people/${personId}/voiceprint`, m === "PUT" ? hub.voiceprintOf(personId) : undefined)).status);
-  return out;
-};
+/** What a window may do with a person's voice: start their join read, and reset it. */
+const voiceStatuses = async (token: string, personId: string) => [
+  (await call(token, "POST", `/people/${personId}/voice/start`, {})).status,
+  (await call(token, "DELETE", `/people/${personId}/voiceprint`)).status,
+];
 
 test("after its laptop is disconnected, a person can't be claimed by another pairing: the host lets one in", async () => {
   const sam = hub.session.upsertPerson({ name: "Sam" });
@@ -49,7 +48,7 @@ test("after its laptop is disconnected, a person can't be claimed by another pai
   expect(claim.status).toBe(403);
   expect((await claim.json()).error).toContain("Ask the host to let this laptop in as Sam");
   expect(hub.auth.get(hostile.device.id)).toMatchObject({ personId: null, wants: sam.id });
-  expect(await voiceStatuses(hostile.token, sam.id)).toEqual([403, 403, 403]);
+  expect(await voiceStatuses(hostile.token, sam.id)).toEqual([403, 403]);
   expect(hub.audio.voiceprints.count(sam.id)).toBeGreaterThan(0);
 
   // Only the host's own window lets a laptop in: not the laptop itself, another laptop, or loopback without the window key.
@@ -71,8 +70,8 @@ test("the host letting a laptop in moves the person: their other laptops are dis
   expect(hub.auth.get(old.device.id)).toBeNull();
   expect(hub.auth.get(fresh.device.id)).toMatchObject({ personId: kim.id, wants: null });
   expect((await call(fresh.token, "POST", "/devices", { deviceId: "d-kim-new", personId: kim.id })).status).toBe(200);
-  expect((await call(fresh.token, "GET", `/people/${kim.id}/voiceprint`)).status).toBe(200);
-  expect((await call(old.token, "GET", `/people/${kim.id}/voiceprint`)).status).not.toBe(200);
+  expect((await call(fresh.token, "POST", `/people/${kim.id}/voice/start`, {})).status).toBe(200);
+  expect((await call(old.token, "POST", `/people/${kim.id}/voice/start`, {})).status).not.toBe(200);
   // Not the person at the host's own window, though.
   const hostP = hub.session.upsertPerson({ name: "Hosty" });
   hub.session.store.setSetting("hostPersonId", hostP.id);
@@ -90,14 +89,14 @@ test("someone a browser made itself is its to be; someone with a voice here that
   expect((await call(other.token, "POST", "/devices", { deviceId: "d-other", personId: made.id })).status).toBe(403);
   expect((await call(maker.token, "POST", "/devices", { deviceId: "d-maker", personId: made.id })).status).toBe(200);
   hub.audio.voiceprints.add(made.id, unit(10), "enrol", Date.now());
-  expect(await voiceStatuses(maker.token, made.id)).toEqual([200, 200, 200]);
+  expect(await voiceStatuses(maker.token, made.id)).toEqual([200, 200]);
 
   // Taught by the room (the host's microphone, a correction), held by no browser: the host decides.
   const voiced = hub.session.upsertPerson({ name: "Voiced" });
   hub.audio.voiceprints.add(voiced.id, unit(2), "correction", Date.now());
   const claimer = browser("Claimer");
   expect((await call(claimer.token, "POST", "/devices", { deviceId: "d-claimer", personId: voiced.id })).status).toBe(403);
-  expect(await voiceStatuses(claimer.token, voiced.id)).toEqual([403, 403, 403]);
+  expect(await voiceStatuses(claimer.token, voiced.id)).toEqual([403, 403]);
 });
 
 test("removing a person (which erases their voice) is for the host or that person, not any laptop", async () => {
@@ -113,37 +112,6 @@ test("removing a person (which erases their voice) is for the host or that perso
   expect(hub.session.person(pat.id)).toBeUndefined();
   const gone = hub.session.upsertPerson({ name: "Gone" });
   expect((await asHostWindow("DELETE", `/people/${gone.id}`)).status).toBe(200);
-});
-
-test("after a reset only a copy this host sealed since is taken: a sealed older one is stale whatever its clock says", () => {
-  const ana = hub.session.upsertPerson({ name: "Ana" });
-  hub.audio.voiceprints.add(ana.id, unit(4), "enrol", Date.now());
-  // Never reset: any well-formed copy is taken, sealed or not.
-  const unsealed = { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: [...unit(5)] }] };
-  expect(hub.carryVoiceprint(ana.id, unsealed)).toMatchObject({ ok: true });
-  const before = hub.voiceprintOf(ana.id);
-  expect(before.stamp?.gen).toBe(0);
-  hub.resetVoice(ana.id);
-  // The host's own pre-reset copy, from a laptop whose clock runs 30 seconds (or an hour) fast.
-  for (const skew of [0, 30_000, 3_600_000]) expect(hub.carryVoiceprint(ana.id, { ...before, updatedAt: Date.now() + skew })).toMatchObject({ ok: false, reset: true, stale: true });
-  // A seal moved onto other samples, a seal from another host, no seal: not taken (and not provably stale).
-  expect(hub.carryVoiceprint(ana.id, { ...before, samples: unsealed.samples })).toMatchObject({ ok: false, reset: true, stale: false });
-  const otherHub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "other") });
-  const there = otherHub.session.upsertPerson({ name: "Ana" });
-  otherHub.audio.voiceprints.add(there.id, unit(6), "enrol", Date.now());
-  const foreign = otherHub.voiceprintOf(there.id);
-  expect(hub.carryVoiceprint(ana.id, { ...foreign, stamp: { ...foreign.stamp!, gen: 1, at: Date.now() + 1 } })).toMatchObject({ ok: false, stale: false });
-  expect(hub.carryVoiceprint(ana.id, unsealed)).toMatchObject({ ok: false, stale: false });
-  otherHub.devproxy.stop();
-  expect(hub.audio.voiceprints.count(ana.id)).toBe(0);
-  // What it hears from her after the reset is hers, and its own copy of that comes back.
-  expect(hub.audio.voiceprints.add(ana.id, unit(7), "enrol", Date.now() + 1)).toBe(true);
-  const after = hub.voiceprintOf(ana.id);
-  expect(after.stamp?.gen).toBe(1);
-  expect(hub.carryVoiceprint(ana.id, after)).toMatchObject({ ok: true });
-  // A second reset makes that one stale too: generations only go forward.
-  hub.resetVoice(ana.id);
-  expect(hub.carryVoiceprint(ana.id, after)).toMatchObject({ ok: false, stale: true });
 });
 
 test("nothing heard before a reset teaches the voice: a line still in flight, a held first sample, a stored line", () => {
@@ -196,22 +164,4 @@ voiced("correcting an old unlabelled line to someone after their reset doesn't t
   line("utt_new", Date.now() + 1);
   expect(hub.audio.assign("utt_new", kai.id).learning).toMatchObject({ learned: true });
   expect(hub.audio.voiceprints.count(kai.id)).toBeGreaterThan(0);
-});
-
-test("the host signs a Mac app's nonce with a key it keeps, so a replacement host at its address can't pass as it", async () => {
-  const { createPublicKey, verify } = await import("node:crypto");
-  const nonce = "ab".repeat(16);
-  const r = await fetch(`${base}/api/host-proof?nonce=${nonce}`);
-  expect(r.status).toBe(200);
-  const { publicKey, signature } = await r.json();
-  const spki = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(publicKey, "base64")]);
-  const key = createPublicKey({ key: spki, format: "der", type: "spki" });
-  expect(verify(null, Buffer.from(`jamsesh-host-proof:v1:${nonce}`), key, Buffer.from(signature, "base64"))).toBe(true);
-  expect(verify(null, Buffer.from(`jamsesh-host-proof:v1:${"cd".repeat(16)}`), key, Buffer.from(signature, "base64"))).toBe(false);
-  // The same key every time (and after a restart: it's kept); another host has its own.
-  expect(hub.hostProof("cd".repeat(16))?.publicKey).toBe(publicKey);
-  const other = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "other2") });
-  expect(other.hostProof(nonce)?.publicKey).not.toBe(publicKey);
-  other.devproxy.stop();
-  for (const bad of ["", "xyz", "ab", "a".repeat(200)]) expect((await fetch(`${base}/api/host-proof?nonce=${bad}`)).status).toBe(400);
 });

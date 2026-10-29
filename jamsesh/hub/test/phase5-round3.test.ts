@@ -35,12 +35,10 @@ test("a newly paired browser can't claim a person who is already on another lapt
   const claim = await call(stranger.token, "POST", "/devices", { deviceId: "d-stranger", personId: victim.id });
   expect(claim.status).toBe(403);
   expect(hub.auth.get(stranger.device.id)?.personId).toBeNull();
-  for (const method of ["GET", "PUT", "DELETE"]) {
-    const r = await call(stranger.token, method, `/people/${victim.id}/voiceprint`, method === "PUT" ? { model: "m", dim: 256, samples: [] } : undefined);
-    expect(r.status).toBe(403);
-  }
+  expect((await call(stranger.token, "DELETE", `/people/${victim.id}/voiceprint`)).status).toBe(403);
+  expect((await call(stranger.token, "POST", `/people/${victim.id}/voice/start`, {})).status).toBe(403);
   // The owner still can.
-  expect((await call(owner.token, "GET", `/people/${victim.id}/voiceprint`)).status).toBe(200);
+  expect((await call(owner.token, "POST", `/people/${victim.id}/voice/start`, {})).status).toBe(200);
 });
 
 test("nor the person using the host's own window; a person nobody holds can be claimed once", async () => {
@@ -58,16 +56,11 @@ test("nor the person using the host's own window; a person nobody holds can be c
   expect((await call(late.token, "POST", "/devices", { deviceId: "d-late", personId: loose.id })).status).toBe(403);
 });
 
-test("a reset forgets voices not yet confirmed, and a copy dated in the future doesn't get past it", async () => {
+test("a reset forgets voices not yet confirmed", async () => {
   const held = new Float32Array(256).fill(0.1);
   (hub.audio as any).candidates.set(victim.id, [[{ e: held, at: Date.now() }]]);
   hub.resetVoice(victim.id);
   expect((hub.audio as any).candidates.has(victim.id)).toBe(false);
-  const stale = { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: Array(256).fill(0.1) }] };
-  for (const updatedAt of [Date.now() - 5000, Date.now() + 3_600_000, 1e15, Number.NaN, undefined]) {
-    const r = hub.carryVoiceprint(victim.id, { ...stale, updatedAt });
-    expect(r).toMatchObject({ ok: false, reset: true });
-  }
 });
 
 test("the level a laptop reports in the URL is ignored: the audio is measured", async () => {

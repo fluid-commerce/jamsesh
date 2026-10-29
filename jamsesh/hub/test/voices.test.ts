@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ENROL_SCRIPT, scriptShare } from "../src/audio/enrol";
-import { embed, learningNote, parseCarried } from "../src/audio/voiceprint";
+import { embed, learningNote } from "../src/audio/voiceprint";
 import { decodeWav, encodeWav, resample } from "../src/audio/wav";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
@@ -77,7 +77,7 @@ test("the read is matched by the script's word order, not its vocabulary", () =>
 });
 
 const SKEWS = [
-  { name: "laptop clocks a second and a half off", opts: { skew: { "lap-b": 1500, "lap-c": -1300 }, textNoise: true } },
+  { name: "laptop clocks a second and a half off", opts: { skew: { "lap-b": 1500, "lap-c": -1300 } } },
   { name: "one laptop's copy arrives five seconds late", opts: { settleMs: 1000 } },
   { name: "far laptops mishear a word", opts: { textNoise: true } },
 ];
@@ -92,6 +92,18 @@ for (const c of SKEWS)
     expect(s.lost).toBe(0);
     expect(ofRoom(room)).toHaveLength(lines.length);
   }, T);
+
+// Clocks too far off to group the copies by time, and a far laptop that lost a word: the words don't agree one by
+// one, so JamSesh can't be sure it's one line and keeps both rather than lose what someone said.
+sim("a copy with clocks off and a word lost isn't merged by guesswork: both lines are kept", async () => {
+  const room = makeRoom();
+  const lines = script(21, 3, base()).slice(0, 12);
+  const r = rng(5);
+  for (const l of lines) await play(room, l, r, { skew: { "lap-b": 1500, "lap-c": -1300 }, textNoise: true });
+  const s = score(room, lines);
+  expect(s.lost).toBe(0);
+  expect(s.dupes).toBeGreaterThan(0);
+}, T);
 
 sim("two people saying the same words a moment apart are still two lines when far apart in time", async () => {
   const room = makeRoom();
@@ -269,96 +281,34 @@ function wavOf(key: Key, text: string) {
   return encodeWav({ sampleRate: 16000, samples: say(key, text, 165) });
 }
 
-sim("a voiceprint made on one host identifies its owner on another, and holds embeddings only", async () => {
-  // Host A: Ana reads the join sentences and a correction teaches her more.
+sim("a voice stays on the host that learned it: another host doesn't know it until the person reads there", async () => {
   const anaA = hubA.session.upsertPerson({ name: "Ana" });
   expect(hubA.enrollVoice(anaA.id, wavOf("ana", ENROL_TEXT.ana))).toMatchObject({ ok: true });
-  const carried = hubA.voiceprintOf(anaA.id);
-  expect(carried.samples.length).toBeGreaterThan(1);
-  // Nothing but numbers: no audio, no names, no file.
-  expect(Object.keys(carried).sort()).toEqual(["dim", "model", "samples", "stamp", "updatedAt", "version"]);
-  expect(carried.samples.every((s) => Object.keys(s).sort().join() === "embedding,kind" && s.embedding.length === 256)).toBe(true);
-  // Host B has never heard her.
+  expect(hubA.audio.voiceprints.count(anaA.id)).toBeGreaterThan(0);
+  // Host B has never heard her, and there is no way to bring it there.
   const anaB = hubB.session.upsertPerson({ name: "Ana" });
-  const benB = hubB.session.upsertPerson({ name: "Ben" });
+  hubB.session.upsertPerson({ name: "Ben" });
   expect(hubB.audio.voiceprints.count(anaB.id)).toBe(0);
-  expect(hubB.carryVoiceprint(anaB.id, JSON.parse(JSON.stringify(carried)))).toMatchObject({ ok: true, samples: carried.samples.length });
-  // A line on host B at a laptop nobody owns: only the voice can name her.
+  for (const method of ["GET", "PUT"]) expect((await fetch(`${url}/api/people/${anaB.id}/voiceprint`, { method, headers: remote })).status).not.toBe(200);
+  // A line on host B at a laptop nobody owns: nothing names her yet.
   hubB.session.touchDevice("shared", { kind: "host", location: "room", micOn: true });
-  (hubB.audio as any).transcriber = { transcribe: async () => ({ text: "I think the header should be taller so the logo has some room to breathe.", engine: "stub" }) };
-  const samples = say("ana", "I think the header should be taller so the logo has some room to breathe.", 170);
-  const t = Date.now() - 20_000;
-  await hubB.audio.ingest({ deviceId: "shared", t0: t, t1: t + 4000, wav: encodeWav({ sampleRate: 16000, samples }) });
-  await hubB.audio.flush();
-  const heard = hubB.session.store.all("utterances")[0];
+  const words = "I think the header should be taller so the logo has some room to breathe.";
+  (hubB.audio as any).transcriber = { transcribe: async () => ({ text: words, engine: "stub" }) };
+  const hear = async (t: number) => {
+    await hubB.audio.ingest({ deviceId: "shared", t0: t, t1: t + 4000, wav: encodeWav({ sampleRate: 16000, samples: say("ana", words, 170) }) });
+    await hubB.audio.flush();
+  };
+  await hear(Date.now() - 60_000);
+  expect(hubB.session.store.all("utterances").at(-1)?.personId).not.toBe(anaB.id);
+  // She reads on B: from then on B knows her.
+  expect(hubB.enrollVoice(anaB.id, wavOf("ana", ENROL_TEXT.ana))).toMatchObject({ ok: true });
+  await hear(Date.now() - 20_000);
+  const heard = hubB.session.store.all("utterances").sort((a, b) => a.t0 - b.t0).at(-1)!;
   expect(heard.speakerName).toBe("Ana");
   expect(heard.method).toContain("voice");
-  expect(benB.id).not.toBe(heard.personId);
-  // Bringing it again replaces the copy; it doesn't pile up.
-  hubB.carryVoiceprint(anaB.id, JSON.parse(JSON.stringify(carried)));
-  expect(hubB.audio.voiceprints.learnedFrom(anaB.id).carried).toBe(carried.samples.length);
 }, T);
 
-const good = () => hubA.voiceprintOf(hubA.session.people().find((p) => p.name === "Ana")!.id);
-
-sim("a carried voiceprint is checked: wrong model, wrong size, junk and too many samples are refused", () => {
-  const p = hubB.session.upsertPerson({ name: "Checked" });
-  const ok = good();
-  const bad = [
-    { ...ok, model: "other_model" },
-    { ...ok, dim: 192 },
-    { ...ok, samples: [] },
-    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.slice(0, 100) }] },
-    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map(() => "x") }] },
-    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map(() => 0) }] },
-    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map((_, i) => (i === 3 ? Infinity : 1)) }] },
-    // Finite in JSON, infinite as Float32.
-    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map(() => 1e100) }] },
-    { ...ok, samples: [{ kind: "enrol", embedding: ok.samples[0].embedding.map((n, i) => (i === 0 ? 1e39 : n)) }] },
-    { ...ok, samples: Array.from({ length: 40 }, () => ok.samples[0]) },
-    null,
-    "audio",
-  ];
-  for (const b of bad) expect(hubB.carryVoiceprint(p.id, b)).toMatchObject({ ok: false });
-  expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
-});
-
-test("a sample whose numbers overflow Float32 is refused, never stored as infinities", () => {
-  const r = parseCarried({ model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: new Array(256).fill(1e100) }] });
-  expect(r.ok).toBe(false);
-  const tiny = parseCarried({ model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: new Array(256).fill(0.0625) }] });
-  expect(tiny.ok && tiny.samples[0].every(Number.isFinite)).toBe(true);
-});
-
-test("a full voiceprint carried to another host and back loses nothing, and its version says when it changed", () => {
-  const full = hubA.session.upsertPerson({ name: "Full" });
-  const base = Array.from({ length: 256 }, (_, i) => Math.sin(i + 1));
-  // 32 distinct samples, the most a device carries.
-  const samples = Array.from({ length: 32 }, (_, k) => ({ kind: "enrol" as const, embedding: base.map((n, i) => (i === k ? n + 0.5 : n)) }));
-  const onB = hubB.session.upsertPerson({ name: "Full" });
-  expect(hubB.carryVoiceprint(onB.id, { model: "wespeaker_en", dim: 256, samples })).toMatchObject({ ok: true, samples: 32 });
-  const back = hubB.voiceprintOf(onB.id);
-  expect(back.samples).toHaveLength(32);
-  const sent = samples.map((x) => normalizeArr(x.embedding));
-  const which = (e: number[]) => sent.findIndex((x) => x.reduce((d, n, i) => d + n * e[i], 0) > 0.99999);
-  expect(new Set(back.samples.map((x) => which(x.embedding))).size).toBe(32);
-  expect(back.samples.every((x) => which(x.embedding) >= 0)).toBe(true);
-  // Same samples, same version; anything learned changes it.
-  expect(hubB.voiceprintOf(onB.id).version).toBe(back.version);
-  hubB.audio.voiceprints.add(onB.id, Float32Array.from(base), "correction", Date.now());
-  expect(hubB.voiceprintOf(onB.id).version).not.toBe(back.version);
-  // Its own samples coming back from another host aren't counted twice: the correction stays one correction.
-  const own = hubB.voiceprintOf(onB.id);
-  expect(hubB.carryVoiceprint(onB.id, own)).toMatchObject({ ok: true, samples: 31 });
-  expect(hubB.audio.voiceprints.learnedFrom(onB.id)).toMatchObject({ correction: 1, carried: 31 });
-  expect(hubA.voiceprintOf(full.id)).toMatchObject({ samples: [], version: "", updatedAt: 0 });
-});
-const normalizeArr = (e: number[]) => {
-  const n = Math.hypot(...e);
-  return e.map((x) => x / n);
-};
-
-test("resetting a voice forgets it everywhere it could come back from: samples, the lines' embeddings, older copies", () => {
+test("resetting a voice forgets it everywhere it could come back from: samples, the lines' embeddings, what's held", () => {
   const s = hubB.session;
   const p = s.upsertPerson({ name: "Resetter" });
   const v = Array.from({ length: 256 }, (_, i) => Math.cos(i));
@@ -368,7 +318,6 @@ test("resetting a voice forgets it everywhere it could come back from: samples, 
   const theirs = s.store.addEvent({ kind: "speech", authorType: "person", authorId: other.id, authorName: other.name, text: "Not theirs", data: { embedding: v } });
   const now = Date.now();
   s.store.put("utterances", { id: "utt_reset1", t0: now - 5000, t1: now - 3000, text: "A line of theirs", personId: p.id, speakerName: p.name, confidence: 0.5, method: "voice", deviceId: "d", devices: [], location: "room", eventId: ev.id, engine: "stub" } as any);
-  const before = hubB.voiceprintOf(p.id);
   expect(hubB.resetVoice(p.id)).toMatchObject({ ok: true, scrubbed: 1 });
   expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
   expect(s.store.event(ev.id)?.data.embedding).toBeUndefined();
@@ -376,14 +325,8 @@ test("resetting a voice forgets it everywhere it could come back from: samples, 
   // Correcting their old line to them teaches nothing now.
   expect(hubB.audio.assign("utt_reset1", p.id).learning.learned).toBe(false);
   expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
-  // A copy this host sealed before the reset is stale, whatever its clock says; one it didn't seal can't show it's newer.
-  expect(hubB.carryVoiceprint(p.id, before)).toMatchObject({ ok: false, reset: true, stale: true });
-  expect(hubB.carryVoiceprint(p.id, { ...before, updatedAt: Date.now() + 30_000 })).toMatchObject({ ok: false, reset: true, stale: true });
-  expect(hubB.carryVoiceprint(p.id, { ...before, samples: [{ kind: "enrol", embedding: v }], updatedAt: undefined })).toMatchObject({ ok: false, reset: true });
-  expect(hubB.carryVoiceprint(p.id, { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: v }], updatedAt: Date.now() + 1000 })).toMatchObject({ ok: false, reset: true, stale: false });
-  // What it learns from them afterwards, and its own copy of that, are theirs again.
+  // What it hears from them afterwards is theirs again.
   expect(hubB.audio.voiceprints.add(p.id, Float32Array.from(v), "enrol", Date.now() + 1)).toBe(true);
-  expect(hubB.carryVoiceprint(p.id, hubB.voiceprintOf(p.id))).toMatchObject({ ok: true });
 });
 
 test("the join read's window closes when the read fails: a refused recording, bad audio, or no microphone", async () => {
@@ -408,38 +351,21 @@ test("the join read's window closes when the read fails: a refused recording, ba
   expect(open()).toBeUndefined();
 });
 
-sim("only a person gives their own voiceprint: not another person, not an agent, not a window with no person", async () => {
+sim("only a person resets or reads for their own voice: not another person, not an agent, not a window with no person", async () => {
   const ana = hubB.session.people().find((p) => p.name === "Ana")!;
   const ben = hubB.session.people().find((p) => p.name === "Ben")!;
   const anaLaptop = hubB.auth.issue({ kind: "browser", label: "Ana's laptop", ip: "10.0.0.6", personId: ana.id });
   const benLaptop = hubB.auth.issue({ kind: "browser", label: "Ben's laptop", ip: "10.0.0.7", personId: ben.id });
   const nobody = hubB.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.8" });
   const agent = hubB.auth.issue({ kind: "agent", label: "Ana's agents", ip: "10.0.0.5", personId: ana.id, ownerDeviceId: anaLaptop.device.id });
-  const send = (token: string, id: string, method: string, body?: unknown) =>
-    fetch(`${url}/api/people/${id}/voiceprint`, { method, headers: { ...remote, authorization: `Bearer ${token}` }, body: body === undefined ? undefined : JSON.stringify(body) });
-  const own = good();
-  // Ben pushing Ana's, reading Ana's, forgetting Ana's.
-  expect((await send(benLaptop.token, ana.id, "PUT", own)).status).toBe(403);
-  expect((await send(benLaptop.token, ana.id, "GET")).status).toBe(403);
-  expect((await send(benLaptop.token, ana.id, "DELETE")).status).toBe(403);
-  // An agent, even one acting for Ana.
-  expect((await send(agent.token, ana.id, "PUT", own)).status).toBe(403);
-  expect((await send(agent.token, ana.id, "GET")).status).toBe(403);
-  // A window nobody has joined as.
-  expect((await send(nobody.token, ana.id, "PUT", own)).status).toBe(403);
-  // Nor a stranger to the host: no credential at all.
-  expect((await fetch(`${url}/api/people/${ana.id}/voiceprint`, { method: "PUT", headers: remote, body: JSON.stringify(own) })).status).toBeGreaterThanOrEqual(401);
-  // Ana's own device: reads hers, brings hers (twice, harmlessly), and a malformed one is a plain 400.
-  const got = await send(anaLaptop.token, ana.id, "GET");
-  expect(got.status).toBe(200);
-  const back = (await got.json()) as { model: string; samples: unknown[] };
-  expect(back.model).toBe("wespeaker_en");
-  for (let i = 0; i < 2; i++) {
-    const put = await send(anaLaptop.token, ana.id, "PUT", own);
-    expect([put.status, await put.text()]).toEqual([200, expect.any(String)]);
-  }
-  expect(hubB.audio.voiceprints.learnedFrom(ana.id).carried).toBe(own.samples.length);
-  expect((await send(anaLaptop.token, ana.id, "PUT", { ...own, dim: 3 })).status).toBe(400);
+  const reset = (token: string | null, id: string) => fetch(`${url}/api/people/${id}/voiceprint`, { method: "DELETE", headers: token ? { ...remote, authorization: `Bearer ${token}` } : remote });
+  const before = hubB.audio.voiceprints.count(ana.id);
+  expect(before).toBeGreaterThan(0);
+  for (const token of [benLaptop.token, agent.token, nobody.token]) expect((await reset(token, ana.id)).status).toBe(403);
+  expect((await reset(null, ana.id)).status).toBeGreaterThanOrEqual(401);
+  expect(hubB.audio.voiceprints.count(ana.id)).toBe(before);
+  // Nobody reads a voice out of the host, Ana included: there is no such route.
+  for (const method of ["GET", "PUT"]) expect((await fetch(`${url}/api/people/${ana.id}/voiceprint`, { method, headers: { ...remote, authorization: `Bearer ${anaLaptop.token}` } })).status).toBe(404);
   // Reading aloud and starting a read follow the same rule.
   const read = (token: string, id: string, path: string) => fetch(`${url}/api/people/${id}/${path}`, { method: "POST", headers: { ...remote, authorization: `Bearer ${token}` }, body: path === "voice" ? new Uint8Array(wavOf("ana", ENROL_SCRIPT[0])) : "{}" });
   expect((await read(benLaptop.token, ana.id, "voice/start")).status).toBe(403);

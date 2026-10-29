@@ -43,10 +43,8 @@ export const PALETTE = ["#FF6B4A", "#3E8BFF", "#22C08B", "#B36BFF", "#FFB020", "
 const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
 const TEAM_SETTINGS = new Set<string>([
   "hostId",
-  "voiceResets",
-  "voiceStampSecret",
+  "voiceResetAt",
   "personKeepers",
-  "hostSigningKey",
   "gatewayKey",
   "brainName",
   "brainAliases",
@@ -71,8 +69,8 @@ export function newId(prefix: string) {
 /** As long as a laptop keeps a queued change (web/src/shared/offline.ts): a replay is always recognized. */
 const REPLAY_MS = 7 * 86_400_000;
 
-/** Where a voice sample came from: heard in passing, read aloud, a correction, or brought from another host. */
-export type VoiceKind = "auto" | "enrol" | "correction" | "carried";
+/** Where a voice sample came from: heard in passing, read aloud, or a correction. */
+export type VoiceKind = "auto" | "enrol" | "correction";
 
 export class Store {
   db: Database;
@@ -113,6 +111,8 @@ export class Store {
     `);
     // Older stores kept voice samples with no kind: they were all learned automatically.
     if (!(this.db.query("PRAGMA table_info(voiceprints)").all() as any[]).some((c) => c.name === "kind")) this.db.exec("ALTER TABLE voiceprints ADD COLUMN kind TEXT NOT NULL DEFAULT 'auto'");
+    // Earlier builds took copies of a voice from other hosts. A voice now lives only on the host that learned it.
+    this.db.exec("DELETE FROM voiceprints WHERE kind = 'carried'");
   }
 
   // ---- generic collections ----
@@ -339,33 +339,31 @@ export class Store {
 
   // ---- voiceprints ----
 
-  /** When a person's voice was last reset here (`at`, this host's clock) and how many times (`gen`). */
-  voiceReset(personId: string): { gen: number; at: number } {
-    return this.setting<Record<string, { gen: number; at: number }>>("voiceResets", {})[personId] ?? { gen: 0, at: 0 };
+  /** When a person's voice was last reset here (this host's clock), or 0. */
+  voiceResetAt(personId: string): number {
+    return this.setting<Record<string, number>>("voiceResetAt", {})[personId] ?? 0;
   }
 
-  /** A reset: a new generation, at a moment later than any before it even if the clock stepped back. */
-  markVoiceReset(personId: string): { gen: number; at: number } {
-    const all = this.setting<Record<string, { gen: number; at: number }>>("voiceResets", {});
-    const prev = all[personId] ?? { gen: 0, at: 0 };
-    const next = { gen: prev.gen + 1, at: Math.max(Date.now(), prev.at + 1) };
-    this.setSetting("voiceResets", { ...all, [personId]: next });
-    return next;
+  /** A reset, at a moment later than any before it even if the clock stepped back. */
+  markVoiceReset(personId: string): number {
+    const all = this.setting<Record<string, number>>("voiceResetAt", {});
+    const at = Math.max(Date.now(), (all[personId] ?? 0) + 1);
+    this.setSetting("voiceResetAt", { ...all, [personId]: at });
+    return at;
   }
 
   /**
    * Every voice sample comes in here, with when its source was heard (this host's clock). Nothing heard
    * at or before the person's last reset teaches their voice again, whichever path it took (a line still
-   * being transcribed, a later correction of an old line, a held first sample, a carried copy). Returns
+   * being transcribed, a later correction of an old line, a held first sample). Returns
    * whether it was kept.
    */
   addVoiceSample(personId: string, embedding: Float32Array, kind: VoiceKind, heardAt: number): boolean {
-    if (!(Number.isFinite(heardAt) && heardAt > this.voiceReset(personId).at)) return false;
+    if (!(Number.isFinite(heardAt) && heardAt > this.voiceResetAt(personId))) return false;
     if (this.team) return this.team.addVoiceSample(personId, embedding, kind, heardAt);
     this.db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)), kind);
-    // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24
-    // each). A carried copy keeps everything a device may carry (32, MAX_CARRIED), so carrying it back loses nothing.
-    for (const [k, keep] of [["auto", 40], ["enrol", 24], ["correction", 24], ["carried", 32]] as const)
+    // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24 each).
+    for (const [k, keep] of [["auto", 40], ["enrol", 24], ["correction", 24]] as const)
       this.db
         .query(
           `DELETE FROM voiceprints WHERE person_id = ? AND kind = ? AND rowid NOT IN
@@ -391,7 +389,7 @@ export class Store {
     for (const id of ids) this.db.query("DELETE FROM voiceprints WHERE rowid = ?").run(id);
   }
 
-  /** Drops one kind of a person's samples (a new carried copy replaces the old one). */
+  /** Drops one kind of a person's samples (a new join read replaces the old one). */
   clearVoiceKind(personId: string, kind: VoiceKind): void {
     if (this.team) return this.team.clearVoiceKind(personId, kind);
     this.db.query("DELETE FROM voiceprints WHERE person_id = ? AND kind = ?").run(personId, kind);

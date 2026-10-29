@@ -9,8 +9,8 @@ export interface Person {
   color: string;
   hasVoiceprint: boolean;
   voiceSamples: number;
-  /** What the voiceprint was learned from: reads aloud, corrections, lines heard, and a copy brought from another host. */
-  voiceLearned?: { read: number; corrections: number; heard: number; carried: number };
+  /** What the voiceprint was learned from: reads aloud, corrections, lines heard. */
+  voiceLearned?: { read: number; corrections: number; heard: number };
   createdAt: number;
   /** Profile photo URL (from the person's camera), or null. */
   photo?: string | null;

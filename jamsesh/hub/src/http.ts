@@ -406,11 +406,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
-  // Anyone may ask: a signature over their own nonce, so a Mac app knows it reached the host it trusted.
-  if (path === "/host-proof" && req.method === "GET") {
-    const proof = hub.hostProof(url.searchParams.get("nonce") ?? "");
-    return proof ? json(proof) : bad("nonce is 32 to 128 hex characters");
-  }
 
   // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt
   let hm = path.match(/^\/history\/(events|utterances|directives|artifacts)$/);
@@ -497,7 +492,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     }
   }
 
-  // A voice belongs to its person: only their own window or device reads, reads aloud, brings or forgets it.
+  // A voice belongs to its person: only their own window reads aloud for it or resets it.
   const own = (id: string) => {
     if (paired?.kind === "agent") return "That's for people; agents use their jam_ tools.";
     if (isLocal(ip) && !hostWindow) return NOT_THE_HOST_WINDOW;
@@ -524,17 +519,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!p) return bad("no such person", 404);
     return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
   }
+  // Reset: the voice lives only here, so this is the only place it is forgotten.
   m = path.match(/^\/people\/([\w-]+)\/voiceprint$/);
-  if (m) {
+  if (m && req.method === "DELETE") {
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
     if (!s.person(m[1])) return bad("no such person", 404);
-    if (req.method === "GET") return json(hub.voiceprintOf(m[1]));
-    if (req.method === "PUT") {
-      const r = hub.carryVoiceprint(m[1], body);
-      return r.ok ? json(r) : "reset" in r ? json({ error: r.reason, reset: true, stale: r.stale }, 409) : bad(r.reason);
-    }
-    if (req.method === "DELETE") return json(hub.resetVoice(m[1]));
+    return json(hub.resetVoice(m[1]));
   }
   if (path === "/voice/script" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people; agents use their jam_ tools.", 403) : json({ sentences: ENROL_SCRIPT, seconds: ENROL_SECONDS });
   m = path.match(/^\/people\/([\w-]+)\/voice\/start$/);

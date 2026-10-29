@@ -317,11 +317,11 @@ export class Session {
   people(): Person[] {
     const samples = new Map<string, Person["voiceLearned"] & object>();
     for (const s of this.store.voiceSamples()) {
-      const n = samples.get(s.personId) ?? { read: 0, corrections: 0, heard: 0, carried: 0 };
-      n[({ enrol: "read", correction: "corrections", auto: "heard", carried: "carried" } as const)[s.kind]]++;
+      const n = samples.get(s.personId) ?? { read: 0, corrections: 0, heard: 0 };
+      n[({ enrol: "read", correction: "corrections", auto: "heard" } as const)[s.kind]]++;
       samples.set(s.personId, n);
     }
-    const total = (n?: Person["voiceLearned"]) => (n ? n.read + n.corrections + n.heard + n.carried : 0);
+    const total = (n?: Person["voiceLearned"]) => (n ? n.read + n.corrections + n.heard : 0);
     return this.store
       .all("people")
       .map((p) => ({ ...p, voiceSamples: total(samples.get(p.id)), voiceLearned: samples.get(p.id), hasVoiceprint: total(samples.get(p.id)) > 0 }))

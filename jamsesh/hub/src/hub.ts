@@ -1,10 +1,9 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
-import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
-import { learningNote, parseCarried, voiceprintStatus, type Learning } from "./audio/voiceprint";
+import { learningNote, voiceprintStatus, type Learning } from "./audio/voiceprint";
 import { decodeWav, resample } from "./audio/wav";
 import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
@@ -386,52 +385,19 @@ export class Hub {
     return this.audio.enrol(personId, pcm);
   }
 
-  /** What a person's own device keeps of their voice: embeddings only, never audio. */
-  voiceprintOf(personId: string) {
-    return this.audio.voiceprints.exportFor(personId);
-  }
-
-  /**
-   * This host proves it is the host a Mac app trusted before: it signs the app's fresh nonce with a key it keeps
-   * (Ed25519, made once). The app pins the public key with the person's Share answer, so another host at the
-   * same address, claiming the same id, can't sign as this one.
-   */
-  hostProof(nonce: string): { publicKey: string; signature: string } | null {
-    if (!/^[0-9a-f]{32,128}$/.test(nonce)) return null;
-    const store = this.session.store;
-    let pem = store.setting<string>("hostSigningKey", "");
-    if (!pem) store.setSetting("hostSigningKey", (pem = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString()));
-    const key = createPrivateKey(pem);
-    const raw = createPublicKey(key).export({ type: "spki", format: "der" }).subarray(-32);
-    return { publicKey: raw.toString("base64"), signature: sign(null, Buffer.from(`jamsesh-host-proof:v1:${nonce}`), key).toString("base64") };
-  }
-
-  /** A person's own device brings their voiceprint to this host. */
-  carryVoiceprint(personId: string, body: unknown) {
-    if (!this.session.person(personId)) throw new Error("No such person.");
-    const r = parseCarried(body);
-    if (!r.ok) return r;
-    // After a reset, only a copy this host sealed since: never one made before it, whatever its clock says.
-    const from = this.audio.voiceprints.provenance(personId, body);
-    if (!from.ok) return { ok: false as const, reason: from.reason, reset: true as const, stale: from.stale };
-    const kept = this.audio.voiceprints.importCarried(personId, r.samples, from.heardAt);
-    this.session.store.put("people", this.session.person(personId)!);
-    return { ok: true as const, samples: kept };
-  }
-
   /**
    * Forgets a person's voice on this host: their samples, the embeddings kept with their lines in this
-   * session, what's held or in flight, and starts a new generation: nothing heard before it, and no copy
-   * sealed before it, teaches their voice again (Store.addVoiceSample).
+   * session, and what's held or in flight. A voice lives only on the host that learned it, so nothing else
+   * can bring it back, and nothing heard before now teaches it again (Store.addVoiceSample).
    */
   resetVoice(personId: string) {
-    const { gen } = this.session.store.markVoiceReset(personId);
+    this.session.store.markVoiceReset(personId);
     this.audio.voiceprints.clear(personId);
     const scrubbed = this.session.store.scrubEmbeddings(personId);
     this.audio.forgetVoice(personId);
     const p = this.session.person(personId);
     if (p) this.session.store.put("people", p);
-    return { ok: true as const, scrubbed, gen };
+    return { ok: true as const, scrubbed };
   }
 
   /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */
