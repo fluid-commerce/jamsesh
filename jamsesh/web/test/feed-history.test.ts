@@ -46,3 +46,13 @@ test("the hub client announces each new event as it arrives, so a burst past the
   h.handle({ type: "event", event: { id: 651, kind: "speech", text: "x", data: {} } });
   expect(n).toBe(650);
 });
+
+test("lines that arrived while the client was disconnected are announced when the snapshot replaces the state", () => {
+  const h = hub as any;
+  h.handle({ type: "state", state: { events: [{ id: 5, kind: "speech", text: "a", data: {} }], utterances: [] } });
+  const seen: number[] = [];
+  const off = hub.onEvent((e) => void seen.push(e.id));
+  h.handle({ type: "state", state: { events: [5, 6, 7, 8].map((id) => ({ id, kind: "speech", text: "x", data: {} })), utterances: [] } });
+  expect(seen).toEqual([6, 7, 8]);
+  off();
+});

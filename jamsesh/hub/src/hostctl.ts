@@ -211,6 +211,8 @@ export async function runShort(cmd: string[], timeoutMs = 30_000, cwd?: string):
   return r.status === "stuck" ? { code: -1, out: r.out } : { code: r.code, out: r.out };
 }
 
+/** Query or fragment parameter names that carry a secret. */
+const SECRET_PARAM = /(^|[_.-])(token|access[_-]?token|id[_-]?token|refresh[_-]?token|api[_-]?key|apikey|key|secret|client[_-]?secret|password|passwd|pwd|auth|authorization|sig|signature|credential|credentials|session|sessionid|bearer)s?$/i;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
 /**
@@ -226,8 +228,10 @@ export function urlProblem(text: string, o: { single?: boolean; allowGitUser?: b
   const creds = "That has a URL with a username or token in it. Leave the credentials out; the host's own git login does the authenticating.";
   if (typeof text !== "string") return "That isn't valid.";
   if (o.single && (/\s/.test(text) || CONTROL.test(text))) return "That has whitespace or control characters in it.";
+  if (text.length > 100_000) return "That is too long to check.";
   for (const m of text.matchAll(/[a-z][a-z0-9+.-]*:\/\//gi)) {
-    const rest = text.slice(m.index! + m[0].length, m.index! + m[0].length + 2048).replace(/[\u0000-\u001f\u007f]/g, ""); // tabs, newlines and other control characters, which a URL parser drops
+    // The whole token after the scheme, with the control characters a URL parser drops removed (no length limit: an @ far along still counts).
+    const rest = text.slice(m.index! + m[0].length).replace(/[\u0000-\u001f\u007f]/g, "");
     const authority = rest.split(/[/?#\\\s]/)[0];
     if (authority.includes("@")) {
       const user = authority.slice(0, authority.lastIndexOf("@"));
@@ -235,8 +239,10 @@ export function urlProblem(text: string, o: { single?: boolean; allowGitUser?: b
       continue;
     }
     try {
-      const u = new URL(`${m[0]}${authority}`);
+      const u = new URL(`${m[0]}${rest.split(/[\s"'`<>]/)[0]}`);
       if (u.username || u.password) return creds;
+      // Secrets can ride in the query or fragment too (?token=..., #access_token=...).
+      for (const params of [u.searchParams, new URLSearchParams(u.hash.slice(1))]) for (const key of params.keys()) if (SECRET_PARAM.test(key)) return creds;
     } catch {
       return "That has a URL that doesn't parse.";
     }
@@ -390,6 +396,8 @@ export class HostControl {
   static BUILD_MS = 20 * 60_000;
   /** Deadline for the short steps after a build (open, defaults, simctl launch). */
   static STEP_MS = 30_000;
+  /** Deadline for booting a simulator and installing an app in it. */
+  static SIM_MS = 120_000;
   /** The host's displays, refreshed in the background so the brain can read them any time. */
   displays: Display[] = [];
   bigScreen: BigScreen | null = null;
@@ -744,7 +752,7 @@ export class HostControl {
             const up = await this.simulatorUp(undefined, undefined, (c, ms) => step(c, ms ?? HostControl.STEP_MS));
             if (!up) return "";
             if (!up.ok) return `Built ${label}, but the Simulator couldn't start: ${up.msg.slice(0, 300)}`;
-            const inst = await step(["xcrun", "simctl", "install", "booted", app], 120_000);
+            const inst = await step(["xcrun", "simctl", "install", "booted", app], HostControl.SIM_MS);
             if (!inst) return "";
             if (inst.code) return `Built ${label}, but the Simulator couldn't run it: ${inst.out.slice(0, 300)}`;
             const idr = await step(["/usr/bin/defaults", "read", join(app, "Info"), "CFBundleIdentifier"], HostControl.STEP_MS);
@@ -814,7 +822,7 @@ export class HostControl {
       devices.find((d) => d.name.startsWith("iPhone"));
     if (!pick) return "No simulator device is installed.";
     if (pick.state !== "Booted") {
-      const boot = await exec(["xcrun", "simctl", "boot", pick.udid], 120_000);
+      const boot = await exec(["xcrun", "simctl", "boot", pick.udid], HostControl.SIM_MS);
       if (!boot) return null;
       if (boot.code) return `Couldn't boot ${pick.name}: ${boot.out.slice(0, 200)}`;
     }

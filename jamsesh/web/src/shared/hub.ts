@@ -305,6 +305,11 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
+        // A replacement (after a reconnect) can carry lines that arrived while this client was away from the wire: announce the new ones.
+        if (s) {
+          const known = Math.max(0, ...s.events.map((e) => e.id));
+          for (const e of [...m.state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
+        }
         return this.set({ state: m.state });
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });

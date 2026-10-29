@@ -355,50 +355,57 @@ test("open_url and the Simulator URL refuse credentials before anything runs or 
   }
 });
 
-test("a preview's Simulator setup that can't be stopped ends the preview, reports it, and holds the lock", async () => {
-  const hc: any = Object.create(HostControl.prototype);
-  hc.builds = new Map();
-  hc.session = { settings: () => ({ hostControl: true }) };
-  const notes: string[] = [];
-  hc.log = (x: string) => void notes.push(x);
-  hc.onBuilt = (_l: string, ok: boolean, x: string) => void notes.push(`built:${ok}:${x}`);
-  const repo = "https://example.invalid/acme/stucksim.git";
-  const slug = `stucksim-${createHash("sha1").update(repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
-  const co = join(dir, "previews", slug);
-  mkdirSync(join(co, ".git"), { recursive: true });
-  mkdirSync(join(co, "App.app"), { recursive: true });
-  const real = Bun.spawn;
-  const realAlive = groups.alive;
-  const realSignal = groups.signal;
-  const ran: string[] = [];
-  let stuckAlive = true;
-  const empty = () => new ReadableStream<Uint8Array>({ start() {} });
-  const closed = () => new ReadableStream<Uint8Array>({ start: (c) => c.close() });
-  (Bun as any).spawn = (cmd: string[]) => {
-    const argv = cmd.slice(3);
-    ran.push(argv.join(" "));
-    return argv[0] === "xcrun" && argv[2] === "list"
-      ? { pid: 999998, exited: new Promise<number>(() => {}), stdout: empty(), stderr: empty(), kill: () => {} }
-      : { pid: 111111, exited: Promise.resolve(0), stdout: closed(), stderr: closed(), kill: () => {} };
-  };
-  groups.alive = (g) => g === 999998 && stuckAlive;
-  groups.signal = () => {};
-  const was = HostControl.STEP_MS;
-  try {
-    HostControl.STEP_MS = 100;
-    hc.preview({ repo, command: "true", open: "simulator:App.app", by: "T" });
-    await Bun.sleep(3_000);
-    expect(ran.some((c) => c.includes("simctl list"))).toBe(true);
-    expect(ran.some((c) => c.includes("simctl install"))).toBe(false); // nothing after the stuck step
-    expect(notes.some((n) => n.startsWith("built:false:") && n.includes("couldn't be stopped"))).toBe(true);
-    expect(hc.builds.size).toBe(1);
-    stuckAlive = false;
-    await Bun.sleep(900);
-    expect(hc.builds.size).toBe(0);
-  } finally {
-    HostControl.STEP_MS = was;
-    (Bun as any).spawn = real;
-    groups.alive = realAlive;
-    groups.signal = realSignal;
-  }
-}, 20_000);
+for (const [stuckStep, argvMatch] of [["list", "simctl list"], ["boot", "simctl boot"], ["open -a Simulator", "open -a Simulator"], ["install", "simctl install"], ["launch", "simctl launch"]] as const) {
+  test(`a preview's Simulator step that can't be stopped (${stuckStep}) ends the preview there, reports it, and holds the lock`, async () => {
+    const hc: any = Object.create(HostControl.prototype);
+    hc.builds = new Map();
+    hc.session = { settings: () => ({ hostControl: true }) };
+    hc.log = () => {};
+    const notes: string[] = [];
+    hc.onBuilt = (_l: string, ok: boolean, x: string) => void notes.push(`built:${ok}:${x}`);
+    const repo = `https://example.invalid/acme/stucksim-${stuckStep.replace(/\W+/g, "")}.git`;
+    const slug = `stucksim-${stuckStep.replace(/\W+/g, "")}-${createHash("sha1").update(repo.toLowerCase().replace(/\.git$/, "")).digest("hex").slice(0, 8)}`;
+    const co = join(dir, "previews", slug);
+    mkdirSync(join(co, ".git"), { recursive: true });
+    mkdirSync(join(co, "App.app"), { recursive: true });
+    const real = Bun.spawn;
+    const realAlive = groups.alive;
+    const realSignal = groups.signal;
+    const ran: string[] = [];
+    let stuckAlive = true;
+    const empty = () => new ReadableStream<Uint8Array>({ start() {} });
+    const text = (x: string) => new ReadableStream<Uint8Array>({ start: (c) => (c.enqueue(new TextEncoder().encode(x)), c.close()) });
+    const devices = JSON.stringify({ devices: { ios: [{ state: stuckStep === "boot" ? "Shutdown" : "Booted", name: "iPhone 15", udid: "U1" }] } });
+    (Bun as any).spawn = (cmd: string[]) => {
+      const argv = cmd.slice(3);
+      const line = argv.join(" ");
+      ran.push(line);
+      if (line.includes(argvMatch)) return { pid: 999997, exited: new Promise<number>(() => {}), stdout: empty(), stderr: empty(), kill: () => {} };
+      return { pid: 111111, exited: Promise.resolve(0), stdout: text(line.includes("simctl list") ? devices : line.includes("defaults read") ? "com.example.app\n" : ""), stderr: text(""), kill: () => {} };
+    };
+    groups.alive = (g) => g === 999997 && stuckAlive;
+    groups.signal = () => {};
+    const was = HostControl.STEP_MS;
+    const wasSim = HostControl.SIM_MS;
+    try {
+      HostControl.STEP_MS = 100;
+      HostControl.SIM_MS = 100;
+      hc.preview({ repo, command: "true", open: "simulator:App.app", by: "T" });
+      await Bun.sleep(3_000);
+      expect(ran.some((c) => c.includes(argvMatch))).toBe(true);
+      expect(notes.some((n) => n.startsWith("built:false:") && n.includes("couldn't be stopped"))).toBe(true);
+      expect(notes.some((n) => n.includes("is running in the Simulator"))).toBe(false);
+      if (stuckStep !== "launch") expect(ran.some((c) => c.includes("simctl launch"))).toBe(false); // nothing after the stuck step
+      expect(hc.builds.size).toBe(1);
+      stuckAlive = false;
+      await Bun.sleep(900);
+      expect(hc.builds.size).toBe(0);
+    } finally {
+      HostControl.STEP_MS = was;
+      HostControl.SIM_MS = wasSim;
+      (Bun as any).spawn = real;
+      groups.alive = realAlive;
+      groups.signal = realSignal;
+    }
+  }, 20_000);
+}
