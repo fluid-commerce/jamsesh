@@ -10,7 +10,6 @@ mod perms;
 mod projects;
 mod proxy;
 mod screens;
-mod voiceprints;
 mod watchdog;
 
 use std::path::PathBuf;
@@ -911,123 +910,6 @@ fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
     }
 }
 
-/// The person this app's window is on the host it shows, as that host says (not as the page says), and
-/// only for the person's own window. `person_id` is who the page thinks it is: a page that's behind
-/// (someone else picked who they are) gets nothing.
-async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Result<(String, u16), String> {
-    if window.label() != "client" {
-        return Err("Only your own window keeps your voice.".into());
-    }
-    let port = {
-        let inner = state.inner.lock().await;
-        inner.hub.as_ref().map(|h| h.port).or(inner.relay.as_ref().map(|r| r.port))
-    };
-    let port = port.ok_or("Host or join a session first.")?;
-    let (status, me) = proxy::get_as_window(port, "/api/me").await?;
-    let (id, name) = voiceprints::person_of(&me).filter(|_| status.is_success()).ok_or("Pick who you are first.")?;
-    if id != person_id {
-        return Err("This window is someone else now.".into());
-    }
-    Ok((name, port))
-}
-
-/// The host the window shows, as (the key its answers are kept under, its room's name, the address the app
-/// reached it at, its key's fingerprint). The key is the public key the host proves it holds by signing a fresh
-/// nonce: a host can claim any id and sit at any address, but can't sign as the host the person trusted.
-async fn voice_host(state: &App, port: u16) -> Result<(String, String, String, String), String> {
-    let address = {
-        let inner = state.inner.lock().await;
-        if inner.hub.is_some() {
-            "this Mac".to_string()
-        } else {
-            let url = inner.cfg.host_url.clone().ok_or("This window isn't joined to a host.")?;
-            url.replace("https://", "").replace("http://", "").trim_end_matches('/').to_string()
-        }
-    };
-    let (status, info) = proxy::get_as_window(port, "/api/pair/info").await?;
-    let (_, room) = voiceprints::host_of(&info, &address).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())?;
-    let nonce = proxy::random_hex(16).ok_or("No randomness for a check.")?;
-    let (status, proof) = proxy::get_as_window(port, &format!("/api/host-proof?nonce={nonce}")).await?;
-    let key = voiceprints::verify_host(&proof, &nonce).filter(|_| status.is_success()).ok_or_else(|| "This host couldn't prove who it is.".to_string())?;
-    Ok((voiceprints::host_key(&key), room, address, voiceprints::fingerprint(&key)))
-}
-
-/// A yes or no in the app's own dialog: the person's say, which a host's page can ask for but not give.
-async fn confirm(app: AppHandle, title: &str, text: String, yes: &str, no: &str) -> bool {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .message(text)
-        .title(title)
-        .buttons(MessageDialogButtons::OkCancelCustom(yes.into(), no.into()))
-        .show(move |ok| {
-            let _ = tx.send(ok);
-        });
-    rx.await.unwrap_or(false)
-}
-
-/// The copy as this host's page may see it: without its samples until the person said Share to this host.
-#[tauri::command]
-async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
-    let (_, port) = voice_owner(&window, &state, &person_id).await?;
-    let (key, ..) = voice_host(&state, port).await?;
-    Ok(voiceprints::for_page(voiceprints::load(&state.dir), &key))
-}
-
-/// The whole copy, to send to this host: asks the person the first time, in a native dialog.
-#[tauri::command]
-async fn voiceprint_share(
-    app: AppHandle,
-    window: tauri::Window,
-    state: State<'_, Arc<App>>,
-    person_id: String,
-) -> Result<Option<voiceprints::Copy>, String> {
-    let (name, port) = voice_owner(&window, &state, &person_id).await?;
-    let (key, room, address, print) = voice_host(&state, port).await?;
-    let question = voiceprints::question(&name, &room, &address, &print);
-    voiceprints::share(&state.dir, &key, || confirm(app, "Share your voice", question, "Share", "Not this room")).await
-}
-
-/// A copy this host's page brought for the app to keep. The host's code can ask, so a host the person hasn't
-/// trusted with their voice is put to them in a native dialog first.
-#[tauri::command]
-async fn voiceprint_put(
-    app: AppHandle,
-    window: tauri::Window,
-    state: State<'_, Arc<App>>,
-    person_id: String,
-    copy: voiceprints::Copy,
-) -> Result<(), String> {
-    let (name, port) = voice_owner(&window, &state, &person_id).await?;
-    let (key, room, address, print) = voice_host(&state, port).await?;
-    let question = voiceprints::keep_question(&name, &room, &address, &print);
-    voiceprints::put(&state.dir, &key, copy, || confirm(app, "Keep your voice", question, "Keep", "Not this room")).await
-}
-
-/// Their yes or no to keeping their voice in the app. A no erases it, so it needs the person's yes in a native dialog.
-#[tauri::command]
-async fn voiceprint_consent(app: AppHandle, window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
-    voice_owner(&window, &state, &person_id).await?;
-    let text = "Stop keeping your voice in this app? The copy on this Mac is deleted, and every host will be asked again.".to_string();
-    if voiceprints::choose(&state.dir, on, || confirm(app, "Forget your voice", text, "Delete it", "Keep it")).await? {
-        Ok(())
-    } else {
-        Err("You kept your voice in the app.".into())
-    }
-}
-
-/// The person reset their voice on a host: the app's copy goes too, so it can't bring the old voice back.
-/// Deleting needs the person's yes in a native dialog.
-#[tauri::command]
-async fn voiceprint_forget(app: AppHandle, window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<(), String> {
-    voice_owner(&window, &state, &person_id).await?;
-    let text = "Delete the copy of your voice this app keeps on this Mac? A host asked, usually because you reset your voice there.".to_string();
-    if voiceprints::forget(&state.dir, || confirm(app, "Delete your voice copy", text, "Delete it", "Keep it")).await? {
-        Ok(())
-    } else {
-        Err("You kept the copy on this Mac.".into())
-    }
-}
-
 /// What a host picks up at launch: the Projects picker if that's where it was, else the last project.
 fn resume_launch(cfg: &Config) -> Launch {
     if cfg.lobby {
@@ -1073,11 +955,6 @@ fn main() {
             toggle_userless,
             local_fonts,
             heartbeat,
-            voiceprint_get,
-            voiceprint_put,
-            voiceprint_share,
-            voiceprint_consent,
-            voiceprint_forget,
             screens::screens_state,
             screens::screens_preview,
             screens::screens_save,
@@ -1086,6 +963,9 @@ fn main() {
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
+            // Earlier builds kept a copy of the person's voice here to take to other hosts. Voices now stay on the
+            // host that learned them, so a copy left behind is deleted rather than kept anywhere.
+            let _ = std::fs::remove_file(dir.join("voiceprint.json"));
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let state = Arc::new(App {
                 inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }),

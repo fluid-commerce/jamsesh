@@ -41,8 +41,6 @@ block2 = "0.6"
 # The Mac's font folders, for people's canvases (fonts.rs).
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs"] }
 base64 = "0.22"
-# Checks a host's Ed25519 signature before its Share answer is reused (already in the tree through rustls).
-ring = "0.17"
 
 [profile.release]
 strip = true
