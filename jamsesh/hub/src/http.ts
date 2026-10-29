@@ -405,6 +405,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
+  // Anyone may ask: a signature over their own nonce, so a Mac app knows it reached the host it trusted.
+  if (path === "/host-proof" && req.method === "GET") {
+    const proof = hub.hostProof(url.searchParams.get("nonce") ?? "");
+    return proof ? json(proof) : bad("nonce is 32 to 128 hex characters");
+  }
 
   // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt
   let hm = path.match(/^\/history\/(events|utterances|directives|artifacts)$/);

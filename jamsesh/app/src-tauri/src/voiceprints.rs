@@ -5,9 +5,11 @@
 // app is out of scope (SPEC).
 //
 // The samples never reach a host's page until the person said yes to that host: the first time the copy
-// would go to a host it hasn't gone to before, the app asks in a native dialog and keeps the answer per
-// host id (what the host's /api/pair/info says, not its address). Until then the page sees the copy's
-// version and dates only.
+// would go to a host it hasn't gone to before, the app asks in a native dialog and keeps the answer under
+// the host's public key, which the host proves it holds by signing a fresh nonce each time (/api/host-proof).
+// A host at the same address claiming the same id can't sign as the one the person trusted. Until then the
+// page sees the copy's version and dates only. A host trusted with the voice may also replace the copy the
+// app keeps (it's the person's latest voice, from a host they chose); the copy must be the hub's model and shape.
 //
 // Every change is read, changed and written under one lock, through a temporary file of its own, so a
 // "no" and a copy arriving at the same moment can't undo each other.
@@ -20,6 +22,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// What a device may carry, as the hub checks it (hub/src/audio/voiceprint.ts).
+const MODEL: &str = "wespeaker_en";
+const KINDS: [&str; 4] = ["auto", "enrol", "correction", "carried"];
 const DIM: usize = 256;
 const MAX_SAMPLES: usize = 32;
 const KEY_MAX: usize = 200;
@@ -45,6 +49,9 @@ pub struct Copy {
     pub updated_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
+    /// The seal of the host the copy came from; only that host reads it (after a reset there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -54,7 +61,7 @@ pub struct Kept {
     pub me: String,
     pub consent: Option<bool>,
     pub copy: Option<Copy>,
-    /// Hosts (by the address the app reached them at, with the id they gave) the person said Share or Not this room to.
+    /// Hosts (by the public key they proved they hold) the person said Share or Not this room to.
     #[serde(default)]
     pub hosts: BTreeMap<String, bool>,
 }
@@ -65,14 +72,22 @@ fn file(dir: &Path) -> PathBuf {
 
 /// A copy the app will keep: the hub's shape and limits, every number finite.
 pub fn check(c: &Copy) -> Result<(), String> {
-    if c.dim != DIM || c.model.is_empty() || c.model.len() > 64 {
+    if c.dim != DIM || c.model != MODEL {
         return Err("That isn't a voiceprint this app keeps.".into());
     }
     if c.samples.is_empty() || c.samples.len() > MAX_SAMPLES {
         return Err(format!("A voiceprint holds 1 to {MAX_SAMPLES} samples."));
     }
-    if c.samples.iter().any(|s| s.kind.len() > 16 || s.embedding.len() != DIM || !s.embedding.iter().all(|n| n.is_finite())) {
+    // Every sample a direction the hub can use: finite, and not all zeros (nothing to normalize).
+    let usable = |e: &[f32]| e.len() == DIM && e.iter().all(|n| n.is_finite()) && {
+        let norm = e.iter().map(|n| f64::from(*n) * f64::from(*n)).sum::<f64>().sqrt();
+        norm.is_finite() && norm > 1e-6
+    };
+    if c.samples.iter().any(|s| !KINDS.contains(&s.kind.as_str()) || !usable(&s.embedding)) {
         return Err("A sample in that voiceprint is malformed.".into());
+    }
+    if c.stamp.as_ref().is_some_and(|v| v.to_string().len() > 512) {
+        return Err("That voiceprint's details are malformed.".into());
     }
     if c.version.as_ref().is_some_and(|v| v.len() > 64)
         || c.host.as_ref().is_some_and(|h| h.len() > 64)
@@ -258,20 +273,47 @@ pub fn host_of(info: &str, fallback: &str) -> Option<(String, String)> {
     (!id.is_empty()).then(|| (id, name.chars().take(60).collect()))
 }
 
-/// What a host is known by here: the address the app itself reached it at, with the id it says it has. A
-/// host can say any id, so an id another host used is a different key at a different address.
-pub fn host_key(address: &str, host_id: &str) -> String {
-    format!("{}#{}", address.trim(), host_id.trim()).chars().take(KEY_MAX).collect()
+/// The message a host signs: the app's own fresh nonce, so an old answer can't be replayed.
+fn proof_message(nonce: &str) -> String {
+    format!("jamsesh-host-proof:v1:{nonce}")
 }
 
-/// The question, in the dialog's words. The address is the app's, not the host's.
-pub fn question(person: &str, room: &str, address: &str) -> String {
-    format!("Share {person}'s voice with {room} ({address})? It's numbers that describe your voice, never a recording.")
+/// The host's public key (base64), when its answer to `/api/host-proof?nonce=…` is a valid Ed25519 signature
+/// over this nonce. What a host is known by here: a host can claim any id or sit at any address, not sign
+/// with another host's key.
+pub fn verify_host(proof: &str, nonce: &str) -> Option<String> {
+    use base64::Engine as _;
+    let v: serde_json::Value = serde_json::from_str(proof).ok()?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let key = v.get("publicKey")?.as_str()?;
+    let public = b64.decode(key).ok().filter(|k| k.len() == 32)?;
+    let signature = b64.decode(v.get("signature")?.as_str()?).ok()?;
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public)
+        .verify(proof_message(nonce).as_bytes(), &signature)
+        .ok()
+        .map(|()| key.to_string())
+}
+
+/// What a host is known by here: the key it proved it holds.
+pub fn host_key(public_key: &str) -> String {
+    format!("ed25519:{}", public_key.trim()).chars().take(KEY_MAX).collect()
+}
+
+/// A short, readable fingerprint of a host's key for the dialog ("A1B2-C3D4"): a host that changed keys reads differently.
+pub fn fingerprint(key: &str) -> String {
+    let d = ring::digest::digest(&ring::digest::SHA256, key.as_bytes());
+    let hex: String = d.as_ref().iter().take(4).map(|b| format!("{b:02X}")).collect();
+    format!("{}-{}", &hex[..4], &hex[4..])
+}
+
+/// The question, in the dialog's words. The address and fingerprint are the app's, not the host's say.
+pub fn question(person: &str, room: &str, address: &str, print: &str) -> String {
+    format!("Share {person}'s voice with {room} ({address}, key {print})? It's numbers that describe your voice, never a recording.")
 }
 
 /// Asked when a host's page brings a copy for the app to keep.
-pub fn keep_question(person: &str, room: &str, address: &str) -> String {
-    format!("Keep {person}'s voice from {room} ({address}) on this Mac, and let that host have it? It's numbers that describe your voice, never a recording.")
+pub fn keep_question(person: &str, room: &str, address: &str, print: &str) -> String {
+    format!("Keep {person}'s voice from {room} ({address}, key {print}) on this Mac, and let that host have it? It's numbers that describe your voice, never a recording.")
 }
 
 /// The window's person on the host it shows, from `/api/me` as the host answers it for this app's window:
@@ -295,6 +337,7 @@ mod tests {
             version: Some("v1".into()),
             updated_at: Some(5.0),
             host: Some("hostA".into()),
+            stamp: None,
         }
     }
 
@@ -381,14 +424,37 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// A real signature (made with Node's Ed25519 for this nonce), as a hub's /api/host-proof answers.
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const PUBLIC: &str = "NyGsxgHuNJ/6zSU64LIFujAAplYXcVFCoR+t1iZJTL4=";
+    const SIGNATURE: &str = "+ta8ip3w/YoAtRB3oVLXuflh2XIDpmIZZTJi8Fv4ttHcEDX7qlSr2flVSWzekGrteMpCSI5FM/eCByBP2VdyCQ==";
+    fn proof(key: &str, sig: &str) -> String {
+        format!(r#"{{"publicKey":"{key}","signature":"{sig}"}}"#)
+    }
+
     #[test]
-    fn an_id_another_host_used_is_not_the_same_host() {
+    fn a_host_is_known_by_the_key_it_proves_it_holds() {
+        assert_eq!(verify_host(&proof(PUBLIC, SIGNATURE), NONCE), Some(PUBLIC.to_string()));
+        // Another nonce (a replayed answer), another key claiming the signature, junk: no host.
+        assert_eq!(verify_host(&proof(PUBLIC, SIGNATURE), "ffffffffffffffffffffffffffffffff"), None);
+        assert_eq!(verify_host(&proof("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", SIGNATURE), NONCE), None);
+        assert_eq!(verify_host(&proof(PUBLIC, "AAAA"), NONCE), None);
+        assert_eq!(verify_host(r#"{"hostId":"same-id"}"#, NONCE), None);
+        assert_eq!(verify_host("not json", NONCE), None);
+        let print = fingerprint(PUBLIC);
+        assert_eq!(print.len(), 9);
+        assert_ne!(print, fingerprint("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+    }
+
+    #[test]
+    fn a_host_that_cant_sign_as_the_trusted_one_is_a_stranger() {
         let d = dir();
         let asked = std::cell::Cell::new(0);
         set_consent(&d, true).unwrap();
         put_now(&d, copy(3, 0.1)).unwrap();
-        let a = host_key("10.0.0.2:4747", "same-id");
-        let b = host_key("evil.example", "same-id");
+        // Same address, same claimed id; only the proven key tells them apart.
+        let a = host_key(&verify_host(&proof(PUBLIC, SIGNATURE), NONCE).unwrap());
+        let b = host_key("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
         assert_ne!(a, b);
         assert_eq!(block(share(&d, &a, stub(true, &asked))).unwrap(), Some(copy(3, 0.1)));
         // The second host copied the first one's id and is asked as a stranger; the answer is no.
@@ -396,7 +462,7 @@ mod tests {
         assert_eq!(asked.get(), 2);
         assert!(for_page(load(&d), &b).copy.unwrap().samples.is_empty());
         assert_eq!(for_page(load(&d), &a).copy.unwrap().samples.len(), 3);
-        assert!(question("Chey", "Review", "evil.example").contains("(evil.example)"));
+        assert!(question("Chey", "Review", "evil.example", "AB12-CD34").contains("(evil.example, key AB12-CD34)"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -478,13 +544,33 @@ mod tests {
     }
 
     #[test]
-    fn the_host_is_known_by_its_id_and_named_by_its_room() {
+    fn only_the_hubs_model_and_usable_samples_are_kept() {
+        assert!(check(&copy(2, 0.1)).is_ok());
+        let mut wrong_model = copy(2, 0.1);
+        wrong_model.model = "other_model".into();
+        assert!(check(&wrong_model).is_err());
+        assert!(check(&copy(2, 0.0)).is_err());
+        let mut odd_kind = copy(2, 0.1);
+        odd_kind.samples[0].kind = "made-up".into();
+        assert!(check(&odd_kind).is_err());
+        let mut tiny = copy(1, 0.1);
+        tiny.samples[0].embedding = vec![1e-30; DIM];
+        assert!(check(&tiny).is_err());
+        let mut sealed = copy(1, 0.1);
+        sealed.stamp = Some(serde_json::json!({ "gen": 1, "at": 5, "mac": "m" }));
+        assert!(check(&sealed).is_ok());
+        sealed.stamp = Some(serde_json::json!({ "mac": "x".repeat(600) }));
+        assert!(check(&sealed).is_err());
+    }
+
+    #[test]
+    fn the_host_is_named_by_its_room() {
         assert_eq!(host_of(r#"{"name":"Design review","hostId":"ab12"}"#, "10.0.0.2:4747"), Some(("ab12".into(), "Design review".into())));
         assert_eq!(host_of(r#"{"name":"","hostId":"ab12"}"#, "10.0.0.2:4747"), Some(("ab12".into(), "10.0.0.2:4747".into())));
         assert_eq!(host_of(r#"{"name":"Design review"}"#, "x"), None);
         assert_eq!(
-            question("Chey", "Design review", "10.0.0.2:4747"),
-            "Share Chey's voice with Design review (10.0.0.2:4747)? It's numbers that describe your voice, never a recording."
+            question("Chey", "Design review", "10.0.0.2:4747", "AB12-CD34"),
+            "Share Chey's voice with Design review (10.0.0.2:4747, key AB12-CD34)? It's numbers that describe your voice, never a recording."
         );
     }
 

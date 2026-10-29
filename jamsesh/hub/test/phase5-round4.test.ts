@@ -197,3 +197,21 @@ voiced("correcting an old unlabelled line to someone after their reset doesn't t
   expect(hub.audio.assign("utt_new", kai.id).learning).toMatchObject({ learned: true });
   expect(hub.audio.voiceprints.count(kai.id)).toBeGreaterThan(0);
 });
+
+test("the host signs a Mac app's nonce with a key it keeps, so a replacement host at its address can't pass as it", async () => {
+  const { createPublicKey, verify } = await import("node:crypto");
+  const nonce = "ab".repeat(16);
+  const r = await fetch(`${base}/api/host-proof?nonce=${nonce}`);
+  expect(r.status).toBe(200);
+  const { publicKey, signature } = await r.json();
+  const spki = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(publicKey, "base64")]);
+  const key = createPublicKey({ key: spki, format: "der", type: "spki" });
+  expect(verify(null, Buffer.from(`jamsesh-host-proof:v1:${nonce}`), key, Buffer.from(signature, "base64"))).toBe(true);
+  expect(verify(null, Buffer.from(`jamsesh-host-proof:v1:${"cd".repeat(16)}`), key, Buffer.from(signature, "base64"))).toBe(false);
+  // The same key every time (and after a restart: it's kept); another host has its own.
+  expect(hub.hostProof("cd".repeat(16))?.publicKey).toBe(publicKey);
+  const other = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "other2") });
+  expect(other.hostProof(nonce)?.publicKey).not.toBe(publicKey);
+  other.devproxy.stop();
+  for (const bad of ["", "xyz", "ab", "a".repeat(200)]) expect((await fetch(`${base}/api/host-proof?nonce=${bad}`)).status).toBe(400);
+});

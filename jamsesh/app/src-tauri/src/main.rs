@@ -932,9 +932,9 @@ async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Re
 }
 
 /// The host the window shows, as (the key its answers are kept under, its room's name, the address the app
-/// reached it at). The key and address are the app's own knowledge (this Mac, or the address it joined), with
-/// the id the host gave beside them: a host can claim any id, but not another host's address.
-async fn voice_host(state: &App, port: u16) -> Result<(String, String, String), String> {
+/// reached it at, its key's fingerprint). The key is the public key the host proves it holds by signing a fresh
+/// nonce: a host can claim any id and sit at any address, but can't sign as the host the person trusted.
+async fn voice_host(state: &App, port: u16) -> Result<(String, String, String, String), String> {
     let address = {
         let inner = state.inner.lock().await;
         if inner.hub.is_some() {
@@ -945,8 +945,11 @@ async fn voice_host(state: &App, port: u16) -> Result<(String, String, String), 
         }
     };
     let (status, info) = proxy::get_as_window(port, "/api/pair/info").await?;
-    let (id, room) = voiceprints::host_of(&info, &address).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())?;
-    Ok((voiceprints::host_key(&address, &id), room, address))
+    let (_, room) = voiceprints::host_of(&info, &address).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())?;
+    let nonce = proxy::random_hex(16).ok_or("No randomness for a check.")?;
+    let (status, proof) = proxy::get_as_window(port, &format!("/api/host-proof?nonce={nonce}")).await?;
+    let key = voiceprints::verify_host(&proof, &nonce).filter(|_| status.is_success()).ok_or_else(|| "This host couldn't prove who it is.".to_string())?;
+    Ok((voiceprints::host_key(&key), room, address, voiceprints::fingerprint(&key)))
 }
 
 /// A yes or no in the app's own dialog: the person's say, which a host's page can ask for but not give.
@@ -966,7 +969,7 @@ async fn confirm(app: AppHandle, title: &str, text: String, yes: &str, no: &str)
 #[tauri::command]
 async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
     let (_, port) = voice_owner(&window, &state, &person_id).await?;
-    let (key, _, _) = voice_host(&state, port).await?;
+    let (key, ..) = voice_host(&state, port).await?;
     Ok(voiceprints::for_page(voiceprints::load(&state.dir), &key))
 }
 
@@ -979,8 +982,8 @@ async fn voiceprint_share(
     person_id: String,
 ) -> Result<Option<voiceprints::Copy>, String> {
     let (name, port) = voice_owner(&window, &state, &person_id).await?;
-    let (key, room, address) = voice_host(&state, port).await?;
-    let question = voiceprints::question(&name, &room, &address);
+    let (key, room, address, print) = voice_host(&state, port).await?;
+    let question = voiceprints::question(&name, &room, &address, &print);
     voiceprints::share(&state.dir, &key, || confirm(app, "Share your voice", question, "Share", "Not this room")).await
 }
 
@@ -995,8 +998,8 @@ async fn voiceprint_put(
     copy: voiceprints::Copy,
 ) -> Result<(), String> {
     let (name, port) = voice_owner(&window, &state, &person_id).await?;
-    let (key, room, address) = voice_host(&state, port).await?;
-    let question = voiceprints::keep_question(&name, &room, &address);
+    let (key, room, address, print) = voice_host(&state, port).await?;
+    let question = voiceprints::keep_question(&name, &room, &address, &print);
     voiceprints::put(&state.dir, &key, copy, || confirm(app, "Keep your voice", question, "Keep", "Not this room")).await
 }
 

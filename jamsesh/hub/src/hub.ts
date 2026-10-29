@@ -1,4 +1,5 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
@@ -388,6 +389,21 @@ export class Hub {
   /** What a person's own device keeps of their voice: embeddings only, never audio. */
   voiceprintOf(personId: string) {
     return this.audio.voiceprints.exportFor(personId);
+  }
+
+  /**
+   * This host proves it is the host a Mac app trusted before: it signs the app's fresh nonce with a key it keeps
+   * (Ed25519, made once). The app pins the public key with the person's Share answer, so another host at the
+   * same address, claiming the same id, can't sign as this one.
+   */
+  hostProof(nonce: string): { publicKey: string; signature: string } | null {
+    if (!/^[0-9a-f]{32,128}$/.test(nonce)) return null;
+    const store = this.session.store;
+    let pem = store.setting<string>("hostSigningKey", "");
+    if (!pem) store.setSetting("hostSigningKey", (pem = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" }).toString()));
+    const key = createPrivateKey(pem);
+    const raw = createPublicKey(key).export({ type: "spki", format: "der" }).subarray(-32);
+    return { publicKey: raw.toString("base64"), signature: sign(null, Buffer.from(`jamsesh-host-proof:v1:${nonce}`), key).toString("base64") };
   }
 
   /** A person's own device brings their voiceprint to this host. */

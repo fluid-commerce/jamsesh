@@ -125,6 +125,7 @@ const AGENT_MAY = [
   "ANY /api/canvas-link",
   "ANY /api/clock",
   "ANY /api/engines",
+  "GET /api/host-proof",
   "ANY /api/me",
   "ANY /api/pair/info",
   "ANY /api/state",
