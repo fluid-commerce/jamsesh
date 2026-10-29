@@ -269,7 +269,7 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
   return (
     <>
       <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
-        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" />
+        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" panels={!phone} />
         <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
       </div>
       {tab === "screen" &&

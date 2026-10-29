@@ -1,13 +1,15 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
-import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { ago, api, hub, useHub, type Agent, type Artifact, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { registerDriveTarget } from "./driving";
 import { canvasDriver, frameDriver } from "./drivetiles";
 import { VersionBadge } from "./StageControls";
-import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, canvasSrc, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { loadFonts, newFontMemory } from "./roomFonts";
+import { askRoomForFonts, fetchRoomFace } from "./roomFontsApi";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -865,6 +867,7 @@ type PageRow = { id: number; name: string; children: number; current: boolean; d
  * canvas's join is going, a way to reconnect it, and the fonts it shows in a substitute. */
 function PageBar({
   frame,
+  panels,
   canAdd,
   page,
   join,
@@ -873,6 +876,8 @@ function PageBar({
   onPage,
 }: {
   frame: React.RefObject<HTMLIFrameElement | null>;
+  /** The canvas has a panel button in its top left corner: the bar sits beside it. */
+  panels?: boolean;
   canAdd: boolean;
   page?: string;
   join: JoinState;
@@ -932,7 +937,7 @@ function PageBar({
   const label = joinLabel(join);
   const fonts = substituted.length ? `${substituted.join(", ")} ${substituted.length === 1 ? "isn't" : "aren't"} on this computer: text in ${substituted.length === 1 ? "it" : "them"} is shown in a substitute font.` : "";
   return (
-    <div className="page-bar">
+    <div className={`page-bar ${panels ? "with-panels" : ""}`}>
       {live && pages.length > 0 && (
         <button
           className="page-current"
@@ -1018,7 +1023,7 @@ function Countdown({ at, attempt }: { at: number | null; attempt: number }) {
 
 const figcraftIn = (iframe: HTMLIFrameElement | null) => (iframe?.contentWindow as any)?.figcraft as { execute: (c: string, p?: unknown) => Promise<any> } | undefined;
 
-export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string }) {
+export function CanvasFrame({ kind, name, title, follow, page, panels }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string; panels?: boolean }) {
   const frame = useRef<HTMLIFrameElement>(null);
   // Follow a participant (by name): the canvas shows what they're looking at. A reload or reconnect gives them
   // a new client id, so this keeps checking and follows the new one.
@@ -1146,34 +1151,52 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     };
   }, [link, mount]);
 
-  // Fonts the canvas lacks: in the Mac app, from this Mac's own font folders; elsewhere they're
-  // only listed (the canvas draws them in a substitute).
+  // Fonts the canvas lacks, from the room (the open fonts its repositories use, and fonts people lent
+  // for the session), then this Mac's own in the Mac app, then asked of the room. All in memory.
   const [substituted, setSubstituted] = useState<string[]>([]);
   const live = join.state === "live";
+  const roomFonts = state?.fonts?.available;
+  const fontsNow = useRef<FontInfo[]>([]);
+  fontsNow.current = roomFonts ?? [];
+  const recheck = useRef<() => void>(() => {});
   useEffect(() => {
     if (!live) return;
-    const tried = new Set<string>();
+    const memory = newFontMemory();
+    const room = { get available() { return fontsNow.current; }, fetchFace: fetchRoomFace, want: askRoomForFonts };
     let gone = false;
     let busy = false;
+    let again = false;
     const tick = async () => {
-      const fc = figcraftIn(frame.current);
-      if (!fc || busy) return;
+      // A request that lands mid-pass runs again right after it, so a font that just arrived clears its chip.
+      if (busy) return void (again = true);
       busy = true;
       try {
-        const left = await loadLocalFonts(fc, macInvoke(), tried);
-        if (!gone) setSubstituted(left);
+        do {
+          again = false;
+          const fc = figcraftIn(frame.current);
+          if (!fc) break;
+          const left = await loadFonts(fc, macInvoke(), memory, room);
+          if (!gone) setSubstituted(left);
+        } while (again && !gone);
       } catch {
       } finally {
         busy = false;
       }
     };
+    recheck.current = tick;
     tick();
     const t = setInterval(tick, 5000);
     return () => {
       gone = true;
+      recheck.current = () => {};
       clearInterval(t);
     };
   }, [live, link, mount]);
+  // A font just arrived in the room: look now rather than at the next pass.
+  const heldKeys = (roomFonts ?? []).map((f) => f.key).join("|");
+  useEffect(() => {
+    recheck.current();
+  }, [heldKeys]);
 
   const reconnect = () => {
     failures.current = 0;
@@ -1185,14 +1208,14 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
         {err ?? (status === "failed" ? state?.session.canvas.reason : why ?? "Connecting to the canvas…")}
       </div>
     );
-  const gl = new URLSearchParams(location.search).has("webgl") ? "&webgl" : "";
-  const src = `/canvas/?canvas&control${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;
+  const src = canvasSrc({ link, name, panels, webgl: new URLSearchParams(location.search).has("webgl") });
   return (
     <>
       <iframe key={`${mount}:${link}`} ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />
       <PageBar
         key={mount}
         frame={frame}
+        panels={panels}
         canAdd={kind === "edit"}
         page={page ?? resume}
         join={join}

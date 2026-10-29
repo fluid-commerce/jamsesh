@@ -130,6 +130,16 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Full-size frame render (`/renders/full`) | Tested live | Against a real figcraft-server: 1440x900 frame came back 1600, 3200 and 4096 px wide. Not yet seen on a TV. |
 | Expand on a second display | Not tested | Needs a real second screen. |
 
+## Canvas panels and fonts (phase 6.4, 6.5)
+
+| Capability | Status | Notes |
+|---|---|---|
+| Panel buttons: layers (left) and Design (right) slide in over a person's canvas; the big screen has none (6.4) | Simulated | Real canvas build in headless Chromium against a throwaway hub: both panels closed, each open, and the big screen's canvas, screenshots looked at. The `view.canvasPanel` command and the slide are covered by FigCraft's tests. |
+| The chosen panels come back after a reload | Simulated | Kept in the browser's local storage; reload checked in headless Chromium. Not tried in the Mac app's web view. |
+| Open fonts from repo cards fetched for every canvas (6.5) | Tested live | Real network: Fraunces, Lora and Space Grotesk fetched from Google Fonts (files on fonts.gstatic.com), Fontsource as the fallback; all OFL 1.1. Text in them drew correctly on a second person's canvas. |
+| A font only one person has, lent after their confirmation (6.5) | Simulated | The Mac app's `has_fonts`/`local_fonts` stood in by a script serving real fonts from this Mac (Zapfino); prompt, sharing, declining, a damaged file and a session ending checked in headless Chromium. The real Mac app prompt hasn't been clicked. |
+| Fonts are never kept: memory only, `no-store`, not in the offline outbox, dropped when the session ends | Simulated | Tested in the hub (bytes overwritten on withdraw and end) and the page (outbox stays empty with the network down). |
+
 ## Remote access
 
 | Capability | Status | Notes |

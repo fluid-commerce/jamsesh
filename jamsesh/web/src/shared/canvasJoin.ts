@@ -28,6 +28,15 @@ export function joinStateOf(peers: any): JoinState {
   return { state: "failed", reason: "The canvas isn't in the session." };
 }
 
+/**
+ * The canvas page's address for a join link. `panels`: a person's canvas, with buttons in its
+ * top corners for the layers and properties panels (the big screen leaves them out).
+ */
+export function canvasSrc(o: { link: string; name?: string; webgl?: boolean; panels?: boolean }): string {
+  const name = o.name ? `&name=${encodeURIComponent(o.name)}` : "";
+  return `/canvas/?canvas&control${o.webgl ? "&webgl" : ""}${o.panels ? "&panels" : ""}${name}#join=${encodeURIComponent(o.link)}`;
+}
+
 /** How long a canvas may take to start, and to get through connecting, before it counts as failed. */
 export const START_TIMEOUT_MS = 30_000;
 export const CONNECT_TIMEOUT_MS = 25_000;
@@ -63,7 +72,7 @@ export function joinLabel(j: JoinState): string | null {
   }
 }
 
-type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<any>;
+export type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<any>;
 
 /** The Mac app's command bridge, in its own windows only (a browser has none). */
 export function macInvoke(): Invoke | null {
@@ -71,7 +80,7 @@ export function macInvoke(): Invoke | null {
   return typeof i === "function" ? i : null;
 }
 
-type Fc = { execute: (command: string, params?: unknown) => Promise<any> };
+export type Fc = { execute: (command: string, params?: unknown) => Promise<any> };
 
 /** Families the canvas names that it has no font for. */
 export async function missingFamilies(fc: Fc): Promise<string[]> {

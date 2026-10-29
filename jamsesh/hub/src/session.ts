@@ -27,7 +27,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest, LiveApp, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
+ BuildRequest, FontsState, LiveApp, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -176,6 +176,7 @@ export class Session {
   buildRequests: () => BuildRequest[] = () => [];
   /** Live Simulator and Mac app tiles; LiveApps owns them. */
   liveApps: () => LiveApp[] = () => [];
+  fonts: () => FontsState = () => ({ available: [], wanted: [] });
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
   voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
 
@@ -199,6 +200,7 @@ export class Session {
       facts: this.facts(),
       buildRequests: this.buildRequests(),
       liveApps: this.liveApps(),
+      fonts: this.fonts(),
       screens: this.screens(),
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
@@ -292,6 +294,8 @@ export class Session {
         return { key, value: this.buildRequests() };
       case "liveApps":
         return { key, value: this.liveApps() };
+      case "fonts":
+        return { key, value: this.fonts() };
       case "readyToShow":
         return { key, value: this.readyToShow() };
       case "showRequests":

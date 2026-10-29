@@ -1242,6 +1242,10 @@ select {
 .page-bar > * {
   pointer-events: auto;
 }
+/* The canvas's layers button takes the corner. */
+.page-bar.with-panels {
+  left: 56px;
+}
 /* How the canvas's join is going, when it isn't live. */
 .canvas-join,
 .canvas-fonts {
@@ -3200,3 +3204,34 @@ html.in-app .app-header {
 .drive-controls .drive-who { font-size: 12px; opacity: .8; }
 .drive-controls .drive-menu { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .drive-controls .drive-note { font-size: 12px; color: var(--warn, #e0a030); }
+/* ---- Fonts: asking the person who has one whether they may share it with the session ---- */
+.font-shares {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  z-index: 80;
+  display: grid;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+}
+.font-share-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.font-sharing {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.font-sharing b {
+  color: var(--text);
+}

@@ -27,6 +27,12 @@ pub fn canvas(search: &str) -> bool {
     search.strip_prefix('?').unwrap_or(search).split('&').any(|entry| matches!(entry.split('=').next(), Some("canvas" | "jamsesh")))
 }
 
+/// Whether `search` asks for the panel buttons (`?panels`, with the canvas-only view): a person's
+/// canvas slides the layers and properties panels in; the big screen leaves them out.
+pub fn panels(search: &str) -> bool {
+    search.strip_prefix('?').unwrap_or(search).split('&').any(|entry| entry.split('=').next() == Some("panels"))
+}
+
 /// The display name in `?name=<escaped>` (`+` and `%20` are spaces), at most 64 characters, `None`
 /// when it is missing or blank.
 pub fn name(search: &str) -> Option<String> {

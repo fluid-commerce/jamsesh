@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
 // fails, instead of leaving a blank document up. It also loads fonts from the person's own Mac.
 import { expect, test } from "bun:test";
-import { friendlyReason, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
+import { canvasSrc, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -78,4 +78,11 @@ test("in a browser there's no Mac to ask: the missing families are only listed",
   const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
   expect(await loadLocalFonts(fc, null, new Set())).toEqual(["Helvetica Neue"]);
   expect(loaded).toEqual([]);
+});
+
+test("only a person's canvas asks for the panel buttons", () => {
+  const link = "ws://h:1/?k=a&b";
+  expect(canvasSrc({ link, name: "Big screen" })).toBe(`/canvas/?canvas&control&name=Big%20screen#join=${encodeURIComponent(link)}`);
+  expect(canvasSrc({ link, name: "Dana", panels: true, webgl: true })).toBe(`/canvas/?canvas&control&webgl&panels&name=Dana#join=${encodeURIComponent(link)}`);
+  expect(canvasSrc({ link })).not.toContain("panels");
 });

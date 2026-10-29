@@ -43,13 +43,13 @@ mod branch_ui_tests;
 #[cfg(test)]
 mod canvas_double_click_tests;
 #[cfg(test)]
-mod canvas_only_tests;
-#[cfg(test)]
 mod canvas_drag_tests;
 #[cfg(test)]
 mod canvas_fixes_tests;
 #[cfg(test)]
 mod canvas_image_rect_tests;
+#[cfg(test)]
+mod canvas_only_tests;
 #[cfg(test)]
 mod clipboard_fence_tests;
 #[cfg(test)]
@@ -383,6 +383,9 @@ pub struct UiState {
     /// Canvas-only mode (an embedded room view): just the canvas and its live overlays, with no tab bar,
     /// panels, toolbar, home screen, main menu or update prompt. The embedder sets it.
     pub canvas_only: bool,
+    /// With `canvas_only`: two buttons in the canvas's top corners slide the layers and properties
+    /// panels in (`view.canvasPanel`). The embedder sets it; the big screen leaves it off.
+    pub canvas_panels: bool,
     /// The home screen's section, and the Templates search and filter.
     pub home_view: home::Home,
     /// How the window's title bar is drawn (the desktop app sets it when it opens the window).
@@ -568,6 +571,7 @@ impl Default for UiState {
             opacity_digit: None,
             home: false,
             canvas_only: false,
+            canvas_panels: false,
             home_view: home::Home::default(),
             title_bar: TitleBar::Native,
             icon_gallery: false,
