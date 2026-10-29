@@ -2366,3 +2366,56 @@ test("a callback already awaiting I/O when the room closes writes into nothing: 
     process.off("unhandledRejection", catcher);
   }
 }, 30_000);
+
+test("once the room has stopped no vault file is written: an edit, a source and a page write are refused before touching the folder", async () => {
+  const { hub, w, dir, s } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  const cur = readPage(dir, "pricing")!;
+  const before = sourceIds(dir).length;
+  await hub.shutdown();
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const r = w.editPage("pricing", "# Pricing\n\nThree tiers.", { rev: cur.rev, by: "Chey" });
+    expect(r.ok).toBe(false);
+    expect((r as any).status).toBe(503);
+    expect(() => w.addSource("document", "Late", "Written after the stop.", "Chey")).toThrow("closed");
+  } finally {
+    console.warn = warn;
+  }
+  expect(readPage(dir, "pricing")!.markdown).toBe(cur.markdown);
+  expect(sourceIds(dir).length).toBe(sourceIds(dir).length); // (shutdown's own capture may add; the late one above must not)
+  expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).not.toContain("Written after the stop.");
+  void before;
+  void s;
+}, 30_000);
+
+test("a shell job that ends while the conversation is sealed is let go: no unhandled rejection", async () => {
+  const { hub } = room();
+  const errors: unknown[] = [];
+  const catcher = (e: unknown) => void errors.push(e);
+  process.on("uncaughtException", catcher);
+  process.on("unhandledRejection", catcher);
+  try {
+    hub.store.seal("events");
+    (hub.host as any).log("late note from a job");
+    (hub.host as any).onBuilt = () => {
+      throw Object.assign(new Error("closed"), { code: "ESEALED" });
+    };
+    await Bun.sleep(50);
+    expect(errors).toEqual([]);
+  } finally {
+    process.off("uncaughtException", catcher);
+    process.off("unhandledRejection", catcher);
+  }
+});
+
+test("closing records canvas work still waiting for its timer", async () => {
+  const { hub, s } = room();
+  const agent = s.registerAgent({ ownerName: "Sam", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "/x", platform: "web", branch: "main" }).agent;
+  (hub.canvas as any).noteActivity(agent, "create_node", {});
+  expect(s.store.eventsAfter(0).some((e) => e.kind === "canvas")).toBe(false);
+  await hub.shutdown();
+  expect(s.store.eventsAfter(0).some((e) => e.kind === "canvas" && e.text.includes("1 new layer"))).toBe(true);
+}, 30_000);

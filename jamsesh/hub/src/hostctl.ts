@@ -242,8 +242,13 @@ export class HostControl {
     return lines.join("\n");
   }
 
+  /** A note in the room's feed. A background job can finish after the conversation is sealed: then there is no feed to write to, and that is not an error. */
   private log(text: string) {
-    this.session.store.addEvent({ kind: "system", authorType: "brain", authorName: "Host", text, relevance: "work" });
+    try {
+      this.session.store.addEvent({ kind: "system", authorType: "brain", authorName: "Host", text, relevance: "work" });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ESEALED") throw e;
+    }
   }
 
   async act(a: HostAction): Promise<string> {
@@ -523,9 +528,13 @@ export class HostControl {
       // A background job never ends as an unhandled rejection: the room is told it failed, and a log that finds the room closed is dropped.
       this.builds.delete(slug);
       console.error("[host] preview build:", e instanceof Error ? e.message : e);
+      const result = `The ${label} build stopped: ${e instanceof Error ? e.message : e}`;
+      this.log(result);
       try {
-        this.log(`The ${label} build stopped: ${e instanceof Error ? e.message : e}`);
-      } catch {}
+        this.onBuilt(label, false, result); // the same way the room hears of any build that ends badly
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "ESEALED") console.error("[host] preview build:", err);
+      }
     });
     return `Building ${label} on the host. It opens when the build finishes, and the room sees a note either way.`;
   }

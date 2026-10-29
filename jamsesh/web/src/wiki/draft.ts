@@ -17,7 +17,7 @@ export const saveRev = (base: string, theirs: WikiPage | null, overTheirs: boole
  * host-mode switch, the Wiki view closing) leaves the text here, and the page opens back into it. It goes only when the
  * person saves or cancels. Closing or reloading the window asks first while anything is held.
  */
-const held = new Map<string, { text: string; base: string; n: number }>();
+const held = new Map<string, { text: string; base: string; n: number; first: number }>();
 let armed = false;
 /** Edit numbers come from one counter that only goes up (never reset by Cancel, a save or a new draft), so a save's number can match no other draft. */
 let edits = 0;
@@ -26,7 +26,8 @@ export const drafts = {
   hold(slug: string, text: string, base: string) {
     // Each change of text is one more edit; a save remembers which edit it sent.
     const was = held.get(slug);
-    held.set(slug, { text, base, n: was && was.text === text ? was.n : ++edits });
+    const n = was && was.text === text ? was.n : ++edits;
+    held.set(slug, { text, base, n, first: was ? was.first : n }); // `first`: the edit this draft began with
     if (!armed && typeof window !== "undefined") {
       armed = true;
       window.addEventListener("beforeunload", (e) => void (held.size && e.preventDefault()));
@@ -43,7 +44,8 @@ export const drafts = {
     const d = held.get(slug);
     if (!d) return true;
     if (d.n === n) return held.delete(slug), true;
-    held.set(slug, { ...d, base: rev });
+    // A draft begun after the sent edit (the old one was cancelled) is someone else's: the answer leaves it, and its revision, alone.
+    if (d.first <= n) held.set(slug, { ...d, base: rev });
     return false;
   },
   drop: (slug: string) => void held.delete(slug),

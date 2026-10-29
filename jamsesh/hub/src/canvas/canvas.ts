@@ -436,16 +436,24 @@ export class Canvas {
     } else if (tool === "run_command" && /^(node|frame|component)\.create/.test(String(args?.command ?? ""))) a.created++;
     else a[k]++;
     this.session.touchAgent(agent.id, { status: "working", activity: "Designing on the canvas" });
-    if (!a.timer) {
-      a.timer = this.session.timers.after(() => {
-        const cur = this.activity.get(agent.id);
-        if (!cur) return;
-        this.activity.delete(agent.id);
-        const parts = [cur.created && `${cur.created} new layer${cur.created > 1 ? "s" : ""}`, cur.edited && `${cur.edited} edit${cur.edited > 1 ? "s" : ""}`].filter(Boolean);
-        if (parts.length) {
-          this.session.store.addEvent({ kind: "canvas", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `Canvas: ${parts.join(", ")}.`, relevance: "work" });
-        }
-      }, 12_000);
+    if (!a.timer) a.timer = this.session.timers.after(() => this.reportActivity(agent), 12_000);
+  }
+
+  /** Writes one agent's batched canvas work into the feed (when its timer fires, and for every agent at shutdown). */
+  private reportActivity(agent: { id: string; name: string }) {
+    const cur = this.activity.get(agent.id);
+    if (!cur) return;
+    this.session.timers.clear(cur.timer);
+    this.activity.delete(agent.id);
+    const parts = [cur.created && `${cur.created} new layer${cur.created > 1 ? "s" : ""}`, cur.edited && `${cur.edited} edit${cur.edited > 1 ? "s" : ""}`].filter(Boolean);
+    if (parts.length) this.session.store.addEvent({ kind: "canvas", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `Canvas: ${parts.join(", ")}.`, relevance: "work" });
+  }
+
+  /** Closing the room: batches still waiting for their timer are recorded now. */
+  flushActivity() {
+    for (const id of [...this.activity.keys()]) {
+      const agent = this.session.agent(id);
+      this.reportActivity({ id, name: agent?.name ?? "An agent" });
     }
   }
 

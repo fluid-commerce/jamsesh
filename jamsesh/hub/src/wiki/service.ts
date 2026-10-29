@@ -271,6 +271,7 @@ export class WikiService {
 
   /** A document, link or agent report. Saved at once; the next ingest reads it. */
   addSource(kind: SourceKind, title: string, text: string, by: string, at: { id?: string; now?: number } = {}): Source {
+    this.open();
     const src = addSource(this.dir, { kind, title, text, by, ...at });
     // The source is saved; a log line that can't be written doesn't undo that, and is written at the next chance.
     try {
@@ -565,7 +566,13 @@ export class WikiService {
    * before the write and the page recorded as known after it, so a write the wiki makes is never taken for a hand edit,
    * even across a crash (syncVault finishes it from the intent). A state that can't be saved fails the write loudly.
    */
+  /** The room has stopped: a vault write now would land after the final capture, outside the store's seal. Refused. */
+  private open() {
+    if (this.s.store.closed) throw Object.assign(new Error("The room is closed."), { code: "ESEALED" });
+  }
+
   private write(slug: string, body: string, opts: Parameters<typeof writePage>[3] = {}): Page {
+    this.open();
     const page = writePage(this.dir, slug, body, {
       ...opts,
       beforeWrite: (text) => {
@@ -1084,6 +1091,7 @@ export class WikiService {
   /** A person's edit applies at once and is kept as a source, so the next ingest builds on it. `rev` guards against overwriting a newer page. */
   editPage(slug: string, body: string, opts: { rev?: string; by: string; title?: string; category?: Category }): { ok: true; page: Page } | { ok: false; error: string; status: number; current?: Page } {
     if (!isPageSlug(slug)) return { ok: false, error: "That isn't a page name.", status: 400 };
+    if (this.s.store.closed) return { ok: false, error: "The room is closed. Try again once it is open.", status: 503 };
     // A proposal write that landed and wasn't recorded is recorded now, while the page still carries its token: an edit can't hide it.
     try {
       this.syncVault(); // also reconciles; a hand edit made since is filed before this one

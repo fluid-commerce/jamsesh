@@ -288,13 +288,11 @@ test("a card's cut change is fetched whole through the client's api(): every add
 
 // These drive the same functions PageView calls (track on each text change, restore on mount). Unmounting calls nothing, so
 // "leaving by X" is the same store sequence for every X; they do not render the component (no DOM library in this package).
-test("store level: a held draft comes back with its revision after the view unmounts and mounts again (the labels name exits that all unmount the same way; nothing is rendered)", () => {
-  for (const way of ["page link", "phone Index button", "backlink", "tab switch", "host mode switch", "wiki view closed"]) {
-    track("pricing", `edited, then left by ${way}`, "rev1"); // typing
-    // (the view unmounts here; nothing is called)
-    expect(restore("pricing")).toEqual({ editing: `edited, then left by ${way}`, base: "rev1" }); // the page is opened again
-  }
+test("store level: a held draft comes back with its revision when the view is mounted again", () => {
+  track("pricing", "edited text", "rev1"); // typing; the view is then unmounted (nothing is called) and mounted again:
+  expect(restore("pricing")).toEqual({ editing: "edited text", base: "rev1" });
   expect(restore("other")).toEqual({ editing: null, base: "" });
+  track("pricing", null, "rev1");
 });
 
 test("store level: Save or Cancel drops the draft, and only that page's", () => {
@@ -339,8 +337,8 @@ test("store level: edit numbers never repeat, across Cancel, a save and a new dr
   track("r", "a fresh draft", "r1");
   expect(drafts.edit("r")).not.toBe(old);
   expect(drafts.saved("r", old, "r2")).toBe(false); // the old save answers late: the fresh draft stays
-  expect(restore("r").editing).toBe("a fresh draft");
-  track("r", null, "r2");
+  expect(restore("r")).toEqual({ editing: "a fresh draft", base: "r1" }); // and its revision is not moved by the old save
+  track("r", null, "r1");
 });
 
 test("store level: the same text tracked again is not a new edit", () => {
