@@ -333,6 +333,8 @@ export interface HubState {
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];
   digest: string;
+  /** How much the session holds in all; the lists above carry only the newest, /api/history/<what> pages the rest. */
+  totals: { events: number; utterances: number; directives: number; artifacts: number };
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
 }
 

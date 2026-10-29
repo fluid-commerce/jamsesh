@@ -35,6 +35,8 @@ class Bus {
     this.flushTimer = null;
     const keys = [...this.dirty];
     this.dirty.clear();
+    // The counts of what the state leaves out travel with the lists they count.
+    if (keys.some((k) => k === "directives" || k === "artifacts" || k === "utterances") && !keys.includes("totals")) keys.push("totals");
     for (const k of keys) {
       // One collection that can't be read (a store error) doesn't stop the others' patches.
       let patch: ReturnType<NonNullable<Bus["resolver"]>> = null;

@@ -81,7 +81,7 @@ const JAM_TOOLS = [
   {
     name: "jam_search",
     description: "Search everything said, typed, decided, and posted in the session (full text).",
-    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many hits to see more" } }, required: ["query"] },
   },
   {
     name: "jam_update",
@@ -227,8 +227,16 @@ const JAM_TOOLS = [
   },
   {
     name: "jam_artifacts",
-    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words.",
-    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } } },
+    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words. Long sessions have more than one page: it says how many more there are; pass offset to page on.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many (from the newest) to see older ones" } } },
+  },
+  {
+    name: "jam_directives",
+    description: "List the session's directives (what the room asked agents to do), newest first, with their status, so you can see older ones the context leaves out. Filter by words or status. It says how many more there are; pass offset to page on.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" }, status: { type: "string", description: "open, done or cancelled" }, limit: { type: "number" }, offset: { type: "number" } },
+    },
   },
   {
     name: "jam_ask_room",
@@ -402,8 +410,12 @@ export class McpEndpoint {
         return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10));
       case "jam_search": {
         this.requireAgent(ctx);
-        const hits = s.store.searchEvents(String(args.query ?? ""), Math.min(60, args.limit ?? 20));
-        return text(hits.map(fmtEvent).join("\n") || "Nothing found.");
+        const limit = Math.min(60, Math.max(1, Number(args.limit) || 20));
+        const offset = Math.max(0, Math.floor(Number(args.offset) || 0));
+        // One extra hit tells whether there are more without counting them all.
+        const hits = s.store.searchEvents(String(args.query ?? ""), limit + 1, offset);
+        const shown = hits.slice(0, limit);
+        return text(shown.length ? `${shown.map(fmtEvent).join("\n")}${hits.length > limit ? `\n\nThere are more matches: call again with offset ${offset + limit}.` : ""}` : "Nothing found.");
       }
       case "jam_update": {
         const agent = this.requireAgent(ctx);
@@ -552,11 +564,17 @@ export class McpEndpoint {
       case "jam_artifacts": {
         this.requireAgent(ctx);
         const q = String(args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-        const list = s
-          .artifacts()
-          .filter((a) => !q.length || q.every((w) => `${a.title} ${a.note} ${a.agentName} ${a.platform}`.toLowerCase().includes(w)))
-          .slice(0, Math.min(80, args.limit ?? 30));
-        return text(list.map((a) => `${a.id}: [${a.stage}/${a.kind}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.nodeId ? ` (frame ${a.nodeId})` : ""}${a.url ? ` ${a.url}` : ""}`).join("\n") || "No artifacts yet.");
+        const all = s.artifacts().filter((a) => !q.length || q.every((w) => `${a.title} ${a.note} ${a.agentName} ${a.platform}`.toLowerCase().includes(w)));
+        const { shown, more } = pageOf(all, args);
+        return text(shown.map((a) => `${a.id}: [${a.stage}/${a.kind}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.nodeId ? ` (frame ${a.nodeId})` : ""}${a.url ? ` ${a.url}` : ""}`).join("\n") + more || "No artifacts yet.");
+      }
+      case "jam_directives": {
+        this.requireAgent(ctx);
+        const q = String(args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+        const want = String(args.status ?? "").toLowerCase();
+        const all = s.directives().filter((d) => (!q.length || q.every((w) => `${d.text} ${d.result ?? ""}`.toLowerCase().includes(w))) && (!want || (want === "open" ? d.status !== "done" && d.status !== "cancelled" : d.status === want)));
+        const { shown, more } = pageOf(all, args);
+        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id))).join("\n") + more || "No directives yet.");
       }
       case "jam_ask_room": {
         const agent = this.requireAgent(ctx);
@@ -757,6 +775,15 @@ function knowledge(s: Hub["session"], workstream?: string) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** One page of a newest-first list (limit, offset), and the line telling the agent how to get the rest. */
+function pageOf<T>(all: T[], args: { limit?: unknown; offset?: unknown }, max = 80, def = 30): { shown: T[]; more: string } {
+  const limit = Math.min(max, Math.max(1, Math.floor(Number(args.limit)) || def));
+  const offset = Math.max(0, Math.floor(Number(args.offset)) || 0);
+  const shown = all.slice(offset, offset + limit);
+  const left = all.length - offset - shown.length;
+  return { shown, more: left > 0 ? `\n\n${all.length} in all; ${left} more: call again with offset ${offset + shown.length}.` : shown.length && offset ? `\n\n(${all.length} in all; that is the last page.)` : "" };
 }
 
 export function fmtEvent(e: JamEvent) {
