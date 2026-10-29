@@ -30,10 +30,11 @@ struct ProjectFile {
     last_used: f64,
 }
 
-/// `~/.jamsesh`, or `$JAMSESH_HOME` (the hub reads the same variable).
+/// `~/.jamsesh`, or `$JAMSESH_HOME` / `<JAMSESH_APP_DATA>/home` (the hub is started with the same folder).
 fn home() -> PathBuf {
-    std::env::var_os("JAMSESH_HOME")
-        .map(PathBuf::from)
+    crate::isolation::get()
+        .hub_home
+        .clone()
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".jamsesh")))
         .unwrap_or_else(|| PathBuf::from("/"))
 }

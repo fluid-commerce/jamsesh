@@ -274,6 +274,40 @@ Developers can run the host from a checkout without the app:
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.
 
+**Run a test build beside the real app.** A build for trying changes must not share the real app's
+ports, Keychain item, data folder or web view store. The app reads these once at launch and, when
+a variable is unset, behaves as before. A value that is set but empty or invalid stops the launch
+with a message (it never falls back to the real app's value).
+
+| Variable | Moves | Default |
+| --- | --- | --- |
+| `JAMSESH_RELAY_PORT` | the port this Mac's agents use to reach the room | `4790` |
+| `JAMSESH_KEYCHAIN_SERVICE` | the Keychain service tokens are kept under | `JamSesh` |
+| `JAMSESH_HUB_PORTS` | comma list of ports a hosted session may use (must not include the relay port) | `4747,4848,4949` |
+| `JAMSESH_APP_DATA` | the app's data folder: `app.json`, `logs/`, screen layouts, and (as `home/`, unless `JAMSESH_HOME` is set) the hosted session's data | the system's app data folder; `~/.jamsesh` |
+| `JAMSESH_BONJOUR_SERVICE` | the Bonjour type, so test and real hosts don't list each other | `_jamsesh._tcp` |
+
+The web view's store (cookies, local storage) is tied by WebKit to the bundle id. With
+`JAMSESH_APP_DATA` set, the app gives its windows their own store on macOS 14 and later; on macOS
+13 WebKit has one store per bundle id, so only a different bundle id separates them. For a fully
+separate app (own bundle id, so also own macOS permissions and web view folder), build with the test
+config:
+
+```bash
+cd jamsesh/app && ./bundle-hub.sh
+cd src-tauri && cargo tauri build --bundles app --config tauri.test.conf.json   # "JamSesh Test", com.fluidcommerce.jamsesh.test
+TEST=/tmp/jamsesh-test
+open -n -a "$PWD/target/release/bundle/macos/JamSesh Test.app" \
+  --env JAMSESH_APP_DATA=$TEST --env JAMSESH_RELAY_PORT=5890 \
+  --env JAMSESH_HUB_PORTS=5747,5848,5949 --env JAMSESH_KEYCHAIN_SERVICE="JamSesh Test" \
+  --env JAMSESH_BONJOUR_SERVICE=_jamsesh-test._tcp
+```
+
+(`target/` is under `jamsesh/app/src-tauri` unless `CARGO_TARGET_DIR` is set. Agents on the same
+Mac that should join the test room need the test relay port; `jamsesh join` talks to the real one.)
+`bundle-hub.sh` only reads `~/.jamsesh` (to copy models), and the test hub is told its bundle id
+(`JAMSESH_BUNDLE_ID`) so "bring JamSesh forward" focuses the test app, not the real one.
+
 ### 3.6 Projects
 
 A **project** holds many sessions. It is what the host opens, so starting new work is a choice in

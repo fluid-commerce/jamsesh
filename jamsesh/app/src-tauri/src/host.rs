@@ -28,10 +28,22 @@ pub fn window_url(origin: &str, path: &str) -> String {
     format!("{origin}/host-window?once={once}&next={next}")
 }
 
-pub const PORTS: [u16; 3] = [4747, 4848, 4949];
+/// The ports a hosted session may use, in the order tried (`JAMSESH_HUB_PORTS` overrides them).
+fn ports() -> Vec<u16> {
+    crate::isolation::get().hub_ports.clone()
+}
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// "4747, 4848 and 4949".
+fn list_ports(ports: &[u16]) -> String {
+    match ports {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")),
+    }
 }
 
 /// Whether Claude Code or Codex is on this Mac. Their CLIs are often off PATH: the Claude desktop
@@ -100,12 +112,12 @@ impl Hub {
 
     /// Starts this app's hub. A hub this app didn't start (one from a terminal) is never adopted:
     /// the app couldn't give its windows the window key, so they couldn't act as the host's person.
-    pub async fn start(log_dir: &Path, resources: Option<&Path>, launch: &Launch) -> Result<Hub, String> {
+    pub async fn start(log_dir: &Path, resources: Option<&Path>, launch: &Launch, bundle_id: &str) -> Result<Hub, String> {
         // A hub left by this app's last launch stops on its own within seconds (it watches its parent).
         let mut running = None;
         for _ in 0..20 {
             running = None;
-            for port in PORTS {
+            for port in ports() {
                 if healthy(&format!("http://127.0.0.1:{port}")).await {
                     running = Some(port);
                     break;
@@ -122,10 +134,12 @@ impl Hub {
             ));
         }
         let rt = runtime(resources)?;
-        let port = PORTS
-            .into_iter()
+        let all = ports();
+        let port = all
+            .iter()
+            .copied()
             .find(|p| std::net::TcpListener::bind(("0.0.0.0", *p)).is_ok() && std::net::TcpListener::bind(("::", *p)).is_ok())
-            .ok_or("Ports 4747, 4848 and 4949 are all in use by other apps.")?;
+            .ok_or_else(|| format!("Ports {} are all in use by other apps.", list_ports(&all)))?;
         let _ = create_dir_all(log_dir);
         let log = OpenOptions::new().create(true).append(true).open(log_dir.join("hub.log")).map_err(|e| e.to_string())?;
         let err = log.try_clone().map_err(|e| e.to_string())?;
@@ -153,11 +167,16 @@ impl Hub {
                 cmd.env("JAMSESH_NEW_PROJECT", name);
             }
         }
+        if let Some(home) = &crate::isolation::get().hub_home {
+            cmd.env("JAMSESH_HOME", home);
+        }
         let child = cmd
             .env("PATH", path_env())
             // The hub exits on its own if this app goes away without stopping it.
             .env("JAMSESH_PARENT_PID", std::process::id().to_string())
             .env("JAMSESH_PORT", port.to_string())
+            .env("JAMSESH_BONJOUR_SERVICE", &crate::isolation::get().bonjour)
+            .env("JAMSESH_BUNDLE_ID", bundle_id)
             .env("JAMSESH_WINDOW_LINKS", "stdin")
             .stdin(Stdio::piped())
             .stdout(Stdio::from(log))

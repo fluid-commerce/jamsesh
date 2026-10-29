@@ -6,6 +6,7 @@
 mod discover;
 mod fonts;
 mod host;
+mod isolation;
 mod perms;
 mod projects;
 mod proxy;
@@ -23,8 +24,10 @@ use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilde
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::Mutex;
 
-const RELAY_PORT: u16 = 4790;
-const KEYCHAIN_SERVICE: &str = "JamSesh";
+/// The port agents on this Mac reach the room by (`JAMSESH_RELAY_PORT` overrides it for a test build).
+fn relay_port() -> u16 {
+    isolation::get().relay_port
+}
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -211,7 +214,7 @@ fn warn(app: &AppHandle, title: &str, message: String) {
 }
 
 fn keychain(origin: &str) -> Option<keyring::Entry> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, origin).ok()
+    keyring::Entry::new(&isolation::get().keychain_service, origin).ok()
 }
 
 // ---- windows ----
@@ -226,7 +229,7 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
         return Ok(());
     }
     let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
-    WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+    own_store(WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed)))
         .devtools(devtools())
         .title(title)
         // No separate title bar: the window controls sit in the page's own header (centered in
@@ -242,6 +245,15 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
         .build()
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// A build with its own app data folder keeps its own cookies and storage too (macOS 14 and later;
+/// earlier systems have one store per bundle id, which is why a test build also gets its own id).
+fn own_store<'a, R: tauri::Runtime, M: Manager<R>>(b: WebviewWindowBuilder<'a, R, M>) -> WebviewWindowBuilder<'a, R, M> {
+    match isolation::get().web_store_id() {
+        Some(id) => b.data_store_identifier(id),
+        None => b,
+    }
 }
 
 /// Shows a window at `url`: a new one, or an existing one carried over to it (a session's windows
@@ -261,7 +273,7 @@ fn open_start(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "start", WebviewUrl::App("index.html".into()))
+    let _ = own_store(WebviewWindowBuilder::new(app, "start", WebviewUrl::App("index.html".into())))
         .devtools(devtools())
         .title("JamSesh")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -282,7 +294,7 @@ fn close_start(app: &AppHandle) {
 async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(), String> {
     let mut inner = state.inner.lock().await;
     let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
-    let hub = host::Hub::start(&state.dir.join("logs"), resources.as_deref(), &launch).await?;
+    let hub = host::Hub::start(&state.dir.join("logs"), resources.as_deref(), &launch, &app.config().identifier).await?;
     let origin = hub.origin();
     let port = hub.port;
     inner.hub = Some(hub);
@@ -314,7 +326,7 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
         .ok()
         .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
         .and_then(|v| v["token"].as_str().map(str::to_string));
-    inner.relay = proxy::start(proxy::Upstream::parse(&origin)?, None, agents, RELAY_PORT, |_| {}).await.ok();
+    inner.relay = proxy::start(proxy::Upstream::parse(&origin)?, None, agents, relay_port(), |_| {}).await.ok();
     inner.cfg.role = Some("host".into());
     state.save(&inner.cfg)?;
     let setup_done = inner.cfg.host_setup_done;
@@ -377,7 +389,7 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
     for (_, m) in inner.mirrors.drain() {
         m.stop();
     }
-    let relay = proxy::start(up, token.clone(), agents.clone(), RELAY_PORT, move |tok| {
+    let relay = proxy::start(up, token.clone(), agents.clone(), relay_port(), move |tok| {
         if let Some(k) = keychain(&keep) {
             let _ = k.set_password(&tok);
         }
@@ -473,7 +485,7 @@ fn open_remote_setup(app: &AppHandle, origin: &str) {
         return;
     }
     if let Ok(url) = host::window_url(origin, "/setup?app").parse::<url::Url>() {
-        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url))
+        let _ = own_store(WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)))
             .devtools(devtools())
             .title("Remote access")
             .inner_size(900.0, 820.0)
@@ -494,7 +506,7 @@ fn open_setup(app: &AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "setup", WebviewUrl::App("setup.html".into()))
+    let _ = own_store(WebviewWindowBuilder::new(app, "setup", WebviewUrl::App("setup.html".into())))
         .devtools(devtools())
         .title("Set up this Mac")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -702,7 +714,7 @@ async fn sync_mirrors(state: &App, st: &serde_json::Value) {
         .flatten()
         .filter_map(|d| d["hostPort"].as_u64())
         .filter_map(|p| u16::try_from(p).ok())
-        .filter(|p| *p != RELAY_PORT && *p >= 1024)
+        .filter(|p| *p != relay_port() && *p >= 1024)
         .collect();
     let mut inner = state.inner.lock().await;
     let gone: Vec<u16> = inner.mirrors.keys().filter(|p| !wanted.contains(*p)).copied().collect();
@@ -1290,6 +1302,10 @@ async fn reopen(app: &AppHandle, state: &App, ticket: Ticket, discard: bool) -> 
 }
 
 fn main() {
+    if let Err(e) = isolation::init() {
+        eprintln!("JamSesh: {e}");
+        std::process::exit(2);
+    }
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
@@ -1328,7 +1344,7 @@ fn main() {
             screens::screens_close
         ])
         .setup(|app| {
-            let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
+            let dir = isolation::app_data_or(app.path().app_data_dir().ok());
             let stuck = forget_voice_copies(&dir);
             if !stuck.is_empty() {
                 let list = stuck.iter().map(|(p, e)| format!("{} ({e})", p.display())).collect::<Vec<_>>().join("\n");
