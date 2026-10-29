@@ -463,18 +463,16 @@ describe("agent setup script", () => {
 
   test("if the earlier entry can't be put back, setup says so instead of claiming it was", async () => {
     const box = sandbox();
-    // add-json is refused and leaves the home folder read-only, so ~/.claude.json can't be rewritten.
-    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"mcp remove"*) exec perl -MJSON::PP -e 'my $c = "$ENV{HOME}/.claude.json"; open my $f, "<", $c; local $/; my $d = decode_json(<$f>); delete $d->{mcpServers}{jamsesh}; open my $o, ">", $c; print $o encode_json($d)' ;; *"add-json"*) chmod 555 "$HOME"; exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    // add-json is refused and leaves a folder where ~/.claude.json was, so no file can be renamed over it
+    // (a read-only home would do on a Mac, but not for root, which these tests may run as).
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) rm -f "$HOME/.claude.json"; mkdir "$HOME/.claude.json"; exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
-    try {
-      const r = await run(box);
-      expect(r.code).not.toBe(0);
-      expect(r.stderr).toContain("couldn't put the jamsesh entry");
-      expect(r.stderr).toContain("couldn't put your earlier connection back completely");
-      expect(r.stderr).not.toContain("was put back");
-    } finally {
-      chmodSync(box.home, 0o755);
-    }
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("couldn't put the jamsesh entry");
+    expect(r.stderr).toContain("couldn't put your earlier connection back completely");
+    expect(r.stderr).not.toContain("was put back");
+    expect(readdirSync(box.home).filter((f) => f.startsWith(".claude.jamsesh-"))).toEqual([]);
   });
 
   test("a failed first install leaves no credential behind, and a good one leaves no spare copies", async () => {
@@ -543,7 +541,6 @@ describe("agent setup script", () => {
   function earlierWholeInstall(box: ReturnType<typeof sandbox>) {
     const earlier = earlierInstall(box);
     const { dir } = earlier;
-    
     writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
     writeFileSync(join(dir, "mcp-headers.sh"), `#!/bin/sh\nexec cat '${dir}/mcp-headers.json'\n`, { mode: 0o700 });
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headersHelper: join(dir, "mcp-headers.sh") } } }));
@@ -717,6 +714,60 @@ describe("agent setup script", () => {
       expect(lstatSync(join(box.home, link)).isSymbolicLink()).toBe(true);
       connectionIntact(dir, files);
     }
+  }, 60_000);
+
+  test("a folder where setup would put a file is refused, and nothing is put inside it or left changed", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".claude/commands/jamsesh.md"), { recursive: true });
+    const { dir, files } = earlierInstall(box);
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("it is a folder");
+    expect(readdirSync(join(box.home, ".claude/commands/jamsesh.md"))).toEqual([]);
+    connectionIntact(dir, files);
+  });
+
+  test("a folder that took a written file's place by the rollback is left as it is and listed", async () => {
+    const box = sandbox();
+    const { dir } = earlierInstall(box);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) rm -f "$HOME/.jamsesh/client.env"; mkdir "$HOME/.jamsesh/client.env" ;; esac\nexit 0\n`, { mode: 0o755 });
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain(`Changed by someone else while setup ran, so not put back: ${dir}/client.env`);
+    expect(readdirSync(join(dir, "client.env"))).toEqual([]);
+  });
+
+  test("a ~/.claude.json that is a link to an instruction file is never written by the rollback", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    // Contrived so that it parses: the point is that the rollback's one edit of that file passes the guard.
+    const rules = join(box.home, ".claude/CLAUDE.md");
+    writeFileSync(rules, "{}");
+    symlinkSync(rules, join(box.home, ".claude.json"));
+    stubCli(join(box.bin, "claude"), box.log);
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("instruction file");
+    expect(r.stderr).toContain("couldn't put the jamsesh entry");
+    // What the CLI (the stub) wrote through the link is all that changed; setup's rollback didn't rewrite it.
+    expect(JSON.parse(readFileSync(rules, "utf8")).mcpServers.jamsesh.url).toBe(`${origin}/mcp`);
+    expect(lstatSync(join(box.home, ".claude.json")).isSymbolicLink()).toBe(true);
+  });
+
+  test("a setup lock that is a link is refused before anything is written", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const { dir, files } = earlierInstall(box);
+    symlinkSync(join(box.home, ".claude/CLAUDE.md"), join(dir, "setup.lock"));
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toContain("it is a link");
+    expect(existsSync(join(box.home, ".claude/CLAUDE.md"))).toBe(false);
+    connectionIntact(dir, files);
   });
 
   test("a link that leads outside the home folder is refused", async () => {
@@ -828,15 +879,16 @@ describe("agent setup script", () => {
   });
 
   test("two setups started at once against a stale lock never run at the same time, twenty times over", async () => {
-    // add-json takes a moment and marks that it is running; a second one running then would see the mark.
+    // A setup's transaction is open from the moment its saved folder is made (just after the lock) until it
+    // is removed at the end. Every CLI call takes a moment and checks that its run's folder is the only one.
     const marker = (box: ReturnType<typeof sandbox>) => {
-      writeFileSync(join(box.bin, "claude"), `#!/bin/sh\\ncase "$*" in *"add-json"*) mkdir "${box.log}.busy" 2>/dev/null || echo overlap >> "${box.log}.overlap"; sleep 0.15; rmdir "${box.log}.busy" ;; esac\\nexit 0\\n`, { mode: 0o755 });
+      writeFileSync(join(box.bin, "claude"), `#!/bin/sh\nn="$(ls -d "$HOME"/.jamsesh/.saved.* 2>/dev/null | wc -l)"\n[ "$n" -eq 1 ] || echo "overlap $n" >> "${box.log}.overlap"\nsleep 0.1\nexit 0\n`, { mode: 0o755 });
     };
     for (let i = 0; i < 20; i++) {
       const box = sandbox();
       marker(box);
       mkdirSync(join(box.home, ".jamsesh"), { recursive: true });
-      writeFileSync(join(box.home, ".jamsesh/setup.lock"), "999999\\n");
+      writeFileSync(join(box.home, ".jamsesh/setup.lock"), "999999\n");
       const [a, b] = await Promise.all([run(box), run(box)]);
       expect([a.code, b.code]).toEqual([0, 0]);
       expect(existsSync(`${box.log}.overlap`)).toBe(false);

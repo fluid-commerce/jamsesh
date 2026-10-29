@@ -299,6 +299,8 @@ command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this 
 # would roll back a good one. The lock is an flock on a file kept open as descriptor 9 for the whole run;
 # the system drops it when this process ends however it ends, so there is no stale lock to recover and
 # no way to take over a live one. A second run waits a few seconds, then gives up.
+# A link there is refused: opening the lock would create or follow whatever it leads to.
+[ ! -L "$DIR/setup.lock" ] || { echo "JamSesh won't use $DIR/setup.lock: it is a link." >&2; exit 1; }
 exec 9>>"$DIR/setup.lock"
 waited=0
 until perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or exit 2; flock($f, LOCK_EX | LOCK_NB) or exit 1'; do
@@ -318,27 +320,29 @@ done
 SAVED="$(mktemp -d "$DIR/.saved.XXXXXXXX")"
 J="$SAVED/journal"
 mkdir "$J"
-sha() { perl -MDigest::SHA=sha256_hex -e 'if (open(my $f, "<:raw", $ARGV[0])) { local $/; print sha256_hex(<$f> // "") } else { print "absent" }' "$1"; }
+# A folder where a file was is neither the file nor its absence, so it never matches either.
+sha() { perl -MDigest::SHA=sha256_hex -e 'if (-d $ARGV[0]) { print "folder" } elsif (open(my $f, "<:raw", $ARGV[0])) { local $/; print sha256_hex(<$f> // "") } else { print "absent" }' "$1"; }
 key_of() { printf '%s' "$1" | perl -MDigest::SHA=sha1_hex -e 'local $/; print sha1_hex(<STDIN>)'; }
 mode_of() { perl -e 'printf "%o", (stat $ARGV[0])[2] & 07777' "$1"; }
 # Where a write to this path really lands: a symlink is followed (one that leads nowhere too), so the
 # link itself stays a link.
 resolve() { perl -MCwd=abs_path -MFile::Basename=dirname -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { $r = readlink $p; $r = dirname($p) . "/" . $r unless $r =~ m{^/} } print $r // $p' "$1"; }
 # Setup writes inside the person's home and never into an instruction file (CLAUDE.md, AGENTS.md), however
-# a link points there.
+# a link points there. A folder in a file's place is refused too: moving a file onto it would put it inside.
 guard() {
   local real="$1" f home
   home="$(resolve "$HOME")"
   case "$real" in "$HOME"/*|"$home"/*) ;; *) echo "JamSesh won't write $real: it is outside your home folder." >&2; return 1 ;; esac
+  [ ! -d "$real" ] || { echo "JamSesh won't write $real: it is a folder." >&2; return 1; }
   case "$(basename "$real" | tr 'A-Z' 'a-z')" in claude.md|agents.md) echo "JamSesh won't write $real: it is an instruction file." >&2; return 1 ;; esac
   for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
     if [ -e "$f" ] && [ "$real" -ef "$f" ]; then echo "JamSesh won't write $real: it is an instruction file." >&2; return 1; fi
   done
 }
-# The one way setup writes a file: safe_write <path> <mode | keep:mode> [append], content on standard input.
+# The one way setup writes a file: safe_write <path> <mode | keep:mode>, content on standard input.
 # A new file is made beside the target (mktemp creates it exclusively and never follows a link), then moved over it.
 safe_write() {
-  local path="$1" mode="$2" append="\${3:-}" real k t
+  local path="$1" mode="$2" real k t
   real="$(resolve "$path")"
   guard "$real" || return 1
   k="$(key_of "$real")"
@@ -349,8 +353,7 @@ safe_write() {
     sha "$real" > "$J/$k/beforesha"
   fi
   t="$(mktemp "$real.XXXXXXXX")" || return 1
-  if [ "$append" = append ] && [ -f "$real" ]; then cat "$real" > "$t" || { rm -f "$t"; return 1; }; fi
-  cat >> "$t" || { rm -f "$t"; return 1; }
+  cat > "$t" || { rm -f "$t"; return 1; }
   case "$mode" in keep:*) if [ -f "$real" ]; then mode="$(mode_of "$real")"; else mode="\${mode#keep:}"; fi ;; esac
   chmod "$mode" "$t" || { rm -f "$t"; return 1; }
   sha "$t" > "$J/$k/after"
@@ -360,8 +363,11 @@ safe_write() {
 fetch() { curl -fsS "\${AUTH[@]}" "$HUB/$1" -o "$2"; }
 # The jamsesh entry of Claude Code's config (~/.claude.json), alone: get prints it as JSON (nothing if
 # absent), set puts the entry in the file given, del removes it. The rest of the file is carried over
-# as it was read, and a write is retried if the file changed between reading it and replacing it.
-mcp_key() { perl -MJSON::PP -MDigest::SHA=sha256_hex -MFile::Temp -MFile::Basename -MCwd=abs_path - "$@" <<'MCPKEY'
+# as it was read, and a write is retried if the file changed between reading it and replacing it. A write
+# passes the same guard as safe_write, wherever a link at ~/.claude.json leads.
+mcp_key() {
+  case "$1" in set|del) guard "$(resolve "$2")" || return 1 ;; esac
+  perl -MJSON::PP -MDigest::SHA=sha256_hex -MFile::Temp -MFile::Basename -MCwd=abs_path - "$@" <<'MCPKEY'
 use strict; use warnings;
 my ($op, $cfg, $val) = @ARGV;
 $cfg = abs_path($cfg) // $cfg;
@@ -434,7 +440,7 @@ on_exit() {
       mcp_result=foreign
     else
       if [ "$now" != "$mcp_before" ]; then
-        if [ -n "$mcp_before" ]; then mcp_key set "$CLAUDEJSON" "$SAVED/mcp_before.json" 2>/dev/null; else mcp_key del "$CLAUDEJSON" 2>/dev/null; fi
+        if [ -n "$mcp_before" ]; then mcp_key set "$CLAUDEJSON" "$SAVED/mcp_before.json"; else mcp_key del "$CLAUDEJSON"; fi
       fi
       now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"
       if [ "$now" = "$mcp_before" ]; then
