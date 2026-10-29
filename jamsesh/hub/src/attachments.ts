@@ -135,15 +135,14 @@ export class Attachments {
    * What the room brain gets for these attachments: images and PDFs as message parts, text files
    * as text. Reads at most a few hundred KB of text in all so a big file can't swamp the prompt.
    */
-  brainInput(refs: AttachmentRef[]): { text: string; parts: ({ type: "image"; image: Uint8Array; mediaType: string } | { type: "file"; data: Uint8Array; mediaType: string })[] } {
+  brainInput(refs: AttachmentRef[]): { text: string; parts: { type: "file"; data: Uint8Array; mediaType: string }[] } {
     const parts: ReturnType<Attachments["brainInput"]>["parts"] = [];
     const texts: string[] = [];
     let budget = 60_000;
     for (const r of refs) {
       const bytes = this.bytes(r.id);
       if (!bytes) continue;
-      if (r.kind === "image") parts.push({ type: "image", image: bytes, mediaType: r.type });
-      else if (r.kind === "pdf") parts.push({ type: "file", data: bytes, mediaType: r.type });
+      if (r.kind === "image" || r.kind === "pdf") parts.push({ type: "file", data: bytes, mediaType: r.type });
       else {
         const body = new TextDecoder().decode(bytes).slice(0, Math.min(budget, 30_000));
         budget -= body.length;

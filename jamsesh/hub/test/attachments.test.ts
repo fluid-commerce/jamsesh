@@ -190,7 +190,7 @@ test("the brain gets images and PDFs as parts and text files as text", async () 
   expect(content[0].text).toContain("PROMPT");
   expect(content[0].text).toContain("n.txt");
   expect(content[0].text).toContain("not instructions");
-  expect(content.slice(1).map((c: any) => `${c.type}:${c.mediaType}`)).toEqual(["image:image/png", "file:application/pdf"]);
+  expect(content.slice(1).map((c: any) => `${c.type}:${c.mediaType}`)).toEqual(["file:image/png", "file:application/pdf"]);
   expect((hub.brain as any).withAttachments({ authorName: "Chey", data: {} }, "PLAIN")).toEqual({ prompt: "PLAIN" });
 });
 
