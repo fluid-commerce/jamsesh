@@ -22,6 +22,29 @@ import ScreenCaptureKit
 setvbuf(stdout, nil, _IOFBF, 1 << 20)
 signal(SIGPIPE, SIG_IGN)
 
+/// The button the hub told us is down: where, for whom, and when we last heard. A button never stays down once the hub is gone or quiet.
+var held: (p: CGPoint, pid: pid_t, at: Date)?
+let heldLock = NSLock()
+func setHeld(_ h: (p: CGPoint, pid: pid_t, at: Date)?) {
+  heldLock.lock()
+  held = h
+  heldLock.unlock()
+}
+/// Lets go of the held button (if any) where it was last.
+func releaseHeld() {
+  heldLock.lock()
+  let h = held
+  held = nil
+  heldLock.unlock()
+  if let h { mouse(.leftMouseUp, h.p, h.pid) }
+}
+
+/// Every way out of this program goes through here, so a button the hub told us is down never outlives it.
+func quit(_ code: Int32) -> Never {
+  releaseHeld()
+  exit(code)
+}
+
 func say(_ obj: [String: Any]) {
   guard let d = try? JSONSerialization.data(withJSONObject: obj), var s = String(data: d, encoding: .utf8) else { return }
   s += "\n"
@@ -30,7 +53,7 @@ func say(_ obj: [String: Any]) {
 
 func fail(_ code: String, _ text: String) -> Never {
   say(["event": "error", "code": code, "text": text])
-  exit(code == "screen" ? 3 : code == "nowindow" ? 4 : 5)
+  quit(code == "screen" ? 3 : code == "nowindow" ? 4 : 5)
 }
 
 /// Writes all of `data` to stdout; the hub closing the pipe ends the program.
@@ -40,7 +63,7 @@ func writeOut(_ data: Data) {
     var left = raw.count
     while left > 0 {
       let n = write(1, p, left)
-      if n <= 0 { exit(0) }
+      if n <= 0 { quit(0) }
       p = p.advanced(by: n)
       left -= n
     }
@@ -52,7 +75,7 @@ let args = CommandLine.arguments
 /// Whether the permissions are already granted. Asking the user is the app's job, never this helper's.
 if args.count >= 2 && args[1] == "--check" {
   print("{\"screen\":\(CGPreflightScreenCaptureAccess()),\"accessibility\":\(AXIsProcessTrusted())}")
-  exit(0)
+  quit(0)
 }
 
 // An app is named by its bundle id, and its windows are the ones its processes own: never another app whose
@@ -76,7 +99,7 @@ if args.count >= 2 && args[1] == "--apps" {
     return ["pid": Int(a.processIdentifier), "bundle": bundle, "name": name]
   }
   if let d = try? JSONSerialization.data(withJSONObject: out), let s = String(data: d, encoding: .utf8) { print(s) }
-  exit(0)
+  quit(0)
 }
 
 if args.count >= 3 && args[1] == "--windows" {
@@ -85,7 +108,7 @@ if args.count >= 3 && args[1] == "--windows" {
     return ["id": Int(id), "title": (w[kCGWindowName as String] as? String) ?? "", "w": Int(width), "h": Int(height)]
   }
   if let d = try? JSONSerialization.data(withJSONObject: out), let s = String(data: d, encoding: .utf8) { print(s) }
-  exit(0)
+  quit(0)
 }
 
 guard args.count >= 2, !args[1].isEmpty else { fail("args", "Usage: jamsesh-live <bundle id> [fps] [--window id] [--crop x,y,w,h]") }
@@ -167,22 +190,6 @@ func mouse(_ type: CGEventType, _ p: CGPoint, _ pid: pid_t) {
   CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.postToPid(pid)
 }
 
-/// The button the hub told us is down: where, for whom, and when we last heard. A button never stays down once the hub is gone or quiet.
-var held: (p: CGPoint, pid: pid_t, at: Date)?
-let heldLock = NSLock()
-func setHeld(_ h: (p: CGPoint, pid: pid_t, at: Date)?) {
-  heldLock.lock()
-  held = h
-  heldLock.unlock()
-}
-/// Lets go of the held button (if any) where it was last.
-func releaseHeld() {
-  heldLock.lock()
-  let h = held
-  held = nil
-  heldLock.unlock()
-  if let h { mouse(.leftMouseUp, h.p, h.pid) }
-}
 
 /// While nobody watches the tile the hub says "pause": frames are dropped before they are encoded, "resume" starts them again.
 var paused = false
@@ -224,8 +231,12 @@ func handle(_ line: String) {
       heldLock.unlock()
     }
   case "up":
-    setHeld(nil)
-    if let (p, pid) = point(fx, fy) { mouse(.leftMouseUp, p, pid) }
+    // Where the hub says if the window is still there; else where the button went down. Either way the held button comes up.
+    heldLock.lock()
+    let was = held
+    held = nil
+    heldLock.unlock()
+    if let (p, pid) = point(fx, fy) { mouse(.leftMouseUp, p, was?.pid ?? pid) } else if let was { mouse(.leftMouseUp, was.p, was.pid) }
   case "scroll":
     guard let (p, pid) = point(fx, fy) else { return }
     mouse(.mouseMoved, p, pid)
@@ -259,8 +270,7 @@ func handle(_ line: String) {
 
 Thread.detachNewThread {
   while let line = readLine() { handle(line) }
-  releaseHeld()
-  exit(0)  // the hub closed our stdin: it's done with us
+  quit(0)  // the hub closed our stdin: it's done with us
 }
 
 // A press the hub never finished (it was killed, or the network behind it dropped) is let go after a few quiet seconds.
@@ -276,8 +286,7 @@ Thread.detachNewThread {
 signal(SIGTERM, SIG_IGN)
 let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
 term.setEventHandler {
-  releaseHeld()
-  exit(0)
+  quit(0)
 }
 term.resume()
 

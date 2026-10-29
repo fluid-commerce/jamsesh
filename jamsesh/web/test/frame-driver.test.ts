@@ -150,3 +150,36 @@ test("a frame mounted before the hub first answered learns the key at its first 
     globalThis.fetch = realFetch;
   }
 });
+
+test("overlapping key asks that finish out of order never put an older key back", async () => {
+  const resolvers: ((r: Response) => void)[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((url: string) => {
+    if (url === "/api/pair/info") return Promise.resolve(Response.json({ hostId: "h" }));
+    return new Promise<Response>((res) => resolvers.push(res));
+  }) as typeof fetch;
+  try {
+    const older = refreshFrameKey();
+    const newer = refreshFrameKey();
+    await Bun.sleep(5);
+    expect(resolvers.length).toBe(2);
+    // The newer ask is answered first; the older one (from before the hub restarted) comes back last.
+    resolvers[1](Response.json({ key: "new-hub" }));
+    expect(await newer).toBe("new-hub");
+    resolvers[0](Response.json({ key: "old-hub" }));
+    expect(await older).toBe("new-hub");
+    const posted: any[] = [];
+    frameDriver({ src: "http://localhost:5173/", contentWindow: { postMessage: (m: unknown) => posted.push(m) } } as any)({ k: "move", lx: 0, ly: 0 }, "p1");
+    expect(posted.at(-1).key).toBe("new-hub");
+    // A late failure of an older ask doesn't throw away the newer key either.
+    const a = refreshFrameKey();
+    const b = refreshFrameKey();
+    await Bun.sleep(5);
+    resolvers[3](Response.json({ key: "third" }));
+    await b;
+    resolvers[2](new Response("no", { status: 502 }));
+    expect(await a).toBe("third");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

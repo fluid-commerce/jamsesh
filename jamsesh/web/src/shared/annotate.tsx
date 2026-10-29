@@ -815,7 +815,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       // The hub answers first, with the recording's id: Record is live only once the hub has one, and Stop names it.
       let id: string;
       try {
-        const started = await api<{ id?: string }>("/record/start", { deviceId: hub.deviceId, personId, t0, ...(screen ? { screen } : {}) }, undefined, { queue: false });
+        const started = await api<{ id?: string }>("/record/start", { deviceId: hub.deviceId, personId, ...(screen ? { screen } : {}) }, undefined, { queue: false });
         if (!started?.id) throw new Error("Couldn't start recording.");
         id = started.id;
       } catch (e) {
@@ -859,7 +859,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
       const res = await api<{ ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[]; queued?: boolean }>(
         "/record/stop",
-        { deviceId: hub.deviceId, personId, recordingId: cur.id, t1, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
+        { deviceId: hub.deviceId, personId, recordingId: cur.id, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
         undefined,
         { queue: false, timeoutMs: 15_000 },
       );
@@ -932,7 +932,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       recRef.current = { phase: "idle" };
       offDart.current?.();
       const send = (pointer: PointerMark[]) => {
-        const body = { deviceId: hub.deviceId, personId: who.current, recordingId: cur.id, t0: cur.t0, t1: hub.now(), pointer, ...(typed.current ? { text: typed.current } : {}) };
+        const body = { deviceId: hub.deviceId, personId: who.current, recordingId: cur.id, pointer, ...(typed.current ? { text: typed.current } : {}) };
         if (unloading) {
           fetch("/api/prompt-window", { method: "POST", keepalive: true, credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
         } else {

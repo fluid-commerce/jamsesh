@@ -404,6 +404,11 @@ test("a build's frame lets go of a held button and held keys when the driver lea
   expect(f.fired).toContain("mouseup b0 buttons0");
   expect(f.fired).toContain("keyup Shift");
   expect(f.fired.some((e) => e.startsWith("click"))).toBe(false);
+  // Every button the hub lets through (0 to 4, back and forward included) is let go, not only the first three.
+  for (const b of [1, 2, 3, 4]) await f.post({ k: "down", x: 0.5, y: 0.5, b });
+  f.fired.length = 0;
+  await f.post({ k: "leave" });
+  for (const b of [1, 2, 3, 4]) expect(f.fired.some((e) => e.startsWith(`mouseup b${b} `))).toBe(true);
   // A second leave has nothing left to release.
   f.fired.length = 0;
   await f.post({ k: "leave" });

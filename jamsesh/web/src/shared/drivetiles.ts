@@ -4,28 +4,44 @@ import { pageAt, readView, type CanvasView } from "./pointer";
 import { api } from "./hub";
 import type { DriveTarget, TileEvent } from "./driving";
 
-/** The session's frame key (only the host's big screen gets one): a build's frame takes input only with it. */
+/**
+ * The session's frame key (only the host's big screen gets one): a build's frame takes input only with it. Every ask is numbered and
+ * an answer is kept only if no later ask has been answered already, so a slow old answer can never put an old key back.
+ */
 let frameKey: string | null = null;
 let asking: Promise<unknown> | null = null;
+let issued = 0;
+let applied = 0;
+function ask(): Promise<void> {
+  const seq = ++issued;
+  const keep = (key: string | null) => {
+    if (seq < applied) return;
+    applied = seq;
+    frameKey = key;
+  };
+  return api<{ key: string }>("/drive/frame-key").then(
+    (r) => keep(typeof r?.key === "string" ? r.key : null),
+    () => keep(null),
+  );
+}
 function withKey(): string | null {
-  asking ??= api<{ key: string }>("/drive/frame-key")
-    .then((r) => (frameKey = typeof r?.key === "string" ? r.key : null))
-    .catch(() => (asking = null));
+  asking ??= ask().then(() => {
+    if (!frameKey) asking = null;
+  });
   return frameKey;
 }
 
 /**
  * Asks the hub for the frame key now, whether or not one was fetched before: a restarted hub has a new one, and the pages its proxy
- * serves carry the matching script. Returns the key, or null when the hub didn't answer (or this screen gets none).
+ * serves carry the matching script. Returns the key held once the answer is in (the newest answer, if several overlapped), or null
+ * when the hub didn't answer (or this screen gets none).
  */
 export async function refreshFrameKey(): Promise<string | null> {
-  try {
-    const r = await api<{ key: string }>("/drive/frame-key");
-    frameKey = typeof r?.key === "string" ? r.key : null;
-  } catch {
-    frameKey = null;
-  }
-  asking = frameKey ? Promise.resolve() : null;
+  const mine = ask();
+  asking = mine.then(() => {
+    if (!frameKey) asking = null;
+  });
+  await mine;
   return frameKey;
 }
 

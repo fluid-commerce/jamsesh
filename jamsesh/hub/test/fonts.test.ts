@@ -12,7 +12,7 @@ import { forbiddenCommand } from "../src/canvas/canvas";
 import { cardText, decodeBase64, FontService, MAX_TICKETS, MAX_TICKETS_PER_CALLER, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
-import { FONT_BODY_MAX, startHttp } from "../src/http";
+import { FONT_BODY_MAX, readBody, startHttp, TOO_LARGE } from "../src/http";
 import type { Agent } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -523,6 +523,37 @@ test("over HTTP: a lend body over the cap is refused before it is parsed, with o
   expect(sized.status).toBe(413);
   const chunked = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: as(danasMac), body: new ReadableStream({ start(c) { const bytes = new TextEncoder().encode(body); for (let i = 0; i < bytes.length; i += 1 << 20) c.enqueue(bytes.subarray(i, i + (1 << 20))); c.close(); } }), duplex: "half" } as any);
   expect([413, 431]).toContain(chunked.status); // Bun may answer a refused chunked upload itself
+});
+
+test("every kind of request body is counted against the cap as it streams: chunked multipart, raw bytes and JSON alike", async () => {
+  const big = new Uint8Array(FONT_BODY_MAX + (1 << 20));
+  const boundary = "----jamtest";
+  const head = new TextEncoder().encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="f.ttf"\r\nContent-Type: font/ttf\r\n\r\n`);
+  const tail = new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+  const multipart = new Uint8Array(head.length + big.length + tail.length);
+  multipart.set(head);
+  multipart.set(big, head.length);
+  multipart.set(tail, head.length + big.length);
+  let pulled = 0;
+  // No Content-Length (as when chunked), and the reader is told how much was taken.
+  const streamOf = (bytes: Uint8Array) =>
+    new ReadableStream<Uint8Array>({
+      pull(c) {
+        const next = bytes.subarray(pulled, pulled + (1 << 20));
+        pulled += next.length;
+        next.length ? c.enqueue(next) : c.close();
+      },
+    });
+  for (const [type, bytes] of [["multipart/form-data; boundary=" + boundary, multipart], ["application/octet-stream", big], ["application/json", big], ["image/png", big], ["audio/wav", big]] as const) {
+    pulled = 0;
+    const req = new Request("http://x/api/fonts/lend", { method: "POST", headers: { "content-type": type }, body: streamOf(bytes), duplex: "half" } as any);
+    expect(await readBody(req, FONT_BODY_MAX)).toBe(TOO_LARGE);
+    // It stopped reading just past the cap, not at the end of the body.
+    expect(pulled).toBeLessThanOrEqual(FONT_BODY_MAX + 4 * (1 << 20));
+  }
+  // Within the cap each kind is still read whole.
+  const ok = await readBody(new Request("http://x/", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: new Uint8Array([1, 2, 3]) }), FONT_BODY_MAX);
+  expect(ok.__raw).toEqual(new Uint8Array([1, 2, 3]));
 });
 
 test("a reply is read only up to its cap: a large Content-Length is refused unread, an endless body is cut off", async () => {

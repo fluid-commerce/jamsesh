@@ -574,10 +574,13 @@ test("on a locked screen a press by a driver who stopped driving is released whe
   s.drive("start", "main", maya.id);
   s.drive("together", "main", maya.id, sam.id);
   await hub.live.input(r.id, who(maya), { t: "down", x: 0.3, y: 0.3 });
-  s.drive("pass", "main", sam.id, sam.id);
-  // Maya is out; Sam's input first lets go of her press.
+  s.drive("pass", "main", maya.id, sam.id);
+  // Maya is out: the stage change itself lets her button go, before anyone sends anything.
+  expect((await sent()).map((m) => `${m.t} ${m.x},${m.y}`)).toEqual(["down 0.3,0.3", "up 0.3,0.3"]);
   expect(await hub.live.input(r.id, who(sam), { t: "move", x: 0.8, y: 0.8 })).toBeNull();
-  expect((await sent()).map((m) => `${m.t} ${m.x},${m.y}`)).toEqual(["down 0.3,0.3", "up 0.3,0.3", "move 0.8,0.8"]);
+  // Dropped from drivers by stopping, or the screen unlocking, also lets go.
+  await hub.live.input(r.id, who(sam), { t: "down", x: 0.5, y: 0.5 });
   s.unlockStage("main");
+  expect((await sent()).map((m) => m.t)).toEqual(["down", "up", "move", "down", "up"]);
   hub.live.stop(r.id);
 });

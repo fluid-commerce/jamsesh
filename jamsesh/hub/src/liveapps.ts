@@ -305,7 +305,7 @@ export class LiveApps {
             if (live.info.kind === "ios") continue;
             if (m.event === "window" && finite(m.w, m.h)) this.update(live, { width: m.w, height: m.h });
             else if (m.event === "error" && m.code === "accessibility") this.update(live, { canTap: false, note: String(m.text).slice(0, 200) });
-            else if (m.event === "error") this.update(live, { status: "gone", note: String(m.text).slice(0, 200) });
+            else if (m.event === "error") this.end(live, String(m.text).slice(0, 200));
           } catch {}
         }
       }
@@ -620,6 +620,15 @@ export class LiveApps {
       return !!sink;
     } catch {
       return false;
+    }
+  }
+
+  /** A held button whose person is no longer the one driving its tile (the screen's drivers or the tile's controller changed) comes up. */
+  syncHeld() {
+    for (const live of this.apps.values()) {
+      if (!live.held) continue;
+      const allowed = this.screenDriverIds(live.info.id) ?? (live.info.controller?.personId ? [live.info.controller.personId] : []);
+      if (!allowed.includes(live.held.by)) this.releaseHeld(live);
     }
   }
 

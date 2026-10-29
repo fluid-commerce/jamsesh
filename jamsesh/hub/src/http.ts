@@ -895,13 +895,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/prompt-window/start" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
     if (!ownDeviceOf(body.deviceId)) return bad("Record from your own window.", 403);
-    hub.promptStart(String(body.deviceId), Number(body.t0) || Date.now());
+    hub.promptStart(String(body.deviceId));
     return json({ ok: true });
   }
   if (path === "/prompt-window" && req.method === "POST") {
-    if (!body?.deviceId || !body?.t0 || !body?.t1) return bad("deviceId, t0 and t1 are required");
+    if (!body?.deviceId) return bad("deviceId is required");
     if (!ownDeviceOf(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
-    return json(await hub.promptWindow({ deviceId: body.deviceId, recordingId: typeof body.recordingId === "string" ? body.recordingId : undefined, personId: body.personId ?? null, t0: Number(body.t0), t1: Number(body.t1), pointer: body.pointer ?? [], typed: body.text }));
+    const r = await hub.promptWindow({ deviceId: body.deviceId, recordingId: typeof body.recordingId === "string" ? body.recordingId : undefined, personId: body.personId ?? null, pointer: body.pointer ?? [], typed: body.text });
+    return r.status ? bad(r.reason ?? "That recording has already ended.", r.status) : json(r);
   }
 
   // ---- Record: talk and point, review the notes, send them to the agents that own the work ----
@@ -912,13 +913,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (path === "/record/start") {
       if (!body?.deviceId) return bad("deviceId is required");
       if (!ownDevice(body.deviceId)) return bad("Record from your own window.", 403);
-      const r = hub.recordStart(String(body.deviceId), actor().id, Number(body.t0) || Date.now(), typeof body.screen === "string" ? body.screen : null);
+      const r = hub.recordStart(String(body.deviceId), actor().id, undefined, typeof body.screen === "string" ? body.screen : null);
       return r.ok ? json(r) : bad(r.reason, r.status);
     }
     if (path === "/record/stop") {
-      if (!body?.deviceId || !body?.recordingId || !body?.t1) return bad("deviceId, recordingId and t1 are required");
+      if (!body?.deviceId || !body?.recordingId) return bad("deviceId and recordingId are required");
       if (!ownDevice(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
-      const r = await hub.recordStop({ deviceId: String(body.deviceId), recordingId: String(body.recordingId), caller, personId: actor().id, t1: Number(body.t1), pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
+      const r = await hub.recordStop({ deviceId: String(body.deviceId), recordingId: String(body.recordingId), caller, personId: actor().id, pointer: body.pointer ?? [], typed: typeof body.text === "string" ? body.text : undefined });
       return r.ok ? json(r) : r.status ? bad(r.reason, r.status) : json(r);
     }
     if (path === "/record/send") {
@@ -1120,13 +1121,13 @@ function originOf(req: Request, url: URL) {
 
 /** The most a /api/fonts request may carry: a family's files (32 MB) as base64, plus the envelope. */
 export const FONT_BODY_MAX = 45 * 1024 * 1024;
-const TOO_LARGE = Symbol("too large");
+export const TOO_LARGE = Symbol("too large");
 
-/** The text of a request body, read in chunks and abandoned past `max` bytes (null: over). */
-async function readCapped(req: Request, max: number): Promise<string | null> {
-  if (max === Infinity) return req.text();
+/** A request body's bytes, read in chunks and abandoned past `max` bytes (null: over). Every kind of body is read through here. */
+async function readCapped(req: Request, max: number): Promise<Uint8Array | null> {
+  if (max === Infinity) return new Uint8Array(await req.arrayBuffer());
   const reader = req.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return new Uint8Array();
   const chunks: Uint8Array[] = [];
   let n = 0;
   for (;;) {
@@ -1136,23 +1137,28 @@ async function readCapped(req: Request, max: number): Promise<string | null> {
     if (n > max) return (await reader.cancel().catch(() => {}), null);
     chunks.push(value);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
 }
 
-async function readBody(req: Request, max = Infinity): Promise<any> {
+export async function readBody(req: Request, max = Infinity): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) {
-    const text = await readCapped(req, max);
-    if (text === null) return TOO_LARGE;
+  const kind = type.includes("application/json") ? "json" : type.includes("multipart/form-data") ? "form" : type.includes("audio/") || type.includes("image/") || type.includes("octet-stream") ? "raw" : null;
+  if (!kind) return null;
+  const bytes = await readCapped(req, max);
+  if (bytes === null) return TOO_LARGE;
+  if (kind === "raw") return { __raw: bytes };
+  if (kind === "form") {
     try {
-      return JSON.parse(text);
+      return { __form: await new Response(bytes as unknown as BodyInit, { headers: { "content-type": type } }).formData() };
     } catch {
       return {};
     }
   }
-  if (type.includes("multipart/form-data")) return { __form: await req.formData() };
-  if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
-  return null;
+  try {
+    return JSON.parse(Buffer.from(bytes).toString("utf8"));
+  } catch {
+    return {};
+  }
 }
 
 function file(p: string, root: string, cache = false): Response {

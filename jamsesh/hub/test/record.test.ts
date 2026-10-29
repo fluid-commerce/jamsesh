@@ -6,13 +6,17 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { Hub } from "../src/hub";
-import { startHttp } from "../src/http";
+import type { Hub as HubType } from "../src/hub";
 import { AFTER_MS, alignNotes, BEFORE_MS, describeNote, LEAD_MS } from "../src/record";
 import type { RecordMark, RecordNote, Utterance } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
 const dir = mkdtempSync(join(tmpdir(), "jam-record-"));
+// The hub reads its home folder when it loads: a throwaway one, so renders, uploads and links the tests make never touch a real session.
+process.env.JAMSESH_HOME = join(dir, "home");
+const { Hub } = await import("../src/hub");
+const { startHttp } = await import("../src/http");
+type Hub = HubType;
 const hubs: Hub[] = [];
 const servers: ReturnType<typeof startHttp>[] = [];
 afterAll(() => {
@@ -129,11 +133,15 @@ function room() {
     const t0 = Date.now() - 1000;
     const started = hub.recordStart("mayaLaptop", personId, t0);
     if (!started.ok) throw new Error(started.reason);
-    const r = await hub.recordStop({ deviceId: "mayaLaptop", recordingId: started.id, caller: "host", personId, t1: Date.now(), pointer: [], typed: "a note" });
+    const r = await hub.recordStop({ deviceId: "mayaLaptop", recordingId: started.id, caller: "host", personId, pointer: [], typed: "a note" });
     if (!r.ok) throw new Error(r.reason);
     return r.recordingId;
   };
-  return { hub, s, maya, ben, reg, post, server, stopped };
+  // The hub's clock can be set, so a recording's window can sit around speech that was injected at known times.
+  const tick: { t: number | null } = { t: null };
+  hub.clock = () => tick.t ?? Date.now();
+  const at = (t: number | null) => void (tick.t = t);
+  return { hub, s, maya, ben, reg, post, server, stopped, at };
 }
 
 let n = 0;
@@ -167,10 +175,12 @@ const rid = (r: ReturnType<typeof room>, device: string): string => (r.hub as an
 type StopOk = { ok: true; recordingId: string; notes: RecordNote[] };
 async function record(r: ReturnType<typeof room>, speak: (t0: number) => void, pointer: (t0: number) => RecordMark[], extra: Record<string, unknown> = {}) {
   const t0 = Date.now() - 8000;
-  const start = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, ...extra });
+  r.at(t0);
+  const start = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, ...extra });
   expect(start.status).toBe(200);
   const recordingId = ((await start.json()) as { id: string }).id;
   speak(t0);
+  r.at(t0 + 10_000);
   const stop = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId, personId: r.maya.id, t1: t0 + 10_000, pointer: pointer(t0), ...extra });
   return { t0, res: stop, body: (await stop.clone().json()) as StopOk };
 }
@@ -331,7 +341,7 @@ test("another person's window can't stop my recording", async () => {
   const res = await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: rid(r, "mayaLaptop"), personId: r.ben.id, t1: t0 + 3000, pointer: [] });
   expect(res.status).toBe(403);
   expect(r.s.recordings().length).toBe(1);
-  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 1 , pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
 }, 30_000);
 
 // ---------- the big screen ----------
@@ -340,7 +350,8 @@ test("on the big screen: Record takes a free screen's lock and gives it back; a 
   const r = room();
   const t0 = Date.now() - 5000;
   expect(r.s.lockOf("main")).toBeNull();
-  const ok = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, screen: "main" });
+  r.at(t0);
+  const ok = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, screen: "main" });
   expect(ok.status).toBe(200);
   expect(r.s.lockOf("main")?.personId).toBe(r.maya.id);
   expect(r.s.recordings()[0]).toMatchObject({ screenId: "main", personName: "Maya" });
@@ -352,7 +363,8 @@ test("on the big screen: Record takes a free screen's lock and gives it back; a 
   expect(r.s.recordings().length).toBe(1);
   // Stopping lists the notes (marked with the screen) and releases the lock it took.
   line(r.hub, "move the logo to the left", r.maya.id, "mayaLaptop", t0 + 500);
-  const stop = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: rid(r, "mayaLaptop"), personId: r.maya.id, t1: t0 + 4000, pointer: [{ t: t0 + 600, kind: "click", x: 0.1, y: 0.1, target: { kind: "artifact", ref: "x", label: "Logo" } }], screen: "main" })).json()) as StopOk;
+  r.at(t0 + 4000);
+  const stop = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: rid(r, "mayaLaptop"), personId: r.maya.id, pointer: [{ t: t0 + 600, kind: "click", x: 0.1, y: 0.1, target: { kind: "artifact", ref: "x", label: "Logo" } }], screen: "main" })).json()) as StopOk;
   expect(stop.notes[0]).toMatchObject({ screenId: "main", pin: { x: 0.1 } });
   expect(r.s.lockOf("main")).toBeNull();
   expect(r.s.recordings()).toEqual([]);
@@ -363,7 +375,7 @@ test("a screen the person already holds stays held after Record; an unknown scre
   const t0 = Date.now() - 3000;
   r.s.setStage({ mode: "spotlight", items: ["a"] }, "Maya", "main", { person: { id: r.maya.id, name: "Maya" } });
   expect((await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, screen: "main" })).status).toBe(200);
-  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 100, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
   expect(r.s.lockOf("main")?.personId).toBe(r.maya.id);
   expect((await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0, screen: "screen-9" })).status).toBe(404);
   expect(r.hub.recordStart("x", null, t0, "main")).toMatchObject({ ok: false, status: 403 });
@@ -382,10 +394,10 @@ test("driving together: each driver is recorded, and the lock is let go only aft
   line(r.hub, "ben wants the footer shorter", r.ben.id, "benLaptop", t0 + 600);
   const mt = { kind: "artifact" as const, ref: "h", label: "Header" };
   const bt = { kind: "artifact" as const, ref: "f", label: "Footer" };
-  const m = await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 4000, pointer: [{ t: t0 + 550, kind: "click", x: 0.5, y: 0.1, target: mt }] });
+  const m = await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [{ t: t0 + 550, kind: "click", x: 0.5, y: 0.1, target: mt }] });
   // Ben is still recording: the screen stays locked.
   expect(r.s.lockOf("main")).not.toBeNull();
-  const b = await r.hub.recordStop({ recordingId: rid(r, "benLaptop"), caller: "host", deviceId: "benLaptop", personId: r.ben.id, t1: t0 + 4000, pointer: [{ t: t0 + 650, kind: "click", x: 0.5, y: 0.9, target: bt }] });
+  const b = await r.hub.recordStop({ recordingId: rid(r, "benLaptop"), caller: "host", deviceId: "benLaptop", personId: r.ben.id, pointer: [{ t: t0 + 650, kind: "click", x: 0.5, y: 0.9, target: bt }] });
   expect(m.ok && b.ok).toBe(true);
   if (m.ok && b.ok) {
     expect(m.notes.map((x) => x.text)).toEqual(["maya wants the header taller"]);
@@ -402,7 +414,7 @@ test("a new Record on the same device replaces a recording whose Stop never came
   r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main");
   r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 10, "main");
   expect(r.s.recordings().length).toBe(1);
-  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 }, 30_000);
 
@@ -440,10 +452,10 @@ test("a lock refresh while recording never cuts off drivers, and Record taking t
   r.s.touchLock("main");
   expect(r.s.driversOf("main")).toEqual([r.maya.id, r.ben.id]);
   expect(r.hub.recordStart("benLaptop", r.ben.id, t0, "main").ok).toBe(true);
-  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
   // Ben is still recording and still driving.
   expect(r.s.driversOf("main")).toEqual([r.maya.id, r.ben.id]);
-  await r.hub.recordStop({ recordingId: rid(r, "benLaptop"), caller: "host", deviceId: "benLaptop", personId: r.ben.id, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "benLaptop"), caller: "host", deviceId: "benLaptop", personId: r.ben.id, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 }, 30_000);
 
@@ -563,7 +575,7 @@ test("a recording replacing its own keeps the screen locked; one that ends gives
   // The replacement is recording a locked screen, still Maya's.
   expect(r.s.lockOf("main")?.personId).toBe(r.maya.id);
   expect(r.s.recordings().length).toBe(1);
-  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
   expect(r.s.lockOf("main")).toBeNull();
 
   // Maya records the free screen; it is unlocked while she records, and Ben puts something up.
@@ -573,7 +585,7 @@ test("a recording replacing its own keeps the screen locked; one that ends gives
   const bens = r.s.lockOf("main");
   expect(bens?.personId).toBe(r.ben.id);
   // Her recording ending (stopped, abandoned or swept) leaves Ben's lock alone.
-  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, t1: t0 + 10, pointer: [] });
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
   expect(r.s.lockOf("main")).toEqual(bens);
   r.s.unlockStage("main");
   expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
@@ -627,13 +639,13 @@ test("a Stop still gathering words doesn't end the recording that started after 
   const t0 = Date.now() - 3000;
   const first = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
   expect(first.ok).toBe(true);
-  const stopping = r.hub.recordStop({ recordingId: (first as any).id, deviceId: "mayaLaptop", caller: "host", personId: r.maya.id, t1: t0 + 10, pointer: [], typed: "first" });
+  const stopping = r.hub.recordStop({ recordingId: (first as any).id, deviceId: "mayaLaptop", caller: "host", personId: r.maya.id, pointer: [], typed: "first" });
   const second = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 20);
   expect(second.ok).toBe(true);
   await stopping;
   expect(r.s.recordings().map((x) => x.id)).toEqual([(second as any).id]);
   // The same for the older prompt window.
-  const prompting = r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, t0, t1: t0 + 10, pointer: [], typed: "x" });
+  const prompting = r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "x" });
   const third = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 30);
   await prompting;
   expect(r.s.recordings().map((x) => x.id)).toEqual([(third as any).id]);
@@ -700,6 +712,48 @@ test("an old prompt window naming a replaced recording ends nothing", async () =
   const a = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
   const b = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 10);
   if (!a.ok || !b.ok) throw new Error("start");
-  await r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, t0, t1: t0 + 10, pointer: [], typed: "x" });
+  await r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "x" });
   expect(r.s.recordings().map((x) => x.id)).toEqual([b.id]);
 }, 30_000);
+
+test("a stale prompt-window for recording A closes nothing of B: not B's recording, not B's speech window", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok || !b.ok) throw new Error("start");
+  const stale = await r.post("/prompt-window", { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, text: "late" });
+  expect(stale.status).toBe(409);
+  expect(r.s.recordings().map((x) => x.id)).toEqual([b.id]);
+  const win = (r.hub as any).promptMode.get("mayaLaptop");
+  expect(win).toBeTruthy();
+  expect(win.t1).toBeUndefined();
+  expect(win.rec).toBe(b.id);
+  // An id-less close can't take a recording's window either; only the older start call's own window.
+  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", personId: r.maya.id, text: "x" })).status).toBe(409);
+  expect((r.hub as any).promptMode.get("mayaLaptop")).toBe(win);
+  // B's own id closes it.
+  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", recordingId: b.id, personId: r.maya.id, text: "ok" })).status).toBe(200);
+  expect(r.s.recordings()).toEqual([]);
+}, 30_000);
+
+test("the recording window is the hub's clock: a caller's start or stop time changes nothing, and adjacent recordings don't share speech", async () => {
+  const r = room();
+  const base = Date.now() - 60_000;
+  // Speech from before Start, and from after Stop, belongs to neither recording.
+  r.at(base);
+  line(r.hub, "before the recording", r.maya.id, "mayaLaptop", base - 3000);
+  const a = (await (await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, t0: base - 3_600_000 })).json()) as { id: string };
+  line(r.hub, "inside A", r.maya.id, "mayaLaptop", base + 1000);
+  r.at(base + 5000);
+  line(r.hub, "after A stopped", r.maya.id, "mayaLaptop", base + 9000);
+  const stopA = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, t0: 1, t1: base + 3_600_000, pointer: [] })).json()) as StopOk;
+  expect(stopA.notes.map((n) => n.text)).toEqual(["inside A"]);
+  // B starts later; a Stop that claims a far-future end doesn't pull in anything after the hub's own now.
+  r.at(base + 8000);
+  const b = (await (await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id })).json()) as { id: string };
+  line(r.hub, "later than now", r.maya.id, "mayaLaptop", base + 40_000);
+  r.at(base + 12_000);
+  const stopB = (await (await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: b.id, personId: r.maya.id, t1: base + 3_600_000, pointer: [{ t: base + 1_000_000, kind: "click", x: 0.5, y: 0.5, target: { kind: "artifact", ref: "a", label: "A" } }] })).json()) as StopOk;
+  expect(stopB.notes.map((n) => n.text)).toEqual(["after A stopped"]);
+  expect(stopB.notes.every((n) => !n.pin)).toBe(true);
+}, 60_000);

@@ -45,7 +45,7 @@ if(step)scroller(t,step[0],step[1]).scrollBy({left:step[0],top:step[1],behavior:
 if(e.key==='Home'||e.key==='End')(document.scrollingElement||document.documentElement).scrollTo({top:e.key==='Home'?0:1e9,behavior:'instant'});
 }
 function kev(t,type,k,h){t.dispatchEvent(new KeyboardEvent(type,{key:k,code:h.code,bubbles:true,cancelable:true,composed:true,shiftKey:!!h.mods.shift,ctrlKey:!!h.mods.ctrl,altKey:!!h.mods.alt,metaKey:!!h.mods.meta}))}
-function rel(w){var s=S[w];if(!s)return;var p=pt({x:s.x,y:s.y});for(var b=0;b<3;b++)if(s.b&(1<<b)){s.b&=~(1<<b);fire(p.el,'pointerup',opts(p,b));fire(p.el,'mouseup',opts(p,b))}
+function rel(w){var s=S[w];if(!s)return;var p=pt({x:s.x,y:s.y});for(var b=0;b<5;b++)if(s.b&(1<<b)){s.b&=~(1<<b);fire(p.el,'pointerup',opts(p,b));fire(p.el,'mouseup',opts(p,b))}
 s.el=null;var a=document.activeElement&&document.activeElement!==document.body?document.activeElement:document.body;for(var k in s.k)kev(a,'keyup',k,s.k[k]);s.k={}}
 function arm(){clearTimeout(tm);var held=false;for(var w in S){var s=S[w];if(s.b||Object.keys(s.k).length)held=true}if(held)tm=setTimeout(function(){for(var w in S)rel(w)},8000)}
 function apply(e,w){

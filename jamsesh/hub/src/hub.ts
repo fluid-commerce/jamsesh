@@ -71,6 +71,15 @@ const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command
 
 type RecordSendResult = { ok: true; sent: { agentId: string; agentName: string; notes: number; directiveId: string }[]; brain: number; pins: string[] } | { ok: false; reason: string; status?: number };
 
+/** A recording laptop's open window: when it started (hub clock), when Stop closed it, and the recording (if any) it belongs to. */
+interface PromptWindow {
+  t0: number;
+  t1?: number;
+  max: number;
+  timer?: ReturnType<typeof setTimeout>;
+  rec?: string;
+}
+
 export class Hub {
   store: Store;
   session: Session;
@@ -112,6 +121,7 @@ export class Hub {
     this.live.pickSim = (d) => this.host.pickSim(d);
     this.live.log = (text) => this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text });
     this.session.liveApps = () => this.live.list();
+    this.session.onStageCommit = () => this.live.syncHeld();
     // A tile on a locked big screen is driven by that screen's drivers (6.1).
     this.live.screenFor = (appId) => {
       const s = this.session;
@@ -236,22 +246,25 @@ export class Hub {
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
-  private promptMode = new Map<string, { t0: number; t1?: number; max: number; timer?: ReturnType<typeof setTimeout> }>();
+  private promptMode = new Map<string, PromptWindow>();
+  /** The hub's own clock: every recording window is bounded by it, never by a time a caller sent (tests move it). */
+  clock: () => number = () => Date.now();
   /** A prompt window stays open this long at most (SPEC 11.3). */
   static PROMPT_MAX_MS = 2 * 60_000;
 
-  promptStart(deviceId: string, t0: number, max = Hub.PROMPT_MAX_MS) {
+  promptStart(deviceId: string, t0 = this.clock(), max = Hub.PROMPT_MAX_MS): PromptWindow {
     // A new recording on a laptop whose last one never got its Stop: that one's held words go to the room.
     this.releasePrompt(deviceId);
-    const w: { t0: number; t1?: number; max: number; timer?: ReturnType<typeof setTimeout> } = { t0, max };
+    const w: PromptWindow = { t0, max };
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
     w.timer = setTimeout(() => this.releasePrompt(deviceId, w), max + 1000);
     w.timer.unref?.();
     this.promptMode.set(deviceId, w);
+    return w;
   }
 
   /** Closes a window that never got Stop and hands what it held back to the room as ordinary speech. */
-  private releasePrompt(deviceId: string, only?: { t0: number; t1?: number; max: number }) {
+  private releasePrompt(deviceId: string, only?: PromptWindow) {
     const w = this.promptMode.get(deviceId);
     if (!w || (only && w !== only) || w.t1 !== undefined) return;
     clearTimeout(w.timer);
@@ -331,13 +344,12 @@ export class Hub {
   }
 
   /** What this device heard in a closed recording window, once the last words are transcribed (about 7 s at most). */
-  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }): Promise<Utterance[]> {
+  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }, open: PromptWindow | undefined): Promise<Utterance[]> {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
     // usually the one that is, because Stop lands right after it was said.
     // Stop was pressed: the window ends here, even while its last words are still being transcribed.
-    const open = this.promptMode.get(w.deviceId);
     if (open) open.t1 = w.t1;
     // SPEC 11.3: answer within about 7 s, before the client gives up waiting.
     // Words still in transcription after that reach the feed as ordinary room speech (the window is closed by then).
@@ -365,13 +377,21 @@ export class Hub {
    * Record-to-prompt finished: everything this device heard in the window, plus where
    * the person pointed while talking, goes to the brain as one prompt.
    */
-  async promptWindow(w: { deviceId: string; recordingId?: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+  async promptWindow(w: { deviceId: string; recordingId?: string; personId: string | null; pointer: PointerMark[]; typed?: string }): Promise<{ ok: boolean; reason?: string; status?: number; eventId?: number; text?: string; pointed?: string[] }> {
     const s = this.session;
-    // The recording this call belongs to: one started while the words were being gathered is not ended by it.
-    const cur = this.recs.get(w.deviceId);
-    const rec = w.recordingId && cur?.id !== w.recordingId ? undefined : cur;
-    const lines = await this.windowLines(w);
-    this.recordEnd(w.deviceId, rec ?? null);
+    // A prompt window is closed by the recording it belongs to, named by id: an id that is no longer the device's current recording
+    // closes nothing. Without an id, only a window opened by the older start call (no recording) can be closed.
+    const open = this.promptMode.get(w.deviceId);
+    const rec = this.recs.get(w.deviceId);
+    if (w.recordingId) {
+      if (!rec || rec.id !== w.recordingId || open?.rec !== rec.id || rec.stopping) return { ok: false, reason: "That recording has already ended.", status: 409 };
+      rec.stopping = true;
+    } else if (!open || open.rec || open.t1 !== undefined) return { ok: false, reason: "There is no recording to stop.", status: 409 };
+    const t0 = open.t0;
+    const t1 = this.clock();
+    const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open);
+    if (rec && w.recordingId) this.recordEnd(w.deviceId, rec);
+    w = { ...w, pointer: this.inWindow(w.pointer, t0, t1) };
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
     const marks = describePointer(w.pointer, lines);
@@ -387,7 +407,7 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      data: { direct: true, recorded: true, saidAt: t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
     });
     // One spoken line: it can be relabelled from the prompt, like any line in the feed.
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
@@ -421,7 +441,7 @@ export class Hub {
    * recording there ends. A device's earlier recording whose Stop never came ends first, but only the same person's: the caller has
    * already shown the device is its window's.
    */
-  recordStart(deviceId: string, personId: string | null, t0: number, screen?: string | null): { ok: true; id: string } | { ok: false; reason: string; status: number } {
+  recordStart(deviceId: string, personId: string | null, t0 = this.clock(), screen?: string | null): { ok: true; id: string } | { ok: false; reason: string; status: number } {
     const s = this.session;
     const person = s.person(personId);
     const earlier = this.recs.get(deviceId);
@@ -452,7 +472,8 @@ export class Hub {
       }
     }
     const id = newId("rec");
-    this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
+    const prompt = this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
+    prompt.rec = id;
     const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, t0, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0 };
     // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
     (rec.cap = setTimeout(() => this.abandonRecording(deviceId, rec), Hub.RECORD_MAX_MS + 1000)).unref?.();
@@ -494,8 +515,13 @@ export class Hub {
     if (cur && cur.since === rec.lock.since && cur.personId === rec.lock.personId) this.session.unlockStage(rec.screenId);
   }
 
+  /** The pointer moments that fall inside a window the hub opened (a little slack either side for the pointer's own clock). */
+  private inWindow<T extends { t: number }>(marks: T[], t0: number, t1: number): T[] {
+    return (Array.isArray(marks) ? marks : []).filter((m) => Number.isFinite(m?.t) && m.t >= t0 - 1000 && m.t <= t1 + 1000);
+  }
+
   /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
-  async recordStop(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; t1: number; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
+  async recordStop(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
     const s = this.session;
     // A Stop names the recording it ends. One that arrives after that recording ended (a lost reply, a replacement Start) ends nothing.
     const rec = this.recs.get(w.deviceId);
@@ -506,11 +532,12 @@ export class Hub {
     const person = s.person(w.personId ?? rec.personId);
     // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
     const t0 = rec.t0;
-    const t1 = Number.isFinite(w.t1) ? Math.max(w.t1, t0) : Date.now();
-    const lines = await this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 });
+    const t1 = this.clock();
+    const open = this.promptMode.get(w.deviceId);
+    const lines = await this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined);
     // Only the recording this Stop belongs to: a Start that came in while the words were gathered stays.
     this.recordEnd(w.deviceId, rec);
-    const marks = (Array.isArray(w.pointer) ? w.pointer : []).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
+    const marks = this.inWindow(Array.isArray(w.pointer) ? w.pointer : [], t0, t1).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
     const notes = alignNotes(lines, marks, { screenId: rec.screenId });
     const typed = w.typed?.trim();
     if (typed) notes.unshift({ id: "typed", text: typed, t0, t1: t0, personId: person?.id ?? null, pin: null, ...(rec.screenId ? { screenId: rec.screenId } : {}) });
