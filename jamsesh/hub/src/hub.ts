@@ -272,6 +272,7 @@ export class Hub {
     // and finishes; (4) the brain triages what it heard, takes nothing new, and its pass finishes. Only then does it stop, and the
     // local whisper after it. A step that overruns the deadline is given up on: what it adds afterwards is refused.
     this.closing = true;
+    this.net.close(); // no certificate is issued or router mapped from here on
     this.session.timers.stop(); // no timer of the room fires from here on: none can write past the seal
     this.autosave.stop();
     this.keeper.stop();

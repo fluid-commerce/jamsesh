@@ -192,12 +192,13 @@ export function commitPaths(dir: string, message: string, paths: string[]): bool
  * sides of a move to the archive (a deletion and a new file). Only what git says changed, so the list stays as long as the
  * change and not as long as the archive; a person's own files there are not sources and are never named.
  */
-export function rawPaths(dir: string): string[] {
+export function rawPaths(dir: string): string[] | null {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
   const out = new Set<string>();
   const own = (f: string) => /^raw\/(archive\/)?[\w-]+\.md$/.test(f) && isSourceId(f.replace(/^raw\/(archive\/)?/, "").slice(0, -3));
   try {
     const r = Bun.spawnSync(["git", "status", "--porcelain=v1", "-z", "-uall", "--", "raw"], { cwd: dir, stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    if (r.exitCode !== 0) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
     const parts = r.stdout.toString().split("\0");
     for (let i = 0; i < parts.length; i++) {
       const e = parts[i];
@@ -208,7 +209,9 @@ export function rawPaths(dir: string): string[] {
         if (own(parts[i] ?? "")) out.add(parts[i]);
       }
     }
-  } catch {}
+  } catch {
+    return null;
+  }
   return [...out];
 }
 
@@ -621,7 +624,7 @@ export interface WikiState {
   /** Per session: an event too long for one source, and how far into it the sources written so far reach. */
   partial?: Record<string, { id: number; off: number }>;
   /** Sources that couldn't be written when they came in (a saved fact), to try again. */
-  queued?: { kind: SourceKind; title: string; text: string; by: string }[];
+  queued?: { kind: SourceKind; title: string; text: string; by: string; /** The source's id, fixed when queued, so a retry (or a restart after the source landed but the queue didn't save) finds it instead of making another. */ id?: string }[];
   /** Existing pages the model asked to change without having been shown them whole: the next ingest shows these first. */
   need?: string[];
   /** Each page as the wiki last knew it (its hash): a page that differs was changed by hand in the vault. Absent until the first look, which only records. */
@@ -655,7 +658,7 @@ function parseState(j: unknown): WikiState {
   const reports = recOf(j.reports, isNat);
   const partial = recOf(j.partial, (x): x is { id: number; off: number } => isRec(x) && isNat(x.id) && isNat(x.off));
   const queued = j.queued;
-  if (queued !== undefined && !(Array.isArray(queued) && queued.every((q) => isRec(q) && KINDS.includes(q.kind as string) && typeof q.title === "string" && typeof q.text === "string" && typeof q.by === "string"))) throw new Error("bad queue");
+  if (queued !== undefined && !(Array.isArray(queued) && queued.every((q) => isRec(q) && KINDS.includes(q.kind as string) && typeof q.title === "string" && typeof q.text === "string" && typeof q.by === "string" && (q.id === undefined || (typeof q.id === "string" && isSourceId(q.id)))))) throw new Error("bad queue");
   // A state written before the file time was dropped still carries it: read, then left out.
   const seenRaw = recOf(j.seen, (x): x is { rev: string } => isRec(x) && typeof x.rev === "string" && (x.mtime === undefined || isNat(x.mtime)));
   const seen = seenRaw && Object.fromEntries(Object.entries(seenRaw).map(([k, v]) => [k, { rev: v.rev }]));

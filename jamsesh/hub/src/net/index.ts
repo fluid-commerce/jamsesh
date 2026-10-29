@@ -86,8 +86,20 @@ export class Network {
     return this.cfg ? parseDomain(this.cfg.domain) : null;
   }
 
+  /** The room is closing: nothing here starts, saves or maps from now on (stop() still takes the router mapping down). */
+  private closed = false;
+
+  close() {
+    this.closed = true;
+    this.stopUpdater?.();
+    this.stopUpdater = undefined;
+    if (this.renewTimer) clearInterval(this.renewTimer);
+    this.renewTimer = undefined;
+  }
+
   // ---- lifecycle ----
   async start() {
+    if (this.closed) return;
     const d = this.domain();
     if (!this.cfg?.enabled || !d) return;
     this.stopUpdater?.();
@@ -105,6 +117,7 @@ export class Network {
   /** A first certificate often fails while DNS settles: try again after 2, 5, then 15 minutes. */
   private async certWithRetry(attempt = 0) {
     await this.ensureCert();
+    if (this.closed) return;
     const delays = [2, 5, 15];
     if (this.st.cert?.state !== "ok" && attempt < delays.length) {
       const t = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000);
@@ -148,6 +161,7 @@ export class Network {
 
   /** Issues (or renews) whatever is missing or within 30 days of expiry. Concurrent calls share one run. */
   ensureCert(force = false): Promise<void> {
+    if (this.closed) return Promise.resolve();
     if (this.issuing) return this.issuing;
     const d = this.domain();
     if (!d || !this.cfg) return Promise.resolve();
@@ -164,7 +178,9 @@ export class Network {
     this.issuing = (async () => {
       try {
         for (const kind of todo) {
+          if (this.closed) break;
           const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.fetchFn, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          if (this.closed) break; // issued as the room closed: not kept
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };
           this.certChanged.forEach((cb) => cb());
@@ -183,12 +199,14 @@ export class Network {
   // ---- router ----
   async openRouter() {
     const c = this.cfg;
-    if (!c) return;
+    if (!c || this.closed) return;
     this.st.router = { state: "working", method: "none", externalPort: c.externalPort, message: "Asking your router to open the port…" };
     const lan = lanIpv4();
     const ip = await lookupIp(this.fetchFn, this.st.publicIp);
+    if (this.closed) return;
     this.st.publicIp ??= ip;
     const r = await this.mapper.map(c.externalPort, c.internalPort, lan, ip);
+    if (this.closed) return void (await this.mapper.unmap()); // mapped as the room closed: taken down again
     this.st.router = { ...r, state: "done" };
   }
 

@@ -168,7 +168,7 @@ export function projectRoot(dir: string, trusted?: string): string {
   return real;
 }
 
-type Queued = { kind: SourceKind; title: string; text: string; by: string };
+type Queued = { kind: SourceKind; title: string; text: string; by: string; id?: string };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -247,7 +247,8 @@ export class WikiService {
     this.catchUpLog();
     appendLog(this.dir, message, pages, Date.now(), key);
     rebuildIndex(this.dir);
-    commitPaths(this.dir, message, [...pages.map((p) => `wiki/${p}.md`), "index.md", "log.md", ...rawPaths(this.dir)]);
+    const raw = rawPaths(this.dir);
+    if (raw) commitPaths(this.dir, message, [...pages.map((p) => `wiki/${p}.md`), "index.md", "log.md", ...raw]); // git couldn't list the sources: no half commit; the next change commits it
   }
 
   // ---- sources ----
@@ -300,8 +301,9 @@ export class WikiService {
    */
   private keep(q: Queued): Source | null {
     this.drainQueue();
+    q = { ...q, id: q.id ?? `${today()}_queued-${hashOf(q.title + q.text).slice(0, 8)}-${Date.now().toString(36)}` };
     try {
-      return this.addSource(q.kind, q.title, q.text, q.by);
+      return this.addSource(q.kind, q.title, q.text, q.by, { id: q.id });
     } catch (e) {
       console.error(`wiki: couldn't save "${q.title}" (${errText(e)}); it will be tried again.`);
       this.queue.push(q);
@@ -316,7 +318,7 @@ export class WikiService {
     let n = 0;
     while (this.queue.length) {
       try {
-        this.addSource(this.queue[0].kind, this.queue[0].title, this.queue[0].text, this.queue[0].by);
+        this.addSource(this.queue[0].kind, this.queue[0].title, this.queue[0].text, this.queue[0].by, this.queue[0].id ? { id: this.queue[0].id } : {});
       } catch {
         break;
       }
@@ -379,9 +381,11 @@ export class WikiService {
           } catch (err) {
             console.error(`wiki: couldn't save ${e.authorName}'s ${kind} report (${errText(err)}); it will be tried again.`);
             if (!final) return done();
-            // The session is ending: its events are not read again by the next session, so the report goes to the project's own queue (the state file), which the next start writes.
-            this.queue.push({ kind: "agent", title: `${e.authorName} ${kind}: ${text.slice(0, 50)}`, text: `${e.authorName} reported (${kind})${ws ? ` on ${ws}` : ""} at ${new Date(e.ts).toTimeString().slice(0, 5)}:\n\n${text}`, by: e.authorName });
+            // The session is ending: its events are not read again by the next session, so the report goes to the project's own queue (the state file), which the next start writes. Its id is fixed, so a replay never makes a second source.
+            const id = `${today(e.ts)}_report-${hashOf(this.sessionId).slice(0, 6)}-${e.id}`;
+            if (!this.queue.some((q) => q.id === id)) this.queue.push({ kind: "agent", title: `${e.authorName} ${kind}: ${text.slice(0, 50)}`, text: `${e.authorName} reported (${kind})${ws ? ` on ${ws}` : ""} at ${new Date(e.ts).toTimeString().slice(0, 5)}:\n\n${text}`, by: e.authorName, id });
             this.saveQueue();
+            if (this.queueDirty) return done(); // the queue couldn't be saved either: the cursor stays before this report, so nothing skips it
           }
         }
         cursor = this.reportCursor = e.id;
@@ -691,7 +695,8 @@ export class WikiService {
         this.catchUpLog();
         rebuildIndex(this.dir);
         // Named files only: a directory pathspec would stage whatever else a person keeps beside the wiki's own files.
-        commitPaths(this.dir, "Changes made by hand in the vault", [...[...new Set([...touched, ...gone])].map((s) => `wiki/${s}.md`), "index.md", "log.md", ...rawPaths(this.dir)]);
+        const raw = rawPaths(this.dir);
+        if (raw) commitPaths(this.dir, "Changes made by hand in the vault", [...[...new Set([...touched, ...gone])].map((s) => `wiki/${s}.md`), "index.md", "log.md", ...raw]);
         this.notify("edit", [...new Set([...touched, ...gone])], "Someone in the vault");
       }
     }

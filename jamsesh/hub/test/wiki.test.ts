@@ -2581,3 +2581,38 @@ test("project and network changes by a request past the shutdown deadline are re
   });
   expect(() => assertLive()).not.toThrow(); // the room's own work carries no request context
 });
+
+test("a report queued at session end keeps its id: a replay after the queue failed to save makes no second source", async () => {
+  const { w, s, agent, dir } = room();
+  const err = console.error;
+  console.error = () => {};
+  chmodSync(join(dir, "raw"), 0o555);
+  try {
+    s.postUpdate(agent.id, "shipped", "Built the replay screen.");
+    w.captureFinal();
+  } finally {
+    chmodSync(join(dir, "raw"), 0o755);
+    console.error = err;
+  }
+  const queued = readState(dir).queued!;
+  expect(queued.length).toBe(1);
+  expect(queued[0]!.id).toMatch(/_report-/);
+  // The source lands, but the queue's removal doesn't save (a crash here): drained again, it finds its source.
+  const next = new Hub({ canvas: false, whisper: false, dataDir: join(root, `replay-${Math.random().toString(36).slice(2)}`), wikiDir: dir });
+  hubs.push(next);
+  next.wiki.drainQueue();
+  const stateText = JSON.stringify({ ...readState(dir), queued });
+  writeFileSync(join(dir, ".wiki-state.json"), stateText);
+  const again = new Hub({ canvas: false, whisper: false, dataDir: join(root, `replay2-${Math.random().toString(36).slice(2)}`), wikiDir: dir });
+  hubs.push(again);
+  again.wiki.drainQueue();
+  expect(sourceIds(dir).filter((id) => readSource(dir, id)!.text.includes("replay screen"))).toHaveLength(1);
+});
+
+test("when git can't say what changed in raw/, no half commit is made", () => {
+  if (!gitAvailable()) return;
+  const { dir } = room();
+  rmSync(join(dir, ".git", "index"), { force: true });
+  writeFileSync(join(dir, ".git", "index"), "not an index"); // git status fails on it
+  expect(rawPaths(dir)).toBeNull();
+});
