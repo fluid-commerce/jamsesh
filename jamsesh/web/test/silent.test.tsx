@@ -167,23 +167,17 @@ test("a silent tile is inert (no click or key reaches its links, even target=_se
   expect(loud).not.toContain("inert");
 });
 
-test("the chime's audio context is suspended when the room turns silent and resumed when sound is back", () => {
-  const calls: string[] = [];
-  let state = "running";
+test("when the room turns silent the chime's audio context is closed, so no old chime plays when sound is back", () => {
+  const made: { closed: boolean }[] = [];
   (globalThis as any).AudioContext = class {
     currentTime = 0;
     destination = {};
-    get state() {
-      return state;
+    closed = false;
+    constructor() {
+      made.push(this);
     }
-    suspend() {
-      calls.push("suspend");
-      state = "suspended";
-      return Promise.resolve();
-    }
-    resume() {
-      calls.push("resume");
-      state = "running";
+    close() {
+      this.closed = true;
       return Promise.resolve();
     }
     createOscillator() {
@@ -196,36 +190,37 @@ test("the chime's audio context is suspended when the room turns silent and resu
   forgetChimeContext();
   setSilent(false);
   playChime();
+  expect(made.length).toBe(1);
   (hub as any).set({ state: { session: { silent: true, canvas: { status: "starting", reason: "" } }, devservers: [] } });
-  expect(calls).toContain("suspend");
+  expect(made[0].closed).toBe(true);
   setSilent(false);
   playChime();
-  expect(calls.at(-1)).toBe("resume");
+  // A fresh context, not the old one with its unfinished notes.
+  expect(made.length).toBe(2);
+  expect(made[1].closed).toBe(false);
 });
 
-// The real thing, in a real browser (muted): an authored silent tile can't be clicked away from its document and
-// loads no media. Skipped where Playwright isn't installed.
-test("in a browser, a silent tile with a _self link and a video stays put and loads no media", async () => {
-  let pw: any;
-  try {
-    pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
-  } catch (e) {
-    if (process.env.JAMSESH_NO_BROWSER_TESTS === "1") return;
-    throw new Error(`Playwright isn't installed (set JAMSESH_NO_BROWSER_TESTS=1 to skip this test): ${e}`);
-  }
-  const tile = `<a id="l" href="data:text/html,<audio autoplay src=x.mp3></audio>" target="_self" style="display:block;padding:40px">play</a><video id="v" autoplay src="http://127.0.0.1:9/x.mp4"></video>`;
-  setSilent(true);
+test("in a browser, a mounted tile goes inert and stays on its document when the room turns silent", async () => {
+  const pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
+  const built = await Bun.build({ entrypoints: [`${import.meta.dir}/browser-entry.tsx`], target: "browser" });
+  expect(built.success).toBe(true);
+  const code = await built.outputs[0].text();
+  const doc = `<!doctype html><a id="l" href="data:text/html,<audio autoplay src=x.mp3></audio>" target="_self" style="display:block;padding:40px">play</a><video autoplay src="http://127.0.0.1:9/x.mp4"></video>`;
   const run = async (silent: boolean) => {
-    setSilent(silent);
-    const markup = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
     const browser = await pw.chromium.launch({ args: ["--mute-audio"] });
     try {
       const page = await browser.newPage();
       const requested: string[] = [];
       page.on("request", (r: any) => requested.push(r.url()));
-      await page.setContent(`<body style="margin:0">${markup.replace('style="', 'style="width:400px;height:300px;')}</body>`);
+      await page.setContent(`<body style="margin:0"><div id="root"></div><script>window.__doc=${JSON.stringify(doc)}</script><script>${code.replace(/<\/script/g, "<\\/script")}</script></body>`);
+      await page.waitForSelector("iframe");
+      if (silent) {
+        await page.evaluate(() => (window as any).setSilent(true));
+        await page.waitForFunction(() => document.querySelector("iframe")?.hasAttribute("inert"));
+        requested.length = 0;
+      }
+      await page.waitForTimeout(300);
       const frame = page.frames().find((f: any) => f !== page.mainFrame());
-      expect(frame).toBeDefined();
       await page.mouse.click(50, 50);
       await page.waitForTimeout(400);
       return { url: frame.url(), media: requested.filter((u) => u.includes("x.mp4") || u.includes("x.mp3")) };
@@ -233,10 +228,10 @@ test("in a browser, a silent tile with a _self link and a video stays put and lo
       await browser.close();
     }
   };
-  // Control: in a normal room the same link does navigate the frame (the test could fail).
+  // Control: in a normal room the same link does navigate the frame, so the test could fail.
   expect((await run(false)).url).not.toBe("about:srcdoc");
-  // Silent: it stays on its document and nothing asks for media.
+  // Turned silent while mounted: inert, on its own document, and nothing asks for media afterwards.
   const quiet = await run(true);
   expect(quiet.url).toBe("about:srcdoc");
   expect(quiet.media).toEqual([]);
-}, 30000);
+}, 60000);

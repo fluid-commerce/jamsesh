@@ -54,7 +54,9 @@ export function stopAllSound() {
     }
   }
   clips.clear();
-  void ctx?.suspend?.().catch?.(() => {});
+  // Closed, not suspended: a suspended context would finish its unfinished notes when it resumed.
+  void ctx?.close?.().catch?.(() => {});
+  ctx = null;
 }
 
 // The moment the hub says the room is silent, whatever was playing stops.
@@ -89,8 +91,6 @@ export function playChime() {
   if (!soundAllowed()) return;
   try {
     ctx ??= new AudioContext();
-    // The room was silent a moment ago (stopAllSound suspended this): sound is back on.
-    if (ctx.state === "suspended") void ctx.resume();
     const t = ctx.currentTime + 0.01;
     for (const [i, f] of [660, 990].entries()) {
       const osc = ctx.createOscillator();
