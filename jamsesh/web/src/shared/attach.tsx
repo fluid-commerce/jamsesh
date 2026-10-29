@@ -43,7 +43,8 @@ export async function uploadAttachment(file: File, signal?: AbortSignal): Promis
     throw new Error("This laptop isn't connected to the session.");
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `Upload failed (${res.status})`);
+  // The hub's "do this from the host window" line is for the host's own terminal setup, not for a person adding a file.
+  if (!res.ok) throw new Error(body.error && !/^On the host, do this/.test(body.error) ? body.error : `Upload failed (${res.status})`);
   return body as AttachmentRef;
 }
 
@@ -210,7 +211,7 @@ export function AttachTray({ items, onRemove, onRetry }: { items: Pending[]; onR
           {!i.preview && (
             <span className="say-file-text">
               <span className="say-file-name">{i.name}</span>
-              <span className="say-file-meta">{i.status === "error" ? i.error : i.status === "uploading" ? "Adding…" : sizeLabel(i.size)}</span>
+              <span className="say-file-meta">{i.status === "error" ? "Didn't attach" : i.status === "uploading" ? "Adding…" : sizeLabel(i.size)}</span>
             </span>
           )}
           {i.preview && i.status !== "ready" && <span className="say-file-badge">{i.status === "error" ? "!" : "…"}</span>}
