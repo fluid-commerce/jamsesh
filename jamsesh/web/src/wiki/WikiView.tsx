@@ -7,7 +7,7 @@ import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/atta
 import { isTypingTarget, plain } from "../shared/keys";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
-import { renderMarkdown } from "./markdown";
+import { dropTitle, renderMarkdown } from "./markdown";
 import { wikiApi, useWiki, type WikiData } from "./wikiApi";
 import { CATEGORIES, CATEGORY_COLOR, CATEGORY_LABEL, type Category, type LogEntry, type PageMeta, type SearchHit, type SourceText, type WikiPage } from "./types";
 import "./wiki.css";
@@ -281,7 +281,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
   }, [slug, wiki.version]);
 
   const sources = useMemo(() => new Set(page?.sources.map((s) => s.id) ?? []), [page]);
-  const html = useMemo(() => (page ? renderMarkdown(page.markdown, { pages: pageSet, sources }) : ""), [page, pageSet, sources]);
+  const html = useMemo(() => (page ? renderMarkdown(dropTitle(page.markdown, page.title), { pages: pageSet, sources }) : ""), [page, pageSet, sources]);
   const local = useMemo(() => localGraph(wiki.graph, slug), [wiki.graph, slug]);
 
   const clicked = (e: MouseEvent) => {

@@ -2,6 +2,7 @@
 import { asCategory, type Category, type RawGraph } from "./types";
 
 export const MAX_NODES = 400;
+const arr = <T>(v: T[] | undefined | null): T[] => (Array.isArray(v) ? v : []);
 
 export interface GNode {
   id: string;
@@ -30,20 +31,20 @@ export interface Graph {
 }
 
 /** A node's radius from how many pages link to it; the square root keeps one popular page from swallowing the map. */
-export const radiusFor = (backlinks: number, scale = 1) => (4.5 + Math.sqrt(Math.max(0, backlinks)) * 3.2) * scale;
+export const radiusFor = (backlinks: number, scale = 1) => (4.5 + Math.sqrt(Number.isFinite(backlinks) ? Math.max(0, backlinks) : 0) * 3.2) * scale;
 
 /** Whatever the hub sent, made safe to draw: no repeats, no dangling or self links, bounded, finite numbers. */
 export function shapeGraph(raw: Partial<RawGraph> | null | undefined, scale = 1): Graph {
   const seen = new Map<string, GNode>();
-  for (const n of raw?.nodes ?? []) {
-    const id = typeof n?.id === "string" ? n.id : "";
+  for (const n of arr(raw?.nodes)) {
+    const id = n && typeof n.id === "string" ? n.id : "";
     if (!id || seen.has(id)) continue;
     const backlinks = Number.isFinite(n.backlinks) && n.backlinks > 0 ? Math.floor(n.backlinks) : 0;
     seen.set(id, { id, title: String(n.title || id).slice(0, 120), category: asCategory(n.category), backlinks, degree: 0, r: radiusFor(backlinks, scale) });
   }
   const edges: GEdge[] = [];
   const have = new Set<string>();
-  for (const e of raw?.edges ?? []) {
+  for (const e of arr(raw?.edges)) {
     if (!e || e.from === e.to || !seen.has(e.from) || !seen.has(e.to)) continue;
     const key = `${e.from}\u0000${e.to}`;
     if (have.has(key)) continue;

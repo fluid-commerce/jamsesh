@@ -107,17 +107,20 @@ function purify(html: string): string | null {
 /** "(src: id, 14:32)" is how the maintainer cites a transcript moment; it becomes a citation link. */
 const cites = (t: string) => t.replace(/\(src:\s*([\w./-]{1,120})(?:,\s*(\d{1,2}:\d{2}(?::\d{2})?))?\)/g, (_m, id: string, at?: string) => `[[raw/${id}${at ? `#${at}` : ""}|${at ?? "source"}]]`);
 
-export function renderMarkdown(text: string, c: RenderCtx = {}): string {
+/** The markdown-it half: raw HTML never passes, only safe links stand. Safe on its own; renderMarkdown adds DOMPurify. */
+export function markdownToHtml(text: string, c: RenderCtx = {}): string {
   ctx = c;
-  let html: string;
   try {
-    html = md.render(cites(String(text ?? "").slice(0, 400_000)));
+    return md.render(cites(String(text ?? "").slice(0, 400_000)));
   } catch {
     return `<p>${esc(String(text ?? "").slice(0, 2000))}</p>`;
   } finally {
     ctx = {};
   }
-  return purify(html) ?? `<pre class="plain">${esc(String(text ?? ""))}</pre>`;
+}
+
+export function renderMarkdown(text: string, c: RenderCtx = {}): string {
+  return purify(markdownToHtml(text, c)) ?? `<pre class="plain">${esc(String(text ?? "").slice(0, 400_000))}</pre>`;
 }
 
 /** The first few words of a page, plain, for a search result or a tooltip. */
@@ -138,4 +141,10 @@ export function linksIn(text: string): string[] {
     if (l && l.source === null && l.slug && !out.includes(l.slug)) out.push(l.slug);
   }
   return out;
+}
+
+/** A page's body starts with its own "# Title" line; the page view shows the title above, so drop the repeat. */
+export function dropTitle(body: string, title: string): string {
+  const m = /^\s*#[ \t]+([^\n]+)\n?/.exec(body);
+  return m && m[1].trim().toLowerCase() === title.trim().toLowerCase() ? body.slice(m[0].length) : body;
 }
