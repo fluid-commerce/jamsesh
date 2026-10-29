@@ -456,13 +456,17 @@ export class AudioPipeline {
     return true;
   }
 
-  /** "drop" when this line is an echo of a clearer copy heard in the other location. */
+  /**
+   * "drop" when this line is an echo of a clearer copy heard in the other location: the very same words, one by one.
+   * A line with a word added or changed ("Yes" and "Yes please") is someone answering, and stays.
+   */
   private echoOf(u: Utterance, snr: number): "drop" | "keep" {
+    const words = plainText(u.text);
     const recent = this.session.store
       .all("utterances")
       .filter((x) => x.location && x.location !== u.location && Math.abs(x.t0 - u.t0) < 3000 && Math.abs(x.t1 - u.t1) < 3500);
     for (const other of recent) {
-      if (textSimilarity(other.text, u.text) < 0.55) continue;
+      if (plainText(other.text) !== words) continue;
       const otherSnr = Math.max(...other.devices.map((d) => d.snr));
       if (otherSnr >= snr - 6) return "drop";
       // This copy is much clearer: the earlier one was the echo.
@@ -738,14 +742,6 @@ export class AudioPipeline {
 
 /** Lowercase words only: "Looks good." and "looks good" are the same words. */
 const plainText = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}\s']+/gu, " ").replace(/\s+/g, " ").trim();
-
-function textSimilarity(a: string, b: string) {
-  const words = (t: string) => new Set(t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2));
-  const x = words(a);
-  const y = words(b);
-  if (!x.size || !y.size) return 0;
-  return [...x].filter((w) => y.has(w)).length / Math.min(x.size, y.size);
-}
 
 function overlaps(g: Group, s: { t0: number; t1: number }) {
   return g.segments.some((m) => sameUtterance(m, s));
