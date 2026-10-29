@@ -5,7 +5,7 @@ import { ago, api, hub, useHub, type Agent, type Artifact, type FontInfo, type H
 import { useArtSrc } from "./frames";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { registerDriveTarget } from "./driving";
-import { canvasDriver, frameDriver } from "./drivetiles";
+import { canvasDriver, frameDriver, refreshFrameKey } from "./drivetiles";
 import { VersionBadge } from "./StageControls";
 import { CONNECT_TIMEOUT_MS, JoinWatch, canvasSrc, START_TIMEOUT_MS, friendlyReason, joinLabel, rejoinDelay, type JoinState } from "./canvasJoin";
 import { loadFonts, newFontMemory } from "./roomFonts";
@@ -273,7 +273,14 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
   // A driver's clicks, scrolls and typing reach the page through the dev proxy's script (SPEC 10.6).
   useEffect(() => {
     const f = frame.current;
-    return f && !blocked ? registerDriveTarget(f, frameDriver(f)) : undefined;
+    if (!f || blocked) return;
+    const off = registerDriveTarget(f, frameDriver(f));
+    // A restarted hub has a new frame key, and pages it serves carry the matching script: load this one again.
+    const unsub = hub.onReconnect(() => void refreshFrameKey().then((changed) => changed && (f.src = f.src)));
+    return () => {
+      off();
+      unsub();
+    };
   }, [blocked, src]);
   // Sized in the resize callback itself, not through React state: state would land a frame late
   // and the frame would shake while the window is being resized.

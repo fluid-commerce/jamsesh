@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 
 (globalThis as any).location ??= { origin: "http://127.0.0.1:4790", pathname: "/host", search: "" };
 (globalThis as any).navigator ??= { onLine: true };
-const { frameDriver } = await import("../src/shared/drivetiles");
+const { frameDriver, refreshFrameKey } = await import("../src/shared/drivetiles");
 
 test("a frame gets events only once the key is in hand, to its own origin, with the key; a failed ask is made again", async () => {
   const asked: string[] = [];
@@ -38,6 +38,47 @@ test("a frame gets events only once the key is in hand, to its own origin, with 
     const bad = { src: "", contentWindow: { postMessage: () => posted.push(["bad", "*"]) } } as any;
     frameDriver(bad)(move, "p1");
     expect(posted.length).toBe(2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("after a hub restart the new key is used, the frames are told to reload, and an unchanged key leaves them alone", async () => {
+  // (The key from the test above is still the page's: a page keeps its key for its lifetime.)
+  let key = "secret";
+  let up = true;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url === "/api/pair/info") return Response.json({ hostId: "h" });
+    return up ? Response.json({ key }) : new Response("no", { status: 502 });
+  }) as typeof fetch;
+  try {
+    const posted: any[] = [];
+    const iframe = { src: "http://localhost:5173/app", contentWindow: { postMessage: (m: unknown) => posted.push(m) } } as any;
+    const drive = frameDriver(iframe);
+    const move = { k: "move" as const, lx: 0.1, ly: 0.2 };
+    drive(move, "p1");
+    expect(posted.at(-1).key).toBe("secret");
+    // The connection came back to the same hub: nothing changes.
+    expect(await refreshFrameKey()).toBe(false);
+    // A new hub, a new key: events carry it and the caller reloads the frame.
+    key = "two";
+    expect(await refreshFrameKey()).toBe(true);
+    drive(move, "p1");
+    expect(posted.at(-1).key).toBe("two");
+    // The hub isn't answering yet: the caller reloads, and the next event asks again rather than sending a stale key.
+    up = false;
+    expect(await refreshFrameKey()).toBe(true);
+    const n = posted.length;
+    drive(move, "p1");
+    await Bun.sleep(5);
+    expect(posted.length).toBe(n);
+    up = true;
+    key = "three";
+    drive(move, "p1");
+    await Bun.sleep(5);
+    drive(move, "p1");
+    expect(posted.at(-1).key).toBe("three");
   } finally {
     globalThis.fetch = realFetch;
   }

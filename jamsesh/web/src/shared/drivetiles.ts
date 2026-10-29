@@ -15,6 +15,26 @@ function withKey(): string | null {
 }
 
 /**
+ * After the connection to the hub came back: asks again for the key. A restarted hub has a new one (and its proxy hands pages the
+ * matching script, so they must be loaded again); resolves true when the key changed. Nothing to do if this screen never had one.
+ */
+export async function refreshFrameKey(): Promise<boolean> {
+  if (!frameKey) return false;
+  const old = frameKey;
+  try {
+    const r = await api<{ key: string }>("/drive/frame-key");
+    if (typeof r?.key !== "string" || r.key === old) return false;
+    frameKey = r.key;
+    return true;
+  } catch {
+    // Unreachable for now: forget it, so the next event asks, and let the caller try again on the next reconnect.
+    frameKey = null;
+    asking = null;
+    return true;
+  }
+}
+
+/**
  * A frame from the dev proxy: post the event in, in fractions of the frame (the page script turns them into its own pixels),
  * to the frame's exact origin and with the session's key. Events before the key arrives are dropped.
  */
