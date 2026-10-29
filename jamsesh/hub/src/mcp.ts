@@ -359,6 +359,11 @@ export class McpEndpoint {
     return server;
   }
 
+  /** After a wait: a device disconnected meanwhile gets nothing more. */
+  private requireCredential(ctx: Ctx) {
+    if (ctx.device && ctx.device !== "host" && !this.hub.auth.get(ctx.device)) throw new Error("This device was disconnected from the JamSesh session.");
+  }
+
   private requireAgent(ctx: Ctx): Agent {
     const a = this.hub.session.agent(ctx.agentId);
     if (!a && ctx.agentId && this.hub.session.removedAgents.has(ctx.agentId)) throw new Error("The room removed you from this session. Don't join again unless your person asks you to.");
@@ -401,7 +406,20 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
-        const chatId = typeof args.chat === "string" && args.chat.trim() ? args.chat.trim().slice(0, 80) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined;
+        // Which chat this is. Claude Code's hooks hand it its session id (passed as chat). A harness without
+        // hooks (Codex) has no chat id of its own, and its MCP session changes on every reconnect or hub
+        // restart, so its chat is its folder on its machine: a reconnect resumes it and a removal sticks.
+        // (Two Codex chats open in one folder at once are one agent.) Without even a folder, the session.
+        const where = String(args.cwd ?? "").trim() || String(args.repo ?? "").trim();
+        const harness = String(args.harness ?? "other");
+        const chatId =
+          typeof args.chat === "string" && args.chat.trim()
+            ? args.chat.trim().slice(0, 80)
+            : harness !== "claude-code" && where
+              ? `${harness}:${machine}:${where}`.slice(0, 300)
+              : ctx.sessionId
+                ? `mcp:${ctx.sessionId}`
+                : undefined;
         // A chat the room removed stays out until a person lets it back in.
         if (s.rejoinBlocked(chatId, ctx.agentId))
           throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
@@ -494,8 +512,7 @@ export class McpEndpoint {
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
         this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
-        // Its device was disconnected while it waited: nothing more for it.
-        if (ctx.device && ctx.device !== "host" && !this.hub.auth.get(ctx.device)) throw new Error("This device was disconnected from the JamSesh session.");
+        this.requireCredential(ctx);
         const out = this.inboxText(agent, true);
         const idle = out.startsWith("Nothing new.");
         s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
@@ -522,6 +539,9 @@ export class McpEndpoint {
         const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000);
         s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
         const a = await answer;
+        // Removed, or its device disconnected, while it waited: nothing more for it.
+        this.requireAgent(ctx);
+        this.requireCredential(ctx);
         s.touchAgent(agent.id, { status: "working" });
         return text(a ? `Answer: ${a}` : `No answer yet (question ${askId}). It will arrive in your inbox; carry on and check jam_inbox.`);
       }

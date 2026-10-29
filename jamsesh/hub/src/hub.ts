@@ -125,7 +125,11 @@ export class Hub {
       const id = (m as any).type === "revoked" ? ((m as any).deviceId as string | undefined) : undefined;
       if (!id) return;
       const machine = this.auth.machineOf(id);
-      for (const a of this.session.agents()) if (a.machine === machine || a.machine === id) this.session.wake(a.id);
+      for (const a of this.session.agents())
+        if (a.machine === machine || a.machine === id) {
+          this.session.wake(a.id);
+          this.session.cancelAsks(a.id);
+        }
     });
     this.session.extraAddresses = () => {
       const st = this.net.status();
@@ -606,9 +610,10 @@ export class Hub {
     this.hookSeen.set(agent.id, Date.now());
     this.markNewHooks(agent.id);
     const done = typeof agent.activity === "string" && agent.activity.startsWith("Done:");
-    // JamSesh's own tools (the jam_update that just said "Done") aren't new work; any other tool is.
+    // JamSesh's own tools (the jam_update that just said "Done", "blocked" or asked a question) aren't
+    // new work, so what they reported stays; any other tool is the agent working again.
     const own = /(^|__)jam_\w+$/.test(String(body?.tool_name ?? ""));
-    if (done && own) this.session.touchAgent(agent.id, {});
+    if (own && (done || agent.status === "blocked")) this.session.touchAgent(agent.id, {});
     else if (agent.status !== "working" || done) this.session.touchAgent(agent.id, { status: "working", ...(done ? { activity: "Working" } : {}) });
     else this.session.touchAgent(agent.id);
     if (/jam_(inbox|wait|ask)$/.test(String(body?.tool_name ?? ""))) return {};
@@ -680,13 +685,15 @@ export class Hub {
     this.ackDeliveries(agent.id, body.jamAcks);
     this.hookSeen.set(agent.id, Date.now());
     const last = typeof body.last_assistant_message === "string" ? body.last_assistant_message.trim() : "";
-    // A finished turn reads as "Done: ..." until the next task starts.
-    if (last && !agent.activity.startsWith("Done:")) this.session.touchAgent(agent.id, { activity: `Done: ${last.split("\n")[0]}`.slice(0, 140) });
+    // An agent that reported it's blocked or asked the room a question stays that way when its turn
+    // ends: it isn't done, and it isn't idle. Otherwise a finished turn reads "Done: ..." until the next task.
+    const blocked = agent.status === "blocked";
+    if (last && !blocked && !agent.activity.startsWith("Done:")) this.session.touchAgent(agent.id, { activity: `Done: ${last.split("\n")[0]}`.slice(0, 140) });
     // Decisions are news, not work: they wait for the next turn rather than keeping the agent going.
     const o = this.offer(agent, { withDecisions: false });
     if (!o) {
       // Idle: the agent goes back to its person. The listener hook (see onListen) wakes it when the room has something.
-      this.session.touchAgent(agent.id, { status: "idle" });
+      this.session.touchAgent(agent.id, blocked ? {} : { status: "idle" });
       // An install from before the listener existed can't be woken: keep it waiting in jam_wait, once per stop.
       if (!this.newHooks(agent.id) && !body.stop_hook_active && agent.harness === "claude-code" && agent.status !== "offline")
         return { decision: "block", reason: "You're in a JamSesh session: call jam_wait to wait for the room's next directive. If your person is typing to you, stop and help them instead." };

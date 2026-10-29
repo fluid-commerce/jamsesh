@@ -121,20 +121,24 @@ confirmed
 printf '%s' "$out"
 handed_over
 gone && rm -f "$mark"
-# Back in touch: send what was queued while the host was away, two at a time (each call stays
-# short). An entry leaves the outbox only once the host has it, it's too old to matter (ten minutes:
-# a prompt from hours ago would only confuse the room), or its chat isn't in the room any more.
-if [ -s "$outbox" ] && lock; then
+# Back in touch: what was queued while the host was away is sent in the background, so this hook ends
+# as soon as the room's answer is printed and a slow host never runs it past its time limit. An
+# entry leaves the outbox only once the host has it, it's too old to matter (ten minutes: a prompt
+# from hours ago would only confuse the room), or its chat isn't in the room any more. A replay
+# stops after a minute; what's left goes with a later hook.
+replay() {
+  locked=""
+  trap '[ -z "$locked" ] || rmdir "$outbox.lock" 2>/dev/null' EXIT
+  lock || return 0
+  local stop=$(($(date +%s) + 60))
   : > "$outbox.keep"
-  n=0
   while IFS=$'\\t' read -r ts qid line; do
     case "$ts" in ''|*[!0-9]*) continue ;; esac
     # Queued by an older hook.sh, without an id: one made from the line stays the same on every try.
     [ -n "$line" ] || { line="$qid"; qid="q$ts-$(printf '%s' "$line" | cksum | cut -d ' ' -f 1)"; }
-    [ $((now - ts)) -le 600 ] && [ -n "$line" ] || continue
+    [ $(($(date +%s) - ts)) -le 600 ] && [ -n "$line" ] || continue
     keep() { printf '%s\\t%s\\t%s\\n' "$ts" "$qid" "$line" >> "$outbox.keep"; }
-    [ "$n" -lt 2 ] || { keep; continue; }
-    n=$((n + 1))
+    [ "$(date +%s)" -lt "$stop" ] || { keep; continue; }
     qsid="$(printf '%s' "$line" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -n 1)"
     [ -n "$qsid" ] || continue
     ans="$(joined "$qsid")" || { keep; continue; }
@@ -143,7 +147,8 @@ if [ -s "$outbox" ] && lock; then
   done < "$outbox"
   mv -f "$outbox.keep" "$outbox"
   unlock
-fi
+}
+if [ -s "$outbox" ]; then replay </dev/null >/dev/null 2>&1 & fi
 `;
 }
 

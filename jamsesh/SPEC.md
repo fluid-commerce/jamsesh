@@ -328,8 +328,11 @@ indented block, or anything else between the markers, stays), plus the one blank
 put before a block it appended at the end. Every other byte is kept, and a symlinked file is edited at
 its target, so the link stays a link. Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
-which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`), and
-a Codex chat is its own MCP connection. The hooks ask the host whether the chat has joined
+which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
+harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect
+or hub restart, so its chat is its folder on its machine (`codex:<machine>:<cwd>`): a reconnect
+resumes the same agent with its workstreams and tasks, and a removal sticks across reconnects and
+restarts. Two Codex chats open in one folder at once are one agent. The hooks ask the host whether the chat has joined
 (`POST /api/hooks/joined`, session id only) and do nothing, and send nothing, for a chat that hasn't;
 a second chat in the same folder is not the joined agent. A chat resumes only its own record, from
 the same machine: a quiet or offline record is never inherited by a different chat id or another
@@ -337,8 +340,8 @@ machine. Only a record from before chats had ids migrates to the chat that comes
 "Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
 which takes the agent out and, with `purge`, deletes the feed lines it caused.
 
-**A removed chat stays out.** Its `jam_join` is refused (by its chat id, or for a Codex chat by the
-MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
+**A removed chat stays out.** Its `jam_join` is refused (by its chat id, which for Codex is its
+folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
 Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only), or its
 own person saying "connect to jamsesh" in that chat, which its hook reports from the same machine
 (`/api/hooks/joined` with `connect: true`). Removals are kept in the session, so a hub restart doesn't
@@ -367,7 +370,7 @@ chat is let back in by its person's words only through its own machine's joined 
 sends `connect: true` only when the prompt starts by asking to connect, so "don't connect to jamsesh"
 doesn't count), or by a person choosing Allow again.
 
-**Removing an agent ends everything waiting on it.** Its listener and any `jam_wait` end at once
+**Removing an agent ends everything waiting on it.** Its listener, any `jam_wait`, and any `jam_ask` it is waiting on end at once
 with nothing (a wait that ends checks the agent is still in the room), handovers it hadn't
 acknowledged are dropped, and its share of each open task is cancelled, with one feed line naming the
 tasks so the room can hand them to someone else; other targets of a shared task carry on.
@@ -375,7 +378,9 @@ tasks so the room can hand them to someone else; other targets of a shared task 
 `hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
 asks the host whether the chat has joined, every time (the question carries the session id only),
 so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
-have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the hub
+have a 4-second limit (the joined question 3). Replays run in the background after the hook has printed its
+answer (a minute at most per run; what's left goes with a later hook), so a slow host never keeps a
+hook past its time limit. Each prompt carries an id (`x-jam-prompt-id`), and the hub
 records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once. When
 the host is unreachable, prompts of a chat this Mac saw joined go to `~/.jamsesh/outbox.jsonl` with
 their id. Later hook calls replay them, two per call, each after a fresh joined check; an entry is
@@ -595,7 +600,7 @@ over themselves.
 message the agent was handed, keeps only those for it (to it, or to everyone), and hands over the
 next 50; messages to other agents in between never push an unread one out, and a burst of more
 than 50 arrives over successive calls without loss. When a device is disconnected, its agents'
-open listener and `jam_wait` end at once and check the credential before handing anything over.
+open listener, `jam_wait` and `jam_ask` end at once and check the credential before handing anything over.
 
 **Delivery is at least once, and never twice once acknowledged.** A hook's answer can be lost (a
 timeout, a dropped connection), so what the hooks and the listener hand over carries a delivery id
@@ -651,13 +656,15 @@ its person can do: type anything to it, or tell it to wait for the room.
 ### 6.3a What an agent's tile says
 
 - **Status text.** Working shows what the agent is on ("Working on: <the prompt>" or its latest
-  update). When an agent finishes (a `done` or `shipped` update, or a turn that ends) the tile reads
+  update). A `blocked` or `question` report stays on the tile (status blocked) through its own tool
+  hook and the end of the turn, until the agent uses another tool or reports again. When an agent finishes (a `done` or `shipped` update, or a turn that ends) the tile reads
   "Done: <summary>" until its next task starts: its person prompting it, or an ack, claim, or
   progress update.
 - **Repository, platform, focus.** `jam_repo_card` takes optional `repo`, `platform`, and `focus`;
   whenever they're sent the agent's tile follows, and a changed repository posts "<agent> moved
   to <repo>". Fields left out stay as they were.
-- **Open tasks** show on the tile with their age ("35m Not picked up: ..." or "On it: ..."): any
+- **Open tasks** show on the tile with their age (the live state carries every open task, not only
+  the newest 60 directives) ("35m Not picked up: ..." or "On it: ..."): any
   offered for reassignment first, with its Reassign button (all of them, even past the tile's room),
   then the oldest.
 - **Workstreams.** A workstream pauses when its owner goes offline (20 minutes quiet): the room sees

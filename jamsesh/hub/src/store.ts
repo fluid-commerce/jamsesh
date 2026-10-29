@@ -262,6 +262,11 @@ export class Store {
     return opts.oldestFirst ? rows : rows.reverse();
   }
 
+  /** Whether this agent's person prompted it since a time (prompt events carry the agent in data.agentId). */
+  promptedSince(agentId: string, since: number): boolean {
+    return !!this.db.query("SELECT 1 FROM events WHERE kind = 'prompt' AND ts >= ? AND json_extract(data, '$.agentId') = ? LIMIT 1").get(since, agentId);
+  }
+
   /** The oldest events after an id (of some kinds), oldest first: for reading forward from a cursor. */
   eventsAfter(afterId: number, kinds: EventKind[], limit = 200): JamEvent[] {
     const sql = `SELECT * FROM events WHERE id > ?${kinds.length ? ` AND kind IN (${kinds.map(() => "?").join(",")})` : ""} ORDER BY id ASC LIMIT ?`;

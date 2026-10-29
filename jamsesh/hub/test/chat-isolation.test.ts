@@ -55,11 +55,12 @@ test("room state never shows a chat's transport id, and an MCP session answers o
   await (await mcpPost(macA.token, { jsonrpc: "2.0", method: "notifications/initialized" }, sid)).body?.cancel();
   const joined = await mcpPost(macA.token, callTool("jam_join", { harness: "codex", repo: "api", cwd: "/work/api" }), sid);
   expect(await joined.text()).toContain("api");
-  const victim = s.agents().find((a) => a.chatId === `mcp:${sid}`)!;
+  const victim = s.agents().find((a) => a.harness === "codex" && a.cwd === "/work/api")!;
   expect(victim).toBeDefined();
   // Not in the room's state, over HTTP or in the live patches.
   const state = await (await fetch(`${base}/api/state`, { headers: bearer(felipeWindow.token) })).json();
   expect(JSON.stringify(state)).not.toContain(sid);
+  expect(JSON.stringify(state)).not.toContain(victim.chatId!);
   expect(state.agents.find((a: Agent) => a.id === victim.id).chatId).toBeUndefined();
   expect(JSON.stringify((s as any).resolve("agents"))).not.toContain(sid);
   // Another paired device that has the id anyway (another Mac's agents, or a person's window) gets "not found".
@@ -416,17 +417,21 @@ test("hook.sh outbox: a lost answer is replayed under the same id, a failed repl
     rmSync(join(home, "hub-down"), { force: true });
     mode = "fail";
     failId = id;
+    // Replays run in the background after the hook returns: wait for each to finish.
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; i < 200 && !ok(); i++) await Bun.sleep(50);
+      expect(ok()).toBe(true);
+    };
+    const idle = () => !existsSync(`${outbox}.lock`);
     await run("tool", { session_id: "chat-q", tool_name: "Edit" });
     // The tool call went through but the replay didn't: the prompt is still queued.
-    expect(prompts.filter((p) => p.id === id)).toHaveLength(2);
+    await until(() => prompts.filter((p) => p.id === id).length === 2 && idle());
     expect(lines().map((l) => l.split("\t")[1])).toEqual([id]);
     mode = "ok";
     prompts.length = 0;
     await run("tool", { session_id: "chat-q", tool_name: "Edit" });
     // Replayed under the same id it was first sent with, so the host can tell it's the same prompt.
-    expect(prompts.some((p) => p.id === id && p.body.includes("first prompt"))).toBe(true);
-    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
-    expect(lines()).toHaveLength(0);
+    await until(() => prompts.some((p) => p.id === id && p.body.includes("first prompt")) && idle() && lines().length === 0);
     // Many hooks queueing at once (the host is down): every prompt lands, each with its own id.
     writeFileSync(join(home, "hub-down"), String(Math.floor(Date.now() / 1000)));
     await Promise.all(Array.from({ length: 12 }, (_, i) => run("prompt", { session_id: "chat-q", prompt: `burst ${i}` })));

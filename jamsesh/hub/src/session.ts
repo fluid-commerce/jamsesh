@@ -184,7 +184,7 @@ export class Session {
       devices: this.store.all("devices"),
       agents: this.agents().map(publicAgent),
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
-      directives: this.directives().slice(0, 60),
+      directives: this.stateDirectives(),
       artifacts: this.artifacts().slice(0, 120),
       devservers: this.store.all("devservers"),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
@@ -252,7 +252,7 @@ export class Session {
       case "workstreams":
         return { key, value: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt) };
       case "directives":
-        return { key, value: this.directives().slice(0, 60) };
+        return { key, value: this.stateDirectives() };
       case "artifacts":
         return { key, value: this.artifacts().slice(0, 120) };
       case "devservers":
@@ -543,6 +543,7 @@ export class Session {
       this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed with ${open.length === 1 ? "an open task" : `${open.length} open tasks`}, now cancelled: ${open.map((d) => `"${d.text.slice(0, 80)}"`).join("; ")}. Ask the room to give ${open.length === 1 ? "it" : "them"} to another agent.`, data: { directiveIds: open.map((d) => d.id) } });
     this.store.setSetting(`deliveries:${id}`, []);
     this.wake(id);
+    this.cancelAsks(id);
     const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
     if (opts.purge) for (const d of this.store.all("documents")) if (d.authorId === id) this.store.remove("documents", d.id);
     if (ids.length) bus.send({ type: "events-removed", ids });
@@ -723,7 +724,8 @@ export class Session {
     // Only Claude Code reports its person's prompts; for other agents we can't tell, so they aren't accused.
     if (agent.harness !== "claude-code") return false;
     const since = Date.now() - ASKED_WINDOW_MS;
-    return !this.store.recentEvents({ kinds: ["prompt"], limit: 60 }).some((e) => e.ts >= since && e.data.agentId === agent.id);
+    // By time, for this agent: however busy the room, other agents' prompts can't push its own out.
+    return !this.store.promptedSince(agent.id, since);
   }
 
   /** A workstream pauses when its owner goes offline, and picks up again when the owner is back. */
@@ -836,6 +838,12 @@ export class Session {
   }
 
   // ---- directives ----
+
+  /** What the live state carries: the newest 60, plus every open one however old, so each agent's tile has all its tasks (and their Reassign offers). */
+  stateDirectives(): Directive[] {
+    const all = this.directives();
+    return all.filter((d, i) => i < 60 || (d.status !== "done" && d.status !== "cancelled"));
+  }
 
   directives(): Directive[] {
     return this.store.all("directives").sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : -1));
@@ -1083,7 +1091,12 @@ export class Session {
 
   // ---- agents asking each other ----
 
-  private asks = new Map<string, { resolve: (answer: string) => void; timer: ReturnType<typeof setTimeout> }>();
+  private asks = new Map<string, { resolve: (answer: string | null) => void; timer: ReturnType<typeof setTimeout>; from: string | null }>();
+
+  /** Ends the questions this agent is waiting on (it was removed, or its device disconnected): they return empty now. */
+  cancelAsks(fromId: string) {
+    for (const a of [...this.asks.values()]) if (a.from === fromId) a.resolve(null);
+  }
 
   /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
   ask(fromId: string | null, to: string, question: string, waitMs: number): { askId: string; answer: Promise<string | null> } {
@@ -1103,7 +1116,7 @@ export class Session {
     this.wake(target.id);
     const answer = new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => (this.asks.delete(askId), resolve(null)), waitMs);
-      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer });
+      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer, from: fromId });
     });
     return { askId, answer };
   }
