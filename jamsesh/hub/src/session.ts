@@ -45,7 +45,7 @@ export class Session {
   /** This session's id; the team store remembers every session. */
   sessionId: string;
   startedAt = Date.now();
-  canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null };
+  canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null, generation: 0 };
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
   private waiters = new Map<string, Set<Waiter>>();
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
