@@ -336,24 +336,31 @@ on_exit() {
       rm -f "$real" || bad="$bad $real"
     fi
   done
+  mcp_result=none
   if [ "$mcp_touched" = 1 ]; then
+    # What happened is read from the CLI afterwards, not assumed from the commands' exit codes.
     "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1
-    if [ -n "$rollback_mcp" ]; then
-      { "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; } || restored=0
+    if "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then
+      mcp_result=failed
+    elif [ -n "$rollback_mcp" ]; then
+      if "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then mcp_result=restored; else mcp_result=failed; fi
+    else
+      mcp_result=removed
     fi
+    [ "$mcp_result" != failed ] || restored=0
   fi
   [ -z "$bad" ] || restored=0
   if [ "$restored" = 1 ]; then
     rm -rf "$SAVED"
     case "$reason" in
       hook) echo "JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2 ;;
-      mcp) echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2 ;;
+      mcp) if [ "$mcp_result" = restored ]; then echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2; else echo "JamSesh couldn't register its MCP server with Claude Code, so none is registered. Try connecting again." >&2; fi ;;
       quiet) ;;
       *) echo "Setup didn't finish, so your earlier connection was put back. Try connecting again." ;;
     esac
   else
     [ -z "$bad" ] || echo "JamSesh couldn't put these files back:$bad (the earlier copies are in $SAVED)." >&2
-    [ "$mcp_touched" = 0 ] || echo "Check the Claude Code entry with: claude mcp get jamsesh" >&2
+    [ "$mcp_result" != failed ] || echo "The jamsesh entry in Claude Code is not as it was; check it with: claude mcp get jamsesh" >&2
     echo "Setup didn't finish, and JamSesh couldn't put your earlier connection back completely." >&2
   fi
   exit "$rc"

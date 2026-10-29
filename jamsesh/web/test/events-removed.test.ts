@@ -76,3 +76,29 @@ test("a room change clears the old room's thinking, speaking, levels and toasts"
   const s = hub.get();
   expect([s.thinking, s.speaking, s.levels, s.toasts]).toEqual([null, null, {}, []]);
 });
+
+test("two overlapping fallbacks answering out of order across a room switch keep the newest answer", async () => {
+  const state = (roomId: string, ids: number[]) => ({ session: { roomId }, events: ids.map((id) => ({ id })) });
+  (hub as any).snap = { ...(hub as any).snap, removed: [], state: null };
+  const answers: ((r: Response) => void)[] = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = (() => new Promise<Response>((res) => answers.push(res))) as any;
+  try {
+    const a = hub.refreshState();
+    const b = hub.refreshState();
+    answers[1](Response.json(state("room-b", [7])));
+    await b;
+    answers[0](Response.json(state("room-a", [1])));
+    await a;
+  } finally {
+    globalThis.fetch = real;
+  }
+  expect(hub.get().state!.session.roomId).toBe("room-b");
+});
+
+test("a room change resets the clock, so audio isn't stamped against the old host", () => {
+  const state = (roomId: string) => ({ session: { roomId }, events: [] });
+  (hub as any).snap = { ...(hub as any).snap, state: state("room-a"), clockSynced: true, clockOffset: 500 };
+  (hub as any).handle({ type: "state", state: state("room-b") });
+  expect([hub.get().clockSynced, hub.get().clockOffset]).toEqual([false, 0]);
+});

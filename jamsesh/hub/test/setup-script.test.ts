@@ -48,9 +48,28 @@ function sandbox() {
   return { home, bin, log: join(root, "cli.log") };
 }
 
-function stubCli(path: string, log: string) {
+/**
+ * A CLI that logs its arguments and keeps the "jamsesh" MCP entry like the real one: `mcp add-json` stores it,
+ * `mcp remove` deletes it, `mcp get` succeeds only while it is there. Marker files next to the log make it
+ * refuse: `.refuse-add` (an `add-json` call whose arguments contain its text fails; empty refuses all) and `.refuse-remove`.
+ */
+function stubCli(path: string, log: string, opts: { entry?: boolean; refuseAdd?: string; refuseRemove?: boolean } = {}) {
   mkdirSync(join(path, ".."), { recursive: true });
-  writeFileSync(path, `#!/bin/sh\necho "$0 $*" >> "${log}"\n`);
+  if (opts.entry) writeFileSync(`${log}.entry`, "earlier\n");
+  if (opts.refuseAdd !== undefined) writeFileSync(`${log}.refuse-add`, opts.refuseAdd);
+  if (opts.refuseRemove) writeFileSync(`${log}.refuse-remove`, "");
+  writeFileSync(
+    path,
+    `#!/bin/sh
+echo "$0 $*" >> "${log}"
+case "$*" in
+  *"mcp remove"*) [ -e "${log}.refuse-remove" ] && exit 1; rm -f "${log}.entry"; exit 0 ;;
+  *"add-json"*) if [ -e "${log}.refuse-add" ]; then pat="$(cat "${log}.refuse-add")"; case "$*" in *"$pat"*) exit 1 ;; esac; fi; echo "$*" > "${log}.entry"; exit 0 ;;
+  *"mcp get"*) [ -e "${log}.entry" ]; exit $? ;;
+esac
+exit 0
+`,
+  );
   chmodSync(path, 0o755);
 }
 
@@ -412,7 +431,7 @@ describe("agent setup script", () => {
   test("if Claude Code won't take the new MCP entry, the earlier one is put back, without its token on a command line", async () => {
     const box = sandbox();
     // A claude that logs its arguments and refuses the new entry (the one for this host).
-    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    stubCli(join(box.bin, "claude"), box.log, { entry: true, refuseAdd: `${origin}/mcp` });
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headers: { Authorization: "Bearer old-secret", "X-Other": "1" } } } }));
     const r = await run(box);
     expect(r.code).not.toBe(0);
@@ -431,7 +450,7 @@ describe("agent setup script", () => {
 
   test("a failed reinstall puts the earlier room's credential back, so the earlier entry still signs in to it", async () => {
     const box = sandbox();
-    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    stubCli(join(box.bin, "claude"), box.log, { entry: true, refuseAdd: `${origin}/mcp` });
     const dir = join(box.home, ".jamsesh");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
@@ -451,7 +470,7 @@ describe("agent setup script", () => {
   test("if the earlier entry can't be put back either, setup says so instead of claiming it was", async () => {
     const box = sandbox();
     // Every add-json fails, and so does the check that the entry is there.
-    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\ncase "$*" in *"add-json"*|*" get "*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    stubCli(join(box.bin, "claude"), box.log, { entry: true, refuseAdd: "" });
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp" } } }));
     const r = await run(box);
     expect(r.code).not.toBe(0);
@@ -462,7 +481,7 @@ describe("agent setup script", () => {
 
   test("a failed first install leaves no credential behind, and a good one leaves no spare copies", async () => {
     const failing = sandbox();
-    writeFileSync(join(failing.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    stubCli(join(failing.bin, "claude"), failing.log, { refuseAdd: "" });
     expect((await run(failing)).code).not.toBe(0);
     expect(existsSync(join(failing.home, ".jamsesh/mcp-headers.json"))).toBe(false);
     const good = sandbox();
@@ -502,7 +521,7 @@ describe("agent setup script", () => {
 
   test("a refused MCP entry leaves auth.header, client.env and hook.sh as they were, so no file points at the new host", async () => {
     const box = sandbox();
-    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    stubCli(join(box.bin, "claude"), box.log, { refuseAdd: `${origin}/mcp` });
     const { dir, files } = earlierInstall(box);
     const r = await run(box);
     expect(r.code).not.toBe(0);
@@ -512,7 +531,7 @@ describe("agent setup script", () => {
 
   test("a failed first install leaves none of the connection files; a good one keeps no token in client.env", async () => {
     const failing = sandbox();
-    writeFileSync(join(failing.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    stubCli(join(failing.bin, "claude"), failing.log, { refuseAdd: "" });
     expect((await run(failing)).code).not.toBe(0);
     expect(readdirSync(join(failing.home, ".jamsesh")).filter((f) => ["auth.header", "client.env", "hook.sh"].includes(f) || f.startsWith(".saved"))).toEqual([]);
     const good = sandbox();
@@ -526,6 +545,7 @@ describe("agent setup script", () => {
   function earlierWholeInstall(box: ReturnType<typeof sandbox>) {
     const earlier = earlierInstall(box);
     const { dir } = earlier;
+    writeFileSync(`${box.log}.entry`, "earlier\n");
     writeFileSync(join(dir, "mcp-headers.json"), '{"authorization":"Bearer old-room"}', { mode: 0o600 });
     writeFileSync(join(dir, "mcp-headers.sh"), `#!/bin/sh\nexec cat '${dir}/mcp-headers.json'\n`, { mode: 0o700 });
     writeFileSync(join(box.home, ".claude.json"), JSON.stringify({ mcpServers: { jamsesh: { type: "http", url: "http://old-host:4747/mcp", headersHelper: join(dir, "mcp-headers.sh") } } }));
@@ -536,7 +556,7 @@ describe("agent setup script", () => {
     return { ...earlier, extra, mcp: { ...earlier.files, "mcp-headers.json": '{"authorization":"Bearer old-room"}' } };
   }
   /** A claude that records its arguments, keeps no state, and passes `mcp get`. */
-  const okClaude = (box: ReturnType<typeof sandbox>) => writeFileSync(join(box.bin, "claude"), `#!/bin/sh\necho "$0 $*" >> "${box.log}"\nexit 0\n`, { mode: 0o755 });
+  const okClaude = (box: ReturnType<typeof sandbox>) => stubCli(join(box.bin, "claude"), box.log);
   const earlierEntryBack = (box: ReturnType<typeof sandbox>) => {
     const log = readFileSync(box.log, "utf8").trim().split("\n");
     const lastAdd = log.filter((l) => l.includes("add-json")).pop()!;
@@ -623,5 +643,31 @@ describe("agent setup script", () => {
     } finally {
       hookBody = HOOK_OK;
     }
+  });
+
+  test("a first install whose entry can't be removed again says so, keeps its saved copies and exits non-zero", async () => {
+    const box = sandbox();
+    // add-json works, remove is refused, then the settings step fails: the new entry stays registered.
+    stubCli(join(box.bin, "claude"), box.log, { refuseRemove: true });
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(r.stdout).not.toContain("put back");
+    expect(r.stderr).toContain("claude mcp get jamsesh");
+    expect(r.stderr).toContain("couldn't put your earlier connection back completely");
+    expect(readdirSync(join(box.home, ".jamsesh")).filter((f) => f.startsWith(".saved"))).toHaveLength(1);
+  });
+
+  test("a first install that fails later has its entry removed, and the result is checked rather than assumed", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(join(box.home, ".claude/settings.json"), "{ not json");
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    expect(existsSync(`${box.log}.entry`)).toBe(false);
+    const log = readFileSync(box.log, "utf8").trim().split("\n");
+    expect(log.filter((l) => l.includes("mcp get")).length).toBeGreaterThan(0);
   });
 });
