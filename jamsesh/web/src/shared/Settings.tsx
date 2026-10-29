@@ -198,7 +198,6 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
 const MODEL_LABELS: Record<string, string> = {
   triage: "Triage (every line)",
   router: "Router",
-  presenter: "Presenter",
   digest: "Digests",
   speech: "Speech",
   transcribe: "Transcription fallback",

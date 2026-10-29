@@ -196,8 +196,9 @@ the canvas also become FigCraft comments, so agents see them in the file.
 
 ## Share a screen or camera
 
-In your JamSesh window, **Share screen** or **Camera** puts your screen or camera on the big screen;
-the brain finds it a place. The brain (or anyone, from Settings > People) can also ask you to
+In your JamSesh window, **Share screen** or **Camera** puts your screen or camera on the big screen,
+full screen, straight away (unless someone pinned the screen). One share of each kind per person: a
+new one from another of your windows replaces the first. The brain (or anyone, from Settings > People) can also ask you to
 share, and your window asks you first.
 
 ## Your profile

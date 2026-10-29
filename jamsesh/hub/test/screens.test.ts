@@ -47,3 +47,16 @@ test("after a restart, an extra display's brought-up view still returns to the b
     rmSync(d2, { recursive: true, force: true });
   }
 });
+
+test("a room's saved model choices keep only the roles that exist (an older room's presenter is dropped)", () => {
+  const d3 = mkdtempSync(join(tmpdir(), "jam-models-"));
+  try {
+    const store = new Store(d3);
+    store.setSetting("models", { presenter: "x/old", router: "x/router" });
+    const models = new Session(store).settings().models as Record<string, string>;
+    expect("presenter" in models).toBe(false);
+    expect(models.router).toBe("x/router");
+  } finally {
+    rmSync(d3, { recursive: true, force: true });
+  }
+});
