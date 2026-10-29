@@ -1851,7 +1851,12 @@ the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps`
 - **A Mac button is never left down.** Every line to a Mac helper goes through one place in the hub, which knows whether a
   button is down, where and for whom. It lets go (an `up` at the last position) when control changes hands (also when a locked screen's drivers or lock change), the tile ends, another
   person's input arrives, or the button has seen no input for 4 seconds. The helper does the same on its own at 6 seconds, when the
-  hub closes its input, and on SIGTERM. The page also sends its own `up` on pointer cancel, capture loss and leaving the tile, so
+  hub closes its input, and on SIGTERM. For a Mac app the helper captures the frontmost window of the app (not the largest), keeps its stream alive in a global (a stream held
+  only by its starting task sent one frame), and treats a window that is minimized, hidden or on another Space as *away*: input is dropped
+  and the stream is kept, and the tile only ends when the window is gone. Mouse and scroll events reach AppKit only with window field 51
+  and the window-relative point set; this relies on an **undocumented CGEvent field** and a patch to the event's data, found on a real
+  Mac, and must be rechecked on each macOS release.
+  The page also sends its own `up` on pointer cancel, capture loss and leaving the tile, so
   a drag ends promptly; the hub is what guarantees it.
 
 ### 13.4 Displays
