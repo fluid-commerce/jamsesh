@@ -29,7 +29,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|drive\/(start|stop|pass|together)|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -888,25 +888,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "POST") {
     const bytes: Uint8Array = body?.__raw ?? (body?.__form?.get("file") instanceof Blob ? new Uint8Array(await (body.__form.get("file") as Blob).arrayBuffer()) : new Uint8Array());
     return json(await hub.savePhoto(m[1], bytes));
-  }
-
-  // ---- prompts addressed to the brain ----
-  const ownDeviceOf = (id: unknown) => !!caller && typeof id === "string" && s.store.get("devices", id)?.pairedId === caller;
-  if (path === "/prompt-window/start" && req.method === "POST") {
-    if (!body?.deviceId) return bad("deviceId is required");
-    if (!ownDeviceOf(body.deviceId)) return bad("Record from your own window.", 403);
-    // The older start call would replace the open window of a recording that is still running: refused, the recording keeps going.
-    if (hub.recordingOn(String(body.deviceId))) return bad("A recording is already running in this window. Stop it first.", 409);
-    hub.promptStart(String(body.deviceId));
-    return json({ ok: true });
-  }
-  if (path === "/prompt-window" && req.method === "POST") {
-    if (!body?.deviceId) return bad("deviceId is required");
-    if (!ownDeviceOf(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
-    // The author is whoever this window belongs to; a body naming someone else is refused.
-    if (body.personId && body.personId !== actor().id) return bad("That isn't you.", 403);
-    const r = await hub.promptWindow({ deviceId: body.deviceId, recordingId: typeof body.recordingId === "string" ? body.recordingId : undefined, personId: actor().id, pointer: body.pointer ?? [], typed: body.text });
-    return r.status ? bad(r.reason ?? "That recording has already ended.", r.status) : json(r);
   }
 
   // ---- Record: talk and point, review the notes, send them to the agents that own the work ----

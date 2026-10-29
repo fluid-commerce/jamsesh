@@ -18,7 +18,7 @@ export interface JamTarget {
   page?: string | null;
 }
 
-/** What the hub's /api/prompt-window takes. */
+/** One distilled pointer moment of a recording, as /api/record/stop takes it. */
 export interface PointerMark {
   t: number;
   kind: "dwell" | "click" | "drag";

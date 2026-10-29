@@ -46,51 +46,13 @@ test("U1: a window that never gets Stop hands its held lines back to the room", 
 test("U2: Stop answers within the spec's 7 s even when transcription never finishes", async () => {
   const { hub, maya } = room();
   const t0 = Date.now() - 3000;
-  hub.promptStart("mayaLaptop", t0);
+  const started = hub.recordStart("mayaLaptop", maya.id, t0);
+  if (!started.ok) throw new Error(started.reason);
   (hub.audio as any).pendingFor = () => 1;
   const began = Date.now();
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [], typed: "show the footer" });
+  const r = await hub.recordStop({ deviceId: "mayaLaptop", recordingId: started.id, caller: "host", personId: maya.id, pointer: [], typed: "show the footer" });
   expect(Date.now() - began).toBeLessThan(8000);
   expect(r.ok).toBe(true);
-  hub.stop();
-}, 12000);
-
-test("U3: relabeling a recorded prompt changes its speaker but not its text", async () => {
-  const { hub, s, maya, ben } = room();
-  const t0 = Date.now() - 6000;
-  hub.promptStart("mayaLaptop", t0);
-  const u = line(hub, "make it blue", maya.id, t0 + 500);
-  const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [] });
-  expect(s.store.event(r.eventId)?.authorName).toBe("Maya");
-  hub.audio.assign(u.id, ben.id);
-  const ev = s.store.event(r.eventId)!;
-  expect(ev.authorName).toBe("Ben");
-  expect(ev.authorId).toBe(ben.id);
-  expect(ev.text).toBe("make it blue");
-  hub.stop();
-}, 12000);
-
-test("U5: lines past the window cap are not also in the prompt", async () => {
-  const { hub, maya } = room();
-  const t0 = Date.now() - 4 * 60_000;
-  hub.promptStart("mayaLaptop", t0);
-  line(hub, "first part", maya.id, t0 + 1000);
-  line(hub, "and then the footer", maya.id, t0 + 3 * 60_000 - 1000 - 60_000 + 61_000);
-  const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [] });
-  expect(r.text).toBe("first part");
-  hub.stop();
-}, 12000);
-
-test("R13: a window ending after a newer one started leaves the newer one open", async () => {
-  const { hub, s, maya } = room();
-  const t0 = Date.now() - 4000;
-  hub.promptStart("mayaLaptop", t0);
-  const first = hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, pointer: [], typed: "one" });
-  hub.promptStart("mayaLaptop", Date.now());
-  await first;
-  const second = Date.now() + 500;
-  line(hub, "second recording words", maya.id, second);
-  expect(speech(s).filter((e) => e.text.includes("second recording")).length).toBe(0);
   hub.stop();
 }, 12000);
 

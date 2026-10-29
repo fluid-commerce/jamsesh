@@ -620,23 +620,6 @@ test("two sends of one recording at once (a double click, a retry racing the fir
   expect(r.s.directives().length).toBe(2);
 }, 30_000);
 
-test("the older prompt routes need the caller's own device too: another person can't replace or end a recording through them", async () => {
-  const r = room();
-  const t0 = Date.now() - 3000;
-  expect(r.hub.recordStart("mayaLaptop", r.maya.id, t0, "main").ok).toBe(true);
-  const lock = r.s.lockOf("main");
-  const bens = r.hub.auth.issue({ kind: "browser", label: "Ben's laptop", ip: "10.0.0.7", personId: r.ben.id });
-  const asBen = { "x-forwarded-for": "10.0.0.7", authorization: `Bearer ${bens.token}` };
-  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop", t0 }, asBen)).status).toBe(403);
-  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", t0, t1: t0 + 10 }, asBen)).status).toBe(403);
-  expect((await r.post("/prompt-window", { deviceId: "nobody-has-this", t0, t1: t0 + 10 }, asBen)).status).toBe(403);
-  // Maya's recording and her lock are untouched; her own window still works.
-  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
-  expect(r.s.lockOf("main")).toEqual(lock);
-  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop", t0 })).status).toBe(409);
-  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Maya"]);
-}, 30_000);
-
 test("a Stop still gathering words doesn't end the recording that started after it", async () => {
   const r = room();
   const t0 = Date.now() - 3000;
@@ -647,11 +630,6 @@ test("a Stop still gathering words doesn't end the recording that started after 
   expect(second.ok).toBe(true);
   await stopping;
   expect(r.s.recordings().map((x) => x.id)).toEqual([(second as any).id]);
-  // The same for the older prompt window.
-  const prompting = r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "x" });
-  const third = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 30);
-  await prompting;
-  expect(r.s.recordings().map((x) => x.id)).toEqual([(third as any).id]);
 }, 30_000);
 
 test("a Start that is refused leaves the recording already running", async () => {
@@ -709,36 +687,6 @@ test("the notes' window is the hub's own record of Start: a Stop can't widen it,
   expect(one.ok && two.ok).toBe(true);
   expect(one).toEqual(two);
   expect((r.hub as any).noteRecs.size).toBe(1);
-}, 30_000);
-
-test("an old prompt window naming a replaced recording ends nothing", async () => {
-  const r = room();
-  const t0 = Date.now() - 2000;
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id, t0);
-  const b = r.hub.recordStart("mayaLaptop", r.maya.id, t0 + 10);
-  if (!a.ok || !b.ok) throw new Error("start");
-  await r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "x" });
-  expect(r.s.recordings().map((x) => x.id)).toEqual([b.id]);
-}, 30_000);
-
-test("a stale prompt-window for recording A closes nothing of B: not B's recording, not B's speech window", async () => {
-  const r = room();
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
-  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
-  if (!a.ok || !b.ok) throw new Error("start");
-  const stale = await r.post("/prompt-window", { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, text: "late" });
-  expect(stale.status).toBe(409);
-  expect(r.s.recordings().map((x) => x.id)).toEqual([b.id]);
-  const win = (r.hub as any).promptMode.get("mayaLaptop");
-  expect(win).toBeTruthy();
-  expect(win.t1).toBeUndefined();
-  expect(win.rec).toBe(b.id);
-  // An id-less close can't take a recording's window either; only the older start call's own window.
-  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", personId: r.maya.id, text: "x" })).status).toBe(409);
-  expect((r.hub as any).promptMode.get("mayaLaptop")).toBe(win);
-  // B's own id closes it.
-  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", recordingId: b.id, personId: r.maya.id, text: "ok" })).status).toBe(200);
-  expect(r.s.recordings()).toEqual([]);
 }, 30_000);
 
 test("the recording window is the hub's clock: a caller's start or stop time changes nothing, and adjacent recordings don't share speech", async () => {
@@ -1006,23 +954,6 @@ test("a Stop that fails with nothing else happening puts the recording back to l
   expect(rec.state).toBe("ended");
 });
 
-test("a prompt-window close and a Stop racing for one recording: one closes it, the other is refused, in either order", async () => {
-  for (const first of ["stop", "window"] as const) {
-    const r = room();
-    const a = r.hub.recordStart("mayaLaptop", r.maya.id);
-    if (!a.ok) throw new Error("start");
-    const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" });
-    const win = () => r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bigger" });
-    const [one, two]: any[] = await Promise.all(first === "stop" ? [stop(), win()] : [win(), stop()]);
-    expect([one.ok, two.ok]).toEqual([true, false]);
-    expect(two.status).toBe(409);
-    expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
-    // Only one close made anything: a repeated Stop shares or repeats it, never adds a second prompt.
-    const prompts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length;
-    expect(prompts).toBe(first === "stop" ? 0 : 1);
-  }
-}, 60_000);
-
 test("a Stop whose pointer can't be read still ends the recording: junk marks are dropped, not fatal", async () => {
   const r = room();
   for (const pointer of ["garbage", [null, 5, { t: "x" }, { t: 1, kind: "click" }]] as any[]) {
@@ -1034,18 +965,15 @@ test("a Stop whose pointer can't be read still ends the recording: junk marks ar
   }
 }, 30_000);
 
-test("a cancel that lands while a close is still waiting wins: the close makes nothing (no notes, no prompt) and says it ended", async () => {
-  for (const via of ["stop", "window"] as const) {
+test("a cancel that lands while a close is still waiting wins: the close makes nothing (no notes) and says it ended", async () => {
+  {
     const r = room();
     const tok = "rt_gggggggggggggggg";
     const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
     if (!a.ok) throw new Error("start");
     const real = (r.hub as any).windowLines.bind(r.hub);
     (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(150), real(...args));
-    const closing: Promise<any> =
-      via === "stop"
-        ? r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" })
-        : r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bigger" });
+    const closing: Promise<any> = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" });
     r.hub.recordCancel("mayaLaptop", tok, "host");
     const out = await closing;
     expect(out).toMatchObject({ ok: false, status: 409 });
@@ -1054,17 +982,6 @@ test("a cancel that lands while a close is still waiting wins: the close makes n
     expect(r.hub.recordStatus("mayaLaptop", a.id, "host")).toMatchObject({ state: "ended", outcome: { kind: "cancel" } });
   }
 }, 30_000);
-
-test("simultaneous prompt-window closes of one recording make exactly one prompt", async () => {
-  const r = room();
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
-  if (!a.ok) throw new Error("start");
-  const win = () => r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bigger" });
-  const [one, two] = await Promise.all([win(), win()]);
-  expect(one.ok && two.ok).toBe(true);
-  expect(two.eventId).toBe(one.eventId);
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
-});
 
 test("the hub is the source of truth: a committed Stop whose reply was lost is recovered by asking, and a cancel after it returns it and undoes nothing", async () => {
   const r = room();
@@ -1115,22 +1032,6 @@ test("Stop A, Start B, cancel A, then A's wait ends: A's notes are not made", as
   expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
 }, 30_000);
 
-test("a prompt close whose later write fails leaves nothing behind, and its retry makes one event and one set of pins", async () => {
-  const r = room();
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
-  if (!a.ok) throw new Error("start");
-  const close = () => r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, typed: "make it bigger", pointer: [{ t: Date.now(), kind: "click", x: 0.5, y: 0.5, target: { kind: "artifact", ref: "a", label: "A" } } as any] });
-  const real = r.s.store.patch.bind(r.s.store);
-  let failed = false;
-  (r.s.store as any).patch = (...args: any[]) => (failed ? (real as any)(...args) : ((failed = true), (() => { throw new Error("database is locked"); })()));
-  await expect(close()).rejects.toThrow("locked");
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(0);
-  expect(r.s.annotations().length).toBe(0);
-  expect((await close()).ok).toBe(true);
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
-  expect(r.s.annotations().length).toBe(1);
-}, 30_000);
-
 test("a close that a cancel overtakes gives the words it gathered to the room as ordinary speech, and makes no prompt or notes", async () => {
   for (const mode of ["cancel", "replaced-then-cancelled"] as const) {
     const r = room();
@@ -1152,18 +1053,6 @@ test("a close that a cancel overtakes gives the words it gathered to the room as
   }
 }, 60_000);
 
-test("the older ID-less prompt close, if its prompt can't be written, leaves its window open so the close can be tried again", async () => {
-  const r = room();
-  r.hub.promptStart("mayaLaptop", Date.now() - 2000);
-  const close = () => r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, typed: "make it bigger", pointer: [] });
-  const real = r.s.store.addEvent.bind(r.s.store);
-  let failed = false;
-  (r.s.store as any).addEvent = (e: any) => (failed ? real(e) : ((failed = true), (() => { throw new Error("database is locked"); })()));
-  await expect(close()).rejects.toThrow("locked");
-  expect((await close()).ok).toBe(true);
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
-}, 30_000);
-
 test("a close overtaken by a cancel gives everything it held to the room, even when its read of the words fails, and text typed with it too", async () => {
   for (const readFails of [false, true]) {
     const r = room();
@@ -1184,47 +1073,6 @@ test("a close overtaken by a cancel gives everything it held to the room, even w
     expect(texts).toContain("and the footer too");
     expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).some((e) => e.data.recorded)).toBe(false);
   }
-}, 60_000);
-
-test("a typed-only close overtaken by a cancel still gives its text to the room", async () => {
-  const r = room();
-  const tok = "rt_llllllllllllllll";
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
-  if (!a.ok) throw new Error("start");
-  const real = (r.hub as any).windowLines.bind(r.hub);
-  (r.hub as any).windowLines = async (...args: any[]) => (await Bun.sleep(150), real(...args));
-  const closing = r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bluer" });
-  r.hub.recordCancel("mayaLaptop", tok, "host");
-  expect(await closing).toMatchObject({ ok: false, status: 409 });
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("make it bluer");
-});
-
-test("the older ID-less close, failing to write, keeps its first end time for the retry; a newer Start ends the retry and the words go to the room", async () => {
-  const r = room();
-  const base = Date.now() - 30_000;
-  r.hub.promptStart("mayaLaptop", base);
-  line(r.hub, "first thing said", r.maya.id, "mayaLaptop", base + 500);
-  const real = r.s.store.addEvent.bind(r.s.store);
-  let failed = false;
-  (r.s.store as any).addEvent = (e: any) => (failed ? real(e) : e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
-  const close = () => r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
-  await expect(close()).rejects.toThrow("locked");
-  // Said after the first close's end time: not part of the retry.
-  line(r.hub, "said after", r.maya.id, "mayaLaptop", Date.now() + 5000);
-  const again = await close();
-  expect(again.ok).toBe(true);
-  expect(again.text).toContain("first thing said");
-  expect(again.text).not.toContain("said after");
-  // A second failure followed by a newer Start: the retry is refused, the first words reach the room.
-  const r2 = room();
-  r2.hub.promptStart("mayaLaptop", Date.now() - 5000);
-  line(r2.hub, "kept words", r2.maya.id, "mayaLaptop", Date.now() - 4000);
-  const real2 = r2.s.store.addEvent.bind(r2.s.store);
-  let f2 = false;
-  (r2.s.store as any).addEvent = (e: any) => (e.data?.recorded && !f2 ? ((f2 = true), (() => { throw new Error("database is locked"); })()) : real2(e));
-  await expect(r2.hub.promptWindow({ deviceId: "mayaLaptop", personId: r2.maya.id, pointer: [] })).rejects.toThrow("locked");
-  expect(r2.hub.recordStart("mayaLaptop", r2.maya.id).ok).toBe(true);
-  expect(r2.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("kept words");
 }, 60_000);
 
 test("a close whose read failed releases only its own recording's words: a successor's held speech stays with the successor", async () => {
@@ -1250,21 +1098,6 @@ test("a close whose read failed releases only its own recording's words: a succe
   expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
 }, 30_000);
 
-test("text typed with a failed older close is not lost: it goes to the room when a newer Start ends the retry, or when the retry window times out", async () => {
-  for (const how of ["newer-start", "timeout"] as const) {
-    const r = room();
-    r.hub.promptStart("mayaLaptop", Date.now() - 3000);
-    const real = r.s.store.addEvent.bind(r.s.store);
-    let failed = false;
-    (r.s.store as any).addEvent = (e: any) => (e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
-    await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "typed only note" })).rejects.toThrow("locked");
-    if (how === "timeout") (r.hub as any).releasePrompt("mayaLaptop", (r.hub as any).promptMode.get("mayaLaptop"));
-    else expect(r.hub.recordStart("mayaLaptop", r.maya.id).ok).toBe(true);
-    const texts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
-    expect(texts.filter((t) => t === "typed only note").length).toBe(1);
-  }
-}, 30_000);
-
 test("a read that fails after the window closed still lets a cancel or the window's timer give its words to the room", async () => {
   for (const how of ["cancel", "timeout"] as const) {
     const r = room();
@@ -1284,18 +1117,7 @@ test("a read that fails after the window closed still lets a cancel or the windo
   }
 }, 60_000);
 
-test("a retry of the older close with blank text keeps the text from the failed try", async () => {
-  const r = room();
-  r.hub.promptStart("mayaLaptop", Date.now() - 3000);
-  const real = r.s.store.addEvent.bind(r.s.store);
-  let failed = false;
-  (r.s.store as any).addEvent = (e: any) => (e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
-  await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "typed only note" })).rejects.toThrow("locked");
-  const again = await r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "" });
-  expect(again).toMatchObject({ ok: true, text: "typed only note" });
-});
-
-test("a prompt write that fails leaves the recording's words to the room when it is then cancelled", async () => {
+test("a Stop whose notes can't be made leaves the recording's words to the room when it is then cancelled", async () => {
   const r = room();
   const base = Date.now() - 30_000;
   r.at(base);
@@ -1304,30 +1126,11 @@ test("a prompt write that fails leaves the recording's words to the room when it
   if (!a.ok) throw new Error("start");
   line(r.hub, "words before the write failed", r.maya.id, "mayaLaptop", base + 500);
   r.at(base + 4000);
-  const real = r.s.store.addEvent.bind(r.s.store);
-  let failed = false;
-  (r.s.store as any).addEvent = (e: any) => (e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
-  await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "x" })).rejects.toThrow("locked");
+  (r.hub as any).stopNotes = () => { throw new Error("database is locked"); };
+  await expect(r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "x" })).rejects.toThrow("locked");
   r.hub.recordCancel("mayaLaptop", tok, "host");
   expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("words before the write failed");
 }, 60_000);
-
-test("the older close's author is the window's actor (a paired window's own person, whatever the body says), not a field of the body", async () => {
-  const r = room();
-  r.hub.promptStart("mayaLaptop", Date.now() - 3000);
-  // The test window is the host's, which may name who is acting; the route reads that through the same actor as every other route.
-  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", personId: r.maya.id, text: "as myself" })).status).toBe(200);
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).find((e) => e.text.includes("as myself"))?.authorId).toBe(r.maya.id);
-});
-
-test("text typed with an older close whose read fails is given back by the window's timer", async () => {
-  const r = room();
-  r.hub.promptStart("mayaLaptop", Date.now() - 3000);
-  (r.hub as any).audio.pendingFor = () => { throw new Error("read failed"); };
-  await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "typed before the read" })).rejects.toThrow("read failed");
-  (r.hub as any).releasePrompt("mayaLaptop", (r.hub as any).promptMode.get("mayaLaptop"));
-  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("typed before the read");
-}, 30_000);
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
@@ -1356,17 +1159,18 @@ test("the right to send and the receipt of the send are one record: past the cap
   expect(r.s.directives().length).toBe(0);
 }, 60_000);
 
-test("the older prompt-window start is refused while a recording runs, and the recording and its window are untouched", async () => {
+test("a paired non-host window is the person it is paired to, whatever personId its body names", async () => {
   const r = room();
-  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
-  if (!a.ok) throw new Error("start");
-  const win = (r.hub as any).promptMode.get("mayaLaptop");
-  const res = await r.post("/prompt-window/start", { deviceId: "mayaLaptop" });
-  expect(res.status).toBe(409);
-  expect((r.hub as any).promptMode.get("mayaLaptop")).toBe(win);
-  expect(r.s.recordings().map((x) => x.id)).toEqual([a.id]);
-  // Its own Stop still closes the window.
-  expect((await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, text: "ok" })).status).toBe(200);
-  // With no recording running the older call works as before.
-  expect((await r.post("/prompt-window/start", { deviceId: "mayaLaptop" })).status).toBe(200);
+  const bens = r.hub.auth.issue({ kind: "browser", label: "Ben's laptop", ip: "10.0.0.7", personId: r.ben.id });
+  r.s.touchDevice("benPhone", { personId: r.ben.id, location: "room", micOn: true, pairedId: bens.device.id });
+  const asBen = { "x-forwarded-for": "10.0.0.7", authorization: `Bearer ${bens.token}` };
+  // Ben's window names Maya as the person: the hub records Ben.
+  const res = await r.post("/record/start", { deviceId: "benPhone", personId: r.maya.id }, asBen);
+  expect(res.status).toBe(200);
+  expect(r.s.recordings().map((x) => x.personName)).toEqual(["Ben"]);
+  // And it cannot stop, cancel or ask about Maya's recording on her window's device.
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id).ok).toBe(true);
+  expect((await r.post("/record/stop", { deviceId: "mayaLaptop", recordingId: rid(r, "mayaLaptop"), personId: r.maya.id }, asBen)).status).toBe(403);
+  expect((await r.post("/record/cancel", { deviceId: "mayaLaptop", token: "rt_zzzzzzzzzzzzzzzz" }, asBen)).status).toBe(403);
+  expect((await r.get(`/record/${rid(r, "mayaLaptop")}?deviceId=mayaLaptop`, asBen)).status).toBe(403);
 }, 30_000);

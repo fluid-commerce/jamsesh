@@ -25,38 +25,10 @@ import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
 import { FontService } from "./fonts";
 
-/** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
-export interface PointerMark {
-  t: number;
-  kind: "dwell" | "click" | "drag" | "move";
-  x: number;
-  y: number;
-  dur?: number;
-  target: Annotation["target"];
-  word?: string;
-}
-
 function where(x: number, y: number) {
   const v = y < 0.33 ? "top" : y > 0.66 ? "bottom" : "middle";
   const h = x < 0.33 ? "left" : x > 0.66 ? "right" : "center";
   return v === "middle" && h === "center" ? "the center" : `${v} ${h}`;
-}
-
-/** Ties each pointer moment to the word being said at that time (words spread evenly over a line). */
-export function describePointer(marks: PointerMark[], lines: Utterance[]): string[] {
-  return marks
-    .filter((m) => m.kind !== "move")
-    .map((m) => {
-      const u = lines.find((l) => m.t >= l.t0 - 300 && m.t <= l.t1 + 300);
-      if (u) {
-        const words = u.text.split(/\s+/);
-        const i = Math.max(0, Math.min(words.length - 1, Math.floor(((m.t - u.t0) / Math.max(1, u.t1 - u.t0)) * words.length)));
-        m.word = words.slice(Math.max(0, i - 2), i + 3).join(" ");
-      }
-      const what = `${m.target.kind} "${m.target.label}"${m.target.nodeId ? ` (node ${m.target.nodeId})` : ""}`;
-      const action = m.kind === "click" ? "clicked" : m.kind === "drag" ? "dragged across" : `held on${m.dur ? ` for ${(m.dur / 1000).toFixed(1)}s` : ""}`;
-      return `${action} ${what} at ${where(m.x, m.y)}${m.word ? ` while saying “…${m.word}…”` : ""}`;
-    });
 }
 
 export interface HubOptions {
@@ -81,17 +53,13 @@ interface PromptWindow {
   max: number;
   timer?: ReturnType<typeof setTimeout>;
   rec?: string;
-  /** The older close failed to write its prompt: this window waits (bounded) for it to be sent again, with the same end time. */
-  retry?: boolean;
-  /** Text typed with a close that failed to write, for the retry to use or the room to get. */
-  held?: { personId: string | null; text: string };
 }
 
 /**
  * A recording's life on the hub: live -> ending (a close that has to wait for the last words) -> ended. It begins live: the page's
  * "starting" is the time between its token and the hub's answer, and the token's cancel covers it. Only `endRecording` moves it.
  */
-type EndReason = "stop" | "window-close" | "cancel" | "disconnect" | "cap" | "replaced";
+type EndReason = "stop" | "cancel" | "disconnect" | "cap" | "replaced";
 interface Rec {
   id: string;
   deviceId: string;
@@ -308,14 +276,13 @@ export class Hub {
   /** Closes a window that never got Stop and hands what it held back to the room as ordinary speech. */
   private releasePrompt(deviceId: string, only?: PromptWindow) {
     const w = this.promptMode.get(deviceId);
-    if (!w || (only && w !== only) || (w.t1 !== undefined && !w.retry)) return;
+    if (!w || (only && w !== only) || w.t1 !== undefined) return;
     clearTimeout(w.timer);
     this.promptMode.delete(deviceId);
     for (const u of this.session.store.all("utterances")) {
       if (u.eventId || u.t0 < w.t0 || u.t0 > w.t0 + w.max || (w.t1 !== undefined && u.t0 > w.t1 + 300) || !this.fromRecorder(u, deviceId)) continue;
       this.roomLine(u, true);
     }
-    if (w.held?.text.trim()) this.typed(w.held.personId, w.held.text);
   }
 
   /**
@@ -342,7 +309,7 @@ export class Hub {
   /** A transcribed line from the room (new, or updated after a late copy or a label). */
   private roomLine(u: Utterance, isNew: boolean) {
     const s = this.session;
-    // The recorder's own words belong to the prompt (promptWindow reads them from the store);
+    // The recorder's own words belong to its recording (a Stop reads them from the store);
     // a feed line as well would show them twice.
     if (isNew && this.inPrompt(u)) return;
     if (isNew) {
@@ -415,8 +382,8 @@ export class Hub {
         await Bun.sleep(400);
       }
     } catch (e) {
-      // The read failed with the window already closed: it stays, bounded, so a later cancel or its timer can still give its words to the room.
-      if (open) open.retry = true;
+      // The read failed with the window closed: it is open again (its own timer still bounds it), so a cancel or the timer can give its words to the room.
+      if (open) open.t1 = undefined;
       throw e;
     }
     // Only this window's entry: a new recording may have started while this one waited.
@@ -425,54 +392,6 @@ export class Hub {
       this.promptMode.delete(w.deviceId);
     }
     return lines.sort((a, b) => a.t0 - b.t0);
-  }
-
-  /**
-   * Record-to-prompt finished: everything this device heard in the window, plus where
-   * the person pointed while talking, goes to the brain as one prompt.
-   */
-  async promptWindow(w: { deviceId: string; recordingId?: string; personId: string | null; pointer: PointerMark[]; typed?: string }): Promise<{ ok: boolean; reason?: string; status?: number; eventId?: number; text?: string; pointed?: string[] }> {
-    const s = this.session;
-    // A prompt window is closed by the recording it belongs to, named by id: an id that is no longer the device's current recording
-    // closes nothing. Without an id, only a window opened by the older start call (no recording) can be closed.
-    const open = this.promptMode.get(w.deviceId);
-    const rec = this.recs.get(w.deviceId);
-    const t1 = this.clock();
-    if (w.recordingId) {
-      if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
-      // The recording's own start, so a close tried again after a failure (the speech window already closed) still has its bounds.
-      const t0 = rec.t0;
-      const win = open?.rec === rec.id ? open : undefined;
-      const out = await this.endRecording(rec, "window-close", () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, win, rec)), (lines) => this.promptFrom(w, lines, t0, t1), (lines) => this.release(rec, w.personId, w.deviceId, t0, lines, w.typed, t1));
-      if (out.kind === "done") return out.value;
-      return { ok: false, reason: out.kind === "busy" ? "That recording is being closed another way." : "That recording has already ended.", status: 409 };
-    }
-    if (!open || open.rec || (open.t1 !== undefined && !open.retry)) return { ok: false, reason: "There is no recording to stop.", status: 409 };
-    // A close tried again keeps its first end time, so the same words are gathered and nothing later slips in.
-    const end = open.t1 ?? t1;
-    // The text typed with the first try is used again when the retry carries none.
-    const typed = w.typed?.trim() ? w.typed : open.held?.text ?? w.typed;
-    w = { ...w, ...(typed !== undefined ? { typed } : {}) };
-    // Kept on the window before the read, so a read that fails still leaves the text to be given back.
-    if (w.typed?.trim()) open.held = { personId: w.personId, text: w.typed };
-    const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0: open.t0, t1: end }, open);
-    open.retry = false;
-    open.held = undefined;
-    try {
-      return this.promptFrom(w, lines, open.t0, end);
-    } catch (e) {
-      // The prompt wasn't made. If a newer recording has begun, the words go to the room now; otherwise the window waits, bounded, for the close to be sent again.
-      if (this.promptMode.has(w.deviceId) || this.recs.has(w.deviceId)) this.release(undefined, w.personId, w.deviceId, open.t0, lines, w.typed, end);
-      else {
-        open.retry = true;
-        if (w.typed?.trim()) open.held = { personId: w.personId, text: w.typed };
-        this.promptMode.set(w.deviceId, open);
-        clearTimeout(open.timer);
-        open.timer = setTimeout(() => this.releasePrompt(w.deviceId, open), open.max + 1000);
-        open.timer.unref?.();
-      }
-      throw e;
-    }
   }
 
   /**
@@ -485,44 +404,6 @@ export class Hub {
     const held = lines ?? this.session.store.all("utterances").filter((u) => !u.eventId && u.t0 >= t0 && u.t0 <= end && u.t0 < (rec?.nextT0 ?? Infinity) && this.fromRecorder(u, deviceId, personId));
     for (const u of held) if (!u.eventId && !this.session.store.get("utterances", u.id)?.eventId) this.roomLine(u, true);
     if (typed?.trim()) this.typed(personId, typed);
-  }
-
-  /** What a prompt-window close makes once the last words are in: one event for the brain. Synchronous, and run once per recording. */
-  private promptFrom(w: { deviceId: string; personId: string | null; pointer: PointerMark[]; typed?: string }, lines: Utterance[], t0: number, t1: number): { ok: boolean; reason?: string; status?: number; eventId?: number; text?: string; pointed?: string[] } {
-    const s = this.session;
-    w = { ...w, pointer: this.inWindow(w.pointer, t0, t1) };
-    const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
-    const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
-    const marks = describePointer(w.pointer, lines);
-    if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
-    // The writes are one: if a later one fails nothing stays, so the close can be tried again without doubling the event or the pins.
-    const ev = s.store.atomic(() => {
-      const pointed = w.pointer
-        .filter((m) => m.kind !== "move")
-        .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));
-      const made = s.store.addEvent({
-        kind: "speech",
-        authorType: "person",
-        authorId: person?.id ?? null,
-        authorName: person?.name ?? "Someone",
-        text: said || "(pointed without speaking)",
-        relevance: "work",
-        // The recording laptop gets the chime for its own prompt.
-        data: { direct: true, recorded: true, saidAt: t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
-      });
-      // One spoken line: it can be relabelled from the prompt, like any line in the feed.
-      if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: made.id });
-      // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
-      for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: made.id });
-      return made;
-    });
-    // To the brain only once it is all committed, and a failure to hand it over doesn't undo the prompt.
-    try {
-      this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
-    } catch (e) {
-      console.error("brain couldn't take the prompt", e);
-    }
-    return { ok: true, eventId: ev.id, text: said, pointed: marks };
   }
 
   // ---------- Record (6.2): talk and point, and it becomes notes ----------
@@ -650,7 +531,7 @@ export class Hub {
   }
 
   /**
-   * The one way a recording ends. Every route calls it: Stop, a prompt-window close, a cancel, the disconnect sweep, the cap and a
+   * The one way a recording ends. Every route calls it: Stop, a cancel, the disconnect sweep, the cap and a
    * replacing Start. A close that waits for the last words gives `gather` (the wait) and `commit` (what it makes: synchronous, run once,
    * and only if nothing ended the recording during the wait). It goes live -> ending -> ended; a call while ending shares that close if it
    * is the same kind and is refused (busy) if it is another. If `gather` or `commit` fails the recording is live again with the error
