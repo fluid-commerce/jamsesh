@@ -292,3 +292,12 @@ test("a reused chat id from another Mac or harness is not the removed chat", asy
   expect(s.rejoinBlocked("chat-reuse", null, { machine: win.device.id, cwd: "/w/elsewhere", harness: "codex" })).toBeUndefined();
   s.allowRejoin({ id: rec.id });
 });
+
+test("the hook's removed notice is for a Claude Code removal only", async () => {
+  const rec = { id: "rc_codexsame", agentId: "a_cx", chatId: "same-id-9", machine: "mac-9", harness: "codex", name: "x", ownerName: "Chey", at: 1, cwd: "/w/x" } as any;
+  s.store.setSetting("removedChats", [...s.removedChats(), rec]);
+  expect(hub.chatJoined({ session_id: "same-id-9" }, "mac-9")).toEqual({ joined: false });
+  s.store.setSetting("removedChats", s.removedChats().map((r) => (r.id === rec.id ? { ...r, harness: "claude-code" } : r)));
+  expect(hub.chatJoined({ session_id: "same-id-9" }, "mac-9")).toEqual({ joined: false, removed: true });
+  s.allowRejoin({ id: rec.id });
+});

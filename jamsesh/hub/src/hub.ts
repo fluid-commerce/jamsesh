@@ -464,7 +464,7 @@ export class Hub {
   chatJoined(body: any, machine?: string | null): { joined: boolean; removed?: boolean } {
     if (this.hookAgent(body, "", machine)) return { joined: true };
     const chat = typeof body?.session_id === "string" ? body.session_id : "";
-    const removed = !!chat && !!machine && this.session.removedChats().some((r) => r.chatId === chat && r.machine === machine);
+    const removed = !!chat && !!machine && this.session.removedChats().some((r) => r.chatId === chat && r.machine === machine && r.harness === "claude-code");
     return removed ? { joined: false, removed: true } : { joined: false };
   }
 

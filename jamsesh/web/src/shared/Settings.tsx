@@ -302,8 +302,11 @@ function RemovedChats() {
       .catch(() => mine === latest.current && setLoadFailed(true));
   };
   useEffect(() => {
+    // Answers still on their way belong to the room we just left.
+    latest.current++;
     setList([]);
     setError("");
+    setLoadFailed(false);
   }, [roomId]);
   const source = removedChatsSource(snap);
   useEffect(() => {
