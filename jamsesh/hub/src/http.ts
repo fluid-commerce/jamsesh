@@ -190,7 +190,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           return bad("expected a WebSocket");
         }
 
-        const device = local ? null : hub.auth.check(tokenOf(req, url), ip);
+        // On loopback a request is the host's, except reading an attachment: there a paired agent calling the hub directly
+        // is its credential (the route still turns away a local process with neither a credential nor the host's window).
+        const readsFile = local && (req.method === "GET" || req.method === "HEAD") && /^\/api\/attachments\/[\w-]+$/.test(path);
+        const device = local ? (readsFile ? anyToken(hub, req, url, ip) : null) : hub.auth.check(tokenOf(req, url), ip);
         const ok = local || !!device;
 
         if (path === "/") {
