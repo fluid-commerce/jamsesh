@@ -1426,3 +1426,47 @@ test("malformed stage data is refused, never thrown on: raw writes, stored histo
   expect(s.stage().mode).toBe("spotlight");
   void chey;
 });
+
+test("a stage write is all or nothing: a failure at the stage write or the history write leaves the screen, its revision and its questions as they were", () => {
+  const { s, chey } = room();
+  const a = artifact(s, "Checkout");
+  const b = artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  for (const failing of ["stage", "stageHistory"]) {
+    const rev = s.stageRev();
+    const claim = s.stageClaim();
+    const real = s.store.setSetting.bind(s.store);
+    (s.store as any).setSetting = (k: string, v: unknown) => { if (k === failing) throw new Error("disk full"); real(k, v); };
+    expect(() => s.setStage({ mode: "spotlight", items: [b.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" }, claim })).toThrow("disk full");
+    (s.store as any).setSetting = real;
+    expect(s.stageRev()).toBe(rev);
+    expect(s.stage().items).toEqual([a.id]);
+    // The claim didn't move on, so it still holds.
+    expect(s.setStage({ mode: "spotlight", items: [b.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" }, claim })).toMatchObject({ applied: true });
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  }
+});
+
+test("a decision made before a lock lapsed doesn't land after it", () => {
+  const { s, chey } = room();
+  const a = artifact(s, "Checkout");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const claim = s.stageClaim();
+  // Chey's person is gone: the lock lapses on the next look.
+  s.store.remove("people", chey.id);
+  expect(s.setStage({ mode: "agents" }, "Room brain", "main", { claim })).toMatchObject({ applied: false, reason: expect.stringContaining("changed") });
+  expect(s.stage().mode).toBe("spotlight");
+});
+
+test("malformed history records are skipped, a new stage starts unexpanded, and an empty html tile has nothing to show", () => {
+  const { s } = room();
+  const a = artifact(s, "Checkout");
+  s.store.setSetting("stageHistory", { main: [null, 5, { id: "x" }], other: "no" });
+  expect(() => s.stageHistory()).not.toThrow();
+  expect(s.stageHistory().main).toEqual([]);
+  expect(() => s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { override: true })).not.toThrow();
+  expect(s.restoreHistory("x", "main", { claim: s.stageClaim() })).toMatchObject({ applied: false });
+  expect(s.setStage({ mode: "spotlight", items: [a.id], expanded: a.id }, "Chey", "main", { override: true })).toMatchObject({ applied: true });
+  expect(s.stage().expanded).toBeUndefined();
+  expect(s.setStage({ mode: "layout", layout: { tiles: [{ kind: "html", html: "" }] } }, "Chey", "main", { override: true })).toMatchObject({ applied: false });
+});

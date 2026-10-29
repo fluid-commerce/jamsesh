@@ -1646,9 +1646,12 @@ export class Session {
     // Parse once, at the very top: everything below reads and commits only the cleaned copy, never the raw input.
     const parsed = parseStage(next);
     if (!parsed.ok) return refused(parsed.error);
-    next = parsed.stage;
-    if (!this.claimHolds(opts.claim, screen)) return refused("The screen changed since this was decided.");
+    // A new stage starts unexpanded (expandTile is what sets it).
+    const { expanded: _x, ...clean } = parsed.stage;
+    next = clean;
+    // The lock is looked at first (a lapse is a change too), then the claim: a decision made before the lapse doesn't land after it.
     const held = this.lockOf(screen);
+    if (!this.claimHolds(opts.claim, screen)) return refused("The screen changed since this was decided.");
     // The lock's owner asked for this very write: it replaces their lock in the same step (nothing is released ahead of it).
     if (!opts.person && !opts.override && held && !(opts.mayReplaceLock && opts.mayReplaceLock === held.personId)) return refused(`${held.by} has this screen locked.`);
     // Work bound to one share (the presenter's placement) lands only while that share is live and in the layout.
@@ -1680,9 +1683,12 @@ export class Session {
     // Who pinned it, by identity (never by name): only a person with an id of their own is recorded.
     if (stage.pinned && opts.person) stage.pinnedById = opts.person.id ?? "";
     else if (!stage.pinned || opts.person) delete stage.pinnedById;
-    this.commitStage(stage, screen);
+    // The stage, the questions it expires and its history entry are one write; a caller's claim moves on only once it committed.
+    this.atomically(() => {
+      this.commitStage(stage, screen);
+      this.recordHistory(stage, screen);
+    });
     opts.claim?.revs.set(screen, this.stageRev(screen));
-    this.recordHistory(stage, screen);
     return { applied: true, stage };
   }
 
@@ -2073,7 +2079,14 @@ export class Session {
 
   /** What a screen showed recently, newest first, with who put it up. */
   stageHistory(screen?: string): Record<string, StageHistoryEntry[]> {
-    const all = this.store.setting<Record<string, StageHistoryEntry[]>>("stageHistory", {});
+    const raw = this.store.setting<unknown>("stageHistory", {});
+    // Stored data is only trusted after a look: a record that isn't an entry with a stage that parses is skipped.
+    const all: Record<string, StageHistoryEntry[]> = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw))
+      for (const [k, list] of Object.entries(raw as Record<string, unknown>)) {
+        if (!Array.isArray(list)) continue;
+        all[k] = list.filter((e): e is StageHistoryEntry => !!e && typeof e === "object" && typeof (e as any).id === "string" && typeof (e as any).at === "number" && typeof (e as any).label === "string" && typeof (e as any).by === "string" && parseStage((e as any).stage).ok);
+      }
     return screen ? { [screen]: all[screen] ?? [] } : all;
   }
 

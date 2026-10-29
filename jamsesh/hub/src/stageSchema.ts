@@ -11,7 +11,7 @@ const tile = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("web"), url: z.string().max(2000), label }),
   z.object({ kind: z.literal("screen"), shareId: id, label }),
   z.object({ kind: z.literal("agent"), agentId: id, label }),
-  z.object({ kind: z.literal("html"), html: z.string().max(200_000), label }),
+  z.object({ kind: z.literal("html"), html: z.string().min(1).max(200_000), label }),
   z.object({ kind: z.literal("feed"), label }),
 ]);
 
