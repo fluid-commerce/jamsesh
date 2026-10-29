@@ -98,7 +98,7 @@ rm -f "$down"
 if [ "$1" = "listen" ]; then
   end=$((now + \${JAMSESH_LISTEN_SECONDS:-3000}))
   while [ "$(date +%s)" -lt "$end" ]; do
-    if out="$(printf '%s' "$body" | post --max-time 230 -D "$hdr" -H "x-jam-ack: $sent" --data-binary @- "$hub/api/hooks/listen" 2>/dev/null)"; then
+    if out="$(printf '%s' "$body" | post --max-time 230 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-room: $room" --data-binary @- "$hub/api/hooks/listen" 2>/dev/null)"; then
       confirmed
       sent=""
       gone && { rm -f "$mark"; exit 0; }
@@ -111,7 +111,7 @@ if [ "$1" = "listen" ]; then
   exit 0
 fi
 
-if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-prompt-id: $pid" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then
+if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-prompt-id: $pid" -H "x-jam-room: $room" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then
   # The host is unreachable: keep prompts so they reach the room when it's back.
   printf '%s' "$now" > "$down"
   queue "$1"
@@ -145,7 +145,8 @@ replay() {
     # goes back, until it's too old.
     printf '%s' "$ans" | grep -q "\\"room\\":\\"$qroom\\"" || continue
     printf '%s' "$ans" | grep -q '"joined":true' || { rm -f "$outbox/$f"; continue; }
-    post --max-time 4 -H "x-jam-prompt-id: $qid" --data-binary @"$outbox/$f" "$hub/api/hooks/prompt" >/dev/null 2>&1 && rm -f "$outbox/$f"
+    # The host refuses it (409) if it isn't that room by the time it arrives: then it stays queued.
+    post --max-time 4 -H "x-jam-prompt-id: $qid" -H "x-jam-room: $qroom" --data-binary @"$outbox/$f" "$hub/api/hooks/prompt" >/dev/null 2>&1 && rm -f "$outbox/$f"
   done
   rmdir "$outbox/.replaying" 2>/dev/null
 }
@@ -216,7 +217,16 @@ for my $old (@blocks) {
   }
 }
 exit 0 unless $changed;
-if ($text eq '' && !-l $path) { unlink $real; exit 0; }
+# Edited by someone else since it was read (an editor saving): theirs stays, and nothing of it is lost.
+# Checked again right before the file is replaced or, when only the block was in it, deleted.
+sub unchanged {
+  select(undef, undef, undef, $ENV{JAMSESH_STRIP_PAUSE}) if $ENV{JAMSESH_STRIP_PAUSE}; # tests widen the window
+  my $now = do { open(my $again, '<:raw', $real) or return 0; local $/; <$again> };
+  return 1 if defined $now && $now eq $before;
+  print STDERR "JamSesh: $path changed while the old JamSesh block was being taken out, so it was left as it is. Connect again to take the block out.\n";
+  return 0;
+}
+if ($text eq '' && !-l $path) { unlink $real if unchanged(); exit 0; }
 my $mode = (stat $real)[2] & 07777;
 # A new private file next to it (created exclusively, mode 600): its contents are never readable to
 # others on the way, and a file left at a predictable name can't be written through.
@@ -225,14 +235,7 @@ binmode $o;
 print $o $text;
 close $o or die "JamSesh: can't write $tmp: $!\n";
 chmod $mode, $tmp;
-# Edited by someone else since it was read (an editor saving): theirs stays, and nothing of it is lost.
-select(undef, undef, undef, $ENV{JAMSESH_STRIP_PAUSE}) if $ENV{JAMSESH_STRIP_PAUSE}; # tests widen the window
-my $now = do { open(my $again, '<:raw', $real) or do { unlink $tmp; exit 0 }; local $/; <$again> };
-if (!defined $now || $now ne $before) {
-  unlink $tmp;
-  print STDERR "JamSesh: $path changed while the old JamSesh block was being taken out, so it was left as it is. Connect again to take the block out.\n";
-  exit 0;
-}
+if (!unchanged()) { unlink $tmp; exit 0; }
 rename $tmp, $real or die "JamSesh: can't replace $real: $!\n";
 `;
 

@@ -421,7 +421,9 @@ export class McpEndpoint {
                 ? `mcp:${ctx.sessionId}`
                 : undefined;
         // A chat the room removed stays out until a person lets it back in.
-        if (s.rejoinBlocked(chatId, ctx.agentId))
+        // A join that doesn't name its chat can't show it isn't the removed one: a removal in this folder counts.
+        const named = typeof args.chat === "string" && !!args.chat.trim();
+        if (s.rejoinBlocked(chatId, ctx.agentId, named ? undefined : { machine, cwd: String(args.cwd ?? "").trim(), harness }))
           throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
         // Rejoining keeps the stored role unless the caller names one (the session settles it).
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;

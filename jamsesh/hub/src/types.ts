@@ -65,6 +65,9 @@ export interface RemovedChat {
   agentId: string;
   chatId: string | null;
   machine: string;
+  /** Its folder and harness: a join that can't name its chat (a fresh MCP session) from there is this chat as far as anyone can tell. */
+  cwd?: string;
+  harness?: Agent["harness"];
   name: string;
   ownerName: string;
   at: number;

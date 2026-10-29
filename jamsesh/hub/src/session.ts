@@ -561,13 +561,23 @@ export class Session {
   }
 
   private blockRejoin(agent: Agent) {
-    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
-    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec].slice(-200));
+    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, cwd: agent.cwd || undefined, harness: agent.harness, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
+    // Kept until a person lets the chat back in (or the session goes): never dropped for space.
+    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec]);
   }
 
   /** The removal that keeps this chat out, if any (by its chat id, or the agent id its connection had). */
-  rejoinBlocked(chatId: string | undefined, agentId: string | null): RemovedChat | undefined {
-    return this.removedChats().find((r) => (!!chatId && r.chatId === chatId) || (!!agentId && r.agentId === agentId));
+  /**
+   * `folder`: a join that can't name its chat (a Claude Code chat without its chat id, on a fresh MCP
+   * session) is refused if a chat removed from that machine, folder and harness hasn't been let back.
+   */
+  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }): RemovedChat | undefined {
+    return this.removedChats().find(
+      (r) =>
+        (!!chatId && r.chatId === chatId) ||
+        (!!agentId && r.agentId === agentId) ||
+        (!!folder?.cwd && r.machine === folder.machine && r.cwd === folder.cwd && r.harness === folder.harness),
+    );
   }
 
   /** Lets a removed chat join again. By chat id, only a removal from the same machine (the chat's own hook asking). */

@@ -345,7 +345,10 @@ folder on its machine, or by the MCP connection that joined) until a person lets
 Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only), or its
 own person saying "connect to jamsesh" in that chat, which its hook reports from the same machine
 (`/api/hooks/joined` with `connect: true`). Removals are kept in the session, so a hub restart doesn't
-undo them.
+undo them, and they never expire on their own. A join that doesn't name its chat (a Claude Code
+`jam_join` without `chat`, say on a fresh MCP session) can't show it isn't the removed chat, so it
+is also refused from the machine, folder and harness of a removed chat until someone lets that chat
+back in.
 
 **Hooks belong to one machine.** The hook routes (`/api/hooks/*`) take only an agent's credential (a
 person's window is refused), or the host's own loopback, which stands for the host's agents (the
@@ -391,7 +394,9 @@ outbox in the background, after printing its own answer, so a slow host never ke
 its time limit: one replay at a time (a lock folder, cleared after a minute if a replay was killed;
 queueing never takes it), at most 45 seconds per run, each entry after a fresh joined check. An entry
 goes only to the room it was queued for: if the host's room is a different one (this Mac switched
-hosts), it isn't sent. It is removed once the host has it, when it is ten minutes old, or when its
+hosts), it isn't sent. Every hook call carries the room it is meant for (`x-jam-room`), and the hub
+refuses one meant for another room with 409 before recording, reading or acknowledging anything,
+so a switch between the room check and the send leaves the prompt queued. It is removed once the host has it, when it is ten minutes old, or when its
 chat is no longer in its room. An older `outbox.jsonl` (no room) is dropped.
 
 ### 4.6 Remote access

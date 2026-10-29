@@ -624,13 +624,9 @@ export class Hub {
    * An idle Claude Code agent has gone back to its person. Its Stop hook starts this call in the
    * background (asyncRewake): it holds until the room has something for the agent, then returns the
    * text that wakes it. A new prompt or a newer listen ends it empty; so does the time limit (the
-   * server drops idle connections after about four minutes, so the hook script calls again).
+   * server drops idle connections after about four minutes, so the hook script calls again). With
+   * the delivery id of what it hands over (the hook route sends it as a header).
    */
-  async onListen(body: any, ip: string, device?: string | null, maxMs = 200_000): Promise<string> {
-    return (await this.listen(body, ip, device, maxMs)).text;
-  }
-
-  /** onListen with the delivery id of what it hands over (the hook route sends it as a header). */
   async listen(body: any, ip: string, device?: string | null, maxMs = 200_000, credentialLive: () => boolean = () => true): Promise<{ text: string; delivery: string | null }> {
     const none = { text: "", delivery: null };
     const agent = this.hookAgent(body, ip, device);
@@ -692,7 +688,7 @@ export class Hub {
     // Decisions are news, not work: they wait for the next turn rather than keeping the agent going.
     const o = this.offer(agent, { withDecisions: false });
     if (!o) {
-      // Idle: the agent goes back to its person. The listener hook (see onListen) wakes it when the room has something.
+      // Idle: the agent goes back to its person. The listener hook (see listen) wakes it when the room has something.
       this.session.touchAgent(agent.id, blocked ? {} : { status: "idle" });
       // An install from before the listener existed can't be woken: keep it waiting in jam_wait, once per stop.
       if (!this.newHooks(agent.id) && !body.stop_hook_active && agent.harness === "claude-code" && agent.status !== "offline")

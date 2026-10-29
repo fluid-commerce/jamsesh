@@ -320,7 +320,7 @@ test("the tool and listen hooks find the agent by its chat, and do nothing for a
   const a = s.store.put("agents", { ...a0, chatId: "chat-A" }) as Agent;
   directive(s, "Take this", [a.id]);
   expect(hub.onTool({ session_id: "stranger", tool_name: "Edit" }, "127.0.0.1", "m1")).toEqual({});
-  expect(await hub.onListen({ session_id: "stranger" }, "127.0.0.1", "m1", 1)).toBe("");
+  expect((await hub.listen({ session_id: "stranger" }, "127.0.0.1", "m1", 1)).text).toBe("");
   expect(s.hasInbox(a.id)).toBe(true);
   expect(JSON.stringify(hooksOf(hub).tool(a, { tool_name: "Edit" }))).toContain("Take this");
   // Its newer-hooks mark belongs to the agent.
