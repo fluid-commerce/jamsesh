@@ -261,7 +261,7 @@ export class Hub {
         authorName: u.speakerName,
         text: u.text,
         ts: u.t0,
-        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, embedding: this.audio.embeddingFor(u.id), source: "overheard" },
+        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, ...this.audio.voiceFor(u.id), source: "overheard" },
       });
       s.store.put("utterances", { ...u, eventId: ev.id });
       this.brain.hear(ev);
@@ -340,7 +340,7 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, ...this.audio.voiceFor(lines[0].id) } : {}) },
     });
     // One spoken line: it can be relabelled from the prompt, like any line in the feed.
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
@@ -393,30 +393,29 @@ export class Hub {
   /** A person's own device brings their voiceprint to this host. */
   carryVoiceprint(personId: string, body: unknown) {
     if (!this.session.person(personId)) throw new Error("No such person.");
-    // A copy made before the person reset their voice here would bring the old voice back.
-    const resetAt = this.session.store.setting<Record<string, number>>("voiceResetAt", {})[personId];
-    const madeAt = Number((body as { updatedAt?: unknown } | null)?.updatedAt);
-    // The copy's own clock is only believed up to now: a time in the future is how a stale copy would slip past a reset.
-    if (resetAt && !(madeAt > resetAt && madeAt <= Date.now() + 60_000)) return { ok: false as const, reason: "Your voice was reset on this host after that copy was made.", reset: true };
     const r = parseCarried(body);
     if (!r.ok) return r;
-    const kept = this.audio.voiceprints.importCarried(personId, r.samples);
+    // After a reset, only a copy this host sealed since: never one made before it, whatever its clock says.
+    const from = this.audio.voiceprints.provenance(personId, body);
+    if (!from.ok) return { ok: false as const, reason: from.reason, reset: true as const, stale: from.stale };
+    const kept = this.audio.voiceprints.importCarried(personId, r.samples, from.heardAt);
     this.session.store.put("people", this.session.person(personId)!);
     return { ok: true as const, samples: kept };
   }
 
   /**
    * Forgets a person's voice on this host: their samples, the embeddings kept with their lines in this
-   * session (so a later correction can't rebuild it), and, from now on, any copy made before this.
+   * session, what's held or in flight, and starts a new generation: nothing heard before it, and no copy
+   * sealed before it, teaches their voice again (Store.addVoiceSample).
    */
   resetVoice(personId: string) {
+    const { gen } = this.session.store.markVoiceReset(personId);
     this.audio.voiceprints.clear(personId);
     const scrubbed = this.session.store.scrubEmbeddings(personId);
     this.audio.forgetVoice(personId);
-    this.session.store.setSetting("voiceResetAt", { ...this.session.store.setting<Record<string, number>>("voiceResetAt", {}), [personId]: Date.now() });
     const p = this.session.person(personId);
     if (p) this.session.store.put("people", p);
-    return { ok: true as const, scrubbed };
+    return { ok: true as const, scrubbed, gen };
   }
 
   /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */

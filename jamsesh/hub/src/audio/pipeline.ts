@@ -31,6 +31,8 @@ export interface Segment {
   pcm: Pcm;
   wav: Uint8Array;
   arrivedAt: number;
+  /** When it was heard, on this host's clock: its synced start, or its arrival if that's earlier. */
+  heardAt: number;
   embedding?: Float32Array | null;
 }
 
@@ -50,6 +52,9 @@ interface Group {
   /** Its speaker's voice was reset since: nothing is learned from it. */
   forgotten?: boolean;
 }
+
+/** A voice sample and when it was heard. */
+type Heard = { e: Float32Array; at: number };
 
 export interface SpeakerGuess {
   personId: string | null;
@@ -102,7 +107,7 @@ export class AudioPipeline {
   private finalized: Group[] = [];
   private lag = new Map<string, { ms: number; at: number; location: "room" | "remote" }>();
   /** Unconfirmed first voice samples per person (see autoEnroll). */
-  private candidates = new Map<string, Float32Array[][]>();
+  private candidates = new Map<string, Heard[][]>();
   voiceprints: Voiceprints;
   /** People reading the join sentence right now: what the room's laptops hear of it is not conversation. */
   private enrolling = new Map<string, { since: number; until: number }>();
@@ -169,6 +174,7 @@ export class AudioPipeline {
       pcm,
       wav: pcm === raw ? input.wav : encodeWav(pcm),
       arrivedAt: now,
+      heardAt: Number.isFinite(input.t0) ? Math.min(now, input.t0) : now,
     };
     const location = this.session.store.get("devices", seg.deviceId)?.location ?? "room";
     const lag = Math.max(0, now - seg.t1);
@@ -548,26 +554,26 @@ export class AudioPipeline {
     const runnerVoice = guess.scores.filter((x) => x.personId !== pid).reduce((m, x) => Math.max(m, x.voice), 0);
     const decisive = enrolled > 0 && !owner && top.personId === pid && top.voice >= DECISIVE_VOICE && runnerVoice <= 0.2 && margin >= 3;
     if (!(atOwnDevice || decisive) || best.snr <= CLEAN_SNR || best.clipped > MAX_CLIPPED || autos >= MAX_PRINT_SAMPLES) return;
-    const voices = [best.embedding];
+    const voices: Heard[] = [{ e: best.embedding, at: best.heardAt }];
     for (const s of segments) {
       if (s === best || s.snr < 10 || s.clipped > MAX_CLIPPED) continue;
       if (s.embedding === undefined) s.embedding = embed(s.pcm);
       // Skip copies that carry someone else's voice (cross-talk bleed).
-      if (s.embedding && cosine(s.embedding, best.embedding) >= 0.35) voices.push(s.embedding);
+      if (s.embedding && cosine(s.embedding, best.embedding) >= 0.35) voices.push({ e: s.embedding, at: s.heardAt });
     }
     if (enrolled > 0) {
       // Either the device is clearly the loudest, or it is a bit closer than the rest and
       // the voice says the same: two weak signals that agree are enough to learn from.
       const sure = decisive || (guess.confidence >= 0.72 && margin >= 6 && (top.voice < 0 || top.voice >= 0.5));
       const agreed = guess.confidence >= 0.55 && margin >= 3 && top.voice >= 0.6;
-      if (sure || agreed) for (const v of voices) this.voiceprints.add(pid, v);
+      if (sure || agreed) for (const v of voices) this.voiceprints.add(pid, v.e, "auto", v.at);
       return;
     }
     if (guess.confidence < 0.5 || margin < 3) return;
     const held = this.candidates.get(pid) ?? [];
-    const twin = held.find((c) => cosine(c[0], best.embedding!) >= 0.4);
+    const twin = held.find((c) => cosine(c[0].e, best.embedding!) >= 0.4);
     if (twin) {
-      for (const v of [...twin, ...voices]) this.voiceprints.add(pid, v);
+      for (const v of [...twin, ...voices]) this.voiceprints.add(pid, v.e, "auto", v.at);
       this.candidates.delete(pid);
     } else {
       this.candidates.set(pid, [...held, voices].slice(-4));
@@ -583,8 +589,8 @@ export class AudioPipeline {
     const heard = this.voiceOf(u);
     let learning: Learning;
     if (!voiceprintStatus().available) learning = { learned: false, reason: "voice matching is off on this host" };
+    else if (heard.embedding && !this.voiceprints.add(personId, heard.embedding, "correction", heard.heardAt)) learning = { learned: false, reason: `that line was heard before ${person.name}'s voice was reset` };
     else if (heard.embedding) {
-      this.voiceprints.add(personId, heard.embedding, "correction");
       let cleaned = 0;
       if (prior) {
         // What the wrong label taught the wrong person: this line's sample, and others that sound like it.
@@ -607,18 +613,20 @@ export class AudioPipeline {
     for (const g of this.finalized) if (g.utteranceId && this.session.store.get("utterances", g.utteranceId)?.personId === personId) g.forgotten = true;
   }
 
-  private voiceOf(u: Utterance): { embedding: Float32Array | null; reason: string } {
+  /** A line's voice and when it was heard. A line kept from before heard-times were (no heardAt) counts as heard long ago. */
+  private voiceOf(u: Utterance): { embedding: Float32Array | null; heardAt: number; reason: string } {
     const g = this.finalized.find((x) => x.utteranceId === u.id);
-    if (g?.forgotten) return { embedding: null, reason: "that voice was reset after the line" };
+    if (g?.forgotten) return { embedding: null, heardAt: 0, reason: "that voice was reset after the line" };
     if (g) {
       const usable = g.segments.filter((s) => s.clipped <= MAX_CLIPPED);
-      if (!usable.length) return { embedding: null, reason: "every copy of it was clipped" };
+      if (!usable.length) return { embedding: null, heardAt: 0, reason: "every copy of it was clipped" };
       const best = pickBest(usable);
       if (best.embedding === undefined) best.embedding = embed(best.pcm);
-      return best.embedding ? { embedding: best.embedding, reason: "" } : { embedding: null, reason: `the line is under ${MIN_VOICE_SECONDS} seconds` };
+      return best.embedding ? { embedding: best.embedding, heardAt: best.heardAt, reason: "" } : { embedding: null, heardAt: 0, reason: `the line is under ${MIN_VOICE_SECONDS} seconds` };
     }
-    const stored = u.eventId ? (this.session.store.event(u.eventId)?.data.embedding as number[] | undefined) : undefined;
-    return stored?.length ? { embedding: new Float32Array(stored), reason: "" } : { embedding: null, reason: "no voice sample was kept for that line" };
+    const data = u.eventId ? this.session.store.event(u.eventId)?.data : undefined;
+    const stored = data?.embedding as number[] | undefined;
+    return stored?.length ? { embedding: new Float32Array(stored), heardAt: Number(data?.heardAt) || 0, reason: "" } : { embedding: null, heardAt: 0, reason: "no voice sample was kept for that line" };
   }
 
   /** Lines nobody could name that sound like the voice just corrected: they were that person too. */
@@ -655,19 +663,17 @@ export class AudioPipeline {
       if (e) fresh.push(e);
     }
     if (!fresh.length) return { ok: false, reason: "Couldn't hear enough speech. Try reading the whole thing." };
-    this.session.store.clearVoiceKind(personId, "enrol");
-    for (const e of fresh) this.session.store.addVoiceSample(personId, e, "enrol");
-    this.voiceprints.reload();
+    this.voiceprints.replaceEnrol(personId, fresh, Date.now());
     return { ok: true, samples: this.voiceprints.learnedFrom(personId).enrol };
   }
 
-  /** The embedding of an utterance's best copy, kept with its event so labels work after restarts. */
-  embeddingFor(utteranceId: string): number[] | null {
+  /** The embedding of an utterance's best copy and when it was heard, kept with its event so labels work after restarts. */
+  voiceFor(utteranceId: string): { embedding: number[] | null; heardAt?: number } {
     const g = [...this.finalized, ...this.open].find((x) => x.utteranceId === utteranceId);
-    if (!g) return null;
+    if (!g) return { embedding: null };
     const best = pickBest(g.segments);
     if (best.embedding === undefined) best.embedding = embed(best.pcm);
-    return best.embedding ? [...best.embedding] : null;
+    return best.embedding ? { embedding: [...best.embedding], heardAt: best.heardAt } : { embedding: null };
   }
 }
 

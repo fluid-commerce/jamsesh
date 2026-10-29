@@ -1,7 +1,7 @@
 // The third review of Phase 5: who may claim a person (and so their voiceprint), what a reset forgets,
 // levels measured from the audio and never taken from the sender, and a download that can be cancelled.
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
@@ -53,16 +53,17 @@ test("nor the person using the host's own window; a person nobody holds can be c
   // A second laptop for the same person isn't allowed to take it either; the host removes the old pairing first.
   const late = hub.auth.issue({ kind: "browser", label: "Late", ip: "10.0.0.9" });
   expect((await call(late.token, "POST", "/devices", { deviceId: "d-late", personId: loose.id })).status).toBe(403);
+  // Once someone has been them, disconnecting that laptop doesn't free them for anyone: the host lets one in (phase5-round4).
   hub.auth.revoke(other.device.id);
-  expect((await call(late.token, "POST", "/devices", { deviceId: "d-late", personId: loose.id })).status).toBe(200);
+  expect((await call(late.token, "POST", "/devices", { deviceId: "d-late", personId: loose.id })).status).toBe(403);
 });
 
 test("a reset forgets voices not yet confirmed, and a copy dated in the future doesn't get past it", async () => {
   const held = new Float32Array(256).fill(0.1);
-  (hub.audio as any).candidates.set(victim.id, [[held]]);
+  (hub.audio as any).candidates.set(victim.id, [[{ e: held, at: Date.now() }]]);
   hub.resetVoice(victim.id);
   expect((hub.audio as any).candidates.has(victim.id)).toBe(false);
-  const stale = { model: "m", dim: 256, samples: [{ kind: "enrol", embedding: Array(256).fill(0.1) }] };
+  const stale = { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: Array(256).fill(0.1) }] };
   for (const updatedAt of [Date.now() - 5000, Date.now() + 3_600_000, 1e15, Number.NaN, undefined]) {
     const r = hub.carryVoiceprint(victim.id, { ...stale, updatedAt });
     expect(r).toMatchObject({ ok: false, reset: true });
@@ -123,8 +124,14 @@ test("installed Parakeet files are checked against what was verified at install;
   const where = join(dir, "pk");
   mkdirSync(where, { recursive: true });
   for (const f of PARAKEET.files) writeFileSync(join(where, f), `contents of ${f}`);
-  // Installed before there was a manifest: accepted once and recorded.
-  expect(await installedIntact(where)).toBe(true);
+  // No manifest, or one that can't be read: the files can't be verified, so they're not blessed (and nothing is written).
+  expect(await installedIntact(where)).toBe(false);
+  expect(existsSync(join(where, ".files.sha256.json"))).toBe(false);
+  for (const bad of ["{not json", "null", "[]", "{}"]) {
+    writeFileSync(join(where, ".files.sha256.json"), bad);
+    expect(await installedIntact(where)).toBe(false);
+  }
+  await writeManifest(where);
   expect(Object.keys(JSON.parse(readFileSync(join(where, ".files.sha256.json"), "utf8")))).toEqual(PARAKEET.files);
   expect(await installedIntact(where)).toBe(true);
   writeFileSync(join(where, PARAKEET.files[1]), "swapped");

@@ -272,6 +272,6 @@ export function enrol(room: Room, key: Key) {
   const chunk = 16000 * 3;
   for (let i = 0; i + chunk / 2 <= samples.length; i += chunk) {
     const e = embed({ sampleRate: 16000, samples: samples.subarray(i, Math.min(samples.length, i + chunk)) });
-    if (e) p.voiceprints.add(room.people[key].id, e);
+    if (e) p.voiceprints.add(room.people[key].id, e, "enrol", Date.now());
   }
 }

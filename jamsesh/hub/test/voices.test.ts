@@ -181,7 +181,7 @@ sim("correcting a line takes back what the wrong label taught the wrong person",
     "I tested the signup form and the error text overlaps the input on small phones.",
     "Could we use a softer shadow under the cards, the current one looks heavy.",
   ];
-  for (const text of deeLines) room.pipeline.voiceprints.add(ana.id, embed({ sampleRate: 16000, samples: say("dee", text, 170) })!, "auto");
+  for (const text of deeLines) room.pipeline.voiceprints.add(ana.id, embed({ sampleRate: 16000, samples: say("dee", text, 170) })!, "auto", Date.now());
   expect(room.pipeline.voiceprints.learnedFrom(ana.id).auto).toBe(3);
   await play(room, line("dee", "Let me write down what we decided about the navigation so nobody forgets it.", t), r);
   const u = ofRoom(room)[0];
@@ -276,7 +276,7 @@ sim("a voiceprint made on one host identifies its owner on another, and holds em
   const carried = hubA.voiceprintOf(anaA.id);
   expect(carried.samples.length).toBeGreaterThan(1);
   // Nothing but numbers: no audio, no names, no file.
-  expect(Object.keys(carried).sort()).toEqual(["dim", "model", "samples", "updatedAt", "version"]);
+  expect(Object.keys(carried).sort()).toEqual(["dim", "model", "samples", "stamp", "updatedAt", "version"]);
   expect(carried.samples.every((s) => Object.keys(s).sort().join() === "embedding,kind" && s.embedding.length === 256)).toBe(true);
   // Host B has never heard her.
   const anaB = hubB.session.upsertPerson({ name: "Ana" });
@@ -345,7 +345,7 @@ test("a full voiceprint carried to another host and back loses nothing, and its 
   expect(back.samples.every((x) => which(x.embedding) >= 0)).toBe(true);
   // Same samples, same version; anything learned changes it.
   expect(hubB.voiceprintOf(onB.id).version).toBe(back.version);
-  hubB.audio.voiceprints.add(onB.id, Float32Array.from(base), "correction");
+  hubB.audio.voiceprints.add(onB.id, Float32Array.from(base), "correction", Date.now());
   expect(hubB.voiceprintOf(onB.id).version).not.toBe(back.version);
   // Its own samples coming back from another host aren't counted twice: the correction stays one correction.
   const own = hubB.voiceprintOf(onB.id);
@@ -362,7 +362,7 @@ test("resetting a voice forgets it everywhere it could come back from: samples, 
   const s = hubB.session;
   const p = s.upsertPerson({ name: "Resetter" });
   const v = Array.from({ length: 256 }, (_, i) => Math.cos(i));
-  hubB.audio.voiceprints.add(p.id, Float32Array.from(v), "enrol");
+  hubB.audio.voiceprints.add(p.id, Float32Array.from(v), "enrol", Date.now());
   const ev = s.store.addEvent({ kind: "speech", authorType: "person", authorId: p.id, authorName: p.name, text: "A line of theirs", data: { embedding: v } });
   const other = s.upsertPerson({ name: "Bystander" });
   const theirs = s.store.addEvent({ kind: "speech", authorType: "person", authorId: other.id, authorName: other.name, text: "Not theirs", data: { embedding: v } });
@@ -376,10 +376,14 @@ test("resetting a voice forgets it everywhere it could come back from: samples, 
   // Correcting their old line to them teaches nothing now.
   expect(hubB.audio.assign("utt_reset1", p.id).learning.learned).toBe(false);
   expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
-  // A copy made before the reset can't bring it back; one made after (they read again elsewhere) can.
-  expect(hubB.carryVoiceprint(p.id, before)).toMatchObject({ ok: false, reset: true });
+  // A copy this host sealed before the reset is stale, whatever its clock says; one it didn't seal can't show it's newer.
+  expect(hubB.carryVoiceprint(p.id, before)).toMatchObject({ ok: false, reset: true, stale: true });
+  expect(hubB.carryVoiceprint(p.id, { ...before, updatedAt: Date.now() + 30_000 })).toMatchObject({ ok: false, reset: true, stale: true });
   expect(hubB.carryVoiceprint(p.id, { ...before, samples: [{ kind: "enrol", embedding: v }], updatedAt: undefined })).toMatchObject({ ok: false, reset: true });
-  expect(hubB.carryVoiceprint(p.id, { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: v }], updatedAt: Date.now() + 1000 })).toMatchObject({ ok: true });
+  expect(hubB.carryVoiceprint(p.id, { model: "wespeaker_en", dim: 256, samples: [{ kind: "enrol", embedding: v }], updatedAt: Date.now() + 1000 })).toMatchObject({ ok: false, reset: true, stale: false });
+  // What it learns from them afterwards, and its own copy of that, are theirs again.
+  expect(hubB.audio.voiceprints.add(p.id, Float32Array.from(v), "enrol", Date.now() + 1)).toBe(true);
+  expect(hubB.carryVoiceprint(p.id, hubB.voiceprintOf(p.id))).toMatchObject({ ok: true });
 });
 
 test("the join read's window closes when the read fails: a refused recording, bad audio, or no microphone", async () => {

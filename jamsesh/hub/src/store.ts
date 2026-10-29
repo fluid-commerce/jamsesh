@@ -43,7 +43,10 @@ export const PALETTE = ["#FF6B4A", "#3E8BFF", "#22C08B", "#B36BFF", "#FFB020", "
 const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
 const TEAM_SETTINGS = new Set<string>([
   "hostId",
-  "voiceResetAt",
+  "voiceResets",
+  "voiceStampSecret",
+  "personKeepers",
+  "hostSigningKey",
   "gatewayKey",
   "brainName",
   "brainAliases",
@@ -336,8 +339,29 @@ export class Store {
 
   // ---- voiceprints ----
 
-  addVoiceSample(personId: string, embedding: Float32Array, kind: VoiceKind = "auto"): void {
-    if (this.team) return this.team.addVoiceSample(personId, embedding, kind);
+  /** When a person's voice was last reset here (`at`, this host's clock) and how many times (`gen`). */
+  voiceReset(personId: string): { gen: number; at: number } {
+    return this.setting<Record<string, { gen: number; at: number }>>("voiceResets", {})[personId] ?? { gen: 0, at: 0 };
+  }
+
+  /** A reset: a new generation, at a moment later than any before it even if the clock stepped back. */
+  markVoiceReset(personId: string): { gen: number; at: number } {
+    const all = this.setting<Record<string, { gen: number; at: number }>>("voiceResets", {});
+    const prev = all[personId] ?? { gen: 0, at: 0 };
+    const next = { gen: prev.gen + 1, at: Math.max(Date.now(), prev.at + 1) };
+    this.setSetting("voiceResets", { ...all, [personId]: next });
+    return next;
+  }
+
+  /**
+   * Every voice sample comes in here, with when its source was heard (this host's clock). Nothing heard
+   * at or before the person's last reset teaches their voice again, whichever path it took (a line still
+   * being transcribed, a later correction of an old line, a held first sample, a carried copy). Returns
+   * whether it was kept.
+   */
+  addVoiceSample(personId: string, embedding: Float32Array, kind: VoiceKind, heardAt: number): boolean {
+    if (!(Number.isFinite(heardAt) && heardAt > this.voiceReset(personId).at)) return false;
+    if (this.team) return this.team.addVoiceSample(personId, embedding, kind, heardAt);
     this.db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)), kind);
     // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24
     // each). A carried copy keeps everything a device may carry (32, MAX_CARRIED), so carrying it back loses nothing.
@@ -348,6 +372,7 @@ export class Store {
            (SELECT rowid FROM voiceprints WHERE person_id = ? AND kind = ? ORDER BY ts DESC, rowid DESC LIMIT ?)`,
         )
         .run(personId, k, personId, k, keep);
+    return true;
   }
 
   voiceSamples(): { id: number; personId: string; embedding: Float32Array; kind: VoiceKind; ts: number }[] {
