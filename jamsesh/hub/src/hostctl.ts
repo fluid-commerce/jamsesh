@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { bus } from "./bus";
+import { stopHelper } from "./children";
 import { config } from "./config";
 import type { Session } from "./session";
 import type { BuildRequest } from "./types";
@@ -91,11 +92,20 @@ JSON.stringify(out);`;
 
 async function run(cmd: string[], timeoutMs = 30_000): Promise<{ code: number; out: string }> {
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-  const timer = setTimeout(() => p.kill(), timeoutMs);
-  const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
-  const code = await p.exited;
+  // Every wait is bounded: past the timeout the process is stopped (TERM, then KILL) and we stop waiting on its pipes and exit.
+  const finished = (async () => {
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    const code = await p.exited;
+    return { code, out: (out + (err ? `\n${err}` : "")).trim() };
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutMs)));
+  const r = await Promise.race([finished, late]);
   clearTimeout(timer);
-  return { code, out: (out + (err ? `\n${err}` : "")).trim() };
+  if (r) return r;
+  finished.catch(() => {});
+  await stopHelper(p, 1_000).catch(() => false);
+  return { code: -1, out: "timed out" };
 }
 
 const osa = (script: string) => run(["osascript", "-e", script]);

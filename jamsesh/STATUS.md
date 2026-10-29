@@ -17,7 +17,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Permission setup window | Simulated | Rendered and laid out; the macOS prompts themselves weren't clicked through. |
 | Microphone inside the app's window (WebKit) | Not tested | The page is a secure origin, so the browser allows it; macOS will ask for Microphone on first use. |
 | Big screen on a second display, same-Space full screen | Not tested | Needs a second display. |
-| Helpers stop with the hub (canvas server, participants, key helper, local whisper), graceful or killed | Simulated | Hub tests with stand-in helpers, including ones that ignore `SIGTERM` and a hub killed outright; the bundled app's hung-page, hub-restart and port-release check is still to run on a Mac. |
+| Helpers stop with the hub (canvas server, participants, key helper, local whisper), graceful or killed | Simulated | Hub tests with stand-in helpers, including ones that ignore `SIGTERM` and a hub killed outright; the bundled app's hung-page, hub-restart and port-release check is an owner-run release check on a Mac, still to run. |
 | Opening the app on another Mac | Not tested | Ad-hoc signed: needs **Open Anyway** once in Privacy & Security. Permissions reset if the app is rebuilt. |
 
 ## Room and brain

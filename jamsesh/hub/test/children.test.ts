@@ -185,3 +185,14 @@ test("once stopAll has begun, nothing new may be spawned (assertOpen), so its re
   expect(await p).toBe(true);
   expect(() => reg.assertOpen()).toThrow(/stopping/); // and after it returned
 });
+
+test("a stop that arrives the instant the wrapper starts never leaves the helper running", async () => {
+  for (let n = 0; n < 5; n++) {
+    const secs = `299.${n}7${Date.now() % 1000}`;
+    const p = Bun.spawn(withParentWatch(["sleep", secs]), { stdio: ["ignore", "ignore", "ignore"] });
+    p.kill(); // before the wrapper has got as far as launching the helper
+    await p.exited;
+    await Bun.sleep(300);
+    expect(Bun.spawnSync(["pgrep", "-f", `sleep ${secs}`]).stdout.toString().trim()).toBe("");
+  }
+}, 20_000);

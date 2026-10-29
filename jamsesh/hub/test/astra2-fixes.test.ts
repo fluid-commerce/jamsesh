@@ -173,7 +173,7 @@ test("A10: revoking a device closes its dev sockets and its token stops at once"
   proxy.sockets.delete(other);
 });
 
-test("a closed big-screen window stops being a screen at once; main stays, and only the host can say so", async () => {
+test("a closed big-screen window stops being a screen at once, main too until it reports again, and only the host can say so", async () => {
   const json = { "content-type": "application/json" };
   const report = (screen: string) => fetch(`${base}/api/display`, { method: "POST", headers: json, body: JSON.stringify({ screen, width: 1920, height: 1080 }) });
   await report("main");
@@ -186,5 +186,7 @@ test("a closed big-screen window stops being a screen at once; main stays, and o
   expect((await del("screen-2")).status).toBe(200);
   expect(ids()).not.toContain("screen-2");
   await del("main");
+  expect(ids()).not.toContain("main"); // 1.R5: main counts only while its window reports
+  await report("main");
   expect(ids()).toContain("main");
 });

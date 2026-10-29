@@ -156,3 +156,13 @@ test("a stopped canvas gives no agent a new participant", async () => {
   await expect(c.forAgent({ id: "a1", name: "A" })).rejects.toThrow(/stopped/);
   expect(spawned).toBe(0);
 });
+
+test("a dev server refresh that is mid-check when the proxy stops writes nothing afterwards", async () => {
+  const { DevProxy } = await import("../src/devproxy");
+  const patches: unknown[] = [];
+  const dp: any = new DevProxy({ devservers: () => [{ id: "d1", up: true, target: "127.0.0.1:1" }], store: { patch: (...a: unknown[]) => void patches.push(a) } } as any);
+  dp.check = async () => (dp.stop(), false); // stop arrives while the check is awaited
+  await dp.refresh();
+  expect(patches).toEqual([]);
+  expect(dp.downSince.size).toBe(0);
+});

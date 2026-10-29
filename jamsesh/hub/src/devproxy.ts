@@ -194,7 +194,9 @@ export class DevProxy {
   async refresh() {
     const now = Date.now();
     for (const d of this.session.devservers()) {
+      if (this.stopped) return;
       const up = await this.check(d);
+      if (this.stopped) return; // stopped during the check: nothing is written after stop
       if (up !== d.up) this.session.store.patch("devservers", d.id, { up });
       if (up) {
         this.downSince.delete(d.id);
@@ -221,7 +223,10 @@ export class DevProxy {
     if (art) this.session.store.remove("artifacts", art.id);
   }
 
+  private stopped = false;
+
   stop() {
+    this.stopped = true;
     this.offRevoked();
     for (const id of [...this.listeners.keys()]) this.close(id);
   }

@@ -243,8 +243,8 @@ export class Canvas {
     } finally {
       clearTimeout(timer);
       // Never left running: killed if it's still going, and reaped either way.
-      if (p.exitCode == null) await stopHelper(p, 500).catch(() => {});
-      await p.exited.catch(() => {});
+      // Every wait is bounded (stopHelper's TERM then KILL grace); a helper whose exit still isn't seen stays in the registry, which reports it at shutdown.
+      if (p.exitCode == null && !(await stopHelper(p, 500).catch(() => false))) console.warn("canvas: the key helper's exit wasn't observed");
       if (this.keyProc === p) this.keyProc = null;
     }
   }

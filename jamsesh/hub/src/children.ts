@@ -15,11 +15,13 @@ export function withParentWatch(cmd: string[], parentPid = process.pid, graceMs 
     // A backgrounded command would otherwise lose stdin (the MCP child reads it). dash (Linux /bin/sh)
     // swaps in /dev/null before applying `<&0`, so stdin is held on fd 3 first and handed over from there.
     "exec 3<&0",
+    "child=",
+    // The TERM trap goes in before the child exists, so an immediate stop is never lost (with no child yet it just exits).
+    // TERM first; a helper that ignores it gets KILL after the grace, so nothing the wrapper stops outlives it.
+    `stop() { child=\${child:-$!}; [ -n "$child" ] || return 0; kill $child 2>/dev/null; i=0; while kill -0 $child 2>/dev/null && [ $i -lt ${ticks} ]; do sleep 0.1; i=$((i+1)); done; kill -0 $child 2>/dev/null && kill -9 $child 2>/dev/null; wait $child 2>/dev/null; }`,
+    "trap 'stop; exit 0' TERM INT HUP",
     '"$@" <&3 3<&- &',
     "child=$!",
-    // TERM first; a helper that ignores it gets KILL after the grace, so nothing the wrapper stops outlives it.
-    `stop() { kill $child 2>/dev/null; i=0; while kill -0 $child 2>/dev/null && [ $i -lt ${ticks} ]; do sleep 0.1; i=$((i+1)); done; kill -0 $child 2>/dev/null && kill -9 $child 2>/dev/null; wait $child 2>/dev/null; }`,
-    "trap 'stop; exit 0' TERM INT HUP",
     'while kill -0 $child 2>/dev/null && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d \' \')" = "$parent" ]; do',
     "  sleep 1 & wait $!",
     "done",

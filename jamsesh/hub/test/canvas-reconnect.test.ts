@@ -2,6 +2,7 @@
 // canvas server again when it stops (it crashed, or something killed it).
 import { expect, test } from "bun:test";
 import { Canvas } from "../src/canvas/canvas";
+import { config as cfg } from "../src/config";
 import { HelperRegistry, withParentWatch } from "../src/children";
 
 test("each announcement of the canvas is a new generation, so people's canvases fetch their link again", () => {
@@ -505,7 +506,7 @@ test("Stop reaps a canvas server that ignores SIGTERM, and a key helper still ru
     const pids = ["key", "serve"].map((m) => Number(readFileSync(join(dir, `${m}.pid`), "utf8").trim()));
     expect(pids.every(isAlive)).toBe(true);
     expect(await canvas.stop()).toBe(true); // resolves true only once the TERM-resistant helpers' exits were seen
-    expect(pids.every((p) => !isAlive(p))).toBe(true);
+    expect(await waitFor(() => pids.every((p) => !isAlive(p)))).toBe(true); // SIGKILL lands a few ms after the wrapper's exit is seen
     await key;
   } finally {
     (config as any).figcraftServerBin = was.bin;
@@ -548,3 +549,25 @@ test("a failed start whose helper didn't exit says so in the canvas status, and 
     Canvas.START_RETRY_MS = was;
   }
 });
+
+test("serverKey never waits unboundedly on a key helper whose exit is never seen: it returns, and the registry still holds it", async () => {
+  const helpers = new HelperRegistry();
+  const kills: (string | undefined)[] = [];
+  const stuck = { pid: 999999, exitCode: null, exited: new Promise<number>(() => {}), stdout: new Response("key=abc").body, kill: (sig?: any) => void kills.push(sig) };
+  const real = Bun.spawn;
+  (Bun as any).spawn = () => stuck;
+  try {
+    const canvas: any = { helpers, checkRunning() {}, serverDir: "/x", keyProc: null };
+    const was = cfg.figcraftServerBin;
+    (cfg as any).figcraftServerBin = "/bin/true";
+    const t0 = Date.now();
+    const key = await (Canvas.prototype as any).serverKey.call(canvas);
+    (cfg as any).figcraftServerBin = was;
+    expect(key).toBe("abc");
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(kills).toContain("SIGKILL");
+    expect(helpers.size).toBe(1); // still tracked
+  } finally {
+    (Bun as any).spawn = real;
+  }
+}, 15_000);

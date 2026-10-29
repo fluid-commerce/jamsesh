@@ -133,7 +133,10 @@ the client.
   `SIGTERM`, then `SIGKILL` for one that ignores it. Shutdown reports the helpers reaped only when
   each one's exit was seen, and warns otherwise. Once shutdown begins no helper is spawned (every
   spawn site checks the registry right before spawning), so the result covers every helper there
-  will be; a helper whose exit promise fails stays tracked and counts as not seen. (A `whisper-server` already running on its port when the hub starts isn't the
+  will be; a helper whose exit promise fails stays tracked and counts as not seen. No wait on a
+  helper's exit is unbounded (TERM, then KILL, then give up and report). The bundled Mac app's
+  recovery check (hung page, killed hub, restart, port release) is an owner-run release check on
+  real hardware, deliberately not part of the automated tests. (A `whisper-server` already running on its port when the hub starts isn't the
   hub's, and is left alone.)
 - Opens the **big screen** window at `/host`. With two or more displays it moves to the first
   display that isn't the main one; with one it stays there. It uses same-Space full screen, so
