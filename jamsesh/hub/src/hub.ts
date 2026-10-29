@@ -150,7 +150,8 @@ export class Hub {
       const ev = this.store.event(eventId);
       const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });
       if (!ev?.data.utteranceId) return "That line wasn't spoken, so there's no voice to learn.";
-      const { learning } = this.audio.assign(ev.data.utteranceId, person.id);
+      // Said out loud to the brain: whoever said it isn't known for sure, so it relabels and teaches nothing.
+      const { learning } = this.audio.assign(ev.data.utteranceId, person.id, { host: false, personId: null });
       this.confirmLearning(person.name, learning);
       return `Line ${eventId} is now ${person.name}'s. ${learningNote(person.name, learning)}`;
     };

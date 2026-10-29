@@ -2,7 +2,7 @@
 // the numbers. It uses only what the pipeline offered before 5.3 as well (so the same file measures
 // the "before"), and asserts nothing about them beyond a sanity floor: voices.test.ts holds the rules.
 import { expect, test } from "bun:test";
-import { CAN_SIM, CAST, ENROL_TEXT, enrol, makeRoom, play, pct, rng, score, script, type Spoken, say, type Key } from "./voices.sim";
+import { CAN_SIM, CAST, ENROL_TEXT, enrol, HOST, makeRoom, play, pct, rng, score, script, type Spoken, say, type Key } from "./voices.sim";
 
 const SEEDS = [11, 12, 13];
 const fmt = (s: ReturnType<typeof score>) => `Someone ${pct(s.someone, s.lines)}  right ${pct(s.right, s.lines)}  wrong ${pct(s.wrong, s.lines)}  duplicates ${s.dupes}  lost ${s.lost}`;
@@ -21,7 +21,7 @@ async function run(opts: { enrolled?: boolean; fixes?: number; skewed?: boolean;
       await play(room, l, r, opts.skewed ? { skew: { "lap-b": 1500, "lap-c": -1300 }, textNoise: true } : {});
       if (opts.fixes && fixed < opts.fixes) {
         const u = room.session.store.all("utterances").find((x) => x.t0 < l.t1 + 1500 && x.t1 > l.t0 - 1500);
-        if (u && u.personId !== room.people[l.speaker].id) (room.pipeline.assign(u.id, room.people[l.speaker].id), fixed++, (from = i + 1));
+        if (u && u.personId !== room.people[l.speaker].id) (room.pipeline.assign(u.id, room.people[l.speaker].id, HOST), fixed++, (from = i + 1));
       }
     }
     // Judge everything after the last correction; the whole run when there were none.

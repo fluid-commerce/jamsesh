@@ -550,7 +550,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     let personId = body?.personId;
     if (!personId && body?.name) personId = s.upsertPerson({ name: body.name, role: body.role }).id;
     if (!personId) return bad("personId or name is required");
-    const { utterance, learning } = hub.audio.assign(m[1], personId);
+    const by = { host: hostWindow, personId: paired?.kind === "browser" ? paired.personId : null };
+    const { utterance, learning } = hub.audio.assign(m[1], personId, by);
     const person = s.person(personId)!;
     s.store.put("people", person);
     hub.confirmLearning(person.name, learning);

@@ -10,7 +10,7 @@ import { embed, learningNote } from "../src/audio/voiceprint";
 import { decodeWav, encodeWav, resample } from "../src/audio/wav";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
-import { CAN_SIM, CAST, copiesOf, enrol, ENROL_TEXT, LAPTOPS, makeRoom, play, rng, say, score, script, type Key, type Spoken } from "./voices.sim";
+import { CAN_SIM, CAST, copiesOf, enrol, ENROL_TEXT, HOST, LAPTOPS, makeRoom, play, rng, say, score, script, type Key, type Spoken } from "./voices.sim";
 
 const sim = test.skipIf(!CAN_SIM);
 const T = 120_000;
@@ -171,7 +171,7 @@ sim("a correction is worth many automatic samples, says it is learning, and the 
   await play(room, first, r);
   const u = ofRoom(room)[0];
   const dee = room.people.dee;
-  const done = room.pipeline.assign(u.id, dee.id);
+  const done = room.pipeline.assign(u.id, dee.id, HOST);
   expect(done.learning.learned).toBe(true);
   expect(learningNote("Dee", done.learning)).toBe("Learning Dee's voice.");
   expect(room.pipeline.voiceprints.learnedFrom(dee.id).correction).toBe(1);
@@ -197,8 +197,8 @@ sim("correcting a line takes back what the wrong label taught the wrong person",
   expect(room.pipeline.voiceprints.learnedFrom(ana.id).auto).toBe(3);
   await play(room, line("dee", "Let me write down what we decided about the navigation so nobody forgets it.", t), r);
   const u = ofRoom(room)[0];
-  room.pipeline.assign(u.id, ana.id); // wrongly filed under Ana first, as the live room did
-  const fixed = room.pipeline.assign(u.id, dee.id);
+  room.pipeline.assign(u.id, ana.id, HOST); // wrongly filed under Ana first, as the live room did
+  const fixed = room.pipeline.assign(u.id, dee.id, HOST);
   expect(fixed.learning.learned).toBe(true);
   // The wrong label's samples that sound like Dee are gone; what Ana read herself stays.
   expect(room.pipeline.voiceprints.learnedFrom(ana.id).auto).toBe(0);
@@ -219,7 +219,7 @@ sim("a correction also names earlier lines nobody could place that sound like th
   for (const l of spoken) await play(room, l, r);
   const before = ofRoom(room).filter((u) => !u.personId).length;
   expect(before).toBeGreaterThanOrEqual(2);
-  const out = room.pipeline.assign(ofRoom(room)[2].id, room.people.cam.id);
+  const out = room.pipeline.assign(ofRoom(room)[2].id, room.people.cam.id, HOST);
   expect(out.learning.learned && out.learning.relabelled).toBeGreaterThanOrEqual(1);
   expect(ofRoom(room).filter((u) => !u.personId).length).toBeLessThan(before);
   expect(learningNote("Cam", out.learning)).toMatch(/^Learning Cam's voice\. Fixed \d+ earlier lines? too\.$/);
@@ -230,7 +230,7 @@ sim("a line with no voice sample kept says so instead of pretending", async () =
   // An old line: its copies are long gone and its event kept no sample.
   const old = { id: "utt_old", t0: Date.now() - 3_600_000, t1: Date.now() - 3_598_000, text: "an old line", personId: null, speakerName: "Someone", confidence: 0, method: "unknown", deviceId: "lap-a", devices: [], location: "room" as const, eventId: null, engine: "t" };
   room.session.store.put("utterances", old);
-  const out = room.pipeline.assign(old.id, room.people.ben.id);
+  const out = room.pipeline.assign(old.id, room.people.ben.id, HOST);
   expect(out.learning.learned).toBe(false);
   expect(learningNote("Ben", out.learning)).toMatch(/^Renamed, but couldn't learn from that line \(no voice sample was kept/);
   expect(room.session.store.get("utterances", old.id)?.speakerName).toBe("Ben");
@@ -245,7 +245,7 @@ sim("corrections stick: three fixes in a cold room and everything after is right
   for (const [i, l] of lines.entries()) {
     await play(room, l, r);
     const u = ofRoom(room).find((x) => x.t0 < l.t1 + 1500 && x.t1 > l.t0 - 1500);
-    if (fixed < 3 && u && u.personId !== room.people[l.speaker].id) (room.pipeline.assign(u.id, room.people[l.speaker].id), fixed++, (from = i + 1));
+    if (fixed < 3 && u && u.personId !== room.people[l.speaker].id) (room.pipeline.assign(u.id, room.people[l.speaker].id, HOST), fixed++, (from = i + 1));
   }
   const s = score(room, lines.slice(from));
   expect(s.right / s.lines).toBeGreaterThanOrEqual(0.9);
@@ -323,7 +323,7 @@ test("resetting a voice forgets it everywhere it could come back from: samples, 
   expect(s.store.event(ev.id)?.data.embedding).toBeUndefined();
   expect(s.store.event(theirs.id)?.data.embedding).toEqual(v);
   // Correcting their old line to them teaches nothing now.
-  expect(hubB.audio.assign("utt_reset1", p.id).learning.learned).toBe(false);
+  expect(hubB.audio.assign("utt_reset1", p.id, { host: true, personId: null }).learning.learned).toBe(false);
   expect(hubB.audio.voiceprints.count(p.id)).toBe(0);
   // What it hears from them afterwards is theirs again.
   expect(hubB.audio.voiceprints.add(p.id, Float32Array.from(v), "enrol", Date.now() + 1)).toBe(true);

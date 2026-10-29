@@ -196,7 +196,7 @@ describe("3 manual labels", () => {
       const truths = await sayAll(room, items);
       const s = score(room, truths);
       // The room does not know anyone yet (or is unsure); a person labels each line.
-      for (const x of s) room.pipeline.assign(x.lines[0].id, room.people[x.truth.speaker as Key].id);
+      for (const x of s) room.pipeline.assign(x.lines[0].id, room.people[x.truth.speaker as Key].id, { host: true, personId: null });
       return s;
     };
     const first = await label(0, 500);

@@ -53,6 +53,9 @@ interface Group {
   forgotten?: boolean;
 }
 
+/** Who corrected a line: the host's own window, or a person's window (null: neither, e.g. the brain). */
+export type Corrector = { host: boolean; personId: string | null };
+
 /** A voice sample and when it was heard. */
 type Heard = { e: Float32Array; at: number };
 
@@ -565,25 +568,29 @@ export class AudioPipeline {
     }
   }
 
-  /** Someone says who said a line. The line's voice joins that person's voiceprint, counted as a correction. */
-  assign(utteranceId: string, personId: string): { utterance: Utterance; learning: Learning } {
+  /**
+   * Someone says who said a line. The line is relabelled whoever says so. Its voice joins that person's
+   * voiceprint (counted as a correction) only when the one correcting is that person or the host; what the
+   * wrong label taught the wrong person is taken back only when they or the host correct it. Anyone else's
+   * correction relabels the line and teaches nothing, so nobody can write or erase another person's voice.
+   */
+  assign(utteranceId: string, personId: string, by: Corrector): { utterance: Utterance; learning: Learning } {
     const u = this.session.store.get("utterances", utteranceId);
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
     const prior = u.personId && u.personId !== personId ? u.personId : null;
+    const mayTeach = by.host || by.personId === personId;
+    const mayUnteach = !!prior && (by.host || by.personId === prior);
     const heard = this.voiceOf(u);
     let learning: Learning;
     if (!voiceprintStatus().available) learning = { learned: false, reason: "voice matching is off on this host" };
-    else if (heard.embedding && !this.voiceprints.add(personId, heard.embedding, "correction", heard.heardAt)) learning = { learned: false, reason: `that line was heard before ${person.name}'s voice was reset` };
-    else if (heard.embedding) {
-      let cleaned = 0;
-      if (prior) {
-        // What the wrong label taught the wrong person: this line's sample, and others that sound like it.
-        this.voiceprints.remove(prior, heard.embedding);
-        cleaned = this.voiceprints.forgetLike(prior, heard.embedding);
-      }
-      learning = { learned: true, cleaned, relabelled: this.relabelSimilar(heard.embedding, personId, u.id) };
-    } else learning = { learned: false, reason: heard.reason };
+    else if (!heard.embedding) learning = { learned: false, reason: heard.reason };
+    else {
+      const cleaned = mayUnteach ? (this.voiceprints.remove(prior!, heard.embedding), this.voiceprints.forgetLike(prior!, heard.embedding)) : 0;
+      if (!mayTeach) learning = { learned: false, reason: `only ${person.name} or the host can teach ${person.name}'s voice` };
+      else if (!this.voiceprints.add(personId, heard.embedding, "correction", heard.heardAt)) learning = { learned: false, reason: `that line was heard before ${person.name}'s voice was reset` };
+      else learning = { learned: true, cleaned, relabelled: this.relabelSimilar(heard.embedding, personId, u.id) };
+    }
     const next: Utterance = { ...u, personId, speakerName: person.name, confidence: 1, method: "manual" };
     this.session.store.put("utterances", next);
     this.onLine?.(next, false);

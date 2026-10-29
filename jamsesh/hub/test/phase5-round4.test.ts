@@ -158,10 +158,10 @@ voiced("correcting an old unlabelled line to someone after their reset doesn't t
   };
   line("utt_old", old);
   hub.resetVoice(kai.id);
-  const r = hub.audio.assign("utt_old", kai.id);
+  const r = hub.audio.assign("utt_old", kai.id, { host: true, personId: null });
   expect(r.learning).toMatchObject({ learned: false });
   expect(hub.audio.voiceprints.count(kai.id)).toBe(0);
   line("utt_new", Date.now() + 1);
-  expect(hub.audio.assign("utt_new", kai.id).learning).toMatchObject({ learned: true });
+  expect(hub.audio.assign("utt_new", kai.id, { host: true, personId: null }).learning).toMatchObject({ learned: true });
   expect(hub.audio.voiceprints.count(kai.id)).toBeGreaterThan(0);
 });

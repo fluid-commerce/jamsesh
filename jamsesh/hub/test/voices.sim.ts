@@ -275,3 +275,6 @@ export function enrol(room: Room, key: Key) {
     if (e) p.voiceprints.add(room.people[key].id, e, "enrol", Date.now());
   }
 }
+
+/** A correction made at the host's own window: it teaches and unteaches voices. */
+export const HOST = { host: true, personId: null } as const;
