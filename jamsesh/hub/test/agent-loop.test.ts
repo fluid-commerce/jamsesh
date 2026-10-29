@@ -163,10 +163,10 @@ test("an open task is asked about, then offered for reassignment; a workstream p
   expect(nudge).toContain(d.id);
   // Asking again changes nothing, and no offer yet.
   s.tick(t0 + TASK_STALE_MS + 60_000);
-  expect(s.store.get("directives", d.id)?.reassignOfferedAt).toBeUndefined();
+  expect(s.store.get("directives", d.id)?.reassignOfferedAt?.[a.id]).toBeUndefined();
   // Still nothing after the grace: the room is offered the reassignment.
   s.tick(t0 + TASK_STALE_MS + TASK_OFFER_MS + 5000);
-  expect(s.store.get("directives", d.id)?.reassignOfferedAt).toBeDefined();
+  expect(s.store.get("directives", d.id)?.reassignOfferedAt?.[a.id]).toBeDefined();
   expect(s.store.recentEvents({ kinds: ["system"] }).some((e) => e.data.reassignOffer)).toBe(true);
   const moved = s.reassignDirective(d.id, "Chey")!;
   expect(moved.targets).toEqual([b.id]);
@@ -183,9 +183,9 @@ test("an agent that answers the nudge keeps its task", () => {
   s.tick(t0 + TASK_STALE_MS + 1000);
   void call;
   s.setDirectiveFor(d.id, a.id, "acked");
-  s.store.patch("directives", d.id, { updatedAt: t0 + TASK_STALE_MS + 2000 }); // the ack, as if it came a second after the nudge
+  s.store.patch("directives", d.id, { signs: { [a.id]: t0 + TASK_STALE_MS + 2000 } }); // the ack, as if it came a second after the nudge
   s.tick(t0 + TASK_STALE_MS + TASK_OFFER_MS + 5000);
-  expect(s.store.get("directives", d.id)?.reassignOfferedAt).toBeUndefined();
+  expect(s.store.get("directives", d.id)?.reassignOfferedAt?.[a.id]).toBeUndefined();
 });
 
 test("a workstream pauses when its owner goes offline and resumes when the owner returns", () => {
@@ -208,7 +208,7 @@ test("an offline agent's task is offered for reassignment without waiting on a n
   const d = directive(s, "Build the settings page", [a.id]);
   s.store.put("agents", { ...s.agent(a.id)!, lastSeen: Date.now() - 30 * 60_000 });
   s.tick(Date.now() + TASK_STALE_MS);
-  expect(s.store.get("directives", d.id)?.reassignOfferedAt).toBeDefined();
+  expect(s.store.get("directives", d.id)?.reassignOfferedAt?.[a.id]).toBeDefined();
 });
 
 test("observers join without a repository, get no product tasks, and can skip broadcasts", async () => {
@@ -238,8 +238,13 @@ test("observers join without a repository, get no product tasks, and can skip br
 test("work an agent starts on its own is announced; work its person asked for is not", async () => {
   const { hub, s, reg, call } = room();
   const a = reg("Jonathan", "acme/desktop", "/d");
-  await call(a, "jam_claim", { workstream: "Surprise refactor" });
+  const first = await call(a, "jam_claim", { workstream: "Setup" });
+  expect(first.isError).toBeFalsy();
   const lines = () => s.store.recentEvents({ kinds: ["system"] }).map((e) => e.text);
+  // The first claim right after joining is what the join prompt asked for.
+  expect(lines().some((t) => t.includes('"Setup" on its own'))).toBe(false);
+  expect(lines().some((t) => t.includes('took "Setup"'))).toBe(true);
+  await call(a, "jam_claim", { workstream: "Surprise refactor" });
   expect(lines().some((t) => t.includes('started "Surprise refactor" on its own'))).toBe(true);
   hub.onPrompt({ agentId: a.id, prompt: "please do the footer" }, "127.0.0.1");
   await call(a, "jam_claim", { workstream: "Footer" });
@@ -317,4 +322,80 @@ test("the tool and listen hooks find the agent by its chat, and do nothing for a
   expect(JSON.stringify(hub.onTool({ session_id: "chat-A", tool_name: "Edit" }, "127.0.0.1"))).toContain("Take this");
   // Its newer-hooks mark belongs to the agent.
   expect(hub.onStop({ session_id: "chat-A" }, "127.0.0.1")).toEqual({});
+});
+
+test("a multi-target directive offers and reassigns per target; the others keep their work", () => {
+  const { s, reg } = room();
+  const a = reg("Jonathan", "acme/desktop", "/d");
+  const b = reg("Chey", "acme/desktop2", "/d2");
+  const c = reg("Mo", "acme/api", "/api");
+  const d = directive(s, "Build the settings page", [a.id, b.id]);
+  s.inbox(a.id);
+  s.inbox(b.id);
+  const t0 = Date.now();
+  // b reports on this task late; a never does.
+  s.postUpdate(b.id, "progress", "halfway there", { data: { directiveId: d.id } });
+  s.noteProgress(d.id, b.id, t0 + TASK_STALE_MS);
+  s.tick(t0 + TASK_STALE_MS + 1000);
+  s.tick(t0 + TASK_STALE_MS + TASK_OFFER_MS + 5000);
+  const offers = s.store.get("directives", d.id)!.reassignOfferedAt ?? {};
+  expect(offers[a.id]).toBeDefined();
+  expect(offers[b.id]).toBeUndefined();
+  const moved = s.reassignDirective(d.id, "Chey", undefined, a.id)!;
+  expect(moved.targets).toEqual([c.id]);
+  const after = s.store.get("directives", d.id)!;
+  expect(after.progress[a.id]).toBe("cancelled");
+  expect(after.progress[b.id]).not.toBe("cancelled");
+  expect(after.status).not.toBe("cancelled");
+  expect(after.reassignOfferedAt?.[a.id]).toBeUndefined();
+});
+
+test("only progress on that task resets its clock, and progress clears an offer", () => {
+  const { s, reg } = room();
+  const a = reg("Jonathan", "acme/desktop", "/d");
+  reg("Chey", "acme/desktop2", "/d2");
+  const d = directive(s, "Build the settings page", [a.id]);
+  s.inbox(a.id);
+  const t0 = Date.now();
+  // Unrelated work doesn't count.
+  s.postUpdate(a.id, "progress", "fixing the footer");
+  s.tick(t0 + TASK_STALE_MS + 1000);
+  expect(s.store.get("directives", d.id)?.nudgedAt?.[a.id]).toBeDefined();
+  s.tick(t0 + TASK_STALE_MS + TASK_OFFER_MS + 5000);
+  expect(s.store.get("directives", d.id)?.reassignOfferedAt?.[a.id]).toBeDefined();
+  // An update linked to the directive is progress: the offer goes.
+  s.postUpdate(a.id, "progress", "settings page started", { data: { directiveId: d.id } });
+  expect(s.store.get("directives", d.id)?.reassignOfferedAt?.[a.id]).toBeUndefined();
+  expect(s.store.get("directives", d.id)?.signs?.[a.id]).toBeGreaterThanOrEqual(t0);
+});
+
+test("a jam_update(done) keeps Done through its own PostToolUse; the next real tool resets it", async () => {
+  const { hub, s, reg, call } = room();
+  const a0 = reg("Jonathan", "acme/desktop", "/d");
+  const a = s.store.put("agents", { ...a0, chatId: "chat-D" }) as Agent;
+  await call(a, "jam_update", { kind: "done", text: "Footer is fixed." });
+  hub.onTool({ session_id: "chat-D", tool_name: "mcp__jamsesh__jam_update" }, "127.0.0.1");
+  expect(s.agent(a.id)?.activity).toBe("Done: Footer is fixed.");
+  expect(s.agent(a.id)?.status).toBe("idle");
+  hub.onTool({ session_id: "chat-D", tool_name: "Edit" }, "127.0.0.1");
+  expect(s.agent(a.id)?.activity).toBe("Working");
+  expect(s.agent(a.id)?.status).toBe("working");
+});
+
+test("an observer stays an observer when it rejoins without a role, and can't claim", async () => {
+  const { hub, s } = room();
+  const ctx = { agentId: null as string | null, ip: "127.0.0.1", device: null };
+  const joinArgs = { owner: "Chey", harness: "claude-code", cwd: "/triage", chat: "chat-O" };
+  await hub.mcp.call(ctx, "jam_join", { ...joinArgs, role: "observer" });
+  const id = ctx.agentId!;
+  expect(s.agent(id)?.role).toBe("observer");
+  const again = { agentId: null as string | null, ip: "127.0.0.1", device: null };
+  await hub.mcp.call(again, "jam_join", { ...joinArgs, repo: "acme/x" });
+  expect(again.agentId).toBe(id);
+  expect(s.agent(id)).toMatchObject({ role: "observer", repo: "" });
+  await expect(hub.mcp.call(again, "jam_claim", { workstream: "Anything" })).rejects.toThrow("observer");
+  expect(s.store.all("workstreams")).toEqual([]);
+  // Naming a role changes it.
+  await hub.mcp.call({ agentId: null, ip: "127.0.0.1", device: null }, "jam_join", { ...joinArgs, repo: "acme/x", role: "worker" });
+  expect(s.agent(id)?.role).toBe("worker");
 });

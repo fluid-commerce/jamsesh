@@ -525,7 +525,10 @@ export class Hub {
     this.hookSeen.set(agent.id, Date.now());
     this.markNewHooks(agent.id);
     const done = typeof agent.activity === "string" && agent.activity.startsWith("Done:");
-    if (agent.status !== "working" || done) this.session.touchAgent(agent.id, { status: "working", ...(done ? { activity: "Working" } : {}) });
+    // JamSesh's own tools (the jam_update that just said "Done") aren't new work; any other tool is.
+    const own = /(^|__)jam_\w+$/.test(String(body?.tool_name ?? ""));
+    if (done && own) this.session.touchAgent(agent.id, {});
+    else if (agent.status !== "working" || done) this.session.touchAgent(agent.id, { status: "working", ...(done ? { activity: "Working" } : {}) });
     else this.session.touchAgent(agent.id);
     if (/jam_(inbox|wait|ask)$/.test(String(body?.tool_name ?? ""))) return {};
     return this.pendingContext(agent, "PostToolUse", "Fold these into your current work; jam_ack directives when you take them, and answer questions with jam_answer.");

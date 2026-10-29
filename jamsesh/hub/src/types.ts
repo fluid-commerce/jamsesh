@@ -127,8 +127,10 @@ export interface Directive {
   updatedAt: number;
   /** When JamSesh asked each target how it's going (an open task with no progress for a while). */
   nudgedAt?: Record<string, number>;
-  /** When the room was offered a reassignment; the tile shows a Reassign button until the task moves. */
-  reassignOfferedAt?: number;
+  /** Per target: when it last showed progress on this task (delivery, ack, a linked update, a status change). */
+  signs?: Record<string, number>;
+  /** Per target: when the room was offered a reassignment; that target's tile shows a Reassign button until it resumes or the task moves. */
+  reassignOfferedAt?: Record<string, number>;
 }
 
 export type ArtifactKind = "frame" | "screenshot" | "devserver" | "html" | "note";

@@ -383,13 +383,14 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
-        const observer = args.role === "observer";
+        // Rejoining keeps the stored role unless the caller names one (the session settles it).
+        const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
         const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
           harness: args.harness ?? "other",
-          repo: observer ? "" : cleanRepo(String(args.repo ?? "")),
-          role: observer ? "observer" : "worker",
-          broadcasts: observer && typeof args.broadcasts === "boolean" ? args.broadcasts : undefined,
+          repo: cleanRepo(String(args.repo ?? "")),
+          role,
+          broadcasts: typeof args.broadcasts === "boolean" ? args.broadcasts : undefined,
           branch: args.branch,
           cwd: args.cwd,
           machine,
@@ -454,6 +455,7 @@ export class McpEndpoint {
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
+        if (agent.role === "observer") throw new Error("You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.");
         const { workstream, conflict } = s.claim(agent.id, String(args.workstream), { force: !!args.force });
         if (conflict) return text(`"${workstream.title}" belongs to ${conflict.name} (${conflict.status}, ${conflict.activity}). Message them with jam_message to split the work, or pass force:true if the room reassigned it.`);
         return text(`You own "${workstream.title}".${workstream.brief ? `\n\nBrief so far:\n${workstream.brief}` : ""}`);
