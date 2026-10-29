@@ -1583,7 +1583,8 @@ a machine's agents share its credential, so an upload can't prove which agent se
 one of the caller's machine's agents; only the host's own window uploads for the room or makes
 versions over HTTP. An uploaded image must be a whole PNG or JPEG (PNG chunks, CRCs, pixel data that
 inflates to its declared size with valid row filters, at most 80 MB decoded; JPEG segments, a frame,
-a scan and its end marker), checked before anything is written. Variants
+a scan and its end marker), checked before anything is written. JPEG scan data itself isn't decoded
+(owner decision): a JPEG whose compressed data is damaged is stored and shows as a broken image. Variants
 ("Nav / A", "Nav / B") stay separate, and one agent can't replace another's item. The item keeps its
 id, so a screen showing it, a pin and the feed all follow the newest build; earlier builds are kept in
 the item's `versions` (up to 20). The tile's badge reads "v3 · 2 min ago" and opens the versions.
