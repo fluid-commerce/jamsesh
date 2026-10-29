@@ -286,9 +286,6 @@ TOKEN=${shellWord(token)}
 DIR="$HOME/.jamsesh"
 # JamSesh's folder holds credentials: only this person can open it, however it was made before.
 mkdir -p "$DIR" && chmod 700 "$DIR"
-# Replaces a credential file in one step with a private one (mode 600), from standard input: an
-# existing file is never written in place, so a looser mode it had never carries over.
-private() { local t; t="$(mktemp "$1.XXXXXXXX")" && cat > "$t" && chmod 600 "$t" && mv -f "$t" "$1"; }
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
 # Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
@@ -312,57 +309,143 @@ until perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or exit 2; flock($f, LOCK_EX
   sleep 0.2
   waited=$((waited + 1))
 done
-# Setup is one transaction. Every file it can change is saved before the first change, the saved copies
-# stay until the very last step has succeeded, and any failure before then (any command that fails
-# under set -e, or an explicit exit) puts every file and the Claude Code MCP entry back. A restore that
-# fails is reported by path and its saved copy is kept, never swallowed. Paths are saved by where a
-# symlink leads, since that is where setup writes.
+# Setup is one transaction, kept as a journal. Every file setup writes goes through safe_write, which
+# first records the file's earlier content (or that it was absent), and after that the hash of what it
+# wrote. Nothing is recorded for a file setup never changes, so a rollback never touches one. On any
+# failure before the last step, a file is put back only if it still holds what setup wrote; one that
+# someone else changed meanwhile is left as it is and listed. Claude Code's config is not a file setup
+# owns: only its one jamsesh entry is read, compared and put back, key by key.
 SAVED="$(mktemp -d "$DIR/.saved.XXXXXXXX")"
-TRACKED=()
-track() {
-  local real i
-  real="$(perl -MCwd=abs_path -MFile::Basename=dirname -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { $r = readlink $p; $r = dirname($p) . "/" . $r unless $r =~ m{^/} } print $r // $p' "$1")"
-  i=\${#TRACKED[@]}
-  TRACKED+=("$real")
-  if [ -f "$real" ]; then cp -p "$real" "$SAVED/$i"; else : > "$SAVED/$i.absent"; fi
+J="$SAVED/journal"
+mkdir "$J"
+sha() { perl -MDigest::SHA=sha256_hex -e 'if (open(my $f, "<:raw", $ARGV[0])) { local $/; print sha256_hex(<$f> // "") } else { print "absent" }' "$1"; }
+key_of() { printf '%s' "$1" | perl -MDigest::SHA=sha1_hex -e 'local $/; print sha1_hex(<STDIN>)'; }
+mode_of() { perl -e 'printf "%o", (stat $ARGV[0])[2] & 07777' "$1"; }
+# Where a write to this path really lands: a symlink is followed (one that leads nowhere too), so the
+# link itself stays a link.
+resolve() { perl -MCwd=abs_path -MFile::Basename=dirname -e 'my $p = shift; my $r = abs_path($p); if (!defined $r && -l $p) { $r = readlink $p; $r = dirname($p) . "/" . $r unless $r =~ m{^/} } print $r // $p' "$1"; }
+# Setup writes inside the person's home and never into an instruction file (CLAUDE.md, AGENTS.md), however
+# a link points there.
+guard() {
+  local real="$1" f home
+  home="$(resolve "$HOME")"
+  case "$real" in "$HOME"/*|"$home"/*) ;; *) echo "JamSesh won't write $real: it is outside your home folder." >&2; return 1 ;; esac
+  case "$(basename "$real" | tr 'A-Z' 'a-z')" in claude.md|agents.md) echo "JamSesh won't write $real: it is an instruction file." >&2; return 1 ;; esac
+  for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codex/AGENTS.md"; do
+    if [ -e "$f" ] && [ "$real" -ef "$f" ]; then echo "JamSesh won't write $real: it is an instruction file." >&2; return 1; fi
+  done
 }
-for f in "$DIR/auth.header" "$DIR/client.env" "$DIR/hook.sh" "$DIR/mcp-headers.json" "$DIR/mcp-headers.sh" \\
-  "$HOME/.claude/settings.json" "$HOME/.claude/commands/jamsesh.md" "$HOME/.claude/skills/jamsesh/SKILL.md" \\
-  "$HOME/.codex/config.toml" "$HOME/.codex/prompts/jamsesh.md" "$HOME/.codex/skills/jamsesh/SKILL.md"; do track "$f"; done
+# The one way setup writes a file: safe_write <path> <mode | keep:mode> [append], content on standard input.
+# A new file is made beside the target (mktemp creates it exclusively and never follows a link), then moved over it.
+safe_write() {
+  local path="$1" mode="$2" append="\${3:-}" real k t
+  real="$(resolve "$path")"
+  guard "$real" || return 1
+  k="$(key_of "$real")"
+  if [ ! -d "$J/$k" ]; then
+    mkdir "$J/$k"
+    printf '%s' "$real" > "$J/$k/path"
+    if [ -f "$real" ]; then cp -p "$real" "$J/$k/before"; fi
+    sha "$real" > "$J/$k/beforesha"
+  fi
+  t="$(mktemp "$real.XXXXXXXX")" || return 1
+  if [ "$append" = append ] && [ -f "$real" ]; then cat "$real" > "$t" || { rm -f "$t"; return 1; }; fi
+  cat >> "$t" || { rm -f "$t"; return 1; }
+  case "$mode" in keep:*) if [ -f "$real" ]; then mode="$(mode_of "$real")"; else mode="\${mode#keep:}"; fi ;; esac
+  chmod "$mode" "$t" || { rm -f "$t"; return 1; }
+  sha "$t" > "$J/$k/after"
+  mv -f "$t" "$real"
+}
+# Downloads go to the saved folder (private, ours), and are checked before safe_write puts them in place.
+fetch() { curl -fsS "\${AUTH[@]}" "$HUB/$1" -o "$2"; }
+# The jamsesh entry of Claude Code's config (~/.claude.json), alone: get prints it as JSON (nothing if
+# absent), set puts the entry in the file given, del removes it. The rest of the file is carried over
+# as it was read, and a write is retried if the file changed between reading it and replacing it.
+mcp_key() { perl -MJSON::PP -MDigest::SHA=sha256_hex -MFile::Temp -MFile::Basename -MCwd=abs_path - "$@" <<'MCPKEY'
+use strict; use warnings;
+my ($op, $cfg, $val) = @ARGV;
+$cfg = abs_path($cfg) // $cfg;
+sub slurp { open(my $f, '<:raw', $_[0]) or return undef; local $/; my $t = <$f>; close $f; return $t }
+my $js = JSON::PP->new->canonical;
+if ($op eq 'get') {
+  my $t = slurp($cfg);
+  exit 0 unless defined $t;
+  my $d = eval { decode_json($t) };
+  exit 2 unless ref $d eq 'HASH';
+  my $o = ref $d->{mcpServers} eq 'HASH' ? $d->{mcpServers}{jamsesh} : undef;
+  print $js->encode($o) if defined $o;
+  exit 0;
+}
+for my $try (1 .. 5) {
+  my $t = slurp($cfg);
+  my $d = defined $t ? eval { decode_json($t) } : {};
+  exit 2 unless ref $d eq 'HASH';
+  $d->{mcpServers} = {} unless ref $d->{mcpServers} eq 'HASH';
+  if ($op eq 'set') { my $v = slurp($val); exit 1 unless defined $v; $d->{mcpServers}{jamsesh} = decode_json($v) } else { delete $d->{mcpServers}{jamsesh} }
+  my $mode = defined $t ? ((stat $cfg)[2] & 07777) : 0600;
+  my ($o, $tmp) = File::Temp::tempfile('.claude.jamsesh-XXXXXXXX', DIR => dirname($cfg));
+  print $o $js->pretty->encode($d);
+  close $o or exit 1;
+  chmod $mode, $tmp;
+  my $now = slurp($cfg);
+  if ((defined $now ? sha256_hex($now) : '') eq (defined $t ? sha256_hex($t) : '')) { rename $tmp, $cfg or exit 1; exit 0 }
+  unlink $tmp;
+}
+exit 1;
+MCPKEY
+}
+CLAUDEJSON="$HOME/.claude.json"
 committed=0
 reason=""
 mcp_touched=0
+mcp_before=""
+mcp_ours=""
 CLAUDE=""
 on_exit() {
-  local rc=$? i real t bad="" restored=1
+  local rc=$? d real t cur before after bad="" foreign="" restored=1 mcp_result=none now
   trap - EXIT
   set +e
   [ "$committed" = 1 ] && exit "$rc"
   [ "$rc" = 0 ] && rc=1
-  for ((i = 0; i < \${#TRACKED[@]}; i++)); do
-    real="\${TRACKED[$i]}"
-    t=""
-    if [ -f "$SAVED/$i" ]; then
-      # Through a new private file made beside it (mktemp creates it exclusively, never through a link).
-      { t="$(mktemp "$real.XXXXXXXX")" && cp -p "$SAVED/$i" "$t" && mv -f "$t" "$real"; } || { rm -f "$t"; bad="$bad $real"; }
+  for d in "$J"/*/; do
+    [ -d "$d" ] || continue
+    real="$(cat "$d/path")"
+    cur="$(sha "$real")"
+    before="$(cat "$d/beforesha")"
+    after="$(cat "$d/after" 2>/dev/null)"
+    if [ "$cur" = "$before" ]; then
+      continue
+    elif [ -n "$after" ] && [ "$cur" = "$after" ]; then
+      if [ -f "$d/before" ]; then
+        t=""
+        { t="$(mktemp "$real.XXXXXXXX")" && cp -p "$d/before" "$t" && mv -f "$t" "$real"; } || { rm -f "$t"; bad="$bad $real"; }
+      else
+        rm -f "$real" || bad="$bad $real"
+      fi
     else
-      rm -f "$real" || bad="$bad $real"
+      foreign="$foreign $real"
     fi
   done
-  mcp_result=none
   if [ "$mcp_touched" = 1 ]; then
-    # What happened is read from the CLI afterwards, not assumed from the commands' exit codes.
-    "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1
-    if "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then
-      mcp_result=failed
-    elif [ -f "$SAVED/old_mcp.json" ]; then
-      if perl -MJSON::PP -MFile::Temp -MFile::Basename -MCwd=abs_path -e 'my ($path, $saved) = @ARGV; $path = abs_path($path) // $path; open(my $e, "<", $saved) or exit 1; my $entry = decode_json(do { local $/; <$e> }); open(my $in, "<", $path) or exit 1; my $d = decode_json(do { local $/; <$in> }); close $in; $d->{mcpServers} = {} unless ref $d->{mcpServers} eq "HASH"; $d->{mcpServers}{jamsesh} = $entry; my $mode = (stat $path)[2] & 07777; my ($o, $t) = File::Temp::tempfile(".claude.jamsesh-XXXXXXXX", DIR => dirname($path)); print $o JSON::PP->new->canonical->pretty->encode($d); close $o or exit 1; chmod $mode, $t; rename $t, $path or exit 1' "$HOME/.claude.json" "$SAVED/old_mcp.json" 2>/dev/null && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1; then mcp_result=restored; else mcp_result=failed; fi
+    # Read from the file itself, never from the CLI's exit status: the entry is put back only if it is
+    # absent (setup removed it) or is the one setup registered; anything else is someone else's.
+    now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"
+    if [ "$now" != "$mcp_before" ] && [ -n "$now" ] && [ "$now" != "$mcp_ours" ]; then
+      mcp_result=foreign
     else
-      mcp_result=removed
+      if [ "$now" != "$mcp_before" ]; then
+        if [ -n "$mcp_before" ]; then mcp_key set "$CLAUDEJSON" "$SAVED/mcp_before.json" 2>/dev/null; else mcp_key del "$CLAUDEJSON" 2>/dev/null; fi
+      fi
+      now="$(mcp_key get "$CLAUDEJSON" 2>/dev/null)"
+      if [ "$now" = "$mcp_before" ]; then
+        if [ -n "$mcp_before" ]; then mcp_result=restored; else mcp_result=removed; fi
+      else
+        mcp_result=failed
+      fi
     fi
-    [ "$mcp_result" != failed ] || restored=0
+    case "$mcp_result" in foreign|failed) restored=0 ;; esac
   fi
-  [ -z "$bad" ] || restored=0
+  { [ -z "$bad" ] && [ -z "$foreign" ]; } || restored=0
   if [ "$restored" = 1 ]; then
     rm -rf "$SAVED"
     case "$reason" in
@@ -373,13 +456,15 @@ on_exit() {
     esac
   else
     [ -z "$bad" ] || echo "JamSesh couldn't put these files back:$bad (the earlier copies are in $SAVED)." >&2
-    [ "$mcp_result" != failed ] || echo "The jamsesh entry in Claude Code is not as it was; check it with: claude mcp get jamsesh" >&2
+    [ -z "$foreign" ] || echo "Changed by someone else while setup ran, so not put back:$foreign" >&2
+    [ "$mcp_result" != foreign ] || echo "The jamsesh entry in $CLAUDEJSON was changed by someone else while setup ran, so it was left as it is." >&2
+    [ "$mcp_result" != failed ] || echo "JamSesh couldn't put the jamsesh entry in $CLAUDEJSON back as it was (the earlier one is in $SAVED/mcp_before.json)." >&2
     echo "Setup didn't finish, and JamSesh couldn't put your earlier connection back completely." >&2
   fi
   exit "$rc"
 }
 trap on_exit EXIT
-printf 'authorization: Bearer %s\\n' "$TOKEN" | private "$DIR/auth.header"
+printf 'authorization: Bearer %s\\n' "$TOKEN" | safe_write "$DIR/auth.header" 600
 AUTH=(-H "@$DIR/auth.header")
 # A value as one single-quoted shell word, so sourcing client.env (the jamsesh command does) runs
 # nothing in it; the hook reads it as data.
@@ -396,14 +481,13 @@ if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)";
   printf 'JAMSESH_HUB=%s\\n' "$(q "$HUB")"
   printf 'JAMSESH_NAME=%s\\n' "$(q "$NAME")"
   echo 'JAMSESH_ACTIVE=1'
-} | private "$DIR/client.env"
+} | safe_write "$DIR/client.env" 600
 # The hook is fetched to a private temporary file and checked before it replaces the installed one, so
 # a download cut short never leaves Claude Code's hooks running half a script.
-hooktmp="$(mktemp "$DIR/hook.sh.XXXXXXXX")"
-if curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$hooktmp" && head -n 1 "$hooktmp" | grep -q '^#!/usr/bin/env bash' && bash -n "$hooktmp"; then
-  chmod 755 "$hooktmp" && mv -f "$hooktmp" "$DIR/hook.sh"
+hooktmp="$SAVED/hook.sh.new"
+if fetch hook.sh "$hooktmp" && head -n 1 "$hooktmp" | grep -q '^#!/usr/bin/env bash' && bash -n "$hooktmp"; then
+  safe_write "$DIR/hook.sh" 755 < "$hooktmp"
 else
-  rm -f "$hooktmp"
   reason=hook
   exit 1
 fi
@@ -435,32 +519,31 @@ configured=0
 
 CLAUDE="$(find_cli claude || true)"
 if [ -n "$CLAUDE" ]; then
-  # claude mcp has no replace: the old entry has to go before the new one is added. So the old entry and
-  # the credential it uses are saved first (the new token goes in only after), and both are put back
-  # if the new one can't be added. Nothing here puts a token on a command line.
+  # claude mcp has no replace: the old entry has to go before the new one is added. So the old entry is
+  # kept first and put back, key by key, if the new one can't be added. Nothing here puts a token on a
+  # command line.
   cred="$DIR/mcp-headers.json"
-  old_mcp="$(perl -MJSON::PP -0777 -ne 'my $d = eval { decode_json($_) }; my $o = ref $d eq "HASH" && ref $d->{mcpServers} eq "HASH" ? $d->{mcpServers}{jamsesh} : undef; print JSON::PP->new->canonical->encode($o) if ref $o eq "HASH"' "$HOME/.claude.json" 2>/dev/null || true)"
-  # The earlier entry is kept as it was (mode 600, in the saved folder) and put back by editing that one
-  # key of Claude Code's config file, never through a command line, where any process could read a secret.
-  if [ -n "$old_mcp" ]; then printf '%s' "$old_mcp" | private "$SAVED/old_mcp.json"; fi
+  mcp_before="$(mcp_key get "$CLAUDEJSON" 2>/dev/null || true)"
+  printf '%s' "$mcp_before" > "$SAVED/mcp_before.json"
   # Claude Code asks a helper for the credential header each time it connects, so the token is in
   # neither its arguments nor its config. Without a token the app's relay adds it.
   helper=""
   if [ -n "$TOKEN" ]; then
-    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' | private "$cred"
-    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$cred")" | private "$DIR/mcp-headers.sh"
-    chmod 700 "$DIR/mcp-headers.sh"
+    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' | safe_write "$cred" 600
+    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$cred")" | safe_write "$DIR/mcp-headers.sh" 700
     helper="$DIR/mcp-headers.sh"
   fi
   new_mcp="$(JAMSESH_URL="$HUB/mcp" JAMSESH_HELPER="$helper" perl -MJSON::PP -e 'print JSON::PP->new->canonical->encode({ type => "http", url => $ENV{JAMSESH_URL}, ($ENV{JAMSESH_HELPER} ? (headersHelper => $ENV{JAMSESH_HELPER}) : ()) })')"
   mcp_touched=1
   "$CLAUDE" mcp remove jamsesh -s user >/dev/null 2>&1 || true
   if ! "$CLAUDE" mcp add-json -s user jamsesh "$new_mcp" >/dev/null; then reason=mcp; exit 1; fi
+  mcp_ours="$(mcp_key get "$CLAUDEJSON" 2>/dev/null || true)"
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
-  curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
+  fetch launcher.md "$SAVED/launcher.md"
+  safe_write "$HOME/.claude/skills/jamsesh/SKILL.md" 644 < "$SAVED/launcher.md"
   # JamSesh used to write a block into CLAUDE.md. It never does now, and says where the old one is.
   note_block "$HOME/.claude/CLAUDE.md"
-  cat > "$HOME/.claude/commands/jamsesh.md" <<'CMD'
+  safe_write "$HOME/.claude/commands/jamsesh.md" 644 <<'CMD'
 ---
 description: Join the JamSesh room session
 argument-hint: [what you're working on]
@@ -474,12 +557,11 @@ Join the JamSesh room session and work as part of it.
 5. Then do the work. When you're idle, just stop: JamSesh wakes you when the room has something.
 CMD
   # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
-  perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" <<'PL'
+  perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" > "$SAVED/settings.new" <<'PL'
 use strict; use warnings; use JSON::PP; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($hook, $path) = @ARGV;
 # A symlinked settings file is edited at its target, and keeps its mode (it may hold secrets).
 $path = abs_path($path) // $path if -l $path;
-my $mode = -e $path ? (stat $path)[2] & 07777 : 0600;
 # The hook's path as one shell word: a home folder with spaces still runs it.
 (my $cmd = $hook) =~ s/'/'\\\\''/g;
 $cmd = "'$cmd'";
@@ -531,13 +613,9 @@ for my $pair (['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 
   push @kept, { hooks => [{ type => 'command', command => "$cmd listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
   $hooks->{$event} = \\@kept;
 }
-# Written to a new private file next to it (created exclusively, mode 600), then put in place.
-my ($out, $tmp) = File::Temp::tempfile('.settings.jamsesh-XXXXXXXX', DIR => File::Basename::dirname($path));
-print $out JSON::PP->new->pretty->canonical->encode($data);
-close $out or die "JamSesh: can't write $tmp: $!\\n";
-chmod $mode, $tmp;
-rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
+print JSON::PP->new->pretty->canonical->encode($data);
 PL
+  safe_write "$HOME/.claude/settings.json" keep:600 < "$SAVED/settings.new"
   ok "Claude Code: MCP server, skill, /jamsesh command, hooks (a chat joins only when told to)"
   configured=$((configured + 1))
 else
@@ -547,7 +625,7 @@ fi
 if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/prompts"
   # The token comes from the header file, not this process's arguments or environment.
-  perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" <<'PL'
+  perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" > "$SAVED/config.new" <<'PL'
 use strict; use warnings; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($hub, $header, $path) = @ARGV;
 # A symlinked config is edited at its target, so the link stays a link.
@@ -604,17 +682,16 @@ $text =~ s/\\s+\\z//;
 (my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
 (my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
 $text .= ($text eq '' ? '' : "\\n\\n") . "[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n";
-my ($out, $tmp) = File::Temp::tempfile('.config.jamsesh-XXXXXXXX', DIR => File::Basename::dirname($path));
-print $out $text;
-close $out or die "JamSesh: can't write $tmp: $!\\n";
-chmod 0600, $tmp;
-rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
+print $text;
 PL
+  safe_write "$HOME/.codex/config.toml" 600 < "$SAVED/config.new"
   mkdir -p "$HOME/.codex/skills/jamsesh"
-  curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.codex/skills/jamsesh/SKILL.md"
+  fetch launcher.md "$SAVED/codex-launcher.md"
+  safe_write "$HOME/.codex/skills/jamsesh/SKILL.md" 644 < "$SAVED/codex-launcher.md"
   # The prompt is the full instructions, for when a person types /jamsesh in Codex.
-  curl -fsS "\${AUTH[@]}" "$HUB/skill.md" -o "$HOME/.codex/prompts/jamsesh.md"
-  printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$HOME/.codex/prompts/jamsesh.md"
+  fetch skill.md "$SAVED/codex-prompt.md"
+  printf '\\n\\nJoin now: call jam_join (harness codex, cwd this directory; add owner only if jam_join asks), post jam_repo_card, jam_claim your workstream, and when idle call jam_wait. Focus: $ARGUMENTS\\n' >> "$SAVED/codex-prompt.md"
+  safe_write "$HOME/.codex/prompts/jamsesh.md" 644 < "$SAVED/codex-prompt.md"
   # JamSesh used to write a block into AGENTS.md. It never does now, and says where the old one is.
   note_block "$HOME/.codex/AGENTS.md"
   ok "Codex: MCP server, skill, /jamsesh prompt (Codex has no hooks here; a chat joins only when told to)"
