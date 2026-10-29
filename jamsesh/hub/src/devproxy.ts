@@ -78,10 +78,21 @@ export class DevProxy {
       url: `http://${config.publicHost}:${hostPort}`,
       platform: opts.platform ?? this.session.agent(opts.agentId)?.platform ?? null,
       createdAt: existing?.createdAt ?? Date.now(),
+      generation: (existing?.generation ?? 0) + 1,
       up: false,
     };
+    // The new generation is on record before anything is awaited: a refresh still holding the old one
+    // sees it changed and leaves this registration (and its listener) alone.
+    this.session.store.put("devservers", d, false);
     await this.listen(d);
     const up = await this.check(d);
+    // Registered again (or removed) meanwhile: this registration is no longer the one to publish.
+    const now = this.session.store.get("devservers", d.id);
+    if (!now) {
+      this.close(d.id); // taken off the board meanwhile: its port closes again
+      return d;
+    }
+    if ((now.generation ?? 0) !== d.generation) return now;
     this.session.store.put("devservers", { ...d, up, problem: undefined, downSince: undefined });
     const agent = this.session.agent(opts.agentId);
     this.session.upsertArtifact({
@@ -203,8 +214,11 @@ export class DevProxy {
    * if it stays down a few minutes its tile clears itself.
    */
   async refresh(now = Date.now()) {
-    for (const d of this.session.devservers()) {
-      const up = await this.check(d);
+    for (const checked of this.session.devservers()) {
+      const up = await this.check(checked);
+      // Registered again (or removed) while it was being checked: that result is about a server that's gone.
+      const d = this.session.store.get("devservers", checked.id);
+      if (!d || (d.generation ?? 0) !== (checked.generation ?? 0) || d.target !== checked.target) continue;
       if (up) {
         if (!d.up || d.problem || d.downSince) this.session.store.patch("devservers", d.id, { up: true, problem: undefined, downSince: undefined });
         continue;

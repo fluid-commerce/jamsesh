@@ -71,7 +71,7 @@ describe("agent setup script", () => {
     expect(r.stdout).toContain("ok  Claude Code");
     const data = JSON.parse(readFileSync(settings, "utf8"));
     expect(data.theme).toBe("dark");
-    expect(data.hooks.Stop.map((e: { hooks: { command: string }[] }) => e.hooks[0]!.command)).toEqual(["mine.sh", `${box.home}/.jamsesh/hook.sh stop`, `${box.home}/.jamsesh/hook.sh listen`]);
+    expect(data.hooks.Stop.map((e: { hooks: { command: string }[] }) => e.hooks[0]!.command)).toEqual(["mine.sh", `'${box.home}/.jamsesh/hook.sh' stop`, `'${box.home}/.jamsesh/hook.sh' listen`]);
     expect(data.hooks.PostToolUse).toHaveLength(1);
     expect(data.hooks.Stop[2].hooks[0].asyncRewake).toBe(true);
     // Claude Code still enforces the timeout on an async hook: it has to outlast the listener's loop (about 3000 seconds).
@@ -240,5 +240,120 @@ describe("agent setup script", () => {
     expect(toml).toContain('authorization = "Bearer tok"');
     // Nothing of ours is left in the person's own instructions, and nothing of theirs is lost.
     expect(readFileSync(agents, "utf8")).toBe("# Mine\n");
+  });
+
+  test("reinstalling never widens a file's mode, and tightens JamSesh's own credential files", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true, mode: 0o755 });
+    chmodSync(dir, 0o755);
+    for (const f of ["auth.header", "client.env", "mcp-headers.json"]) writeFileSync(join(dir, f), "old\n", { mode: 0o644 });
+    const settings = join(box.home, ".claude/settings.json");
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    writeFileSync(settings, JSON.stringify({ env: { SECRET: "s3cret" } }), { mode: 0o600 });
+    chmodSync(settings, 0o600);
+    expect((await run(box)).code).toBe(0);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    for (const f of ["auth.header", "client.env", "mcp-headers.json"]) expect(statSync(join(dir, f)).mode & 0o777).toBe(0o600);
+    expect(statSync(settings).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(settings, "utf8")).env.SECRET).toBe("s3cret");
+    expect(statSync(join(box.home, ".codex/config.toml")).mode & 0o777).toBe(0o600);
+  });
+
+  test("a home folder with spaces still runs the hooks", async () => {
+    const box = sandbox();
+    box.home = join(box.home, "Jo Smith's Mac");
+    mkdirSync(box.home, { recursive: true });
+    stubCli(join(box.bin, "claude"), box.log);
+    expect((await run(box)).code).toBe(0);
+    const cmd: string = JSON.parse(readFileSync(join(box.home, ".claude/settings.json"), "utf8")).hooks.Stop[0].hooks[0].command;
+    // Run the command the way Claude Code does, through a shell: the hook (the stub host's) runs.
+    writeFileSync(join(box.home, ".jamsesh/hook.sh"), "#!/bin/sh\necho ran \"$1\"\n", { mode: 0o755 });
+    const out = Bun.spawnSync(["/bin/sh", "-c", cmd]);
+    expect(out.stdout.toString().trim()).toBe("ran stop");
+  });
+
+  test("Codex: JamSesh's tables go by their header lines, whatever brackets the values hold", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    writeFileSync(
+      config,
+      [
+        'model = "gpt"',
+        "",
+        "[mcp_servers.jamsesh]",
+        'url = "http://[::1]:4747/mcp" # the old [v1] address',
+        'note = """',
+        "[not.a.header]",
+        '"""',
+        "",
+        "[mcp_servers.jamsesh.http_headers]",
+        'authorization = "Bearer old"',
+        "",
+        "[mcp_servers.other]",
+        'url = "http://[fe80::1]:9000/mcp" # keep [me]',
+        "",
+        '[ mcp_servers . "jamsesh" . env ]',
+        'X = "y"',
+        "",
+        "[profiles.a]",
+        "k = 1",
+        "",
+      ].join("\n"),
+    );
+    for (let i = 0; i < 2; i++) expect((await run(box)).code).toBe(0);
+    const toml = readFileSync(config, "utf8");
+    expect(toml).not.toContain("[::1]");
+    expect(toml).not.toContain("not.a.header");
+    expect(toml).not.toContain('X = "y"');
+    expect(toml).toContain('[mcp_servers.other]\nurl = "http://[fe80::1]:9000/mcp" # keep [me]');
+    expect(toml).toContain("[profiles.a]\nk = 1");
+    expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
+    expect(toml).toContain(`url = "${origin}/mcp"`);
+  });
+
+  test("reinstalling takes out only JamSesh's own hook commands, keeping a person's hooks even in the same group", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const settings = join(box.home, ".claude/settings.json");
+    mkdirSync(join(box.home, ".claude"), { recursive: true });
+    const mine = { type: "command", command: "~/bin/jamsesh-notify.sh --room jamsesh" };
+    writeFileSync(
+      settings,
+      JSON.stringify({
+        hooks: {
+          Stop: [
+            { hooks: [{ type: "command", command: "/Users/old/.jamsesh/hook.sh stop" }, mine] },
+            { matcher: "", hooks: [{ type: "command", command: "'/Users/old/.jamsesh/hook.sh' listen", asyncRewake: true }] },
+          ],
+          PostToolUse: [{ hooks: [{ type: "command", command: "echo jamsesh is great" }] }],
+          SessionStart: [{ hooks: [{ type: "command", command: "/x/.jamsesh/hook.sh start" }] }],
+        },
+      }),
+    );
+    expect((await run(box)).code).toBe(0);
+    const hooks = JSON.parse(readFileSync(settings, "utf8")).hooks;
+    const cmds = (event: string) => hooks[event].flatMap((g: any) => g.hooks.map((h: any) => h.command));
+    expect(cmds("Stop")).toEqual([mine.command, `'${box.home}/.jamsesh/hook.sh' stop`, `'${box.home}/.jamsesh/hook.sh' listen`]);
+    expect(cmds("PostToolUse")).toEqual(["echo jamsesh is great", `'${box.home}/.jamsesh/hook.sh' tool`]);
+    expect(hooks.SessionStart).toBeUndefined();
+    // Reinstalling again changes nothing more.
+    expect((await run(box)).code).toBe(0);
+    expect(JSON.parse(readFileSync(settings, "utf8")).hooks).toEqual(hooks);
+  });
+
+  test("Codex: triple quotes in a comment don't hide JamSesh's table", async () => {
+    const box = sandbox();
+    mkdirSync(join(box.home, ".codex"), { recursive: true });
+    const config = join(box.home, ".codex/config.toml");
+    writeFileSync(config, ['model = "gpt" # a comment with """ in it', "", "[mcp_servers.jamsesh]", 'url = "http://old/mcp"', "", "[keep]", 'a = "b\\" # [c]"', ""].join("\n"));
+    expect((await run(box)).code).toBe(0);
+    const toml = readFileSync(config, "utf8");
+    expect(toml).not.toContain("http://old/mcp");
+    expect(toml.match(/\[mcp_servers\.jamsesh\]/g)).toHaveLength(1);
+    expect(toml).toContain('[keep]\na = "b\\" # [c]"');
   });
 });

@@ -2,7 +2,7 @@
 // AGENTS.md, hooks do nothing for a chat that never called jam_join, and chats are told apart even in
 // one folder. A wrongly joined agent can be removed, with what it caused.
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
@@ -62,6 +62,46 @@ describe("removing the block an earlier install wrote", () => {
   test("blank lines and indentation around the block stay byte for byte", async () => {
     expect(await strip(`# Mine\n\n\n${BLOCK}\n\n  indented rule\n\t\n`)).toBe("# Mine\n\n\n\n\n  indented rule\n\t\n");
     expect(await strip(`  - item\n${BLOCK}    - next\n`)).toBe("  - item\n    - next\n");
+  });
+  test("the new text goes through a fresh private file, never a predictable path", async () => {
+    const d = tmp();
+    const file = join(d, "AGENTS.md");
+    writeFileSync(file, `# Mine\n\n${BLOCK}`, { mode: 0o640 });
+    // Something left at the old temp name (world-readable) is neither written through nor used.
+    const planted = `${file}.jamsesh-tmp`;
+    writeFileSync(planted, "planted", { mode: 0o644 });
+    const proc = Bun.spawn(["/bin/sh", "-c", 'umask 000; exec perl - "$1"', "x", file], { stdin: new Blob([STRIP_BLOCK_PL]) });
+    expect(await proc.exited).toBe(0);
+    expect(readFileSync(file, "utf8")).toBe("# Mine\n");
+    expect(statSync(file).mode & 0o777).toBe(0o640);
+    expect(readFileSync(planted, "utf8")).toBe("planted");
+    expect(readdirSync(d).sort()).toEqual(["AGENTS.md", "AGENTS.md.jamsesh-tmp"]);
+    expect(STRIP_BLOCK_PL).toContain("File::Temp::tempfile");
+  });
+  test("an edit someone makes while the block is being taken out is kept, not overwritten", async () => {
+    const d = tmp();
+    const file = join(d, "AGENTS.md");
+    writeFileSync(file, `# Mine\n\n${BLOCK}`);
+    const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe", env: { ...process.env, JAMSESH_STRIP_PAUSE: "0.5" } });
+    await Bun.sleep(150);
+    writeFileSync(file, `# Mine, edited\n\n${BLOCK}`);
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toContain("changed while");
+    expect(readFileSync(file, "utf8")).toBe(`# Mine, edited\n\n${BLOCK}`);
+    expect(readdirSync(d)).toEqual(["AGENTS.md"]);
+    // Run again with nobody editing: the block goes.
+    expect(await strip(readFileSync(file, "utf8"))).toBe("# Mine, edited\n");
+  });
+  test("a file that was only the block isn't deleted if someone wrote in it meanwhile", async () => {
+    const d = tmp();
+    const file = join(d, "AGENTS.md");
+    writeFileSync(file, BLOCK);
+    const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe", env: { ...process.env, JAMSESH_STRIP_PAUSE: "0.5" } });
+    await Bun.sleep(150);
+    writeFileSync(file, `${BLOCK}# A rule I just added\n`);
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toContain("changed while");
+    expect(readFileSync(file, "utf8")).toBe(`${BLOCK}# A rule I just added\n`);
   });
   test("a symlinked file is edited at its target and stays a symlink", async () => {
     const d = tmp();

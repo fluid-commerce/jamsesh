@@ -25,14 +25,13 @@ if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eq '"prompt"[[:space:]]*:[
   exit 0
 fi
 dir="\${JAMSESH_DIR:-$HOME/.jamsesh}"
-outbox="\${JAMSESH_OUTBOX:-$dir/outbox.jsonl}"
+outbox="\${JAMSESH_OUTBOX:-$dir/outbox}"
 down="$dir/hub-down"
 mark="$dir/chats/$sid"
 acks="$dir/acks/$sid"
 hdr="$dir/.headers.$$"
 now="$(date +%s)"
-locked=""
-trap 'rm -f "$hdr"; [ -z "$locked" ] || rmdir "$outbox.lock" 2>/dev/null' EXIT
+trap 'rm -f "$hdr"' EXIT
 hub_down() { [ -f "$down" ] && [ $((now - $(cat "$down" 2>/dev/null || echo 0))) -lt 45 ]; }
 # The credential is in a file (mode 600) that curl reads, so it never shows in a process list. With
 # none, the JamSesh app's relay on this Mac adds it.
@@ -51,24 +50,23 @@ joined() { printf '{"session_id":"%s","connect":%s}' "$1" "\${2:-false}" | post 
 # Each prompt has an id that goes with it, and stays with it in the outbox, so the host records it once
 # however often it arrives (a send whose answer was lost, then the same prompt replayed).
 pid="p$now-$$-$RANDOM$RANDOM"
-# Every chat's hooks share the outbox: one at a time changes it. A lock left by a hook that was
-# killed holding it is cleared after a minute.
-lock() {
-  local i=0
-  find "$outbox.lock" -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null
-  until mkdir "$outbox.lock" 2>/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && return 1; sleep 0.1; done
-  locked=1
-}
-unlock() { rmdir "$outbox.lock" 2>/dev/null; locked=""; }
+# The room this chat was last seen joined to (the host's room id, kept in the chat's marker): a
+# queued prompt belongs to that room and is never sent to another.
+room="$(tr -cd 'A-Za-z0-9-' < "$mark" 2>/dev/null)"
 # The host was unreachable a moment ago: don't make every prompt wait for it again. A chat this Mac
-# saw joined keeps its prompts until the host is back.
+# saw joined keeps its prompts until the host is back. Each queued prompt is its own file, written
+# whole and then moved in, so hooks running at once never wait on each other or lose one; its name
+# carries when, its id and its room. Only the newest 50 are kept.
 queue() {
-  [ "$1" = "prompt" ] && [ -f "$mark" ] || return 0
-  lock || return 0
-  printf '%s\\t%s\\t%s\\n' "$now" "$pid" "$(printf '%s' "$body" | tr -d '\\n')" >> "$outbox"
-  # Keep the newest 50 only.
-  if [ "$(wc -l < "$outbox")" -gt 50 ]; then tail -n 50 "$outbox" > "$outbox.tmp" && mv -f "$outbox.tmp" "$outbox"; fi
-  unlock
+  [ "$1" = "prompt" ] && [ -n "$room" ] || return 0
+  local t
+  if mkdir -p "$outbox" && t="$(mktemp "$outbox/.new.XXXXXXXX")" && printf '%s' "$body" > "$t" && mv -f "$t" "$outbox/\${now}_\${pid}_\${room}"; then
+    ls "$outbox" 2>/dev/null | sort -r | tail -n +51 | while read -r old; do rm -f "$outbox/$old"; done
+    return 0
+  fi
+  [ -n "$t" ] && rm -f "$t"
+  echo "JamSesh couldn't keep this prompt for the room while the host is unreachable (writing to $outbox failed)." >&2
+  exit 1
 }
 if hub_down; then queue "$1"; exit 0; fi
 
@@ -90,7 +88,9 @@ if ! printf '%s' "$ans" | grep -q '"joined":true'; then
   fi
   exit 0
 fi
-mkdir -p "$dir/chats" && : > "$mark"
+# Remembered with the room it joined, so a prompt queued while the host is away goes to that room only.
+room="$(printf '%s' "$ans" | sed -n 's/.*"room"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9-]*\\)".*/\\1/p' | head -n 1)"
+mkdir -p "$dir/chats" && printf '%s' "$room" > "$mark"
 rm -f "$down"
 
 # listen runs in the background after the agent stops (asyncRewake): it holds until the room has
@@ -98,7 +98,7 @@ rm -f "$down"
 if [ "$1" = "listen" ]; then
   end=$((now + \${JAMSESH_LISTEN_SECONDS:-3000}))
   while [ "$(date +%s)" -lt "$end" ]; do
-    if out="$(printf '%s' "$body" | post --max-time 230 -D "$hdr" -H "x-jam-ack: $sent" --data-binary @- "$hub/api/hooks/listen" 2>/dev/null)"; then
+    if out="$(printf '%s' "$body" | post --max-time 230 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-room: $room" --data-binary @- "$hub/api/hooks/listen" 2>/dev/null)"; then
       confirmed
       sent=""
       gone && { rm -f "$mark"; exit 0; }
@@ -111,7 +111,7 @@ if [ "$1" = "listen" ]; then
   exit 0
 fi
 
-if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-prompt-id: $pid" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then
+if ! out="$(printf '%s' "$body" | post --max-time 4 -D "$hdr" -H "x-jam-ack: $sent" -H "x-jam-prompt-id: $pid" -H "x-jam-room: $room" --data-binary @- "$hub/api/hooks/$1" 2>/dev/null)"; then
   # The host is unreachable: keep prompts so they reach the room when it's back.
   printf '%s' "$now" > "$down"
   queue "$1"
@@ -121,29 +121,38 @@ confirmed
 printf '%s' "$out"
 handed_over
 gone && rm -f "$mark"
-# Back in touch: send what was queued while the host was away, two at a time (each call stays
-# short). An entry leaves the outbox only once the host has it, it's too old to matter (ten minutes:
-# a prompt from hours ago would only confuse the room), or its chat isn't in the room any more.
-if [ -s "$outbox" ] && lock; then
-  : > "$outbox.keep"
-  n=0
-  while IFS=$'\\t' read -r ts qid line; do
+# Back in touch: what was queued while the host was away is sent in the background, so this hook ends
+# as soon as the room's answer is printed and a slow host never runs it past its time limit. One
+# replay runs at a time (a lock folder, cleared after a minute if a replay was killed); queueing
+# never waits for it. A prompt goes only to the room it was queued for, once the host confirms that
+# room has its chat; it leaves the outbox once the host has it, when it's ten minutes old (a prompt
+# from hours ago would only confuse the room), or when its chat isn't in that room any more. A replay
+# stops after 45 seconds; what's left goes with a later hook.
+replay() {
+  find "$outbox/.replaying" -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null
+  mkdir "$outbox/.replaying" 2>/dev/null || return 0
+  trap 'rmdir "$outbox/.replaying" 2>/dev/null' EXIT
+  local stop=$(($(date +%s) + 45)) f ts qid qroom qsid ans
+  for f in $(ls "$outbox" 2>/dev/null | sort); do
+    IFS=_ read -r ts qid qroom <<< "$f"
     case "$ts" in ''|*[!0-9]*) continue ;; esac
-    # Queued by an older hook.sh, without an id: one made from the line stays the same on every try.
-    [ -n "$line" ] || { line="$qid"; qid="q$ts-$(printf '%s' "$line" | cksum | cut -d ' ' -f 1)"; }
-    [ $((now - ts)) -le 600 ] && [ -n "$line" ] || continue
-    keep() { printf '%s\\t%s\\t%s\\n' "$ts" "$qid" "$line" >> "$outbox.keep"; }
-    [ "$n" -lt 2 ] || { keep; continue; }
-    n=$((n + 1))
-    qsid="$(printf '%s' "$line" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -n 1)"
-    [ -n "$qsid" ] || continue
-    ans="$(joined "$qsid")" || { keep; continue; }
-    printf '%s' "$ans" | grep -q '"joined":true' || continue
-    printf '%s' "$line" | post --max-time 4 -H "x-jam-prompt-id: $qid" --data-binary @- "$hub/api/hooks/prompt" >/dev/null 2>&1 || keep
-  done < "$outbox"
-  mv -f "$outbox.keep" "$outbox"
-  unlock
-fi
+    if [ $(($(date +%s) - ts)) -gt 600 ] || [ -z "$qroom" ]; then rm -f "$outbox/$f"; continue; fi
+    [ "$(date +%s)" -lt "$stop" ] || break
+    qsid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' "$outbox/$f" | head -n 1)"
+    [ -n "$qsid" ] || { rm -f "$outbox/$f"; continue; }
+    ans="$(joined "$qsid")" || continue
+    # Another room now (this Mac switched hosts): not this one's to have. It waits, in case the chat
+    # goes back, until it's too old.
+    printf '%s' "$ans" | grep -q "\\"room\\":\\"$qroom\\"" || continue
+    printf '%s' "$ans" | grep -q '"joined":true' || { rm -f "$outbox/$f"; continue; }
+    # The host refuses it (409) if it isn't that room by the time it arrives: then it stays queued.
+    post --max-time 4 -H "x-jam-prompt-id: $qid" -H "x-jam-room: $qroom" --data-binary @"$outbox/$f" "$hub/api/hooks/prompt" >/dev/null 2>&1 && rm -f "$outbox/$f"
+  done
+  rmdir "$outbox/.replaying" 2>/dev/null
+}
+# The outbox of an earlier hook.sh (one file, no room) can't be told apart by room: it goes.
+rm -f "$dir/outbox.jsonl" "$dir/outbox.jsonl.keep" 2>/dev/null
+if [ -n "$(ls "$outbox" 2>/dev/null)" ]; then replay </dev/null >/dev/null 2>&1 & fi
 `;
 }
 
@@ -179,13 +188,14 @@ export const OLD_BLOCKS = [
  * file (a shared CLAUDE.md/AGENTS.md) is edited at its target, so the link stays a link. A file
  * with no block isn't rewritten.
  */
-export const STRIP_BLOCK_PL = String.raw`use strict; use warnings; use Cwd qw(abs_path);
+export const STRIP_BLOCK_PL = String.raw`use strict; use warnings; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($path) = @ARGV;
 exit 0 unless -f $path;
 my $real = abs_path($path) // exit 0;
 open(my $in, '<:raw', $real) or exit 0;
 my $text = do { local $/; <$in> };
 close $in;
+my $before = $text;
 my @blocks = (${OLD_BLOCKS.map((b) => `'${b.replace(/[\\']/g, "\\$&")}'`).join(", ")});
 my $changed = 0;
 for my $old (@blocks) {
@@ -207,13 +217,25 @@ for my $old (@blocks) {
   }
 }
 exit 0 unless $changed;
-if ($text eq '' && !-l $path) { unlink $real; exit 0; }
+# Edited by someone else since it was read (an editor saving): theirs stays, and nothing of it is lost.
+# Checked again right before the file is replaced or, when only the block was in it, deleted.
+sub unchanged {
+  select(undef, undef, undef, $ENV{JAMSESH_STRIP_PAUSE}) if $ENV{JAMSESH_STRIP_PAUSE}; # tests widen the window
+  my $now = do { open(my $again, '<:raw', $real) or return 0; local $/; <$again> };
+  return 1 if defined $now && $now eq $before;
+  print STDERR "JamSesh: $path changed while the old JamSesh block was being taken out, so it was left as it is. Connect again to take the block out.\n";
+  return 0;
+}
+if ($text eq '' && !-l $path) { unlink $real if unchanged(); exit 0; }
 my $mode = (stat $real)[2] & 07777;
-my $tmp = "$real.jamsesh-tmp";
-open(my $o, '>:raw', $tmp) or die "JamSesh: can't write $tmp: $!\n";
+# A new private file next to it (created exclusively, mode 600): its contents are never readable to
+# others on the way, and a file left at a predictable name can't be written through.
+my ($o, $tmp) = File::Temp::tempfile('.jamsesh-strip-XXXXXXXX', DIR => File::Basename::dirname($real));
+binmode $o;
 print $o $text;
 close $o or die "JamSesh: can't write $tmp: $!\n";
 chmod $mode, $tmp;
+if (!unchanged()) { unlink $tmp; exit 0; }
 rename $tmp, $real or die "JamSesh: can't replace $real: $!\n";
 `;
 
@@ -271,18 +293,25 @@ If the command fails because the host is unreachable, say so; don't retry in a l
 `;
 }
 
+/** A value as one single-quoted shell word: nothing in it is expanded or run. */
+export const shellWord = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+
 export function joinScript(hub: Hub, origin?: string, token = "") {
   const HUB = origin ?? hub.session.hubUrl;
   return `#!/usr/bin/env bash
-# JamSesh: set up this computer's agents for the host at ${HUB} (run by the agent after pairing).
+# JamSesh: set up this computer's agents for a JamSesh host (run by the agent after pairing).
 set -euo pipefail
 # Everything runs inside main, read in full before it starts: piped into bash, a command that
 # reads standard input (claude mcp does) would otherwise swallow the rest of this script.
 main() {
-HUB="${HUB}"
-TOKEN="${token}"
+HUB=${shellWord(HUB)}
+TOKEN=${shellWord(token)}
 DIR="$HOME/.jamsesh"
-mkdir -p "$DIR"
+# JamSesh's folder holds credentials: only this person can open it, however it was made before.
+mkdir -p "$DIR" && chmod 700 "$DIR"
+# Replaces a credential file in one step with a private one (mode 600), from standard input: an
+# existing file is never written in place, so a looser mode it had never carries over.
+private() { local t; t="$(mktemp "$1.XXXXXXXX")" && cat > "$t" && chmod 600 "$t" && mv -f "$t" "$1"; }
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
 # Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
@@ -292,9 +321,7 @@ case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing toke
 command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 # The credential goes in files (mode 600) that curl and Claude Code read, never in a command's
 # arguments, which any process on this computer can list. Empty: the JamSesh app's relay adds it.
-umask 077
-printf 'authorization: Bearer %s\\n' "$TOKEN" > "$DIR/auth.header"
-umask 022
+printf 'authorization: Bearer %s\\n' "$TOKEN" | private "$DIR/auth.header"
 AUTH=(-H "@$DIR/auth.header")
 # A value as one single-quoted shell word, so sourcing client.env (the jamsesh command does) runs
 # nothing in it; the hook reads it as data.
@@ -307,14 +334,12 @@ NAME="$(curl -fsS --max-time 5 "\${AUTH[@]}" "$HUB/api/me" 2>/dev/null | perl -M
 [ -n "$NAME" ] || NAME="\${JAMSESH_NAME:-}"
 if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)"; fi
 
-umask 077
 {
   printf 'JAMSESH_HUB=%s\\n' "$(q "$HUB")"
   printf 'JAMSESH_TOKEN=%s\\n' "$(q "$TOKEN")"
   printf 'JAMSESH_NAME=%s\\n' "$(q "$NAME")"
   echo 'JAMSESH_ACTIVE=1'
-} > "$DIR/client.env"
-umask 022
+} | private "$DIR/client.env"
 curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$DIR/hook.sh" && chmod +x "$DIR/hook.sh"
 
 # Agent CLIs often aren't on PATH: the Claude desktop app keeps its own copy of Claude Code, and nvm
@@ -349,10 +374,8 @@ if [ -n "$CLAUDE" ]; then
   # neither its arguments nor its config. Without a token the app's relay adds it.
   helper=""
   if [ -n "$TOKEN" ]; then
-    umask 077
-    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' > "$DIR/mcp-headers.json"
-    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$DIR/mcp-headers.json")" > "$DIR/mcp-headers.sh"
-    umask 022
+    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' | private "$DIR/mcp-headers.json"
+    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$DIR/mcp-headers.json")" | private "$DIR/mcp-headers.sh"
     chmod 700 "$DIR/mcp-headers.sh"
     helper="$DIR/mcp-headers.sh"
   fi
@@ -376,8 +399,14 @@ Join the JamSesh room session and work as part of it.
 CMD
   # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
   perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" <<'PL'
-use strict; use warnings; use JSON::PP;
+use strict; use warnings; use JSON::PP; use Cwd qw(abs_path); use File::Temp (); use File::Basename ();
 my ($hook, $path) = @ARGV;
+# A symlinked settings file is edited at its target, and keeps its mode (it may hold secrets).
+$path = abs_path($path) // $path if -l $path;
+my $mode = -e $path ? (stat $path)[2] & 07777 : 0600;
+# The hook's path as one shell word: a home folder with spaces still runs it.
+(my $cmd = $hook) =~ s/'/'\\\\''/g;
+$cmd = "'$cmd'";
 my $data = {};
 if (-e $path) {
   open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
@@ -390,24 +419,47 @@ if (-e $path) {
 }
 $data->{hooks} = {} unless ref $data->{hooks} eq 'HASH';
 my $hooks = $data->{hooks};
-my $plain = JSON::PP->new->allow_nonref;
+# Only JamSesh's own hook commands go: its hook script (~/.jamsesh/hook.sh, under any home, quoted or
+# not) with one of its verbs, and nothing else. A person's own hook stays, even in the same group,
+# and even if its path or arguments mention JamSesh.
+sub ours {
+  my ($h) = @_;
+  return 0 unless ref $h eq 'HASH' && defined $h->{command} && !ref $h->{command};
+  my $c = $h->{command};
+  my $p = $c =~ /^'((?:[^']|'\\\\'')*)' (start|prompt|tool|stop|listen)\\z/ ? $1 =~ s/'\\\\''/'/gr : $c =~ /^(\\S+) (start|prompt|tool|stop|listen)\\z/ ? $1 : '';
+  return $p =~ m{(^|/)\\.jamsesh/hook\\.sh\\z} ? 1 : 0;
+}
+sub without_ours {
+  my @groups;
+  for my $g (@_) {
+    if (ref $g eq 'HASH' && ref $g->{hooks} eq 'ARRAY') {
+      my @left = grep { !ours($_) } @{ $g->{hooks} };
+      next unless @left;
+      push @groups, @left == @{ $g->{hooks} } ? $g : { %$g, hooks => \\@left };
+    } else {
+      push @groups, $g;
+    }
+  }
+  return @groups;
+}
 # JamSesh no longer reminds every new session to join: take that hook out of earlier installs.
 if (ref $hooks->{SessionStart} eq 'ARRAY') {
-  my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } @{ $hooks->{SessionStart} };
+  my @kept = without_ours(@{ $hooks->{SessionStart} });
   if (@kept) { $hooks->{SessionStart} = \\@kept } else { delete $hooks->{SessionStart} }
 }
 for my $pair (['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 'stop']) {
   my ($event, $arg) = @$pair;
-  my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
-  push @kept, { hooks => [{ type => 'command', command => "$hook $arg", timeout => 15 }] };
+  my @kept = without_ours(ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
+  push @kept, { hooks => [{ type => 'command', command => "$cmd $arg", timeout => 15 }] };
   # An idle agent is woken by a background listener that holds until the room has something for it.
-  push @kept, { hooks => [{ type => 'command', command => "$hook listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
+  push @kept, { hooks => [{ type => 'command', command => "$cmd listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
   $hooks->{$event} = \\@kept;
 }
-my $tmp = "$path.jamsesh-tmp";
-open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+# Written to a new private file next to it (created exclusively, mode 600), then put in place.
+my ($out, $tmp) = File::Temp::tempfile('.settings.jamsesh-XXXXXXXX', DIR => File::Basename::dirname($path));
 print $out JSON::PP->new->pretty->canonical->encode($data);
 close $out or die "JamSesh: can't write $tmp: $!\\n";
+chmod $mode, $tmp;
 rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
 PL
   ok "Claude Code: MCP server, skill, /jamsesh command, hooks (a chat joins only when told to)"
@@ -420,7 +472,7 @@ if find_cli codex >/dev/null || [ -d "$HOME/.codex" ]; then
   mkdir -p "$HOME/.codex/prompts"
   # The token comes from the header file, not this process's arguments or environment.
   perl - "$HUB" "$DIR/auth.header" "$HOME/.codex/config.toml" <<'PL'
-use strict; use warnings;
+use strict; use warnings; use File::Temp (); use File::Basename ();
 my ($hub, $header, $path) = @ARGV;
 my $token = '';
 if (open(my $h, '<', $header)) { ($token) = (<$h> // '') =~ /Bearer\\s+(\\S+)/; close $h; }
@@ -431,12 +483,50 @@ if (-e $path) {
   $text = do { local $/; <$in> };
   close $in;
 }
-$text =~ s/\\n?\\[mcp_servers\\.jamsesh(\\.[a-z_]+)?\\][^\\[]*/\\n/g;
+# Where a line leaves us: inside a multi-line string (its opening quotes) or not (''). Comments and
+# one-line strings are skipped, so quotes in a comment or a value never start a multi-line string.
+sub scan {
+  my ($line, $long) = @_;
+  my ($i, $n) = (0, length $line);
+  while ($i < $n) {
+    if ($long) {
+      my $j = index($line, $long, $i);
+      return $long if $j < 0;
+      ($i, $long) = ($j + 3, '');
+      next;
+    }
+    my $c = substr($line, $i, 1);
+    return '' if $c eq '#';
+    my $three = substr($line, $i, 3);
+    if ($three eq '"' x 3 || $three eq "'" x 3) { ($long, $i) = ($three, $i + 3); next; }
+    if ($c eq '"') {
+      for ($i++; $i < $n; $i++) { my $d = substr($line, $i, 1); if ($d eq '\\\\') { $i++; next } if ($d eq '"') { $i++; last } }
+      next;
+    }
+    if ($c eq "'") { my $j = index($line, "'", $i + 1); $i = $j < 0 ? $n : $j + 1; next; }
+    $i++;
+  }
+  return $long;
+}
+# Takes out JamSesh's own tables ([mcp_servers.jamsesh] and its subtables) by their header lines, so
+# a "[" inside a value (an IPv6 address, a comment) or a multi-line string never ends a table early.
+my ($kept, $ours, $long) = ('', 0, '');
+for my $line (split /(?<=\\n)/, $text) {
+  if (!$long && $line =~ /^\\s*\\[\\[?\\s*([^\\]\\[#]+?)\\s*\\]\\]?\\s*(?:#.*)?\\r?\\n?\\z/) {
+    (my $name = $1) =~ s/\\s*\\.\\s*/./g;
+    $name =~ s/"([^"]*)"/$1/g;
+    $ours = $name =~ /^mcp_servers\\.jamsesh(\\.|\\z)/ ? 1 : 0;
+  }
+  $kept .= $line unless $ours;
+  # Inside a multi-line string nothing is a header.
+  $long = scan($line, $long);
+}
+$text = $kept;
 $text =~ s/\\s+\\z//;
-$text .= "\\n\\n[mcp_servers.jamsesh]\\nurl = \\"$hub/mcp\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $token\\"\\n";
-my $tmp = "$path.jamsesh-tmp";
-umask 077;
-open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+(my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
+(my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
+$text .= ($text eq '' ? '' : "\\n\\n") . "[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n";
+my ($out, $tmp) = File::Temp::tempfile('.config.jamsesh-XXXXXXXX', DIR => File::Basename::dirname($path));
 print $out $text;
 close $out or die "JamSesh: can't write $tmp: $!\\n";
 chmod 0600, $tmp;

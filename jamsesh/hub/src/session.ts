@@ -41,6 +41,8 @@ export const AGENT_OFFLINE_MS = 20 * 60_000;
 /** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
 export const TASK_STALE_MS = 20 * 60_000;
 export const TASK_OFFER_MS = 10 * 60_000;
+/** Why an observer can't take a workstream (jam_claim and Session.claim say the same). */
+export const OBSERVER_CLAIM = "You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.";
 /** A person prompt this recent means the agent's own work was asked for. */
 const ASKED_WINDOW_MS = 30 * 60_000;
 
@@ -203,7 +205,7 @@ export class Session {
       devices: this.store.all("devices"),
       agents: this.agents().map(publicAgent),
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
-      directives: this.directives().slice(0, 60),
+      directives: this.stateDirectives(),
       artifacts: this.artifacts().slice(0, 120),
       devservers: this.store.all("devservers"),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
@@ -275,7 +277,7 @@ export class Session {
       case "workstreams":
         return { key, value: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt) };
       case "directives":
-        return { key, value: this.directives().slice(0, 60) };
+        return { key, value: this.stateDirectives() };
       case "artifacts":
         return { key, value: this.artifacts().slice(0, 120) };
       case "devservers":
@@ -487,8 +489,9 @@ export class Session {
     // The owner, harness and folder are the caller's word, so they alone never hand over a record
     // that may still be live (an agent busy for a minute is still live).
     const now = Date.now();
-    // A chat is its own agent: one that names its chat resumes only that chat's record (or an older
-    // record from before chats were told apart), and a chat that doesn't never takes a named chat's.
+    // A chat is its own agent: one that names its chat resumes only that chat's record from the same
+    // machine (or an older record from before chats were told apart), and a chat that doesn't never
+    // takes a named chat's.
     const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
       // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
@@ -497,7 +500,9 @@ export class Session {
       (info.cwd && owner
         ? agents
             .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && now - a.lastSeen > 60_000)
-            .filter((a) => sameChat(a) || now - a.lastSeen > AGENT_OFFLINE_MS)
+            // Only a record from before chats had ids migrates this way: a named chat is never inherited
+            // by another chat, however long it has been quiet or wherever the newcomer joins from.
+            .filter((a) => !a.chatId)
             .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
@@ -571,6 +576,7 @@ export class Session {
       this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed with ${open.length === 1 ? "an open task" : `${open.length} open tasks`}, now cancelled: ${open.map((d) => `"${d.text.slice(0, 80)}"`).join("; ")}. Ask the room to give ${open.length === 1 ? "it" : "them"} to another agent.`, data: { directiveIds: open.map((d) => d.id) } });
     this.store.setSetting(`deliveries:${id}`, []);
     this.wake(id);
+    this.cancelAsks(id);
     const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
     if (opts.purge) for (const d of this.store.all("documents")) if (d.authorId === id) this.store.remove("documents", d.id);
     if (ids.length) bus.send({ type: "events-removed", ids });
@@ -588,13 +594,23 @@ export class Session {
   }
 
   private blockRejoin(agent: Agent) {
-    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
-    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec].slice(-200));
+    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, cwd: agent.cwd || undefined, harness: agent.harness, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
+    // Kept until a person lets the chat back in (or the session goes): never dropped for space.
+    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec]);
   }
 
   /** The removal that keeps this chat out, if any (by its chat id, or the agent id its connection had). */
-  rejoinBlocked(chatId: string | undefined, agentId: string | null): RemovedChat | undefined {
-    return this.removedChats().find((r) => (!!chatId && r.chatId === chatId) || (!!agentId && r.agentId === agentId));
+  /**
+   * `folder`: a join that can't name its chat (a Claude Code chat without its chat id, on a fresh MCP
+   * session) is refused if a chat removed from that machine, folder and harness hasn't been let back.
+   */
+  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }): RemovedChat | undefined {
+    return this.removedChats().find(
+      (r) =>
+        (!!chatId && r.chatId === chatId) ||
+        (!!agentId && r.agentId === agentId) ||
+        (!!folder?.cwd && r.machine === folder.machine && r.cwd === folder.cwd && r.harness === folder.harness),
+    );
   }
 
   /** Lets a removed chat join again. By chat id, only a removal from the same machine (the chat's own hook asking). */
@@ -678,8 +694,12 @@ export class Session {
   postUpdate(agentId: string, kind: UpdateKind, text: string, extra: { workstream?: string; data?: Record<string, any> } = {}) {
     const agent = this.agent(agentId);
     if (!agent) throw new Error("Unknown agent; call jam_join first.");
-    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its brief.
-    const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
+    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its
+    // brief. An observer claims nothing, so its update stays untagged too. A workstream the update takes
+    // up for the first time is announced like any claim (work nobody asked for included).
+    const mine = (w: Workstream) => w.ownerAgentId === agentId && w.status === "active";
+    const already = !!extra.workstream && this.store.all("workstreams").some((w) => mine(w) && normalize(w.title) === normalize(extra.workstream!));
+    const claimed = extra.workstream && agent.role !== "observer" ? this.claim(agentId, extra.workstream, { quiet: already }) : undefined;
     const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
     const short = this.shelve(agent, text);
     const ev = this.store.addEvent({
@@ -706,6 +726,7 @@ export class Session {
 
   claim(agentId: string, title: string, opts: { quiet?: boolean; force?: boolean } = {}) {
     const agent = this.agent(agentId);
+    if (agent?.role === "observer") throw new Error(OBSERVER_CLAIM);
     const t = title.trim();
     const key = normalize(t);
     const existing = this.store.all("workstreams").find((w) => normalize(w.title) === key);
@@ -749,7 +770,8 @@ export class Session {
     // Only Claude Code reports its person's prompts; for other agents we can't tell, so they aren't accused.
     if (agent.harness !== "claude-code") return false;
     const since = Date.now() - ASKED_WINDOW_MS;
-    return !this.store.recentEvents({ kinds: ["prompt"], limit: 60 }).some((e) => e.ts >= since && e.data.agentId === agent.id);
+    // By time, for this agent: however busy the room, other agents' prompts can't push its own out.
+    return !this.store.promptedSince(agent.id, since);
   }
 
   /** A workstream pauses when its owner goes offline, and picks up again when the owner is back. */
@@ -774,9 +796,11 @@ export class Session {
       this.store.put("workstreams", { ...w, status: "paused", updatedAt: now });
       this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${owner.name} went offline; "${w.title}" is paused until it's back or someone takes it.`, workstreamId: w.id });
     }
-    for (const d of this.openDirectives()) {
-      if (d.mode !== "explore" && d.mode !== "implement") continue;
-      for (const t of d.targets) {
+    for (const open of this.openDirectives()) {
+      if (open.mode !== "explore" && open.mode !== "implement") continue;
+      for (const t of open.targets) {
+        // Fresh for each target: an earlier target's nudge or offer this tick is kept, not overwritten.
+        const d = this.store.get("directives", open.id) ?? open;
         const state = d.progress?.[t] ?? d.status;
         if (state === "done" || state === "cancelled") continue;
         const agent = agents.get(t);
@@ -840,7 +864,12 @@ export class Session {
     if (!from.length) return undefined;
     const taken = new Set(d.targets);
     const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
-    const pick = (to ? live.find((a) => a.id === to) : undefined) ?? (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
+    // A named recipient is that agent or nobody: never someone the person didn't choose.
+    if (to && !live.some((a) => a.id === to)) {
+      const named = this.agent(to);
+      throw new Error(!named ? "There's no agent with that id." : named.role === "observer" ? `${named.name} only watches, so it can't take work.` : taken.has(named.id) ? `${named.name} already has this task.` : `${named.name} is offline, so it can't take it now.`);
+    }
+    const pick = to ? live.find((a) => a.id === to) : (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
     if (!pick) {
       bus.send({ type: "toast", tone: "warn", text: "Nobody else is free to take it", detail: d.text.slice(0, 100) });
       return undefined;
@@ -855,6 +884,19 @@ export class Session {
   }
 
   // ---- directives ----
+
+  /** This room's id (one per session, kept with it): what a hook ties a queued prompt to. */
+  roomId(): string {
+    let id = this.store.setting<string>("roomId", "");
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) this.store.setSetting("roomId", (id = crypto.randomUUID()));
+    return id;
+  }
+
+  /** What the live state carries: the newest 60, plus every open one however old, so each agent's tile has all its tasks (and their Reassign offers). */
+  stateDirectives(): Directive[] {
+    const all = this.directives();
+    return all.filter((d, i) => i < 60 || (d.status !== "done" && d.status !== "cancelled"));
+  }
 
   directives(): Directive[] {
     return this.store.all("directives").sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : -1));
@@ -957,12 +999,30 @@ export class Session {
     }
   }
 
+  /**
+   * A person ends a whole task (done or cancelled): every target still on it ends the same way, so no
+   * agent's inbox or tile keeps it open. A finished task never reopens.
+   */
+  endDirective(id: string, status: unknown): Directive | undefined {
+    const d = this.store.get("directives", id);
+    if (!d) return undefined;
+    if (status !== "done" && status !== "cancelled") return d;
+    if (d.status === "done" || d.status === "cancelled") return d;
+    const progress = { ...(d.progress ?? {}) };
+    for (const t of d.targets) if (progress[t] !== "done" && progress[t] !== "cancelled") progress[t] = status;
+    const out = this.setDirective(id, { progress, status });
+    for (const t of d.targets) this.wake(t);
+    return out;
+  }
+
   /** One agent's progress on a directive; the directive's status follows the slowest target. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
-    // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
-    if (d.status === "cancelled" || d.progress?.[agentId] === "cancelled") return d;
+    // Finished stays finished: a late ack or "done" doesn't reopen a task that is done or cancelled,
+    // for this agent or as a whole.
+    const over = (x: string | undefined) => x === "done" || x === "cancelled";
+    if (over(d.status) || over(d.progress?.[agentId])) return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
@@ -987,9 +1047,16 @@ export class Session {
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const quiet = this.skipsBroadcasts(this.agent(agentId));
-    const messages = this.store
-      .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet)));
+    const forMe = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
+    // Read forward from the cursor, oldest first, and filter before counting: the next 50 messages for
+    // this agent, however many for others came in between. Nothing unread is ever passed over.
+    const messages: JamEvent[] = [];
+    for (let after = lastRead; messages.length < 50; ) {
+      const page = this.store.eventsAfter(after, ["message"], 200);
+      for (const e of page) if (forMe(e) && messages.length < 50) messages.push(e);
+      if (page.length < 200) break;
+      after = page[page.length - 1].id;
+    }
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");
@@ -1040,18 +1107,20 @@ export class Session {
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
     const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
-    const out: JamEvent[] = [];
+    // After a cursor (what an agent was last handed), read forward oldest first: a burst bigger than
+    // the limit arrives over successive handovers, and the cursor never passes one it didn't hand over.
     if (opts.afterId != null) {
-      // Not handed over yet: the oldest first, so a burst of more than `limit` is delivered a page at a time and none is skipped.
-      let afterId = opts.afterId;
-      while (out.length < opts.limit) {
-        const page = this.store.recentEvents({ kinds: ["decision"], afterId, limit: 100, oldestFirst: true });
-        out.push(...page.filter(relevant));
-        if (page.length < 100) break;
-        afterId = page[page.length - 1].id;
+      const next: JamEvent[] = [];
+      for (let after = opts.afterId; next.length < opts.limit; ) {
+        const page = this.store.eventsAfter(after, ["decision"], 200);
+        for (const e of page) if (relevant(e) && next.length < opts.limit) next.push(e);
+        if (page.length < 200) break;
+        after = page[page.length - 1].id;
       }
-      return out.slice(0, opts.limit);
+      return next;
     }
+    // The latest: page back until enough are relevant, so other workstreams' decisions can't crowd one out.
+    const out: JamEvent[] = [];
     // The newest that matter: page back until enough are relevant, so other workstreams' can't crowd one out.
     let beforeId: number | undefined;
     while (out.length < opts.limit) {
@@ -1099,7 +1168,12 @@ export class Session {
 
   // ---- agents asking each other ----
 
-  private asks = new Map<string, { resolve: (answer: string) => void; timer: ReturnType<typeof setTimeout> }>();
+  private asks = new Map<string, { resolve: (answer: string | null) => void; timer: ReturnType<typeof setTimeout>; from: string | null }>();
+
+  /** Ends the questions this agent is waiting on (it was removed, or its device disconnected): they return empty now. */
+  cancelAsks(fromId: string) {
+    for (const a of [...this.asks.values()]) if (a.from === fromId) a.resolve(null);
+  }
 
   /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
   ask(fromId: string | null, to: string, question: string, waitMs: number): { askId: string; answer: Promise<string | null> } {
@@ -1119,7 +1193,7 @@ export class Session {
     this.wake(target.id);
     const answer = new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => (this.asks.delete(askId), resolve(null)), waitMs);
-      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer });
+      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer, from: fromId });
     });
     return { askId, answer };
   }

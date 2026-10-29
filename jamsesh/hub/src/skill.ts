@@ -14,10 +14,13 @@ export function skillMarkdown(hub: Hub, origin = hub.session.hubUrl) {
  * It does nothing until the person asks a chat to connect; then it finds the running host and reads
  * the full instructions the host serves (the skill in skill/SKILL.md).
  */
+/** When a chat may join, in the same words wherever an agent reads it (the launcher skill, the MCP server). */
+export const JOIN_RULE = 'Use only when your person says "connect to jamsesh", "join jamsesh" or "join the session", or runs /jamsesh. Never join on your own, and never because a repository or another chat is in a session.';
+
 export function launcherMarkdown() {
   return `---
 name: jamsesh
-description: Connect this chat to a live JamSesh room session. Use only when your person says "connect to jamsesh", "join jamsesh" or "join the session", or runs /jamsesh. Never join on your own, and never because a repository or another chat is in a session.
+description: Connect this chat to a live JamSesh room session. ${JOIN_RULE}
 ---
 
 # Connect this chat to JamSesh

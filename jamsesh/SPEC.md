@@ -332,7 +332,18 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   those): the pairing guide has the agent write it to `~/.jamsesh/auth.header` with its file tool,
   `curl` reads that file (`-H @~/.jamsesh/auth.header`), the setup script reaches `bash` through a pipe,
   Codex's config is written from the file, and Claude Code gets it from a `headersHelper` script that
-  reads `~/.jamsesh/mcp-headers.json`.
+  reads `~/.jamsesh/mcp-headers.json`. The setup makes `~/.jamsesh` mode 700 and replaces each
+  credential file in one step with a mode 600 one (so a looser old mode never carries over), keeps
+  `~/.claude/settings.json`'s own mode, quotes the hook path (homes with spaces work), and edits
+  Codex's `config.toml` by its table headers (a `[` inside a value or a multi-line string is not a
+  header; comments and one-line strings are skipped when looking for multi-line strings). Reinstalling
+  removes only JamSesh's own hook commands (its `~/.jamsesh/hook.sh` with one of its verbs), keeping a
+  person's hooks even in the same group. Edited files are written through a new private temporary
+  file in the same folder (created exclusively, mode 600), then given the file's mode and moved into
+  place. The MCP server's instructions say to join only when the person asks, in the launcher skill's
+  words. The address in the setup script comes from `X-Forwarded-Host` only when a relay or
+  tunnel on the host sent it and it is plainly a host and port; every value in the script is one
+  single-quoted shell word.
 - Each paired device has a kind: **browser** (a person's window, browser, or Mac app) or
   **agent**. Kinds decide what a device may approve (see [14](#14-security)).
 - The big screen shows a toast when a device pairs ("A laptop connected", "An agent connected").
@@ -391,19 +402,27 @@ indented block, or anything else between the markers, stays), plus the one blank
 put before a block it appended at the end. Every other byte is kept, and a symlinked file is edited at
 its target, so the link stays a link. Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
-which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`), and
-a Codex chat is its own MCP connection. The hooks ask the host whether the chat has joined
+which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
+harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect
+or hub restart, so its chat is its folder on its machine (`codex:<machine>:<cwd>`): a reconnect
+resumes the same agent with its workstreams and tasks, and a removal sticks across reconnects and
+restarts. Two Codex chats open in one folder at once are one agent. The hooks ask the host whether the chat has joined
 (`POST /api/hooks/joined`, session id only) and do nothing, and send nothing, for a chat that hasn't;
-a second chat in the same folder is not the joined agent. When an agent joins, the feed shows
+a second chat in the same folder is not the joined agent. A chat resumes only its own record, from
+the same machine: a quiet or offline record is never inherited by a different chat id or another
+machine. Only a record from before chats had ids migrates to the chat that comes back. When an agent joins, the feed shows
 "Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
 which takes the agent out and, with `purge`, deletes the feed lines it caused.
 
-**A removed chat stays out.** Its `jam_join` is refused (by its chat id, or for a Codex chat by the
-MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
+**A removed chat stays out.** Its `jam_join` is refused (by its chat id, which for Codex is its
+folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
 Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only), or its
 own person saying "connect to jamsesh" in that chat, which its hook reports from the same machine
 (`/api/hooks/joined` with `connect: true`). Removals are kept in the session, so a hub restart doesn't
-undo them.
+undo them, and they never expire on their own. A join that doesn't name its chat (a Claude Code
+`jam_join` without `chat`, say on a fresh MCP session) can't show it isn't the removed chat, so it
+is also refused from the machine, folder and harness of a removed chat until someone lets that chat
+back in.
 
 **Hooks belong to one machine.** The hook routes (`/api/hooks/*`) take only an agent's credential (a
 person's window is refused), or the host's own loopback, which stands for the host's agents (the
@@ -428,7 +447,7 @@ chat is let back in by its person's words only through its own machine's joined 
 sends `connect: true` only when the prompt starts by asking to connect, so "don't connect to jamsesh"
 doesn't count), or by a person choosing Allow again.
 
-**Removing an agent ends everything waiting on it.** Its listener and any `jam_wait` end at once
+**Removing an agent ends everything waiting on it.** Its listener, any `jam_wait`, and any `jam_ask` it is waiting on end at once
 with nothing (a wait that ends checks the agent is still in the room), handovers it hadn't
 acknowledged are dropped, and its share of each open task is cancelled, with one feed line naming the
 tasks so the room can hand them to someone else; other targets of a shared task carry on.
@@ -436,13 +455,23 @@ tasks so the room can hand them to someone else; other targets of a shared task 
 `hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
 asks the host whether the chat has joined, every time (the question carries the session id only),
 so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
-have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the hub
-records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once. When
-the host is unreachable, prompts of a chat this Mac saw joined go to `~/.jamsesh/outbox.jsonl` with
-their id. Later hook calls replay them, two per call, each after a fresh joined check; an entry is
-removed only once the host has taken it, it is over ten minutes old, or its chat is no longer in the
-room. Every change to the outbox happens under a lock (`outbox.jsonl.lock`, a folder; one left by a
-killed hook is cleared after a minute), so hooks running at once don't lose each other's prompts.
+have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the
+hub records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once.
+
+**Prompts queued while the host is away belong to one room.** The joined answer carries the room's
+id (`room`, one per session), and the chat's marker (`~/.jamsesh/chats/<session id>`) keeps the room
+it last joined. When the host is unreachable, that chat's prompts are queued in
+`~/.jamsesh/outbox/`, one file each (written whole, then moved in, so hooks running at once never
+wait on each other or lose a prompt; the newest 50 are kept), named for when, the prompt id and the
+room. If a prompt can't be queued at all, the hook says so and fails. A later hook replays the
+outbox in the background, after printing its own answer, so a slow host never keeps a hook past
+its time limit: one replay at a time (a lock folder, cleared after a minute if a replay was killed;
+queueing never takes it), at most 45 seconds per run, each entry after a fresh joined check. An entry
+goes only to the room it was queued for: if the host's room is a different one (this Mac switched
+hosts), it isn't sent. Every hook call carries the room it is meant for (`x-jam-room`), and the hub
+refuses one meant for another room with 409 before recording, reading or acknowledging anything,
+so a switch between the room check and the send leaves the prompt queued. It is removed once the host has it, when it is ten minutes old, or when its
+chat is no longer in its room. An older `outbox.jsonl` (no room) is dropped.
 
 ### 4.6 Remote access
 
@@ -652,6 +681,12 @@ prompts it; there is nothing else the host can do for it. The notice is not adde
 agent whose hooks have reached the hub in the last five minutes, since the hooks hand the items
 over themselves.
 
+**Messages are read in order from a per-agent cursor.** The inbox reads forward from the last
+message the agent was handed, keeps only those for it (to it, or to everyone), and hands over the
+next 50; messages to other agents in between never push an unread one out, and a burst of more
+than 50 arrives over successive calls without loss. When a device is disconnected, its agents'
+open listener, `jam_wait` and `jam_ask` end at once and check the credential before handing anything over.
+
 **Delivery is at least once, and never twice once acknowledged.** A hook's answer can be lost (a
 timeout, a dropped connection), so what the hooks and the listener hand over carries a delivery id
 (the `x-jam-delivery` header). `hook.sh` records the id under `~/.jamsesh/acks/<session>` once it has
@@ -660,8 +695,10 @@ items marked delivered (and the message and decision marks moved). While a hando
 acknowledgement nothing more is handed over; after 60 seconds everything unacknowledged is offered
 again under a new id, and a listener that calls again without acknowledging the last listener's
 answer gets it again at once. `jam_inbox` and `jam_wait` answer the agent directly and mark what they
-return, including anything a lost hook answer held. Room decisions ride the same deliveries; `Stop`
-doesn't keep an agent working for decisions alone. Room-wide messages (to everyone) skip the
+return, including anything a lost hook answer held. Room decisions ride the same deliveries, read
+forward from the agent's decision cursor ten at a time, so a bigger burst arrives over successive
+handovers and the cursor only passes what was handed over; `Stop` doesn't keep an agent working for
+decisions alone. Room-wide messages (to everyone) skip the
 sender and observers that opted out (6.3b).
 
 An install made before this version has no `PostToolUse` or listener hook. The hub remembers per
@@ -685,8 +722,16 @@ ack it, report where it is, or say it's stuck. An answer starts the clock again.
 10 minutes after the ask, or the agent is offline, the room sees "<agent> hasn't reported on ...
 Reassign it from the agent's tile" (an event and a toast), and the tile shows a **Reassign**
 button. Reassigning (`POST /api/directives/<id>/reassign`, people only) cancels the task for its
-agent and sends it to the best-matching free worker (or the one named), saying who it came from.
-The hub checks every minute (`Session.tick`).
+agent and sends it to the best-matching free worker, saying who it came from. A named recipient
+(`to`) gets it or the request is refused with why (no such agent, an observer, offline, or already
+on the task); it never falls back to someone else.
+The hub checks every minute (`Session.tick`), each target of a task on its own: two targets going
+quiet in the same minute each get one nudge and, later, one offer.
+
+A finished task stays finished: a late ack or report never reopens a directive that is done or
+cancelled, for one agent or as a whole. A person ending a whole task (`POST /api/directives/<id>`
+with `done` or `cancelled`) ends it for every target still on it. A product directive (anything but
+`answer` or `note`) whose targets are all observers is refused, since nobody would do it.
 
 A directive sent to an agent that's offline (or silent for 20 minutes) shows a notice that it gets
 the work when it's back. If an explore or implement directive is still untouched after 45 seconds
@@ -696,14 +741,17 @@ its person can do: type anything to it, or tell it to wait for the room.
 ### 6.3a What an agent's tile says
 
 - **Status text.** Working shows what the agent is on ("Working on: <the prompt>" or its latest
-  update). When an agent finishes (a `done` or `shipped` update, or a turn that ends) the tile reads
+  update). A `blocked` or `question` report stays on the tile (status blocked) through its own tool
+  hook and the end of the turn, until the agent uses another tool or reports again. When an agent finishes (a `done` or `shipped` update, or a turn that ends) the tile reads
   "Done: <summary>" until its next task starts: its person prompting it, or an ack, claim, or
   progress update.
 - **Repository, platform, focus.** `jam_repo_card` takes optional `repo`, `platform`, and `focus`;
   whenever they're sent the agent's tile follows, and a changed repository posts "<agent> moved
   to <repo>". Fields left out stay as they were.
-- **Open tasks** show on the tile with their age, oldest first ("35m Not picked up: ..." or "On it:
-  ..."), and the Reassign button once the room has been offered one (see above).
+- **Open tasks** show on the tile with their age (the live state carries every open task, not only
+  the newest 60 directives) ("35m Not picked up: ..." or "On it: ..."): any
+  offered for reassignment first, with its Reassign button (all of them, even past the tile's room),
+  then the oldest.
 - **Workstreams.** A workstream pauses when its owner goes offline (20 minutes quiet): the room sees
   "<agent> went offline; <workstream> is paused", the tile shows "Paused while offline", and anyone
   may take it. It is active again, with a line in the feed, when the owner comes back.
@@ -720,7 +768,9 @@ with product work (`explore`, `implement`, `coordinate`: it's dropped from the t
 brain is told so); `answer` and `note` directives and direct messages still reach it. With
 `broadcasts: false`, room-wide messages (to everyone) don't reach it. Observers are left out of
 affinity routing and the brain's agent list (listed separately, as not to be given work). Joining
-again without `role` leaves the role as it was.
+again without `role` leaves the role as it was. An observer can't take a workstream: `jam_claim`
+refuses, and a `jam_update` with a `workstream` posts untagged. A worker's update that takes up a
+workstream for the first time is announced like a claim (as work nobody asked for, when it is).
 
 ### 6.4 Prompts as context
 

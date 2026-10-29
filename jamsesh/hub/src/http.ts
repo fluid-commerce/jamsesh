@@ -149,6 +149,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     async fetch(req, srv) {
       const url = new URL(req.url);
       const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
+      if (isLocal(peer)) viaLoopback.add(req);
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
       // Mac app's relay (which carries agents' traffic) all mark their requests.
       const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
@@ -710,15 +711,26 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
+    // Observers only watch: product work for observers alone would reach nobody.
+    const mode = body.mode ?? "explore";
+    if (mode !== "answer" && mode !== "note" && targets.every((t: string) => s.agent(t)?.role === "observer")) return bad("Those agents only watch (observers), so nobody would do this. Pick a working agent.");
     const p = s.person(body.personId);
-    return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    return json(s.createDirective({ text: body.text.trim(), mode, targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
   }
 
   m = path.match(/^\/directives\/([\w-]+)$/);
-  if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
+  if (m && req.method === "POST") {
+    if (body?.status !== "done" && body?.status !== "cancelled") return bad("status is done or cancelled");
+    return json(s.endDirective(m[1], body.status));
+  }
   m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
   if (m && req.method === "POST") {
-    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
+    let moved;
+    try {
+      moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" && body.to ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
+    } catch (e) {
+      return bad(e instanceof Error ? e.message : String(e));
+    }
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
   }
 
@@ -779,7 +791,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
     if (!machine) return bad("This device isn't paired with this JamSesh host.", 401);
     const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
-    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine) });
+    // With this room's id: a hook keeps it with the chat, so a prompt queued while the host is away
+    // is only ever sent to this room.
+    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine), room: s.roomId() });
+    // Sent for one room (a queued prompt, or a call made just before this Mac's relay switched hosts):
+    // refused before anything is recorded, read or acknowledged, so the hook keeps it for that room.
+    const room = req.headers.get("x-jam-room");
+    if (room && room !== s.roomId()) return json({ error: "That was meant for another JamSesh room.", room: s.roomId() }, 409);
     // What the hook script passed on to the agent since its last call (see Hub.offer).
     const promptId = req.headers.get("x-jam-prompt-id") ?? "";
     if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;
@@ -789,7 +807,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
     if (hook === "listen") {
       // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
-      const r = joined ? await hub.listen(b, ip, machine) : { text: "", delivery: null };
+      const r = joined ? await hub.listen(b, ip, machine, undefined, () => !paired || !!hub.auth.get(paired.id)) : { text: "", delivery: null };
       if (r.delivery) headers["x-jam-delivery"] = r.delivery;
       return new Response(r.text, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
     }
@@ -1058,9 +1076,20 @@ async function idempotent(hub: Hub, req: Request, path: string, run: () => Promi
 }
 
 /** The origin the client used to reach this host (proxies forward the original host). */
-function originOf(req: Request, url: URL) {
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
-  const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
+/** Requests that reached the hub from this computer: only a relay or tunnel here can say where it was asked. */
+const viaLoopback = new WeakSet<Request>();
+/** A host name or address with an optional port, nothing else (it ends up in scripts and links). */
+const HOST_SHAPE = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:\d{1,5})?$/;
+
+/**
+ * The address the caller reached the hub at. X-Forwarded-* count only from a relay or tunnel on this
+ * computer (anyone else could send them), and a value that isn't plainly a host and port is ignored.
+ */
+export function originOf(req: Request, url: URL) {
+  const relay = viaLoopback.has(req);
+  const host = [relay ? req.headers.get("x-forwarded-host") : null, req.headers.get("host"), url.host].find((h): h is string => !!h && HOST_SHAPE.test(h)) ?? "127.0.0.1";
+  const fwd = relay ? req.headers.get("x-forwarded-proto") : null;
+  const proto = fwd === "http" || fwd === "https" ? fwd : url.protocol === "https:" ? "https" : "http";
   return `${proto}://${host}`;
 }
 

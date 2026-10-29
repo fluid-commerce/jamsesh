@@ -12,7 +12,7 @@ import type { Hub } from "./hub";
 import { confidentBanter } from "./brain/card";
 import { shortRepo, type UpdateKind } from "./session";
 import type { Agent, Directive, JamEvent } from "./types";
-import { skillMarkdown } from "./skill";
+import { JOIN_RULE, skillMarkdown } from "./skill";
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type ToolOut = { content: Content[]; isError?: boolean };
@@ -340,7 +340,7 @@ export class McpEndpoint {
       {
         capabilities: { tools: {}, prompts: {} },
         instructions:
-          "You are connected to a JamSesh room session. Call jam_join first. Then follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, when idle: Claude Code stops (JamSesh wakes it when the room has something), Codex calls jam_wait (it returns after a few minutes with nothing; call it again), and verify mockups against the design system and builds against mockups.",
+          `These tools connect this chat to a live JamSesh room session with jam_join. ${JOIN_RULE} Until your person asks, don't call any JamSesh tool. Once you've joined, follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, when idle: Claude Code stops (JamSesh wakes it when the room has something), Codex calls jam_wait (it returns after a few minutes with nothing; call it again), and verify mockups against the design system and builds against mockups.`,
       },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.toolList() }));
@@ -361,6 +361,11 @@ export class McpEndpoint {
       }
     });
     return server;
+  }
+
+  /** After a wait: a device disconnected meanwhile gets nothing more. */
+  private requireCredential(ctx: Ctx) {
+    if (ctx.device && ctx.device !== "host" && !this.hub.auth.get(ctx.device)) throw new Error("This device was disconnected from the JamSesh session.");
   }
 
   private requireAgent(ctx: Ctx): Agent {
@@ -405,9 +410,24 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
-        const chatId = typeof args.chat === "string" && args.chat.trim() ? args.chat.trim().slice(0, 80) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined;
+        // Which chat this is. Claude Code's hooks hand it its session id (passed as chat). A harness without
+        // hooks (Codex) has no chat id of its own, and its MCP session changes on every reconnect or hub
+        // restart, so its chat is its folder on its machine: a reconnect resumes it and a removal sticks.
+        // (Two Codex chats open in one folder at once are one agent.) Without even a folder, the session.
+        const where = String(args.cwd ?? "").trim() || String(args.repo ?? "").trim();
+        const harness = String(args.harness ?? "other");
+        const chatId =
+          typeof args.chat === "string" && args.chat.trim()
+            ? args.chat.trim().slice(0, 80)
+            : harness !== "claude-code" && where
+              ? `${harness}:${machine}:${where}`.slice(0, 300)
+              : ctx.sessionId
+                ? `mcp:${ctx.sessionId}`
+                : undefined;
         // A chat the room removed stays out until a person lets it back in.
-        if (s.rejoinBlocked(chatId, ctx.agentId))
+        // A join that doesn't name its chat can't show it isn't the removed one: a removal in this folder counts.
+        const named = typeof args.chat === "string" && !!args.chat.trim();
+        if (s.rejoinBlocked(chatId, ctx.agentId, named ? undefined : { machine, cwd: String(args.cwd ?? "").trim(), harness }))
           throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
         // Rejoining keeps the stored role unless the caller names one (the session settles it).
         const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
@@ -420,9 +440,7 @@ export class McpEndpoint {
           branch: args.branch,
           cwd: args.cwd,
           machine,
-          // Claude Code's hooks know the chat by its session id, which the SessionStart note hands the
-          // agent. Without one (Codex has no hooks) the MCP connection is the chat.
-          chatId,
+          chatId, // see above
           platform: args.platform,
           focus: args.focus,
           name: args.name,
@@ -481,7 +499,6 @@ export class McpEndpoint {
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
-        if (agent.role === "observer") throw new Error("You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.");
         const { workstream, conflict } = s.claim(agent.id, String(args.workstream), { force: !!args.force });
         if (conflict) return text(`"${workstream.title}" belongs to ${conflict.name} (${conflict.status}, ${conflict.activity}). Message them with jam_message to split the work, or pass force:true if the room reassigned it.`);
         return text(`You own "${workstream.title}".${workstream.brief ? `\n\nBrief so far:\n${workstream.brief}` : ""}`);
@@ -499,6 +516,7 @@ export class McpEndpoint {
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
         this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
+        this.requireCredential(ctx);
         const out = this.inboxText(agent, true);
         const idle = out.startsWith("Nothing new.");
         s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
@@ -525,6 +543,9 @@ export class McpEndpoint {
         const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000);
         s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
         const a = await answer;
+        // Removed, or its device disconnected, while it waited: nothing more for it.
+        this.requireAgent(ctx);
+        this.requireCredential(ctx);
         s.touchAgent(agent.id, { status: "working" });
         return text(a ? `Answer: ${a}` : `No answer yet (question ${askId}). It will arrive in your inbox; carry on and check jam_inbox.`);
       }

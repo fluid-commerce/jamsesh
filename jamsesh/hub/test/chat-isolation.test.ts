@@ -55,11 +55,12 @@ test("room state never shows a chat's transport id, and an MCP session answers o
   await (await mcpPost(macA.token, { jsonrpc: "2.0", method: "notifications/initialized" }, sid)).body?.cancel();
   const joined = await mcpPost(macA.token, callTool("jam_join", { harness: "codex", repo: "api", cwd: "/work/api" }), sid);
   expect(await joined.text()).toContain("api");
-  const victim = s.agents().find((a) => a.chatId === `mcp:${sid}`)!;
+  const victim = s.agents().find((a) => a.harness === "codex" && a.cwd === "/work/api")!;
   expect(victim).toBeDefined();
   // Not in the room's state, over HTTP or in the live patches.
   const state = await (await fetch(`${base}/api/state`, { headers: bearer(felipeWindow.token) })).json();
   expect(JSON.stringify(state)).not.toContain(sid);
+  expect(JSON.stringify(state)).not.toContain(victim.chatId!);
   expect(state.agents.find((a: Agent) => a.id === victim.id).chatId).toBeUndefined();
   expect(JSON.stringify((s as any).resolve("agents"))).not.toContain(sid);
   // Another paired device that has the id anyway (another Mac's agents, or a person's window) gets "not found".
@@ -378,62 +379,125 @@ test("a prompt that arrives twice under one id is recorded once", async () => {
   expect(s.store.recentEvents({ kinds: ["prompt"] }).filter((e) => e.text === "make the header sticky")).toHaveLength(1);
 });
 
-test("hook.sh outbox: a lost answer is replayed under the same id, a failed replay stays queued, concurrent writes all land", async () => {
-  // A fake host: the first prompt is accepted but answered too late (the hook gives up after 4 seconds);
-  // then its replay fails once; after that everything goes through.
-  let mode: "slow" | "fail" | "ok" = "slow";
-  let failId = "";
-  const prompts: { id: string | null; body: string }[] = [];
-  const fake = Bun.serve({
+/** A fake host for the outbox: its room, which prompts fail or are slow, and what it received. */
+function outboxHost() {
+  const st = { room: "room-A", joined: true, failIds: new Set<string>(), slowIds: new Set<string>(), failNew: false, slowAll: false, slowMs: 5000, prompts: [] as { id: string | null; body: string }[] };
+  const server = Bun.serve({
     port: 0,
     idleTimeout: 30,
     fetch: async (req) => {
       const path = new URL(req.url).pathname;
       const body = await req.text();
-      if (path.endsWith("/hooks/joined")) return Response.json({ joined: true });
+      if (path.endsWith("/hooks/joined")) return Response.json({ joined: st.joined, room: st.room });
       if (!path.endsWith("/hooks/prompt")) return Response.json({});
-      prompts.push({ id: req.headers.get("x-jam-prompt-id"), body });
-      if (mode === "slow") {
-        await Bun.sleep(5000);
-        return Response.json({});
-      }
-      if (mode === "fail" && req.headers.get("x-jam-prompt-id") === failId) return new Response("busy", { status: 503 });
+      const id = req.headers.get("x-jam-prompt-id");
+      st.prompts.push({ id, body });
+      if (st.slowAll || (id && st.slowIds.has(id))) await Bun.sleep(st.slowMs);
+      if ((id && st.failIds.has(id)) || st.failNew) return new Response("busy", { status: 503 });
       return Response.json({});
     },
   });
+  return { st, server };
+}
+const until = async (ok: () => boolean) => {
+  for (let i = 0; i < 300 && !ok(); i++) await Bun.sleep(50);
+  expect(ok()).toBe(true);
+};
+
+test("hook.sh outbox: a lost answer is replayed under the same id, a failed replay stays queued, concurrent queueing all lands", async () => {
+  const { st, server: fake } = outboxHost();
   try {
     const { home, run } = box(`http://127.0.0.1:${fake.port}`, "tok");
-    mkdirSync(join(home, "chats"), { recursive: true });
-    writeFileSync(join(home, "chats/chat-q"), "");
+    const outbox = join(home, "outbox");
+    const entries = () => (existsSync(outbox) ? readdirSync(outbox).filter((f) => !f.startsWith(".")) : []);
+    const idle = () => !existsSync(join(outbox, ".replaying"));
+    // Joined once (the marker keeps room A), then the first prompt is accepted but answered too late.
+    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
+    expect(readFileSync(join(home, "chats/chat-q"), "utf8")).toBe("room-A");
+    st.slowMs = 5000;
+    st.slowAll = true;
     await run("prompt", { session_id: "chat-q", prompt: "first prompt" });
-    const outbox = join(home, "outbox.jsonl");
-    const lines = () => (existsSync(outbox) ? readFileSync(outbox, "utf8").split("\n").filter(Boolean) : []);
-    expect(lines()).toHaveLength(1);
-    const id = prompts[0]!.id!;
-    expect(id).toMatch(/^p\d+-/);
-    expect(lines()[0]!.split("\t")[1]).toBe(id);
-    // The host looks down for 45 seconds after that: let it be reachable again.
+    st.slowAll = false;
+    expect(entries()).toHaveLength(1);
+    const [ts, id, room] = entries()[0]!.split("_");
+    expect(ts).toMatch(/^\d+$/);
+    expect(id).toBe(st.prompts[0]!.id!);
+    expect(room).toBe("room-A");
+    // Back: the replay fails once and the prompt stays queued, then it goes under the same id.
     rmSync(join(home, "hub-down"), { force: true });
-    mode = "fail";
-    failId = id;
+    st.failIds.add(id!);
     await run("tool", { session_id: "chat-q", tool_name: "Edit" });
-    // The tool call went through but the replay didn't: the prompt is still queued.
-    expect(prompts.filter((p) => p.id === id)).toHaveLength(2);
-    expect(lines().map((l) => l.split("\t")[1])).toEqual([id]);
-    mode = "ok";
-    prompts.length = 0;
+    await until(() => st.prompts.filter((p) => p.id === id).length === 2 && idle());
+    expect(entries()).toHaveLength(1);
+    st.failIds.clear();
     await run("tool", { session_id: "chat-q", tool_name: "Edit" });
-    // Replayed under the same id it was first sent with, so the host can tell it's the same prompt.
-    expect(prompts.some((p) => p.id === id && p.body.includes("first prompt"))).toBe(true);
-    await run("tool", { session_id: "chat-q", tool_name: "Edit" });
-    expect(lines()).toHaveLength(0);
+    await until(() => entries().length === 0 && idle());
+    expect(st.prompts.filter((p) => p.id === id && p.body.includes("first prompt"))).toHaveLength(3);
     // Many hooks queueing at once (the host is down): every prompt lands, each with its own id.
     writeFileSync(join(home, "hub-down"), String(Math.floor(Date.now() / 1000)));
     await Promise.all(Array.from({ length: 12 }, (_, i) => run("prompt", { session_id: "chat-q", prompt: `burst ${i}` })));
-    const burst = lines();
-    expect(burst).toHaveLength(12);
-    expect(new Set(burst.map((l) => l.split("\t")[1])).size).toBe(12);
-    expect(existsSync(`${outbox}.lock`)).toBe(false);
+    expect(entries()).toHaveLength(12);
+    expect(new Set(entries().map((f) => f.split("_")[1])).size).toBe(12);
+  } finally {
+    fake.stop(true);
+  }
+}, 40_000);
+
+test("hook.sh outbox: a prompt that fails while a slow replay runs is still queued", async () => {
+  const { st, server: fake } = outboxHost();
+  try {
+    const { home, run } = box(`http://127.0.0.1:${fake.port}`, "tok");
+    const outbox = join(home, "outbox");
+    await run("tool", { session_id: "chat-r", tool_name: "Edit" }); // joined: the marker keeps room A
+    const now = Math.floor(Date.now() / 1000);
+    mkdirSync(outbox, { recursive: true });
+    writeFileSync(join(outbox, `${now}_pold-1_room-A`), JSON.stringify({ session_id: "chat-r", prompt: "queued earlier" }));
+    st.slowIds.add("pold-1");
+    st.slowMs = 3000;
+    await run("tool", { session_id: "chat-r", tool_name: "Edit" }); // starts the slow replay in the background
+    await until(() => existsSync(join(outbox, ".replaying")));
+    st.failNew = true;
+    const t0 = Date.now();
+    const r = await run("prompt", { session_id: "chat-r", prompt: "new while replaying" });
+    expect(Date.now() - t0).toBeLessThan(6000);
+    expect(r.code).toBe(0);
+    const queued = readdirSync(outbox).filter((f) => !f.startsWith(".")).map((f) => readFileSync(join(outbox, f), "utf8"));
+    expect(queued.some((b) => b.includes("new while replaying"))).toBe(true);
+  } finally {
+    fake.stop(true);
+  }
+}, 30_000);
+
+test("hook.sh outbox: a prompt queued for one room is never sent to another", async () => {
+  const { st, server: fake } = outboxHost();
+  try {
+    const { home, run } = box(`http://127.0.0.1:${fake.port}`, "tok");
+    const outbox = join(home, "outbox");
+    const now = Math.floor(Date.now() / 1000);
+    mkdirSync(outbox, { recursive: true });
+    writeFileSync(join(outbox, `${now}_pA-1_room-A`), JSON.stringify({ session_id: "chat-s", prompt: "for room A only" }));
+    // This Mac now reaches room B, and the same chat joined it.
+    st.room = "room-B";
+    await run("tool", { session_id: "chat-s", tool_name: "Edit" });
+    expect(readFileSync(join(home, "chats/chat-s"), "utf8")).toBe("room-B");
+    await until(() => !existsSync(join(outbox, ".replaying")) && st.prompts.length === 0);
+    await Bun.sleep(300);
+    expect(st.prompts.some((p) => p.body.includes("for room A only"))).toBe(false);
+    expect(readdirSync(outbox).filter((f) => !f.startsWith("."))).toEqual([`${now}_pA-1_room-A`]);
+    // Back in room A, it goes.
+    st.room = "room-A";
+    await run("tool", { session_id: "chat-s", tool_name: "Edit" });
+    await until(() => st.prompts.some((p) => p.id === "pA-1" && p.body.includes("for room A only")));
+    // A prompt queued while room B was the room goes to B only.
+    writeFileSync(join(home, "chats/chat-s"), "room-B");
+    writeFileSync(join(home, "hub-down"), String(now));
+    await run("prompt", { session_id: "chat-s", prompt: "for room B" });
+    expect(readdirSync(outbox).filter((f) => !f.startsWith(".")).some((f) => f.endsWith("_room-B"))).toBe(true);
+    // An old outbox file (no room) is dropped rather than guessed at.
+    writeFileSync(join(home, "outbox.jsonl"), `${now}\tq1\t{"session_id":"chat-s","prompt":"old format"}\n`);
+    rmSync(join(home, "hub-down"), { force: true });
+    await run("tool", { session_id: "chat-s", tool_name: "Edit" });
+    expect(existsSync(join(home, "outbox.jsonl"))).toBe(false);
   } finally {
     fake.stop(true);
   }
