@@ -61,14 +61,21 @@ pub fn check(c: &Copy) -> Result<(), String> {
     if c.samples.iter().any(|s| s.kind.len() > 16 || s.embedding.len() != DIM || !s.embedding.iter().all(|n| n.is_finite())) {
         return Err("A sample in that voiceprint is malformed.".into());
     }
-    if c.version.as_ref().is_some_and(|v| v.len() > 64) || c.host.as_ref().is_some_and(|h| h.len() > 64) || c.updated_at.is_some_and(|t| !t.is_finite()) {
+    if c.version.as_ref().is_some_and(|v| v.len() > 64)
+        || c.host.as_ref().is_some_and(|h| h.len() > 64)
+        || c.updated_at.is_some_and(|t| !t.is_finite())
+    {
         return Err("That voiceprint's details are malformed.".into());
     }
     Ok(())
 }
 
 pub fn load(dir: &Path, name: &str) -> Kept {
-    file_for(dir, name).and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice::<Kept>(&b).ok()).filter(|k| k.copy.as_ref().is_none_or(|c| check(c).is_ok())).unwrap_or_default()
+    file_for(dir, name)
+        .and_then(|f| std::fs::read(f).ok())
+        .and_then(|b| serde_json::from_slice::<Kept>(&b).ok())
+        .filter(|k| k.copy.as_ref().is_none_or(|c| check(c).is_ok()))
+        .unwrap_or_default()
 }
 
 fn save(dir: &Path, name: &str, kept: &Kept) -> Result<(), String> {
@@ -115,7 +122,14 @@ mod tests {
     use super::*;
 
     fn copy(n: usize, value: f32) -> Copy {
-        Copy { model: "wespeaker_en".into(), dim: DIM, samples: (0..n).map(|_| Sample { kind: "enrol".into(), embedding: vec![value; DIM] }).collect(), version: Some("v1".into()), updated_at: Some(5.0), host: Some("hostA".into()) }
+        Copy {
+            model: "wespeaker_en".into(),
+            dim: DIM,
+            samples: (0..n).map(|_| Sample { kind: "enrol".into(), embedding: vec![value; DIM] }).collect(),
+            version: Some("v1".into()),
+            updated_at: Some(5.0),
+            host: Some("hostA".into()),
+        }
     }
 
     fn dir() -> PathBuf {
@@ -157,7 +171,10 @@ mod tests {
         short.samples[0].embedding.truncate(100);
         assert!(check(&short).is_err());
         // Numbers too big for f32 arrive as infinity and are refused.
-        let big: Result<Copy, _> = serde_json::from_str(&format!(r#"{{"model":"m","dim":256,"samples":[{{"kind":"enrol","embedding":[{}]}}]}}"#, vec!["1e100"; DIM].join(",")));
+        let big: Result<Copy, _> = serde_json::from_str(&format!(
+            r#"{{"model":"m","dim":256,"samples":[{{"kind":"enrol","embedding":[{}]}}]}}"#,
+            vec!["1e100"; DIM].join(",")
+        ));
         assert!(big.is_err() || check(&big.unwrap()).is_err());
     }
 

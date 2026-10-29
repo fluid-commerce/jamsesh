@@ -3207,6 +3207,31 @@ html.in-app .app-header {
   font-size: 14px;
   color: var(--dim);
 }
+.connect-elsewhere {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
+  background: var(--panel-2);
+  font-size: 14px;
+  color: var(--muted);
+  text-align: left;
+}
+.connect-elsewhere p {
+  margin: 0 0 12px;
+}
+.connect-elsewhere b {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.connect-elsewhere .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.connect-elsewhere .connect-paste:first-child {
+  color: var(--text);
+}
 .qr-scan {
   display: grid;
   justify-items: center;

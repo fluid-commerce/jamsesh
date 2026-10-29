@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { QrScanner } from "./QrScanner";
-import { canScan, type Scanned } from "./joinHelp";
+import { canScan, scanGoes, type Scanned } from "./joinHelp";
 
 const ALPHABET = /[23456789ABCDEFGHJKMNPQRSTUVWXYZ]/;
 
@@ -20,6 +20,8 @@ export function ConnectView() {
   const [info, setInfo] = useState<{ name: string; brainName: string } | null>(null);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
   const [scanning, setScanning] = useState(false);
+  // A scanned code for an address this page doesn't know waits for a yes.
+  const [elsewhere, setElsewhere] = useState<Scanned | null>(null);
 
   useEffect(() => {
     fetch("/api/pair/info").then((r) => r.json()).then(setInfo).catch(() => {});
@@ -69,10 +71,13 @@ export function ConnectView() {
     else boxes.current[Math.min(j, 3)]?.focus();
   };
 
-  // A scanned code for this room fills the boxes; one for another room goes there.
+  const go = (s: Scanned) => location.assign(`${s.origin}/connect${s.code ? `?c=${s.code}` : ""}`);
+  // A scanned code for this room fills the boxes; one for another address asks first.
   function scanned(s: Scanned) {
     setScanning(false);
-    if (s.origin !== location.origin) return void location.assign(`${s.origin}/connect${s.code ? `?c=${s.code}` : ""}`);
+    const where = scanGoes(s, location.origin);
+    if (where === "known") return void go(s);
+    if (where === "ask") return void setElsewhere(s);
     if (!s.code) return void (setState("error"), setError("That QR code has no code in it. Type the code on the big screen."));
     if (s.code.length === 8) return void submit(s.code);
     setChars(s.code.split(""));
@@ -131,6 +136,21 @@ export function ConnectView() {
           </button>
         )}
         {scanning && <QrScanner onScan={scanned} onClose={() => setScanning(false)} />}
+        {elsewhere && (
+          <div className="connect-elsewhere" role="alertdialog" aria-label="Another address">
+            <p>
+              That QR code is for <b>{elsewhere.origin.replace(/^https?:\/\//, "")}</b>, not this room. Go there only if it's the big screen in front of you.
+            </p>
+            <div className="row">
+              <button type="button" className="connect-paste" onClick={() => go(elsewhere)}>
+                Go to {elsewhere.origin.replace(/^https?:\/\//, "")}
+              </button>
+              <button type="button" className="connect-paste" onClick={() => setElsewhere(null)}>
+                Stay here
+              </button>
+            </div>
+          </div>
+        )}
         <button
           type="button"
           className="connect-paste"

@@ -147,14 +147,14 @@
       }
       const KEYCHAIN_HINT = "If macOS asks to let JamSesh use its saved sign-in, enter your Mac password and choose Always Allow.";
 
-      function joinRow(name, sub, url, label) {
+      function joinRow(name, sub, url, label, code = null) {
         const b = document.createElement("button");
         b.className = "host";
         b.innerHTML = `<span class="dot"></span><span class="what"><div class="name"></div><div class="sub"></div></span><span class="go"></span>`;
         b.querySelector(".name").textContent = name;
         b.querySelector(".sub").textContent = sub;
         b.querySelector(".go").textContent = label;
-        b.onclick = () => run(`Connecting to ${name}…`, () => invoke("join", { url, name, code: null }), KEYCHAIN_HINT);
+        b.onclick = () => ((scannedHost = null), run(`Connecting to ${name}…`, () => invoke("join", { url, name, code }), KEYCHAIN_HINT));
         return b;
       }
 
@@ -162,6 +162,10 @@
         const list = $("hosts");
         list.replaceChildren();
         const urls = new Set(found.map((h) => h.url));
+        if (scannedHost) {
+          const where = scannedHost.origin.replace(/^https?:\/\//, "");
+          list.append(joinRow(where, "From the QR code, not a session found on this network. Join only if it's the big screen in front of you.", scannedHost.origin, "Join", scannedHost.code));
+        }
         for (const h of found) list.append(joinRow(h.name, [h.session, h.url.replace(/^https?:\/\//, "")].filter(Boolean).join(" · "), h.url, "Join"));
         if (info?.lastHost && !urls.has(info.lastHost)) {
           list.append(joinRow(info.lastHostName || info.lastHost.replace(/^https?:\/\//, ""), `Last time · ${info.lastHost.replace(/^https?:\/\//, "")}`, info.lastHost, "Rejoin"));
@@ -204,6 +208,12 @@
       // ---- scanning the big screen's QR code: `<address>/connect?c=<code>` ----
       let scanning = false;
       let stream = null;
+      // A scanned address JamSesh didn't find here waits in the list for a click: anyone can print a QR code.
+      let scannedHost = null;
+      const originOf = (u) => {
+        try { return new URL(u).origin; } catch { return ""; }
+      };
+      const knownHost = (origin) => found.some((h) => originOf(h.url) === origin) || (!!info?.lastHost && originOf(info.lastHost) === origin);
       function parseJoin(text) {
         let u;
         try { u = new URL(String(text).trim()); } catch { return null; }
@@ -260,6 +270,7 @@
             const hit = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
             const joined = hit && parseJoin(hit.data);
             if (joined) {
+              if (!knownHost(joined.origin)) return (scannedHost = joined), stopScan();
               stopScan();
               return run(`Connecting to ${joined.origin.replace(/^https?:\/\//, "")}…`, () => invoke("join", { url: joined.origin, name: null, code: joined.code }), KEYCHAIN_HINT);
             }

@@ -89,7 +89,12 @@ pub fn diagnose(f: &Facts) -> Status {
         };
     }
     if !f.has_network {
-        return status("none", Some("offline"), "This Mac isn't on a network", "Connect to the Wi-Fi the big screen is on, or type its address if you have one.");
+        return status(
+            "none",
+            Some("offline"),
+            "This Mac isn't on a network",
+            "Connect to the Wi-Fi the big screen is on, or type its address if you have one.",
+        );
     }
     if f.waited < LOOK_FOR {
         return status("looking", None, "Looking for rooms on this network…", "");
@@ -110,11 +115,15 @@ pub fn diagnose(f: &Facts) -> Status {
     )
 }
 
-/// Whether this Mac has a route out of the machine. Sends nothing: connecting a UDP socket only picks a route.
+/// Whether this Mac is on a network, from its own interfaces: an IPv4 address other than loopback. A
+/// self-assigned 169.254 address counts, and no route to the internet is needed: a room's own Wi-Fi or
+/// a cable between two Macs is a network. (IPv6 link-local addresses exist on every interface, so they don't count.)
+fn on_a_network(addrs: impl IntoIterator<Item = std::net::IpAddr>) -> bool {
+    addrs.into_iter().any(|ip| matches!(ip, std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified()))
+}
+
 fn has_network() -> bool {
-    std::net::UdpSocket::bind("0.0.0.0:0")
-        .and_then(|s| s.connect("192.0.2.1:9").and_then(|()| s.local_addr()))
-        .is_ok_and(|a| !a.ip().is_unspecified() && !a.ip().is_loopback())
+    if_addrs::get_if_addrs().is_ok_and(|ifs| on_a_network(ifs.iter().map(|i| i.ip())))
 }
 
 impl Hosts {
@@ -122,7 +131,8 @@ impl Hosts {
     pub fn status(&self) -> Status {
         let (listed, advertised) = self.0.lock().map(|m| (m.values().filter(|e| e.up).count(), m.len())).unwrap_or_default();
         let error = self.1.lock().ok().and_then(|s| s.error.clone());
-        diagnose(&Facts { listed, advertised, error, has_network: has_network(), waited: self.2.elapsed() })
+        // A Bonjour advert reached this Mac, so it's on a network whatever its interfaces say.
+        diagnose(&Facts { listed, advertised, error, has_network: advertised > 0 || has_network(), waited: self.2.elapsed() })
     }
 
     fn fail(&self, error: &str) {
@@ -231,7 +241,7 @@ fn plain_name(instance: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Facts, Hosts, Found, LOOK_FOR, Status, diagnose, plain_name};
+    use super::{Facts, Found, Hosts, LOOK_FOR, Status, diagnose, on_a_network, plain_name};
     use std::time::Duration;
 
     fn facts() -> Facts {
@@ -325,6 +335,21 @@ mod tests {
         assert_eq!(hosts.list().len(), 1);
         hosts.withdraw("new");
         assert!(hosts.list().is_empty());
+    }
+
+    #[test]
+    fn a_network_with_no_internet_is_still_a_network() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        // A room's own Wi-Fi with no way out, or two Macs on a cable (self-assigned).
+        assert!(on_a_network([ip("127.0.0.1"), ip("192.168.4.20")]));
+        assert!(on_a_network([ip("169.254.12.7")]));
+        // Nothing but loopback and IPv6 link-local: no network.
+        assert!(!on_a_network([ip("127.0.0.1"), ip("::1"), ip("fe80::1")]));
+        assert!(!on_a_network(Vec::new()));
+        // An advert that arrived means a network, even if the interfaces said otherwise.
+        let hosts = Hosts::default();
+        hosts.advertise("a".into(), host("http://10.0.0.2:4747"));
+        assert_ne!(hosts.status().reason, Some("offline"));
     }
 
     #[test]

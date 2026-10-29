@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cameraProblem, parseJoin } from "../src/connect/joinHelp";
+import { cameraProblem, parseJoin, scanGoes } from "../src/connect/joinHelp";
 
 describe("reading the big screen's QR code", () => {
   test("takes the address and the code from the connect link", () => {
@@ -26,5 +26,17 @@ describe("camera trouble", () => {
     expect(all.size).toBe(4);
     for (const m of all) expect(m).toContain("instead");
     expect(say("NotAllowedError")).toContain("Allow");
+  });
+});
+
+describe("where a scanned code leads", () => {
+  const here = "http://192.168.1.20:4747";
+  test("this room's code stays here; a known host is followed; any other address asks first", () => {
+    expect(scanGoes({ origin: here, code: "K7M2" }, here)).toBe("here");
+    expect(scanGoes({ origin: "http://10.0.0.9:4747", code: "K7M2" }, here, ["http://10.0.0.9:4747/"])).toBe("known");
+    expect(scanGoes({ origin: "http://10.0.0.9:4747", code: "K7M2" }, here)).toBe("ask");
+    expect(scanGoes({ origin: "https://evil.example", code: null }, here, ["http://10.0.0.9:4747", "not a url"])).toBe("ask");
+    // Same host, other port or scheme: another address.
+    expect(scanGoes({ origin: "https://192.168.1.20:4747", code: null }, here)).toBe("ask");
   });
 });
