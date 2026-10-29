@@ -43,6 +43,8 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Taps while the screen is turned | Not working | The companion's touches don't land in landscape; the hub refuses them with a reason. Rotating and watching work. |
 | Control passing, agents refused, a person without control refused, a device that vanishes mid-stream | Simulated | `hub/test/liveapps.test.ts` with a fake `xcrun`, a fake companion and a fake Mac helper. |
 | Mac and Electron apps: capture and input | Not tested | The Swift helper compiles and refuses cleanly without Screen Recording; capture and CGEvent input need those permissions on a real host (office checklist). |
+| Mac button release: a held button is let go on control change, tile end, another driver, a quiet press, helper EOF and SIGTERM | Simulated | Hub tests with a fake helper that logs its input; the Swift helper's own release typechecks (`swiftc -typecheck`) but was not run against a real app. Part of the release check below. |
+| **Release check (not done): real ScreenCaptureKit capture and CGEvent input on a host with the permissions** | Not tested | Phase 6 is not complete until the 6.3 office checklist is run on a Mac with Screen Recording and Accessibility: capture of a real Simulator, a Mac app and an Electron app, clicks, drags, scrolling and typing, a drag cut off by passing control or dropping the network (the button must come up), and the frame rate. |
 | Idb companion missing | Simulated | The tile starts watch-only with the install line. Not tried on a Mac without it. |
 
 ## Room and brain
