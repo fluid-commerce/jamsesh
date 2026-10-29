@@ -121,9 +121,7 @@ export class Board {
     const fresh = sources.filter((x) => x.eventId == null || !match.sources.some((m) => m.eventId === x.eventId));
     // A line seen twice (the same event) isn't a repeat.
     if (!fresh.length && sources.some((x) => x.eventId != null)) return match;
-    // Said again, it is the room's ask once more: an "overruled" mark from an earlier line no longer stands.
-    const { overruled: _gone, ...live } = match;
-    const next = { ...live, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), updatedAt: this.stamp() };
+    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), updatedAt: this.stamp() };
     return this.s.store.put("triage", next);
   }
 
@@ -151,12 +149,15 @@ export class Board {
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const workstream = clean(p.workstream);
     // The same words for other agents, or another workstream, are another task.
-    const same = this.match("task", text, (c) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream));
+    const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream);
+    const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
     if (same) return this.repeat(same, sources);
+    // Asked again after the room overruled it: a new card, so the veto stays on the old one for people to see and decide.
+    const vetoed = this.match("task", text, (c) => purpose(c) && !!c.overruled && c.status === "open");
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, kind: "fact", workstream, conflictsWith: null, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -427,26 +428,31 @@ export class Board {
    * Overheard: the room wants a task stopped. The cancellation waits as a card (sending it cancels the task and
    * tells its agents); nothing an agent is doing changes until a person sends it.
    */
-  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[] }): TriageCard | null {
+  proposeCancel(p: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"] }): TriageCard | null {
     const d = p.directive;
     if (d.status === "done" || d.status === "cancelled") return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
-    const open = this.open().find((c) => c.cancels === d.id);
+    const open = this.open().find((c) => c.cancels === d.id && !c.overruled);
     if (open) return this.repeat(open, sources);
     const text = clean(p.reason) || "The room changed its mind";
     const now = this.stamp();
     const card: TriageCard = {
-      id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: "overheard", text, original: text, by: p.by,
+      id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
       mode: d.mode, targets: d.targets, kind: "fact", workstream: "", conflictsWith: null, cancels: d.id, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
 
-  /** Overheard: a later line overrules a proposal still waiting. It stays for a person to dismiss, marked with why. */
-  overrule(id: string, reason: string): TriageCard | null {
+  /**
+   * Overheard: a later line overrules a proposal still waiting. It stays for a person to dismiss, marked with why, and
+   * the veto (who, when, which lines) is kept on the card for good: the same ask said again makes a new card instead.
+   */
+  overrule(id: string, reason: string, by = "", eventIds: number[] = []): TriageCard | null {
     const c = this.get(id);
     if (!c || c.status !== "open") return null;
-    return this.s.store.put("triage", { ...c, overruled: clean(reason).slice(0, 200) || "Overruled in the room", updatedAt: this.stamp() });
+    const why = clean(reason).slice(0, 200) || "Overruled in the room";
+    const vetoes = [...(c.vetoes ?? []), { reason: why, by, at: Date.now(), eventIds: eventIds.slice(0, SOURCES_MAX) }].slice(-SOURCES_MAX);
+    return this.s.store.put("triage", { ...c, overruled: why, vetoes, updatedAt: this.stamp() });
   }
 
   /** Minutes a card has waited, once it has waited long enough to label. */
@@ -482,7 +488,7 @@ export class Board {
         const w = Board.waitingMin(c, now);
         const who = c.targets.map((t) => this.s.agent(t)?.name ?? t).join(", ");
         const where = c.cancels ? `cancel ${c.cancels} for ${who}` : c.type === "task" ? `${c.mode} → ${who || "no agent chosen"}` : c.retire ? `retire a saved fact (${c.retire})` : `${c.kind}${c.conflictsWith ? ", contradicts a saved fact" : ""}`;
-        return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})${c.overruled ? ` [overruled: ${c.overruled}]` : ""}`;
+        return `${i + 1}. ${c.id} [${c.type}: ${where}] ${c.text}${c.count > 1 ? ` (said ${c.count} times)` : ""} (${c.by}${w != null ? `, waiting ${w} min` : ""})${c.overruled ? ` [overruled: ${c.overruled}]` : ""}${c.renews ? ` [asks again for overruled card ${c.renews}]` : ""}`;
       })
       .join("\n");
   }

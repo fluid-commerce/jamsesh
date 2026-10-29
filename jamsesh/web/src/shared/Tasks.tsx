@@ -321,6 +321,12 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
         </p>
       )}
 
+      {card.renews && !card.overruled && (
+        <p className="tk-overruled" role="note">
+          <span className="label">Asked again</span> after the room overruled it
+        </p>
+      )}
+
       {conflict && !editing && (
         <div className="tk-versus" aria-label="This disagrees with a saved fact">
           <div>
