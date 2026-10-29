@@ -136,8 +136,9 @@ export async function publish(kind: Kind, shareId: string = `sh-${rid()}${rid()}
   const stream = await capture(kind);
   const pub: PubInternal = { shareId, kind, stream, peers: new Map(), stopped: false, since: Date.now() };
   pubs.set(shareId, pub);
-  // The browser's own "Stop sharing" button ends the track: end the share for everyone.
-  for (const t of stream.getTracks()) t.addEventListener("ended", () => void stopPublishing(shareId), { once: true });
+  // The browser's own "Stop sharing" button ends the track: end the share for everyone, under the
+  // id it has by then (registering a share nobody asked for renames it).
+  for (const t of stream.getTracks()) t.addEventListener("ended", () => void stopPublishing(pub.shareId), { once: true });
   publishChanged();
   return pub;
 }
