@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { stopHelper, withStdinWatch } from "../children";
 import { config } from "../config";
 import { downloadVerified, fileMatches, type ModelState, type ModelStatus } from "./models";
@@ -134,7 +134,7 @@ export class LocalWhisper {
       this.set("starting", "Checking the speech model.");
       if (await verified(model)) return model;
       this.bad.add(model);
-      if (model.startsWith(join(config.home, "models"))) rmSync(model, { force: true });
+      if (inManagedFolder(model)) rmSync(model, { force: true });
     }
     return null;
   }
@@ -215,4 +215,9 @@ export class LocalWhisper {
     if (this.proc) void stopHelper(this.proc);
     this.proc = null;
   }
+}
+
+/** Inside JamSesh's own models folder (not a sibling such as models-backup, which only shares its name's start). */
+export function inManagedFolder(path: string) {
+  return resolve(path).startsWith(resolve(config.home, "models") + sep);
 }
