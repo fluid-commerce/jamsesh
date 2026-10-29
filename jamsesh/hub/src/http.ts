@@ -13,7 +13,20 @@ import { agentGuide, agentIntro, joinScript, hookScript } from "./install-script
 import { skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
+type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[]; queueBytes?: number; openTimer?: ReturnType<typeof setTimeout> };
+
+/** What a relay holds for a canvas server that hasn't opened yet, and how long it waits: past either the client is told to try again. */
+export const RELAY_LIMITS = { bytes: 8 * 1024 * 1024, frames: 1000, openMs: 10_000 };
+
+/** Holds a frame for the canvas server; false when the relay is already holding as much as it may. */
+export function queueRelayFrame(data: WsData, raw: string | Buffer | ArrayBuffer | Uint8Array): boolean {
+  const size = typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength;
+  const q = (data.queue ??= []);
+  if (q.length >= RELAY_LIMITS.frames || (data.queueBytes ?? 0) + size > RELAY_LIMITS.bytes) return false;
+  q.push(raw as any);
+  data.queueBytes = (data.queueBytes ?? 0) + size;
+  return true;
+}
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
@@ -309,7 +322,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (ws.data.collab != null) {
           const up = ws.data.upstream;
           if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
-          else (ws.data.queue ??= []).push(raw);
+          else if (!queueRelayFrame(ws.data, raw as any)) ws.close(1013, "canvas not ready, try again");
           return;
         }
         try {
@@ -327,6 +340,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       close(ws: ServerWebSocket<WsData>) {
         if (ws.data.collab != null) {
           (ws as any).off?.();
+          clearTimeout(ws.data.openTimer);
+          ws.data.queue = [];
           return void ws.data.upstream?.close();
         }
         hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
@@ -352,9 +367,16 @@ function openCollab(ws: ServerWebSocket<WsData>, hub: Hub) {
   const up = new WebSocket(`ws://127.0.0.1:${port}${ws.data.collab}`);
   up.binaryType = "arraybuffer";
   ws.data.upstream = up;
+  // A canvas server that doesn't open in time (stalled, restarting) ends the relay with a retryable close.
+  ws.data.openTimer = setTimeout(() => {
+    up.close();
+    ws.close(1013, "canvas not ready, try again");
+  }, RELAY_LIMITS.openMs);
   up.onopen = () => {
+    clearTimeout(ws.data.openTimer);
     for (const m of ws.data.queue ?? []) up.send(m as any);
     ws.data.queue = [];
+    ws.data.queueBytes = 0;
   };
   up.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer));
   up.onclose = () => ws.close();
