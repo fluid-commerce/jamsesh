@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { closeUnattended, newRecordToken, stopWithRetry, sendSummary, type RecordNote, type SendReply } from "./notes";
+import { closeUnattended, newRecordToken, pointerOrNone, stopWithRetry, sendSummary, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -800,6 +800,8 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
 
   const starting = useRef(false);
   const alive = useRef(true);
+  /** The pointer, read once: a Stop pressed again after a failure sends the same marks. */
+  const pointerCache = useRef<PointerMark[] | null>(null);
   /** The token made before a Start and kept until the hub answers it: the page closing in between cancels by it. */
   const pendingToken = useRef<string | null>(null);
   const unmuted = useRef(false);
@@ -865,7 +867,8 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     offDart.current?.();
     offDart.current = null;
     try {
-      const pointer = await r.stop();
+      // A pointer that can't be read doesn't keep the recording open: it ends with the words alone.
+      const pointer = (pointerCache.current ??= await pointerOrNone(() => r.stop()));
       // The sentence still being spoken has to reach the hub before it closes the window.
       await mic?.flush?.().catch(() => {});
       // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
@@ -882,13 +885,21 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
           if (r.queued) throw new OfflineError(NOT_SENT);
           return r;
         },
-        () => api("/record/cancel", { deviceId: hub.deviceId, token: cur.token }, undefined, { queue: false, timeoutMs: 15_000 }),
+        // The cancel is retried the same way; only when the hub confirms it is the recording let go.
+        () => stopWithRetry(() => api("/record/cancel", { deviceId: hub.deviceId, token: cur.token }, undefined, { queue: false, timeoutMs: 15_000 }), async () => {}),
       );
       if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
       else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
     } catch (e) {
+      // Neither the Stop nor the cancel got through: the recording id is kept, still live, so Stop can be pressed again.
+      if ((e as { unended?: boolean })?.unended && hub.get().state?.recordings?.some((x) => x.id === cur.id) !== false) {
+        fail("Couldn't stop that recording. Check your connection and press Stop again.", "Still recording");
+        setRec(cur);
+        return;
+      }
       fail(e instanceof OfflineError ? NOT_SENT : e instanceof Error ? e.message : "Couldn't finish that recording.");
     }
+    pointerCache.current = null;
     setRec({ phase: "idle" });
     if (unmuted.current) {
       // Back to muted, once the last words have been through the mic.

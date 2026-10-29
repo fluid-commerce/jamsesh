@@ -972,6 +972,66 @@ test("a write's announcement waits for the commit: a rolled-back transaction ann
   off?.();
 });
 
+test("a cancel while a Stop is in flight ends the recording at once, and it stays ended when that Stop then fails", async () => {
+  const r = room();
+  const tok = "rt_ffffffffffffffff";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  (r.hub as any).stopRecording = async () => (await Bun.sleep(100), Promise.reject(new Error("database is locked")));
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "x" });
+  const failed = stopping.then(() => "ok", (e) => String(e));
+  expect((r.hub as any).recs.get("mayaLaptop").state).toBe("ending");
+  r.hub.recordCancel("mayaLaptop", tok);
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
+  expect(await failed).toContain("database is locked");
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
+  expect(r.s.recordings().length).toBe(0);
+});
+
+test("a Stop that fails with nothing else happening puts the recording back to live with the error kept, and the retry runs it again", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const rec = (r.hub as any).recs.get("mayaLaptop");
+  const real = (r.hub as any).stopRecording.bind(r.hub);
+  let n = 0;
+  (r.hub as any).stopRecording = (...args: any[]) => (++n === 1 ? Promise.reject(new Error("database is locked")) : real(...args));
+  const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "x" });
+  await expect(stop()).rejects.toThrow("locked");
+  expect(rec.state).toBe("live");
+  expect(rec.error).toContain("locked");
+  expect((await stop()).ok).toBe(true);
+  expect(rec.state).toBe("ended");
+});
+
+test("a prompt-window close and a Stop racing for one recording: one closes it, the other is refused, in either order", async () => {
+  for (const first of ["stop", "window"] as const) {
+    const r = room();
+    const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+    if (!a.ok) throw new Error("start");
+    const stop = () => r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [], typed: "make it bigger" });
+    const win = () => r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "make it bigger" });
+    const [one, two]: any[] = await Promise.all(first === "stop" ? [stop(), win()] : [win(), stop()]);
+    expect([one.ok, two.ok]).toEqual([true, false]);
+    expect(two.status).toBe(409);
+    expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
+    // Only one close made anything: a repeated Stop shares or repeats it, never adds a second prompt.
+    const prompts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length;
+    expect(prompts).toBe(first === "stop" ? 0 : 1);
+  }
+}, 60_000);
+
+test("a Stop whose pointer can't be read still ends the recording: junk marks are dropped, not fatal", async () => {
+  const r = room();
+  for (const pointer of ["garbage", [null, 5, { t: "x" }, { t: 1, kind: "click" }]] as any[]) {
+    const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+    if (!a.ok) throw new Error("start");
+    const res = await r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer, typed: "words" });
+    expect(res.ok).toBe(true);
+    expect(r.hub.recordingOn("mayaLaptop")).toBe(false);
+  }
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

@@ -55,8 +55,23 @@ export async function stopWithRetry<T>(call: () => Promise<T>, cancel: () => Pro
       if (i < tries - 1) await wait(1000 * 2 ** i);
     }
   }
-  await cancel().catch(() => {});
+  // Never confirmed: cancelled by its token. If that is not acknowledged either the recording may still be running, and the error says so.
+  try {
+    await cancel();
+  } catch (c) {
+    throw Object.assign(c instanceof Error ? c : new Error(String(c)), { unended: true });
+  }
   throw last;
+}
+
+/** What the pointer recorder made of the gesture, or nothing if it can't be read: the recording still ends, with the words alone. */
+export async function pointerOrNone<P>(read: () => Promise<P[]>): Promise<P[]> {
+  try {
+    const marks = await read();
+    return Array.isArray(marks) ? marks : [];
+  } catch {
+    return [];
+  }
 }
 
 /** A recording that began after its page went away has nobody to stop it: closes it, sending the words alone. */

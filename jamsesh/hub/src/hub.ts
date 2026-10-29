@@ -83,6 +83,31 @@ interface PromptWindow {
   rec?: string;
 }
 
+/**
+ * A recording's life on the hub: live -> ending (a close that has to wait for the last words) -> ended. It begins live: the page's
+ * "starting" is the time between its token and the hub's answer, and the token's cancel covers it. Only `endRecording` moves it.
+ */
+type EndReason = "stop" | "window-close" | "cancel" | "disconnect" | "cap" | "replaced";
+interface Rec {
+  id: string;
+  deviceId: string;
+  t0: number;
+  personId: string | null;
+  screenId: string | null;
+  lock: { personId?: string | null; since: number } | null;
+  keep?: ReturnType<typeof setInterval>;
+  cap?: ReturnType<typeof setTimeout>;
+  missed: number;
+  state: "live" | "ending" | "ended";
+  ending?: { reason: EndReason; promise: Promise<unknown> };
+  /** Why the last close failed (it went back to live, so it can be tried again). */
+  error?: string;
+  nextT0?: number;
+  token?: string;
+}
+type Ended<R> = { kind: "done"; value: R } | { kind: "busy" } | { kind: "ended" };
+
+type StopAnswer = { ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number };
 type SendProgress = { brain?: boolean };
 
 export class Hub {
@@ -398,14 +423,20 @@ export class Hub {
     // closes nothing. Without an id, only a window opened by the older start call (no recording) can be closed.
     const open = this.promptMode.get(w.deviceId);
     const rec = this.recs.get(w.deviceId);
-    if (w.recordingId) {
-      if (!rec || rec.id !== w.recordingId || open?.rec !== rec.id || rec.stopping) return { ok: false, reason: "That recording has already ended.", status: 409 };
-      rec.stopping = true;
-    } else if (!open || open.rec || open.t1 !== undefined) return { ok: false, reason: "There is no recording to stop.", status: 409 };
-    const t0 = open.t0;
+    let lines: Utterance[];
+    let t0: number;
     const t1 = this.clock();
-    const lines = await this.waiting(w.deviceId, w.recordingId ? rec : undefined, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open, w.recordingId ? rec : undefined));
-    if (rec && w.recordingId) this.recordEnd(w.deviceId, rec);
+    if (w.recordingId) {
+      if (!rec || rec.id !== w.recordingId || !open || open.rec !== rec.id) return { ok: false, reason: "That recording has already ended.", status: 409 };
+      t0 = open.t0;
+      const out = await this.endRecording(rec, "window-close", () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open, rec)));
+      if (out.kind !== "done") return { ok: false, reason: out.kind === "busy" ? "That recording is being closed another way." : "That recording has already ended.", status: 409 };
+      lines = out.value;
+    } else {
+      if (!open || open.rec || open.t1 !== undefined) return { ok: false, reason: "There is no recording to stop.", status: 409 };
+      t0 = open.t0;
+      lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, open);
+    }
     w = { ...w, pointer: this.inWindow(w.pointer, t0, t1) };
     const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
     const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
@@ -440,7 +471,7 @@ export class Hub {
    * Recording laptops. `lock` is the screen lock this recording took (its owner and `since`), so only
    * that lock is given back: never one someone took after it.
    */
-  private recs = new Map<string, { id: string; t0: number; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number; stopping?: boolean; stop?: Promise<unknown>; nextT0?: number; token?: string }>();
+  private recs = new Map<string, Rec>();
   /** Recordings stopped and still gathering their last words, by device: a Start in that time writes its time on each (`nextT0`). */
   private stoppingRecs = new Map<string, Set<{ nextT0?: number }>>();
   private async waiting<T>(deviceId: string, rec: { nextT0?: number } | undefined, run: () => Promise<T>): Promise<T> {
@@ -455,7 +486,7 @@ export class Hub {
     }
   }
   /** What each Stop answered (the last 200), so a Stop sent again, because its reply was lost, gets the same answer and does nothing twice. */
-  private stopResults = new Map<string, { deviceId: string; caller: string; result: Awaited<ReturnType<Hub["recordStop"]>> }>();
+  private stopResults = new Map<string, { deviceId: string; caller: string; result: StopAnswer }>();
   private recSweep = (() => {
     const t = setInterval(() => this.sweepRecordings(), 15_000);
     t.unref?.();
@@ -492,7 +523,7 @@ export class Hub {
     // Ended before the lock is taken, so giving back its lock can't release the one this recording relies on.
     // The first start after a recording is that recording's bound, kept on the recording itself (also while it still waits for its last words).
     for (const r of [earlier, ...(this.stoppingRecs.get(deviceId) ?? [])]) if (r && r.nextT0 === undefined) r.nextT0 = t0;
-    this.recordEnd(deviceId);
+    if (earlier) void this.endRecording(earlier, "replaced");
     let screenId: string | null = null;
     let lockTaken: { personId?: string | null; since: number } | null = null;
     if (sc && person) {
@@ -509,9 +540,9 @@ export class Hub {
     const id = newId("rec");
     const prompt = this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
     prompt.rec = id;
-    const rec: NonNullable<ReturnType<typeof this.recs.get>> = { id, t0, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0, ...(token ? { token } : {}) };
+    const rec: Rec = { id, deviceId, t0, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0, state: "live", ...(token ? { token } : {}) };
     // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
-    (rec.cap = setTimeout(() => this.abandonRecording(deviceId, rec), Hub.RECORD_MAX_MS + 1000)).unref?.();
+    (rec.cap = setTimeout(() => void this.endRecording(rec, "cap"), Hub.RECORD_MAX_MS + 1000)).unref?.();
     // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
     if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
     this.recs.set(deviceId, rec);
@@ -526,27 +557,56 @@ export class Hub {
   recordCancel(deviceId: string, token: string) {
     this.session.store.cancelToken(deviceId, token);
     const rec = this.recs.get(deviceId);
-    if (rec?.token === token && !rec.stopping) this.abandonRecording(deviceId, rec);
-  }
-
-  private abandonRecording(deviceId: string, only: unknown) {
-    if (this.recs.get(deviceId) !== only) return;
-    this.releasePrompt(deviceId);
-    this.recordEnd(deviceId);
+    if (rec?.token === token) void this.endRecording(rec, "cancel");
   }
 
   /** Ends recordings whose window has been gone for two checks in a row (this runs every 15 s). */
   sweepRecordings() {
     for (const [deviceId, rec] of [...this.recs]) {
       rec.missed = this.session.deviceOnline(deviceId) ? 0 : rec.missed + 1;
-      if (rec.missed >= 2) this.abandonRecording(deviceId, rec);
+      if (rec.missed >= 2) void this.endRecording(rec, "disconnect");
     }
   }
 
-  /** Forgets a device's recording and, if it was the last on its screen and took the lock, gives the screen back. */
-  private recordEnd(deviceId: string, only?: unknown) {
-    const rec = this.recs.get(deviceId);
-    if (!rec || (only !== undefined && rec !== only)) return;
+  /**
+   * The one way a recording ends. Every route calls it: Stop, a prompt-window close, a cancel, the disconnect sweep, the cap and a
+   * replacing Start. With `finish` (a close that waits for the last words) it goes live -> ending -> ended; a call while ending shares
+   * that close if it is the same kind and is refused (busy) if it is another. If `finish` fails the recording is live again with the
+   * error kept, and the caller may try again. Without `finish` (cancel, disconnect, cap, replaced) it ends at once, even while ending.
+   */
+  private endRecording<R>(rec: Rec, reason: EndReason, finish?: () => Promise<R>): Promise<Ended<R>> {
+    if (!finish) {
+      if (rec.state !== "ended") {
+        // A replaced recording's window belongs to its replacement already; the others hand their held words to the room.
+        if (reason !== "replaced" && this.recs.get(rec.deviceId) === rec) this.releasePrompt(rec.deviceId);
+        this.teardown(rec);
+      }
+      return Promise.resolve({ kind: "done", value: undefined as R });
+    }
+    if (rec.state === "ended") return Promise.resolve({ kind: "ended" });
+    if (rec.state === "ending") {
+      const cur = rec.ending!;
+      return cur.reason === reason ? (cur.promise as Promise<R>).then((value) => ({ kind: "done", value })) : Promise.resolve({ kind: "busy" });
+    }
+    rec.state = "ending";
+    rec.error = undefined;
+    const promise = finish().then(
+      (value) => (this.teardown(rec), value),
+      (e) => {
+        if (rec.state === "ending") (rec.state = "live"), (rec.ending = undefined), (rec.error = e instanceof Error ? e.message : String(e));
+        throw e;
+      },
+    );
+    rec.ending = { reason, promise };
+    return promise.then((value) => ({ kind: "done", value }));
+  }
+
+  /** Forgets the recording and, if it was the last on its screen and took the lock, gives the screen back. Only `endRecording` calls this. */
+  private teardown(rec: Rec) {
+    if (rec.state === "ended") return;
+    rec.state = "ended";
+    const deviceId = rec.deviceId;
+    if (this.recs.get(deviceId) !== rec) return;
     clearInterval(rec.keep);
     clearTimeout(rec.cap);
     this.recs.delete(deviceId);
@@ -566,7 +626,7 @@ export class Hub {
   }
 
   /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
-  async recordStop(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
+  async recordStop(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }): Promise<StopAnswer> {
     // A Stop sent again (its reply was lost) gets the answer the first one got, from the same window; one still running is shared.
     const prior = this.stopResults.get(w.recordingId);
     if (prior && prior.deviceId === w.deviceId && prior.caller === w.caller) return prior.result;
@@ -574,22 +634,15 @@ export class Hub {
     const rec = this.recs.get(w.deviceId);
     if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
     if (rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
-    if (rec.stop) return rec.stop as ReturnType<Hub["recordStop"]>;
-    rec.stopping = true;
-    const run = this.stopRecording(w, rec);
-    rec.stop = run;
-    run.then(
-      (result) => {
-        this.stopResults.set(w.recordingId, { deviceId: w.deviceId, caller: w.caller, result });
-        if (this.stopResults.size > NOTE_RECS_MAX) this.stopResults.delete(this.stopResults.keys().next().value!);
-      },
-      // A Stop that failed outright can be tried again.
-      () => ((rec.stopping = false), (rec.stop = undefined)),
-    );
-    return run;
+    const out = await this.endRecording(rec, "stop", () => this.stopRecording(w, rec));
+    if (out.kind === "busy") return { ok: false, reason: "That recording is being closed another way.", status: 409 };
+    if (out.kind === "ended") return { ok: false, reason: "That recording has already ended.", status: 409 };
+    this.stopResults.set(w.recordingId, { deviceId: w.deviceId, caller: w.caller, result: out.value });
+    if (this.stopResults.size > NOTE_RECS_MAX) this.stopResults.delete(this.stopResults.keys().next().value!);
+    return out.value;
   }
 
-  private async stopRecording(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }, rec: NonNullable<ReturnType<typeof this.recs.get>>): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
+  private async stopRecording(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }, rec: Rec): Promise<StopAnswer> {
     const s = this.session;
     const person = s.person(w.personId ?? rec.personId);
     // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
@@ -597,8 +650,6 @@ export class Hub {
     const t1 = this.clock();
     const open = this.promptMode.get(w.deviceId);
     const lines = await this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined, rec));
-    // Only the recording this Stop belongs to: a Start that came in while the words were gathered stays.
-    this.recordEnd(w.deviceId, rec);
     const marks = this.inWindow(Array.isArray(w.pointer) ? w.pointer : [], t0, t1).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
     const notes = alignNotes(lines, marks, { screenId: rec.screenId });
     const typed = w.typed?.trim();

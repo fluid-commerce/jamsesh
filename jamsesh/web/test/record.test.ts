@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { closeUnattended, stopWithRetry, newRecordToken, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { closeUnattended, pointerOrNone, stopWithRetry, newRecordToken, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -64,4 +64,22 @@ test("a Stop is sent again until confirmed: a lost reply is retried with backoff
   let cancelled = 0;
   await expect(stopWithRetry(() => Promise.reject(new Error("offline")), async () => void cancelled++, 3, wait)).rejects.toThrow("offline");
   expect(cancelled).toBe(1);
+});
+
+test("a Stop and a cancel that both fail leave the recording marked as possibly still running, so the page keeps its id", async () => {
+  const wait = async () => {};
+  const err = await stopWithRetry(() => Promise.reject(new Error("offline")), () => stopWithRetry(() => Promise.reject(new Error("still offline")), async () => {}, 2, wait), 2, wait).catch((e) => e);
+  expect(err.unended).toBe(true);
+  expect(err.message).toBe("still offline");
+  // A cancel that gets through (on its second try) ends it: the Stop's own failure is what is reported, and it is not "unended".
+  let n = 0;
+  const e2 = await stopWithRetry(() => Promise.reject(new Error("offline")), () => stopWithRetry(async () => (++n < 2 ? Promise.reject(new Error("blip")) : "ok"), async () => {}, 3, wait), 2, wait).catch((e) => e);
+  expect(e2.message).toBe("offline");
+  expect(e2.unended).toBeUndefined();
+});
+
+test("a pointer that can't be read becomes no marks, so the Stop still goes out", async () => {
+  expect(await pointerOrNone(async () => { throw new Error("bad gesture"); })).toEqual([]);
+  expect(await pointerOrNone(async () => "nope" as any)).toEqual([]);
+  expect(await pointerOrNone(async () => [1, 2])).toEqual([1, 2]);
 });

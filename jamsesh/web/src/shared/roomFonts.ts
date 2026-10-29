@@ -88,7 +88,7 @@ export function noteLookupFailed(tries: Map<string, number>, families: string[],
     const k = familyKey(f);
     const n = (tries.get(k) ?? 0) + 1;
     tries.set(k, n);
-    if (n > max) checked.add(k);
+    if (n >= max) checked.add(k);
     else more = true;
   }
   return more;
