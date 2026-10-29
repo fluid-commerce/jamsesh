@@ -468,4 +468,54 @@ describe("agent setup script", () => {
     expect((await run(good)).code).toBe(0);
     expect(readdirSync(join(good.home, ".jamsesh")).filter((f) => /\.prev$|rollback/.test(f))).toEqual([]);
   });
+
+  /** A home with an earlier install for another host: its connection files, which a failed setup must leave exactly as they were. */
+  function earlierInstall(box: ReturnType<typeof sandbox>) {
+    const dir = join(box.home, ".jamsesh");
+    mkdirSync(dir, { recursive: true });
+    const files = { "auth.header": "authorization: Bearer old-room\n", "client.env": "JAMSESH_HUB='http://old-host:4747'\nJAMSESH_NAME='Old'\nJAMSESH_ACTIVE=1\n", "hook.sh": "#!/usr/bin/env bash\n# old hook\n" };
+    for (const [f, body] of Object.entries(files)) writeFileSync(join(dir, f), body, { mode: f === "hook.sh" ? 0o755 : 0o600 });
+    return { dir, files };
+  }
+  const connectionIntact = (dir: string, files: Record<string, string>) => {
+    for (const [f, body] of Object.entries(files)) expect(readFileSync(join(dir, f), "utf8")).toBe(body);
+    expect(statSync(join(dir, "hook.sh")).mode & 0o777).toBe(0o755);
+    expect(readdirSync(dir).filter((f) => f.startsWith(".saved") || f.endsWith(".restore"))).toEqual([]);
+  };
+
+  test("a failed hook download leaves auth.header, client.env and hook.sh as they were", async () => {
+    const box = sandbox();
+    stubCli(join(box.bin, "claude"), box.log);
+    const { dir, files } = earlierInstall(box);
+    hookBody = null;
+    try {
+      const r = await run(box);
+      expect(r.code).not.toBe(0);
+      connectionIntact(dir, files);
+    } finally {
+      hookBody = HOOK_OK;
+    }
+  });
+
+  test("a refused MCP entry leaves auth.header, client.env and hook.sh as they were, so no file points at the new host", async () => {
+    const box = sandbox();
+    writeFileSync(join(box.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*"${origin}/mcp"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    const { dir, files } = earlierInstall(box);
+    const r = await run(box);
+    expect(r.code).not.toBe(0);
+    connectionIntact(dir, files);
+    expect(readFileSync(join(dir, "client.env"), "utf8")).not.toContain(origin);
+  });
+
+  test("a failed first install leaves none of the connection files; a good one keeps no token in client.env", async () => {
+    const failing = sandbox();
+    writeFileSync(join(failing.bin, "claude"), `#!/bin/sh\ncase "$*" in *"add-json"*) exit 1 ;; esac\nexit 0\n`, { mode: 0o755 });
+    expect((await run(failing)).code).not.toBe(0);
+    expect(readdirSync(join(failing.home, ".jamsesh")).filter((f) => ["auth.header", "client.env", "hook.sh"].includes(f) || f.startsWith(".saved"))).toEqual([]);
+    const good = sandbox();
+    stubCli(join(good.bin, "claude"), good.log);
+    expect((await run(good)).code).toBe(0);
+    expect(readFileSync(join(good.home, ".jamsesh/client.env"), "utf8")).not.toContain("tok");
+    expect(readdirSync(join(good.home, ".jamsesh")).filter((f) => f.startsWith(".saved"))).toEqual([]);
+  });
 });

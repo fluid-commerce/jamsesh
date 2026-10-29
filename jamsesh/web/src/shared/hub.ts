@@ -278,8 +278,13 @@ class HubClient {
 
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
-    const state = await api<HubState>("/state");
-    this.set({ state });
+    this.adopt(await api<HubState>("/state"));
+  }
+
+  /** Takes a full state, from the socket or from HTTP. Another room (this window outlived a relay restart into a new one): its purge ids mean nothing here. */
+  private adopt(state: HubState) {
+    const s = this.snap.state;
+    this.set(s && s.session?.roomId !== state.session?.roomId ? { state, removed: [] } : { state });
   }
 
   /** Host time now, for stamping audio. */
@@ -301,8 +306,7 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
-        // Another room (this window outlived a relay restart into a new one): its event ids mean nothing here.
-        return this.set(s && s.session?.roomId !== m.state.session?.roomId ? { state: m.state, removed: [] } : { state: m.state });
+        return this.adopt(m.state);
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });
         return;

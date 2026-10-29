@@ -36,3 +36,17 @@ test("a state from another room drops the old room's purge ids, so reused ids sh
   expect(hub.get().removed).toEqual([]);
   expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([1, 2]);
 });
+
+test("the HTTP fallback drops the old room's purge ids too", async () => {
+  const state = (roomId: string, ids: number[]) => ({ session: { roomId }, events: ids.map((id) => ({ id })) });
+  (hub as any).snap = { ...(hub as any).snap, removed: [2], state: state("room-a", [1, 3]) };
+  const real = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json(state("room-b", [1, 2]))) as any;
+  try {
+    await hub.refreshState();
+  } finally {
+    globalThis.fetch = real;
+  }
+  expect(hub.get().removed).toEqual([]);
+  expect(hub.get().state!.events.map((e: any) => e.id)).toEqual([1, 2]);
+});

@@ -212,7 +212,7 @@ for my $old (@blocks) {
   }
 }
 for my $first (sort { $a <=> $b } keys %found) {
-  print STDERR "JamSesh: $path still has the block an earlier JamSesh wrote (lines $first-$found{$first}). JamSesh no longer changes this file, so a chat joins only when you ask it to. Delete those lines, from <!-- jamsesh:start --> to <!-- jamsesh:end -->, to be rid of it.\n";
+  print STDERR "JamSesh: $path still has the block an earlier JamSesh wrote (lines $first-$found{$first}). JamSesh no longer changes this file, and until you delete those lines (from <!-- jamsesh:start --> to <!-- jamsesh:end -->) that block can still make a chat join the room by itself.\n";
 }
 `;
 
@@ -298,6 +298,17 @@ case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing toke
 command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 # The credential goes in files (mode 600) that curl and Claude Code read, never in a command's
 # arguments, which any process on this computer can list. Empty: the JamSesh app's relay adds it.
+# The files that say which host this computer talks to are saved first and put back if setup fails
+# anywhere before the MCP entry is in, so a failure never leaves hooks on one host and the MCP server on another.
+CONNFILES="auth.header client.env hook.sh"
+SAVED="$(mktemp -d "$DIR/.saved.XXXXXXXX")"
+for f in $CONNFILES; do if [ -f "$DIR/$f" ]; then cp -p "$DIR/$f" "$SAVED/$f"; fi; done
+restore_files() {
+  local f
+  for f in $CONNFILES; do
+    if [ -f "$SAVED/$f" ]; then cp -p "$SAVED/$f" "$DIR/$f.restore" && mv -f "$DIR/$f.restore" "$DIR/$f"; else rm -f "$DIR/$f"; fi
+  done
+}
 printf 'authorization: Bearer %s\\n' "$TOKEN" | private "$DIR/auth.header"
 AUTH=(-H "@$DIR/auth.header")
 # A value as one single-quoted shell word, so sourcing client.env (the jamsesh command does) runs
@@ -313,7 +324,6 @@ if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)";
 
 {
   printf 'JAMSESH_HUB=%s\\n' "$(q "$HUB")"
-  printf 'JAMSESH_TOKEN=%s\\n' "$(q "$TOKEN")"
   printf 'JAMSESH_NAME=%s\\n' "$(q "$NAME")"
   echo 'JAMSESH_ACTIVE=1'
 } | private "$DIR/client.env"
@@ -324,6 +334,8 @@ if curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$hooktmp" && head -n 1 "$hooktmp" 
   chmod 755 "$hooktmp" && mv -f "$hooktmp" "$DIR/hook.sh"
 else
   rm -f "$hooktmp"
+  restore_files || echo "JamSesh couldn't put its earlier connection files back." >&2
+  rm -rf "$SAVED"
   echo "JamSesh couldn't download its hook from $HUB, so nothing was changed. Try connecting again." >&2
   exit 1
 fi
@@ -395,6 +407,8 @@ if [ -n "$CLAUDE" ]; then
     if [ -n "$rollback_mcp" ]; then
       "$CLAUDE" mcp add-json -s user jamsesh "$rollback_mcp" >/dev/null 2>&1 && "$CLAUDE" mcp get jamsesh >/dev/null 2>&1 || restored=0
     fi
+    restore_files || restored=0
+    rm -rf "$SAVED"
     if [ "$restored" = 1 ]; then
       echo "JamSesh couldn't register its MCP server with Claude Code, so the earlier one was put back. Try connecting again." >&2
     else
@@ -403,6 +417,7 @@ if [ -n "$CLAUDE" ]; then
     exit 1
   fi
   rm -f "$prev_cred" "$rollback_json" "$rollback_sh"
+  rm -rf "$SAVED"
   mkdir -p "$HOME/.claude/commands" "$HOME/.claude/skills/jamsesh"
   curl -fsS "\${AUTH[@]}" "$HUB/launcher.md" -o "$HOME/.claude/skills/jamsesh/SKILL.md"
   # JamSesh used to write a block into CLAUDE.md. It never does now, and says where the old one is.

@@ -568,10 +568,33 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
             (false, true) => ("Codex on this Mac is", "it"),
             (false, false) => ("Your agents on this Mac are", "them"),
         };
-        Ok(format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in."))
+        let mut msg = format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in.");
+        let old = old_block_notices(&String::from_utf8_lossy(&out.stderr));
+        if !old.is_empty() {
+            msg.push_str(&format!("\n\nOne more step: an earlier JamSesh left instructions that can still make a chat join the room by itself. Delete them:\n{}", old.join("\n")));
+        }
+        Ok(msg)
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         Err(format!("Setup didn't finish: {}", err.lines().last().unwrap_or("unknown error")))
+    }
+}
+
+/// The setup's notices about the block an earlier JamSesh wrote into an instruction file (file, lines,
+/// what to delete), taken from its stderr. Any other stderr line is not shown.
+fn old_block_notices(stderr: &str) -> Vec<String> {
+    stderr.lines().filter(|l| l.starts_with("JamSesh: ") && l.contains(" still has the block an earlier JamSesh wrote")).map(str::to_string).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::old_block_notices;
+
+    #[test]
+    fn keeps_only_the_old_block_notices() {
+        let err = "some warning\nJamSesh: /Users/a/.claude/CLAUDE.md still has the block an earlier JamSesh wrote (lines 4-9). Delete them.\nJamSesh: other\n";
+        assert_eq!(old_block_notices(err), vec!["JamSesh: /Users/a/.claude/CLAUDE.md still has the block an earlier JamSesh wrote (lines 4-9). Delete them."]);
+        assert!(old_block_notices("").is_empty());
     }
 }
 

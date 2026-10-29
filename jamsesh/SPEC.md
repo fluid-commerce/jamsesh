@@ -321,7 +321,7 @@ The setup installs, for each harness found:
 
 | Harness | What's installed |
 |---|---|
-| Both | `~/.jamsesh/client.env` (hub, token, name, `JAMSESH_ACTIVE`; every value one single-quoted shell word, so sourcing it runs nothing, and the hook reads it as data without sourcing it), `~/.jamsesh/auth.header` (the credential as a header file for `curl`), `~/.jamsesh/hook.sh` |
+| Both | `~/.jamsesh/client.env` (hub, name, `JAMSESH_ACTIVE`; no token, which lives only in the mode-600 `auth.header`; every value one single-quoted shell word, so sourcing it runs nothing, and the hook reads it as data without sourcing it), `~/.jamsesh/auth.header` (the credential as a header file for `curl`), `~/.jamsesh/hook.sh` |
 | Claude Code | User-scope MCP server `jamsesh` (HTTP; its credential comes from the `headersHelper` `~/.jamsesh/mcp-headers.sh`, so it is in neither `claude`'s arguments nor its config); a small skill at `~/.claude/skills/jamsesh/SKILL.md` (finds the running host, reads the instructions it serves, says in one line if none is running); the `/jamsesh [focus]` command; `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks (15-second timeout), plus a background `Stop` listener (`asyncRewake`, 3300-second timeout; see 6.3). All of them do nothing for a chat that hasn't joined |
 | Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the same small skill at `~/.codex/skills/jamsesh/SKILL.md`; the prompt `~/.codex/prompts/jamsesh.md` (the full instructions, for `/jamsesh`); no hooks (Codex has none here) |
 
