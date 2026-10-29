@@ -371,9 +371,6 @@ export function useHub() {
 // could undo a later decision, such as clearing a newer lock.
 const NEVER_QUEUE = /^\/(audio|stage($|\/)|show-requests\/|paired($|\/)|pair|invite|hooks\/|agents\/|shares\/request|debug\/|build-requests\/|display|prompt-window|people\/[\w-]+\/voice|shares$)/;
 
-/** Whether a call is never saved for later (tests). Who may be whom, and disconnecting, are always live. */
-export const neverQueued = (path: string) => NEVER_QUEUE.test(path);
-
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {
     super(msg);

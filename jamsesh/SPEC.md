@@ -1169,7 +1169,8 @@ Every client window and the big screen capture audio; it's consolidated on the h
   window can send audio as another's microphone (403), and an unregistered device gets 404, which
   the window retries until its registration lands. Segments that end while the brain is speaking are dropped, so it doesn't transcribe
   itself.
-- **A WAV is read only when it is whole.** `RIFF`/`WAVE` with the RIFF size the file really has,
+- **A WAV is read only when it is whole.** `RIFF`/`WAVE` with the RIFF size the file really has
+  (one more only when its last chunk is odd-sized and its pad byte is really missing),
   every chunk (with a printable id) inside the file and ending at its end, one `data` chunk, exactly one
   complete `fmt ` chunk (16 bytes or more) before `data`, whole sample frames, a rate of 8 to 48 kHz,
   1 or 2 channels, 8/16/32-bit PCM or 32-bit float, at most 120 seconds. Anything else is refused
@@ -1204,7 +1205,8 @@ Every client window and the big screen capture audio; it's consolidated on the h
   lost or counted twice, however late. Each group's copies are decided only in that group's own job
   queue, one job at a time; a group (and each part split from it) gets its transcription queued before a
   late copy can find it, every late copy goes through one admit step, and a group with work queued is
-  never let go. Cost: with four laptops,
+  never let go. A copy so late its line's group was let go (after 15 s) can't change who said it, since
+  the line's other copies are gone: it joins the line's devices only. Cost: with four laptops,
   whisper runs once per line before; now once per copy within 10 dB, which is 2 for laptops spread
   across a room (6 dB apart) and 4 around one table (2 to 3 dB apart). Known limit: a quieter copy
   whisper hears slightly differently ("cup" for "up") shows as a second line.
@@ -1239,7 +1241,12 @@ Every client window and the big screen capture audio; it's consolidated on the h
   profile says why. The window closes as soon as the read is over however it ended: the host takes
   or refuses the recording (25 seconds' grace for copies on their way), or the page says it stopped
   (`POST /api/people/:id/voice/end`, `read: false` when the microphone never started, which closes
-  it at once), including when the recording couldn't be decoded or uploaded.
+  it at once), including when the recording couldn't be decoded or uploaded. Each read has an id
+  (`read`, from `voice/start`); its end (`id`) and its recording (`?read=`) name it, and only the
+  person's latest open read is closed or taken, so an earlier read's late end or upload can't touch a
+  newer one. Closing the profile mid-read stops the microphone, closes the read on the host, then
+  aborts the upload; a recording that arrives after its read was closed isn't taken. One the host
+  already took stays (the read was finished: Done was pressed or its time ran out).
 - **Where a line came from.** Every speech line records `data.source`: `typed` (typed in the room's
   box or to an agent), `addressed` (said to JamSesh, or a recorded prompt) or `overheard`. The feed
   shows it quietly after the line (`typed`, `to JamSesh`; `overheard` only when the line is hovered).
