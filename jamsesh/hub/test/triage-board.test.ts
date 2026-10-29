@@ -194,7 +194,7 @@ test("context cards: add saves the edited fact (a decision reaches agents), merg
   expect(r.s.store.recentEvents({ kinds: ["decision"] })).toHaveLength(0);
 
   // Merge into the saved fact.
-  const m = r.s.proposeContext({ text: "Never the email address", kind: "constraint", by: "Chey" })!;
+  const m = r.s.proposeContext({ text: "Never the email address", kind: "requirement", workstream: "Settings", by: "Chey" })!;
   expect(r.s.board.merge(m.id, "fact_nope", "Chey")).toMatchObject({ ok: false, status: 404 });
   expect(r.s.board.merge(m.id, fact.id, "Chey").ok).toBe(true);
   expect(r.s.store.get("facts", fact.id)!.text).toBe("The greeting uses the person's first name. Never the email address");

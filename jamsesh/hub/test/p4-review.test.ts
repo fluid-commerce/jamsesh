@@ -590,11 +590,13 @@ test("a curation pass that gives nothing back keeps its batch for the next try, 
   expect((r.hub.brain as any).digestRetryAt).toBe(0);
 });
 
-test("Send rechecks the agents: one removed or turned observer while the card waited doesn't get it", () => {
+test("Send rechecks the agents: one removed or turned observer while the card waited means nothing is sent until a person edits it", () => {
   const r = room();
   const card = r.s.proposeTask({ text: "Make three header variants", mode: "explore", targets: [r.desktop.id, r.mobile.id], by: "Chey" })!;
   r.s.removeAgent(r.mobile.id);
-  const sent = r.s.board.send(card.id, "Chey");
+  expect(r.s.board.send(card.id, "Chey")).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.directives()).toHaveLength(0);
+  const sent = r.s.board.send(card.id, "Chey", { targets: [r.desktop.id] });
   expect(sent.ok).toBe(true);
   expect(r.s.store.get("directives", (sent as any).directiveId)!.targets).toEqual([r.desktop.id]);
   const lone = r.s.proposeTask({ text: "Fix the footer", mode: "implement", targets: [r.desktop.id], by: "Chey" })!;

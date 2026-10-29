@@ -58,7 +58,7 @@ test("the buttons' api() calls: edit, send, a second send says who got there fir
 test("context cards through api(): add, merge and replace change the saved facts", async () => {
   const fact = s.board.rememberNow({ text: "Header uses option A", kind: "decision", by: "Chey" })!;
   const c = s.proposeContext({ text: "Header uses option B", kind: "decision", by: "Felipe" })!;
-  const merge = s.proposeContext({ text: "Greeting says hello first", kind: "requirement", by: "Chey" })!;
+  const merge = s.proposeContext({ text: "Greeting says hello first", kind: "decision", by: "Chey" })!;
   await api(`/triage/${merge.id}/merge`, { personId: chey.id, factId: fact.id, text: "Header uses option A. Greeting says hello first" });
   expect(s.store.get("facts", fact.id)!.text).toContain("Greeting says hello first");
   await api(`/triage/${c.id}/replace`, { personId: chey.id });
