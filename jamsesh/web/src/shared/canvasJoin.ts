@@ -206,26 +206,41 @@ export async function loadLocalFonts(fc: Fc, invoke: Invoke | null, tries: FontT
   const ask = missing.filter((f) => tries.due(f));
   if (!invoke || !ask.length) return missing;
   let fonts: { family: string; data: string }[];
+  let deferred: string[];
   try {
-    fonts = await invoke("local_fonts", { families: ask });
-    if (!Array.isArray(fonts)) throw new Error("no font list");
+    const r = await invoke("local_fonts", { families: ask });
+    // One entry per font file; `deferred` names the families the Mac didn't get to (asked again next time).
+    fonts = Array.isArray(r) ? r : r?.fonts;
+    deferred = Array.isArray(r) ? [] : r?.deferred ?? [];
+    if (!Array.isArray(fonts) || !Array.isArray(deferred)) throw new Error("no font list");
   } catch {
     for (const f of ask) tries.failed(f);
     return missing;
   }
-  const have = new Map(fonts.map((f) => [String(f.family).toLowerCase(), f]));
+  const files = new Map<string, string[]>();
+  for (const f of fonts) {
+    const k = String(f.family).toLowerCase();
+    files.set(k, [...(files.get(k) ?? []), f.data]);
+  }
+  const later = new Set(deferred.map((f) => String(f).toLowerCase()));
   for (const family of ask) {
-    const f = have.get(family.toLowerCase());
-    if (!f) {
+    const k = family.toLowerCase();
+    if (later.has(k) && !files.has(k)) continue; // not looked at yet: neither settled nor failed
+    const mine = files.get(k);
+    if (!mine) {
       tries.settle(family); // this Mac doesn't have it
       continue;
     }
-    try {
-      await fc.execute("text.loadFont", { data: f.data });
-      tries.settle(family);
-    } catch {
-      tries.failed(family);
+    let ok = true;
+    for (const data of mine) {
+      try {
+        await fc.execute("text.loadFont", { data }); // every face of the family, each in its own file
+      } catch {
+        ok = false;
+      }
     }
+    if (ok) tries.settle(family);
+    else tries.failed(family);
   }
   return fonts.length ? missingFamilies(fc) : missing;
 }

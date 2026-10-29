@@ -74,6 +74,51 @@ test("fonts this Mac has are loaded into the canvas, each family asked for once"
   expect(asked).toEqual([["Helvetica Neue", "Söhne"]]);
 });
 
+test("a family kept in several font files loads every file", async () => {
+  const { fc, loaded } = fakeCanvas(["Acme"]);
+  const invoke = async () => ({ fonts: [{ family: "Acme", data: btoa("Acme") }, { family: "Acme", data: btoa("Acme") }, { family: "Acme", data: btoa("Acme") }], deferred: [] });
+  const tried = new FontTries();
+  await loadLocalFonts(fc, invoke, tried);
+  expect(loaded).toEqual(["Acme", "Acme", "Acme"]);
+  expect(tried.done.has("acme")).toBe(true);
+});
+
+test("one face failing to load keeps the family due for a retry", async () => {
+  const faces: string[] = [];
+  const fc = {
+    async execute(command: string, params: any) {
+      if (command === "text.missingFonts") return { families: [{ family: "Acme" }] };
+      if (params.data === "bad") throw new Error("bad font");
+      faces.push(params.data);
+      return {};
+    },
+  };
+  const tried = new FontTries();
+  await loadLocalFonts(fc, async () => ({ fonts: [{ family: "Acme", data: "ok" }, { family: "Acme", data: "bad" }], deferred: [] }), tried);
+  expect(faces).toEqual(["ok"]); // the good face still went
+  expect(tried.done.has("acme")).toBe(false);
+  expect(tried.due("Acme", Date.now() + 5_001)).toBe(true);
+});
+
+test("families the Mac didn't get to are asked again, not marked absent", async () => {
+  const { fc, loaded } = fakeCanvas(["A", "B", "Gone"]);
+  const asked: string[][] = [];
+  // Round one: the Mac reads A and defers B; it has no Gone.
+  const invoke = async (_c: string, args: any) => {
+    asked.push(args.families);
+    const fams: string[] = args.families;
+    const later = fams.includes("A") ? ["B"] : [];
+    return { fonts: fams.filter((f) => f === "A" || (f === "B" && !later.length)).map((family) => ({ family, data: btoa(family) })), deferred: later };
+  };
+  const tried = new FontTries();
+  expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["B", "Gone"]);
+  expect(tried.done.has("b")).toBe(false);
+  expect(tried.done.has("gone")).toBe(true);
+  expect(await loadLocalFonts(fc, invoke, tried)).toEqual(["Gone"]);
+  expect(asked).toEqual([["A", "B", "Gone"], ["B"]]);
+  expect(loaded).toEqual(["A", "B"]);
+});
+
 test("in a browser there's no Mac to ask: the missing families are only listed", async () => {
   const { fc, loaded } = fakeCanvas(["Helvetica Neue"]);
   expect(await loadLocalFonts(fc, null, new FontTries())).toEqual(["Helvetica Neue"]);

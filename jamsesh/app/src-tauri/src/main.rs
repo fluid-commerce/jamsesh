@@ -893,7 +893,7 @@ async fn finish_setup(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), 
 /// The font files of `families` from this Mac's font folders, for this person's canvas, which
 /// can't see installed fonts (fonts.rs). Read off the main thread.
 #[tauri::command]
-async fn local_fonts(families: Vec<String>) -> Vec<fonts::LocalFont> {
+async fn local_fonts(families: Vec<String>) -> fonts::LocalFonts {
     tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
 }
 
