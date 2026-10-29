@@ -42,7 +42,8 @@ describe("telling the person where the block an earlier install wrote is", () =>
     const said = await find(`# Mine\n\nrules\n\n${BLOCK}`);
     const n = LONG.split("\n").length;
     expect(said).toContain(`(lines 5-${5 + n - 1})`);
-    expect(said).toContain("Delete those lines");
+    expect(said).toContain("until you delete those lines");
+    expect(said).toContain("can still make a chat join the room by itself");
     expect(said.trim().split("\n")).toHaveLength(1);
   });
   test("CRLF files, a block at the very start, and one with no final newline", async () => {
