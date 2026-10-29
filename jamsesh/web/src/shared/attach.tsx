@@ -103,7 +103,12 @@ export function useAttachments(upload: typeof uploadAttachment = uploadAttachmen
     for (const i of live.current) if (i.preview) URL.revokeObjectURL(i.preview);
     setItems([]);
   }, []);
-  useEffect(() => () => live.current.forEach((i) => i.preview && URL.revokeObjectURL(i.preview)), []);
+  useEffect(
+    () => () => {
+      live.current.forEach((i) => i.preview && URL.revokeObjectURL(i.preview));
+    },
+    [],
+  );
   return {
     items,
     add,

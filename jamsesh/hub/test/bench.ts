@@ -121,7 +121,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     // Routing is what the scenarios judge: a task the brain proposed on the Tasks board counts like one it sent.
     newDirectives: () => [
       ...s.directives().filter((d) => !baseline.has(d.id)),
-      ...s.board.open().filter((c) => c.type === "task").map((c) => ({ id: c.id, ts: c.ts, text: c.text, mode: c.mode, targets: c.targets, rationale: "proposed on the Tasks board", requestedBy: c.by }) as unknown as Directive),
+      ...s.board.open().filter((c) => c.type === "task").map((c) => ({ id: c.id, ts: c.ts, text: c.text, mode: c.mode, targets: c.targets, rationale: `proposed on the Tasks board, from ${c.by}`, requestedBy: c.by }) as unknown as Directive),
     ],
     decisions: () => [
       ...s.store.recentEvents({ kinds: ["decision"], limit: 50 }).filter((e) => e.authorType === "brain"),

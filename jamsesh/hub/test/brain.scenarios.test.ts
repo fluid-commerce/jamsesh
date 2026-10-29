@@ -180,10 +180,12 @@ describe("4. role weights", () => {
       expect(r.newDirectives().length).toBeGreaterThanOrEqual(1);
       r.say("felipe", "actually no, drop the tabs, the sidebar is what we're doing in mobile");
       await r.settle();
+      // The overruled proposal is dismissed from the Tasks board and the sidebar one waits in its place.
       const ds = r.newDirectives();
-      expect(ds.length).toBeGreaterThanOrEqual(2);
-      const last = ds[0]; // newest first
-      expect(last.text).toMatch(/sidebar/i);
+      expect(ds.length).toBeGreaterThanOrEqual(1);
+      expect(ds.some((d) => /tabs/i.test(d.text) && !/sidebar/i.test(d.text))).toBe(false);
+      const last = ds.find((d) => /sidebar/i.test(d.text))!;
+      expect(last).toBeTruthy();
       expect(last.rationale + last.text).toMatch(/felipe/i);
     });
   }, T);

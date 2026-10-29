@@ -538,11 +538,17 @@ export class Brain {
     const all = {
       cancel_directive: tool({
         description:
-          "Cancel an open directive (by id from Open directives) when the room changes its mind or a higher-weight person overrules it. The agent is told it's cancelled and why. Then create the new directive (explore or implement) for what the room wants instead. Never use mode 'answer' to change or cancel work.",
+          "Cancel an open directive (by id from Open directives), or dismiss a proposal still waiting on the Tasks board (by its card id), when the room changes its mind or a higher-weight person overrules it. The agent is told it's cancelled and why. Then create the new directive (explore or implement) for what the room wants instead. Never use mode 'answer' to change or cancel work.",
         inputSchema: z.object({ id: z.string(), reason: z.string().describe("One sentence the agent reads, for example: Felipe (CPO) chose the sidebar instead") }),
         execute: async ({ id, reason }) => {
+          // A proposal still waiting on the Tasks board that the room has since overruled is dismissed, not sent.
+          const card = /^tri_|^[0-9a-f]{4,}$/.test(id) ? s.board.find(id) : undefined;
+          if (card?.status === "open" && card.type === "task") {
+            s.board.dismiss(card.id, `${s.settings().brainName} (${reason.slice(0, 80)})`);
+            return "That proposal was still waiting on the Tasks board: dismissed. Now propose the work the room wants instead.";
+          }
           const d = s.directives().find((x) => x.id === id || x.id.endsWith(id));
-          if (!d) return refuse("No directive with that id.");
+          if (!d) return refuse("No directive or waiting proposal with that id.");
           if (d.status === "done" || d.status === "cancelled") return refuse(`It's already ${d.status}.`);
           s.setDirective(d.id, { status: "cancelled", progress: Object.fromEntries(d.targets.map((t) => [t, "cancelled"])) });
           for (const t of d.targets) {
