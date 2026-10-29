@@ -3,7 +3,7 @@
 // written while a session runs and when it ends (ProjectKeeper), and a new session of the project
 // is seeded from it, each carried item marked with the session it came from. Phase 7's wiki ingests
 // this same file.
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { projectsDir } from "./projects";
 import type { Session } from "./session";
@@ -73,59 +73,100 @@ export function lastActive(s: Session) {
   return Math.max(newest, changed);
 }
 
-/** This session retired what it was carried: settled-on-nothing is then what it settled, and the file says so. */
-const retiredCarried = (s: Session) => [...s.store.all("facts"), ...s.store.all("workstreams")].some((x) => x.carriedFrom && changedHere(x) && x.status !== "active" && x.status !== "paused");
+/** This session retired something settled (its own or carried): settled-on-nothing is then the news, and the file says so. */
+const retiredHere = (s: Session) => [...s.store.all("facts"), ...s.store.all("workstreams")].some((x) => changedHere(x) && x.status !== "active" && x.status !== "paused");
 
-/** What this session has settled right now: its accepted facts (a proposal on the Tasks board is not one yet), live workstreams, brief and people's titles. */
+const clip = (t: unknown, n: number) => String(t ?? "").slice(0, n);
+
+/** What this session has settled right now: its accepted facts (a proposal on the Tasks board is not one yet), live workstreams, brief and people's titles. Every field fits the reader's limits. */
 export function snapshotContext(s: Session, sessionId: string): ProjectContext {
   const now = Date.now();
   const facts = s.store
     .all("facts")
-    .filter((f) => f.status === "active")
+    .filter((f) => f.status === "active" && f.text.trim())
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, MAX_FACTS)
-    .map((f) => ({ kind: f.kind, text: f.text, workstream: f.workstream, by: f.by, note: f.note, ts: f.ts, session: f.carriedFrom?.sessionId ?? sessionId }));
+    .map((f) => ({ kind: f.kind, text: clip(f.text, 4000), workstream: clip(f.workstream, 200), by: clip(f.by, 200), note: clip(f.note, 4000), ts: Math.max(0, Number(f.ts) || 0), session: clip(f.carriedFrom?.sessionId ?? sessionId, 200) }));
   const workstreams = s.store
     .all("workstreams")
-    .filter((w) => w.status !== "done")
+    .filter((w) => w.status !== "done" && w.title.trim())
     .slice(0, MAX_WORKSTREAMS)
-    .map((w) => ({ title: w.title, brief: w.brief, status: w.status, session: w.carriedFrom?.sessionId ?? sessionId }));
+    .map((w) => ({ title: clip(w.title, 200), brief: clip(w.brief, 8000), status: w.status, session: clip(w.carriedFrom?.sessionId ?? sessionId, 200) }));
   const carried = s.store.setting<{ brief?: string } | null>("carried", null);
   return {
-    goal: goalOf(s),
-    glossary: glossaryOf(s),
+    goal: clip(goalOf(s), 2000),
+    glossary: glossaryOf(s).filter((g) => g.term.trim()).slice(0, 300).map((g) => ({ term: clip(g.term, 200), meaning: clip(g.meaning, 2000) })),
     version: 1,
     updatedAt: now,
     activeAt: lastActive(s),
-    fromSession: sessionId,
-    brief: hasBrief(s) ? buildBrief(s).full : carried?.brief || "",
+    fromSession: clip(sessionId, 200),
+    brief: clip(hasBrief(s) ? buildBrief(s).full : carried?.brief || "", 40_000),
     facts,
     workstreams,
-    people: s.people().filter((p) => p.role).map((p) => ({ name: p.name, role: p.role })),
+    people: s.people().filter((p) => p.role && p.name.trim()).slice(0, 500).map((p) => ({ name: clip(p.name, 200), role: clip(p.role, 200) })),
   };
 }
 
 /**
- * Writes the project's context file. A session that has settled nothing never empties a file that has something,
- * and a session that was last active before the one that wrote the file never overwrites it (an older session
- * left open doesn't undo a newer one). Returns whether it wrote. A file that can't be read is kept beside it.
+ * Writes the project's context file. A session that has settled nothing never empties a file that has something
+ * (unless it retired what was there), and a session that was last active before the one that wrote the file never
+ * overwrites it (an older session left open doesn't undo a newer one). Returns whether it wrote.
  */
 export function writeProjectContext(home: string, slug: string, sessionId: string, s: Session): boolean {
   const ctx = snapshotContext(s, sessionId);
   const empty = !ctx.facts.length && !ctx.workstreams.length && !ctx.brief && !ctx.goal;
-  const file = contextFile(home, slug);
-  if (existsSync(file)) {
-    // An empty session never empties the file, unless it retired what it carried in: then nothing settled is the news.
-    if (empty && !retiredCarried(s)) return false;
-    const cur = readProjectContext(home, slug);
-    if (cur && cur.fromSession !== sessionId && cur.activeAt > ctx.activeAt) return false;
-    if (!cur) renameSync(file, `${file}.unreadable-${Date.now()}`);
+  return commitContext(home, slug, ctx, { allowEmpty: !empty || retiredHere(s) });
+}
+
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * The compare-and-replace, under a lock file made with O_EXCL so two hub processes (two sessions of one project)
+ * can't both pass the activeAt check and the older one rename last. A lock left by a process that died is taken
+ * over after 10 seconds. The snapshot is checked against the reader's schema first: a file the next session
+ * couldn't read is never written. A file that can't be read is kept beside the new one.
+ */
+export function commitContext(home: string, slug: string, ctx: ProjectContext, opts: { allowEmpty?: boolean; waitMs?: number } = {}): boolean {
+  if (!contextSchema.safeParse(ctx).success) {
+    console.error("project context: the snapshot doesn't fit the file's limits; not written");
+    return false;
   }
+  const empty = !ctx.facts.length && !ctx.workstreams.length && !ctx.brief && !ctx.goal;
+  const file = contextFile(home, slug);
   mkdirSync(join(projectsDir(home), slug), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(ctx, null, 2));
-  renameSync(tmp, file);
-  return true;
+  const lock = `${file}.lock`;
+  const until = Date.now() + (opts.waitMs ?? 2000);
+  for (;;) {
+    try {
+      closeSync(openSync(lock, "wx"));
+      break;
+    } catch {
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 10_000) rmSync(lock, { force: true });
+      } catch {}
+      if (Date.now() > until) return false;
+      sleepSync(25);
+    }
+  }
+  try {
+    if (existsSync(file)) {
+      if (empty && !opts.allowEmpty) return false;
+      const cur = readProjectContext(home, slug);
+      if (cur && cur.fromSession !== ctx.fromSession && cur.activeAt > ctx.activeAt) return false;
+      if (!cur) renameSync(file, `${file}.unreadable-${Date.now()}`);
+    }
+    const tmp = `${file}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`;
+    const fd = openSync(tmp, "wx");
+    try {
+      writeSync(fd, JSON.stringify(ctx, null, 2));
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, file);
+    return true;
+  } finally {
+    rmSync(lock, { force: true });
+  }
 }
 
 /**

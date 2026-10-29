@@ -605,3 +605,144 @@ test("Send rechecks the agents: one removed or turned observer while the card wa
   expect(r.s.board.send(lone.id, "Chey")).toMatchObject({ ok: false, status: 409 });
   expect(r.s.board.get(lone.id)!.status).toBe("open");
 });
+
+// ---------- third review ----------
+
+const { asksFor, clauses } = await import("../src/brain/intent");
+const { commitContext } = await import("../src/carryover");
+const { restates, sameSpecifics } = await import("../src/similarity");
+
+test("the work gate reads clauses: a negated or quoted request asks for nothing", () => {
+  const no = ["Summarize the file; do not send anything to an agent", "Summarize the file, don't make anything", "Read this and don't send it", "Never build this", "No need to send anything, just read it", 'The file says "send it to Felipe", what do you think?', "It says 'build the nav' — is that right?", "Don't send, don't build: just tell me what it is", "Please do NOT make the screens"];
+  const yes = ["Send this to Felipe's agent", "Don't summarize it, just send it to Felipe", "Build it, not the old one", "Read it and then build the nav", "Ask Felipe's agent to build this"];
+  for (const t of no) expect([t, askedFor("create_directive", t)]).toEqual([t, false]);
+  for (const t of yes) expect([t, askedFor("create_directive", t)]).toEqual([t, true]);
+  expect(askedFor("cancel_directive", "don't cancel anything, just summarize")).toBe(false);
+  expect(askedFor("say_to_room", "")).toBe(true);
+  expect(clauses("read it, but don't send it")).toEqual(["read it", "don't send it"]);
+  expect(asksFor("I won't build it", /\bbuild\b/i)).toBe(false);
+});
+
+test("opposite option choices are never a restatement: each option's side counts", () => {
+  expect(restates("Use option A, not option B", "Use option B, not option A", 0.55)).toBe(false);
+  expect(restates("Use option A instead of option B", "Use option B instead of option A", 0.55)).toBe(false);
+  expect(sameSpecifics("Use option A, not option B", "Use option A, and not option B")).toBe(true);
+  const r = room();
+  r.s.board.rememberNow({ text: "Use option A, not option B", kind: "decision", by: "Chey" });
+  expect(r.s.proposeContext({ text: "Use option B, not option A", kind: "decision", by: "Felipe" })).not.toBeNull();
+});
+
+test("curation reads forward from its cursor, a page at a time, and never skips the oldest of a backlog", async () => {
+  const r = room();
+  const first = r.said(r.felipe, "the very first line about option Z");
+  for (let i = 0; i < 450; i++) r.said(r.felipe, `line ${i} about the header`);
+  calls.length = 0;
+  answer = async (c) => (c.system?.includes("curate") ? { output: { add: [], update: [], resolve: [], supersede: [] } } : c.system?.includes("running brief") ? { output: { goal: "g", glossary: [] } } : { text: "" });
+  await r.hub.brain.digest(true);
+  const curated = calls.find((c) => c.system?.includes("curate"))!;
+  expect(curated.prompt).toContain("the very first line about option Z");
+  const cursor = r.s.store.digest("session")!.throughEvent;
+  expect(cursor).toBeLessThan(r.s.store.lastEventId());
+  expect(cursor).toBeGreaterThan(first.id);
+  calls.length = 0;
+  await r.hub.brain.digest(true);
+  expect(calls.find((c) => c.system?.includes("curate"))!.prompt).toContain("line 449 about the header");
+  expect(r.s.store.digest("session")!.throughEvent).toBe(r.s.store.lastEventId());
+});
+
+test("a conflict is only with a fact of the same kind and workstream, and Replace can't be pointed at another fact", () => {
+  const r = room();
+  const desk = r.s.board.rememberNow({ text: "Header uses 64px spacing", kind: "decision", workstream: "Desktop", by: "Chey" })!;
+  const mob = r.s.proposeContext({ text: "Header uses 48px spacing", kind: "decision", workstream: "Mobile", by: "Felipe" })!;
+  expect(mob.conflictsWith).toBeNull();
+  expect(r.s.proposeContext({ text: "Header uses 48px spacing?", kind: "question", workstream: "Desktop", by: "Felipe" })!.conflictsWith).toBeNull();
+  const other = r.s.board.rememberNow({ text: "Footer is dark", kind: "decision", workstream: "Desktop", by: "Chey" })!;
+  const same = r.s.proposeContext({ text: "Header uses 32px spacing", kind: "decision", workstream: "Desktop", by: "Felipe" })!;
+  expect(same.conflictsWith).toBe(desk.id);
+  expect(r.s.board.replace(same.id, "Chey", other.id).ok).toBe(false);
+  expect(r.s.store.get("facts", other.id)!.status).toBe("active");
+  // With no match, a person may name a fact, but only one of the card's kind and workstream.
+  expect(r.s.board.replace(mob.id, "Chey", desk.id).ok).toBe(false);
+  expect(r.s.store.get("facts", desk.id)!.status).toBe("active");
+  expect(r.s.board.replace(same.id, "Chey").ok).toBe(true);
+  expect(r.s.store.get("facts", desk.id)!.status).toBe("superseded");
+});
+
+test("a Retire card retires only the fact it was proposed for", () => {
+  const r = room();
+  const a = r.s.board.rememberNow({ text: "Is there a dark accent?", kind: "question", by: "Chey" })!;
+  const b = r.s.board.rememberNow({ text: "Header uses option A", kind: "decision", by: "Chey" })!;
+  const ev = r.said(r.chey, "the accent is E85A3A");
+  const card = r.s.board.proposeRetire({ fact: a, status: "resolved", reason: "Answered", by: "Chey", sourceEventIds: [ev.id] })!;
+  expect(r.s.board.replace(card.id, "Chey", b.id)).toMatchObject({ ok: false });
+  expect(r.s.store.get("facts", b.id)!.status).toBe("active");
+  expect(r.s.board.replace(card.id, "Chey", a.id).ok).toBe(true);
+  expect(r.s.store.get("facts", a.id)!.status).toBe("resolved");
+});
+
+test("retiring a session's own last fact writes the empty snapshot too", () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const p = createProject(home, "Settings");
+  const r = room();
+  const f = r.s.board.rememberNow({ text: "Use top tabs", kind: "decision", by: "Chey" })!;
+  expect(writeProjectContext(home, p.slug, "s1", r.s)).toBe(true);
+  r.s.store.put("facts", { ...f, status: "superseded", updatedAt: Date.now() + 5 });
+  expect(writeProjectContext(home, p.slug, "s1", r.s)).toBe(true);
+  expect(readProjectContext(home, p.slug)!.facts).toEqual([]);
+  // A session that never settled anything still leaves the file alone.
+  const idle = room();
+  writeFileSync(contextFile(home, p.slug), JSON.stringify({ version: 1, updatedAt: 1, fromSession: "x", brief: "", goal: "", glossary: [], facts: [{ kind: "decision", text: "Keep", workstream: "", by: "", note: "", ts: 1, session: "x" }], workstreams: [], people: [] }));
+  expect(writeProjectContext(home, p.slug, "s2", idle.s)).toBe(false);
+  expect(readProjectContext(home, p.slug)!.facts).toHaveLength(1);
+});
+
+test("what's written always fits what the reader accepts: an oversized goal is cut, not a lost file", () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const p = createProject(home, "Settings");
+  const r = room();
+  r.s.store.setDigest("brief-parts", JSON.stringify({ goal: "G".repeat(10_000), glossary: [{ term: "T".repeat(900), meaning: "M".repeat(9000) }] }), 0);
+  r.s.store.put("facts", { id: "fact_big", ts: 1, updatedAt: 1, kind: "fact", text: "X".repeat(9000), workstream: "", by: "B".repeat(900), status: "active", note: "", sourceEventIds: [] });
+  expect(writeProjectContext(home, p.slug, "s1", r.s)).toBe(true);
+  const ctx = readProjectContext(home, p.slug)!;
+  expect(ctx.goal.length).toBe(2000);
+  expect(ctx.facts[0].text.length).toBe(4000);
+  // A snapshot that doesn't fit is never written over a good file.
+  expect(commitContext(home, p.slug, { ...ctx, fromSession: "", activeAt: Date.now() + 1e6 } as any)).toBe(false);
+  expect(readProjectContext(home, p.slug)!.goal.length).toBe(2000);
+});
+
+test("the context file's compare-and-replace is locked across processes: the newest session wins whatever the timing", async () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const p = createProject(home, "Settings");
+  const base = { version: 1 as const, updatedAt: 1, brief: "", goal: "", glossary: [], workstreams: [], people: [] };
+  // A lock someone holds: the write waits, then gives up; a lock left by a dead process is taken over.
+  const lock = `${contextFile(home, p.slug)}.lock`;
+  writeFileSync(lock, "");
+  expect(commitContext(home, p.slug, { ...base, activeAt: 5, fromSession: "a", facts: [{ kind: "fact", text: "A", workstream: "", by: "", note: "", ts: 1, session: "a" }] }, { waitMs: 100 })).toBe(false);
+  require("node:fs").utimesSync(lock, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  expect(commitContext(home, p.slug, { ...base, activeAt: 5, fromSession: "a", facts: [{ kind: "fact", text: "A", workstream: "", by: "", note: "", ts: 1, session: "a" }] }, { waitMs: 100 })).toBe(true);
+  // Two processes writing as fast as they can, one newer than the other: the file always ends up the newer one's.
+  const script = join(dir, "writer.ts");
+  writeFileSync(script, `const { commitContext } = await import(${JSON.stringify(join(import.meta.dir, "../src/carryover.ts"))});
+const [home, slug, who, at] = process.argv.slice(2);
+for (let i = 0; i < 150; i++) commitContext(home, slug, { version: 1, updatedAt: Date.now(), activeAt: Number(at), fromSession: who, brief: "", goal: "", glossary: [], workstreams: [], people: [], facts: [{ kind: "fact", text: who + i, workstream: "", by: "", note: "", ts: 1, session: who }] }, { waitMs: 5000 });
+`);
+  const run = (who: string, at: number) => Bun.spawn(["bun", script, home, p.slug, who, String(at)], { stdout: "ignore", stderr: "inherit", env: { ...process.env, JAMSESH_SILENT: "1" } });
+  const [older, newer] = [run("older", 100), run("newer", 200)];
+  expect(await older.exited).toBe(0);
+  expect(await newer.exited).toBe(0);
+  const ctx = readProjectContext(home, p.slug)!;
+  expect(ctx.fromSession).toBe("newer");
+  expect(ctx.activeAt).toBe(200);
+  expect(require("node:fs").existsSync(lock)).toBe(false);
+}, 60_000);
+
+test("the PDF reader takes only streams a page draws, and the brief keeps the carried glossary", () => {
+  const stream = "BT (On the page) Tj ET";
+  const hidden = "BT (Not on any page) Tj ET";
+  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents [4 0 R] >>\nendobj\n4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n5 0 obj\n<< /Length ${hidden.length} >>\nstream\n${hidden}\nendstream\nendobj\n%%EOF`;
+  expect(pdfTextRuns(new TextEncoder().encode(doc))).toBe("On the page");
+  const r = room();
+  r.s.store.setSetting("carried", { fromSession: "old", at: 1, brief: "", goal: "Settings", glossary: [{ term: "Passport", meaning: "customer login" }], items: 0 });
+  expect(buildBrief(r.s).full).toContain("Passport: customer login");
+});

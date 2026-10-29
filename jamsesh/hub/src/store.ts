@@ -302,6 +302,12 @@ export class Store {
     return rows.map((r) => r.n);
   }
 
+  /** The oldest events after an id (of some kinds), oldest first: for reading forward from a cursor. */
+  eventsAfter(afterId: number, kinds: EventKind[], limit = 200): JamEvent[] {
+    const sql = `SELECT * FROM events WHERE id > ?${kinds.length ? ` AND kind IN (${kinds.map(() => "?").join(",")})` : ""} ORDER BY id ASC LIMIT ?`;
+    return (this.db.query(sql).all(afterId, ...kinds, limit) as any[]).map(rowToEvent);
+  }
+
   /** How many events there are (before an id, of some kinds), for "N more" counts. */
   countEvents(opts: { beforeId?: number; kinds?: EventKind[] } = {}): number {
     const where: string[] = [];

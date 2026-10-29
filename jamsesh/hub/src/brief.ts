@@ -54,7 +54,6 @@ export function hasBrief(s: Session) {
 }
 
 export function buildBrief(s: Session): { full: string; short: string } {
-  const parts = briefParts(s);
   const goal = goalOf(s) || `Session "${s.settings().sessionName}"`;
   const name = (id: string | null) => (id ? s.agent(id)?.name ?? "" : "");
   const streams = s.store.all("workstreams").filter((w) => w.status === "active");
@@ -77,7 +76,8 @@ export function buildBrief(s: Session): { full: string; short: string } {
   const accepted = s.facts().filter((f) => f.status === "active").sort((a, b) => a.ts - b.ts);
   const decisions = accepted.filter((f) => f.kind === "decision").slice(-8).map((f) => `${f.text}${f.by ? ` (${f.by})` : ""}`);
   const questions = accepted.filter((f) => f.kind === "question").slice(-6).map((f) => f.text);
-  const glossary = parts?.glossary ?? [];
+  // This session's terms, or the ones an earlier session of the project handed on.
+  const glossary = glossaryOf(s);
 
   const list = (label: string, items: string[]) => (items.length ? `${label}:\n${items.map((i) => `- ${i}`).join("\n")}` : "");
   const full = [

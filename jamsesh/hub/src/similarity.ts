@@ -10,14 +10,29 @@ export function similar(a: string, b: string, both = false) {
   return inter / Math.max(1, both ? Math.max(x.size, y.size) : Math.min(x.size, y.size));
 }
 
-/** Variant letters, numbers and hex colors: the details that make two similar sentences different. */
+/**
+ * Variant letters, numbers and hex colors, each with whether its clause negates it: the details that make two
+ * similar sentences different. "Use option A, not option B" and "Use option B, not option A" name the same options
+ * and mean the opposite, so each option's side counts, not just which options are named.
+ */
 export function sameSpecifics(a: string, b: string) {
-  const specifics = (t: string) =>
-    new Set([...t.matchAll(/(?:\b(?:option|direction|variant|version)\s+([A-Z])\b)|\b([A-Z])\b(?=[:)\s,.])|(#[0-9a-f]{3,8})\b|\b(\d+(?:\.\d+)?)(?=px|pt|%|ms|\b)/gi)].map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4]).toLowerCase()));
+  const specifics = (t: string) => {
+    const out = new Map<string, boolean>();
+    for (const clause of t.split(/[.;,!?]+|\s+\bbut\b\s+/i)) {
+      for (const m of clause.matchAll(/(?:\b(?:option|direction|variant|version)\s+([A-Z])\b)|\b([A-Z])\b(?=[:)\s,.]|$)|(#[0-9a-f]{3,8})\b|\b(\d+(?:\.\d+)?)(?=px|pt|%|ms|\b)/gi)) {
+        const key = (m[1] ?? m[2] ?? m[3] ?? m[4]).toLowerCase();
+        const negated = NEGATED_BEFORE.test(clause.slice(0, m.index ?? 0));
+        out.set(key, (out.get(key) ?? false) || negated);
+      }
+    }
+    return out;
+  };
   const x = specifics(a);
   const y = specifics(b);
-  return x.size === y.size && [...x].every((v) => y.has(v));
+  return x.size === y.size && [...x].every(([k, neg]) => y.has(k) && y.get(k) === neg);
 }
+
+const NEGATED_BEFORE = /\b(?:not|no|never|without|avoid|instead of|rather than)\b|n't\b/i;
 
 /** "three variants" and "five variants" are different asks. */
 export function sameCounts(a: string, b: string) {

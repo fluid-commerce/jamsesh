@@ -874,6 +874,8 @@ The brain keeps context current so new legs of work start informed [B27, A16d]:
   change and writes nothing; `Brain.applyCuration(decision, events)` writes the facts and returns
   what it added, merged and dropped. `Brain.curate` is both in a row. The Tasks board wraps the
   first to turn new facts into proposed context cards.
+- The digest reads forward from its cursor, oldest first, 400 events a pass (`store.eventsAfter`), and moves the
+  cursor only past the page it read; a backlog is read page after page.
 - A batch that fails to curate, or comes back with no result, is retried: the digest cursor doesn't move past it, and
   the next try waits 30 s, doubling up to 10 minutes.
 
@@ -1218,7 +1220,8 @@ disagrees with. Cards never expire. One that has waited 30 minutes reads "Waitin
 and numbers) joins the open card: `count` goes up and the new source line is added. The same line twice (two
 microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context proposal a saved fact
 already states is dropped; one that is close to a fact but differs in its specifics (option A versus B, 16 versus 24
-px) or negates it ("must not use option A"), or names a fact with `replaces`, is flagged `conflictsWith`; a named
+px) or negates it ("must not use option A"), or names a fact with `replaces`, is flagged `conflictsWith`, but only a
+fact of the same kind, workstream and platforms; each option's side counts ("A, not B" is not "B, not A"); a named
 replacement is never dropped as already known. Repeats must also agree on polarity and on the platforms named
 (`hub/src/similarity.ts`, shared with curation), and a task repeat on mode, target agents and workstream; a context
 repeat, and "already known", on kind and workstream.
@@ -1240,7 +1243,9 @@ A card that has been acted on answers 409 ("That card was already sent by Felipe
 action gets the first result again, so a retried click acts once. What an action makes (the directive, the fact, the
 retired fact and its replacement, the room decision event) and the card's own resolution are one transaction
 (`Store.atomic`): a failed write leaves none of them, and the hub's messages go out only after it commits. A cancel card
-that finds its task already done or cancelled answers 409. A context card with `needsWording` (a file with no text to
+that finds its task already done or cancelled answers 409. Replace acts on the fact the card was matched with (a
+`factId` naming another is refused; with no match, a person may name one of the card's kind and workstream), and a
+Retire card only ever retires the fact it was proposed for. A context card with `needsWording` (a file with no text to
 read) can't be added, merged or used to replace until a person writes the wording (a merge whose text is only the
 placeholder or only the fact is refused). Send sends only to the card's agents still in the session and not
 observers; with none left it answers 409 and the card stays open. The client never queues these calls
@@ -1255,7 +1260,8 @@ accepting it only changes the fact's status). Overheard, the brain's `cancel_dir
 `overruled` for a person to dismiss; asked directly, it dismisses it. A document sent with no request is a context card
 with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
 poppler's `pdftotext` when installed, else JamSesh's own reader in a worker with a 5 s limit, which takes only the
-strings drawn by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`; `pdfText`); with nothing readable it gets `needsWording`. Agents'
+strings drawn by `Tj`, `TJ`, `'` and `"` inside `BT`…`ET`, in the content streams pages name; `pdfText`; the compiled
+hub carries the worker as a second entrypoint, and `jamsesh-hub --pdf-text <file>` checks it); with nothing readable it gets `needsWording`. Agents'
 credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.json`) holds only
 accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
 
@@ -1730,7 +1736,9 @@ try again to send.") until it is removed or retried; it is never dropped from a 
 - **Brain.** A direct message's files go to the router model in a message of their own before the
   request: images and PDFs as parts, text files fenced in random `<attached-…>` markers and labelled as
   material, never instructions. In that pass only the tools the person's own words ask for are
-  offered, and each is checked again when it runs (`askedFor`). Reading, summarizing or asking about a
+  offered, and each is checked again when it runs (`askedFor`). The words are read clause by clause
+  (`brain/intent.ts`): quoted passages are dropped, and an action with a negation before it in its clause
+  ("don't send", "no need to build") isn't asked for. Reading, summarizing or asking about a
   file gets answering and searching only; `create_directive` needs an explicit request for work ("send",
   "ask X to", "build", "make"), `cancel_directive` "cancel" or "stop", the screen tools "show"; the Tasks
   board, host control, naming and behaviour notes are never offered with a file, so a file's text can't
@@ -1755,8 +1763,11 @@ resumed session, or the session that wrote the file, is not seeded again. The fi
 (every field's type, the fact kinds and workstream statuses, sizes): one malformed value and nothing is seeded. Each
 file carries `activeAt`, when its session last did something; a session less recently active than that doesn't
 overwrite it (two sessions of a project open at once: the one used last owns the file). Changes to carried items
-count as activity, and a session that retired what it carried writes the file even when nothing is left, so a
-retired fact doesn't come back. A session that already has facts or workstreams of its own is never seeded. An unreadable file is moved
+count as activity, and a session that retired something settled (carried or its own) writes the file even when
+nothing is left, so a retired fact doesn't come back. Every field is cut to the reader's limits and the snapshot is
+checked against the reader's schema before it is written, and the read, compare and rename happen under a lock file
+(`context.json.lock`, made with O_EXCL; one left by a dead process is taken over after 10 s), so two hub processes
+can't both pass the check. A session that already has facts or workstreams of its own is never seeded. An unreadable file is moved
 aside (`context.json.unreadable-<time>`) before a new one is written. The file is plain JSON
 so Phase 7's wiki can ingest it. Today's brief is one text; goal and glossary sections arrive with
 the brain's structured brief.

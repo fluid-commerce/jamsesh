@@ -1,6 +1,7 @@
 // JamSesh's own PDF reader, run in a worker (attachments.ts `pdfText`) so a large or hostile file can't hold up
 // the hub: it is given a time limit and stopped. It reads only what a page draws as text: the strings shown by
-// Tj, TJ, ' and " inside BT…ET blocks, from plain and Flate-compressed content streams. Text in hex strings or
+// Tj, TJ, ' and " inside BT…ET blocks, in the plain or Flate-compressed content streams a page's /Contents names.
+// Pages kept in compressed object streams aren't read: those files get nothing, and the card asks a person. Text in hex strings or
 // with custom font encodings comes back empty, never invented.
 import { inflateSync } from "node:zlib";
 
@@ -21,14 +22,38 @@ const STR = String.raw`\((?:\\[\s\S]|[^\\)])*\)`;
 /** A shown string (`(…) Tj`, `(…) '`, `a b (…) "`), an array of them (`[(…) -20 (…)] TJ`), or a line move. */
 const SHOW = new RegExp(String.raw`(${STR})\s*(?:Tj|')|(${STR})\s*"|\[((?:${STR}|[^\]()])*)\]\s*TJ|\b(T\*|Td|TD|Tm)\b`, "g");
 
+/** The objects of a PDF by number: each one's text from "N G obj" to its "endobj". */
+function objects(src: string): Map<number, { at: number; body: string }> {
+  const out = new Map<number, { at: number; body: string }>();
+  for (const m of src.matchAll(/(?:^|[\s>])(\d+)\s+\d+\s+obj\b/g)) {
+    const at = (m.index ?? 0) + m[0].length;
+    const end = src.indexOf("endobj", at);
+    if (end < 0) continue;
+    out.set(Number(m[1]), { at, body: src.slice(at, end) });
+  }
+  return out;
+}
+
 export function drawnText(bytes: Uint8Array, limit = 200_000): string {
   const src = latin(bytes.subarray(0, 25 * 1024 * 1024));
+  const objs = objects(src);
+  // Only the content streams pages point at (/Contents, one or an array): a stream no page draws isn't wording.
+  const contents: number[] = [];
+  for (const o of objs.values()) {
+    if (!/\/Type\s*\/Page(?![s\w])/.test(o.body)) continue;
+    const c = /\/Contents\s*(?:(\d+)\s+\d+\s+R|\[([^\]]*)\])/.exec(o.body);
+    if (c?.[1]) contents.push(Number(c[1]));
+    else if (c?.[2]) for (const r of c[2].matchAll(/(\d+)\s+\d+\s+R/g)) contents.push(Number(r[1]));
+  }
   const out: string[] = [];
   let size = 0;
-  for (const m of src.matchAll(/<<(.{0,400}?)>>\s*stream\r?\n/gs)) {
-    const start = (m.index ?? 0) + m[0].length;
+  for (const n of contents) {
+    const o = objs.get(n);
+    const m = o && /^\s*<<([\s\S]{0,400}?)>>\s*stream\r?\n/.exec(o.body);
+    if (!o || !m || size > limit) continue;
+    const start = o.at + m[0].length;
     const end = src.indexOf("endstream", start);
-    if (end < 0 || size > limit) break;
+    if (end < 0) continue;
     let body = bytes.subarray(start, end);
     if (/\/FlateDecode/.test(m[1])) {
       try {

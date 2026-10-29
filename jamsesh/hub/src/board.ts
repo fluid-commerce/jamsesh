@@ -1,7 +1,7 @@
 // The Tasks board's triage (4.1): what JamSesh overhears, and the context agents report themselves, waits here
 // as cards for a person to send, add, edit, merge or dismiss. Things said to JamSesh on purpose skip this.
 // Cards never expire; the ones that have waited a while get a label and a spoken mention (brain.ts).
-import { restates, samePolarity, sameSpecifics, similar } from "./similarity";
+import { restates, samePolarity, sameScope, sameSpecifics, similar } from "./similarity";
 import type { Session } from "./session";
 import { newId } from "./store";
 import type { Directive, DirectiveMode, Fact, JamEvent, TriageCard, TriageSource } from "./types";
@@ -173,7 +173,8 @@ export class Board {
     const same = this.match("context", text, (c) => !c.retire && c.kind === kind && sameName(c.workstream, workstream) && (!named || c.conflictsWith === named.id));
     if (same) return this.repeat(same, sources);
     // A close fact that differs in its specifics (option A versus B, 16 versus 24 px) or says the opposite is the one this would replace.
-    const conflict = named ?? active.find((f) => similar(f.text, text) > 0.45 && (!sameSpecifics(f.text, text) || !samePolarity(f.text, text)));
+    // Only a fact of the same kind and workstream: "48px in Mobile" doesn't replace "64px in Desktop".
+    const conflict = named ?? active.find((f) => f.kind === kind && sameName(f.workstream, workstream) && sameScope(f.text, text) && similar(f.text, text) > 0.45 && (!sameSpecifics(f.text, text) || !samePolarity(f.text, text)));
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "context", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
@@ -383,7 +384,12 @@ export class Board {
     if ("done" in c) return { ok: true, card: c.done, factId: c.done.factId ?? "" };
     if ("ok" in c) return c;
     if (c.type !== "context") return fail("Only context cards replace a fact.");
-    const old = this.s.store.get("facts", factId ?? c.conflictsWith ?? "");
+    // A Retire card retires the fact its room line was about, never another; a Replace card replaces the fact it was
+    // matched with, or (with none) one a person picks of the same kind and workstream.
+    if (c.retire && factId !== undefined && factId !== c.conflictsWith) return fail("A Retire card only retires the fact it was proposed for.");
+    if (!c.retire && c.conflictsWith && factId !== undefined && factId !== c.conflictsWith) return fail("This card replaces the fact it was matched with. Dismiss it and propose the change for the other fact.");
+    const old = this.s.store.get("facts", c.conflictsWith ?? factId ?? "");
+    if (old && !c.conflictsWith && (old.kind !== c.kind || !sameName(old.workstream, c.workstream))) return fail("That fact is another kind or workstream: pick one that matches the card, or edit the card.");
     if (!old || old.status !== "active") return fail(c.retire ? "That fact is already gone." : "There's no saved fact left to replace. Add it instead.", 409);
     if (c.retire) {
       return this.commit(() => {

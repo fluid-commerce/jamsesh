@@ -187,7 +187,10 @@ function inWorker(bytes: Uint8Array, ms = 5000): Promise<string> {
   return new Promise((resolve) => {
     let w: Worker;
     try {
-      w = new Worker(new URL("./pdfworker.ts", import.meta.url).href);
+      // From source, the file beside this one; in the compiled hub (bundle-hub.sh builds pdfworker.ts in as an
+      // entrypoint) it's addressed by its bundled name.
+      const beside = new URL("./pdfworker.ts", import.meta.url);
+      w = new Worker(beside.protocol === "file:" && existsSync(Bun.fileURLToPath(beside)) ? beside.href : "./pdfworker.ts");
     } catch {
       return resolve("");
     }

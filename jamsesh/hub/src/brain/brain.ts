@@ -20,9 +20,12 @@ import { briefParts, buildBrief } from "../brief";
 import { confidentBanter, onScreens, projectCard, vocabulary } from "./card";
 import { applyCuration, decideCuration, type Curation, type CurationResult } from "./curation";
 import { sameCounts, sameSpecifics, similar } from "../similarity";
+import { asksFor } from "./intent";
 
 const TRIAGE_DEBOUNCE_MS = 1400;
 const DIGEST_EVERY_MS = 75_000;
+/** Events one digest pass reads, oldest first from its cursor. */
+const DIGEST_PAGE = 400;
 /** Waiting cards are mentioned out loud at most this often. */
 const NAG_EVERY_MS = 20 * 60_000;
 
@@ -1331,16 +1334,18 @@ export class Brain {
     if (this.stopped || !s.settings().brainEnabled) return;
     if (!force && (Date.now() - this.lastDigestAt < DIGEST_EVERY_MS || Date.now() < this.digestRetryAt)) return;
     const prev = s.store.digest("session");
-    const lastId = s.store.lastEventId();
-    if (!force && prev && lastId - prev.throughEvent < 6) return;
+    if (!force && prev && s.store.lastEventId() - prev.throughEvent < 6) return;
     const m = model(s, "digest");
     if (!m) return;
     this.lastDigestAt = Date.now();
-    // Clear banter stays out; a doubtful line goes in with its label and the model decides.
-    const events = s.store
-      .recentEvents({ afterId: prev?.throughEvent ?? 0, limit: 400 })
-      .filter((e) => !confidentBanter(e) && e.kind !== "canvas");
-    if (!events.length) return;
+    // Read forward from the cursor, oldest first, and move it only past the page that was read: a busy session's
+    // backlog is worked through page by page, never skipped. Clear banter stays out; a doubtful line goes in with
+    // its label and the model decides.
+    const page = s.store.eventsAfter(prev?.throughEvent ?? 0, [], DIGEST_PAGE);
+    if (!page.length) return;
+    const lastId = page[page.length - 1].id;
+    const events = page.filter((e) => !confidentBanter(e) && e.kind !== "canvas");
+    if (!events.length) return void s.store.setDigest("session", prev?.text ?? buildBrief(s).full, lastId);
     try {
       const parts = briefParts(s);
       // Agents read the brief as settled, so it's written from what people accepted: saved facts, sent tasks,
@@ -1363,7 +1368,9 @@ export class Brain {
       this.digestRetryAt = 0;
       s.store.setDigest("brief-parts", JSON.stringify(output), lastId);
       s.store.setDigest("session", buildBrief(s).full, lastId);
-      await this.workstreamBriefs(lastId);
+      await this.workstreamBriefs();
+      // More waiting behind this page: read the next one soon rather than after the usual interval.
+      if (page.length === DIGEST_PAGE) this.lastDigestAt = 0;
     } catch (e) {
       this.digestFailed(describeError(e));
     }
@@ -1406,7 +1413,7 @@ export class Brain {
     });
   }
 
-  private async workstreamBriefs(lastId: number) {
+  private async workstreamBriefs() {
     const s = this.session;
     const m = model(s, "digest");
     if (!m) return;
@@ -1424,7 +1431,6 @@ export class Brain {
       // Patch the current record: a claim made while the brief was being written stays.
       s.store.patch("workstreams", ws.id, { brief: text.trim() });
     }
-    void lastId;
   }
 }
 
@@ -1541,13 +1547,12 @@ const WORK = /\b(?:send|assign|hand (?:it|this|that) (?:to|off)|(?:ask|tell|get|
 const SHOW = /\b(?:show|put|bring|display|screen|tv|present|side by side|expand|layout)\b/i;
 /**
  * The tools a pass that also reads attached files may offer, and what the person's own words (never the files')
- * must ask for first (SPEC 12.6). A question about a file gets answering and searching only; a tool not listed
+ * must ask for first, in a clause of their own that isn't negated or quoted (intent.ts, SPEC 12.6). A question
+ * about a file gets answering and searching only; a tool not listed
  * (acting on the Tasks board, the host, names and behaviour notes) is never offered with a file.
  */
+const ANSWERING = new Set(["no_action", "say_to_room", "search_artifacts"]);
 const ASKS: Record<string, RegExp> = {
-  no_action: /(?:)/,
-  say_to_room: /(?:)/,
-  search_artifacts: /(?:)/,
   create_directive: WORK,
   record_decision: /\b(?:record|remember|note (?:down|that)|save (?:it|this|that) as|(?:we|i)(?:'ve| have)? decided|decision is)\b/i,
   pair_agents: /\b(?:pair|work together|align|coordinate)\b/i,
@@ -1560,7 +1565,7 @@ const ASKS: Record<string, RegExp> = {
   restore_screen: SHOW,
   show_saved_layout: SHOW,
 };
-export const askedFor = (tool: string, own: string) => !!ASKS[tool]?.test(own);
+export const askedFor = (tool: string, own: string) => ANSWERING.has(tool) || (!!ASKS[tool] && asksFor(own, ASKS[tool]));
 /** Platforms with a user-facing app, where a shipped feature can be a parity question. */
 const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
 /** A shipped note that could be a feature: not a commit, refactor, fix, dependency or tooling change, and not marked one platform's. */
