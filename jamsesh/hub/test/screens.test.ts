@@ -26,3 +26,24 @@ test("a closed big screen stops being routable at once; main too, until its wind
   s.reportScreen("screen-2", { ...info, screenX: 1920 });
   expect(s.screens().map((sc) => sc.id)).toEqual(["main", "screen-2"]);
 });
+
+test("after a restart, an extra display's brought-up view still returns to the board on its own deadline", async () => {
+  const d2 = mkdtempSync(join(tmpdir(), "jam-screens-restart-"));
+  const was = Session.STAGE_REVERT_MS;
+  Session.STAGE_REVERT_MS = 300;
+  try {
+    const before = new Session(new Store(d2));
+    before.setStage({ mode: "compare", title: "Nav", items: ["a", "b"] }, "Room brain", "screen-2");
+    before.setStage({ mode: "compare", title: "Pinned", items: ["a"], pinned: true }, "Felipe", "screen-3");
+    // The hub restarts: the old process's timers are gone, and a new session opens the same store before the deadline.
+    for (const t of (before as any).screenReverts.values()) clearTimeout(t);
+    const after = new Session(new Store(d2));
+    expect(after.stage("screen-2").mode).toBe("compare");
+    await Bun.sleep(1400); // the remaining time, with the 1-second floor
+    expect(after.stage("screen-2").mode).toBe("board");
+    expect(after.stage("screen-3").title).toBe("Pinned"); // a person pinned it: it stays
+  } finally {
+    Session.STAGE_REVERT_MS = was;
+    rmSync(d2, { recursive: true, force: true });
+  }
+});

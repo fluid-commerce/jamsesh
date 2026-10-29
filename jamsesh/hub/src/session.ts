@@ -81,11 +81,19 @@ export class Session {
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
     for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id, "ended", { lost: true });
-    // The stage's timer died with the old process: a brought-up screen still returns to the board.
+    // The stages' timers died with the old process: a brought-up screen, main or extra, still returns
+    // to the board when its own deadline (it was shown at `since`, which is kept) comes.
+    const left = (st: Stage) => Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now());
     const st = this.stage();
     if (this.revertsToBoard(st)) {
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now()));
+      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), left(st));
       this.stageRevert.unref?.();
+    }
+    for (const [screen, extra] of Object.entries(store.setting<Record<string, Stage>>("screenStages", {}))) {
+      if (!this.revertsToBoard(extra)) continue;
+      const t = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), left(extra));
+      t.unref?.();
+      this.screenReverts.set(screen, t);
     }
     bus.resolver = (key) => this.resolve(key);
   }
