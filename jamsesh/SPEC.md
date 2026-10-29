@@ -116,6 +116,19 @@ The Mac app's start window asks one question [A22a]:
   `_jamsesh._tcp`, refreshed every second), offers a **Rejoin** row for the last host, and takes a
   typed address. Pick one, then type the 4-character code from the big screen once. The app
   remembers the role and the host in its app data and resumes on the next launch.
+- **When no room turns up,** the list says why instead of spinning [A22a]. After six seconds it
+  gives the likeliest reason: Bonjour couldn't start (check Local Network under Privacy &
+  Security), this Mac isn't on a network, a room is advertising but can't be reached (the Wi-Fi
+  keeps devices apart), or simply no rooms here (nobody hosting, Bonjour blocked, or a different
+  Wi-Fi). It offers **Type the address** and **Scan the QR code**. Scanning uses the Mac's camera
+  through the window's `getUserMedia` and decodes the QR in the page with jsQR (Apache-2.0,
+  bundled unmodified in `app/ui/vendor`). The big screen's QR is `<address>/connect?c=<code>`, so
+  the scan gives the address and the code and the app joins without asking for either.
+- **Every code prompt says where the code is:** on the big screen, under the QR code; if it isn't
+  up, ask JamSesh "what's the code?" or ask the host. The app's start window, the browser pairing
+  page, the invite popup and the hub's "pair first" errors all say so. The browser pairing page
+  also has **Scan the QR code** where the browser allows the camera (https or localhost); on a
+  plain-http room address a phone's own Camera app does the scanning, and the page says so.
 
 The app is always either hosting or joined. There's no offline, single-person mode [A26a]. In a
 browser, the role is the path: `/host` is the big screen (host machine only) and anything else is

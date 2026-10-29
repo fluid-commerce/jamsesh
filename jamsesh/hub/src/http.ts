@@ -117,7 +117,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
         const dev = devTarget(req, hub);
         if (dev) {
-          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
+          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code from the big screen, under the QR code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             const who = local ? null : anyToken(hub, req, url, ip);
             if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
@@ -203,7 +203,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if (!ok) {
           if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
-          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
+          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen, under the QR code.", 401);
         }
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
@@ -391,7 +391,7 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   const md = (t: string, status = 200) => new Response(t, { status, headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" } });
   if (!code) return md(agentIntro(origin));
   const r = hub.auth.pair({ code, kind: "agent", label: url.searchParams.get("name") ?? "Agent", ip });
-  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh screen right now, then fetch ${origin}/agent?c=<code> again.`, 403);
+  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh big screen (under the QR code) right now, then fetch ${origin}/agent?c=<code> again.`, 403);
   return md(agentGuide(origin, r.token));
 }
 

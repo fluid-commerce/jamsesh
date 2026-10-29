@@ -223,7 +223,13 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
     Ok(())
 }
 
-async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>) -> Result<(), String> {
+/// The join code from a scanned QR code, as the connect page takes it: capitals and digits only.
+fn clean_code(code: Option<&str>) -> Option<String> {
+    let c: String = code?.to_uppercase().chars().filter(char::is_ascii_alphanumeric).collect();
+    matches!(c.len(), 4 | 8).then_some(c)
+}
+
+async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>, code: Option<&str>) -> Result<(), String> {
     // A typed name like team.duckdns.org is a remote host's HTTPS address; an IP or a .local name
     // is a host on this network.
     let raw = input.trim();
@@ -267,7 +273,11 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
         });
     })
     .await?;
-    let url = relay.window_url(if paired { "/client" } else { "/connect?next=%2Fclient" });
+    let connect = match clean_code(code) {
+        Some(c) => format!("/connect?next=%2Fclient&c={c}"),
+        None => "/connect?next=%2Fclient".to_string(),
+    };
+    let url = relay.window_url(if paired { "/client" } else { &connect });
     let needs_agents = paired && agents.is_none();
     inner.relay = Some(relay);
     inner.cfg.role = Some("join".into());
@@ -717,6 +727,11 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 }
 
 #[tauri::command]
+fn discovery_status(state: State<'_, Arc<App>>) -> discover::Status {
+    state.hosts.status()
+}
+
+#[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
     start_hosting(&app, &state, Launch::Lobby { new_project: false }).await
 }
@@ -762,8 +777,8 @@ async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<
 }
 
 #[tauri::command]
-async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>) -> Result<(), String> {
-    start_joining(&app, &state, &url, name).await
+async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>, code: Option<String>) -> Result<(), String> {
+    start_joining(&app, &state, &url, name, code.as_deref()).await
 }
 
 /// Switches between a host someone uses (one big screen plus their window) and a user-less one
@@ -868,6 +883,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_info,
             nearby_hosts,
+            discovery_status,
             host_here,
             open_project,
             join,
@@ -914,7 +930,7 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 let resumed = match (cfg.role.as_deref(), cfg.host_url.clone()) {
                     (Some("host"), _) => start_hosting(&handle, &state, cfg.project.clone().map_or(Launch::Last, Launch::Project)).await,
-                    (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
+                    (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None, None).await,
                     _ => Err(String::new()),
                 };
                 if let Err(e) = resumed {
@@ -955,4 +971,18 @@ fn main() {
         RunEvent::Reopen { .. } => on_menu(app, "reopen"),
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_code;
+
+    #[test]
+    fn only_a_join_or_invite_code_is_passed_to_the_connect_page() {
+        assert_eq!(clean_code(Some("ab3k")).as_deref(), Some("AB3K"));
+        assert_eq!(clean_code(Some("ABCD2345")).as_deref(), Some("ABCD2345"));
+        assert_eq!(clean_code(Some("AB&next=//evil")), None);
+        assert_eq!(clean_code(Some("AB3")), None);
+        assert_eq!(clean_code(None), None);
+    }
 }
