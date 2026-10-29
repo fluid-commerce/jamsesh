@@ -274,6 +274,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             msg = { ...msg, event: { ...msg.event, data } };
           }
           if (agent && msg.type === "patch" && msg.key === "triage") return;
+          // A proposal is for people to approve: agents hear of wiki changes only once they are written.
+          if (agent && msg.type === "wiki" && msg.kind === "ingest") return;
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;

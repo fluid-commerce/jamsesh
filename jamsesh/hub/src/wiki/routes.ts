@@ -58,7 +58,12 @@ export async function wikiRoute(w: WikiService, method: string, path: string, ur
     const s = isSourceId(m[1]) ? readSource(w.dir, m[1]) : null;
     return s ? ok({ id: s.id, title: s.title, kind: s.kind, ts: s.ts, by: s.by, text: s.text }) : fail("No such source.", 404);
   }
-  if (path === "/wiki/sources" && method === "GET") return ok({ sources: sourceIds(w.dir).slice(-200).reverse().map((id) => readSource(w.dir, id)).filter(Boolean).map((s) => ({ id: s!.id, title: s!.title, kind: s!.kind, ts: s!.ts, ingested: !w.pendingSources().includes(s!.id) })) });
+  if (path === "/wiki/sources" && method === "GET") {
+    const all = sourceIds(w.dir).slice(-200).reverse().map((id) => readSource(w.dir, id)).filter((x): x is NonNullable<typeof x> => !!x);
+    const state = w.sourceStates(all.map((x) => x.id));
+    // `ingested` is true only for a source an accepted or dismissed card (or an empty ingest) has settled; `state` also says "held" for one an open card is waiting on.
+    return ok({ sources: all.map((s) => ({ id: s.id, title: s.title, kind: s.kind, ts: s.ts, ingested: state[s.id] === "ingested", state: state[s.id] })) });
+  }
   if (path === "/wiki/sources" && method === "POST") {
     const title = typeof body?.title === "string" ? body.title : "";
     try {

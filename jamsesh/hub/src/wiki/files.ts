@@ -9,7 +9,7 @@
 // Everything here takes the project folder as an argument and touches only that folder: page names are
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -516,7 +516,11 @@ export interface WikiState {
   migrating?: string;
   /** A long source read in parts: how many characters of it are handled so far. */
   read?: Record<string, number>;
-  /** Sources that couldn't be written when they came in (an agent's shipped or decision report, a saved fact), to try again. */
+  /** Per session: the last event id whose agent report (shipped or decision) is a source. Events are the durable record; this is how far they are read. */
+  reports?: Record<string, number>;
+  /** Per session: an event too long for one source, and how far into it the sources written so far reach. */
+  partial?: Record<string, { id: number; off: number }>;
+  /** Sources that couldn't be written when they came in (a saved fact), to try again. */
   queued?: { kind: SourceKind; title: string; text: string; by: string }[];
 }
 
@@ -524,13 +528,31 @@ const stateFile = (dir: string) => join(dir, ".wiki-state.json");
 
 export function readState(dir: string): WikiState {
   // A link in place of the state file throws: better no ingest than one that starts again from nothing.
-  const text = readPlain(stateFile(dir));
+  const file = stateFile(dir);
+  const text = readPlain(file);
+  let j: Partial<WikiState>;
   try {
-    const j = JSON.parse(text ?? "{}") as Partial<WikiState>;
-    return { ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {}, cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {}, migrated: !!j.migrated, ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}), ...(j.read && typeof j.read === "object" ? { read: j.read } : {}), ...(Array.isArray(j.queued) ? { queued: j.queued } : {}) };
+    j = JSON.parse(text ?? "{}") as Partial<WikiState>;
+    if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("not an object");
   } catch {
-    return { ingested: {}, cursors: {} };
+    // A damaged state file is kept as it is (a copy is set aside) and nothing proceeds on a blank one: the queue, the
+    // read offsets and the transcript cursors it holds can't be guessed again.
+    const aside = `${file}.damaged`;
+    try {
+      if (!existsSync(aside)) copyFileSync(file, aside);
+    } catch {}
+    throw Object.assign(new Error(".wiki-state.json in the wiki folder is damaged; a copy is kept as .wiki-state.json.damaged. Fix or remove it to carry on."), { code: "ESTATE" });
   }
+  return {
+    ingested: j.ingested && typeof j.ingested === "object" ? j.ingested : {},
+    cursors: j.cursors && typeof j.cursors === "object" ? j.cursors : {},
+    migrated: !!j.migrated,
+    ...(typeof j.migrating === "string" ? { migrating: j.migrating } : {}),
+    ...(j.read && typeof j.read === "object" ? { read: j.read } : {}),
+    ...(j.reports && typeof j.reports === "object" ? { reports: j.reports } : {}),
+    ...(j.partial && typeof j.partial === "object" ? { partial: j.partial } : {}),
+    ...(Array.isArray(j.queued) ? { queued: j.queued } : {}),
+  };
 }
 
 export function writeState(dir: string, st: WikiState): void {

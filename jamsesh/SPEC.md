@@ -1739,8 +1739,17 @@ and for accepting or dismissing a wiki card.
 | `POST /api/wiki/sources` | `{title, text}`, `{title, url}` (kept as a link; never fetched) or `{title, attachment}` (text file or PDF; a PDF is read by the router model, 503 without a key) |
 | `POST /api/wiki/ingest`, `/query`, `/lint` | run now; see above |
 
-Changes arrive as a bus message `{type:"wiki", kind:"ingest"|"edit"|"apply"|"source", touched:[slug], by, at}` (`ingest` when a card is
-raised, `apply` when one is accepted).
+Changes arrive as a bus message `{type:"wiki", kind:"ingest"|"edit"|"apply"|"source", touched:[slug], by, at}`. `ingest` (a card is
+raised) carries no page names (`touched: []`) and is not sent to agent sockets: a proposal is for people to approve, and the stage only
+pulses pages that are written. `apply` (a card is accepted) and `edit` name the pages.
+
+**Durability.** A proposal and its card share one id (`tri_…`), the proposal file written first; on start a proposal without its card is
+raised again under that id, and an open wiki card without its proposal is closed (its sources are read again). Agent shipped and
+decision reports are read from the session's events by a cursor in `.wiki-state.json` that moves only past a written source. Every
+source gets one keyed log line (`%%src:<id>%%`), written again at the next change, pass or start if the first write failed. An event
+longer than one source is written in parts, with its offset in the state file. A damaged `.wiki-state.json` stops ingest (a copy is kept
+as `.wiki-state.json.damaged`) rather than restarting from nothing. The project folder must be a real folder directly inside the
+projects folder (never a link, never behind one); otherwise the session uses its own folder.
 
 **Agents.** `jam_wiki_read`, `jam_wiki_search`, `jam_wiki_query` and `jam_source_add` (no tool edits pages). `jam_join` returns
 the wiki's index (page names by category) and the agent's workstream pages instead of the "settled points" pointer, with the whole

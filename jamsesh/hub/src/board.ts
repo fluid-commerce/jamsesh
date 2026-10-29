@@ -196,12 +196,12 @@ export class Board {
     return this.announce(this.s.store.put("triage", card));
   }
 
-  /** The wiki's maintainer proposes page changes (12.8): one card per ingest, accepted page by page. */
-  proposeWiki(wiki: WikiCardPayload, by: string): TriageCard | null {
+  /** The wiki's maintainer proposes page changes (12.8): one card per ingest, accepted page by page. `id` names the card (and so its proposal file) before it exists. */
+  proposeWiki(wiki: WikiCardPayload, by: string, id = newId("tri")): TriageCard | null {
     const now = this.stamp();
     const text = clean(wiki.summary);
     const card: TriageCard = {
-      id: newId("tri"), ts: now, updatedAt: now, type: "wiki", status: "open", origin: "agent", text, original: text, by,
+      id, ts: now, updatedAt: now, type: "wiki", status: "open", origin: "agent", text, original: text, by,
       mode: "note", targets: [], kind: "fact", workstream: "", conflictsWith: null, wiki, sources: [], count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));

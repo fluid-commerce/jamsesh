@@ -147,7 +147,14 @@ export class Hub {
     if (!opts.dataDir && config.project) seedFromProject(config.home, config.project.slug, config.project.sessionId, this.session);
     // The project's wiki (SPEC 12.8): the fact list lives on as pages. The first session of a project folds its facts in.
     const wikiDir = opts.wikiDir ?? (!opts.dataDir && config.project ? join(projectsDir(config.home), config.project.slug) : join(dir, "project-wiki"));
-    this.wiki = new WikiService(this.session, wikiDir, this.session.sessionId, !opts.dataDir ? (config.project?.slug ?? "") : "");
+    const projectWiki = !opts.dataDir && config.project && !opts.wikiDir;
+    try {
+      this.wiki = new WikiService(this.session, wikiDir, this.session.sessionId, !opts.dataDir ? (config.project?.slug ?? "") : "", projectWiki ? projectsDir(config.home) : undefined);
+    } catch (e) {
+      // A project folder that is a link: the wiki lives in this session's own folder instead, and nothing is written through the link.
+      console.error("wiki:", e instanceof Error ? e.message : e);
+      this.wiki = new WikiService(this.session, join(dir, "project-wiki"), this.session.sessionId, "");
+    }
     this.wiki.attachmentBytes = (id) => {
       const rec = this.attachments.record(id);
       const bytes = rec ? this.attachments.bytes(id) : null;
@@ -176,7 +183,11 @@ export class Hub {
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text, ev) => {
       this.brain.agentUpdated(agent, kind, text, ev);
-      this.wiki.agentUpdate(agent.name, kind, text, ev.workstreamId ? this.session.store.get("workstreams", ev.workstreamId)?.title : undefined);
+      try {
+        this.wiki.agentUpdate();
+      } catch (e) {
+        console.error("wiki:", e instanceof Error ? e.message : e);
+      }
     };
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});

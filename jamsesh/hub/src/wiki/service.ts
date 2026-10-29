@@ -3,11 +3,12 @@
 // People's own edits write directly (and are kept as sources). The model can only propose wiki pages: it never touches
 // agent work, and source text reaches it as data.
 import { generateText, Output } from "ai";
-import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { model } from "../brain/llm";
 import { bus } from "../bus";
+import { newId } from "../store";
 import type { ProjectContext } from "../carryover";
 import type { Session } from "../session";
 import type { JamEvent, TriageCard, WikiCardPayload, WikiChange } from "../types";
@@ -124,6 +125,24 @@ interface Proposal {
   by?: string;
 }
 
+/** The project folder as a real path, or an error when it is a link, or isn't directly inside `trusted`. Makes it when it isn't there yet. */
+export function projectRoot(dir: string, trusted?: string): string {
+  const path = resolve(dir);
+  const refuse = () => new Error(`The wiki folder ${path} is a link or sits behind one; JamSesh won't use it.`);
+  mkdirSync(dirname(path), { recursive: true });
+  const parent = realpathSync(dirname(path));
+  if (trusted && parent !== realpathSync(trusted.startsWith("/") ? trusted : resolve(trusted))) throw refuse();
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw refuse();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    mkdirSync(path);
+  }
+  const real = realpathSync(path);
+  if (real !== join(parent, basename(path))) throw refuse();
+  return real;
+}
+
 type Queued = { kind: SourceKind; title: string; text: string; by: string };
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -134,23 +153,31 @@ export class WikiService {
   private agentSourceTimes: number[] = [];
   /** Sources that must not be lost but couldn't be written yet (also kept in the state file). */
   private queue: Queued[] = [];
+  /** The queue in the state file is behind the one in memory. */
+  private queueDirty = false;
+  /** How far the session's events are read for agent reports (also in the state file). */
+  private reportCursor: number | null = null;
   /** Tests (and offline use) can replace the model. */
   decide: Decider | null = null;
   answerer: ((question: string, pages: Page[]) => Promise<string>) | null = null;
   attachmentBytes: ((id: string) => { name: string; type: string; bytes: Uint8Array } | null) | null = null;
   stopped = false;
 
-  /** The project folder by its real path; each of its wiki folders is checked on use (files.ts vaultDir). */
+  /** The project folder, checked not to be (or sit behind) a link; each of its wiki folders is checked on use (files.ts vaultDir). */
   readonly dir: string;
 
+  /**
+   * `trusted` is the folder the project's folder must sit directly in (the projects folder): a project folder that is a
+   * link, or whose parent isn't that folder, is refused before anything is made or written, so the wiki can't land elsewhere.
+   */
   constructor(
     private s: Session,
     dir: string,
     private sessionId: string,
     readonly project = "",
+    trusted?: string,
   ) {
-    mkdirSync(dir, { recursive: true });
-    this.dir = realpathSync(dir);
+    this.dir = projectRoot(dir, trusted);
     try {
       initWiki(this.dir);
       this.queue = readState(this.dir).queued ?? [];
@@ -184,6 +211,7 @@ export class WikiService {
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
   private finish(message: string, pages: string[], key?: string) {
+    this.catchUpLog();
     appendLog(this.dir, message, pages, Date.now(), key);
     rebuildIndex(this.dir);
     commitPaths(this.dir, message, [...pages.map((p) => `wiki/${p}.md`), "index.md", "log.md", ...(sourceIds(this.dir).length ? ["raw"] : [])]);
@@ -191,12 +219,26 @@ export class WikiService {
 
   // ---- sources ----
 
+  /**
+   * Gives every source on disk its log line, keyed by its id. The sources are the durable record: a log write that
+   * failed after one landed is made good by the next change, the next pass or a restart, so History never loses an edit.
+   */
+  private catchUpLog() {
+    const log = readPlain(join(this.dir, "log.md")) ?? "";
+    const missing = sourceIds(this.dir)
+      .filter((id) => !log.includes(` %%src:${id}%%`))
+      .map((id) => readSource(this.dir, id))
+      .filter((x): x is Source => !!x && x.kind !== "transcript")
+      .sort((a, b) => a.ts - b.ts);
+    for (const src of missing) appendLog(this.dir, ...sourceLog(src), src.ts, `src:${src.id}`);
+  }
+
   /** A document, link or agent report. Saved at once; the next ingest reads it. */
   addSource(kind: SourceKind, title: string, text: string, by: string): Source {
     const src = addSource(this.dir, { kind, title, text, by });
-    // The source is saved; a log line that can't be written doesn't undo that.
+    // The source is saved; a log line that can't be written doesn't undo that, and is written at the next chance.
     try {
-      appendLog(this.dir, `Source added: ${src.title} (${kind}, ${by})`);
+      this.catchUpLog();
     } catch (e) {
       console.error("wiki:", errText(e));
     }
@@ -205,9 +247,9 @@ export class WikiService {
   }
 
   /**
-   * A source nobody is waiting on (an agent's shipped or decision report, a saved fact) that mustn't be lost: one that
-   * can't be written now is logged, kept in the state file and written at the next chance (the next such source, or
-   * the next ingest pass).
+   * A source nobody is waiting on (a saved fact) that mustn't be lost: one that can't be written now is logged, kept in
+   * the state file (all of them, none dropped) and written at the next chance (the next such source, or the next pass).
+   * If the state file can't be written either, the queue is kept in memory and written to it again at the next chance.
    */
   private keep(q: Queued): Source | null {
     this.drainQueue();
@@ -223,6 +265,7 @@ export class WikiService {
 
   /** Writes what's queued, in order, stopping at the first that still fails. */
   drainQueue(): number {
+    if (this.queueDirty) this.saveQueue();
     let n = 0;
     while (this.queue.length) {
       try {
@@ -240,8 +283,10 @@ export class WikiService {
   private saveQueue() {
     try {
       const st = readState(this.dir);
-      writeState(this.dir, { ...st, queued: this.queue.slice(-500) });
+      writeState(this.dir, { ...st, queued: this.queue });
+      this.queueDirty = false;
     } catch (e) {
+      this.queueDirty = true;
       console.error("wiki: couldn't keep the queue:", errText(e));
     }
   }
@@ -260,10 +305,48 @@ export class WikiService {
     return this.addSource("document", title, text, by);
   }
 
-  /** An agent's shipped or decision update becomes a small source. */
-  agentUpdate(agentName: string, kind: string, text: string, workstream?: string): Source | null {
-    if (kind !== "shipped" && kind !== "decision") return null;
-    return this.keep({ kind: "agent", title: `${agentName} ${kind}: ${text.slice(0, 50)}`, text: `${agentName} reported (${kind})${workstream ? ` on ${workstream}` : ""} at ${new Date().toTimeString().slice(0, 5)}:\n\n${text}`, by: agentName });
+  /**
+   * An agent's shipped or decision update becomes a small source. The session's events are the durable record, so this
+   * reads forward from a cursor that moves only past a report whose source is written: one that can't be written (a
+   * full disk, a locked folder) is found again at the next pass or after a restart, and none is lost or skipped.
+   */
+  agentUpdate(): Source[] {
+    const out: Source[] = [];
+    const start = (this.reportCursor ??= readState(this.dir).reports?.[this.sessionId] ?? 0);
+    let cursor = start;
+    const done = () => {
+      if (cursor !== start) this.saveReportCursor(cursor);
+      return out;
+    };
+    for (;;) {
+      const page = this.s.store.eventsAfter(cursor, EVENT_PAGE);
+      for (const e of page) {
+        const kind = e.data?.updateKind;
+        if (e.kind === "update" && e.authorType === "agent" && (kind === "shipped" || kind === "decision")) {
+          const text = (e.data?.documentId ? this.s.store.get("documents", e.data.documentId)?.text : null) ?? e.text;
+          const ws = e.workstreamId ? this.s.store.get("workstreams", e.workstreamId)?.title : undefined;
+          try {
+            const src = this.addSource("agent", `${e.authorName} ${kind}: ${text.slice(0, 50)}`, `${e.authorName} reported (${kind})${ws ? ` on ${ws}` : ""} at ${new Date(e.ts).toTimeString().slice(0, 5)}:\n\n${text}`, e.authorName);
+            out.push(src);
+          } catch (err) {
+            console.error(`wiki: couldn't save ${e.authorName}'s ${kind} report (${errText(err)}); it will be tried again.`);
+            return done();
+          }
+        }
+        cursor = this.reportCursor = e.id;
+      }
+      if (page.length < EVENT_PAGE) return done();
+    }
+  }
+
+  private saveReportCursor(id: number) {
+    try {
+      const st = readState(this.dir);
+      writeState(this.dir, { ...st, reports: { ...(st.reports ?? {}), [this.sessionId]: id } });
+    } catch (e) {
+      // Read from memory for now; after a restart the reports since the last saved cursor are read again.
+      console.error("wiki: couldn't keep the report cursor:", errText(e));
+    }
   }
 
   /** A text or PDF attachment as a source. A PDF is read by the model; with no model it can't be. */
@@ -294,18 +377,26 @@ export class WikiService {
   captureTranscript(final = false): Source[] {
     const out: Source[] = [];
     let cursor = readState(this.dir).cursors[this.sessionId] ?? 0;
-    const line = (e: JamEvent) => `[${new Date(e.ts).toTimeString().slice(0, 5)}] ${e.authorName}${e.kind === "speech" ? "" : ` (${e.kind})`}: ${e.text.replace(/\s+/g, " ").slice(0, 600)}`;
+    const body = (e: JamEvent) => ((e.data?.documentId ? this.s.store.get("documents", e.data.documentId)?.text : null) ?? e.text).replace(/\s+/g, " ");
+    const head = (e: JamEvent) => `[${new Date(e.ts).toTimeString().slice(0, 5)}] ${e.authorName}${e.kind === "speech" ? "" : ` (${e.kind})`}: `;
     for (let n = 0; n < 100; n++) {
       const lines: string[] = [];
       let chars = 0;
       let first = 0;
       let to = cursor;
       let full = false;
-      while (!full) {
+      let big: JamEvent | null = null;
+      while (!full && !big) {
         const page = this.s.store.eventsAfter(to, EVENT_PAGE);
         for (const e of page) {
           if (this.fit(e)) {
-            const l = line(e);
+            const l = head(e) + body(e);
+            // One event longer than a source is written on its own, in parts, below.
+            if (l.length > TRANSCRIPT_MAX) {
+              if (lines.length) full = true;
+              else big = e;
+              break;
+            }
             if (lines.length && chars + l.length > TRANSCRIPT_MAX) {
               full = true;
               break;
@@ -317,6 +408,27 @@ export class WikiService {
           to = e.id;
         }
         if (page.length < EVENT_PAGE) break;
+      }
+      if (big) {
+        // The offset into it is saved after each part, so a long typed prompt or decision is kept whole across restarts.
+        const text = body(big);
+        const prefix = head(big);
+        let off = readState(this.dir).partial?.[this.sessionId]?.id === big.id ? readState(this.dir).partial![this.sessionId].off : 0;
+        while (off < text.length) {
+          let end = Math.min(text.length, off + TRANSCRIPT_MAX - 200);
+          const sp = text.lastIndexOf(" ", end);
+          if (end < text.length && sp > off + (TRANSCRIPT_MAX - 200) / 2) end = sp + 1;
+          const piece = `${prefix}(characters ${off.toLocaleString("en-US")} to ${end.toLocaleString("en-US")} of ${text.length.toLocaleString("en-US")}) ${text.slice(off, end)}`;
+          out.push(addSource(this.dir, { kind: "transcript", title: `${this.s.settings().sessionName} ${new Date(big.ts).toTimeString().slice(0, 5)}`, text: piece, by: "JamSesh" }));
+          off = end;
+          const st = readState(this.dir);
+          const partial = { ...(st.partial ?? {}) };
+          if (off < text.length) partial[this.sessionId] = { id: big.id, off };
+          else delete partial[this.sessionId];
+          writeState(this.dir, { ...st, partial, cursors: off < text.length ? st.cursors : { ...st.cursors, [this.sessionId]: big.id } });
+        }
+        cursor = big.id;
+        continue;
       }
       // Only banter or tool chatter since the cursor: nothing to keep, so step past it.
       if (!lines.length) {
@@ -348,6 +460,13 @@ export class WikiService {
     return sourceIds(this.dir).filter((id) => !done[id] && !held.has(id));
   }
 
+  /** Where each source stands: waiting for an ingest, held by a card awaiting a person, or ingested. */
+  sourceStates(ids: string[]): Record<string, "pending" | "held" | "ingested"> {
+    const done = readState(this.dir).ingested;
+    const held = new Set(this.proposals().flatMap((p) => p.prop.sources));
+    return Object.fromEntries(ids.map((id) => [id, done[id] ? "ingested" : held.has(id) ? "held" : "pending"] as const));
+  }
+
   // ---- ingest ----
 
   /** Every 15 minutes: save the transcript, then ingest what's waiting. */
@@ -355,6 +474,12 @@ export class WikiService {
     return this.serial(async () => {
       if (this.stopped) return null;
       this.drainQueue();
+      this.agentUpdate();
+      try {
+        this.catchUpLog();
+      } catch (e) {
+        console.error("wiki:", errText(e));
+      }
       this.captureTranscript(final);
       return this.ingestNow();
     });
@@ -428,7 +553,7 @@ export class WikiService {
     const result = this.propose(out, batch, "ingest", new Map(existing.map((p) => [p.slug, p.rev])), parts);
     // Nothing worth proposing: these parts are read. Otherwise the card holds them until someone accepts or dismisses it.
     if (!result.card) this.markRead(parts);
-    else this.notify("ingest", result.card.wiki?.changes.map((c) => c.slug) ?? [], "JamSesh");
+    else this.notify("ingest", [], "JamSesh"); // Page names stay on the people-only board until a person accepts them.
     return result;
   }
 
@@ -480,13 +605,13 @@ export class WikiService {
     if (!changes.length) return { card: null, sources: prop.sources, changes: 0 };
     const text = `Wiki: ${out.summary.trim().slice(0, 160) || `${changes.length} page${changes.length === 1 ? "" : "s"} to update`}`;
     const payload: WikiCardPayload = { kind, summary: text, changes };
-    // The proposal is on disk before the card is up, so no card is ever shown without what it would write.
-    const draft = `pending-${crypto.randomUUID()}`;
-    prop.key = draft.slice(8, 20);
-    this.saveProposal(draft, { ...prop, card: payload });
-    const card = this.s.board.proposeWiki(payload, "JamSesh");
-    if (card) this.moveProposal(draft, card.id, { ...prop, card: payload });
-    else this.dropProposal(draft);
+    // The card and its proposal share one id, and the proposal is on disk first: no card is ever up without what it would
+    // write, and a crash before the card lands leaves a proposal that restore() raises under the same id.
+    const id = newId("tri");
+    prop.key = id;
+    this.saveProposal(id, { ...prop, card: payload });
+    const card = this.s.board.proposeWiki(payload, "JamSesh", id);
+    if (!card) this.dropProposal(id);
     return { card, sources: prop.sources, changes: changes.length };
   }
 
@@ -560,16 +685,21 @@ export class WikiService {
         if (here.status === "added" || here.status === "dismissed") this.resolve(id, prop);
         continue;
       }
-      if (!prop.card || id.startsWith("pending-")) {
+      if (!prop.card) {
         this.dropProposal(id);
         continue;
       }
       const base = new Map(prop.changes.map((c) => [c.slug, c.baseRev]));
       const done = new Set(prop.applied ?? []);
       const changes = prop.card.changes.map((c) => ({ ...c, stale: !done.has(c.slug) && (readPage(this.dir, c.slug)?.rev ?? "") !== (base.get(c.slug) ?? "") }));
-      const card = this.s.board.proposeWiki({ ...prop.card, changes }, "JamSesh");
-      if (card) this.moveProposal(id, card.id, prop);
+      // Under its own id when it has one (a card and its proposal are one thing); an older proposal named before its card existed gets a fresh id.
+      const keep = id.startsWith("tri_");
+      const card = this.s.board.proposeWiki({ ...prop.card, changes }, "JamSesh", keep ? id : undefined);
+      if (card && !keep) this.moveProposal(id, card.id, prop);
     }
+    // An open wiki card whose proposal is gone can't be accepted: it is closed, and its sources are read again by the next ingest.
+    const held = new Set(this.proposals().map((p) => p.id));
+    for (const c of this.s.board.open()) if (c.type === "wiki" && c.wiki?.kind !== "lint" && !held.has(c.id)) this.s.board.dismiss(c.id, "JamSesh (its proposal was lost)");
   }
 
   /** The Tasks board closed a wiki card: a dismissed one's sources are read now; an accepted one's already were. */
@@ -681,9 +811,9 @@ export class WikiService {
         return { ok: false, error: errText(e), status: (e as NodeJS.ErrnoException).code ? 500 : 400 };
       }
     }
-    // The page is saved: a log or index that couldn't be written catches up at the next change.
+    // The page is saved: a log or index that couldn't be written is made good from the source (keyed by its id) at the next change, pass or start.
     try {
-      this.finish(`${opts.by} ${cur ? "edited" : "wrote"} a page`, [slug]);
+      this.finish(`${opts.by} ${cur ? "edited" : "wrote"} a page`, [slug], src ? `src:${src.id}` : undefined);
     } catch (e) {
       console.error("wiki:", errText(e));
     }
@@ -828,7 +958,11 @@ export class WikiService {
   // ---- reading, for agents and routes ----
 
   info() {
-    return { ready: pageSlugs(this.dir).length > 0 || this.pendingSources().length > 0, pages: pageSlugs(this.dir).length };
+    let pending = 0;
+    try {
+      pending = this.pendingSources().length;
+    } catch {} // an unreadable state file is reported where it is used
+    return { ready: pageSlugs(this.dir).length > 0 || pending > 0, pages: pageSlugs(this.dir).length };
   }
 
   backlinks(slug: string) {
@@ -842,6 +976,13 @@ export class WikiService {
   get exists() {
     return existsSync(this.dir);
   }
+}
+
+/** The log line a source gets (message and the pages it names). */
+function sourceLog(src: Source): [string, string[]] {
+  if (src.kind !== "edit") return [`Source added: ${src.title} (${src.kind}, ${src.by})`, []];
+  const slug = src.title.match(/\(([a-z0-9-]+)\)$/)?.[1];
+  return [`${src.by} ${src.text.includes(" wrote the page ") ? "wrote" : "edited"} a page`, slug ? [slug] : []];
 }
 
 const hashOf = (s: string) => Bun.hash(s).toString(36).slice(0, 8);
