@@ -727,7 +727,11 @@ export class McpEndpoint {
     if (!directives.length && !messages.length) {
       const open = s.openFor(agent.id);
       if (!open.length) return "Nothing new.";
-      return `Nothing new, but you haven't finished: ${open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ")}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
+      const list = open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ");
+      // A coordinate directive is a comparison with the other agent first: finishing it means talking, so don't tell anyone to skip that.
+      if (open.some((d) => d.mode === "coordinate"))
+        return `Nothing new, but you haven't finished: ${list}. For a [coordinate] one, compare with the named agents through jam_message first and build only for a gap you both confirm; finish the others now. Then jam_ack each done.`;
+      return `Nothing new, but you haven't finished: ${list}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
     }
     const out: string[] = [];
     for (const d of directives) {
