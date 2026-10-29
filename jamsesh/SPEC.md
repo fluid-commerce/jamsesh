@@ -1451,7 +1451,7 @@ Both start out, only the page bar shows, and each slides over about 0.2 seconds 
 reduced motion). The panels start below a 48 px strip that holds the buttons, and beside the left
 button the page bar. What a person chose is kept in their browser (local storage, per person) and comes
 back after a reload or rejoin. The big screen's canvas leaves `&panels` off: no buttons, no panels.
-The buttons run the FigCraft command `view.canvasPanel {side: "left"|"right", on?}`, so the control
+In a room canvas the properties panel has no Share button and no people bar (JamSesh's page has both). The buttons run the FigCraft command `view.canvasPanel {side: "left"|"right", on?}`, so the control
 channel and MCP can slide a panel too (it does nothing on a canvas without the buttons).
 
 The host runs `figcraft-server` on `127.0.0.1:47900` (or the next free port) and a headless host
@@ -1514,8 +1514,10 @@ in it, what sharing means (everyone's canvas uses it until the session ends; it'
 that they should share it only if their licence allows. **I'm allowed to share it** reads the files
 (`local_fonts`) and sends them (`POST /api/fonts/lend`); **Don't share** is remembered for that person and
 that font, and the canvas keeps its marked substitute. The first person to confirm wins. A person who
-shared sees a row, *Sharing <font> until the session ends*, with **Stop sharing**. The Mac enforces nothing
-beyond the page's prompt: whoever hosts the session controls the page that asks (as with `local_fonts`).
+shared sees a row, *Sharing <font> until the session ends*, with **Stop sharing**. The page's card is the
+friendly first step; the Mac enforces the consent itself: the files are read only by the app's
+`lend_font` command, which shows a native macOS dialog (the font, the session, who is waiting; **I'm
+allowed to share it** / **Don't share**) and returns nothing on a no.
 
 **Rules the host keeps.**
 - Fonts live in the hub's memory only. Nothing is written to a session folder, and a lent font is never
@@ -1528,6 +1530,7 @@ beyond the page's prompt: whoever hosts the session controls the page that asks 
   403 on them and on downloading a font file; agents see names and counts in the state). A person lends as
   their own person; a lend must be for a font someone is waiting for, so a font can't be pushed
   unasked. An agent's FigCraft tools refuse `text.loadFont` too.
+- A lend request body is read at most 45 MB (413 past it, before parsing).
 - Limits: 24 MB per file, 12 files and 32 MB per family, 128 MB lent and 96 MB open in all, 48 families
   asked for. A file must be a TrueType/OpenType font or collection whose family name is the one asked
   for; damaged, oversize, mislabelled and non-font files are refused with a plain reason.

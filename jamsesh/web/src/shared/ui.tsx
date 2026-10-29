@@ -1152,13 +1152,19 @@ export function CanvasFrame({ kind, name, title, follow, page, panels }: { kind:
     const room = { get available() { return fontsNow.current; }, fetchFace: fetchRoomFace, want: askRoomForFonts };
     let gone = false;
     let busy = false;
+    let again = false;
     const tick = async () => {
-      const fc = figcraftIn(frame.current);
-      if (!fc || busy) return;
+      // A request that lands mid-pass runs again right after it, so a font that just arrived clears its chip.
+      if (busy) return void (again = true);
       busy = true;
       try {
-        const left = await loadFonts(fc, macInvoke(), memory, room);
-        if (!gone) setSubstituted(left);
+        do {
+          again = false;
+          const fc = figcraftIn(frame.current);
+          if (!fc) break;
+          const left = await loadFonts(fc, macInvoke(), memory, room);
+          if (!gone) setSubstituted(left);
+        } while (again && !gone);
       } catch {
       } finally {
         busy = false;

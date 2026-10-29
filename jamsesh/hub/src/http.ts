@@ -397,7 +397,11 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
 async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
-  const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  // A font lend carries up to a family's worth of base64: read at most that much, never Bun's 128 MB default.
+  const cap = path.startsWith("/fonts/") ? FONT_BODY_MAX : Infinity;
+  if (Number(req.headers.get("content-length") ?? 0) > cap) return bad("That request is too large.", 413);
+  const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req, cap) : null;
+  if (body === TOO_LARGE) return bad("That request is too large.", 413);
 
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
@@ -895,9 +899,38 @@ function originOf(req: Request, url: URL) {
   return `${proto}://${host}`;
 }
 
-async function readBody(req: Request): Promise<any> {
+/** The most a /api/fonts request may carry: a family's files (32 MB) as base64, plus the envelope. */
+export const FONT_BODY_MAX = 45 * 1024 * 1024;
+const TOO_LARGE = Symbol("too large");
+
+/** The text of a request body, read in chunks and abandoned past `max` bytes (null: over). */
+async function readCapped(req: Request, max: number): Promise<string | null> {
+  if (max === Infinity) return req.text();
+  const reader = req.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > max) return (await reader.cancel().catch(() => {}), null);
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readBody(req: Request, max = Infinity): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) return req.json().catch(() => ({}));
+  if (type.includes("application/json")) {
+    const text = await readCapped(req, max);
+    if (text === null) return TOO_LARGE;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {};
+    }
+  }
   if (type.includes("multipart/form-data")) return { __form: await req.formData() };
   if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
   return null;

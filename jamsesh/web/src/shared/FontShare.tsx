@@ -53,12 +53,12 @@ function Offer({ family, session, askers, onDone }: { family: string; session: s
     setBusy(true);
     setErr("");
     try {
-      const files: { family: string; data: string }[] = (await invoke?.("local_fonts", { families: [family] })) ?? [];
-      if (!files.length) throw new Error("This Mac no longer has that font.");
+      // The Mac app asks in a native dialog and reads the files only on a yes: this page never gets them otherwise.
+      const files: { family: string; data: string }[] = (await invoke?.("lend_font", { family, session, askers })) ?? [];
       await lendFont(family, files.map((f) => f.data));
       onDone();
     } catch (e: any) {
-      setErr(String(e?.message ?? "Couldn't share it."));
+      setErr(String(typeof e === "string" ? e : e?.message ?? "Couldn't share it."));
       setBusy(false);
     }
   };

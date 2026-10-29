@@ -17,6 +17,7 @@ const COMMANDS: &[&str] = &[
     "toggle_userless",
     "local_fonts",
     "has_fonts",
+    "lend_font",
     "heartbeat",
     "screens_state",
     "screens_preview",

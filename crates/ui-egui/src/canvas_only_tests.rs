@@ -132,3 +132,19 @@ fn a_panel_mid_slide_draws_and_reduced_motion_is_immediate() {
     let texts = frames(&mut app, &ctx, 3);
     assert!(texts.iter().any(|t| t == "Layers"), "{texts:?}");
 }
+
+/// A room canvas's properties panel has no Share button and no people bar (JamSesh's page has both);
+/// the full app's keeps them.
+#[test]
+fn the_room_canvas_properties_panel_has_no_share_or_avatars() {
+    for room in [true, false] {
+        let (ctx, mut app) = (egui::Context::default(), if room { panels_app(true) } else { app(false, true) });
+        app.ui.canvas_only = room;
+        app.session.prefs.canvas_panels = (false, true);
+        app.session.prefs.reduce_motion = true;
+        app.session.prefs.user_name = "Dana".into();
+        let texts = frames(&mut app, &ctx, 5);
+        assert!(texts.iter().any(|t| t == "Design"), "the properties panel shows: {texts:?}");
+        assert_eq!(texts.iter().any(|t| t == "Share"), !room, "room {room}: {texts:?}");
+    }
+}

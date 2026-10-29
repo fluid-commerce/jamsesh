@@ -4,5 +4,5 @@
   "description": "The session windows (the hub's or the relay's page at 127.0.0.1) may only ask for this Mac's fonts for their canvases, send the watchdog their heartbeat, and (the host's Projects picker) open a project.",
   "windows": ["client", "bigscreen*", "remote"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["allow-local-fonts", "allow-has-fonts", "allow-heartbeat", "allow-open-project"]
+  "permissions": ["allow-local-fonts", "allow-has-fonts", "allow-lend-font", "allow-heartbeat", "allow-open-project"]
 }

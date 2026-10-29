@@ -94,6 +94,36 @@ pub fn local_fonts(families: &[String]) -> Vec<LocalFont> {
     read_files(lookup_files(&wanted))
 }
 
+/// What the native dialog asks before a font leaves this Mac: the font, the session and who is waiting for it.
+pub fn lend_prompt(family: &str, session: &str, askers: &[String]) -> String {
+    let who = if askers.is_empty() { "A canvas".to_string() } else { askers.join(" and ") };
+    format!(
+        "Share \u{201c}{family}\u{201d} with \u{201c}{session}\u{201d}?\n\n{who} is drawing text in it. If you share it, everyone's canvas in this session can use it until the session ends. It is never saved on anyone's Mac. Only share it if your licence allows that."
+    )
+}
+
+/// Lending a font: `confirm` (the native dialog) is asked with the prompt first, and only a yes reads the files.
+/// The page never gets font bytes any other way. Errors are plain sentences for the page to show.
+pub fn lend(family: &str, session: &str, askers: &[String], confirm: impl FnOnce(&str) -> bool) -> Result<Vec<LocalFont>, String> {
+    let family = family.trim();
+    if family.is_empty() || family.len() > 200 || session.len() > 200 {
+        return Err("That font name isn't valid.".into());
+    }
+    let asked = [family.to_string()];
+    if installed(&asked).is_empty() {
+        return Err("This Mac no longer has that font.".into());
+    }
+    let askers: Vec<String> = askers.iter().take(5).map(|a| a.chars().take(60).collect()).collect();
+    if !confirm(&lend_prompt(family, session, &askers)) {
+        return Err("You chose not to share it.".into());
+    }
+    let fonts = local_fonts(&asked);
+    if fonts.is_empty() {
+        return Err("That font is too large to share, or couldn't be read.".into());
+    }
+    Ok(fonts)
+}
+
 fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Vec<LocalFont> {
     let mut sent = BTreeSet::new();
     let mut total = 0u64;
@@ -137,6 +167,28 @@ mod tests {
         assert_eq!(installed(&asked), vec!["Helvetica Neue".to_string(), "HELVETICA NEUE".to_string()]);
         let many: Vec<String> = (0..MAX_FAMILIES + 10).map(|i| format!("No Such Family {i}")).collect();
         assert!(installed(&many).is_empty());
+    }
+
+    #[test]
+    fn a_font_is_read_only_after_the_dialog_says_yes() {
+        let askers = vec!["Lee".to_string()];
+        let mut shown = String::new();
+        let no = lend("Helvetica Neue", "Design review", &askers, |p| {
+            shown = p.to_string();
+            false
+        });
+        assert_eq!(no.unwrap_err(), "You chose not to share it.");
+        assert!(shown.contains("Helvetica Neue") && shown.contains("Design review") && shown.contains("Lee"), "{shown}");
+        let yes = lend("helvetica neue", "Design review", &askers, |_| true).unwrap();
+        assert!(!yes.is_empty() && !yes[0].data.is_empty());
+    }
+
+    #[test]
+    fn no_dialog_for_a_font_this_mac_lacks_or_a_bad_name() {
+        let never = |_: &str| -> bool { panic!("no dialog for this") };
+        assert!(lend("No Such Family 7f3a", "S", &[], never).is_err());
+        assert!(lend("  ", "S", &[], never).is_err());
+        assert!(lend(&"x".repeat(300), "S", &[], never).is_err());
     }
 
     #[test]

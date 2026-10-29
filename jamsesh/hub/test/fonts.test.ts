@@ -9,7 +9,7 @@ import { forbiddenCommand } from "../src/canvas/canvas";
 import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, MAX_FACE, MAX_FACES, normalizeFamily } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
-import { startHttp } from "../src/http";
+import { FONT_BODY_MAX, startHttp } from "../src/http";
 import type { Agent } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -423,4 +423,14 @@ test("an agent can't push a font into the canvas through its tools either", () =
   expect(forbiddenCommand("batch", { commands: [{ command: "node.create" }, { command: "text.loadFont", params: { data: "AAAA" } }] })).toBe("text.loadFont");
   expect(forbiddenCommand("run_command", { command: "text.missingFonts" })).toBeNull();
   expect(forbiddenCommand("run_command", { command: "text.set" })).toBeNull();
+});
+
+test("over HTTP: a lend body over the cap is refused before it is parsed, with or without a length header", async () => {
+  await post("want", leesLaptop, { families: ["Gotham Cap"] }).catch(() => {});
+  const huge = "A".repeat(FONT_BODY_MAX + 1024);
+  const body = JSON.stringify({ family: "Gotham Cap", files: [huge] });
+  const sized = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: as(danasMac), body });
+  expect(sized.status).toBe(413);
+  const chunked = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: as(danasMac), body: new ReadableStream({ start(c) { const bytes = new TextEncoder().encode(body); for (let i = 0; i < bytes.length; i += 1 << 20) c.enqueue(bytes.subarray(i, i + (1 << 20))); c.close(); } }), duplex: "half" } as any);
+  expect([413, 431]).toContain(chunked.status); // Bun may answer a refused chunked upload itself
 });

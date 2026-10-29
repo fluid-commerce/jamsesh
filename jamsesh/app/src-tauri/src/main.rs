@@ -836,6 +836,23 @@ async fn local_fonts(families: Vec<String>) -> Vec<fonts::LocalFont> {
     tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
 }
 
+/// Lends a font to the session: a native dialog names the font, the session and who is waiting, and only
+/// "I'm allowed to share it" reads the files (fonts.rs `lend`); the page gets bytes no other way.
+#[tauri::command]
+async fn lend_font(app: AppHandle, family: String, session: String, askers: Vec<String>) -> Result<Vec<fonts::LocalFont>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fonts::lend(&family, &session, &askers, |text| {
+            app.dialog()
+                .message(text)
+                .title("Share a font")
+                .buttons(MessageDialogButtons::OkCancelCustom("I'm allowed to share it".into(), "Don't share".into()))
+                .blocking_show()
+        })
+    })
+    .await
+    .map_err(|_| "Couldn't share the font.".to_string())?
+}
+
 /// Which of `families` are installed on this Mac (names only; no font is read). The page offers
 /// to lend a font only if its Mac has it (fonts.rs).
 #[tauri::command]
@@ -888,6 +905,7 @@ fn main() {
             toggle_userless,
             local_fonts,
             has_fonts,
+            lend_font,
             heartbeat,
             screens::screens_state,
             screens::screens_preview,
