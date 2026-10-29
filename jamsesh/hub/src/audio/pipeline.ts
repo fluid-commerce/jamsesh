@@ -64,6 +64,12 @@ interface Group {
   forgotten?: boolean;
   /** Copies that said other words than the rest of their group: named by voice only, and never taught from. */
   split?: boolean;
+  /**
+   * Copies that arrived after their line's own group was let go: this group stands for that line from then on
+   * (utteranceId is the line's), so later copies join it too. The line's earlier copies are gone, so its speaker
+   * and wording stay as they are; copies only add their devices.
+   */
+  adopted?: boolean;
 }
 
 /** Who corrected a line: the host's own window, or a person's window (null: neither, e.g. the brain). */
@@ -134,7 +140,7 @@ export class AudioPipeline {
   private candidates = new Map<string, Heard[][]>();
   voiceprints: Voiceprints;
   /** People reading the join sentence right now: what the room's laptops hear of it is not conversation. */
-  private enrolling = new Map<string, { since: number; until: number; read: string; open: boolean }>();
+  private enrolling = new Map<string, { since: number; until: number; read: string; open: boolean; seq: number }>();
   /** How lines have been labelled since the host started (a host that never uses the voice should say so). */
   stats = { lines: 0, voice: 0, someone: 0 };
   /** Called with each new or updated room line. */
@@ -424,14 +430,29 @@ export class AudioPipeline {
     bus.send({ type: "utterance", utterance: u });
   }
 
+  /** Adds copies' devices to a line, keeping the ones it already lists. */
+  private addDevices(u: Utterance, segs: Segment[]) {
+    const known = new Set(u.devices.map((d) => d.deviceId));
+    const added = segs.filter((x) => !known.has(x.deviceId)).map((x) => ({ deviceId: x.deviceId, level: round(x.levelDb), snr: round(x.snr) }));
+    if (!added.length) return;
+    const next: Utterance = { ...u, devices: [...u.devices, ...added] };
+    this.session.store.put("utterances", next);
+    this.onLine?.(next, false);
+    bus.send({ type: "utterance", utterance: next });
+  }
+
   /**
    * A person starts reading the join sentence. Returns the read's id: its end and its recording name it, and
    * only the person's latest read is open, so an earlier read's late end or upload can't touch a newer one.
    */
-  beginEnrolment(personId: string): string {
+  beginEnrolment(personId: string, seq = 0): string | null {
     const now = Date.now();
+    // `seq`: the order the page began its reads in. A start that reaches the host after a later-begun read's
+    // start (requests overtaking each other) is refused: it can't replace the newer read.
+    const cur = this.enrolling.get(personId);
+    if (cur && cur.seq > seq && now <= cur.until) return null;
     const read = newId("read");
-    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS, read, open: true });
+    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS, read, open: true, seq });
     return read;
   }
 
@@ -494,15 +515,11 @@ export class AudioPipeline {
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
     // Its group is gone (a copy flushed late): the same words from another laptop then, so it isn't shown twice. It
     // still joins that line: its devices are added (the line's other copies are gone, so its speaker stands).
+    // g then stands for that line (adopted), so a still later copy finds it and joins too.
     if (!home) {
-      const known = new Set(twin.devices.map((d) => d.deviceId));
-      const added = g.segments.filter((x) => !known.has(x.deviceId)).map((x) => ({ deviceId: x.deviceId, level: round(x.levelDb), snr: round(x.snr) }));
-      if (added.length) {
-        const next: Utterance = { ...twin, devices: [...twin.devices, ...added] };
-        this.session.store.put("utterances", next);
-        this.onLine?.(next, false);
-        bus.send({ type: "utterance", utterance: next });
-      }
+      g.utteranceId = twin.id;
+      g.adopted = true;
+      this.addDevices(twin, g.segments);
       return true;
     }
     // The copies become late copies of that line, decided by its own queue; anything still sent to g follows them.
@@ -601,6 +618,7 @@ export class AudioPipeline {
     // Read the line again after the wait: someone may have corrected the speaker meanwhile, and a
     // correction always wins over a late copy.
     const fresh = this.session.store.get("utterances", u.id) ?? u;
+    if (g.adopted) return this.addDevices(fresh, g.segments);
     const manual = fresh.method === "manual";
     const person = manual ? this.session.person(fresh.personId) : this.session.person(guess.personId);
     const next: Utterance = {

@@ -320,3 +320,33 @@ test("a copy flushed so late its line's group is gone still joins that line (its
   expect(r.lines()[0]).toMatchObject({ id: first.id, personId: first.personId, text: first.text });
   expect(copies(r)).toEqual(["lap-a", "lap-b"]);
 });
+
+test("after a pruned line takes a late copy, still later copies join it too: one after another, or while that copy is still being heard", async () => {
+  for (const mode of ["sequential", "queued", "apart"] as const) {
+    const r = room(["lap-a", "lap-b", "lap-c"]);
+    const t0 = t();
+    await r.hear("lap-a", t0, mix(52, [A(3), 1]), "Put the pricing page up.");
+    await r.pipeline.flush();
+    const first = r.lines()[0];
+    (r.pipeline as any).finalized = [];
+    if (mode === "queued") {
+      await r.hear("lap-b", t0 + 200, mix(53, [A(3), 0.7]), "Put the pricing page up.");
+      const release = r.hold();
+      const flushed = r.pipeline.flush();
+      await Bun.sleep(10);
+      const arriving = r.hear("lap-c", t0 + 200, mix(54, [A(3), 0.6]), "Put the pricing page up.");
+      await Bun.sleep(20);
+      release();
+      await Promise.all([flushed, arriving]);
+    } else {
+      await r.hear("lap-b", t0 + 200, mix(53, [A(3), 0.7]), "Put the pricing page up.");
+      await r.pipeline.flush();
+      // "apart": too far in time from lap-b's copy to group with it, still within a line's twin window.
+      await r.hear("lap-c", mode === "apart" ? t0 + 1400 : t0 + 200, mix(54, [A(3), 0.6]), "Put the pricing page up.");
+    }
+    await r.pipeline.flush();
+    expect([mode, r.lines().length]).toEqual([mode, 1]);
+    expect(r.lines()[0]).toMatchObject({ id: first.id, personId: first.personId, speakerName: first.speakerName, text: first.text, deviceId: first.deviceId });
+    expect([mode, copies(r)]).toEqual([mode, ["lap-a", "lap-b", "lap-c"]]);
+  }
+});
