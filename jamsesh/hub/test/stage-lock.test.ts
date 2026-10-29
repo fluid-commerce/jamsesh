@@ -97,14 +97,18 @@ test("a locked screen doesn't revert to the board on the timer; unlocking starts
   }
 });
 
-test("a lock lets go when its owner leaves or goes 20 minutes untouched", () => {
+test("a lock stays while its owner is here however long, and lets go when they leave", () => {
   const { s, chey, felipe } = room();
   const a = artifact(s, "Checkout");
   const cast = (p: { id: string; name: string }) => s.setStage({ mode: "spotlight", items: [a.id] }, p.name, "main", { person: p });
   cast(chey);
-  s.store.setSetting("stage", { ...s.stage(), lock: { ...s.stage().lock!, lastActive: Date.now() - 21 * 60_000 } });
+  s.store.setSetting("stage", { ...s.stage(), lock: { ...s.stage().lock!, since: Date.now() - 90 * 60_000, lastActive: Date.now() - 90 * 60_000 } });
+  expect(s.lockOf()?.by).toBe("Chey");
+  // A lock with no person behind it still lets go when untouched for 20 minutes.
+  s.store.setSetting("stage", { ...s.stage(), lock: { by: "Host", personId: null, since: Date.now() - 30 * 60_000, lastActive: Date.now() - 21 * 60_000 } });
   expect(s.lockOf()).toBeNull();
   expect(s.stage().lock).toBeUndefined();
+  cast(chey);
   // Owner removed from the room.
   cast(felipe);
   s.removePerson(felipe.id);
@@ -458,4 +462,42 @@ test("the person at the host keeps their lock while the host's window is connect
   expect(s.lockOf()?.by).toBe("Chey");
   s.deviceOnline = () => false;
   expect(s.lockOf()).toBeNull();
+});
+
+test("the people-only stage routes refuse an agent, a caller that isn't the host's window, and repeats", async () => {
+  const { hub, s, chey, felipe, reg } = room();
+  const server = startHttp(hub, 0);
+  try {
+    const a = artifact(s, "Checkout");
+    const agent = reg("Felipe");
+    const cred = hub.auth.issue({ kind: "agent", label: "Agents", ip: "127.0.0.1", ownerDeviceId: "host" });
+    const win = () => `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}`;
+    const post = (path: string, body: any, headers: Record<string, string>) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+    const item = s.queueReady({ screen: "main", agentId: agent.id, agentName: agent.name, label: "Build", stage: { mode: "spotlight", items: [a.id] } });
+    s.onShowRequest = () => {};
+    age(s, 6 * 60_000);
+    const req = s.askOwner(item)!;
+    const hist = s.stageHistory().main[0];
+    const calls: [string, any][] = [["/stage", { mode: "agents" }], ["/stage/unlock", {}], ["/stage/restore", { id: hist.id }], [`/stage/ready/${item.id}`, { action: "show" }], [`/show-requests/${req.id}`, { approve: true }]];
+    for (const [path, body] of calls) {
+      // An agent's credential, with or without a person's name in the body.
+      expect((await post(path, { ...body, personId: chey.id }, { authorization: `Bearer ${cred.token}` })).status).toBe(403);
+      // Another process on the host with no window key.
+      expect((await post(path, { ...body, personId: chey.id }, {})).status).toBe(403);
+    }
+    expect(s.stage().mode).toBe("spotlight");
+    expect(s.stage().lock?.by).toBe("Chey");
+    expect(s.readyToShow()).toHaveLength(1);
+    expect(s.showRequests()[0].status).toBe("pending");
+    // The host's window can answer; a repeat, a vanished item and an unknown id are clean refusals.
+    expect((await post(`/show-requests/${req.id}`, { approve: false, personId: chey.id }, { cookie: win() })).status).toBe(200);
+    expect((await post(`/show-requests/${req.id}`, { approve: true, personId: chey.id }, { cookie: win() })).status).toBe(404);
+    expect((await post(`/stage/ready/${item.id}`, { action: "show", personId: felipe.id }, { cookie: win() })).status).toBe(200);
+    expect((await post(`/stage/ready/${item.id}`, { action: "show", personId: felipe.id }, { cookie: win() })).status).toBe(404);
+    expect((await post("/stage/restore", { id: "his-nope", personId: felipe.id }, { cookie: win() })).status).toBe(404);
+    expect((await post("/stage", {}, { cookie: win() })).status).toBe(400);
+  } finally {
+    server.stop(true);
+  }
 });

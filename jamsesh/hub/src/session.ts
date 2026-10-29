@@ -1385,7 +1385,7 @@ export class Session {
 
   /** A lock this old makes an agent's request ask its owner instead of just waiting. */
   static LOCK_ASK_MS = 5 * 60_000;
-  /** A lock nobody has touched for this long lets go by itself. */
+  /** A lock held by no one in particular lets go after this long untouched. A person's lock stays while they're here. */
   static LOCK_IDLE_MS = 20 * 60_000;
   /** Gone from the room: no window of theirs has checked in for this long. */
   static LOCK_GONE_MS = 10 * 60_000;
@@ -1405,8 +1405,8 @@ export class Session {
 
   private lockLapsed(lock: StageLock) {
     const now = Date.now();
-    if (now - lock.lastActive >= Session.LOCK_IDLE_MS) return true;
-    if (!lock.personId) return false;
+    // Someone with no person to watch (the host before anyone picked who they are) can't be seen to leave: only quiet lets go.
+    if (!lock.personId) return now - lock.lastActive >= Session.LOCK_IDLE_MS;
     if (!this.person(lock.personId)) return true;
     // The person at the host also has the host's own window, which carries no person of its own.
     const atHost = lock.personId === this.store.setting<string>("hostPersonId", "");

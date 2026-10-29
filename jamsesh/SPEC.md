@@ -1184,8 +1184,10 @@ history strip brings the earlier one back. A restore from the strip is the excep
 off (409) while someone else holds the screen. Housekeeping (a share ending, a timer) is never held
 back. Brain stages are not locked.
 
-A lock lets go when its owner unlocks, is removed, has no window checking in for 10 minutes, or
-nobody has touched the screen for 20 minutes (a 30-second sweep applies it).
+A person's lock stays until they unlock it, however long they talk through it. It also lets go when
+its owner is removed or has no live window for 10 minutes (a 30-second sweep applies it). A lock held
+by no one in particular (the host before anyone picked who they are) lets go after 20 minutes
+untouched. An agent's only way in is the 5-minute question below.
 
 **Ready to show.** An agent's held-back item waits as "ready to show" (at most 12, an hour), in a
 small queue on the stage that the host and people open to **Show** or **Dismiss** an item. A person
