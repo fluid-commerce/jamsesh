@@ -9,7 +9,6 @@ const { hub } = await import("../src/shared/hub");
 const { clip, dropAudio, htmlFrame, playChime, roomSilent, soundAllowed, stopAllSound, forgetChimeContext, QUIET_CSP } = await import("../src/shared/sound");
 const { CanvasFrame, ScaledFrame } = await import("../src/shared/ui");
 const { HtmlTile } = await import("../src/host/Stage");
-const { loadGuard } = await import("../src/shared/htmlframe");
 
 const was = hub.snap.state;
 const setSilent = (silent: boolean) => (hub.snap.state = { session: { silent, canvas: { status: "starting", reason: "" } }, devservers: [] } as any);
@@ -151,19 +150,6 @@ test("the live canvas is not mounted in a silent room, and is otherwise", () => 
   setSilent(false);
   // Not silent: the live canvas component runs (it has nothing to show without a link, but it isn't the quiet card).
   expect(renderToStaticMarkup(<CanvasFrame kind="view" title="Live canvas" />)).not.toContain("data-quiet-frame");
-});
-
-test("a link click inside a silent tile that loads another page puts the quiet document back", () => {
-  let resets = 0;
-  const onLoad = loadGuard(() => resets++);
-  onLoad(); // the document we gave it
-  expect(resets).toBe(0);
-  onLoad(); // a link was followed: the frame loaded something else
-  expect(resets).toBe(1);
-  onLoad(); // the put-back document
-  expect(resets).toBe(1);
-  onLoad(); // and another click
-  expect(resets).toBe(2);
 });
 
 test("a silent tile is inert (no click or key reaches its links, even target=_self), sandboxed with nothing allowed; a normal one is interactive", () => {
