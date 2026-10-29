@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
-import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { CONNECT_TIMEOUT_MS, JoinWatch, START_TIMEOUT_MS, friendlyReason, joinLabel, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
@@ -708,6 +708,16 @@ export function openTasksFor(state: HubState, agentId: string) {
     .sort((x, y) => x.ts - y.ts);
 }
 
+/**
+ * The open tasks a tile has room for (`max`): any offered for reassignment first, so its Reassign
+ * button is always on screen, then the oldest. All offered tasks show even past `max`.
+ */
+export function tasksToShow(tasks: Directive[], agentId: string, max: number) {
+  const offered = tasks.filter((d) => d.reassignOfferedAt?.[agentId]);
+  const rest = tasks.filter((d) => !d.reassignOfferedAt?.[agentId]);
+  return [...offered, ...rest].slice(0, Math.max(max, offered.length));
+}
+
 /** Moves this agent's stalled task to someone else; the other targets of the same task keep it. */
 export function reassignTask(directiveId: string, agentId: string) {
   return api(`/directives/${directiveId}/reassign`, { personId: readPref("personId"), agentId });
@@ -743,6 +753,7 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
   const ws = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "active");
   const paused = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "paused");
   const tasks = agent.role === "observer" ? [] : openTasksFor(state, agent.id);
+  const shown = tasksToShow(tasks, agent.id, compact ? 1 : 3);
   const repo = agent.repo.split(/[/:]/).pop()?.replace(/\.git$/, "");
   const owner = state.people.find((p) => p.id === agent.ownerId);
   const where = agent.role === "observer" ? "observer" : `${agent.platform} · ${repo}`;
@@ -766,14 +777,14 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
         </div>
         {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
         {paused.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--warn)", marginTop: 2 }}>Paused while offline: {paused.map((w) => w.title).join(", ")}</div>}
-        {tasks.slice(0, compact ? 1 : 3).map((d) => (
+        {shown.map((d) => (
           <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt?.[agent.id] ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
             <span className="chip mono" style={{ flex: "none" }}>{ago(d.ts, now)}</span>
             <span className="ellipsis grow">{d.progress?.[agent.id] === "acked" ? "On it" : "Not picked up"}: {stripMd(d.text)}</span>
             {d.reassignOfferedAt?.[agent.id] && <ReassignButton directiveId={d.id} agentId={agent.id} />}
           </div>
         ))}
-        {tasks.length > (compact ? 1 : 3) && <div style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>and {tasks.length - (compact ? 1 : 3)} more open</div>}
+        {tasks.length > shown.length && <div style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>and {tasks.length - shown.length} more open</div>}
       </div>
     </div>
   );

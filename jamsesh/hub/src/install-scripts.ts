@@ -271,18 +271,25 @@ If the command fails because the host is unreachable, say so; don't retry in a l
 `;
 }
 
+/** A value as one single-quoted shell word: nothing in it is expanded or run. */
+export const shellWord = (v: string) => `'${v.replace(/'/g, `'\\''`)}'`;
+
 export function joinScript(hub: Hub, origin?: string, token = "") {
   const HUB = origin ?? hub.session.hubUrl;
   return `#!/usr/bin/env bash
-# JamSesh: set up this computer's agents for the host at ${HUB} (run by the agent after pairing).
+# JamSesh: set up this computer's agents for a JamSesh host (run by the agent after pairing).
 set -euo pipefail
 # Everything runs inside main, read in full before it starts: piped into bash, a command that
 # reads standard input (claude mcp does) would otherwise swallow the rest of this script.
 main() {
-HUB="${HUB}"
-TOKEN="${token}"
+HUB=${shellWord(HUB)}
+TOKEN=${shellWord(token)}
 DIR="$HOME/.jamsesh"
-mkdir -p "$DIR"
+# JamSesh's folder holds credentials: only this person can open it, however it was made before.
+mkdir -p "$DIR" && chmod 700 "$DIR"
+# Replaces a credential file in one step with a private one (mode 600), from standard input: an
+# existing file is never written in place, so a looser mode it had never carries over.
+private() { local t="$1.jamsesh-tmp.$$"; (umask 077 && cat > "$t") && chmod 600 "$t" && mv -f "$t" "$1"; }
 ok() { printf '  ok  %s\\n' "$*"; }
 skip() { printf '  --  %s\\n' "$*"; }
 # Through the JamSesh app on this computer (127.0.0.1) the app adds the credentials.
@@ -292,9 +299,7 @@ case "$HUB" in http://127.0.0.1:*) ;; *) [ -n "$TOKEN" ] || { echo "Missing toke
 command -v perl >/dev/null 2>&1 || { echo "JamSesh setup needs perl, which this computer doesn't have." >&2; exit 1; }
 # The credential goes in files (mode 600) that curl and Claude Code read, never in a command's
 # arguments, which any process on this computer can list. Empty: the JamSesh app's relay adds it.
-umask 077
-printf 'authorization: Bearer %s\\n' "$TOKEN" > "$DIR/auth.header"
-umask 022
+printf 'authorization: Bearer %s\\n' "$TOKEN" | private "$DIR/auth.header"
 AUTH=(-H "@$DIR/auth.header")
 # A value as one single-quoted shell word, so sourcing client.env (the jamsesh command does) runs
 # nothing in it; the hook reads it as data.
@@ -307,14 +312,12 @@ NAME="$(curl -fsS --max-time 5 "\${AUTH[@]}" "$HUB/api/me" 2>/dev/null | perl -M
 [ -n "$NAME" ] || NAME="\${JAMSESH_NAME:-}"
 if [ -z "$NAME" ] && [ -f "$DIR/client.env" ]; then NAME="$(conf JAMSESH_NAME)"; fi
 
-umask 077
 {
   printf 'JAMSESH_HUB=%s\\n' "$(q "$HUB")"
   printf 'JAMSESH_TOKEN=%s\\n' "$(q "$TOKEN")"
   printf 'JAMSESH_NAME=%s\\n' "$(q "$NAME")"
   echo 'JAMSESH_ACTIVE=1'
-} > "$DIR/client.env"
-umask 022
+} | private "$DIR/client.env"
 curl -fsS "\${AUTH[@]}" "$HUB/hook.sh" -o "$DIR/hook.sh" && chmod +x "$DIR/hook.sh"
 
 # Agent CLIs often aren't on PATH: the Claude desktop app keeps its own copy of Claude Code, and nvm
@@ -349,10 +352,8 @@ if [ -n "$CLAUDE" ]; then
   # neither its arguments nor its config. Without a token the app's relay adds it.
   helper=""
   if [ -n "$TOKEN" ]; then
-    umask 077
-    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' > "$DIR/mcp-headers.json"
-    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$DIR/mcp-headers.json")" > "$DIR/mcp-headers.sh"
-    umask 022
+    printf '%s' "$TOKEN" | perl -MJSON::PP -0777 -ne 'print encode_json({ authorization => "Bearer $_" })' | private "$DIR/mcp-headers.json"
+    printf '#!/bin/sh\\nexec cat %s\\n' "$(q "$DIR/mcp-headers.json")" | private "$DIR/mcp-headers.sh"
     chmod 700 "$DIR/mcp-headers.sh"
     helper="$DIR/mcp-headers.sh"
   fi
@@ -376,8 +377,14 @@ Join the JamSesh room session and work as part of it.
 CMD
   # A settings file that doesn't parse is left exactly as it is, never replaced with an empty one.
   perl - "$DIR/hook.sh" "$HOME/.claude/settings.json" <<'PL'
-use strict; use warnings; use JSON::PP;
+use strict; use warnings; use JSON::PP; use Cwd qw(abs_path);
 my ($hook, $path) = @ARGV;
+# A symlinked settings file is edited at its target, and keeps its mode (it may hold secrets).
+$path = abs_path($path) // $path if -l $path;
+my $mode = -e $path ? (stat $path)[2] & 07777 : 0600;
+# The hook's path as one shell word: a home folder with spaces still runs it.
+(my $cmd = $hook) =~ s/'/'\\\\''/g;
+$cmd = "'$cmd'";
 my $data = {};
 if (-e $path) {
   open(my $in, '<', $path) or die "JamSesh: can't read $path: $!\\n";
@@ -399,13 +406,15 @@ if (ref $hooks->{SessionStart} eq 'ARRAY') {
 for my $pair (['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 'stop']) {
   my ($event, $arg) = @$pair;
   my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
-  push @kept, { hooks => [{ type => 'command', command => "$hook $arg", timeout => 15 }] };
+  push @kept, { hooks => [{ type => 'command', command => "$cmd $arg", timeout => 15 }] };
   # An idle agent is woken by a background listener that holds until the room has something for it.
-  push @kept, { hooks => [{ type => 'command', command => "$hook listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
+  push @kept, { hooks => [{ type => 'command', command => "$cmd listen", timeout => 3300, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
   $hooks->{$event} = \\@kept;
 }
 my $tmp = "$path.jamsesh-tmp";
+umask 077;
 open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";
+chmod $mode, $tmp;
 print $out JSON::PP->new->pretty->canonical->encode($data);
 close $out or die "JamSesh: can't write $tmp: $!\\n";
 rename $tmp, $path or die "JamSesh: can't replace $path: $!\\n";
@@ -431,9 +440,27 @@ if (-e $path) {
   $text = do { local $/; <$in> };
   close $in;
 }
-$text =~ s/\\n?\\[mcp_servers\\.jamsesh(\\.[a-z_]+)?\\][^\\[]*/\\n/g;
+# Takes out JamSesh's own tables ([mcp_servers.jamsesh] and its subtables) by their header lines, so
+# a "[" inside a value (an IPv6 address, a comment) or a multi-line string never ends a table early.
+my ($kept, $ours, $long) = ('', 0, '');
+for my $line (split /(?<=\\n)/, $text) {
+  if (!$long && $line =~ /^\\s*\\[\\[?\\s*([^\\]\\[#]+?)\\s*\\]\\]?\\s*(?:#.*)?\\r?\\n?\\z/) {
+    (my $name = $1) =~ s/\\s*\\.\\s*/./g;
+    $name =~ s/"([^"]*)"/$1/g;
+    $ours = $name =~ /^mcp_servers\\.jamsesh(\\.|\\z)/ ? 1 : 0;
+  }
+  $kept .= $line unless $ours;
+  # Inside a multi-line string nothing is a header: count the quote triples that open and close one.
+  for my $q ('"' x 3, "'" x 3) {
+    my $n = () = $line =~ /\\Q$q\\E/g;
+    $long = $long eq $q ? '' : $q if $n % 2 && (!$long || $long eq $q);
+  }
+}
+$text = $kept;
 $text =~ s/\\s+\\z//;
-$text .= "\\n\\n[mcp_servers.jamsesh]\\nurl = \\"$hub/mcp\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $token\\"\\n";
+(my $url = "$hub/mcp") =~ s/(["\\\\])/\\\\$1/g;
+(my $tok = $token) =~ s/(["\\\\])/\\\\$1/g;
+$text .= ($text eq '' ? '' : "\\n\\n") . "[mcp_servers.jamsesh]\\nurl = \\"$url\\"\\ntool_timeout_sec = 600\\ndefault_tools_approval_mode = \\"approve\\"\\n\\n[mcp_servers.jamsesh.http_headers]\\nauthorization = \\"Bearer $tok\\"\\n";
 my $tmp = "$path.jamsesh-tmp";
 umask 077;
 open(my $out, '>', $tmp) or die "JamSesh: can't write $tmp: $!\\n";

@@ -495,6 +495,8 @@ export class McpEndpoint {
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
         this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
+        // Its device was disconnected while it waited: nothing more for it.
+        if (ctx.device && ctx.device !== "host" && !this.hub.auth.get(ctx.device)) throw new Error("This device was disconnected from the JamSesh session.");
         const out = this.inboxText(agent, true);
         const idle = out.startsWith("Nothing new.");
         s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });

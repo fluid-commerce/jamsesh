@@ -119,6 +119,14 @@ export class Hub {
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
     this.mcp = new McpEndpoint(this);
+    // A disconnected device's agents stop hearing the room now, not when their open wait ends: every
+    // wait of an agent on that machine wakes and checks its credential before handing anything over.
+    this.offRevoked = bus.on((m) => {
+      const id = (m as any).type === "revoked" ? ((m as any).deviceId as string | undefined) : undefined;
+      if (!id) return;
+      const machine = this.auth.machineOf(id);
+      for (const a of this.session.agents()) if (a.machine === machine || a.machine === id) this.session.wake(a.id);
+    });
     this.session.extraAddresses = () => {
       const st = this.net.status();
       return st.enabled && st.publicUrl && st.cert.state === "ok" ? [{ label: "Anywhere", url: st.publicUrl, reachable: st.reachable }] : [];
@@ -168,7 +176,10 @@ export class Hub {
     this.stop();
   }
 
+  private offRevoked: () => void;
+
   stop() {
+    this.offRevoked();
     this.awake.stop();
     this.autosave.stop();
     this.brain.stop();
@@ -615,7 +626,7 @@ export class Hub {
   }
 
   /** onListen with the delivery id of what it hands over (the hook route sends it as a header). */
-  async listen(body: any, ip: string, device?: string | null, maxMs = 200_000): Promise<{ text: string; delivery: string | null }> {
+  async listen(body: any, ip: string, device?: string | null, maxMs = 200_000, credentialLive: () => boolean = () => true): Promise<{ text: string; delivery: string | null }> {
     const none = { text: "", delivery: null };
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return none;
@@ -630,8 +641,8 @@ export class Hub {
     const until = Date.now() + maxMs;
     while (Date.now() < until) {
       await this.session.wait(agent.id, Math.min(30_000, until - Date.now()));
-      // Removed from the room while it waited: it never hears from the room again.
-      if (!this.session.agent(agent.id)) {
+      // Removed from the room, or its device disconnected, while it waited: it hears nothing more.
+      if (!this.session.agent(agent.id) || !credentialLive()) {
         if (this.listening.get(agent.id) === mine) this.listening.delete(agent.id);
         return none;
       }

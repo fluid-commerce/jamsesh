@@ -454,8 +454,9 @@ export class Session {
     // The owner, harness and folder are the caller's word, so they alone never hand over a record
     // that may still be live (an agent busy for a minute is still live).
     const now = Date.now();
-    // A chat is its own agent: one that names its chat resumes only that chat's record (or an older
-    // record from before chats were told apart), and a chat that doesn't never takes a named chat's.
+    // A chat is its own agent: one that names its chat resumes only that chat's record from the same
+    // machine (or an older record from before chats were told apart), and a chat that doesn't never
+    // takes a named chat's.
     const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
       // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
@@ -464,7 +465,9 @@ export class Session {
       (info.cwd && owner
         ? agents
             .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && now - a.lastSeen > 60_000)
-            .filter((a) => sameChat(a) || now - a.lastSeen > AGENT_OFFLINE_MS)
+            // Only a record from before chats had ids migrates this way: a named chat is never inherited
+            // by another chat, however long it has been quiet or wherever the newcomer joins from.
+            .filter((a) => !a.chatId)
             .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
@@ -738,9 +741,11 @@ export class Session {
       this.store.put("workstreams", { ...w, status: "paused", updatedAt: now });
       this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${owner.name} went offline; "${w.title}" is paused until it's back or someone takes it.`, workstreamId: w.id });
     }
-    for (const d of this.openDirectives()) {
-      if (d.mode !== "explore" && d.mode !== "implement") continue;
-      for (const t of d.targets) {
+    for (const open of this.openDirectives()) {
+      if (open.mode !== "explore" && open.mode !== "implement") continue;
+      for (const t of open.targets) {
+        // Fresh for each target: an earlier target's nudge or offer this tick is kept, not overwritten.
+        const d = this.store.get("directives", open.id) ?? open;
         const state = d.progress?.[t] ?? d.status;
         if (state === "done" || state === "cancelled") continue;
         const agent = agents.get(t);
@@ -897,12 +902,30 @@ export class Session {
     return d;
   }
 
+  /**
+   * A person ends a whole task (done or cancelled): every target still on it ends the same way, so no
+   * agent's inbox or tile keeps it open. A finished task never reopens.
+   */
+  endDirective(id: string, status: unknown): Directive | undefined {
+    const d = this.store.get("directives", id);
+    if (!d) return undefined;
+    if (status !== "done" && status !== "cancelled") return d;
+    if (d.status === "done" || d.status === "cancelled") return d;
+    const progress = { ...(d.progress ?? {}) };
+    for (const t of d.targets) if (progress[t] !== "done" && progress[t] !== "cancelled") progress[t] = status;
+    const out = this.setDirective(id, { progress, status });
+    for (const t of d.targets) this.wake(t);
+    return out;
+  }
+
   /** One agent's progress on a directive; the directive's status follows the slowest target. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
-    // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
-    if (d.status === "cancelled" || d.progress?.[agentId] === "cancelled") return d;
+    // Finished stays finished: a late ack or "done" doesn't reopen a task that is done or cancelled,
+    // for this agent or as a whole.
+    const over = (x: string | undefined) => x === "done" || x === "cancelled";
+    if (over(d.status) || over(d.progress?.[agentId])) return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
@@ -927,9 +950,16 @@ export class Session {
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const quiet = this.skipsBroadcasts(this.agent(agentId));
-    const messages = this.store
-      .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet)));
+    const forMe = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
+    // Read forward from the cursor, oldest first, and filter before counting: the next 50 messages for
+    // this agent, however many for others came in between. Nothing unread is ever passed over.
+    const messages: JamEvent[] = [];
+    for (let after = lastRead; messages.length < 50; ) {
+      const page = this.store.eventsAfter(after, ["message"], 200);
+      for (const e of page) if (forMe(e) && messages.length < 50) messages.push(e);
+      if (page.length < 200) break;
+      after = page[page.length - 1].id;
+    }
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");

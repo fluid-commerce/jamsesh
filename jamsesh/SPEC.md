@@ -258,7 +258,13 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   those): the pairing guide has the agent write it to `~/.jamsesh/auth.header` with its file tool,
   `curl` reads that file (`-H @~/.jamsesh/auth.header`), the setup script reaches `bash` through a pipe,
   Codex's config is written from the file, and Claude Code gets it from a `headersHelper` script that
-  reads `~/.jamsesh/mcp-headers.json`.
+  reads `~/.jamsesh/mcp-headers.json`. The setup makes `~/.jamsesh` mode 700 and replaces each
+  credential file in one step with a mode 600 one (so a looser old mode never carries over), keeps
+  `~/.claude/settings.json`'s own mode, quotes the hook path (homes with spaces work), and edits
+  Codex's `config.toml` by its table headers (a `[` inside a value or a multi-line string is not a
+  header). The address in the setup script comes from `X-Forwarded-Host` only when a relay or
+  tunnel on the host sent it and it is plainly a host and port; every value in the script is one
+  single-quoted shell word.
 - Each paired device has a kind: **browser** (a person's window, browser, or Mac app) or
   **agent**. Kinds decide what a device may approve (see [14](#14-security)).
 - The big screen shows a toast when a device pairs ("A laptop connected", "An agent connected").
@@ -320,7 +326,9 @@ its target, so the link stays a link. Nothing joins by itself: an agent joins wh
 which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`), and
 a Codex chat is its own MCP connection. The hooks ask the host whether the chat has joined
 (`POST /api/hooks/joined`, session id only) and do nothing, and send nothing, for a chat that hasn't;
-a second chat in the same folder is not the joined agent. When an agent joins, the feed shows
+a second chat in the same folder is not the joined agent. A chat resumes only its own record, from
+the same machine: a quiet or offline record is never inherited by a different chat id or another
+machine. Only a record from before chats had ids migrates to the chat that comes back. When an agent joins, the feed shows
 "Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
 which takes the agent out and, with `purge`, deletes the feed lines it caused.
 
@@ -578,6 +586,12 @@ prompts it; there is nothing else the host can do for it. The notice is not adde
 agent whose hooks have reached the hub in the last five minutes, since the hooks hand the items
 over themselves.
 
+**Messages are read in order from a per-agent cursor.** The inbox reads forward from the last
+message the agent was handed, keeps only those for it (to it, or to everyone), and hands over the
+next 50; messages to other agents in between never push an unread one out, and a burst of more
+than 50 arrives over successive calls without loss. When a device is disconnected, its agents'
+open listener and `jam_wait` end at once and check the credential before handing anything over.
+
 **Delivery is at least once, and never twice once acknowledged.** A hook's answer can be lost (a
 timeout, a dropped connection), so what the hooks and the listener hand over carries a delivery id
 (the `x-jam-delivery` header). `hook.sh` records the id under `~/.jamsesh/acks/<session>` once it has
@@ -611,7 +625,13 @@ ack it, report where it is, or say it's stuck. An answer starts the clock again.
 Reassign it from the agent's tile" (an event and a toast), and the tile shows a **Reassign**
 button. Reassigning (`POST /api/directives/<id>/reassign`, people only) cancels the task for its
 agent and sends it to the best-matching free worker (or the one named), saying who it came from.
-The hub checks every minute (`Session.tick`).
+The hub checks every minute (`Session.tick`), each target of a task on its own: two targets going
+quiet in the same minute each get one nudge and, later, one offer.
+
+A finished task stays finished: a late ack or report never reopens a directive that is done or
+cancelled, for one agent or as a whole. A person ending a whole task (`POST /api/directives/<id>`
+with `done` or `cancelled`) ends it for every target still on it. A product directive (anything but
+`answer` or `note`) whose targets are all observers is refused, since nobody would do it.
 
 A directive sent to an agent that's offline (or silent for 20 minutes) shows a notice that it gets
 the work when it's back. If an explore or implement directive is still untouched after 45 seconds
@@ -627,8 +647,9 @@ its person can do: type anything to it, or tell it to wait for the room.
 - **Repository, platform, focus.** `jam_repo_card` takes optional `repo`, `platform`, and `focus`;
   whenever they're sent the agent's tile follows, and a changed repository posts "<agent> moved
   to <repo>". Fields left out stay as they were.
-- **Open tasks** show on the tile with their age, oldest first ("35m Not picked up: ..." or "On it:
-  ..."), and the Reassign button once the room has been offered one (see above).
+- **Open tasks** show on the tile with their age ("35m Not picked up: ..." or "On it: ..."): any
+  offered for reassignment first, with its Reassign button (all of them, even past the tile's room),
+  then the oldest.
 - **Workstreams.** A workstream pauses when its owner goes offline (20 minutes quiet): the room sees
   "<agent> went offline; <workstream> is paused", the tile shows "Paused while offline", and anyone
   may take it. It is active again, with a line in the feed, when the owner comes back.

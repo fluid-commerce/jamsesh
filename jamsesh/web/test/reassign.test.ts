@@ -26,3 +26,16 @@ test("reassign posts to /api/directives/:id/reassign for the tile's agent, and a
     globalThis.fetch = realFetch;
   }
 });
+
+test("a tile shows every task offered for reassignment, even past the ones it has room for", async () => {
+  const { tasksToShow } = await import("../src/shared/ui");
+  const task = (id: string, offered = false) => ({ id, ts: Number(id.slice(2)), text: id, targets: ["a_1"], progress: { a_1: "acked" }, ...(offered ? { reassignOfferedAt: { a_1: 1 } } : {}) }) as any;
+  const four = [task("d_1"), task("d_2"), task("d_3"), task("d_4", true)];
+  expect(tasksToShow(four, "a_1", 3).map((d) => d.id)).toEqual(["d_4", "d_1", "d_2"]);
+  expect(tasksToShow(four, "a_1", 1).map((d) => d.id)).toEqual(["d_4"]);
+  // Two offers in a compact tile (room for one): both show.
+  const two = [task("d_1", true), task("d_2"), task("d_3", true)];
+  expect(tasksToShow(two, "a_1", 1).map((d) => d.id)).toEqual(["d_1", "d_3"]);
+  // An offer to another target of the same task doesn't count for this tile.
+  expect(tasksToShow([task("d_1"), { ...task("d_2"), reassignOfferedAt: { a_9: 1 } }], "a_1", 1).map((d) => d.id)).toEqual(["d_1"]);
+});
