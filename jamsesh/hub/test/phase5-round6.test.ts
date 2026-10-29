@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { voiceprintStatus } from "../src/audio/voiceprint";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
-import { encodeWav } from "../src/audio/wav";
+import { BadWav, decodeWav, encodeWav } from "../src/audio/wav";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r6-"));
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
@@ -199,5 +199,64 @@ test("over HTTP, a segment's epoch comes from the device, and one without counts
   } finally {
     hub.audio.ingest = ingest;
     await hub.audio.flush();
+  }
+});
+
+// ---- a WAV is read only once its structure is whole
+
+/** RIFF/WAVE around the given chunks, each [id, body]. */
+function riff(...chunks: [string, Uint8Array][]) {
+  const parts = chunks.map(([id, body]) => {
+    const c = new Uint8Array(8 + body.length + (body.length % 2));
+    c.set([...id].map((ch) => ch.charCodeAt(0)));
+    new DataView(c.buffer).setUint32(4, body.length, true);
+    c.set(body, 8);
+    return c;
+  });
+  const out = new Uint8Array(12 + parts.reduce((a, p) => a + p.length, 0));
+  out.set([..."RIFF"].map((ch) => ch.charCodeAt(0)));
+  new DataView(out.buffer).setUint32(4, out.length - 8, true);
+  out.set([..."WAVE"].map((ch) => ch.charCodeAt(0)), 8);
+  let at = 12;
+  for (const p of parts) (out.set(p, at), (at += p.length));
+  return out;
+}
+const fmt16 = encodeWav({ sampleRate: 16000, samples: new Float32Array(0) }).slice(20, 36);
+const pcm = (n: number) => new Uint8Array(n);
+
+test("a WAV with a missing, late, short or doubled fmt, a chunk past its end or a partial sample is refused as bad audio", () => {
+  const good = riff(["LIST", pcm(5)], ["fmt ", fmt16], ["data", pcm(3200)]);
+  expect(decodeWav(good).samples.length).toBe(1600);
+  const bad: [string, Uint8Array][] = [
+    ["not WAVE", (() => { const w = good.slice(); w.set([65, 86, 73, 32], 8); return w; })()],
+    ["no fmt", riff(["data", pcm(3200)])],
+    ["data first", riff(["data", pcm(3200)], ["fmt ", fmt16])],
+    ["short fmt", riff(["fmt ", fmt16.slice(0, 8)], ["data", pcm(3200)])],
+    ["fmt cut off", riff(["fmt ", fmt16]).slice(0, 28)],
+    ["two fmt", riff(["fmt ", fmt16], ["fmt ", fmt16], ["data", pcm(32)])],
+    ["data past the end", riff(["fmt ", fmt16], ["data", pcm(3200)]).slice(0, 1000)],
+    ["half a sample", riff(["fmt ", fmt16], ["data", pcm(3201)])],
+    ["only a header", new Uint8Array([..."RIFF"].map((c) => c.charCodeAt(0)))],
+  ];
+  for (const [what, w] of bad) {
+    let thrown: unknown;
+    try {
+      decodeWav(w);
+    } catch (e) {
+      thrown = e;
+    }
+    expect([what, thrown instanceof BadWav]).toEqual([what, true]);
+  }
+});
+
+test("over HTTP a malformed WAV is a 400 for a segment and for a read, never a 500", async () => {
+  const p = hub.session.upsertPerson({ name: "Wes" });
+  const wes = hub.auth.issue({ kind: "browser", label: "Wes's laptop", ip: "10.0.0.43" });
+  expect((await call(wes.token, "POST", "/devices", { deviceId: "d-wes", personId: p.id })).status).toBe(200);
+  const post = (path: string, body: Uint8Array) => fetch(`${base}/api${path}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${wes.token}` }, body: body as unknown as BodyInit });
+  const t0 = Date.now() - 5000;
+  for (const [i, w] of [riff(["fmt ", fmt16.slice(0, 4)], ["data", pcm(320)]), riff(["data", pcm(320)], ["fmt ", fmt16]), riff(["fmt ", fmt16]).slice(0, 26)].entries()) {
+    expect((await post(`/audio?deviceId=d-wes&t0=${t0 + i}&t1=${t0 + i + 1000}&epoch=0`, w)).status).toBe(400);
+    expect((await post(`/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}`, w)).status).toBe(400);
   }
 });
