@@ -3,6 +3,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
+import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
 import { voiceprintStatus, learningNote } from "./audio/voiceprint";
 import { describeError } from "./brain/llm";
@@ -28,7 +29,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|ready\/[\w-]+))?|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -508,11 +509,51 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/say" && req.method === "POST") {
-    if (!body?.text?.trim()) return bad("text is required");
     // Only people speak as people: agents post through MCP, and a window speaks as its own person.
     if (paired?.kind === "agent") return bad("Agents post with jam_update and jam_message, not as a person.", 403);
-    if (paired?.personId && body.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
-    return json(hub.typed(body.personId ?? null, body.text, !!body.direct));
+    if (paired?.personId && body?.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
+    let attached: AttachmentRef[] = [];
+    try {
+      attached = hub.attachments.refs(body?.attachments);
+    } catch (e) {
+      if (e instanceof AttachmentError) return bad(e.message, e.status);
+      throw e;
+    }
+    if (!body?.text?.trim() && !attached.length) return bad("text is required");
+    return json(hub.typed(body.personId ?? null, String(body.text ?? ""), !!body.direct, attached));
+  }
+
+  // An image, screenshot or file for a message: one per request, as form field 'file'. People add them; people and agents of the session fetch them.
+  if (path === "/attachments" && req.method === "POST") {
+    if (paired?.kind === "agent") return bad("Agents share files with jam_post_image, not message attachments.", 403);
+    if (Number(req.headers.get("content-length") ?? 0) > MAX_UPLOAD_BYTES) return bad("That file is too big.", 413);
+    const f = (body?.__form as FormData | undefined)?.get("file");
+    if (!(f instanceof Blob)) return bad("send the file as form field 'file'");
+    const who = s.person(paired?.personId ?? (isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : ""))?.name ?? "Someone";
+    try {
+      const rec = hub.attachments.save(new Uint8Array(await f.arrayBuffer()), (f as File).name, who);
+      return json(hub.attachments.ref(rec.id));
+    } catch (e) {
+      if (e instanceof AttachmentError) return bad(e.message, e.status);
+      throw e;
+    }
+  }
+  m = path.match(/^\/attachments\/([\w-]+)$/);
+  if (m && (req.method === "GET" || req.method === "HEAD")) {
+    const f = hub.attachments.file(m[1]);
+    if (!f) return bad("No such file.", 404);
+    const inline = f.rec.kind === "image" || f.rec.kind === "text";
+    // The type is the sniffed one, never sniffed again by the browser, and the file can't run anything.
+    return new Response(req.method === "HEAD" ? null : Bun.file(f.path), {
+      headers: {
+        "content-type": f.rec.kind === "text" ? "text/plain; charset=utf-8" : f.rec.type,
+        "content-length": String(f.rec.size),
+        "content-disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.rec.name)}`,
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        "cache-control": "private, max-age=31536000, immutable",
+      },
+    });
   }
 
   if (path === "/settings" && req.method === "POST") {

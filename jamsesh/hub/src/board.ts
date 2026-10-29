@@ -66,7 +66,8 @@ export interface TaskProposal {
 
 export interface ContextProposal {
   text: string;
-  kind: Fact["kind"];
+  kind?: Fact["kind"];
+  attachments?: TriageCard["attachments"];
   workstream?: string;
   by: string;
   origin?: TriageCard["origin"];
@@ -175,7 +176,7 @@ export class Board {
   proposeContext(p: ContextProposal): TriageCard | null {
     const text = clean(p.text);
     if (!text) return null;
-    const kind = KINDS.includes(p.kind) ? p.kind : "fact";
+    const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
     const active = this.s.store.all("facts").filter((f) => f.status === "active");
     // Already known, in other words: nothing for a person to decide.
     if (active.some((f) => f.kind === kind && sameSpecifics(f.text, text) && similar(f.text, text) > 0.55)) return null;
@@ -188,7 +189,7 @@ export class Board {
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "context", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode: "note", targets: [], kind, workstream: clean(p.workstream), conflictsWith: conflict?.id ?? null, sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode: "note", targets: [], kind, workstream: clean(p.workstream), conflictsWith: conflict?.id ?? null, ...(p.attachments?.length ? { attachments: p.attachments } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -216,7 +217,7 @@ export class Board {
   /** Something a person asked JamSesh to remember is saved at once: no card. Null when it's already known. */
   rememberNow(p: ContextProposal): Fact | null {
     const text = clean(p.text);
-    const kind = KINDS.includes(p.kind) ? p.kind : "fact";
+    const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
     if (!text || this.s.store.all("facts").some((f) => f.status === "active" && f.kind === kind && sameSpecifics(f.text, text) && similar(f.text, text) > 0.55)) return null;
     const now = Date.now();
     return this.s.store.put("facts", { id: newId("fact"), ts: now, updatedAt: now, kind, text, workstream: clean(p.workstream), by: p.by, status: "active", note: "", sourceEventIds: p.sourceEventIds ?? [] });

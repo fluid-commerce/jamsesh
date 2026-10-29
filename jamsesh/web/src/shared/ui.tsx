@@ -3,6 +3,7 @@ import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
+import { FeedAttachments } from "./attach";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { VersionBadge } from "./StageControls";
 import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
@@ -611,8 +612,9 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
           </span>
         )}
         {e.kind === "message" && <span className="tag" style={{ color: "var(--dim)", marginRight: 8 }}>to {e.data.toName}</span>}
-        {e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
+        {e.data.noWords ? null : e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
+        {e.kind === "speech" && Array.isArray(e.data.attachments) && <FeedAttachments list={e.data.attachments} />}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>

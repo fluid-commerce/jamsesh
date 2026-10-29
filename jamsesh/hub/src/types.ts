@@ -1,5 +1,17 @@
 // Shapes shared by the hub, the host view, and the client view.
 
+export type AttachmentKind = "image" | "pdf" | "text";
+
+/** A file or image added to a message; fetched from /api/attachments/<id>. */
+export interface AttachmentRef {
+  id: string;
+  name: string;
+  /** What the bytes are, from sniffing: image/png, application/pdf, text/plain... */
+  type: string;
+  kind: AttachmentKind;
+  size: number;
+}
+
 export interface Person {
   id: string;
   name: string;
@@ -74,6 +86,7 @@ export interface Workstream {
   status: "active" | "paused" | "done";
   brief: string;
   updatedAt: number;
+  carriedFrom?: CarriedFrom;
 }
 
 export type EventKind =
@@ -129,6 +142,8 @@ export interface Directive {
   nudgedAt?: Record<string, number>;
   /** When the room was offered a reassignment; the tile shows a Reassign button until the task moves. */
   reassignOfferedAt?: number;
+  /** Files and images that came with the request; agents fetch them from /api/attachments/<id>. */
+  attachments?: AttachmentRef[];
 }
 
 export type ArtifactKind = "frame" | "screenshot" | "devserver" | "html" | "note";
@@ -251,6 +266,13 @@ export interface Fact {
   status: "active" | "resolved" | "superseded";
   note: string;
   sourceEventIds: number[];
+  /** Set when the project's context carried this over from an earlier session (SPEC 12.7). */
+  carriedFrom?: CarriedFrom;
+}
+
+export interface CarriedFrom {
+  sessionId: string;
+  at: number;
 }
 
 /** One line the card came from: what was heard, who said it, and the transcript moment it links to. */
@@ -289,6 +311,8 @@ export interface TriageCard {
   conflictsWith: string | null;
   /** A card that only retires the saved fact it names (answered, or replaced by something not worded yet). */
   retire?: "superseded" | "resolved";
+  /** Files that came with it (a document sent with no request). */
+  attachments?: AttachmentRef[];
   sources: TriageSource[];
   /** How many times it was proposed: repeats join this card. */
   count: number;

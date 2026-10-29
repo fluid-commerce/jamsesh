@@ -19,6 +19,7 @@ import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
 import { TasksView, triageCount } from "../shared/Tasks";
+import { AttachButton, AttachTray, filesFrom, hasFiles, useAttachments } from "../shared/attach";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
@@ -539,17 +540,38 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState(true);
+  const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const files = useAttachments();
+  const canSend = (!!text.trim() || files.ids.length > 0) && !files.uploading && !busy;
   return (
     <form
-      className={`say ${phone ? "say-phone" : ""}`}
+      className={`say ${phone ? "say-phone" : ""} ${dragging ? "dragging" : ""}`}
+      onDragOver={(e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDragging(false)}
+      onDrop={(e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        setDragging(false);
+        files.add(filesFrom(e.dataTransfer));
+      }}
       onSubmit={async (e) => {
         e.preventDefault();
-        if (!text.trim()) return;
+        if (!canSend) return;
         setBusy(true);
-        await api("/say", { personId, text, direct: ask }).catch(() => {});
-        setText("");
+        const sent = await api("/say", { personId, text, direct: ask, attachments: files.ids }).then(
+          () => true,
+          () => false,
+        );
         setBusy(false);
+        // A send that failed keeps the words and the files, so nothing has to be added again.
+        if (!sent) return;
+        setText("");
+        files.clear();
         if (phone) input.current?.blur();
       }}
     >
@@ -571,7 +593,9 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
           </button>
         ))}
       </div>
+      <AttachTray items={files.items} onRemove={files.remove} />
       <div className="say-row">
+        <AttachButton onFiles={files.add} disabled={busy} />
         <input
           ref={input}
           className="grow"
@@ -581,12 +605,19 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
           autoComplete="off"
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            const pasted = filesFrom(e.clipboardData);
+            if (!pasted.length) return;
+            e.preventDefault();
+            files.add(pasted);
+          }}
           disabled={busy}
         />
-        <button className="btn primary small say-send" disabled={!text.trim() || busy} aria-label="Send">
+        <button className="btn primary small say-send" disabled={!canSend} aria-label="Send">
           {phone ? <SendIcon /> : "Send"}
         </button>
       </div>
+      {dragging && <div className="say-drop">Drop to attach</div>}
     </form>
   );
 }

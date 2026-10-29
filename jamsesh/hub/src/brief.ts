@@ -40,12 +40,15 @@ function oldLine(s: Session, label: string) {
   return m?.[1]?.trim() ?? "";
 }
 
+/** What an earlier session of the project handed on (SPEC 12.7), until this session's brief has its own. */
+const carriedParts = (s: Session) => s.store.setting<{ goal?: string; glossary?: { term: string; meaning: string }[] } | null>("carried", null);
+
 export function goalOf(s: Session): string {
-  return briefParts(s)?.goal?.trim() || oldLine(s, "GOAL") || "";
+  return briefParts(s)?.goal?.trim() || oldLine(s, "GOAL") || carriedParts(s)?.goal?.trim() || "";
 }
 
 export function glossaryOf(s: Session): { term: string; meaning: string }[] {
-  return briefParts(s)?.glossary ?? [];
+  return briefParts(s)?.glossary ?? carriedParts(s)?.glossary ?? [];
 }
 
 /** Whether the brief has anything beyond what the hub can read off its own state. */

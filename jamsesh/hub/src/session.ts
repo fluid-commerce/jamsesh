@@ -1,6 +1,7 @@
 // The session: people, devices, agents, workstreams, directives, artifacts and the
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
+import { MAX_PER_MESSAGE, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
@@ -802,7 +803,12 @@ export class Session {
     requestedBy: string;
     sourceEventIds?: number[];
     workstreamId?: string | null;
+    attachments?: AttachmentRef[];
   }): Directive {
+    // The files that came with the request ride along, so the agent can fetch what the room is looking at.
+    const files = new Map<string, AttachmentRef>();
+    for (const a of d.attachments ?? []) files.set(a.id, a);
+    for (const id of d.sourceEventIds ?? []) for (const a of (this.store.event(id)?.data.attachments ?? []) as AttachmentRef[]) files.set(a.id, a);
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") d = { ...d, targets: d.targets.filter((t) => this.agent(t)?.role !== "observer") };
     const directive: Directive = {
@@ -821,6 +827,7 @@ export class Session {
       result: "",
       deliveredAt: null,
       updatedAt: Date.now(),
+      ...(files.size ? { attachments: [...files.values()].slice(0, MAX_PER_MESSAGE) } : {}),
     };
     this.store.put("directives", directive);
     const names = d.targets.map((t) => this.agent(t)?.name).filter(Boolean);
