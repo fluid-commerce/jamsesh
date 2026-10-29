@@ -260,17 +260,42 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
   Codex's config is written from the file, and Claude Code gets it from a `headersHelper` script that
   reads `~/.jamsesh/mcp-headers.json`. The hook is downloaded to a temporary file and checked (a bash
   script that parses) before it replaces the installed one, so a failed download leaves the working
-  hook in place. `claude mcp` has no replace, so the old `jamsesh` entry is read first, removed, and put
-  back if the new one can't be added (its credential then also from the helper, never a command line).
+  hook in place. `claude mcp` has no replace, so the old `jamsesh` entry is read first, then removed
+  and the new one added.
   The setup makes `~/.jamsesh` mode 700 and replaces each
   credential file in one step with a mode 600 one (so a looser old mode never carries over), keeps
   `~/.claude/settings.json`'s own mode, quotes the hook path (homes with spaces work), and edits
   Codex's `config.toml` by its table headers (a `[` inside a value or a multi-line string is not a
   header; comments and one-line strings are skipped when looking for multi-line strings). Reinstalling
   removes only JamSesh's own hook commands (its `~/.jamsesh/hook.sh` with one of its verbs), keeping a
-  person's hooks even in the same group. Edited files are written through a new private temporary
-  file in the same folder (created exclusively, mode 600), then given the file's mode and moved into
-  place. The MCP server's instructions say to join only when the person asks, in the launcher skill's
+  person's hooks even in the same group.
+- **Every file the setup writes goes through one primitive, `safe_write`.** It resolves a symlink to
+  its target (one that leads nowhere too), so the link stays a link; refuses a target outside the
+  person's home, a folder in the file's place, and any instruction file (`CLAUDE.md`, `AGENTS.md`, by
+  name or by being the same file as `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`), however a link
+  points there; writes a new temporary file beside the target (`mktemp`, created exclusively, mode 600),
+  gives it its mode and moves it into place. Downloads and generated files go first to the run's private
+  saved folder and are checked there. The only other writes are that scratch folder, the lock file
+  (refused if it is a link) and the one key-level edit of `~/.claude.json` below.
+- **Setup is one transaction, kept as a journal**, and only one runs at a time: an `flock` on
+  `~/.jamsesh/setup.lock` held as descriptor 9 for the whole run (the kernel drops it however the run
+  ends; a second run waits `JAMSESH_LOCK_WAIT` seconds, default 10, then says another setup is
+  running). Before its first write to a file, `safe_write` records the file's earlier content (or that
+  it was absent) and, after each write, the hash of what it wrote. A file setup never wrote is never in
+  the journal, so a rollback never touches it. On any failure before the last step, each journaled
+  file is put back (or removed, if it was absent) only if it still holds exactly what setup wrote; one
+  someone else changed meanwhile is left as it is and listed. The lock keeps out another setup, not an
+  editor: the moment between the last hash check and the move can't be closed without an atomic
+  compare-and-swap, which plain file operations don't have.
+- **Claude Code's `~/.claude.json` is not a file setup owns.** Only its user-scope
+  `mcpServers.jamsesh` key is read, compared and put back, key by key: the rest of the file is carried
+  over as it is at that moment, and the replacement is retried if the file changed between reading and
+  replacing it. The result is read back from that key in the file, never from `claude mcp get` (whose
+  exit status an entry of the same name in another scope can satisfy). The entry is put back only if it
+  is absent or still the one setup registered; one set by someone else meanwhile is left and reported.
+  The saved entry never appears in a command's arguments. Whatever the outcome, the message says it
+  plainly: put back, none registered, changed by someone else, or couldn't be put back (the saved
+  copies are then kept, their folder named, and the setup exits non-zero). The MCP server's instructions say to join only when the person asks, in the launcher skill's
   words. The address in the setup script comes from `X-Forwarded-Host` only when a relay or
   tunnel on the host sent it and it is plainly a host and port; every value in the script is one
   single-quoted shell word.
