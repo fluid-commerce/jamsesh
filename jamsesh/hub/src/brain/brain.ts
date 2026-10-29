@@ -342,7 +342,8 @@ export class Brain {
       const lock = s.lockOf(id);
       // A screen the sharer themself pinned or locked is theirs to share over, matched by a person id on both sides: a missing id is nobody.
       if (lock) return !!share.personId && lock.personId === share.personId;
-      if (!(st.pinned && st.by !== "Room brain" && st.by !== "JamSesh")) return true;
+      // A pin is a person's only if a person's id is recorded on it (empty: a person with no id of their own, so nobody else's share). The display label says nothing.
+      if (!st.pinned || st.pinnedById === undefined) return true;
       return !!share.personId && st.pinnedById === share.personId;
     };
     const target = ["main", ...s.screens().filter((x) => x.role === "extra").map((x) => x.id)].find(eligible);

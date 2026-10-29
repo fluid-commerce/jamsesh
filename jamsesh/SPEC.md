@@ -1320,7 +1320,8 @@ tile, in every view, takes pins (see [11.5](#115-annotations)) [A7c].
 People replace people's locks: another person's deliberate cast takes the lock over, and the
 history strip brings the earlier one back. A restore from the strip is the exception: it is held
 off (409) while someone else holds the screen. Housekeeping (a share ending, a timer) is never held
-back. Brain stages are not locked.
+back. A stage the brain puts up on its own is not locked; one it puts up because a person asked it directly is that
+person's cast and is locked to them like any other.
 
 A person's lock stays until they unlock it, however long they talk through it. **Unlock** is shown
 to the lock's owner and goes through one check in the hub, whoever asks: the owner's own window (by

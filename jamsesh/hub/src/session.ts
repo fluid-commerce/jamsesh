@@ -1303,12 +1303,17 @@ export class Session {
     // Nobody is still sharing after a restart.
     for (const sh of this.store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
     for (const id of Object.keys(this.priorStages())) this.atomically(() => this.releaseShareTiles(id));
-    // An ended share still on a screen with nothing saved to give back: nothing can be restored, so the screen stays as it is.
+    // An ended share still on a screen with nothing saved to give back: the earlier screen is lost, but the dead tile comes off
+    // (the other tiles stay; alone, the screen shows the board).
+    const dead = new Set<string>();
     for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) {
       const st = this.stage(screen);
       for (const t of st.mode === "layout" ? st.layout?.tiles ?? [] : [])
-        if (t.kind === "screen" && this.store.get("shares", t.shareId)?.status !== "live")
-          console.warn(`share ${t.shareId} ended but still shows on ${screen}, and no earlier screen was saved; left as it is`);
+        if (t.kind === "screen" && this.store.get("shares", t.shareId)?.status !== "live") dead.add(t.shareId);
+    }
+    for (const id of dead) {
+      console.warn(`share ${id} ended but still showed on a screen, and no earlier screen was saved; took its tile off`);
+      this.atomically(() => this.releaseShareTiles(id));
     }
   }
 
@@ -1625,7 +1630,7 @@ export class Session {
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     // Who pinned it, by identity (never by name): only a person with an id of their own is recorded.
-    if (stage.pinned && opts.person?.id) stage.pinnedById = opts.person.id;
+    if (stage.pinned && opts.person) stage.pinnedById = opts.person.id ?? "";
     else if (!stage.pinned || opts.person) delete stage.pinnedById;
     this.commitStage(stage, screen);
     opts.claim?.revs.set(screen, this.stageRev(screen));
@@ -1671,18 +1676,27 @@ export class Session {
     const revs = new Map(this.stageRevs);
     const shown = new Set(this.sharesShown);
     this.effects = [];
+    let out: T;
     try {
-      const out = this.store.atomic(fn);
-      const run = this.effects;
-      this.effects = null;
-      for (const f of run) f();
-      return out;
+      out = this.store.atomic(fn);
     } catch (e) {
+      // Nothing committed: the in-memory side goes back and no effect runs.
       this.effects = null;
       this.stageRevs = revs;
       this.sharesShown = shown;
       throw e;
     }
+    // Committed. An effect that throws is logged and never touches the committed state or the effects after it.
+    const run = this.effects;
+    this.effects = null;
+    for (const f of run) {
+      try {
+        f();
+      } catch (e) {
+        console.error("effect after a committed write failed:", e);
+      }
+    }
+    return out;
   }
 
   private commitStage(stage: Stage, screen: string) {
@@ -1754,7 +1768,8 @@ export class Session {
   private dropLock(screen: string) {
     const cur = this.stage(screen);
     if (!cur.lock) return;
-    const { lock: _drop, ...rest } = cur;
+    // The lock goes and so does the claim a person's pin had on the screen.
+    const { lock: _drop, pinnedById: _pin, ...rest } = cur;
     this.commitStage(rest, screen);
   }
 

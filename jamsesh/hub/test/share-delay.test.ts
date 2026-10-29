@@ -13,6 +13,13 @@ mock.module("ai", () => ({ ...ai, generateText: () => new Promise((_, no) => (re
 const llm = await import("../src/brain/llm");
 mock.module("../src/brain/llm", () => ({ ...llm, model: () => ({}) }));
 const { Hub } = await import("../src/hub");
+const { Session } = await import("../src/session");
+const { Store } = await import("../src/store");
+/** A restart: close the database and open the same file again. */
+function reopen(r: { s: any; dataDir: string }) {
+  r.s.store.db.close();
+  return new Session(new Store(r.dataDir));
+}
 
 const dir = mkdtempSync(join(tmpdir(), "jam-share-delay-"));
 const hubs: any[] = [];
@@ -22,7 +29,8 @@ afterAll(() => {
 });
 
 function room() {
-  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
+  const dataDir = join(dir, String(Math.random()));
+  const hub = new Hub({ canvas: false, whisper: false, dataDir });
   hubs.push(hub);
   const s = hub.session;
   const chey = s.upsertPerson({ name: "Chey" });
@@ -30,7 +38,7 @@ function room() {
   s.touchDevice("chey-mac", { label: "Chey's Mac", personId: chey.id, kind: "client" });
   s.touchDevice("felipe-laptop", { label: "Felipe's laptop", personId: felipe.id, kind: "client" });
   const a = s.upsertArtifact({ kind: "screenshot", stage: "built", title: "Pricing", image: "/renders/p.png" });
-  return { hub, s, chey, felipe, a };
+  return { hub, s, chey, felipe, a, dataDir };
 }
 
 test("a cast made while the presenter thinks wins: the late fallback neither replaces it nor brings back the old lock", async () => {
@@ -159,7 +167,7 @@ test("a share the presenter places on an extra screen gives that screen back wha
   r.s.reportScreen("main", info);
   r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
   r.s.setStage({ mode: "spotlight", items: [r.a.id], title: "Pricing" }, "Chey", "screen-2", { override: true });
-  r.s.setStage({ mode: "agents", pinned: true }, "Chey", "main", { override: true });
+  r.s.setStage({ mode: "agents", pinned: true }, "Chey", "main", { person: { id: r.chey.id, name: "Chey" }, noLock: true });
   const sh = r.s.startShare("felipe-laptop", "screen");
   await r.hub.brain.placeShare(sh);
   expect(r.s.stage("screen-2").mode).toBe("layout");
@@ -194,8 +202,7 @@ test("a restart with a live share still gives the screens back what the share hi
   await r.hub.brain.placeShare(sh);
   expect(r.s.stage().mode).toBe("layout");
   // A new session over the same store, as after a restart.
-  const { Session } = await import("../src/session");
-  const again = new Session(r.s.store);
+  const again = reopen(r);
   expect(again.store.get("shares", sh.id)?.status).toBe("ended");
   expect(again.stage().mode).toBe("spotlight");
   expect(again.stage().lock?.by).toBe("Felipe");
@@ -230,8 +237,7 @@ test("the presenter's set_layout is bound to the screen chosen for the share: an
   r.s.reportScreen("main", info);
   r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
   // Main is pinned by a person (no lock), so the share is bound for screen-2.
-  r.s.setStage({ mode: "agents", pinned: true }, "Chey", "main", { override: true });
-  r.s.store.setSetting("stage", { ...r.s.stage(), by: "Chey", pinned: true });
+  r.s.setStage({ mode: "agents", pinned: true }, "Chey", "main", { person: { id: r.chey.id, name: "Chey" }, noLock: true });
   const sh = r.s.startShare("felipe-laptop", "screen");
   await r.hub.brain.placeShare(sh);
   expect(r.s.stage().mode).toBe("agents");
@@ -247,8 +253,7 @@ test("an interrupted ending is finished at startup: an ended share whose snapsho
   await r.hub.brain.placeShare(sh);
   // The old ending's first write landed (status) and nothing after it.
   r.s.store.put("shares", { ...r.s.store.get("shares", sh.id)!, status: "ended" });
-  const { Session } = await import("../src/session");
-  const again = new Session(r.s.store);
+  const again = reopen(r);
   expect(again.stage().mode).toBe("spotlight");
   expect(again.store.setting<Record<string, unknown>>("beforeShare", {})[sh.id]).toBeUndefined();
 });
@@ -273,9 +278,9 @@ test("nobody matches nobody: an unclaimed device's share never takes a host lock
   expect(sh.personId).toBeNull();
   await r.hub.brain.placeShare(sh);
   expect(r.s.stage().mode).toBe("spotlight");
-  // Same with a pin and no lock: a pin remembers the person's id, not their name.
-  (r.s as any).dropLock("main");
-  r.s.store.setSetting("stage", { ...r.s.stage(), by: "Unclaimed laptop" });
+  // Same with a pin and no lock, by a person who has no id of their own: nobody else's share is theirs to take it with.
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], pinned: true }, "Host", "main", { person: { id: null, name: "Host" }, noLock: true });
+  expect(r.s.stage().lock).toBeUndefined();
   await r.hub.brain.placeShare(sh);
   expect(r.s.stage().mode).toBe("spotlight");
   // A pin by an identified person is that person's to share over.
@@ -321,10 +326,61 @@ test("an ended share still on a screen with no saved snapshot is left as it is a
   const sh = r.s.startShare("felipe-laptop", "screen");
   r.s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id, label: "x" }] } }, "JamSesh", "main", { override: true });
   r.s.store.put("shares", { ...r.s.store.get("shares", sh.id)!, status: "ended" });
-  const { Session } = await import("../src/session");
-  const again = new Session(r.s.store);
-  expect(again.stage().mode).toBe("layout");
+  const again = reopen(r);
+  // The earlier screen is lost, but the dead tile comes off: the board, since it was alone.
+  expect(again.stage().mode).toBe("board");
   expect(again.store.get("shares", sh.id)?.status).toBe("ended");
+});
+
+test("at restart a dead share's tile comes off and the other tiles stay", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  r.s.setStage({ mode: "layout", layout: { tiles: [{ kind: "feed" }, { kind: "screen", shareId: sh.id, label: "x" }] } }, "JamSesh", "main", { override: true });
+  r.s.store.put("shares", { ...r.s.store.get("shares", sh.id)!, status: "ended" });
+  const again = reopen(r);
+  expect(again.stage().layout?.tiles.map((x: any) => x.kind)).toEqual(["feed"]);
+});
+
+test("after Unlock a person's direct pin is nobody's: another person's share takes the screen; before it, not", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  // The brain, asked directly by Chey to pin a view, writes under its own label but records Chey's id.
+  const tools = (r.hub.brain as any).tools([{ id: 1, ts: Date.now(), kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: "JamSesh, pin the pricing", data: { direct: true } }], { effects: 0 });
+  await tools.show_on_screen.execute({ mode: "spotlight", artifactIds: [r.a.id], pin: true });
+  expect(r.s.stage().by).toBe("Room brain");
+  expect(r.s.stage().pinnedById).toBe(r.chey.id);
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("spotlight");
+  r.s.releaseLock("main", { owner: r.chey.id });
+  expect(r.s.stage().pinnedById).toBeUndefined();
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("layout");
+});
+
+test("a post-commit effect that throws is logged and never undoes the committed ending or skips the rest", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const { bus } = await import("../src/bus");
+  const r = room();
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  r.s.setStage({ mode: "spotlight", items: [r.a.id] }, "Chey", "main", { override: true });
+  r.s.rememberStageFor(sh.id);
+  r.s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id, label: "x" }] } }, "JamSesh", "main", { override: true });
+  const realChanged = bus.changed.bind(bus);
+  const seen: string[] = [];
+  (bus as any).changed = (k: string) => { seen.push(k); if (k === "stageTiles") throw new Error("listener blew up"); realChanged(k); };
+  const err = console.error;
+  console.error = () => {};
+  try {
+    r.s.endShare(sh.id);
+  } finally {
+    (bus as any).changed = realChanged;
+    console.error = err;
+  }
+  expect(r.s.store.get("shares", sh.id)?.status).toBe("ended");
+  expect(r.s.stage().mode).toBe("spotlight");
+  expect(seen).toContain("shares");
 });
 
 test("a failed BEGIN leaves the store usable: the next atomic write still opens a real transaction", () => {
