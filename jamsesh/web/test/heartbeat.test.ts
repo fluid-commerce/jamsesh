@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { HEARTBEAT_EVENT, startHeartbeat } from "../src/shared/heartbeat";
+import { startHeartbeat } from "../src/shared/heartbeat";
 
-test("beats at once and then on a timer, naming the window", async () => {
+test("beats at once and then on a timer, through the app's heartbeat command", async () => {
   const calls: { cmd: string; args: Record<string, unknown> }[] = [];
   const stop = startHeartbeat({ invoke: async (cmd, args) => void calls.push({ cmd, args }), metadata: { currentWindow: { label: "client" } } }, 5);
   expect(calls).toHaveLength(1);
@@ -9,7 +9,9 @@ test("beats at once and then on a timer, naming the window", async () => {
   stop();
   const n = calls.length;
   expect(n).toBeGreaterThan(2);
-  expect(calls[0]).toEqual({ cmd: "plugin:event|emit", args: { event: HEARTBEAT_EVENT, payload: { label: "client" } } });
+  // No label or event name in the call: the app reads the window from the call itself.
+  expect(calls[0]).toEqual({ cmd: "heartbeat", args: {} });
+  expect(calls.every((c) => c.cmd === "heartbeat")).toBe(true);
   await new Promise((r) => setTimeout(r, 20));
   expect(calls).toHaveLength(n);
 });

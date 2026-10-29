@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "session",
-  "description": "The session windows (the hub's or the relay's page at 127.0.0.1) may only ask for this Mac's fonts for their canvases.",
-  "windows": ["client", "bigscreen*"],
+  "description": "The session windows (the hub's or the relay's page at 127.0.0.1) may only ask for this Mac's fonts for their canvases, and send the watchdog their heartbeat.",
+  "windows": ["client", "bigscreen*", "remote"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["allow-local-fonts"]
+  "permissions": ["allow-local-fonts", "allow-heartbeat"]
 }

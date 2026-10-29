@@ -893,6 +893,15 @@ async fn local_fonts(families: Vec<String>) -> Vec<fonts::LocalFont> {
     tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
 }
 
+/// A page's heartbeat (web/src/shared/heartbeat.ts). The window is the one that made the call, so a
+/// page can only vouch for itself.
+#[tauri::command]
+fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
+    if let Ok(mut b) = state.beats.lock() {
+        b.beat(window.label(), std::time::Instant::now());
+    }
+}
+
 /// Screen Recording takes effect after a relaunch.
 #[tauri::command]
 fn relaunch(app: AppHandle) {
@@ -926,7 +935,8 @@ fn main() {
             remote_setup,
             get_userless,
             toggle_userless,
-            local_fonts
+            local_fonts,
+            heartbeat
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
@@ -943,7 +953,6 @@ fn main() {
             });
             app.manage(state.clone());
             DEVTOOLS.store(cfg.devtools || std::env::var_os("JAMSESH_DEVTOOLS").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
-            watchdog::listen(app.handle(), state.beats.clone());
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
             TrayIconBuilder::with_id("main")

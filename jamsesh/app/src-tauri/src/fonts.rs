@@ -4,7 +4,9 @@
 // an agent set in Helvetica Neue (drawn natively on the host) shows in a substitute there. The page
 // asks for the families its canvas reports missing, and this reads them from the Mac's own font
 // folders (system, local and the person's) so the page can hand them to the canvas with
-// `text.loadFont`. The bytes stay on this Mac: they go only to this app's own window.
+// `text.loadFont`. The bytes go to the page in this app's window, which is the host's page: whoever
+// hosts the session can ask for any installed family (capped per request below), so this is not a
+// boundary between a person's Mac and the host.
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;

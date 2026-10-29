@@ -1,5 +1,5 @@
 // The app's commands get ACL permissions, so a capability can give the session window (a page
-// served at 127.0.0.1, not bundled) just the one it needs: `local_fonts` (capabilities/session.json).
+// served at 127.0.0.1, not bundled) just the two it needs: `local_fonts` and `heartbeat` (capabilities/session.json).
 // Every command is listed: with a manifest, a command no capability allows is refused.
 const COMMANDS: &[&str] = &[
     "start_info",
@@ -15,6 +15,7 @@ const COMMANDS: &[&str] = &[
     "get_userless",
     "toggle_userless",
     "local_fonts",
+    "heartbeat",
 ];
 
 fn main() {

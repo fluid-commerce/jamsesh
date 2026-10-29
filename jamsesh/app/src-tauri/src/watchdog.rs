@@ -1,6 +1,7 @@
 // Restarts the page of a window that stops answering.
 //
-// Each hub-served page emits a heartbeat every few seconds (web/src/shared/heartbeat.ts). A page
+// Each hub-served page calls the app's `heartbeat` command every few seconds (web/src/shared/heartbeat.ts;
+// the app takes the window's label from the call itself, not from anything the page says). A page
 // stuck in a loop of promise work can't run its timer, while the app itself stays healthy, so the
 // app notices the silence and restarts that window's WebKit page process. A plain reload doesn't
 // do it: the hung process never reads the request (tried: a page spinning in microtasks ignores
@@ -9,9 +10,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Listener, Manager};
+use tauri::{AppHandle, Manager};
 
-pub const EVENT: &str = "jamsesh-heartbeat";
 /// How long a visible window may stay silent before its page is restarted.
 pub const SILENCE: Duration = Duration::from_secs(15);
 /// Quiet needed after a restart before the window's strikes are forgotten.
@@ -92,16 +92,6 @@ pub fn log(dir: &std::path::Path, line: &str) {
     }
 }
 
-/// Listens for heartbeats. The state is shared with `tick`.
-pub fn listen(app: &AppHandle, beats: std::sync::Arc<std::sync::Mutex<Beats>>) {
-    app.listen(EVENT, move |e| {
-        let label = serde_json::from_str::<serde_json::Value>(e.payload()).ok().and_then(|v| v["label"].as_str().map(str::to_string));
-        if let (Some(label), Ok(mut b)) = (label, beats.lock()) {
-            b.beat(&label, Instant::now());
-        }
-    });
-}
-
 /// Run every few seconds. `last` is when this last ran: a long gap means the app was stalled (or
 /// the Mac slept), and the silence in it isn't the pages' fault.
 pub fn tick(app: &AppHandle, beats: &std::sync::Mutex<Beats>, dir: &std::path::Path, last: &mut Instant) {
@@ -116,7 +106,7 @@ pub fn tick(app: &AppHandle, beats: &std::sync::Mutex<Beats>, dir: &std::path::P
                 b.forget(&label);
             }
         }
-        b.stalled(now, |label| app.get_webview_window(label).is_some_and(|w| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)))
+        b.stalled(now, |label| app.get_webview_window(label).is_some_and(|w| watched(&w)))
     };
     *last = now;
     for label in stalled {
@@ -124,19 +114,52 @@ pub fn tick(app: &AppHandle, beats: &std::sync::Mutex<Beats>, dir: &std::path::P
     }
 }
 
+/// A window is watched when someone could be looking at it: shown, not minimized, and with some part
+/// of it on screen. A fully covered window (or one on another Space) may have its page throttled or
+/// suspended by WebKit, which would look like a hang; when the state can't be read, it isn't watched.
+fn watched(w: &tauri::WebviewWindow) -> bool {
+    w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && on_screen(w) == Some(true)
+}
+
+/// Whether any part of the window is visible (NSWindow.occlusionState has the Visible bit).
+fn on_screen(w: &tauri::WebviewWindow) -> Option<bool> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    const NS_WINDOW_OCCLUSION_STATE_VISIBLE: usize = 1 << 1;
+    let ptr = w.ns_window().ok()? as *mut AnyObject;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `ns_window()` is this window's NSWindow, alive while `w` is; `occlusionState` is a plain getter.
+    let state: usize = unsafe { msg_send![&*ptr, occlusionState] };
+    Some(state & NS_WINDOW_OCCLUSION_STATE_VISIBLE != 0)
+}
+
+/// The page process to stop for `label`: none when another window runs in the same process
+/// (stopping it would blank that window too), or when its pid is unknown.
+fn kill_target(pids: &[(String, Option<i32>)], label: &str) -> Option<i32> {
+    let pid = pids.iter().find(|(l, _)| l == label).and_then(|(_, p)| *p)?;
+    let sharers = pids.iter().filter(|(l, p)| l != label && *p == Some(pid)).count();
+    (sharers == 0).then_some(pid)
+}
+
 fn restart(app: &AppHandle, dir: &std::path::Path, label: &str) {
-    let Some(w) = app.get_webview_window(label) else { return };
+    if app.get_webview_window(label).is_none() {
+        return;
+    }
     log(dir, &format!("watchdog: the {label} window's page sent no heartbeat for {}s; restarting its page process", SILENCE.as_secs()));
     let app = app.clone();
     let (dir, label) = (dir.to_path_buf(), label.to_string());
     // Off the async runtime's threads: this waits on the main thread and on `kill`.
     tauri::async_runtime::spawn_blocking(move || {
-        match page_pid(&w) {
+        // Every window's page process, so a process two windows share is never killed.
+        let pids: Vec<(String, Option<i32>)> = app.webview_windows().into_iter().map(|(l, win)| (l, page_pid(&win))).collect();
+        match kill_target(&pids, &label) {
             Some(pid) if is_page_process(pid) => {
                 let killed = std::process::Command::new("/bin/kill").args(["-9", &pid.to_string()]).status().is_ok_and(|s| s.success());
                 log(&dir, &format!("watchdog: {label}: stopped page process {pid} ({})", if killed { "ok" } else { "kill failed" }));
             }
-            other => log(&dir, &format!("watchdog: {label}: no page process to stop ({other:?}); reloading only")),
+            other => log(&dir, &format!("watchdog: {label}: no page process to stop ({other:?}, or shared with another window); reloading only")),
         }
         std::thread::sleep(Duration::from_millis(500));
         if let Some(w) = app.get_webview_window(&label) {
@@ -180,6 +203,27 @@ mod tests {
 
     fn secs(t: Instant, n: u64) -> Instant {
         t + Duration::from_secs(n)
+    }
+
+    fn pids(list: &[(&str, Option<i32>)]) -> Vec<(String, Option<i32>)> {
+        list.iter().map(|(l, p)| (l.to_string(), *p)).collect()
+    }
+
+    #[test]
+    fn stops_a_page_process_only_when_the_window_has_it_alone() {
+        let own = pids(&[("client", Some(100)), ("bigscreen", Some(200)), ("bigscreen-2", Some(300))]);
+        assert_eq!(kill_target(&own, "client"), Some(100));
+        assert_eq!(kill_target(&own, "bigscreen-2"), Some(300));
+        // Two windows in one process: killing it would blank both, so neither is killed.
+        let shared = pids(&[("client", Some(100)), ("bigscreen", Some(100)), ("bigscreen-2", Some(300))]);
+        assert_eq!(kill_target(&shared, "client"), None);
+        assert_eq!(kill_target(&shared, "bigscreen"), None);
+        assert_eq!(kill_target(&shared, "bigscreen-2"), Some(300));
+        // Unknown pids never match each other, and an unknown window has no target.
+        let unknown = pids(&[("client", None), ("bigscreen", None), ("remote", Some(7))]);
+        assert_eq!(kill_target(&unknown, "client"), None);
+        assert_eq!(kill_target(&unknown, "remote"), Some(7));
+        assert_eq!(kill_target(&unknown, "missing"), None);
     }
 
     #[test]
