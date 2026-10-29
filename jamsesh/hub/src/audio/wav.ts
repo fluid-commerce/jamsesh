@@ -26,12 +26,11 @@ export function decodeWav(bytes: Uint8Array, maxSeconds = MAX_SECONDS): Pcm {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const tag = (at: number) => String.fromCharCode(...bytes.subarray(at, at + 4));
   if (bytes.length < 12 || tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new BadWav("not a WAV file");
-  // The RIFF size is the file's length after its first 8 bytes (a writer may leave out the last chunk's pad byte).
-  const riff = view.getUint32(4, true);
-  if (riff !== bytes.length - 8 && riff !== bytes.length - 7) throw new BadWav(`WAV says it is ${riff + 8} bytes but is ${bytes.length}`);
   let fmt: { format: number; channels: number; sampleRate: number; bits: number } | null = null;
   let data: { body: number; size: number } | null = null;
   let off = 12;
+  /** The last chunk is odd-sized and its pad byte isn't in the file. */
+  let padMissing = false;
   while (off < bytes.length) {
     if (off + 8 > bytes.length) throw new BadWav("WAV ends partway through a chunk header");
     const id = tag(off);
@@ -50,8 +49,12 @@ export function decodeWav(bytes: Uint8Array, maxSeconds = MAX_SECONDS): Pcm {
       data = { body, size };
     }
     // An odd-sized chunk is followed by a pad byte, which only the last chunk may leave out.
+    padMissing = size % 2 === 1 && body + size === bytes.length;
     off = Math.min(bytes.length, body + size + (size % 2));
   }
+  // The RIFF size is the file's length after its first 8 bytes, counting a final pad byte only when one is missing.
+  const riff = view.getUint32(4, true);
+  if (riff !== bytes.length - 8 && !(padMissing && riff === bytes.length - 7)) throw new BadWav(`WAV says it is ${riff + 8} bytes but is ${bytes.length}`);
   if (!fmt) throw new BadWav("WAV file has no fmt chunk");
   if (!data) throw new BadWav("WAV file has no data");
   const { format, channels, sampleRate, bits } = fmt;
