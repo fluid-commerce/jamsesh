@@ -581,6 +581,11 @@ export class Session {
     sourceEventIds?: number[];
     workstreamId?: string | null;
   }): Directive {
+    // A coordinate directive is a comparison, so it must name who with, whatever made it: each target needs a known counterpart other than itself.
+    if (d.mode === "coordinate") {
+      const known = (d.counterparts ?? []).filter((c) => this.agent(c));
+      if (!d.targets.length || d.targets.some((t) => !known.some((c) => c !== t))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
+    }
     const directive: Directive = {
       id: newId("d"),
       ts: Date.now(),
@@ -650,7 +655,8 @@ export class Session {
   exchangeGap(d: Directive, agentId: string): string | null {
     if (d.mode !== "coordinate") return null;
     const msgs = this.store.messagesAbout(d.id);
-    const named = d.counterparts?.length ? d.counterparts : [...new Set(msgs.flatMap((e) => [e.authorId, e.data.to]))].filter((id): id is string => !!id && id !== agentId && !!this.agent(id));
+    const named = (d.counterparts ?? []).filter((c) => c !== agentId);
+    if (!named.length) return "This coordinate directive names nobody to compare with, so it can't be completed: jam_ack it cancelled and ask the room to send it again.";
     // Both directions with the same counterpart: one agent's replies don't stand in for another's.
     const both = named.some((c) => c !== agentId && msgs.some((e) => e.authorId === agentId && e.data.to === c) && msgs.some((e) => e.authorId === c && e.data.to === agentId));
     const sent = msgs.some((e) => e.authorId === agentId && named.includes(String(e.data.to)));

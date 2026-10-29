@@ -1,4 +1,5 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
+import { HelperRegistry } from "./children";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
@@ -84,6 +85,9 @@ export class Hub {
   peopleOnline = 0;
   uploadsDir: string;
 
+  /** Every helper process the hub starts; stop() walks it. */
+  readonly helpers = new HelperRegistry();
+
   constructor(private opts: HubOptions = {}) {
     const dir = opts.dataDir ?? config.dataDir;
     mkdirSync(dir, { recursive: true });
@@ -112,9 +116,9 @@ export class Hub {
       this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: ok ? `Preview build finished: ${label}. ${text}`.trim() : `Preview build failed: ${label}. ${text}`.trim() });
     };
     this.brain = new Brain(this.session, this.host);
-    this.transcriber = new Transcriber(this.session);
+    this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
-    this.canvas = new Canvas(this.session);
+    this.canvas = new Canvas(this.session, this.helpers);
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
@@ -173,11 +177,10 @@ export class Hub {
     this.awake.stop();
     this.autosave.stop();
     this.brain.stop();
-    const reaped = this.canvas.stop();
-    this.transcriber.stop();
+    this.canvas.halt();
     this.devproxy.stop();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
-    return reaped;
+    return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */

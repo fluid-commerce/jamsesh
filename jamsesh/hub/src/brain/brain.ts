@@ -420,6 +420,7 @@ export class Brain {
           rationale: z.string().describe("One short sentence: why these agents, and whose call it was if people disagreed"),
           workstream: z.string().optional().describe("Workstream title this belongs to"),
           priority: z.number().int().min(1).max(3).optional(),
+          counterparts: z.array(z.string()).optional().describe("For mode 'coordinate': the agent ids the targets compare with (other targets count too). Required unless two or more targets are given."),
         }),
         execute: async (i) => {
           const known = agentIds();
@@ -433,12 +434,16 @@ export class Brain {
             (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6 && sameCounts(d.text, i.text),
           );
           if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
+          // Coordination names who compares with whom: the other targets, plus any counterparts given.
+          const counterparts = i.mode === "coordinate" ? [...new Set([...targets, ...(i.counterparts ?? []).filter((c) => known.has(c))])] : undefined;
+          if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return refuse("A coordinate directive needs another agent to compare with: give two or more targets, or counterparts.");
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
           const d = s.createDirective({
             text: i.text,
             mode: i.mode,
             rationale: i.rationale,
             targets,
+            ...(counterparts ? { counterparts } : {}),
             priority: i.priority,
             requestedBy: requester,
             sourceEventIds: sourceIds,

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { config } from "../config";
 import type { Session } from "../session";
 import type { Agent, Platform } from "../types";
-import { stopHelper, withParentWatch } from "../children";
+import { HelperRegistry, stopHelper, withParentWatch } from "../children";
 import { FigcraftMcp, type ToolResult } from "./figcraft-mcp";
 
 interface FrameInfo {
@@ -67,7 +67,11 @@ export class Canvas {
   private agentPage = new Map<string, string>();
   private activity = new Map<string, { created: number; edited: number; timer: ReturnType<typeof setTimeout> | null }>();
 
-  constructor(private session: Session) {
+  constructor(
+    private session: Session,
+    /** Every helper this canvas starts goes in here, so stopping the hub finds them all. */
+    private helpers: HelperRegistry = new HelperRegistry(),
+  ) {
     this.serverDir = join(config.dataDir, "figcraft-server");
     this.rendersDir = join(config.dataDir, "renders");
     this.filesDir = join(config.dataDir, "canvas-files");
@@ -112,9 +116,11 @@ export class Canvas {
       const reason = e instanceof Error ? e.message : String(e);
       if (!this.stopped) console.error("canvas:", reason);
       // Nothing half-started stays behind: the host participant and the server this start spawned stop.
-      this.host?.close();
+      // (Each is awaited to its observed exit before its reference is dropped; the registry still holds any that didn't.)
+      const host = this.host;
+      if (host) await host.close();
       this.host = null;
-      if (this.serverProc) await stopHelper(this.serverProc).catch(() => {});
+      if (this.serverProc) await stopHelper(this.serverProc).catch(() => false);
       this.serverProc = null;
       if (this.stopped) return; // stopped mid-start: cleaned up, nothing to report or retry
       this.session.setCanvas({ status: "failed", reason });
@@ -130,18 +136,18 @@ export class Canvas {
     if (this.stopped) throw new Error("the canvas was stopped");
   }
 
-  /** Stops everything. Resolves true when every helper's exit was seen (a TERM-resistant one gets KILL), false if one is still running. */
-  stop(): Promise<boolean> {
+  /** Cancels timers and retries and refuses further starts; no process is touched (see stop). */
+  halt() {
     this.stopped = true;
     if (this.startRetry) clearTimeout(this.startRetry);
     if (this.poller) clearInterval(this.poller);
     for (const t of this.timers.splice(0)) clearInterval(t);
-    const reaped: Promise<boolean>[] = [];
-    if (this.host) reaped.push(this.host.close());
-    for (const a of this.agents.values()) reaped.push(a.mcp.close());
-    if (this.keyProc) reaped.push(stopHelper(this.keyProc).catch(() => false));
-    if (this.serverProc) reaped.push(stopHelper(this.serverProc).catch(() => false)); // TERM, then KILL, and reaped
-    return Promise.all(reaped).then((all) => all.every(Boolean));
+  }
+
+  /** Halts, then stops every helper in the registry. True when each one's exit was seen (a TERM-resistant one gets KILL). */
+  stop(): Promise<boolean> {
+    this.halt();
+    return this.helpers.stopAll();
   }
 
   private async startServer() {
@@ -161,10 +167,12 @@ export class Canvas {
     if (!existsSync(config.figcraftServerBin) && config.figcraftServerBin.includes("/")) {
       throw new Error(`figcraft-server not found at ${config.figcraftServerBin}. Run jamsesh/install.sh.`);
     }
-    this.serverProc = Bun.spawn(withParentWatch([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir]), {
-      stdout: "ignore",
-      stderr: "pipe",
-    });
+    this.serverProc = this.helpers.track(
+      Bun.spawn(withParentWatch([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir]), {
+        stdout: "ignore",
+        stderr: "pipe",
+      }),
+    );
     // Read all it says while it runs (a full pipe would block it), keeping only the latest part.
     this.serverLog = "";
     void this.drainServerLog(this.serverProc.stderr as ReadableStream<Uint8Array>);
@@ -202,7 +210,7 @@ export class Canvas {
 
   private async serverKey(): Promise<string> {
     this.checkRunning();
-    const p = Bun.spawn(withParentWatch([config.figcraftServerBin, "--data", this.serverDir, "key"]), { stdout: "pipe", stderr: "ignore" });
+    const p = this.helpers.track(Bun.spawn(withParentWatch([config.figcraftServerBin, "--data", this.serverDir, "key"]), { stdout: "pipe", stderr: "ignore" }));
     this.keyProc = p;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -223,7 +231,7 @@ export class Canvas {
 
   private spawnParticipant(dir: string) {
     mkdirSync(dir, { recursive: true });
-    return new FigcraftMcp(config.figcraftBin, ["mcp", "--automation-read-root", dir, "--automation-write-root", dir]);
+    return new FigcraftMcp(config.figcraftBin, ["mcp", "--automation-read-root", dir, "--automation-write-root", dir], {}, this.helpers);
   }
 
   private async startHost() {

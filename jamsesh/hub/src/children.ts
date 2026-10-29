@@ -28,11 +28,42 @@ export function withParentWatch(cmd: string[], parentPid = process.pid, graceMs 
 
 /** Stops a wrapped helper and waits for it. A helper still alive after the grace gets SIGKILL, so a hung one can't hold its port. True only when its exit was observed; false if it is still running after the KILL. */
 export async function stopHelper(proc: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void }, graceMs = 2_000): Promise<boolean> {
-  const exited = (ms: number) => Promise.race([proc.exited.then(() => true, () => true), Bun.sleep(ms).then(() => false)]);
+  const exited = (ms: number) => Promise.race([proc.exited.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
   proc.kill();
   if (await exited(graceMs)) return true;
   // The wrapper is waiting on its helper: kill the helper and the wrapper's wait ends.
   Bun.spawnSync(["pkill", "-KILL", "-P", String(proc.pid)]);
   proc.kill("SIGKILL");
   return exited(graceMs); // true only when the exit itself was seen
+}
+
+type Helper = { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void };
+
+/**
+ * Every helper process a hub starts (canvas server, MCP participants, the key helper, whisper) is
+ * tracked here, and stopping the hub walks this one list: a helper started without being tracked
+ * is the only one that could be missed, so each spawn site goes through `track`.
+ */
+export class HelperRegistry {
+  private procs = new Set<Helper>();
+
+  /** Registers a spawned helper (started with withParentWatch) until it exits. */
+  track<P extends Helper>(proc: P): P {
+    this.procs.add(proc);
+    proc.exited.then(
+      () => this.procs.delete(proc),
+      () => this.procs.delete(proc),
+    );
+    return proc;
+  }
+
+  get size() {
+    return this.procs.size;
+  }
+
+  /** Stops every tracked helper (TERM, then KILL). True only when each one's exit was observed. */
+  async stopAll(graceMs?: number): Promise<boolean> {
+    const all = await Promise.all([...this.procs].map((p) => stopHelper(p, graceMs).catch(() => false)));
+    return all.every(Boolean);
+  }
 }

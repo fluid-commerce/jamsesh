@@ -626,7 +626,12 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
     const p = s.person(body.personId);
-    return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    try {
+      const counterparts = Array.isArray(body.counterparts) ? body.counterparts.filter((c: unknown) => typeof c === "string") : [...targets];
+      return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, ...(body.mode === "coordinate" ? { counterparts: [...new Set([...targets, ...counterparts])] } : {}), requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    } catch (e) {
+      return bad(e instanceof Error ? e.message : String(e));
+    }
   }
 
   m = path.match(/^\/directives\/([\w-]+)$/);
