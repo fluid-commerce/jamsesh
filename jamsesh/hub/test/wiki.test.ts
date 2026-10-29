@@ -2642,18 +2642,23 @@ test("a page whose commit was skipped because git couldn't list raw/ is named by
 
 
 
-test("a changed and a deleted page are committed by the next commit even though nothing recorded them", () => {
+test("commitOwn leaves a page a person is editing (staged or not) alone until the sync has filed it; then it is committed as their edit", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
-  w.editPage("keep", "# Keep\n\nA page.", { by: "Chey" });
-  w.editPage("gone", "# Gone\n\nAbout to be deleted.", { by: "Chey" });
-  // Changes made while nothing recorded them as owed: no state, git otherwise unable to commit.
-  rmSync(join(dir, "wiki", "gone.md"));
-  writePage(dir, "keep", "# Keep\n\nChanged behind the wiki's back.");
-  (w as any).commitOwn("recover", []);
-  const history = Bun.spawnSync(["git", "log", "--name-status", "--pretty=format:%s"], { cwd: dir }).stdout.toString();
-  expect(history).toMatch(/D\s+wiki\/gone\.md/);
-  expect(Bun.spawnSync(["git", "status", "--porcelain", "--", "wiki"], { cwd: dir }).stdout.toString().trim()).toBe("");
+  w.editPage("mine", "# Mine\n\nCommitted.", { by: "Chey" });
+  const file = join(dir, "wiki", "mine.md");
+  writeFileSync(file, readFileSync(file, "utf8") + "\nStaged line.\n");
+  gitOut_(dir, "add", "wiki/mine.md");
+  writeFileSync(file, readFileSync(file, "utf8") + "Unstaged line.\n");
+  const staged = gitOutOf(dir, "diff", "--cached", "--", "wiki/mine.md");
+  writePage(dir, "other", "# Other\n\nUnrelated.");
+  (w as any).commitOwn("Add other", ["wiki/other.md"]); // the real method, as an unrelated wiki action calls it
+  expect(gitOutOf(dir, "show", "--name-only", "--pretty=format:", "HEAD")).toContain("wiki/other.md");
+  expect(gitOutOf(dir, "show", "--name-only", "--pretty=format:", "HEAD")).not.toContain("wiki/mine.md");
+  expect(gitOutOf(dir, "diff", "--cached", "--", "wiki/mine.md")).toBe(staged); // their staged diff is exactly as it was
+  // Once the sync files it as their edit it is the wiki's to commit, with the edit as a source.
+  w.syncVault();
+  expect(gitOutOf(dir, "log", "--name-only", "--pretty=format:%s")).toContain("wiki/mine.md");
 });
 
 const gitOut_ = (dir: string, ...args: string[]) => void Bun.spawnSync(["git", ...args], { cwd: dir });
@@ -2716,23 +2721,49 @@ test("the first commit of a new repository and a deletion are made the same way"
   expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki/gone.md").trim()).toBe("");
 });
 
-test("a pass whose hand edits could not be filed does not ingest over them", async () => {
+
+test("the first commit of a repository with no commits yet is made through the private index", () => {
+  if (!gitAvailable()) return;
+  const dir = join(root, `unborn-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "a.md"), "one");
+  expect(gitOutOf(dir, "rev-parse", "-q", "--verify", "HEAD")).toBe(""); // unborn
+  expect(commitPaths(dir, "First", ["a.md"])).toBe("done");
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD").trim()).toBe("a.md");
+  expect(gitOutOf(dir, "status", "--porcelain").trim()).toBe("");
+});
+
+test("a long backlog of source files is passed on stdin, not as arguments", () => {
+  if (!gitAvailable()) return;
+  const dir = join(root, `many-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+  const names: string[] = [];
+  for (let i = 0; i < 6000; i++) {
+    const n = `raw/2026-10-29_${"x".repeat(60)}-${i}.md`;
+    writeFileSync(join(dir, n), `s${i}`);
+    names.push(n);
+  }
+  expect(commitPaths(dir, "Many", names)).toBe("done");
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD").trim().split("\n").length).toBe(6000);
+}, 60_000);
+
+test("a real filing failure (an unwritable raw/) stops the pass before it ingests", async () => {
   const { w, dir } = room();
   writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
   adopt(dir);
   writeFileSync(join(dir, "wiki", "pricing.md"), readFileSync(join(dir, "wiki", "pricing.md"), "utf8").replace("Two", "Three"));
   let decided = 0;
   w.decide = (async () => (decided++, { summary: "x", pages: [] })) as Decider;
-  w.addSource("document", "A note", "Something to ingest.", "Chey");
-  (w as any).syncVault = () => {
-    throw new Error("filing failed");
-  };
+  chmodSync(join(dir, "raw"), 0o555); // the hand edit can't be filed as a source
   const err = console.error;
   console.error = () => {};
   try {
     expect(await w.tick()).toBeNull();
   } finally {
     console.error = err;
+    chmodSync(join(dir, "raw"), 0o755);
   }
   expect(decided).toBe(0);
 });

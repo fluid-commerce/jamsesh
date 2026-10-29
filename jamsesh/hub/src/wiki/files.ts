@@ -10,7 +10,7 @@
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { pastDeadline } from "../room-context";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -216,10 +216,11 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       if (head ? gitOut(dir, ["read-tree", head], env) === null : false) return "failed";
       // The named files that exist, or that HEAD has (a deletion): HEAD is only asked when one is missing.
       const missing = own.filter((p) => !existsSync(join(dir, p)));
-      const inHead = new Set(head && missing.length ? (gitOut(dir, ["ls-tree", "-r", "--name-only", "-z", head, "--", ...missing]) ?? "").split("\0").filter(Boolean) : []);
+      const inHead = new Set(head && missing.length ? (gitOut(dir, ["ls-tree", "-r", "--name-only", "-z", head]) ?? "").split("\0").filter(Boolean) : []);
       const names = own.filter((p) => existsSync(join(dir, p)) || inHead.has(p));
       if (!names.length) return "nothing";
-      if (gitOut(dir, ["add", "-A", "--", ...names], env) === null) return "failed";
+      // The pathspec goes in on stdin: a long backlog of sources can't hit the argument-size limit.
+      if (gitOut(dir, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], env, names.join("\0") + "\0") === null) return "failed";
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history
@@ -236,27 +237,67 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
   }
 }
 
-/** After the wiki's commit: the person's index entry for each file it changed follows HEAD, unless the person had staged something else there. */
+/**
+ * After the wiki's commit: the person's index entry for each file it changed follows HEAD, unless the person had staged
+ * something different there. It is done under git's own index lock, so nothing they stage meanwhile can be overwritten; if
+ * the lock stays taken the index is left as it was and that is said loudly (their view then shows the wiki's files as changes
+ * until their next `git add` or `git reset`).
+ */
 function followHead(dir: string, oldHead: string | null, newHead: string, names: string[]) {
-  // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
-  const entries = (text: string | null, kind: "index" | "tree") => {
-    const m = new Map<string, string>();
-    for (const rec of (text ?? "").split("\0").filter(Boolean)) {
-      const tab = rec.indexOf("\t");
-      const f = rec.slice(0, tab).split(" ");
-      m.set(rec.slice(tab + 1), kind === "index" ? `${f[0]} ${f[1]}` : `${f[0]} ${f[2]}`);
+  const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
+  if (!gitDir) return;
+  const real = join(gitDir, "index");
+  const lock = `${real}.lock`;
+  let fd: number | null = null;
+  for (let i = 0; i < 20 && fd === null; i++) {
+    try {
+      fd = openSync(lock, "wx");
+    } catch {
+      Bun.sleepSync(50); // someone else (their git) holds the index right now
     }
-    return m;
-  };
-  const index = entries(gitOut(dir, ["ls-files", "-s", "-z", "--", ...names]), "index");
-  const before = entries(oldHead ? gitOut(dir, ["ls-tree", "-r", "-z", oldHead, "--", ...names]) : "", "tree");
-  const after = entries(gitOut(dir, ["ls-tree", "-r", "-z", newHead, "--", ...names]), "tree");
-  let info = "";
-  for (const p of names) {
-    if ((index.get(p) ?? "") !== (before.get(p) ?? "")) continue; // the person staged something different here: theirs stays
-    info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
   }
-  if (info) gitOut(dir, ["update-index", "-z", "--index-info"], {}, info); // (if the person's git holds the index lock, it simply doesn't follow)
+  if (fd === null) return void console.error("wiki: the git index was busy; it was left as it was and will show the wiki's files as changes until the next add or reset");
+  const mine = `${lock}.jamsesh-${process.pid}`;
+  try {
+    // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
+    const entries = (text: string | null, kind: "index" | "tree") => {
+      const m = new Map<string, string>();
+      for (const rec of (text ?? "").split("\0").filter(Boolean)) {
+        const tab = rec.indexOf("\t");
+        const f = rec.slice(0, tab).split(" ");
+        m.set(rec.slice(tab + 1), kind === "index" ? `${f[0]} ${f[1]}` : `${f[0]} ${f[2]}`);
+      }
+      return m;
+    };
+    const wanted = new Set(names);
+    const only = (m: Map<string, string>) => new Map([...m].filter(([p]) => wanted.has(p)));
+    const index = only(entries(gitOut(dir, ["ls-files", "-s", "-z"]), "index"));
+    const before = only(entries(oldHead ? gitOut(dir, ["ls-tree", "-r", "-z", oldHead]) : "", "tree"));
+    const after = only(entries(gitOut(dir, ["ls-tree", "-r", "-z", newHead]), "tree"));
+    let info = "";
+    for (const p of names) {
+      if ((index.get(p) ?? "") !== (before.get(p) ?? "")) continue; // the person staged something different here: theirs stays
+      info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
+    }
+    if (!info) return;
+    // Work on a copy of their index (or HEAD's tree if they have none), then put it in place the way git does: write the lock file, rename it over the index.
+    if (existsSync(real)) copyFileSync(real, mine);
+    const env = { GIT_INDEX_FILE: mine };
+    if (!existsSync(real) && oldHead && gitOut(dir, ["read-tree", oldHead], env) === null) throw new Error("read-tree failed");
+    if (gitOut(dir, ["update-index", "-z", "--index-info"], env, info) === null) throw new Error("update-index failed");
+    copyFileSync(mine, lock);
+    closeSync(fd);
+    fd = null;
+    renameSync(lock, real);
+  } catch (e) {
+    console.error("wiki: couldn't bring the git index up to date with the wiki's commit:", e instanceof Error ? e.message : e);
+  } finally {
+    rmSync(mine, { force: true });
+    if (fd !== null) {
+      closeSync(fd);
+      rmSync(lock, { force: true });
+    }
+  }
 }
 
 /**
@@ -688,8 +729,6 @@ export interface WikiState {
   /** Per session: an event too long for one source, and how far into it the sources written so far reach. */
   partial?: Record<string, { id: number; off: number }>;
   /** Sources that couldn't be written when they came in (a saved fact), to try again. */
-  /** Page files whose commit failed or was skipped: named again by the next commit, across restarts. */
-  owed?: string[];
   queued?: { kind: SourceKind; title: string; text: string; by: string; /** The source's id, fixed when queued, so a retry (or a restart after the source landed but the queue didn't save) finds it instead of making another. */ id?: string }[];
   /** Existing pages the model asked to change without having been shown them whole: the next ingest shows these first. */
   need?: string[];
@@ -735,8 +774,6 @@ function parseState(j: unknown): WikiState {
   };
   const own = pair<{ slug: string; rev: string }>(j.own, (x) => typeof x.slug === "string" && typeof x.rev === "string");
   const filing = pair<{ slug: string; rev: string; id: string }>(j.filing, (x) => typeof x.slug === "string" && typeof x.rev === "string" && isSourceId(x.id));
-  const owedRaw = j.owed;
-  if (owedRaw !== undefined && !(Array.isArray(owedRaw) && owedRaw.every((x) => typeof x === "string" && x.length < 200) && owedRaw.length <= 5000)) throw new Error("bad owed");
   const need = j.need;
   if (need !== undefined && !(Array.isArray(need) && need.every((x) => typeof x === "string"))) throw new Error("bad need");
   if (j.migrated !== undefined && typeof j.migrated !== "boolean") throw new Error("bad migrated");
@@ -751,7 +788,6 @@ function parseState(j: unknown): WikiState {
     ...(partial ? { partial } : {}),
     ...(queued ? { queued: queued as NonNullable<WikiState["queued"]> } : {}),
     ...(need ? { need: need as string[] } : {}),
-    ...(owedRaw ? { owed: owedRaw as string[] } : {}),
     ...(seen ? { seen } : {}),
     ...(own ? { own } : {}),
     ...(filing ? { filing } : {}),

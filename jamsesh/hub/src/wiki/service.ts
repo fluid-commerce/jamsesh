@@ -252,7 +252,18 @@ export class WikiService {
     const raw = rawPaths(this.dir);
     const changed = pagePaths(this.dir);
     if (!raw || !changed) return;
-    commitPaths(this.dir, message, [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]));
+    // The changed pages that are the wiki's: the ones it wrote or has filed (the file is what it last recorded). A page a person is
+    // still editing (staged or not) is theirs until the sync has filed it, and is never committed under an unrelated change.
+    let seen: NonNullable<WikiState["seen"]> = {};
+    try {
+      seen = readState(this.dir).seen ?? {};
+    } catch {}
+    const wikis = changed.filter((f) => {
+      const slug = f.slice(5, -3);
+      const page = readPage(this.dir, slug);
+      return page ? seen[slug]?.rev === page.rev : !seen[slug]; // a deletion counts once the sync has filed it (the record is gone)
+    });
+    commitPaths(this.dir, message, [...new Set([...paths, ...wikis])].concat(["index.md", "log.md", ...raw]));
   }
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
