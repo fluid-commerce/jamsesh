@@ -388,6 +388,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
+  /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
+  const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
 
@@ -418,14 +421,19 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
+    const cur = s.store.get("devices", String(body.deviceId));
+    // The first window to register a device owns it until that pairing is gone. Only it, or the host's
+    // own window, changes whose it is: another window can't take it over or speak and share as it.
+    const owner = cur?.pairedId && (cur.pairedId === "host" || hub.auth.live(cur.pairedId)) ? cur.pairedId : (caller ?? undefined);
+    if (owner && owner !== caller && !hostWindow) return bad("That device belongs to another window.", 403);
     if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
     // The person using the host's own window: agents on the host Mac work for them.
-    if (hostWindow && body.kind !== "host" && body.personId) {
+    if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
-    const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
-    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
+    const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
+    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location, pairedId: owner }));
   }
 
   if (path === "/audio" && req.method === "POST") {
@@ -573,9 +581,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // ---- shares (screens and cameras) ----
+  // Every share call acts for the window that made it: a share starts from that window's own
+  // device and ends or is declined only by it (or, for a request, by the person asked). The host's
+  // own window is the one separate authority: it can end or decline any share in its room.
   if (path === "/shares" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", body.shareId, body.label);
+    if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
+    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
     hub.brain.placeShare(share);
     return json(share);
   }
@@ -587,7 +599,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
   m = path.match(/^\/shares\/([\w-]+)(\/decline)?$/);
   if (m && (req.method === "DELETE" || (req.method === "POST" && m[2]))) {
-    s.endShare(m[1], m[2] ? "declined" : "ended");
+    const sh = s.store.get("shares", m[1]);
+    if (!sh) return json({ ok: true }); // already gone: a repeated call
+    const decline = !!m[2] && sh.status === "requested";
+    const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
+    const asked = decline && !!paired?.personId && sh.personId === paired.personId;
+    if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
+    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended");
     return json({ ok: true });
   }
 

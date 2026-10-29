@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ago, api, useHub, type Person, type Settings as S } from "./hub";
+import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
 
@@ -171,7 +171,9 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
                 <Meter db={levels[d.id]} />
                 <select
                   value={d.personId ?? ""}
-                  onChange={(e) => api("/devices", { deviceId: d.id, personId: e.target.value || null, label: d.label, kind: d.kind })}
+                  disabled={!host && d.id !== hub.deviceId}
+                  title={!host && d.id !== hub.deviceId ? "Only that laptop or the host can change whose it is" : undefined}
+                  onChange={(e) => api("/devices", { deviceId: d.id, personId: e.target.value || null, label: d.label, kind: d.kind }).catch(() => {})}
                   style={{ width: 150, padding: "6px 8px" }}
                 >
                   <option value="">Nobody (room)</option>
