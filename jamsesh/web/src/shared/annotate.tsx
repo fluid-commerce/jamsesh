@@ -10,7 +10,7 @@ import { OfflineError, ago, api, hub, useHub, type Annotation, type HubState, ty
 import { PointerRecorder, canvasHit, dartAt, canvasIframe, fractionOf, hideNativeComments, readView, type CanvasView, type JamTarget, type PointerMark } from "./pointer";
 import { driverState, onCursor } from "./driving";
 import { RecordTidy } from "./record";
-import { closeUnattended, newRecordToken, sendSummary, type RecordNote, type SendReply } from "./notes";
+import { closeUnattended, newRecordToken, stopWithRetry, sendSummary, type RecordNote, type SendReply } from "./notes";
 import { RainbowTrail, type TrailFeed } from "./trail";
 
 export type { JamTarget, PointerMark } from "./pointer";
@@ -729,7 +729,7 @@ export function AnnotationsPanel({ personId }: { personId: string }) {
 
 // ---------- Record: talk and point, and it becomes notes (6.2) ----------
 
-type RecState = { phase: "idle" } | { phase: "live"; t0: number; id: string; screen: string | null } | { phase: "sending" };
+type RecState = { phase: "idle" } | { phase: "live"; t0: number; id: string; screen: string | null; token: string } | { phase: "sending" };
 type RecResult = { ok: boolean; title: string; text: string; pills: string[]; note?: string; out?: boolean };
 type Review = { recordingId: string; notes: RecordNote[]; busy: boolean; error: string | null };
 /** The laptop mic, as far as recording needs it. */
@@ -849,7 +849,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       }
       setResult(null);
       setNow(Date.now());
-      setRec({ phase: "live", t0, id, screen });
+      setRec({ phase: "live", t0, id, screen, token });
     } finally {
       starting.current = false;
       pendingToken.current = null;
@@ -869,13 +869,21 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
       // The sentence still being spoken has to reach the hub before it closes the window.
       await mic?.flush?.().catch(() => {});
       // The hub waits for the last words to be transcribed; never queue this, it is only worth sending live.
-      const res = await api<{ ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[]; queued?: boolean }>(
-        "/record/stop",
-        { deviceId: hub.deviceId, personId, recordingId: cur.id, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
-        undefined,
-        { queue: false, timeoutMs: 15_000 },
+      // The recording's id is kept until the hub confirms the Stop: a lost request or reply is sent again (the hub answers it once),
+      // and if it never gets through the recording is cancelled by its token.
+      const res = await stopWithRetry(
+        async () => {
+          const r = await api<{ ok: boolean; reason?: string; recordingId?: string; notes?: RecordNote[]; queued?: boolean }>(
+            "/record/stop",
+            { deviceId: hub.deviceId, personId, recordingId: cur.id, pointer, ...(cur.screen ? { screen: cur.screen } : {}), ...(typed.current ? { text: typed.current } : {}) },
+            undefined,
+            { queue: false, timeoutMs: 15_000 },
+          );
+          if (r.queued) throw new OfflineError(NOT_SENT);
+          return r;
+        },
+        () => api("/record/cancel", { deviceId: hub.deviceId, token: cur.token }, undefined, { queue: false, timeoutMs: 15_000 }),
       );
-      if (res.queued) throw new OfflineError(NOT_SENT);
       if (res.ok && res.recordingId && res.notes?.length) setReview({ recordingId: res.recordingId, notes: res.notes, busy: false, error: null });
       else setResult({ ok: false, title: "Nothing recorded", text: res.reason || "Nothing was heard in that recording.", pills: [], note: unmuted.current ? "Your mic was muted, so it was on only for this recording." : undefined });
     } catch (e) {

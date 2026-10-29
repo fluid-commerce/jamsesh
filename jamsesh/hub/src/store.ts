@@ -65,6 +65,8 @@ export function newId(prefix: string) {
 /** As long as a laptop keeps a queued change (web/src/shared/offline.ts): a replay is always recognized. */
 const REPLAY_MS = 7 * 86_400_000;
 
+const CANCEL_KEEP_MS = 60 * 60_000;
+
 export class Store {
   db: Database;
   private cache = new Map<CollectionName, Map<string, any>>();
@@ -100,6 +102,7 @@ export class Store {
         person_id TEXT NOT NULL, ts INTEGER NOT NULL, embedding BLOB NOT NULL
       );
       CREATE TABLE IF NOT EXISTS digests (scope TEXT PRIMARY KEY, text TEXT NOT NULL, updated INTEGER NOT NULL, through_event INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS cancels (device TEXT NOT NULL, token TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (device, token));
       CREATE TABLE IF NOT EXISTS replies (key TEXT PRIMARY KEY, status INTEGER NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL);
     `);
   }
@@ -180,12 +183,34 @@ export class Store {
 
   /** Runs the writes as one: all of them land or none do (and the cached collections are reloaded from what landed). */
   atomic<T>(fn: () => T): T {
+    // Announcements wait for the commit: clients never hear of a write that rolled back.
+    const held: (() => void)[] = (this.held = []);
+    let out: T;
     try {
-      return this.db.transaction(fn)();
+      out = this.db.transaction(fn)();
     } catch (e) {
+      this.held = null;
       this.cache.clear();
       throw e;
     }
+    this.held = null;
+    for (const f of held) f();
+    return out;
+  }
+  private held: (() => void)[] | null = null;
+  private announce(f: () => void) {
+    if (this.held) this.held.push(f);
+    else f();
+  }
+
+  /** A recording token a window cancelled (kept an hour, longer than any Start can be in flight). Only that window's own cancels push out its oldest. */
+  cancelToken(device: string, token: string, now = Date.now()) {
+    this.db.query("DELETE FROM cancels WHERE at < ?").run(now - CANCEL_KEEP_MS);
+    this.db.query("INSERT OR REPLACE INTO cancels (device, token, at) VALUES (?, ?, ?)").run(device, token, now);
+    this.db.query("DELETE FROM cancels WHERE device = ? AND token NOT IN (SELECT token FROM cancels WHERE device = ? ORDER BY at DESC LIMIT 200)").run(device, device);
+  }
+  tokenCancelled(device: string, token: string, now = Date.now()): boolean {
+    return !!this.db.query("SELECT 1 FROM cancels WHERE device = ? AND token = ? AND at >= ?").get(device, token, now - CANCEL_KEEP_MS);
   }
 
   addEvent(e: {
@@ -228,7 +253,7 @@ export class Store {
       workstreamId: e.workstreamId ?? null,
       data: e.data ?? {},
     };
-    bus.send({ type: "event", event });
+    this.announce(() => bus.send({ type: "event", event }));
     return event;
   }
 

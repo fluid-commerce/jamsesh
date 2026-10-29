@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { closeUnattended, newRecordToken, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
+import { closeUnattended, stopWithRetry, newRecordToken, mergeInto, pinWords, sendSummary, type RecordNote } from "../src/shared/notes";
 
 const note = (id: string, text: string, over: Partial<RecordNote> = {}): RecordNote => ({ id, text, t0: 0, t1: 1, personId: "p", pin: null, ...over });
 const pin = (ref: string, x = 0.2, y = 0.1) => ({ target: { kind: "artifact" as const, ref, label: "Login" }, x, y, kind: "click" as const });
@@ -47,4 +47,21 @@ test("a recording token is made before Start, is unique, and is one the hub acce
   const a = newRecordToken();
   expect(a).toMatch(/^[\w-]{8,64}$/);
   expect(newRecordToken()).not.toBe(a);
+});
+
+test("a Stop is sent again until confirmed: a lost reply is retried with backoff, a refusal is final, and running out of tries cancels", async () => {
+  const waits: number[] = [];
+  const wait = async (ms: number) => void waits.push(ms);
+  let n = 0;
+  const flaky = async () => (++n < 3 ? Promise.reject(new Error("offline")) : "ok");
+  expect(await stopWithRetry(flaky, async () => { throw new Error("must not cancel"); }, 4, wait)).toBe("ok");
+  expect(waits).toEqual([1000, 2000]);
+  // A 4xx is the hub's answer: no retry, no cancel.
+  let calls = 0;
+  await expect(stopWithRetry(async () => (calls++, Promise.reject(Object.assign(new Error("ended"), { status: 409 }))), async () => { throw new Error("no"); }, 4, wait)).rejects.toThrow("ended");
+  expect(calls).toBe(1);
+  // Never confirmed: cancelled by token, then the failure is reported.
+  let cancelled = 0;
+  await expect(stopWithRetry(() => Promise.reject(new Error("offline")), async () => void cancelled++, 3, wait)).rejects.toThrow("offline");
+  expect(cancelled).toBe(1);
 });

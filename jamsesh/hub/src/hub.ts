@@ -440,7 +440,7 @@ export class Hub {
    * Recording laptops. `lock` is the screen lock this recording took (its owner and `since`), so only
    * that lock is given back: never one someone took after it.
    */
-  private recs = new Map<string, { id: string; t0: number; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number; stopping?: boolean; nextT0?: number; token?: string }>();
+  private recs = new Map<string, { id: string; t0: number; personId: string | null; screenId: string | null; lock: { personId?: string | null; since: number } | null; keep?: ReturnType<typeof setInterval>; cap?: ReturnType<typeof setTimeout>; missed: number; stopping?: boolean; stop?: Promise<unknown>; nextT0?: number; token?: string }>();
   /** Recordings stopped and still gathering their last words, by device: a Start in that time writes its time on each (`nextT0`). */
   private stoppingRecs = new Map<string, Set<{ nextT0?: number }>>();
   private async waiting<T>(deviceId: string, rec: { nextT0?: number } | undefined, run: () => Promise<T>): Promise<T> {
@@ -454,8 +454,8 @@ export class Hub {
       if (!set.size) this.stoppingRecs.delete(deviceId);
     }
   }
-  /** Recording tokens a window cancelled before (or while) its Start was answered, so the Start can't outlive the page. */
-  private cancelled = new Map<string, number>();
+  /** What each Stop answered (the last 200), so a Stop sent again, because its reply was lost, gets the same answer and does nothing twice. */
+  private stopResults = new Map<string, { deviceId: string; caller: string; result: Awaited<ReturnType<Hub["recordStop"]>> }>();
   private recSweep = (() => {
     const t = setInterval(() => this.sweepRecordings(), 15_000);
     t.unref?.();
@@ -476,7 +476,7 @@ export class Hub {
   recordStart(deviceId: string, personId: string | null, t0 = this.clock(), screen?: string | null, token?: string): { ok: true; id: string } | { ok: false; reason: string; status: number } {
     const s = this.session;
     const person = s.person(personId);
-    if (token && this.cancelled.has(token)) return { ok: false, reason: "That recording was cancelled.", status: 409 };
+    if (token && s.store.tokenCancelled(deviceId, token)) return { ok: false, reason: "That recording was cancelled.", status: 409 };
     const earlier = this.recs.get(deviceId);
     if (earlier?.personId && earlier.personId !== person?.id) return { ok: false, reason: "Someone else is recording in this window.", status: 409 };
     // Everything that can refuse is checked first: a rejected Start leaves the earlier recording running.
@@ -524,10 +524,7 @@ export class Hub {
    * recording already begun under it ends, and a Start that arrives later is refused. The words said are not kept.
    */
   recordCancel(deviceId: string, token: string) {
-    const now = Date.now();
-    for (const [t, at] of this.cancelled) if (now - at > Hub.RECORD_MAX_MS) this.cancelled.delete(t);
-    this.cancelled.set(token, now);
-    if (this.cancelled.size > 500) this.cancelled.delete(this.cancelled.keys().next().value!);
+    this.session.store.cancelToken(deviceId, token);
     const rec = this.recs.get(deviceId);
     if (rec?.token === token && !rec.stopping) this.abandonRecording(deviceId, rec);
   }
@@ -570,13 +567,30 @@ export class Hub {
 
   /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
   async recordStop(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
-    const s = this.session;
-    // A Stop names the recording it ends. One that arrives after that recording ended (a lost reply, a replacement Start) ends nothing.
+    // A Stop sent again (its reply was lost) gets the answer the first one got, from the same window; one still running is shared.
+    const prior = this.stopResults.get(w.recordingId);
+    if (prior && prior.deviceId === w.deviceId && prior.caller === w.caller) return prior.result;
+    // A Stop names the recording it ends. One that arrives after that recording ended (a replacement Start, a cancel) ends nothing.
     const rec = this.recs.get(w.deviceId);
     if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
     if (rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
-    if (rec.stopping) return { ok: false, reason: "That recording is already being stopped.", status: 409 };
+    if (rec.stop) return rec.stop as ReturnType<Hub["recordStop"]>;
     rec.stopping = true;
+    const run = this.stopRecording(w, rec);
+    rec.stop = run;
+    run.then(
+      (result) => {
+        this.stopResults.set(w.recordingId, { deviceId: w.deviceId, caller: w.caller, result });
+        if (this.stopResults.size > NOTE_RECS_MAX) this.stopResults.delete(this.stopResults.keys().next().value!);
+      },
+      // A Stop that failed outright can be tried again.
+      () => ((rec.stopping = false), (rec.stop = undefined)),
+    );
+    return run;
+  }
+
+  private async stopRecording(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }, rec: NonNullable<ReturnType<typeof this.recs.get>>): Promise<{ ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number }> {
+    const s = this.session;
     const person = s.person(w.personId ?? rec.personId);
     // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
     const t0 = rec.t0;

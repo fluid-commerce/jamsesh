@@ -2,7 +2,7 @@
 // the person with a font is asked once; and a font file never goes into the offline outbox.
 import "fake-indexeddb/auto";
 import { expect, test } from "bun:test";
-import { bytesToBase64, FACE_TRIES, familyKey, loadFonts, lookUpFonts, newFontMemory, openQuestions, type RoomFonts } from "../src/shared/roomFonts";
+import { bytesToBase64, FACE_TRIES, familyKey, loadFonts, lookUpFonts, noteLookupFailed, newFontMemory, openQuestions, type RoomFonts } from "../src/shared/roomFonts";
 import { api } from "../src/shared/hub";
 import { idbTable, outbox } from "../src/shared/offline";
 
@@ -181,4 +181,16 @@ test("a failed lookup of which fonts this Mac has can be asked again; a good one
   expect(checked.size).toBe(0);
   expect(await lookUpFonts(async () => ["Inter"], ["Inter"], checked)).toEqual(["Inter"]);
   expect(checked.size).toBe(1);
+});
+
+test("font lookup retries are counted per family: one family running out of tries doesn't stop another", () => {
+  const tries = new Map<string, number>();
+  const checked = new Set<string>();
+  for (let i = 0; i < 3; i++) expect(noteLookupFailed(tries, ["Inter"], checked)).toBe(true);
+  expect(checked.has(familyKey("Inter"))).toBe(false);
+  // Inter's fourth failure ends its tries; Lora, new, still has all of its own.
+  expect(noteLookupFailed(tries, ["Inter", "Lora"], checked)).toBe(true);
+  expect(checked.has(familyKey("Inter"))).toBe(true);
+  expect(checked.has(familyKey("Lora"))).toBe(false);
+  expect(noteLookupFailed(tries, ["Inter"], checked)).toBe(false);
 });

@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { deflateSync } from "node:zlib";
+import { bus } from "../src/bus";
 import type { Hub as HubType } from "../src/hub";
 import { AFTER_MS, alignNotes, BEFORE_MS, describeNote, LEAD_MS } from "../src/record";
 import type { RecordMark, RecordNote, Utterance } from "../src/types";
@@ -330,8 +331,8 @@ test("stop with nothing said says so, ends the recording, and a second Stop is h
   const first = (await (await stop()).json()) as any;
   expect(first).toMatchObject({ ok: false, reason: "Nothing was heard in that recording." });
   expect(r.s.recordings()).toEqual([]);
-  // The recording has ended, so a repeat Stop ends nothing.
-  expect((await stop()).status).toBe(409);
+  // The recording has ended, so a repeat Stop ends nothing and gets the first answer.
+  expect(await (await stop()).json()).toEqual(first);
 }, 30_000);
 
 test("another person's window can't stop my recording", async () => {
@@ -703,8 +704,10 @@ test("the notes' window is the hub's own record of Start: a Stop can't widen it,
   if (!start.ok) throw new Error("start");
   const base = { deviceId: "mayaLaptop", recordingId: start.id, caller: "host", personId: r.maya.id, t1: t0 + 10, pointer: [], typed: "x" };
   const [one, two] = await Promise.all([r.hub.recordStop(base), r.hub.recordStop(base)]);
-  expect([one.ok, two.ok].sort()).toEqual([false, true]);
-  expect((one.ok ? two : one)).toMatchObject({ ok: false, status: 409 });
+  // A repeated Stop gets the first one's answer and does nothing twice.
+  expect(one.ok && two.ok).toBe(true);
+  expect(one).toEqual(two);
+  expect((r.hub as any).noteRecs.size).toBe(1);
 }, 30_000);
 
 test("an old prompt window naming a replaced recording ends nothing", async () => {
@@ -920,6 +923,54 @@ test("a recording's speech bound is kept on the recording itself: twenty-five re
   const gotA = await stoppingA;
   expect(gotA.ok && gotA.notes.map((n) => n.text)).toEqual(["said in A"]);
 }, 60_000);
+
+test("a Stop sent again after its reply was lost gets the first answer and ends nothing twice; a Stop that fails outright can be tried again", async () => {
+  const r = room();
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!a.ok) throw new Error("start");
+  const body = { deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], text: "make it bigger" };
+  const first = await r.post("/record/stop", body);
+  const again = await r.post("/record/stop", body);
+  expect(first.status).toBe(200);
+  expect(await again.json()).toEqual(await first.json());
+  expect((r.hub as any).noteRecs.size).toBe(1);
+  // Another window's Stop for the same id is not given that answer.
+  expect((await r.post("/record/stop", { ...body, deviceId: "benLaptop" })).status).toBeGreaterThanOrEqual(400);
+  // An outright failure leaves the recording stoppable.
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!b.ok) throw new Error("start");
+  const real = (r.hub as any).stopRecording.bind(r.hub);
+  let failed = false;
+  (r.hub as any).stopRecording = (...args: any[]) => (failed ? real(...args) : ((failed = true), Promise.reject(new Error("database is locked"))));
+  expect((await r.post("/record/stop", { ...body, recordingId: b.id })).status).toBeGreaterThanOrEqual(500);
+  expect((await r.post("/record/stop", { ...body, recordingId: b.id })).status).toBe(200);
+}, 60_000);
+
+test("a window's cancelled tokens are kept per device and never pushed out by other windows' cancels", async () => {
+  const r = room();
+  const tok = "rt_eeeeeeeeeeeeeeee";
+  r.hub.recordCancel("mayaLaptop", tok);
+  for (let i = 0; i < 600; i++) r.hub.recordCancel("benLaptop", `rt_ben${String(i).padStart(12, "0")}`);
+  const late = await r.post("/record/start", { deviceId: "mayaLaptop", personId: r.maya.id, token: tok });
+  expect(late.status).toBe(409);
+  // One window's own cancels are capped, so it can't grow without limit.
+  const n = (r.s.store.db.query("SELECT COUNT(*) AS n FROM cancels WHERE device = 'benLaptop'").get() as { n: number }).n;
+  expect(n).toBe(200);
+  // Past the hour a token no longer counts.
+  expect(r.s.store.tokenCancelled("mayaLaptop", tok, Date.now() + 61 * 60_000)).toBe(false);
+});
+
+test("a write's announcement waits for the commit: a rolled-back transaction announces nothing", () => {
+  const r = room();
+  const heard: string[] = [];
+  const off = bus.on((m: any) => m.type === "event" && heard.push(m.event.text));
+  const ev = (text: string) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorName: "x", text });
+  expect(() => r.s.store.atomic(() => (ev("rolled back"), (() => { throw new Error("commit failed"); })()))).toThrow();
+  expect(heard).toEqual([]);
+  r.s.store.atomic(() => (ev("kept"), expect(heard).toEqual([])));
+  expect(heard).toEqual(["kept"]);
+  off?.();
+});
 
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();

@@ -39,6 +39,26 @@ export function pinWords(n: RecordNote) {
 /** Made by the page before it asks the hub to start a recording, so the page closing mid-request can still cancel it. */
 export const newRecordToken = () => `rt_${crypto.randomUUID().replace(/-/g, "")}`;
 
+/**
+ * Sends a Stop until the hub confirms it. The hub answers a repeated Stop with the first answer, so trying again is safe. A refusal
+ * (a 4xx) is final. When every try fails the recording is cancelled by its token instead, so it can't run on holding the screen.
+ */
+export async function stopWithRetry<T>(call: () => Promise<T>, cancel: () => Promise<unknown>, tries = 4, wait: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))): Promise<T> {
+  let last: unknown;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await call();
+    } catch (e) {
+      const status = (e as { status?: number })?.status;
+      if (typeof status === "number" && status < 500) throw e;
+      last = e;
+      if (i < tries - 1) await wait(1000 * 2 ** i);
+    }
+  }
+  await cancel().catch(() => {});
+  throw last;
+}
+
 /** A recording that began after its page went away has nobody to stop it: closes it, sending the words alone. */
 export function closeUnattended(post: (path: string, body: object) => Promise<unknown>, deviceId: string, personId: string | null, recordingId: string) {
   return post("/prompt-window", { deviceId, personId, recordingId, pointer: [] }).catch(() => {});

@@ -81,6 +81,19 @@ export function openQuestions(wanted: FontWant[], available: FontInfo[], me: str
   return wanted.filter((w) => !have.has(w.key) && !w.declinedBy.includes(me) && !answered.has(w.key));
 }
 
+/** After a failed lookup: counts a try for each family and puts back in `checked` the ones out of tries. True when any family may still be asked again. */
+export function noteLookupFailed(tries: Map<string, number>, families: string[], checked: Set<string>, max = 3): boolean {
+  let more = false;
+  for (const f of families) {
+    const k = familyKey(f);
+    const n = (tries.get(k) ?? 0) + 1;
+    tries.set(k, n);
+    if (n > max) checked.add(k);
+    else more = true;
+  }
+  return more;
+}
+
 /** Asks the Mac which of these families it has. Families are marked checked while asking; a failed lookup unmarks them so it can be asked again. */
 export async function lookUpFonts(invoke: (cmd: string, args: Record<string, unknown>) => Promise<unknown>, families: string[], checked: Set<string>): Promise<string[] | null> {
   for (const f of families) checked.add(familyKey(f));
