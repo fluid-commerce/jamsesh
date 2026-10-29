@@ -64,6 +64,10 @@ pub struct Kept {
     /// Hosts (by the public key they proved they hold) the person said Share or Not this room to.
     #[serde(default)]
     pub hosts: BTreeMap<String, bool>,
+    /// Counts the times keeping was switched off (every answer forgotten): an answer or a copy that was on its
+    /// way from before that doesn't count after it.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 fn file(dir: &Path) -> PathBuf {
@@ -117,6 +121,12 @@ fn save(dir: &Path, kept: &Kept) -> Result<(), String> {
     written.map_err(|e| format!("Couldn't save your voice in the app: {e}"))
 }
 
+/// Reads the file under the lock, so a decision made from it can't interleave with a change.
+fn read_locked<R>(dir: &Path, f: impl FnOnce(&Kept) -> R) -> Result<R, String> {
+    let _held = LOCK.lock().map_err(|_| "The app's voice store is unavailable.".to_string())?;
+    Ok(f(&load(dir)))
+}
+
 /// Reads, changes and writes the file under the lock. An error from the change leaves the file as it was.
 fn change<R>(dir: &Path, f: impl FnOnce(&mut Kept) -> Result<R, String>) -> Result<R, String> {
     let _held = LOCK.lock().map_err(|_| "The app's voice store is unavailable.".to_string())?;
@@ -136,12 +146,15 @@ pub fn set_consent(dir: &Path, on: bool) -> Result<(), String> {
         if !on {
             k.copy = None;
             k.hosts.clear();
+            k.epoch += 1;
         }
         Ok(())
     })
 }
 
-/// Keeps a copy, only for someone who said yes (checked under the lock, so a "no" can't be overtaken).
+/// Keeps a copy, only for someone who said yes (checked under the lock, so a "no" can't be overtaken). The
+/// tests' way in; a host's copy goes through `put`.
+#[cfg(test)]
 fn put_now(dir: &Path, copy: Copy) -> Result<(), String> {
     check(&copy)?;
     change(dir, |k| {
@@ -169,23 +182,33 @@ where
     if kept.consent != Some(true) {
         return Err("Keeping your voice in the app is off.".into());
     }
-    match kept.hosts.get(host_key) {
-        Some(true) => {}
-        Some(false) => return Err("You said not this room.".into()),
-        None => {
-            let answer = ask().await;
-            change(dir, |k| {
-                if k.consent == Some(true) {
-                    k.hosts.insert(host_key.to_string(), answer);
-                }
-                Ok(())
-            })?;
-            if !answer {
-                return Err("You said not this room.".into());
-            }
-        }
+    let epoch = kept.epoch;
+    if !kept.hosts.contains_key(host_key) {
+        let answer = ask().await;
+        remember(dir, host_key, answer, epoch)?;
     }
-    put_now(dir, copy)
+    // Decided and kept in one locked step, from the answers as they are now: a switch-off since (even one
+    // switched back on) forgot the answer this was going on.
+    change(dir, |k| {
+        if k.consent != Some(true) || k.epoch != epoch {
+            return Err("Keeping your voice in the app was switched off meanwhile.".into());
+        }
+        if k.hosts.get(host_key) != Some(&true) {
+            return Err("You said not this room.".into());
+        }
+        k.copy = Some(copy);
+        Ok(())
+    })
+}
+
+/// Keeps the person's answer for a host, unless keeping was switched off since the question was asked.
+fn remember(dir: &Path, host_key: &str, answer: bool, epoch: u64) -> Result<(), String> {
+    change(dir, |k| {
+        if k.consent == Some(true) && k.epoch == epoch {
+            k.hosts.insert(host_key.to_string(), answer);
+        }
+        Ok(())
+    })
 }
 
 /// Their voice was reset on a host: the copy goes too (the choice stays), so it can't bring the old voice back.
@@ -224,12 +247,18 @@ where
 }
 
 /// What a host's page may see of the copy: everything once the person said Share to this host, else
-/// the copy without its samples (enough to tell which copy is newer), and never the other hosts' answers.
+/// the copy's version and dates only (enough to tell which copy is newer): not its samples, the host it came
+/// from or that host's seal. Never the other hosts' answers, nor the app's own id for the person (which
+/// would follow them from host to host).
 pub fn for_page(mut kept: Kept, host_id: &str) -> Kept {
     let shared = kept.hosts.get(host_id) == Some(&true);
     kept.hosts.clear();
+    kept.me.clear();
+    kept.epoch = 0;
     if !shared && let Some(c) = kept.copy.as_mut() {
         c.samples.clear();
+        c.host = None;
+        c.stamp = None;
     }
     kept
 }
@@ -247,22 +276,17 @@ where
     }
     let kept = load(dir);
     let (Some(true), Some(_)) = (kept.consent, kept.copy.as_ref()) else { return Ok(None) };
-    let yes = match kept.hosts.get(host_id) {
-        Some(&answer) => answer,
-        None => {
-            // Not under the lock: the dialog waits on the person. The answer is written under it.
-            let answer = ask().await;
-            change(dir, |k| {
-                if k.consent == Some(true) {
-                    k.hosts.insert(host_id.to_string(), answer);
-                }
-                Ok(())
-            })?;
-            answer
-        }
-    };
-    let now = load(dir);
-    Ok(if yes && now.consent == Some(true) { now.copy } else { None })
+    let epoch = kept.epoch;
+    if !kept.hosts.contains_key(host_id) {
+        // Not under the lock: the dialog waits on the person. The answer is written under it.
+        let answer = ask().await;
+        remember(dir, host_id, answer, epoch)?;
+    }
+    // The copy is handed over only on the answers as they are now, read under the lock.
+    read_locked(dir, |k| {
+        let yes = k.consent == Some(true) && k.epoch == epoch && k.hosts.get(host_id) == Some(&true);
+        if yes { k.copy.clone() } else { None }
+    })
 }
 
 /// The host's id and the name to ask about ("Design review", else its address), from `/api/pair/info`.
@@ -484,6 +508,48 @@ mod tests {
         // No temporary file is left behind.
         let left = std::fs::read_dir(&d).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".part")).count();
         assert_eq!(left, 0);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn an_answer_given_across_a_switch_off_and_on_neither_shares_nor_keeps() {
+        let d = dir();
+        set_consent(&d, true).unwrap();
+        put_now(&d, copy(3, 0.1)).unwrap();
+        // While the Share dialog is up, the person switches keeping off and on again (every answer forgotten),
+        // and a new copy arrives; then they press Share on the old question.
+        let flip = |d: PathBuf| {
+            move || {
+                set_consent(&d, false).unwrap();
+                set_consent(&d, true).unwrap();
+                put_now(&d, copy(2, 0.2)).unwrap();
+                std::future::ready(true)
+            }
+        };
+        assert_eq!(block(share(&d, "ed25519:A", flip(d.clone()))).unwrap(), None);
+        assert!(load(&d).hosts.is_empty());
+        assert!(block(put(&d, "ed25519:B", copy(1, 0.3), flip(d.clone()))).is_err());
+        assert_eq!(load(&d).copy, Some(copy(2, 0.2)));
+        assert!(load(&d).hosts.is_empty());
+        // Asked again now, the answer counts.
+        let asked = std::cell::Cell::new(0);
+        assert_eq!(block(share(&d, "ed25519:A", stub(true, &asked))).unwrap(), Some(copy(2, 0.2)));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_page_never_sees_the_apps_own_id_and_an_unshared_host_sees_no_origin() {
+        let d = dir();
+        set_consent(&d, true).unwrap();
+        let mut c = copy(2, 0.1);
+        c.stamp = Some(serde_json::json!({ "gen": 1, "at": 5, "mac": "m" }));
+        put_now(&d, c).unwrap();
+        assert_eq!(load(&d).me.len(), 32);
+        let seen = for_page(load(&d), "ed25519:stranger");
+        assert!(seen.me.is_empty());
+        let copy = seen.copy.unwrap();
+        assert!(copy.samples.is_empty() && copy.host.is_none() && copy.stamp.is_none());
+        assert_eq!(copy.version.as_deref(), Some("v1"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
