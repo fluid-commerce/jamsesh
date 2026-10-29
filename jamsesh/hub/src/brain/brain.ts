@@ -336,17 +336,20 @@ export class Brain {
   async placeShare(share: Share) {
     const s = this.session;
     if (this.stopped || !s.settings().brainEnabled) return;
-    const stage = s.stage();
-    if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
-      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
+    // The main screen if the share may take it over; if a person's cast or a pin holds it, a free extra screen.
+    const eligible = (id: string) => {
+      const st = s.stage(id);
+      const lock = s.lockOf(id);
+      return !(st.pinned && st.by !== "Room brain" && st.by !== "JamSesh") && !(lock && lock.personId !== share.personId);
+    };
+    const target = ["main", ...s.screens().filter((x) => x.role === "extra").map((x) => x.id)].find(eligible);
+    if (!target) {
+      const lock = s.lockOf("main");
+      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: lock && lock.personId !== share.personId ? `${lock.by} has the screen locked; unlock it or ask the brain to show the share.` : "The screen is pinned; unpin it or ask the brain to show the share." });
       return;
     }
-    // A person's cast stays up: a share doesn't take it over unless it's that person's own.
-    const held = s.lockOf("main");
-    if (held && held.personId !== share.personId) {
-      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: `${held.by} has the screen locked; unlock it or ask the brain to show the share.` });
-      return;
-    }
+    const stage = s.stage(target);
+    const held = s.lockOf(target);
     const m = model(s, "presenter");
     // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
     s.rememberStageFor(share.id);
@@ -357,7 +360,7 @@ export class Brain {
     const claim = s.stageClaim();
     const fallback = () => {
       if (this.stopped) return;
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined, claim });
+      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", target, { override: true, keepLock: held ?? undefined, claim });
     };
     if (!m) return fallback();
     const pass = { effects: 0 };
@@ -366,7 +369,7 @@ export class Brain {
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
         system: this.system(),
-        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
+        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on ${target === "main" ? "the big screen" : `the screen with id ${target} (the main screen is held by someone else), passing screen: "${target}"`} with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
         tools: { set_layout: this.tools([], pass, "person", claim, share.id).set_layout },
         stopWhen: isStepCount(2),
       });
@@ -480,7 +483,7 @@ export class Brain {
     const s = this.session;
     const lock = s.lockOf(screen);
     if (!lock) return null;
-    const asks = batch.filter((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
+    const asks = batch.filter(isDirectRequest);
     if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId) && asks.some(asksForScreen) && s.mayReplaceLock(screen, lock.personId, claim)) {
       // Nothing is released here: the write that follows replaces the lock, or nothing changes (see castBy).
       this.replaceOk.set(screen, lock.personId);
@@ -516,7 +519,7 @@ export class Brain {
     const artifactIds = () => new Set(s.artifacts().map((a) => a.id));
     const host = this.host;
     // A person who asked JamSesh directly (typed, or spoken to it by name) is putting this up on purpose: it's their cast and takes the lock.
-    const asker = batch.find((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct && e.authorId);
+    const asker = batch.find(isDirectRequest);
     // Every stage write of this pass carries the claim taken when the pass began (see StageClaim): nothing it decided
     // lands on a screen someone changed while the model thought.
     const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(onlyShare ? { requireShare: onlyShare } : {}), ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
@@ -1049,8 +1052,11 @@ export class Brain {
         this.lockRefused = true;
         continue;
       }
-      // The owner's own request replaces their lock in the write itself; nothing is released ahead of it.
-      const wo = { claim, ...(ev.data?.direct && ev.authorId ? { person: { id: ev.authorId, name: ev.authorName } } : {}), ...(held && ev.authorId ? { mayReplaceLock: ev.authorId } : {}) };
+      // Only a direct request replaces the owner's lock, in the write itself (nothing is released ahead of it). The same
+      // person's overheard line leaves their screen as it is.
+      const direct = isDirectRequest(ev);
+      if (held && !direct) continue;
+      const wo = { claim, ...(direct ? { person: { id: ev.authorId!, name: ev.authorName }, ...(held ? { mayReplaceLock: ev.authorId! } : {}) } : {}) };
       if (line.intent === "present" && JOIN_WORDS.test(text.toLowerCase())) {
         s.setStage({ mode: "join", title: "", items: [] }, "Room brain", "main", wo);
         continue;
@@ -1336,6 +1342,11 @@ export class Brain {
 const STOPWORDS = new Set(["the", "and", "for", "option", "options", "variant", "variants", "version", "versions", "one", "ones", "all", "that", "this", "our", "real", "quick", "please", "up", "can", "you", "again"]);
 
 /** Where a request came from, which decides whether a reply is spoken. */
+/** A person's request addressed to JamSesh itself (spoken to it, typed to it, or a button), not talk it overheard and not a prompt to their agent. The one place that decides it. */
+export function isDirectRequest(e: JamEvent): e is JamEvent & { authorId: string } {
+  return e.authorType === "person" && e.kind !== "prompt" && !!e.data?.direct && !!e.authorId;
+}
+
 export function speechSource(batch: JamEvent[]): SpeechSource {
   const ev = batch[batch.length - 1];
   if (!ev) return "ambient";

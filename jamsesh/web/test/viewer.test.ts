@@ -33,11 +33,11 @@ test("groups gather by group or title, variants read A, B, C, and the filter app
   expect(groupArtifacts(list, "built").map(([g]) => g)).toEqual(["Login"]);
 });
 
-test("the viewer keeps its item when the group changes; when it's gone the gallery (which passes no fallback) shows the first", () => {
+test("the viewer keeps its item when the group changes; when it's gone it lands on the first", () => {
   const items = [art("a"), art("b"), art("c")];
-  expect(settle(items, "b", 0)).toBe(1);
-  expect(settle(items, "gone", 0)).toBe(0);
-  expect(settle([], "gone", 0)).toBe(0);
+  expect(settle(items, "b")).toBe(1);
+  expect(settle(items, "gone")).toBe(0);
+  expect(settle([], "gone")).toBe(0);
 });
 
 test("a frame is drawn larger only when its box would upscale the stored 1600 px render", () => {

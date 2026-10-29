@@ -169,3 +169,34 @@ test("a share the presenter places on an extra screen gives that screen back wha
   expect(r.s.stage("screen-2").items).toEqual([r.a.id]);
   expect(r.s.stage().mode).toBe("agents");
 });
+
+test("main locked by someone else: the share goes to a free extra screen, and gives it back at the end", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  const info = { width: 1920, height: 1080, dpr: 2, screenX: 0, screenY: 0, at: Date.now() };
+  r.s.reportScreen("main", info);
+  r.s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  r.s.setStage({ mode: "spotlight", items: [r.a.id] }, "Chey", "main", { person: { id: r.chey.id, name: "Chey" } });
+  r.s.setStage({ mode: "agents" }, "Chey", "screen-2", { override: true });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("spotlight");
+  expect(r.s.stage("screen-2").mode).toBe("layout");
+  r.s.endShare(sh.id);
+  expect(r.s.stage("screen-2").mode).toBe("agents");
+});
+
+test("a restart with a live share still gives the screens back what the share hid", async () => {
+  mock.module("ai", () => ({ ...ai, generateText: async () => { throw new Error("presenter down"); } }));
+  const r = room();
+  r.s.setStage({ mode: "spotlight", items: [r.a.id], title: "Pricing" }, "Chey", "main", { person: { id: r.felipe.id, name: "Felipe" } });
+  const sh = r.s.startShare("felipe-laptop", "screen");
+  await r.hub.brain.placeShare(sh);
+  expect(r.s.stage().mode).toBe("layout");
+  // A new session over the same store, as after a restart.
+  const { Session } = await import("../src/session");
+  const again = new Session(r.s.store);
+  expect(again.store.get("shares", sh.id)?.status).toBe("ended");
+  expect(again.stage().mode).toBe("spotlight");
+  expect(again.stage().lock?.by).toBe("Felipe");
+});

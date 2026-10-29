@@ -1235,12 +1235,16 @@ export class Session {
   }
 
   /** What each screen showed just before a share took it over, so the share's end can give it back. */
-  private beforeShare = new Map<string, Map<string, Stage>>();
+  /** The per-screen stages a share hid, kept in the store with the share so a restart still gives them back. */
+  private priorStages(): Record<string, Record<string, Stage>> {
+    return this.store.setting<Record<string, Record<string, Stage>>>("beforeShare", {});
+  }
 
   /** Remember what every screen shows now (keyed by screen), ahead of a new share taking one of them over. */
   rememberStageFor(shareId: string) {
-    if (this.beforeShare.has(shareId)) return;
-    const snap = new Map<string, Stage>();
+    const all = this.priorStages();
+    if (all[shareId]) return;
+    const snap: Record<string, Stage> = {};
     for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) {
       const st = this.stage(screen);
       const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
@@ -1248,16 +1252,16 @@ export class Session {
       if (tiles.length && tiles.every((t) => t.kind === "screen")) {
         // Another share is all this screen shows: this one gives back what that one was hiding.
         for (const t of tiles) {
-          const prior = t.kind === "screen" ? this.beforeShare.get(t.shareId)?.get(screen) : undefined;
+          const prior = t.kind === "screen" ? all[t.shareId]?.[screen] : undefined;
           if (prior) {
             kept = prior;
             break;
           }
         }
       }
-      snap.set(screen, kept);
+      snap[screen] = kept;
     }
-    this.beforeShare.set(shareId, snap);
+    this.store.setSetting("beforeShare", { ...all, [shareId]: snap });
   }
 
   endShare(id: string, status: Share["status"] = "ended") {
@@ -1265,15 +1269,15 @@ export class Session {
     if (!sh) return;
     this.store.put("shares", { ...sh, status });
     this.sharesShown.delete(id);
-    const before = this.beforeShare.get(id);
-    this.beforeShare.delete(id);
+    const { [id]: before, ...others } = this.priorStages();
+    if (before) this.store.setSetting("beforeShare", others);
     const hosts = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
     for (const screen of hosts) {
       const st = this.stage(screen);
       if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
         const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
         // When the share was all the screen showed, the screen goes back to what it showed before.
-        const prior = before?.get(screen);
+        const prior = before?.[screen];
         const back = !tiles.length && prior && !(prior.mode === "layout" && prior.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? prior : null;
         // A lock still held when the share ends stays with what comes back (the owner's share over their own cast, SPEC 10.5).
         // One its owner let go of during the share stays gone.

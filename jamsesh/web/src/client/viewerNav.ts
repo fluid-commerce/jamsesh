@@ -41,7 +41,7 @@ export function keyAction(e: { key: string; metaKey?: boolean; ctrlKey?: boolean
 }
 
 /** Where the viewer lands when the item it holds goes away or the group changes under it. */
-export function settle(items: Artifact[], currentId: string, fallback: number): number {
+export function settle(items: Artifact[], currentId: string): number {
   const at = items.findIndex((a) => a.id === currentId);
-  return at >= 0 ? at : Math.max(0, Math.min(items.length - 1, fallback));
+  return at >= 0 ? at : 0;
 }

@@ -1111,7 +1111,9 @@ test("every path where a person asks JamSesh directly replaces their own lock wi
     build_custom_view: async () => void (await tools([direct("JamSesh, show a view of pricing")]).build_custom_view.execute({ title: "x", html: "<p>x</p>" })),
     show_saved_layout: async () => void (await tools([direct("JamSesh, bring back the review layout")]).show_saved_layout.execute({ name: "review" })),
     restore_screen: async () => {
+      // The screen showed Pricing, then Checkout; putting the last thing back shows Pricing again.
       cast(chey, [b.id]);
+      cast(chey, [a.id]);
       await tools([direct("JamSesh, put the last thing back")]).restore_screen.execute({});
     },
     show_ready: async () => {
@@ -1125,6 +1127,7 @@ test("every path where a person asks JamSesh directly replaces their own lock wi
     await run();
     expect([name, s.stage().since > before || s.stage().items?.[0] !== a.id || s.stage().mode !== "spotlight" ? "changed" : "same"]).toEqual([name, "changed"]);
     expect([name, owner()]).toEqual([name, chey.id]);
+    if (name === "restore_screen") expect(s.stage().items).toEqual([b.id]);
   }
   // The rule-based path (no gateway) does the same.
   mine();
@@ -1136,4 +1139,16 @@ test("every path where a person asks JamSesh directly replaces their own lock wi
   cast(felipe, [a.id]);
   await tools([direct("JamSesh, show pricing")]).show_on_screen.execute({ mode: "spotlight", artifactIds: [b.id] });
   expect(owner()).toBe(felipe.id);
+});
+
+test("an owner's overheard line, through the rule-based path, leaves their lock and screen alone", () => {
+  const { hub, s, chey, said } = room();
+  const a = artifact(s, "Checkout");
+  artifact(s, "Pricing");
+  s.setStage({ mode: "spotlight", items: [a.id] }, "Chey", "main", { person: { id: chey.id, name: "Chey" } });
+  const before = s.stage();
+  const ev = said(chey, "let's show pricing");
+  hub.brain.ruleRoute([ev], { lines: [{ id: ev.id, relevance: "work", intent: "present" }] } as any);
+  expect(s.stage().items).toEqual([a.id]);
+  expect(s.stage().lock).toEqual(before.lock);
 });
