@@ -290,6 +290,8 @@ export interface Fact {
 export interface CarriedFrom {
   sessionId: string;
   at: number;
+  /** The item's id in the project's context (carryover.ts), so a change to it here updates that row. */
+  id?: string;
 }
 
 /** One line the card came from: what was heard, who said it, and the transcript moment it links to. */
@@ -336,6 +338,10 @@ export interface TriageCard {
   cancels?: string;
   /** A later line in the room overruled this proposal; it waits for a person to dismiss it like any other. */
   overruled?: string;
+  /** Every overrule of it: why, who, when, and the lines it came from. Never cleared; the same ask said again makes a new card. */
+  vetoes?: { reason: string; by: string; at: number; eventIds: number[] }[];
+  /** This card asks again for a proposal that was overruled (that card's id), which keeps its veto. */
+  renews?: string;
   sources: TriageSource[];
   /** How many times it was proposed: repeats join this card. */
   count: number;
