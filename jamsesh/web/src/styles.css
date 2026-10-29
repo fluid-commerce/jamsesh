@@ -1064,6 +1064,15 @@ select {
   cursor: pointer;
 }
 
+/* A choice this window can't change reads as plain text: no chevron, no box. */
+select:disabled {
+  cursor: default;
+  color: var(--dim);
+  background: transparent;
+  border-color: transparent;
+  opacity: 1;
+}
+
 .btn,
 .chip,
 .badge,

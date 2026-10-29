@@ -101,6 +101,7 @@ const JAM_TOOLS = [
         text: { type: "string" },
         workstream: { type: "string" },
         directiveId: { type: "string", description: "The directive this update answers, if any" },
+        platformSpecific: { type: "boolean", description: "With shipped: the change is deliberately for your platform only, so other platforms aren't asked to match it" },
       },
       required: ["kind", "text"],
     },
@@ -469,7 +470,7 @@ export class McpEndpoint {
       }
       case "jam_update": {
         const agent = this.requireAgent(ctx);
-        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId } });
+        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}) } });
         if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
         return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}${s.shareNudge(agent.id, String(args.text ?? ""))}`);

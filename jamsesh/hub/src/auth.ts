@@ -173,6 +173,12 @@ export class Auth {
     return d && !d.revoked ? d : null;
   }
 
+  /** Whether a credential id is still paired (not revoked or forgotten). */
+  live(id: string) {
+    const d = this.devices.get(id);
+    return !!d && !d.revoked;
+  }
+
   update(id: string, fields: Partial<Pick<PairedDevice, "label" | "personId">>) {
     const d = this.devices.get(id);
     if (!d) return null;

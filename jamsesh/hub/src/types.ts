@@ -24,6 +24,8 @@ export interface Device {
   micOn: boolean;
   level: number;
   lastSeen: number;
+  /** The window that registered it: its pairing id, or "host" for the host's own windows. Only that window starts or ends its shares. */
+  pairedId?: string;
 }
 
 export type Harness = "claude-code" | "codex" | "other";

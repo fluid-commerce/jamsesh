@@ -64,10 +64,10 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
   const inflight = { n: 0 };
   const brain = hub.brain as any;
   const origConsider = brain.consider.bind(brain);
-  brain.consider = async (note: string) => {
+  brain.consider = async (...args: unknown[]) => {
     inflight.n++;
     try {
-      return await origConsider(note);
+      return await origConsider(...args);
     } finally {
       inflight.n--;
     }
@@ -85,8 +85,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
   };
   const trace: string[] = [];
   const origTools = brain.tools.bind(brain);
-  brain.tools = (batch: JamEvent[], pass: { effects: number }) => {
-    const tools = origTools(batch, pass);
+  const traced = (tools: Record<string, any>) => {
     for (const [name, t] of Object.entries<any>(tools)) {
       const exec = t.execute;
       t.execute = async (input: any, o: any) => {
@@ -96,6 +95,10 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     }
     return tools;
   };
+  // Forward the person/agent scope: an agent's words get the reduced tool set in production too.
+  brain.tools = (batch: JamEvent[], pass: { effects: number }, from?: "person" | "agent") => traced(origTools(batch, pass, from));
+  const origParity = brain.parityTools.bind(brain);
+  brain.parityTools = (batch: unknown) => traced(origParity(batch));
   const origErr = console.error;
   console.error = (...a: any[]) => {
     trace.push(`console.error ${a.map(String).join(" ").slice(0, 200)}`);

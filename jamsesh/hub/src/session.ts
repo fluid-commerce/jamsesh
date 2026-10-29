@@ -398,6 +398,7 @@ export class Session {
       micOn: fields.micOn ?? cur?.micOn ?? false,
       level: fields.level ?? cur?.level ?? 0,
       lastSeen: Date.now(),
+      pairedId: fields.pairedId ?? cur?.pairedId,
     };
     const changed = !cur || cur.label !== d.label || cur.personId !== d.personId || cur.micOn !== d.micOn || cur.kind !== d.kind || cur.location !== d.location;
     this.store.put("devices", d, changed);
@@ -978,10 +979,17 @@ export class Session {
   /** Decisions the room made (the brain's; agents' own decisions are updates), relevant to this agent's workstream when it has one. */
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
-    return this.store
-      .recentEvents({ kinds: ["decision"], afterId: opts.afterId, limit: opts.limit * 3 })
-      .filter((e) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId)))
-      .slice(-opts.limit);
+    const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
+    // Page back until enough are relevant: other workstreams' decisions can't crowd one out.
+    const out: JamEvent[] = [];
+    let beforeId: number | undefined;
+    for (let pages = 0; out.length < opts.limit && pages < 20; pages++) {
+      const page = this.store.recentEvents({ kinds: ["decision"], afterId: opts.afterId, beforeId, limit: 100 });
+      out.unshift(...page.filter(relevant));
+      if (page.length < 100) break;
+      beforeId = page[0].id;
+    }
+    return out.slice(-opts.limit);
   }
 
   sendMessage(fromAgentId: string, to: string, text: string, data: Record<string, any> = {}) {
@@ -1142,13 +1150,15 @@ export class Session {
   startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string): Share {
     const device = this.store.get("devices", deviceId);
     const person = this.person(device?.personId);
-    const existing = shareId ? this.store.get("shares", shareId) : undefined;
+    // An id is this device's own share, or a request made to its person; any other id starts a new share.
+    const found = shareId ? this.store.get("shares", shareId) : undefined;
+    const existing = found && (found.deviceId === deviceId ? found.status !== "requested" || found.personId === (person?.id ?? null) : found.status === "requested" && !!person && found.personId === person.id) ? found : undefined;
     const id = existing?.id ?? newId("sh");
-    // One share of a kind per device: an earlier one from this device is replaced, and requests for
-    // the same thing that are still waiting are answered by this share.
+    // One share of a kind per person (per device for a device nobody claimed): an earlier one, from
+    // this window or another, is replaced, and requests for the same thing still waiting are answered.
     for (const old of this.shares()) {
       if (old.id === id || old.kind !== kind) continue;
-      if (old.status === "live" && old.deviceId === deviceId) {
+      if (old.status === "live" && (old.deviceId === deviceId || (person && old.personId === person.id))) {
         this.endShare(old.id);
         bus.send({ type: "share-ended", shareId: old.id, deviceId: old.deviceId, text: "" });
       } else if (old.status === "requested" && person && old.personId === person.id) this.endShare(old.id);
@@ -1193,6 +1203,7 @@ export class Session {
     const sh = this.store.get("shares", id);
     if (!sh) return;
     this.store.put("shares", { ...sh, status });
+    this.sharesShown.delete(id);
     const before = this.beforeShare.get(id);
     this.beforeShare.delete(id);
     const hosts = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
@@ -1210,7 +1221,7 @@ export class Session {
   // ---- shares that left the big screen ----
 
   private shareSweep: ReturnType<typeof setTimeout> | null = null;
-  /** Shares a host screen has shown at some point, so the sharer hears why theirs stopped. */
+  /** Shares a host screen has shown at some point: they had their placement, and the sharer hears why theirs stopped. */
   private sharesShown = new Set<string>();
   /** Long enough for the brain to place a brand-new share before it counts as "not on screen". */
   static SHARE_PLACE_MS = 60_000;
@@ -1239,6 +1250,11 @@ export class Session {
     this.shareSweep.unref?.();
   }
 
+  /** Every stage change: a share any host screen shows now has been placed, however briefly. */
+  private noteSharesShown() {
+    for (const id of this.shownShareIds()) this.sharesShown.add(id);
+  }
+
   sweepShares() {
     this.shareSweep = null;
     const shown = this.shownShareIds();
@@ -1246,14 +1262,14 @@ export class Session {
     let recheck = 0;
     for (const sh of this.shares()) {
       if (sh.status !== "live" || shown.has(sh.id)) continue;
-      const young = Session.SHARE_PLACE_MS - (Date.now() - sh.startedAt);
+      // Only a share that was never shown gets the placement window; one taken down had its grace already.
+      const young = this.sharesShown.has(sh.id) ? 0 : Session.SHARE_PLACE_MS - (Date.now() - sh.startedAt);
       if (young > 0) {
         recheck = Math.max(recheck, young);
         continue;
       }
-      this.endShare(sh.id);
       const text = this.sharesShown.has(sh.id) ? `Your ${sh.kind} left the big screen, so sharing stopped.` : `Your ${sh.kind} wasn't put on the big screen, so sharing stopped.`;
-      this.sharesShown.delete(sh.id);
+      this.endShare(sh.id);
       bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text });
     }
     if (recheck) this.scheduleShareSweep(recheck + 50);
@@ -1364,6 +1380,7 @@ export class Session {
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
+      this.noteSharesShown();
       this.scheduleShareSweep();
       clearTimeout(this.screenReverts.get(screen));
       if (this.revertsToBoard(stage))
@@ -1372,6 +1389,7 @@ export class Session {
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
+    this.noteSharesShown();
     this.scheduleShareSweep();
     if (this.bigScreens.size > 1) bus.changed("screens");
     if (this.stageRevert) clearTimeout(this.stageRevert);

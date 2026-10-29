@@ -197,8 +197,10 @@ Use `jam_devserver` instead for anything that runs in a browser.
 ## Across repositories
 
 The same feature often lands in more than one repository (desktop and mobile). When you ship a
-change that applies elsewhere, say so in your `shipped` update. The room brain sends the other
-agent a `coordinate` directive. (That needs the brain online. If it's not, `jam_message` the
+user-visible change that applies elsewhere, say so in your `shipped` update. The room brain sends
+the other platforms' agents a `coordinate` directive. If the change is deliberately for your
+platform only, pass `platformSpecific: true`; commits, refactors, fixes and tooling never
+coordinate. (That needs the brain online. If it's not, `jam_message` the
 other agent yourself.) When you get one:
 
 1. `jam_message` the other agent: what you each have, what the shared behavior is, and what has

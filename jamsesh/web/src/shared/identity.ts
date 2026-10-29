@@ -49,6 +49,14 @@ export function setHostKey(id: string, confirmed = true) {
 }
 export const isHostConfirmed = () => hostConfirmed;
 export function confirmHostKey(id: string): boolean {
+  // A first visit made offline booted with no host id at all: the first id the hub names is this
+  // host's (and is remembered for the next boot, which then opens this host's own records).
+  if (id && !hostKey) {
+    setHostKey(id, true);
+    try {
+      localStorage.setItem(`jamsesh.lastHost::${location.origin}`, id);
+    } catch {}
+  }
   if (id && id === hostKey) hostConfirmed = true;
   return hostConfirmed;
 }

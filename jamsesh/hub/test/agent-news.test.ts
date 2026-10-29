@@ -49,7 +49,7 @@ test("repeated ships from one agent in a window are considered once, and not aga
   expect(calls).toHaveLength(1);
   expect(calls[0]).toContain("new spacing");
   expect(calls[0]).toContain("spacing fix");
-  expect(calls[0]).toContain("call no_action");
+  expect(calls[0]).toContain("Call no_action only when nothing in it is something a person sees");
   s.postUpdate(desktop.id, "shipped", "Header: spacing fix again");
   await wait(80);
   expect(calls).toHaveLength(1);
@@ -123,4 +123,62 @@ test("note mode: its own hint, no build or canvas warnings", () => {
   expect(inbox).not.toContain("screenshot");
   expect((hub.mcp as any).checkWarning(desktop, "shipped", d.id)).toBe("");
   expect((hub.mcp as any).checkWarning(desktop, "shipped")).toContain("built");
+});
+
+test("commits, refactors, fixes, tooling and platform-specific ships never reach the brain", async () => {
+  const { hub, s, desktop, mobile, calls } = room();
+  for (const t of ["Commit 1a2b: tidied the header", "Refactored the nav store", "Fixed the sidebar crash on resize", "Bumped expo to 52", "Shipped a fix for the crash on launch", "Updated CI pipeline and tooling", "Shipped the touch-bar shortcuts, desktop-only on purpose"])
+    s.postUpdate(desktop.id, "shipped", t);
+  // Marked through jam_update, the real tool path.
+  await hub.mcp.call({ agentId: mobile.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text: "Shipped haptic feedback on the tab bar", platformSpecific: true });
+  await wait(80);
+  expect(calls).toHaveLength(0);
+  expect(hub.mcp.inboxText(mobile, false)).toBe("Nothing new.");
+  expect(hub.mcp.inboxText(desktop, false)).toBe("Nothing new.");
+});
+
+test("no coordination without an app on another platform in the room", async () => {
+  const { s, desktop, mobile, calls } = room();
+  s.touchAgent(mobile.id, { status: "offline" });
+  const web2 = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/desktop-2", cwd: "/d2", machine: "m2", platform: "desktop", branch: "main" }).agent;
+  const designer = s.registerAgent({ ownerName: "Bo", harness: "codex", repo: "acme/design", cwd: "/x", machine: "m3", platform: "design", branch: "main" }).agent;
+  s.postUpdate(desktop.id, "shipped", "Shipped the collapsible sidebar navigation");
+  await wait(80);
+  expect(calls).toHaveLength(0);
+  void web2;
+  void designer;
+});
+
+test("the parity tool needs a named cross-platform feature, and its directives are what lands in the inboxes", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const tools = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped the collapsible sidebar navigation" }]);
+  const said = async (input: object) => ((r: any) => r?.text ?? String(r))(await tools.coordinate_parity.execute(input));
+  // Same platform only, or a shipper that isn't in the batch: refused, nothing sent.
+  expect(await said({ feature: "Sidebar", shippedBy: [desktop.id], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
+  expect(await said({ feature: "Sidebar", shippedBy: [mobile.id], platforms: ["desktop"] })).toContain("Name the shipping agents");
+  expect(hub.mcp.inboxText(mobile, false)).toBe("Nothing new.");
+  await tools.coordinate_parity.execute({ feature: "Collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] });
+  const inbox = hub.mcp.inboxText(mobile, false);
+  expect(inbox).toContain("[coordinate]");
+  expect(inbox).toContain("Collapsible sidebar navigation shipped on desktop");
+  expect(hub.mcp.inboxText(desktop, false)).toContain("you shipped it on desktop");
+  // Asked twice: one open coordinate directive each.
+  await tools.coordinate_parity.execute({ feature: "Collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] });
+  expect(s.directives()).toHaveLength(2);
+  // The pass gets only this tool and no_action, never pair_agents or create_directive.
+  expect(Object.keys(tools).sort()).toEqual(["coordinate_parity", "no_action"]);
+});
+
+test("other workstreams' decisions can't crowd out an older relevant one, or move the seen mark past it", () => {
+  const { hub, s, desktop, mobile } = room();
+  const nav = s.claim(desktop.id, "Navigation").workstream;
+  s.claim(mobile.id, "Checkout");
+  const checkout = s.store.all("workstreams").find((w) => w.title === "Checkout")!;
+  const add = (text: string, workstreamId: string | null) => s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, workstreamId, relevance: "work", data: {} });
+  add("Nav goes in a sidebar", nav.id);
+  for (let i = 0; i < 250; i++) add(`Checkout rule ${i}`, checkout.id);
+  expect(s.roomDecisions(desktop.id, { limit: 10 }).map((e) => e.text)).toEqual(["Nav goes in a sidebar"]);
+  // The prompt hook hands it over (and only then marks it seen).
+  expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "next" }, "127.0.0.1"))).toContain("Nav goes in a sidebar");
+  expect(JSON.stringify(hub.onPrompt({ agentId: desktop.id, prompt: "again" }, "127.0.0.1"))).not.toContain("Nav goes in a sidebar");
 });
