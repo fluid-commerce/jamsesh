@@ -10,7 +10,7 @@ import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
-import { Upstream } from "./relay";
+import { FRAME_OVERHEAD, Upstream } from "./relay";
 import { skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
@@ -21,7 +21,7 @@ export const RELAY_LIMITS = { bytes: 8 * 1024 * 1024, frames: 1000, openMs: 10_0
 
 /** Holds a frame for the canvas server; false when the relay is already holding as much as it may. */
 export function queueRelayFrame(data: WsData, raw: string | Buffer | ArrayBuffer | Uint8Array): boolean {
-  const size = typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength;
+  const size = (typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength) + FRAME_OVERHEAD;
   const q = (data.queue ??= []);
   if (q.length >= RELAY_LIMITS.frames || (data.queueBytes ?? 0) + size > RELAY_LIMITS.bytes) return false;
   q.push(raw as any);

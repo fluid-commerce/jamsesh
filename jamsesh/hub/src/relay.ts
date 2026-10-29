@@ -37,9 +37,12 @@ export function encodeFrame(opcode: number, payload: Uint8Array): Uint8Array {
   return out;
 }
 
+/** What each held frame costs beyond its bytes (the queue entry, the frame header): an empty frame still counts. */
+export const FRAME_OVERHEAD = 64;
+
 export class Upstream {
   open = false;
-  /** Bytes taken from send() that the canvas server hasn't read yet. */
+  /** What send() has taken that the canvas server hasn't read yet: each frame's encoded bytes plus FRAME_OVERHEAD. */
   held = 0;
   private sock: Socket | null = null;
   private pending: Uint8Array[] = [];
@@ -87,10 +90,10 @@ export class Upstream {
   send(data: string | Uint8Array): boolean {
     if (this.done) return false;
     const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-    if (this.held + bytes.length > this.maxBytes()) return false;
     const frame = encodeFrame(typeof data === "string" ? 1 : 2, bytes);
+    if (this.held + frame.length + FRAME_OVERHEAD > this.maxBytes()) return false;
     this.pending.push(frame);
-    this.held += frame.length;
+    this.held += frame.length + FRAME_OVERHEAD;
     this.flush();
     return true;
   }
@@ -106,6 +109,7 @@ export class Upstream {
         this.pending[0] = next.subarray(Math.max(0, wrote));
         return; // the kernel is full: the rest goes on drain
       }
+      this.held -= FRAME_OVERHEAD;
       this.pending.shift();
     }
   }

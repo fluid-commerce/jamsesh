@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { createServer } from "node:net";
 import { createHash } from "node:crypto";
+import { FRAME_OVERHEAD } from "../src/relay";
 import { RELAY_LIMITS, queueRelayFrame, relayDown, relayUp, startHttp } from "../src/http";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-relay-"));
@@ -34,9 +35,9 @@ test("frames are held up to the frame and byte caps, then refused", () => {
   for (let i = 0; i < RELAY_LIMITS.frames; i++) expect(queueRelayFrame(data, "x")).toBe(true);
   expect(queueRelayFrame(data, "x")).toBe(false);
   const big = {} as any;
-  expect(queueRelayFrame(big, Buffer.alloc(RELAY_LIMITS.bytes))).toBe(true);
-  expect(queueRelayFrame(big, "x")).toBe(false); // one more byte is over
-  expect(queueRelayFrame({} as any, Buffer.alloc(RELAY_LIMITS.bytes + 1))).toBe(false); // too big even alone
+  expect(queueRelayFrame(big, Buffer.alloc(RELAY_LIMITS.bytes - FRAME_OVERHEAD))).toBe(true);
+  expect(queueRelayFrame(big, "")).toBe(false); // even an empty frame is over: each costs its overhead
+  expect(queueRelayFrame({} as any, Buffer.alloc(RELAY_LIMITS.bytes))).toBe(false); // too big even alone
 });
 
 test("a client that keeps sending while the canvas server is stalled is closed with a retryable code", async () => {
@@ -169,6 +170,44 @@ test("a canvas server that completes the handshake and then stops reading ends t
       await Bun.sleep(10);
     }
     expect((await closed).code).toBe(1013);
+  } finally {
+    RELAY_LIMITS.bytes = was.bytes;
+    (hub.canvas as any).port = was.port;
+    for (const s of sockets) s.destroy();
+    upstream.close();
+  }
+}, 20_000);
+
+test("empty frames count against the cap too, after the canvas server has opened", async () => {
+  const sockets: import("node:net").Socket[] = [];
+  const upstream = createServer((sock) => {
+    sockets.push(sock);
+    sock.once("data", (buf) => {
+      const key = /Sec-WebSocket-Key: (.+)\r\n/i.exec(buf.toString())?.[1] ?? "";
+      const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      sock.pause();
+    });
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const was = { port: (hub.canvas as any).port, bytes: RELAY_LIMITS.bytes };
+  (hub.canvas as any).port = (upstream.address() as any).port;
+  RELAY_LIMITS.bytes = 64 * 1024; // the kernel buffers more than this, so only the count of held frames can end it
+  try {
+    const { Upstream } = await import("../src/relay");
+    // Direct: the held count rises by the overhead for each empty frame until send() refuses.
+    const up = new Upstream((upstream.address() as any).port, "/", { open() {}, message() {}, close() {} }, () => RELAY_LIMITS.bytes);
+    for (let i = 0; i < 200 && !up.open; i++) await Bun.sleep(10);
+    expect(up.open).toBe(true);
+    // Fill the kernel's buffers first (a paused peer takes a few hundred KB), then empty frames must hit the cap.
+    const big = new Uint8Array(32 * 1024);
+    let refused = false;
+    for (let i = 0; i < 100_000 && !refused; i++) {
+      if (!up.send(i < 400 ? big : "")) refused = true;
+    }
+    expect(refused).toBe(true);
+    expect(up.held).toBeLessThanOrEqual(RELAY_LIMITS.bytes);
+    up.close();
   } finally {
     RELAY_LIMITS.bytes = was.bytes;
     (hub.canvas as any).port = was.port;
