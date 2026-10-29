@@ -57,7 +57,11 @@ deviceCopiesProblem();
  * Returns the host's reset epoch, which the recording is sent with (a Reset during the read makes it stale), and the
  * read's id, which its end and its recording carry (the host closes or takes only that read).
  */
-export const beginRead = (personId: string) => api<{ epoch: number; read: string }>(`/people/${personId}/voice/start`, {}, "POST", { queue: false }).then((r) => ({ epoch: r.epoch, read: r.read }));
+export const beginRead = (personId: string) => api<{ epoch: number; read: string }>(`/people/${personId}/voice/start`, { seq: nextReadSeq() }, "POST", { queue: false }).then((r) => ({ epoch: r.epoch, read: r.read }));
+
+let lastSeq = 0;
+/** The order this page begins reads in (always increasing), so the host never lets an older start replace a newer read. */
+export const nextReadSeq = () => (lastSeq = Math.max(Date.now(), lastSeq + 1));
 
 /**
  * The read stopped without the host getting it (no microphone, a failed upload): the host stops keeping

@@ -536,7 +536,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (refused) return bad(refused, 403);
     // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
     // Its id goes with its end and its recording: only this read is closed or taken by them.
-    return json({ ok: true, epoch: s.store.voiceEpoch(), read: hub.audio.beginEnrolment(m[1]) });
+    const seq = Number(body?.seq);
+    const read = hub.audio.beginEnrolment(m[1], Number.isFinite(seq) ? seq : 0);
+    if (!read) return bad("A newer read has already started.", 409);
+    return json({ ok: true, epoch: s.store.voiceEpoch(), read });
   }
   // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
   // whether anything was said aloud, which earns the grace for copies still on their way.

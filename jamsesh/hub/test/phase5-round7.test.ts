@@ -112,3 +112,25 @@ test("an earlier read's late end can't close a newer read, and a recording is ta
   expect((await end(fourth, false)).status).toBe(200);
   expect(window()).toBeUndefined();
 });
+
+test("an older start that reaches the host after a newer one can't replace it; its cancel and upload touch nothing", async () => {
+  const p = hub.session.upsertPerson({ name: "Oda" });
+  const oda = browser("Oda's laptop");
+  expect((await call(oda.token, "POST", "/devices", { deviceId: "d-oda", personId: p.id })).status).toBe(200);
+  const window = () => (hub.audio as any).enrolling.get(p.id) as { read: string; open: boolean; until: number } | undefined;
+  // The page began read 1, then (profile reopened) read 2; read 2's start arrives first.
+  const newer = await call(oda.token, "POST", `/people/${p.id}/voice/start`, { seq: 2000 });
+  const newerRead = (await newer.json()).read;
+  const older = await call(oda.token, "POST", `/people/${p.id}/voice/start`, { seq: 1000 });
+  expect(older.status).toBe(409);
+  expect(window()).toMatchObject({ read: newerRead, open: true });
+  // The old controller was cancelled: it never got a read id, so its end names none, and touches nothing.
+  expect((await call(oda.token, "POST", `/people/${p.id}/voice/end`, { read: false, id: "" })).status).toBe(200);
+  expect(window()).toMatchObject({ read: newerRead, open: true });
+  const upload = await fetch(`${base}/api/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}&read=`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${oda.token}` }, body: encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }) as unknown as BodyInit });
+  expect(await upload.json()).toMatchObject({ ok: false, reason: expect.stringContaining("read was closed") });
+  expect(window()).toMatchObject({ read: newerRead, open: true });
+  // A later start (a newer page order) is taken as usual; so is one after the old read's window ran out.
+  const later = await call(oda.token, "POST", `/people/${p.id}/voice/start`, { seq: 3000 });
+  expect(later.status).toBe(200);
+});
