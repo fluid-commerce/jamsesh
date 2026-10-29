@@ -1172,6 +1172,15 @@ agent's credential and a process on the host without the window key get 403, and
 A card that has been acted on answers 409 ("That card was already sent by Felipe"), so two people clicking, or a
 replayed request, act once. The client never queues these calls while offline.
 
+**Curation and the board.** `Brain.applyCuration` passes a `CurationHold` to `applyCuration`: updates and restatement
+merges still change saved facts directly (they consolidate what a person already accepted), new facts become context
+cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
+curator would resolve or supersede with nothing to take its place becomes a **Retire** card (`retire` on the card;
+accepting it only changes the fact's status). An overruled task card is dismissed by the brain's `cancel_directive`.
+A document sent with no request is a context card with `origin: "document"` and its `attachments`. Agents'
+credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.json`) holds only
+accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
+
 **Spoken triage.** The brain's `triage_card` tool (only in on-purpose passes, only for a person who spoke to it) takes a
 card by number, id or "last" and an action (send, add, replace, merge, dismiss, edit), with changes in the same breath
 ("add it, but for mobile only"). "That one" is the newest card. The situation prompt lists the open cards with
@@ -1192,9 +1201,9 @@ they conflict. Edit is in place (wording, agent, mode or kind, workstream); Send
 the keys ↑ ↓, Enter (open), E, S (send or add) and D. Clicking a card opens a sheet: the wording, who asked and when,
 each agent's progress, the lines it came from (with the conversation around each, from `/api/history/events`), what
 people changed, and for a sent task what it produced: the frames and builds its agents put up since it was sent (each
-**Show on the big screen** or **Open**) and the links in its result. The Phase 3 viewer (`WorkViewer.tsx`) wasn't on the
-branch this was built from, so a produced frame opens on the big screen the existing way; opening it in the viewer is one
-call where `MadeItem` puts it up.
+**Show on the big screen** or **Open**) and the links in its result. A produced frame or build opens in the Phase 3 viewer
+(`WorkViewer`), whose **Show on big screen** is the second step. Reactions saved on an artifact ("Felipe: this is cool",
+with the time) show quietly under its tile and under it in the viewer.
 
 ## 9. Room audio
 
