@@ -453,6 +453,8 @@ export class Hub {
     // The text typed with the first try is used again when the retry carries none.
     const typed = w.typed?.trim() ? w.typed : open.held?.text ?? w.typed;
     w = { ...w, ...(typed !== undefined ? { typed } : {}) };
+    // Kept on the window before the read, so a read that fails still leaves the text to be given back.
+    if (w.typed?.trim()) open.held = { personId: w.personId, text: w.typed };
     const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0: open.t0, t1: end }, open);
     open.retry = false;
     open.held = undefined;
@@ -659,7 +661,11 @@ export class Hub {
     if (!gather || !commit) {
       if (rec.state !== "ended") {
         // A replaced recording's window belongs to its replacement already; the others hand their held words to the room.
-        if (reason !== "replaced" && this.recs.get(rec.deviceId) === rec) this.releasePrompt(rec.deviceId);
+        if (reason !== "replaced" && this.recs.get(rec.deviceId) === rec) {
+          // A close that failed to commit has already taken the speech window away: its words are read from the store instead.
+          if (this.promptMode.get(rec.deviceId)?.rec === rec.id) this.releasePrompt(rec.deviceId);
+          else this.release(rec, rec.personId, rec.deviceId, rec.t0, undefined);
+        }
         this.teardown(rec, { kind: reason });
       }
       return Promise.resolve({ kind: "done", value: undefined as R });

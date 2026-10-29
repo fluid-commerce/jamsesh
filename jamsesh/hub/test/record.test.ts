@@ -1295,6 +1295,40 @@ test("a retry of the older close with blank text keeps the text from the failed 
   expect(again).toMatchObject({ ok: true, text: "typed only note" });
 });
 
+test("a prompt write that fails leaves the recording's words to the room when it is then cancelled", async () => {
+  const r = room();
+  const base = Date.now() - 30_000;
+  r.at(base);
+  const tok = "rt_oooooooooooooooo";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "words before the write failed", r.maya.id, "mayaLaptop", base + 500);
+  r.at(base + 4000);
+  const real = r.s.store.addEvent.bind(r.s.store);
+  let failed = false;
+  (r.s.store as any).addEvent = (e: any) => (e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
+  await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", recordingId: a.id, personId: r.maya.id, pointer: [], typed: "x" })).rejects.toThrow("locked");
+  r.hub.recordCancel("mayaLaptop", tok, "host");
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("words before the write failed");
+}, 60_000);
+
+test("the older close's author is the window's actor (a paired window's own person, whatever the body says), not a field of the body", async () => {
+  const r = room();
+  r.hub.promptStart("mayaLaptop", Date.now() - 3000);
+  // The test window is the host's, which may name who is acting; the route reads that through the same actor as every other route.
+  expect((await r.post("/prompt-window", { deviceId: "mayaLaptop", personId: r.maya.id, text: "as myself" })).status).toBe(200);
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).find((e) => e.text.includes("as myself"))?.authorId).toBe(r.maya.id);
+});
+
+test("text typed with an older close whose read fails is given back by the window's timer", async () => {
+  const r = room();
+  r.hub.promptStart("mayaLaptop", Date.now() - 3000);
+  (r.hub as any).audio.pendingFor = () => { throw new Error("read failed"); };
+  await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "typed before the read" })).rejects.toThrow("read failed");
+  (r.hub as any).releasePrompt("mayaLaptop", (r.hub as any).promptMode.get("mayaLaptop"));
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("typed before the read");
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

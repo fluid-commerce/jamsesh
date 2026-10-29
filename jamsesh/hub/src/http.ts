@@ -903,7 +903,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (path === "/prompt-window" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
     if (!ownDeviceOf(body.deviceId)) return bad("Stop recording from the window that started it.", 403);
-    const r = await hub.promptWindow({ deviceId: body.deviceId, recordingId: typeof body.recordingId === "string" ? body.recordingId : undefined, personId: body.personId ?? null, pointer: body.pointer ?? [], typed: body.text });
+    // The author is whoever this window belongs to; a body naming someone else is refused.
+    if (body.personId && body.personId !== actor().id) return bad("That isn't you.", 403);
+    const r = await hub.promptWindow({ deviceId: body.deviceId, recordingId: typeof body.recordingId === "string" ? body.recordingId : undefined, personId: actor().id, pointer: body.pointer ?? [], typed: body.text });
     return r.status ? bad(r.reason ?? "That recording has already ended.", r.status) : json(r);
   }
 
