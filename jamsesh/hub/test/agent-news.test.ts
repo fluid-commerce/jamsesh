@@ -374,3 +374,58 @@ test("a coordinate directive can always be dropped, and other modes close on jam
   await hub.mcp.call(ctx, "jam_update", { kind: "done", text: "Footer added", directiveId: i.id });
   expect(s.store.get("directives", i.id)!.status).toBe("done");
 });
+
+test("unread messages are found by recipient, however much other traffic came after", () => {
+  const { hub, s, desktop, mobile } = room();
+  const other = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
+  s.sendMessage(desktop.id, mobile.id, "the one that matters");
+  for (let i = 0; i < 120; i++) s.sendMessage(other.id, desktop.id, `unrelated ${i}`);
+  const inbox = hub.mcp.inboxText(mobile);
+  expect(inbox).toContain("the one that matters");
+  expect(inbox).not.toContain("unrelated");
+  // More than a page for one agent: the oldest page first, the rest on the next read, none lost.
+  for (let i = 0; i < 70; i++) s.sendMessage(desktop.id, mobile.id, `note ${i}`);
+  const first = hub.mcp.inboxText(mobile);
+  expect(first).toContain("note 0");
+  expect(first).not.toContain("note 69");
+  expect(hub.mcp.inboxText(mobile)).toContain("note 69");
+});
+
+test("only the agent a question was asked of can answer it, and an old ask is still found", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const other = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
+  const { askId } = s.ask(mobile.id, desktop.id, "Which spacing?", 50);
+  for (let i = 0; i < 450; i++) s.sendMessage(other.id, "all", `noise ${i}`); // far past any recent window
+  expect(() => s.answer(other.id, askId, "I'll take that")).toThrow("wasn't asked of you");
+  expect(() => s.answer(mobile.id, askId, "talking to myself")).toThrow("wasn't asked of you");
+  s.answer(desktop.id, askId, "8px");
+  expect(() => s.answer(desktop.id, askId, "again")).toThrow("already answered");
+  expect(() => s.answer(desktop.id, "ask_nope", "x")).toThrow("No question");
+  void hub;
+});
+
+test("the exchange must be with one named counterpart in both directions, and a reply inherits only from the thread's current end", async () => {
+  const { hub, s, desktop, mobile } = room();
+  const web = s.registerAgent({ ownerName: "Ana", harness: "codex", repo: "acme/web", cwd: "/w", machine: "m2", platform: "web", branch: "main" }).agent;
+  const ctx = { agentId: mobile.id, ip: "127.0.0.1", device: "host" };
+  const refused = (p: Promise<unknown>) => p.then(() => "accepted", (e: Error) => e.message);
+  const d = s.createDirective({ text: "Parity check", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id, web.id], requestedBy: "JamSesh", rationale: "" });
+  const done = () => refused(hub.mcp.call(ctx, "jam_ack", { directiveId: d.id, status: "done", result: "x" }));
+  // Sent to desktop, answered by web: different counterparts don't add up to an exchange.
+  s.sendMessage(mobile.id, desktop.id, "to desktop", { directiveId: d.id });
+  s.sendMessage(web.id, mobile.id, "from web", { directiveId: d.id });
+  expect(await done()).toContain("wait for their reply");
+  s.sendMessage(desktop.id, mobile.id, "from desktop", { directiveId: d.id });
+  expect(await done()).toBe("accepted");
+  // A plain reply inherits only while the linked message is still the thread's end.
+  const d2 = s.createDirective({ text: "Another", mode: "coordinate", targets: [mobile.id], counterparts: [desktop.id], requestedBy: "JamSesh", rationale: "" });
+  s.sendMessage(desktop.id, mobile.id, "about d2", { directiveId: d2.id });
+  s.sendMessage(mobile.id, desktop.id, "plain answer"); // inherits: right after the linked one
+  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBe(d2.id);
+  s.sendMessage(mobile.id, desktop.id, "and a second plain message"); // not a reply to the other agent: the thread's end is its own
+  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBeUndefined();
+  // A third agent's plain message never inherits a pair's thread.
+  s.sendMessage(desktop.id, mobile.id, "again about d2", { directiveId: d2.id });
+  s.sendMessage(web.id, mobile.id, "hello");
+  expect(s.store.recentEvents({ kinds: ["message"], limit: 1 })[0].data.directiveId).toBeUndefined();
+});

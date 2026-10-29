@@ -650,10 +650,11 @@ export class Session {
   exchangeGap(d: Directive, agentId: string): string | null {
     if (d.mode !== "coordinate") return null;
     const msgs = this.store.messagesAbout(d.id);
-    const other = (id: string | null) => !!id && id !== agentId && (d.counterparts?.length ? d.counterparts.includes(id) : !!this.agent(id));
-    const sent = msgs.some((e) => e.authorId === agentId && other(String(e.data.to)));
-    const got = msgs.some((e) => other(e.authorId) && e.data.to === agentId);
-    if (sent && got) return null;
+    const named = d.counterparts?.length ? d.counterparts : [...new Set(msgs.flatMap((e) => [e.authorId, e.data.to]))].filter((id): id is string => !!id && id !== agentId && !!this.agent(id));
+    // Both directions with the same counterpart: one agent's replies don't stand in for another's.
+    const both = named.some((c) => c !== agentId && msgs.some((e) => e.authorId === agentId && e.data.to === c) && msgs.some((e) => e.authorId === c && e.data.to === agentId));
+    const sent = msgs.some((e) => e.authorId === agentId && named.includes(String(e.data.to)));
+    if (both) return null;
     return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message or jam_ask, with directiveId " + d.id}. Their reply has to carry directiveId ${d.id} too. If nobody can answer, jam_ack it cancelled and say why.`;
   }
 
@@ -693,9 +694,7 @@ export class Session {
       .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
-    const messages = this.store
-      .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId)));
+    const messages = this.store.messagesTo(agentId, lastRead, 50);
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");
@@ -788,9 +787,12 @@ export class Session {
     }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
     // A reply to a message that was about a directive is about it too, so an agent that doesn't pass the id still answers on the record.
+    // Only the thread's current end counts: the other agent's latest message to this one, still the last between them.
     if (target && !data.directiveId) {
-      const asked = this.store.lastLinkedMessage(target.id, from.id);
-      if (asked) data = { ...data, directiveId: asked.data.directiveId };
+      const end = this.store.lastBetween(target.id, from.id);
+      const d = end && end.authorId === target.id && end.data.directiveId ? this.store.get("directives", end.data.directiveId) : undefined;
+      const party = (a: string, b: string) => !!d && d.targets.includes(a) && (d.counterparts?.length ? d.counterparts.includes(b) : true);
+      if (d && (party(from.id, target.id) || party(target.id, from.id))) data = { ...data, directiveId: d.id };
     }
     const ev = this.store.addEvent({
       kind: "message",
@@ -833,10 +835,16 @@ export class Session {
     return { askId, answer };
   }
 
+  private answered(askId: string) {
+    return this.store.messagesAnswering(askId).length > 0;
+  }
+
   answer(fromId: string, askId: string, text: string) {
     const from = this.agent(fromId);
-    const q = this.store.recentEvents({ kinds: ["message"], limit: 400 }).find((e) => e.data.askId === askId);
+    const q = this.store.messageByAsk(askId);
     if (!q) throw new Error("No question with that id.");
+    if (q.data.to !== fromId) throw new Error("That question wasn't asked of you.");
+    if (this.answered(askId)) throw new Error("That question was already answered.");
     const waiting = this.asks.get(askId);
     this.store.addEvent({
       kind: "message",

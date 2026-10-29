@@ -256,6 +256,32 @@ export class Store {
     return rows.map(rowToEvent);
   }
 
+  /** Messages for one agent after an id (direct, or to everyone from someone else), oldest first: the filter is in the query, so unrelated traffic can't push them out. */
+  messagesTo(agentId: string, afterId: number, limit: number): JamEvent[] {
+    const rows = this.db
+      .query("SELECT * FROM events WHERE kind = 'message' AND id > ? AND json_extract(data, '$.inline') IS NULL AND (json_extract(data, '$.to') = ? OR (json_extract(data, '$.to') = 'all' AND (author_id IS NULL OR author_id != ?))) ORDER BY id ASC LIMIT ?")
+      .all(afterId, agentId, agentId, limit) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** Answers already recorded for an ask. */
+  messagesAnswering(askId: string): JamEvent[] {
+    const rows = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.answerTo') = ?").all(askId) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** The message with this ask id, wherever it is in the history. */
+  messageByAsk(askId: string): JamEvent | undefined {
+    const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.askId') = ? ORDER BY id ASC LIMIT 1").get(askId);
+    return row ? rowToEvent(row) : undefined;
+  }
+
+  /** The latest message between two agents, either way: the thread's current end. */
+  lastBetween(a: string, b: string): JamEvent | undefined {
+    const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND ((author_id = ? AND json_extract(data, '$.to') = ?) OR (author_id = ? AND json_extract(data, '$.to') = ?)) ORDER BY id DESC LIMIT 1").get(a, b, b, a);
+    return row ? rowToEvent(row) : undefined;
+  }
+
   /** The latest message one agent sent another that is tied to a directive, with no window. */
   lastLinkedMessage(fromId: string, toId: string): JamEvent | undefined {
     const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND author_id = ? AND json_extract(data, '$.to') = ? AND json_extract(data, '$.directiveId') IS NOT NULL ORDER BY id DESC LIMIT 1").get(fromId, toId);
