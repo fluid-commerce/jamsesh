@@ -38,15 +38,15 @@ test("a shipped note is information: readable in jam_context, never in the inbox
 test("repeated ships from one agent in a window are considered once, and not again soon after", async () => {
   const { s, desktop, mobile, calls, hub } = room();
   ship(s, desktop.id, "Header: new spacing", "The header has more room around the title");
-  ship(s, desktop.id, "Header: spacing fix", "The header title lines up with the sidebar");
+  ship(s, desktop.id, "Header: title alignment", "The header title lines up with the sidebar");
   await wait(80);
   expect(calls).toHaveLength(1);
   expect(calls[0]).toContain("new spacing");
   // Two different things a person sees: two lines in the one look.
   expect(calls[0]).toContain("- ship-1: Jonathan's Claude (desktop, desktop): Header: new spacing\n  What a person sees, in the shipper's words: The header has more room around the title");
-  expect(calls[0]).toContain("- ship-2: Jonathan's Claude (desktop, desktop): Header: spacing fix\n  What a person sees, in the shipper's words: The header title lines up with the sidebar");
+  expect(calls[0]).toContain("- ship-2: Jonathan's Claude (desktop, desktop): Header: title alignment\n  What a person sees, in the shipper's words: The header title lines up with the sidebar");
   expect(calls[0]).toContain("sends a parity check about it, not build work");
-  ship(s, desktop.id, "Header: spacing fix again", "The header has more room around the title");
+  ship(s, desktop.id, "Header: spacing tweak again", "The header has more room around the title");
   await wait(80);
   expect(calls).toHaveLength(1);
   // A different agent still gets its own look.
@@ -136,6 +136,36 @@ test("commits, refactors, fixes, tooling, platform-specific ships and ships with
   expect(hub.mcp.inboxText(desktop, false)).toBe("Nothing new.");
 });
 
+test("fixes in any wording never become parity checks, even with a 'seen'", async () => {
+  const { hub, s, desktop, mobile, calls } = room();
+  for (const t of ["Shipped crash fix for sidebar", "Shipped corrected login flow", "Shipped a patch for the settings screen", "Shipped the sidebar crash resolved", "Shipped regression repair for tabs", "Shipped bug fixes in the editor", "Shipped workaround for slow load"])
+    ship(s, desktop.id, t, "The sidebar looks different");
+  await wait(80);
+  expect(calls).toHaveLength(0);
+  expect(s.directives()).toHaveLength(0);
+  const { parityCandidate } = await import("../src/brain/brain");
+  expect(parityCandidate("Shipped the collapsible sidebar navigation")).toBe(true);
+  expect(parityCandidate("Shipped a dark mode toggle in settings")).toBe(true);
+  void hub;
+  void mobile;
+});
+
+test("a second inbox read with a parity check pending still asks for the comparison first", () => {
+  const { hub, s, desktop, mobile } = room();
+  s.createDirective({ text: "Parity check, not a build task: compare the sidebar with desktop.", mode: "coordinate", targets: [mobile.id], requestedBy: "JamSesh", rationale: "Parity" });
+  s.createDirective({ text: "Add the footer", mode: "implement", targets: [mobile.id], requestedBy: "Jonathan", rationale: "" });
+  hub.mcp.inboxText(mobile); // reads (and marks) them
+  const again = hub.mcp.inboxText(mobile);
+  expect(again).toContain("compare with the named agents through jam_message first");
+  expect(again).not.toContain("don't wait for others to reply first");
+  // With only a build task pending the old reminder stands.
+  const { hub: h2, s: s2, mobile: m2 } = room();
+  s2.createDirective({ text: "Add the footer", mode: "implement", targets: [m2.id], requestedBy: "Jonathan", rationale: "" });
+  h2.mcp.inboxText(m2);
+  expect(h2.mcp.inboxText(m2)).toContain("don't wait for others to reply first");
+  void desktop;
+});
+
 test("no coordination without an app on another platform in the room", async () => {
   const { s, desktop, mobile, calls } = room();
   s.touchAgent(mobile.id, { status: "offline" });
@@ -153,7 +183,7 @@ test("the parity tool uses the shipper's own 'seen', refuses without one, and it
   const tools = (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped the collapsible sidebar navigation", seen: "A left sidebar that collapses to icons" }]);
   const said = async (input: object) => ((r: any) => r?.text ?? String(r))(await tools.coordinate_parity.execute(input));
   // The brain can't supply what a person sees: the tool has no such input.
-  expect(Object.keys(tools.coordinate_parity.inputSchema.shape).sort()).toEqual(["feature", "platforms", "shipments"]);
+  expect(Object.keys(tools.coordinate_parity.inputSchema.shape).sort()).toEqual(["platforms", "shipments"]);
   // Same platform only, or a shipper that isn't in the batch: refused, nothing sent.
   expect(await said({ feature: "Sidebar", shipments: ["ship-1"], platforms: ["desktop"] })).toContain("isn't a cross-platform feature");
   expect(await said({ feature: "Sidebar", shipments: ["ship-9"], platforms: ["desktop"] })).toContain("Name the shipments");
@@ -167,13 +197,15 @@ test("the parity tool uses the shipper's own 'seen', refuses without one, and it
   const inbox = hub.mcp.inboxText(mobile, false);
   expect(inbox).toContain("[coordinate]");
   expect(inbox).toContain("Parity check, not a build task: Jonathan's");
-  expect(inbox).toContain("(A left sidebar that collapses to icons)"); // the shipper's words, verbatim
+  expect(inbox).toContain("shipped this on desktop: A left sidebar that collapses to icons"); // the shipper's words, verbatim
   expect(inbox).toContain("Does the mobile app have it, and does it match?");
   expect(inbox).toContain("Build only if you both confirm a gap");
   expect(inbox).toContain("Change code only for a gap you both confirm");
   const shipper = hub.mcp.inboxText(desktop, false);
-  expect(shipper).toContain("Parity check, not a build task: you shipped Collapsible sidebar navigation on desktop");
+  expect(shipper).toContain("Parity check, not a build task: you shipped this on desktop: A left sidebar that collapses to icons");
   expect(shipper).toContain("No code changes unless you both confirm a gap");
+  // The brain's own name for the feature never reaches a directive.
+  expect(hub.mcp.inboxText(mobile, false)).not.toContain("Collapsible sidebar navigation");
   // Asked twice: one check each.
   await tools.coordinate_parity.execute(check);
   expect(s.directives()).toHaveLength(2);

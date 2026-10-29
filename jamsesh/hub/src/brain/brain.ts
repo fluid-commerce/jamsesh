@@ -918,11 +918,10 @@ export class Brain {
       coordinate_parity: tool({
         description: "Send a parity check about one user-visible feature a shipper described: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
         inputSchema: z.object({
-          feature: z.string().describe("The feature's name, as a person would say it"),
           shipments: z.array(z.string()).describe("Ids from 'Shipped just now' (ship-…) of this one feature's shipments: one, or one per platform that shipped the same feature"),
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
-        execute: async ({ feature, shipments, platforms }) => {
+        execute: async ({ shipments, platforms }) => {
           const from = batch.filter((b) => shipments.includes(b.id));
           if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
           // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
@@ -943,12 +942,12 @@ export class Brain {
             const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
             s.createDirective({
               text: shippers.includes(a)
-                ? `Parity check, not a build task: you shipped ${feature} on ${a.platform} (${seen}). ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
-                : `Parity check, not a build task: ${by} shipped ${feature} on ${[...made].join(" and ")} (${seen}). Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
+                ? `Parity check, not a build task: you shipped this on ${a.platform}: ${seen}. ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
+                : `Parity check, not a build task: ${by} shipped this on ${[...made].join(" and ")}: ${seen}. Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
               mode: "coordinate",
               targets: [a.id],
               requestedBy: "JamSesh",
-              rationale: `Parity: ${feature} shipped on ${[...made].join(" and ")}.`,
+              rationale: `Parity: ${seen} shipped on ${[...made].join(" and ")}.`,
             });
             sent.push(a.name);
           }
@@ -1242,7 +1241,8 @@ const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
 export function parityCandidate(text: string) {
   const t = text.toLowerCase().replace(/^\s*(shipped|landed|merged|pushed|done)\b[:,\s-]*/, "");
   if (/^(commit|refactor|fix|fixed|fixes|bugfix|hotfix|bump|bumped|chore|ci\b|lint|test|tests|upgrade|upgraded|tidied|tidy|cleanup|cleaned|format|typo|deps?\b|dependenc|tooling|build script)/.test(t)) return false;
-  if (/\b(refactor(ed|ing)?|a fix for|fix(ed|es)? (a |the )?(bug|crash|regression)|dependenc(y|ies)|tooling|linter|typos?|ci pipeline)\b/.test(t)) return false;
+  // A fix is news wherever the word sits ("crash fix for the sidebar", "corrected login flow"); missing a feature here only costs a parity check.
+  if (/\b(refactor(ed|ing)?|fix(ed|es|ing)?|bugfix(es)?|hotfix(es)?|patch(ed|es)?|corrected|correct(s|ing)? (a|an|the) (bug|crash|error)|crash(es)?|bugs?|regressions?|workarounds?|dependenc(y|ies)|tooling|linter|typos?|ci pipeline)\b/.test(t)) return false;
   return !/\b(platform[- ]specific|(desktop|mobile|web|ios|android|mac|windows)[- ]only|only (on|for|in) (the )?(desktop|mobile|web|ios|android)( app)?|deliberately|on purpose)\b/.test(t);
 }
 export const AGENT_TOOLS = new Set(["create_directive", "record_decision", "ask_agent", "pair_agents", "no_action", "say_to_room"]);

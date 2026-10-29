@@ -28,13 +28,13 @@ function client() {
 }
 
 test("frames are held up to the frame and byte caps, then refused", () => {
-  const data: any = {};
+  const data = {} as any;
   for (let i = 0; i < RELAY_LIMITS.frames; i++) expect(queueRelayFrame(data, "x")).toBe(true);
   expect(queueRelayFrame(data, "x")).toBe(false);
-  const big: any = {};
+  const big = {} as any;
   expect(queueRelayFrame(big, Buffer.alloc(RELAY_LIMITS.bytes))).toBe(true);
   expect(queueRelayFrame(big, "x")).toBe(false); // one more byte is over
-  expect(queueRelayFrame({}, Buffer.alloc(RELAY_LIMITS.bytes + 1))).toBe(false); // too big even alone
+  expect(queueRelayFrame({} as any, Buffer.alloc(RELAY_LIMITS.bytes + 1))).toBe(false); // too big even alone
 });
 
 test("a client that keeps sending while the canvas server is stalled is closed with a retryable code", async () => {
