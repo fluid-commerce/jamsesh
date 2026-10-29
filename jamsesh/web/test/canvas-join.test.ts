@@ -1,7 +1,7 @@
 // A person's canvas joins inside its iframe; the page reads how that's going and rejoins when it
 // fails, instead of leaving a blank document up. It also loads fonts from the person's own Mac.
 import { expect, test } from "bun:test";
-import { joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
+import { friendlyReason, joinLabel, joinStateOf, loadLocalFonts, rejoinDelay } from "../src/shared/canvasJoin";
 
 test("the join state comes from the canvas's own session", () => {
   expect(joinStateOf({ status: "live" })).toEqual({ state: "live" });
@@ -24,7 +24,18 @@ test("a failed join is retried by itself, backing off to every 30 s", () => {
 test("the page bar says something whenever the canvas isn't live", () => {
   expect(joinLabel({ state: "live" })).toBeNull();
   for (const j of [{ state: "loading" }, { state: "connecting" }, { state: "reconnecting", reason: null }, { state: "stale" }] as const) expect(joinLabel(j)).toBeTruthy();
-  expect(joinLabel({ state: "failed", reason: "The canvas server didn't answer." })).toContain("didn't answer");
+  // The pill stays short: the reason is on the card over the canvas, said once.
+  expect(joinLabel({ state: "failed", reason: "WebSocket error: 401" })).toBe("Reconnecting…");
+});
+
+test("join errors read as a few plain reasons", () => {
+  expect(friendlyReason("collab: 401 This device isn't paired")).toBe("This device isn't paired with the host.");
+  expect(friendlyReason("ws://10.0.0.2:47900: Connection refused (os error 61)")).toBe("Can't reach the host on the network.");
+  expect(friendlyReason("The canvas server didn't answer.")).toBe("Can't reach the host on the network.");
+  expect(friendlyReason("The canvas isn't in the session.")).toBe("The host's canvas is restarting.");
+  expect(friendlyReason("file not found on the server")).toBe("The host's canvas is restarting.");
+  expect(friendlyReason("something odd")).toBe("The connection to the host dropped.");
+  expect(friendlyReason(null)).toBe("The connection to the host dropped.");
 });
 
 /** A canvas that lacks `missing` until a font for it is loaded. */

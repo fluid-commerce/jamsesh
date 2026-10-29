@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import qrcode from "qrcode-generator";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
-import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, START_TIMEOUT_MS, friendlyReason, joinLabel, joinStateOf, loadLocalFonts, macInvoke, rejoinDelay, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -676,10 +676,11 @@ function PageBar({
         </button>
       )}
       {label && (
-        <div className={`canvas-join ${join.state === "failed" ? "bad" : ""}`} role="status" title={label}>
+        <div className={`canvas-join ${join.state === "failed" ? "quiet" : ""}`} role="status" title={join.state === "reconnecting" && join.reason ? join.reason : label}>
           <i className="canvas-join-dot" aria-hidden />
           <span className="ellipsis">{label}</span>
-          {join.state !== "loading" && (
+          {/* A failed join has the card over the canvas, with its own button. */}
+          {join.state !== "loading" && join.state !== "failed" && (
             <button className="canvas-join-retry" onClick={onReconnect}>
               Reconnect
             </button>
@@ -728,6 +729,18 @@ function PageBar({
       )}
     </div>
   );
+}
+
+/** "Reconnecting to the host in 6 s (attempt 2)", counting down to `at`. */
+function Countdown({ at, attempt }: { at: number | null; attempt: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const left = at ? Math.ceil((at - now) / 1000) : 0;
+  const tries = attempt > 1 ? ` (attempt ${attempt})` : "";
+  return <>{left > 0 ? `Reconnecting to the host in ${left} s${tries}` : `Reconnecting to the host…${tries}`}</>;
 }
 
 const figcraftIn = (iframe: HTMLIFrameElement | null) => (iframe?.contentWindow as any)?.figcraft as { execute: (c: string, p?: unknown) => Promise<any> } | undefined;
@@ -805,13 +818,15 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
   };
   const stale = link !== null && linkGen !== null && generation !== linkGen;
   useEffect(() => {
-    if (stale) rejoin("The canvas moved; rejoining…");
+    if (stale) rejoin("The host's canvas restarted. Reconnecting…");
   }, [stale]);
 
   // How the canvas's own join is going (it joins inside the iframe, where a failure can't be seen):
   // read every 2 s, shown on the page bar, and a failed join is retried by itself (3 s, 6 s, 12 s, then every 30 s).
   const [join, setJoin] = useState<JoinState>({ state: "loading" });
   const failures = useRef(0);
+  // When the next automatic rejoin happens, for the card's countdown.
+  const [retryAt, setRetryAt] = useState<number | null>(null);
   useEffect(() => {
     if (!link) return;
     setJoin({ state: "loading" });
@@ -835,10 +850,12 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
       setJoin(j);
       if (j.state === "live") ((failures.current = 0), setWhy(null));
       if (j.state === "failed" && !retry) {
+        const wait = rejoinDelay(failures.current);
+        setRetryAt(Date.now() + wait);
         retry = setTimeout(() => {
           failures.current += 1;
-          rejoin("Rejoining the canvas…");
-        }, rejoinDelay(failures.current));
+          rejoin("Reconnecting to the host…");
+        }, wait);
       }
     };
     tick();
@@ -881,7 +898,7 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
 
   const reconnect = () => {
     failures.current = 0;
-    rejoin("Reconnecting to the canvas…");
+    rejoin("Reconnecting to the host…");
   };
   if (!link)
     return (
@@ -907,10 +924,12 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
         }}
       />
       {join.state === "failed" && (
-        <div className="canvas-down" role="alert">
-          <strong>The canvas isn't connected</strong>
-          <span>{join.reason}</span>
-          <span className="canvas-down-note">Trying again by itself.</span>
+        <div className="canvas-down" role="alert" title={join.reason}>
+          <strong>Lost the canvas connection</strong>
+          <span>{friendlyReason(join.reason)}</span>
+          <span className="canvas-down-note">
+            <Countdown at={retryAt} attempt={failures.current + 1} />
+          </span>
           <button className="btn small" onClick={reconnect}>
             Reconnect now
           </button>

@@ -18,7 +18,7 @@ export function joinStateOf(peers: any): JoinState {
   if (status === "live") return { state: "live" };
   if (status === "connecting") return { state: "connecting" };
   if (status === "reconnecting") return { state: "reconnecting", reason: peers?.reason ?? null };
-  if (status === "failed") return { state: "failed", reason: peers?.reason || "The canvas lost the session." };
+  if (status === "failed") return { state: "failed", reason: peers?.reason || "The canvas session failed." };
   // Off: the open file isn't in a session. A join on its way, or one that failed, is in `sessions`.
   const sessions: any[] = Array.isArray(peers?.sessions) ? peers.sessions : [];
   if (sessions.some((s) => s?.status === "live")) return { state: "live" };
@@ -37,7 +37,17 @@ export function rejoinDelay(n: number) {
   return Math.min(30_000, 3000 * 2 ** Math.max(0, n));
 }
 
-/** What the page bar says about a join that isn't live (null: nothing to say). */
+/** A join error as people should read it: a few plain reasons. The raw error stays for a tooltip. */
+export function friendlyReason(raw: string | null | undefined): string {
+  const r = String(raw ?? "");
+  if (/pair|401|403|unauthori[sz]ed|forbidden|token/i.test(r)) return "This device isn't paired with the host.";
+  if (/refused|unreachable|timed? ?out|network|econn|dns|resolve|didn't answer|offline|connection (lost|closed|reset|failed)/i.test(r)) return "Can't reach the host on the network.";
+  if (/not found|404|gone|no such|isn't in the session|didn't start|ended|left|moved|restart|publish/i.test(r)) return "The host's canvas is restarting.";
+  return "The connection to the host dropped.";
+}
+
+/** What the page bar says about a join that isn't live (null: nothing to say). Short: the reason,
+ * when there is one, is on the card over the canvas. */
 export function joinLabel(j: JoinState): string | null {
   switch (j.state) {
     case "live":
@@ -45,13 +55,11 @@ export function joinLabel(j: JoinState): string | null {
     case "loading":
       return "Starting the canvas…";
     case "connecting":
-      return "Connecting to the canvas…";
+      return "Connecting…";
     case "reconnecting":
-      return "Reconnecting to the canvas…";
     case "stale":
-      return "The canvas moved; rejoining…";
     case "failed":
-      return `Canvas disconnected: ${j.reason}`;
+      return "Reconnecting…";
   }
 }
 

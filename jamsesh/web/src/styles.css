@@ -1195,12 +1195,8 @@ select {
   background: #e0a200;
   animation: pulse 1.4s ease-in-out infinite;
 }
-.canvas-join.bad {
-  color: #8a1f17;
-}
-.canvas-join.bad .canvas-join-dot {
-  background: #e5484d;
-  animation: none;
+.canvas-join.quiet {
+  padding-right: 12px;
 }
 .canvas-join-retry {
   flex: none;
