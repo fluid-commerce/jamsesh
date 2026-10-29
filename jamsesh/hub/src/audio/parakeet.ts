@@ -101,16 +101,21 @@ export class Parakeet {
   async start(download: boolean): Promise<string | null> {
     if (process.env.JAMSESH_PARAKEET === "0") return this.set("off", "Turned off on this host (JAMSESH_PARAKEET=0)."), null;
     this.stopped = false;
-    let dir = findModel();
-    const own = join(config.home, "models", PARAKEET.name);
-    // Whatever spelling found it (models/./name, a symlink), the managed model is checked against its manifest.
-    if (dir && samePath(dir, own) && !(await installedIntact(own).catch(() => false))) {
-      // A file changed after it was verified: it isn't loaded, and a fresh copy replaces it where downloads are allowed.
-      rmSync(own, { recursive: true, force: true });
-      dir = findModel();
-    }
-    if (!dir && !download) return this.set("missing", `The speech model isn't on this host (${Math.round(PARAKEET.bytes / 1e6)} MB download).`), null;
+    // Never rejects: every failure, finding and checking the model included, is a failed status (callers fire and forget).
     try {
+      let dir = findModel();
+      const own = join(config.home, "models", PARAKEET.name);
+      // Whatever spelling found it (models/./name, a symlink), the managed model is checked against its manifest.
+      if (dir && samePath(dir, own) && !(await installedIntact(own).catch(() => false))) {
+        // A file changed after it was verified: it isn't loaded, and a fresh copy replaces it where downloads are allowed.
+        try {
+          rmSync(own, { recursive: true, force: true });
+        } catch (e) {
+          throw new Error(`The speech model at ${own} changed and couldn't be removed (${e instanceof Error ? e.message : String(e)}).`);
+        }
+        dir = findModel();
+      }
+      if (!dir && !download) return this.set("missing", `The speech model isn't on this host (${Math.round(PARAKEET.bytes / 1e6)} MB download).`), null;
       dir ??= await this.download();
       if (this.stopped) return null;
       this.set("starting", "Loading the speech model.");

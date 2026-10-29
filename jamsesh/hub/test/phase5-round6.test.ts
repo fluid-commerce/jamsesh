@@ -1,7 +1,7 @@
 // Phase 5, sixth review: who may change a voice by correcting a line, and what a Reset makes stale. Synthetic embeddings only; nothing makes sound.
 import "./voices.env";
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { config } from "../src/config";
@@ -300,5 +300,28 @@ test("a changed managed Parakeet model is caught when it's chosen by another spe
     else process.env.JAMSESH_PARAKEET_DIR = was;
     rmSync(own, { recursive: true, force: true });
     rmSync(link, { force: true });
+  }
+});
+
+test("a changed managed Parakeet model that can't be removed is a failed status, never a rejected start (office review 9)", async () => {
+  const models = join(config.home, "models");
+  const own = join(models, PARAKEET.name);
+  const was = process.env.JAMSESH_PARAKEET_DIR;
+  try {
+    mkdirSync(own, { recursive: true });
+    for (const f of PARAKEET.files) writeFileSync(join(own, f), `contents of ${f}`);
+    await writeManifest(own);
+    writeFileSync(join(own, PARAKEET.files[0]), "swapped");
+    delete process.env.JAMSESH_PARAKEET_DIR;
+    // Its folder can't be changed: the removal fails.
+    chmodSync(models, 0o555);
+    const p = new Parakeet();
+    expect(await p.start(false)).toBeNull();
+    expect(p.status()).toMatchObject({ state: "failed", detail: expect.stringContaining("couldn't be removed") });
+  } finally {
+    chmodSync(models, 0o755);
+    if (was === undefined) delete process.env.JAMSESH_PARAKEET_DIR;
+    else process.env.JAMSESH_PARAKEET_DIR = was;
+    rmSync(own, { recursive: true, force: true });
   }
 });

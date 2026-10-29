@@ -144,7 +144,7 @@ export class Transcriber {
       if (before) await before.catch(() => false);
       if (gen !== this.fastGen || !this.fastWanted()) return false;
       this.parakeet.onExit = () => this.engines.delete("parakeet");
-      const url = await this.parakeet.start(!config.offline);
+      const url = await this.parakeet.start(!config.offline).catch((e) => (console.error("parakeet:", e), null));
       // Turned off meanwhile: that "off" stopped it, and a later "on" has its own start.
       if (!url || gen !== this.fastGen) return false;
       this.engines.set("parakeet", { id: "parakeet", label: "host Parakeet", kind: "parakeet", url, inflight: 0, failures: 0, lastOk: Date.now() });
