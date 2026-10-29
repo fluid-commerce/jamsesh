@@ -57,6 +57,17 @@ export interface Agent {
   broadcasts?: boolean;
 }
 
+/** A chat the room removed (Session.removedChats): kept out until a person lets it back in. */
+export interface RemovedChat {
+  id: string;
+  agentId: string;
+  chatId: string | null;
+  machine: string;
+  name: string;
+  ownerName: string;
+  at: number;
+}
+
 export interface RepoCard {
   stack: string;
   designSystem: string;

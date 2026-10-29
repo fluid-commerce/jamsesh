@@ -21,6 +21,7 @@ import type {
   JamEvent,
   Person,
   Platform,
+  RemovedChat,
   Settings,
   Share,
   Stage,
@@ -179,7 +180,7 @@ export class Session {
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),
-      agents: this.agents(),
+      agents: this.agents().map(publicAgent),
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
       directives: this.directives().slice(0, 60),
       artifacts: this.artifacts().slice(0, 120),
@@ -245,7 +246,7 @@ export class Session {
       case "devices":
         return { key, value: this.store.all("devices") };
       case "agents":
-        return { key, value: this.agents() };
+        return { key, value: this.agents().map(publicAgent) };
       case "workstreams":
         return { key, value: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt) };
       case "directives":
@@ -456,7 +457,8 @@ export class Session {
     // record from before chats were told apart), and a chat that doesn't never takes a named chat's.
     const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
-      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness) : undefined) ??
+      // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
+      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
       agents.find((a) => sameChat(a) && a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
@@ -525,10 +527,40 @@ export class Session {
     for (const w of this.store.all("workstreams")) if (w.ownerAgentId === id) this.store.put("workstreams", { ...w, ownerAgentId: null, status: "paused", updatedAt: Date.now() });
     this.store.remove("agents", id);
     this.removedAgents.add(id);
+    this.blockRejoin(agent);
     const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
     if (ids.length) bus.send({ type: "events-removed", ids });
     if (!opts.purge) this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed from the session.` });
     return { removed: true, events: ids.length };
+  }
+
+  /**
+   * Chats the room removed. Their jam_join is refused until a person lets them back in: "Allow again"
+   * in Settings, or the person saying "connect to jamsesh" in that chat (its hook tells us, from the
+   * same machine). Kept in the session, so a hub restart doesn't let them straight back.
+   */
+  removedChats(): RemovedChat[] {
+    return this.store.setting<RemovedChat[]>("removedChats", []);
+  }
+
+  private blockRejoin(agent: Agent) {
+    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
+    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec].slice(-200));
+  }
+
+  /** The removal that keeps this chat out, if any (by its chat id, or the agent id its connection had). */
+  rejoinBlocked(chatId: string | undefined, agentId: string | null): RemovedChat | undefined {
+    return this.removedChats().find((r) => (!!chatId && r.chatId === chatId) || (!!agentId && r.agentId === agentId));
+  }
+
+  /** Lets a removed chat join again. By chat id, only a removal from the same machine (the chat's own hook asking). */
+  allowRejoin(match: { id?: string; chatId?: string; machine?: string }): boolean {
+    const all = this.removedChats();
+    const gone = all.filter((r) => (match.id ? r.id === match.id : !!match.chatId && r.chatId === match.chatId && r.machine === match.machine));
+    if (!gone.length) return false;
+    for (const r of gone) this.removedAgents.delete(r.agentId);
+    this.store.setSetting("removedChats", all.filter((r) => !gone.includes(r)));
+    return true;
   }
 
   touchAgent(id: string, fields: Partial<Agent> = {}) {
@@ -1322,6 +1354,13 @@ export function publicEvent(e: JamEvent): JamEvent {
   if (!e.data?.embedding) return e;
   const { embedding: _drop, ...data } = e.data;
   return { ...e, data };
+}
+
+/** An agent as the room sees it: its chat id is a transport handle (Claude Code's session id, an MCP session), never shown. */
+export function publicAgent(a: Agent): Agent {
+  if (!a.chatId) return a;
+  const { chatId: _drop, ...rest } = a;
+  return rest;
 }
 
 /** A folder as a person would say it: the home folder is ~. */

@@ -433,15 +433,21 @@ export class Hub {
    * The agent a hook is for: the chat that joined, found by Claude Code's session id. A chat that never
    * called jam_join (another chat in the same folder included) is nobody here, and its hooks do nothing.
    */
-  hookAgent(body: any, _ip: string, _device?: string | null): Agent | undefined {
-    if (body?.agentId) return this.session.agent(body.agentId);
+  hookAgent(body: any, _ip: string, machine?: string | null): Agent | undefined {
     const chat = typeof body?.session_id === "string" ? body.session_id : "";
-    return chat ? this.session.agents().find((a) => a.chatId === chat && a.harness === "claude-code") : undefined;
+    // The machine is the hook's credential's (see the hook routes in http.ts): a chat that joined from
+    // one Mac is nobody to a hook from another, whatever session id it names.
+    if (!chat || !machine) return undefined;
+    return this.session.agents().find((a) => a.chatId === chat && a.harness === "claude-code" && a.machine === machine);
   }
 
-  /** Whether this chat has joined (a hook asks before it sends anything). */
-  chatJoined(body: any): boolean {
-    return !!this.hookAgent(body, "");
+  /**
+   * Whether this chat has joined (a hook asks before it sends anything). `connect`: its person just
+   * said "connect to jamsesh" in it, which lets a chat the room removed join again (from its own machine).
+   */
+  chatJoined(body: any, machine?: string | null): boolean {
+    if (body?.connect === true && typeof body.session_id === "string" && machine) this.session.allowRejoin({ chatId: body.session_id, machine });
+    return !!this.hookAgent(body, "", machine);
   }
 
   /** UserPromptSubmit: the prompt goes into context; new room items come back as context. */
@@ -450,6 +456,7 @@ export class Hub {
     if (HARNESS_TEXT.test(String(body?.prompt ?? ""))) return {};
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
+    this.ackDeliveries(agent.id, body.jamAcks);
     const prompt = String(body.prompt ?? "").trim();
     if (prompt && !prompt.startsWith("/")) {
       const owner = this.session.person(agent.ownerId);
@@ -472,29 +479,79 @@ export class Hub {
   }
 
   /**
-   * What the room has for an agent that it hasn't been handed yet, as hook context. Everything
-   * that reaches an agent (these hooks, jam_inbox, jam_wait, the idle listener) takes items out of
-   * the same inbox and marks them delivered, so nothing is handed over twice.
+   * What the room has for an agent that it hasn't acknowledged yet, as hook context, with the
+   * delivery id (`jamDelivery`, sent as a header) the hook script records once it has passed the
+   * context on. See offer().
    */
   private pendingContext(agent: Agent, event: "UserPromptSubmit" | "PostToolUse", closing: string) {
-    const lines = this.pendingLines(agent);
-    if (!lines.length) return {};
-    return { hookSpecificOutput: { hookEventName: event, additionalContext: `JamSesh, new since your last turn:\n${lines.join("\n")}\n${closing}` } };
+    const o = this.offer(agent);
+    if (!o) return {};
+    return { hookSpecificOutput: { hookEventName: event, additionalContext: `JamSesh, new since your last turn:\n${o.lines.join("\n")}\n${closing}` }, jamDelivery: o.id };
   }
 
-  private pendingLines(agent: Agent) {
-    const { directives, messages } = this.session.inbox(agent.id, true);
+  /** How long a hook's handover waits for its acknowledgement before its items are offered again. */
+  static DELIVERY_RETRY_MS = 60_000;
+
+  private deliveries(agentId: string) {
+    return this.store.setting<Delivery[]>(`deliveries:${agentId}`, []);
+  }
+
+  /**
+   * Delivery is at least once. A hook's response can be lost (a timeout, a dropped connection), so
+   * what a hook or the listener hands over only counts as delivered when the hook script sends its
+   * delivery id back on the chat's next hook call (ackDeliveries). Until then nothing more is handed
+   * over; after DELIVERY_RETRY_MS (or at once for `retry`: a listener whose last answer never came
+   * back) everything still unacknowledged is offered again, under a new id. jam_inbox and jam_wait
+   * answer the agent directly and mark what they return. Acknowledged items are never offered again.
+   */
+  private offer(agent: Agent, { via = "hook", retry = false, withDecisions = true }: { via?: Delivery["via"]; retry?: boolean; withDecisions?: boolean } = {}): { id: string; lines: string[] } | null {
+    const now = Date.now();
+    const list = this.deliveries(agent.id).filter((d) => now - d.at < 30 * 60_000);
+    const open = list[list.length - 1];
+    if (open && now - open.at < Hub.DELIVERY_RETRY_MS && !(retry && open.via === "listen")) return null;
+    const { directives, messages } = this.session.inbox(agent.id, false);
+    const pending = directives.filter((d) => (d.progress?.[agent.id] ?? d.status) === "pending");
     const lastSeen = this.store.setting<number>(`decisionsSeen:${agent.id}`, 0);
-    const decisions = this.session.roomDecisions(agent.id, { afterId: lastSeen, limit: 10 });
-    // Seen moves to the last decision this agent was handed. With none handed over, everything newer
-    // than its mark was for other workstreams, so the mark moves to the newest decision in the log.
-    const seen = decisions.length ? decisions[decisions.length - 1].id : this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0]?.id;
-    if (seen && seen > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, seen);
-    return [
-      ...directives.map((d) => `Room directive ${d.id} [${d.mode}] (${d.requestedBy}): ${d.text}`),
-      ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),
-      ...decisions.map((d) => `Room decision: ${d.text}`),
-    ];
+    const decisions = withDecisions ? this.session.roomDecisions(agent.id, { afterId: lastSeen, limit: 10 }) : [];
+    // With no decision for this agent, everything newer than its mark was for other workstreams: the mark moves on now.
+    if (withDecisions && !decisions.length) {
+      const newest = this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0]?.id;
+      if (newest && newest > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, newest);
+    }
+    if (!pending.length && !messages.length && !decisions.length) {
+      if (list.length) this.store.setSetting(`deliveries:${agent.id}`, []);
+      return null;
+    }
+    const d: Delivery = { id: newId("dl"), at: now, via, directives: pending.map((x) => x.id), msgUpTo: messages[messages.length - 1]?.id ?? 0, decisionUpTo: decisions[decisions.length - 1]?.id ?? 0 };
+    this.store.setSetting(`deliveries:${agent.id}`, [...list, d].slice(-8));
+    return {
+      id: d.id,
+      lines: [
+        ...pending.map((x) => `Room directive ${x.id} [${x.mode}] (${x.requestedBy}): ${x.text}`),
+        ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),
+        ...decisions.map((x) => `Room decision: ${x.text}`),
+      ],
+    };
+  }
+
+  /** The delivery ids a hook script hands back: only now do those items count as delivered (late ones too). */
+  ackDeliveries(agentId: string, ids: unknown) {
+    if (!Array.isArray(ids) || !ids.length) return;
+    const list = this.deliveries(agentId);
+    const acked = list.filter((d) => ids.includes(d.id));
+    if (!acked.length) return;
+    for (const d of acked) {
+      for (const id of d.directives) {
+        const dir = this.store.get("directives", id);
+        // Only what's still waiting: a directive the agent already acked or finished stays as it is.
+        if (!dir || (dir.progress?.[agentId] ?? dir.status) !== "pending") continue;
+        this.session.setDirectiveFor(id, agentId, "delivered");
+        this.session.setDirective(id, { deliveredAt: dir.deliveredAt ?? Date.now() });
+      }
+      if (d.msgUpTo > this.store.setting<number>(`msgRead:${agentId}`, 0)) this.store.setSetting(`msgRead:${agentId}`, d.msgUpTo);
+      if (d.decisionUpTo > this.store.setting<number>(`decisionsSeen:${agentId}`, 0)) this.store.setSetting(`decisionsSeen:${agentId}`, d.decisionUpTo);
+    }
+    this.store.setSetting(`deliveries:${agentId}`, list.filter((d) => !acked.includes(d)));
   }
 
   /** An agent whose machine has the newer hooks (PostToolUse, the listener) is woken by the listener; others still need the old "wait here" nudge at Stop. */
@@ -522,6 +579,7 @@ export class Hub {
   onTool(body: any, ip: string, device?: string | null) {
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
+    this.ackDeliveries(agent.id, body.jamAcks);
     this.hookSeen.set(agent.id, Date.now());
     this.markNewHooks(agent.id);
     const done = typeof agent.activity === "string" && agent.activity.startsWith("Done:");
@@ -538,8 +596,17 @@ export class Hub {
    * server drops idle connections after about four minutes, so the hook script calls again).
    */
   async onListen(body: any, ip: string, device?: string | null, maxMs = 200_000): Promise<string> {
+    return (await this.listen(body, ip, device, maxMs)).text;
+  }
+
+  /** onListen with the delivery id of what it hands over (the hook route sends it as a header). */
+  async listen(body: any, ip: string, device?: string | null, maxMs = 200_000): Promise<{ text: string; delivery: string | null }> {
+    const none = { text: "", delivery: null };
     const agent = this.hookAgent(body, ip, device);
-    if (!agent) return "";
+    if (!agent) return none;
+    this.ackDeliveries(agent.id, body.jamAcks);
+    // A listener that comes back without acknowledging the last one's answer never got it.
+    let retry = true;
     this.hookSeen.set(agent.id, Date.now());
     this.markNewHooks(agent.id);
     const mine = (this.listening.get(agent.id) ?? 0) + 1;
@@ -548,20 +615,25 @@ export class Hub {
     const until = Date.now() + maxMs;
     while (Date.now() < until) {
       await this.session.wait(agent.id, Math.min(30_000, until - Date.now()));
-      if (this.listening.get(agent.id) !== mine) return ""; // replaced, or its person started talking to it
+      if (this.listening.get(agent.id) !== mine) return none; // replaced, or its person started talking to it
       // In jam_wait (or jam_ask) the agent is already listening itself: it gets the items there.
       if (this.session.agent(agent.id)?.status === "waiting") {
         await Bun.sleep(1000);
         continue;
       }
       if (!this.session.hasInbox(agent.id)) continue;
-      const lines = this.pendingLines(agent);
-      if (!lines.length) continue;
+      const o = this.offer(agent, { via: "listen", retry });
+      retry = false;
+      if (!o) {
+        // Handed over a moment ago and not acknowledged yet: offered again once that times out.
+        await Bun.sleep(1000);
+        continue;
+      }
       this.session.touchAgent(agent.id, { status: "working", activity: "Picking up work from the room" });
-      return `JamSesh has something for you from the room:\n${lines.join("\n")}\njam_ack directives as you take them, follow the JamSesh skill, and post a jam_update when done.`;
+      return { text: `JamSesh has something for you from the room:\n${o.lines.join("\n")}\njam_ack directives as you take them, follow the JamSesh skill, and post a jam_update when done.`, delivery: o.id };
     }
     if (this.listening.get(agent.id) === mine) this.listening.delete(agent.id);
-    return "";
+    return none;
   }
 
   private cancelListen(agentId: string) {
@@ -574,12 +646,14 @@ export class Hub {
   onStop(body: any, ip: string, device?: string | null) {
     const agent = this.hookAgent(body, ip, device);
     if (!agent) return {};
+    this.ackDeliveries(agent.id, body.jamAcks);
     this.hookSeen.set(agent.id, Date.now());
     const last = typeof body.last_assistant_message === "string" ? body.last_assistant_message.trim() : "";
     // A finished turn reads as "Done: ..." until the next task starts.
     if (last && !agent.activity.startsWith("Done:")) this.session.touchAgent(agent.id, { activity: `Done: ${last.split("\n")[0]}`.slice(0, 140) });
-    const { directives, messages } = this.session.inbox(agent.id, true);
-    if (!directives.length && !messages.length) {
+    // Decisions are news, not work: they wait for the next turn rather than keeping the agent going.
+    const o = this.offer(agent, { withDecisions: false });
+    if (!o) {
       // Idle: the agent goes back to its person. The listener hook (see onListen) wakes it when the room has something.
       this.session.touchAgent(agent.id, { status: "idle" });
       // An install from before the listener existed can't be woken: keep it waiting in jam_wait, once per stop.
@@ -587,16 +661,14 @@ export class Hub {
         return { decision: "block", reason: "You're in a JamSesh session: call jam_wait to wait for the room's next directive. If your person is typing to you, stop and help them instead." };
       return {};
     }
-    const reason = [
-      "JamSesh has new work for you:",
-      ...directives.map((d) => `- Directive ${d.id} [${d.mode}] from ${d.requestedBy}: ${d.text}`),
-      ...messages.map((m) => (m.data.askId ? `- QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer it with jam_answer before anything else)` : `- Message from ${m.authorName}: ${m.text}`)),
-      "jam_ack each directive as you take it, follow the JamSesh skill, and post jam_update when done.",
-    ].join("\n");
+    const reason = ["JamSesh has new work for you:", ...o.lines.map((l) => `- ${l}`), "jam_ack each directive as you take it, follow the JamSesh skill, and post jam_update when done."].join("\n");
     this.session.touchAgent(agent.id, { status: "working" });
-    return { decision: "block", reason };
+    return { decision: "block", reason, jamDelivery: o.id };
   }
 }
+
+/** One handover by a hook or the listener, waiting for the hook script to acknowledge it (Hub.offer). */
+type Delivery = { id: string; at: number; via: "hook" | "listen"; directives: string[]; msgUpTo: number; decisionUpTo: number };
 
 function imageSize(b: Uint8Array): { width: number; height: number } | null {
   if (b[0] === 0x89 && b[1] === 0x50) {

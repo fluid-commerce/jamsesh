@@ -26,7 +26,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -523,6 +523,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const r = s.removeAgent(rm[1], { purge: !!body?.purge });
     return r.removed ? json(r) : bad("no such agent", 404);
   }
+  // Chats the room removed (kept out of jam_join), and letting one back in: people only.
+  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : json(s.removedChats().map(({ id, name, ownerName, at }) => ({ id, name, ownerName, at })));
+  const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
+  if (rc && req.method === "POST") return s.allowRejoin({ id: rc[1] }) ? json({ ok: true }) : bad("No removed chat with that id.", 404);
 
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
@@ -553,12 +557,34 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
 
-  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/joined" && req.method === "POST") return json({ joined: hub.chatJoined(body) });
-  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/tool" && req.method === "POST") return json(hub.onTool(body, ip, hub.auth.machineOf(paired?.id)));
-  // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
-  if (path === "/hooks/listen" && req.method === "POST") return new Response(await hub.onListen(body, ip, hub.auth.machineOf(paired?.id)), { headers: { "content-type": "text/plain; charset=utf-8" } });
+  // Claude Code's hooks. They speak for an agent, so only an agent's credential sends them, or the
+  // host's own loopback, which is the host's agents (the app's relay hands any process there that
+  // credential anyway; relayed requests never count as loopback). A hook only reaches a chat that
+  // joined from the same machine as its credential, so no other device can read or drain its inbox
+  // or post prompts as its person.
+  const hook = path.match(/^\/hooks\/(prompt|joined|stop|tool|listen)$/)?.[1];
+  if (hook && req.method === "POST") {
+    if (paired && paired.kind !== "agent") return bad("Hooks are for agents' credentials.", 403);
+    const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
+    if (!machine) return bad("This device isn't paired with this JamSesh host.", 401);
+    const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine) });
+    // What the hook script passed on to the agent since its last call (see Hub.offer).
+    b.jamAcks = (req.headers.get("x-jam-ack") ?? "").split(",").map((x) => x.trim()).filter((x) => /^[\w-]{1,40}$/.test(x)).slice(0, 50);
+    // A chat that isn't (or is no longer) in the room: the script stops sending for it.
+    const joined = !!hub.hookAgent(b, ip, machine);
+    const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
+    if (hook === "listen") {
+      // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
+      const r = joined ? await hub.listen(b, ip, machine) : { text: "", delivery: null };
+      if (r.delivery) headers["x-jam-delivery"] = r.delivery;
+      return new Response(r.text, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+    }
+    const out: any = !joined ? {} : hook === "prompt" ? hub.onPrompt(b, ip, machine) : hook === "tool" ? hub.onTool(b, ip, machine) : hub.onStop(b, ip, machine);
+    const { jamDelivery, ...rest } = out;
+    if (jamDelivery) headers["x-jam-delivery"] = jamDelivery;
+    return Response.json(rest, { headers });
+  }
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");

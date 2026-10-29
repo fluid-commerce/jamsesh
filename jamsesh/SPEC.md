@@ -253,7 +253,10 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
 - A successful pairing issues a device token (`jst_` plus 32 random bytes). The host stores only
   its SHA-256 hash. Browsers keep it in an HttpOnly, SameSite=Lax cookie (Secure over HTTPS, and
   scoped to the DuckDNS domain so dev-server subdomains open signed in). The Mac app keeps it in
-  the Keychain. Agents keep it in `~/.jamsesh/client.env` (mode 600) or rely on the app's relay.
+  the Keychain. Agents keep it in files under `~/.jamsesh` (mode 600) or rely on the app's relay. A
+  token is never a command-line argument (any process can list those): `curl` reads it as a header
+  file (`-H @~/.jamsesh/auth.header`, or `-K -` from a pipe), and Claude Code gets it from a
+  `headersHelper` script that reads `~/.jamsesh/mcp-headers.json`.
 - Each paired device has a kind: **browser** (a person's window, browser, or Mac app) or
   **agent**. Kinds decide what a device may approve (see [14](#14-security)).
 - The big screen shows a toast when a device pairs ("A laptop connected", "An agent connected").
@@ -301,13 +304,16 @@ The setup installs, for each harness found:
 
 | Harness | What's installed |
 |---|---|
-| Both | `~/.jamsesh/client.env` (hub, token, name, `JAMSESH_ACTIVE`), `~/.jamsesh/hook.sh` |
-| Claude Code | User-scope MCP server `jamsesh` (HTTP, bearer token); a small skill at `~/.claude/skills/jamsesh/SKILL.md` (finds the running host, reads the instructions it serves, says in one line if none is running); the `/jamsesh [focus]` command; `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks (5-second timeout), plus a background `Stop` listener (`asyncRewake`, 3300-second timeout; see 6.3). All of them do nothing for a chat that hasn't joined |
+| Both | `~/.jamsesh/client.env` (hub, token, name, `JAMSESH_ACTIVE`; every value one single-quoted shell word, so sourcing it runs nothing, and the hook reads it as data without sourcing it), `~/.jamsesh/auth.header` (the credential as a header file for `curl`), `~/.jamsesh/hook.sh` |
+| Claude Code | User-scope MCP server `jamsesh` (HTTP; its credential comes from the `headersHelper` `~/.jamsesh/mcp-headers.sh`, so it is in neither `claude`'s arguments nor its config); a small skill at `~/.claude/skills/jamsesh/SKILL.md` (finds the running host, reads the instructions it serves, says in one line if none is running); the `/jamsesh [focus]` command; `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks (15-second timeout), plus a background `Stop` listener (`asyncRewake`, 3300-second timeout; see 6.3). All of them do nothing for a chat that hasn't joined |
 | Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the same small skill at `~/.codex/skills/jamsesh/SKILL.md`; the prompt `~/.codex/prompts/jamsesh.md` (the full instructions, for `/jamsesh`); no hooks (Codex has none here) |
 
 **Only chats you connect join the room.** JamSesh never writes to `CLAUDE.md` or `AGENTS.md`, and the
-setup removes the `<!-- jamsesh:start -->` block an earlier install wrote (nothing else in the file
-changes). Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
+setup removes the `<!-- jamsesh:start -->` block an earlier install wrote: only the exact text of one
+of the two blocks earlier installs wrote, as whole lines in the file's own line endings (an edited or
+indented block, or anything else between the markers, stays), plus the one blank line the old writer
+put before a block it appended at the end. Every other byte is kept, and a symlinked file is edited at
+its target, so the link stays a link. Nothing joins by itself: an agent joins when its person says "connect to jamsesh" (or runs
 `/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
 which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`), and
 a Codex chat is its own MCP connection. The hooks ask the host whether the chat has joined
@@ -316,10 +322,30 @@ a second chat in the same folder is not the joined agent. When an agent joins, t
 "Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
 which takes the agent out and, with `purge`, deletes the feed lines it caused.
 
-`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`, and nothing for a chat that
-hasn't joined. It posts to the hub with
-a 3-second limit; prompts that can't be delivered go to `~/.jamsesh/outbox.jsonl` and are replayed
-on the next successful call.
+**A removed chat stays out.** Its `jam_join` is refused (by its chat id, or for a Codex chat by the
+MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
+Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only), or its
+own person saying "connect to jamsesh" in that chat, which its hook reports from the same machine
+(`/api/hooks/joined` with `connect: true`). Removals are kept in the session, so a hub restart doesn't
+undo them.
+
+**Hooks belong to one machine.** The hook routes (`/api/hooks/*`) take only an agent's credential (a
+person's window is refused), or the host's own loopback, which stands for the host's agents (the
+app's relay hands any process there that credential anyway; relayed requests never count as
+loopback). A hook reaches only a chat that joined from the machine its credential stands for, found
+by Claude Code's session id; another device naming that session id, or an agent id, reaches nothing,
+so it can't read or drain the chat's inbox or post prompts as its person. MCP sessions are bound the
+same way: a request for an existing session from another machine's credential, or from a different
+kind of credential, is answered "Session not found", and a chat id in `jam_join` only resumes a record
+from the same machine. Transport ids (`chatId`: a Claude Code session id, `mcp:<session>`) never
+appear in `/api/state` or its live patches.
+
+`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
+asks the host whether the chat has joined, every time (the question carries the session id only),
+so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
+have a 4-second limit (the joined question 3). When the host is unreachable, prompts of a chat this
+Mac saw joined go to `~/.jamsesh/outbox.jsonl` and are replayed (each after a fresh joined check) on
+the next successful call, if under ten minutes old.
 
 ### 4.6 Remote access
 
@@ -529,9 +555,16 @@ prompts it; there is nothing else the host can do for it. The notice is not adde
 agent whose hooks have reached the hub in the last five minutes, since the hooks hand the items
 over themselves.
 
-**No item is handed over twice.** Every path above (the hooks, the listener, `jam_inbox`,
-`jam_wait`) takes items from the same inbox and marks them delivered in the same step. Room
-decisions use a per-agent "seen" mark the same way. Room-wide messages (to everyone) skip the
+**Delivery is at least once, and never twice once acknowledged.** A hook's answer can be lost (a
+timeout, a dropped connection), so what the hooks and the listener hand over carries a delivery id
+(the `x-jam-delivery` header). `hook.sh` records the id under `~/.jamsesh/acks/<session>` once it has
+passed the text on, and sends it back with the chat's next hook call (`x-jam-ack`); only then are the
+items marked delivered (and the message and decision marks moved). While a handover waits for its
+acknowledgement nothing more is handed over; after 60 seconds everything unacknowledged is offered
+again under a new id, and a listener that calls again without acknowledging the last listener's
+answer gets it again at once. `jam_inbox` and `jam_wait` answer the agent directly and mark what they
+return, including anything a lost hook answer held. Room decisions ride the same deliveries; `Stop`
+doesn't keep an agent working for decisions alone. Room-wide messages (to everyone) skip the
 sender and observers that opted out (6.3b).
 
 An install made before this version has no `PostToolUse` or listener hook. The hub remembers per

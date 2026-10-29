@@ -187,6 +187,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
 
 {host && <RemoteAccess />}
           <Paired host={host} />
+          <RemovedChats />
         </div>
       </aside>
     </>
@@ -277,6 +278,34 @@ function Paired({ host }: { host: boolean }) {
           )}
         </div>
       ))}
+    </Section>
+  );
+}
+
+/** Chats the room removed: they can't join again by themselves until someone lets them back in. */
+function RemovedChats() {
+  const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number }[]>([]);
+  const [error, setError] = useState("");
+  const load = () => api("/removed-chats").then(setList).catch(() => {});
+  useEffect(() => {
+    load();
+  }, []);
+  if (!list.length) return null;
+  const allow = (id: string) => api(`/removed-chats/${id}/allow`, {}).then(() => (setError(""), load())).catch((e) => setError(e.message));
+  return (
+    <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in, or their person tells that chat to connect to jamsesh again.">
+      {list.map((c) => (
+        <div key={c.id} className="row" style={{ padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 14 }}>
+          <span className="grow ellipsis">
+            {c.name} <span style={{ color: "var(--dim)" }}>· {c.ownerName}</span>
+          </span>
+          <span className="chip mono" style={{ fontSize: 12 }}>{ago(c.at)}</span>
+          <button className="btn ghost small" onClick={() => allow(c.id)}>
+            Allow again
+          </button>
+        </div>
+      ))}
+      {error && <div className="empty-note">{error}</div>}
     </Section>
   );
 }
