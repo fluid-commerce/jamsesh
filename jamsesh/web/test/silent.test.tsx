@@ -109,19 +109,6 @@ test("a live page frame is not loaded in a silent room (a page in a frame can't 
   expect(renderToStaticMarkup(<ScaledFrame src="http://localhost:5100/" title="Demo app" />)).toContain("<iframe");
 });
 
-test("a scripted HTML tile gets no scripts, no media and no plugins in a silent room", () => {
-  const tile = `<video autoplay src="x.mp4"></video><script>new AudioContext()</script>`;
-  setSilent(true);
-  const quiet = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
-  expect(quiet).toContain('sandbox=""');
-  expect(quiet).toContain("Content-Security-Policy");
-  expect(quiet).toContain("media-src");
-  setSilent(false);
-  const loud = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
-  expect(loud).toContain('sandbox="allow-scripts"');
-  expect(loud).not.toContain("Content-Security-Policy");
-});
-
 test("the silent document keeps its doctype first (no quirks mode) and its policy blocks scripts and media", () => {
   const f = htmlFrame(true, "<!doctype html><html><body>hi</body></html>");
   expect(f.srcDoc.startsWith("<!doctype html><meta http-equiv=")).toBe(true);
@@ -150,21 +137,6 @@ test("the live canvas is not mounted in a silent room, and is otherwise", () => 
   setSilent(false);
   // Not silent: the live canvas component runs (it has nothing to show without a link, but it isn't the quiet card).
   expect(renderToStaticMarkup(<CanvasFrame kind="view" title="Live canvas" />)).not.toContain("data-quiet-frame");
-});
-
-test("a silent tile is inert (no click or key reaches its links, even target=_self), sandboxed with nothing allowed; a normal one is interactive", () => {
-  const tile = `<a href="https://example.com/song" target="_self">play</a>`;
-  setSilent(true);
-  const quiet = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
-  expect(quiet).toMatch(/\sinert(=""|\s|>)/);
-  expect(quiet).toContain('sandbox=""');
-  expect(quiet).not.toContain("allow-popups");
-  expect(quiet).not.toContain("allow-top-navigation");
-  expect(quiet).not.toContain("allow-same-origin");
-  expect(QUIET_CSP).toContain("form-action 'none'");
-  setSilent(false);
-  const loud = renderToStaticMarkup(<HtmlTile html={tile} title="Tile" />);
-  expect(loud).not.toContain("inert");
 });
 
 test("when the room turns silent the chime's audio context is closed, so no old chime plays when sound is back", () => {
@@ -200,38 +172,48 @@ test("when the room turns silent the chime's audio context is closed, so no old 
   expect(made[1].closed).toBe(false);
 });
 
-test("in a browser, a mounted tile goes inert and stays on its document when the room turns silent", async () => {
-  const pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
-  const built = await Bun.build({ entrypoints: [`${import.meta.dir}/browser-entry.tsx`], target: "browser" });
-  expect(built.success).toBe(true);
-  const code = await built.outputs[0].text();
-  const doc = `<!doctype html><a id="l" href="data:text/html,<audio autoplay src=x.mp3></audio>" target="_self" style="display:block;padding:40px">play</a><video autoplay src="http://127.0.0.1:9/x.mp4"></video>`;
-  const run = async (silent: boolean) => {
-    const browser = await pw.chromium.launch({ args: ["--mute-audio"] });
-    try {
-      const page = await browser.newPage();
-      const requested: string[] = [];
-      page.on("request", (r: any) => requested.push(r.url()));
-      await page.setContent(`<body style="margin:0"><div id="root"></div><script>window.__doc=${JSON.stringify(doc)}</script><script>${code.replace(/<\/script/g, "<\\/script")}</script></body>`);
-      await page.waitForSelector("iframe");
-      if (silent) {
-        await page.evaluate(() => (window as any).setSilent(true));
-        await page.waitForFunction(() => document.querySelector("iframe")?.hasAttribute("inert"));
+// The real thing, in a real browser (muted): each production frame, flipped from a normal room to a silent one.
+for (const which of ["frame", "tile"]) {
+  test(`in a browser, the mounted ${which} stops running and goes inert when the room turns silent`, async () => {
+    const pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
+    const built = await Bun.build({ entrypoints: [`${import.meta.dir}/browser-entry.tsx`], target: "browser" });
+    expect(built.success).toBe(true);
+    const code = await built.outputs[0].text();
+    // A page that makes sound would be running a script: this one reports a heartbeat, has a navigating link and a video.
+    const doc = `<script>setInterval(()=>parent.postMessage("tick","*"),40)</script><a href="data:text/html,<audio autoplay src=x.mp3></audio>" target="_self" style="display:block;padding:40px">play</a><video autoplay src="http://127.0.0.1:9/x.mp4"></video>`;
+    const run = async (silent: boolean) => {
+      const browser = await pw.chromium.launch({ args: ["--mute-audio"] });
+      try {
+        const page = await browser.newPage();
+        const requested: string[] = [];
+        page.on("request", (r: any) => requested.push(r.url()));
+        await page.setContent(`<body style="margin:0"><div id="root"></div><script>window.__ticks=0;addEventListener("message",e=>{if(e.data==="tick")window.__ticks++});window.__which=${JSON.stringify(which)};window.__doc=${JSON.stringify(doc).replace(/</g, "\\u003c")}</script><script>${code.replace(/<\/script/g, "<\\/script")}</script></body>`);
+        await page.waitForSelector("iframe");
+        await page.waitForFunction(() => (window as any).__ticks > 3);
+        if (silent) {
+          await page.evaluate(() => (window as any).setSilent(true));
+          await page.waitForFunction(() => document.querySelector("iframe")?.hasAttribute("inert"));
+        }
+        // The old page is gone the moment the room is silent: its heartbeat stops (in a normal room it keeps going).
+        const before = await page.evaluate(() => (window as any).__ticks);
         requested.length = 0;
+        await page.waitForTimeout(400);
+        const after = await page.evaluate(() => (window as any).__ticks);
+        const frame = page.frames().find((f: any) => f !== page.mainFrame());
+        await page.mouse.click(50, 50);
+        await page.waitForTimeout(300);
+        return { running: after > before, url: frame.url(), media: requested.filter((u) => u.includes("x.mp4") || u.includes("x.mp3")) };
+      } finally {
+        await browser.close();
       }
-      await page.waitForTimeout(300);
-      const frame = page.frames().find((f: any) => f !== page.mainFrame());
-      await page.mouse.click(50, 50);
-      await page.waitForTimeout(400);
-      return { url: frame.url(), media: requested.filter((u) => u.includes("x.mp4") || u.includes("x.mp3")) };
-    } finally {
-      await browser.close();
-    }
-  };
-  // Control: in a normal room the same link does navigate the frame, so the test could fail.
-  expect((await run(false)).url).not.toBe("about:srcdoc");
-  // Turned silent while mounted: inert, on its own document, and nothing asks for media afterwards.
-  const quiet = await run(true);
-  expect(quiet.url).toBe("about:srcdoc");
-  expect(quiet.media).toEqual([]);
-}, 60000);
+    };
+    // Control: in a normal room the page runs and its link does navigate the frame, so this test could fail.
+    const loud = await run(false);
+    expect(loud.running).toBe(true);
+    expect(loud.url).not.toBe("about:srcdoc");
+    const quiet = await run(true);
+    expect(quiet.running).toBe(false);
+    expect(quiet.url).toBe("about:srcdoc");
+    expect(quiet.media).toEqual([]);
+  }, 60000);
+}
