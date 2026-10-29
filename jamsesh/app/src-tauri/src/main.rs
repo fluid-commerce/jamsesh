@@ -955,19 +955,33 @@ async fn finish_setup(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), 
     Ok(())
 }
 
-/// The font files of `families` from this Mac's font folders, for this person's canvas, which
-/// can't see installed fonts (fonts.rs). Read off the main thread.
+/// Lends a font to the session (fonts.rs). A native dialog names the font, the session and who is waiting, and only
+/// "I'm allowed to share it" reads the files. This sends them to the hub itself, so the page that asked never holds
+/// them: with a ticket the hub issued for this window, signed with a key no page can read. That key is the window key
+/// this app shares with the hub it started, or, for a joined host reached through the relay, the hash of the window's
+/// own credential (the relay adds the credential; the hub keeps its hash). The hub takes lent fonts only this way.
 #[tauri::command]
-async fn local_fonts(families: Vec<String>) -> Vec<fonts::LocalFont> {
-    tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
-}
-
-/// Lends a font to the session: a native dialog names the font, the session and who is waiting, and only
-/// "I'm allowed to share it" reads the files (fonts.rs `lend`); the page gets bytes no other way.
-#[tauri::command]
-async fn lend_font(app: AppHandle, family: String, session: String, askers: Vec<String>) -> Result<Vec<fonts::LocalFont>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        fonts::lend(&family, &session, &askers, |text| {
+async fn lend_font(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, Arc<App>>,
+    family: String,
+    session: String,
+    askers: Vec<String>,
+) -> Result<(), String> {
+    let origin = webview.url().map_err(|e| e.to_string())?.origin().ascii_serialization();
+    let key = {
+        let inner = state.inner.lock().await;
+        if inner.hub.as_ref().is_some_and(|h| h.origin() == origin) {
+            proxy::window_key().map(|k| k.as_bytes().to_vec())
+        } else {
+            inner.relay.as_ref().filter(|r| r.url("") == origin).and_then(|r| r.person_token()).map(|t| fonts::sha256_hex(t.as_bytes()).into_bytes())
+        }
+    }
+    .ok_or("Fonts are shared from a JamSesh window on this Mac.")?;
+    let asked = family.clone();
+    let files = tauri::async_runtime::spawn_blocking(move || {
+        fonts::lend(&asked, &session, &askers, |text| {
             app.dialog()
                 .message(text)
                 .title("Share a font")
@@ -976,7 +990,16 @@ async fn lend_font(app: AppHandle, family: String, session: String, askers: Vec<
         })
     })
     .await
-    .map_err(|_| "Couldn't share the font.".to_string())?
+    .map_err(|_| "Couldn't share the font.".to_string())??;
+    let files: Vec<String> = files.into_iter().map(|f| f.data).collect();
+    let answer = proxy::post_as_window_json(&origin, "/api/fonts/lend-ticket", serde_json::json!({ "family": family }).to_string(), 8).await?;
+    let ticket = serde_json::from_str::<serde_json::Value>(&answer)
+        .ok()
+        .and_then(|v| v["ticket"].as_str().map(str::to_string))
+        .ok_or("The host didn't answer.")?;
+    let sig = fonts::lend_signature(&key, &ticket, &files);
+    let body = serde_json::json!({ "family": family, "files": files, "ticket": ticket, "sig": sig }).to_string();
+    proxy::post_as_window_json(&origin, "/api/fonts/lend", body, 120).await.map(|_| ())
 }
 
 /// Which of `families` are installed on this Mac (names only; no font is read). The page offers
@@ -1120,7 +1143,6 @@ fn main() {
             remote_setup,
             get_userless,
             toggle_userless,
-            local_fonts,
             has_fonts,
             lend_font,
             heartbeat,

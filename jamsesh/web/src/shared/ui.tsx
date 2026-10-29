@@ -8,7 +8,7 @@ import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { registerDriveTarget } from "./driving";
 import { canvasDriver, frameDriver } from "./drivetiles";
 import { VersionBadge } from "./StageControls";
-import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, canvasSrc, START_TIMEOUT_MS, friendlyReason, joinLabel, macInvoke, type JoinState } from "./canvasJoin";
+import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, canvasSrc, START_TIMEOUT_MS, friendlyReason, joinLabel, type JoinState } from "./canvasJoin";
 import { loadFonts, newFontMemory } from "./roomFonts";
 import { askRoomForFonts, fetchRoomFace } from "./roomFontsApi";
 
@@ -1246,7 +1246,7 @@ export function CanvasFrame({ kind, name, title, follow, page, panels }: { kind:
           again = false;
           const fc = figcraftIn(frame.current);
           if (!fc) break;
-          const left = await loadFonts(fc, macInvoke(), memory, room);
+          const left = await loadFonts(fc, memory, room);
           if (!gone) setSubstituted(left);
         } while (again && !gone);
       } catch {

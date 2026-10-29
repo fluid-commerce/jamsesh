@@ -653,10 +653,14 @@ export class Hub {
     // Reserved before anything waits, so two sends at once share one.
     const done = this.sentRecs.get(w.recordingId);
     if (done) return done;
-    const sending = this.sendNotes(person, w.recordingId, w.notes).then((r) => {
-      if (!r.ok) this.sentRecs.delete(w.recordingId); // nothing went out: a corrected send may follow
-      return r;
-    });
+    // Nothing went out (no notes, or it failed): the reservation goes, so a corrected send may follow.
+    const sending = this.sendNotes(person, w.recordingId, w.notes).then(
+      (r) => (r.ok || this.sentRecs.delete(w.recordingId), r),
+      (e) => {
+        this.sentRecs.delete(w.recordingId);
+        throw e;
+      },
+    );
     this.sentRecs.set(w.recordingId, sending);
     if (this.sentRecs.size > 200) this.sentRecs.delete(this.sentRecs.keys().next().value!);
     return sending;

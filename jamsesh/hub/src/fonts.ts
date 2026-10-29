@@ -5,6 +5,7 @@
 //     Fonts, with no question asked;
 //   - a font only one person has, borrowed for the session once that person confirms they may share it.
 // Everything here is memory: nothing is written to disk, and ending the session drops it all.
+import { createHash, randomBytes } from "node:crypto";
 import type { Agent, FontInfo, FontsState } from "./types";
 import { bus } from "./bus";
 import { config } from "./config";
@@ -204,6 +205,8 @@ export class FontService {
   private tried = new Set<string>();
   private abort = new AbortController();
   private closed = false;
+  /** Lend tickets (`lendTicket`): who asked, for which family, until when. */
+  private tickets = new Map<string, { caller: string; personId: string; key: string; until: number }>();
   /** Called with a face the moment it is available, so the host's own canvases can load it too. */
   onFace: ((family: string, data: Uint8Array) => void) | null = null;
 
@@ -487,8 +490,34 @@ export class FontService {
   }
 
   /** The session is over: every font held is dropped, and nothing more is fetched or lent. */
+  /**
+   * A one-time ticket for lending `family`, asked for by the Mac app's `lend_font` after its dialog said yes. The app
+   * signs the lend with it (`lendMessage`), so the hub takes lent bytes only from that dialog. Good for two minutes.
+   */
+  lendTicket(caller: string, personId: string, family: unknown, now = Date.now()): string | null {
+    if (this.closed || typeof family !== "string" || !family.trim() || family.length > 200) return null;
+    for (const [t, v] of this.tickets) if (v.until < now) this.tickets.delete(t);
+    if (this.tickets.size >= 100) return null;
+    const ticket = randomBytes(16).toString("hex");
+    this.tickets.set(ticket, { caller, personId, key: normalizeFamily(family), until: now + 2 * 60_000 });
+    return ticket;
+  }
+
+  get ended() {
+    return this.closed;
+  }
+
+  /** Uses up a ticket: whether it was this window's and person's, for this family, and still good. */
+  redeemTicket(ticket: unknown, caller: string, personId: string, family: unknown, now = Date.now()): boolean {
+    if (typeof ticket !== "string" || typeof family !== "string") return false;
+    const t = this.tickets.get(ticket);
+    this.tickets.delete(ticket);
+    return !!t && t.until >= now && t.caller === caller && t.personId === personId && t.key === normalizeFamily(family);
+  }
+
   clear() {
     this.closed = true;
+    this.tickets.clear();
     this.abort.abort();
     for (const h of this.held.values()) this.wipe(h);
     this.held.clear();
@@ -496,4 +525,9 @@ export class FontService {
     this.resolving.clear();
     this.changed();
   }
+}
+
+/** What the Mac app signs when it lends a font: the hub's ticket and the files it read, as the hub receives them. */
+export function lendMessage(ticket: string, files: string[]): string {
+  return `${ticket}\n${createHash("sha256").update(files.join("\n")).digest("hex")}`;
 }

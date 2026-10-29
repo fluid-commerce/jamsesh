@@ -281,6 +281,11 @@ export class HostWindows {
     return !!this.linkSecret && safeEqual(value, this.linkSecret);
   }
 
+  /** HMAC-SHA256 of `data` under the window key, as the Mac app that shares it computes it (a lent font's signature). */
+  sign(data: string) {
+    return createHmac("sha256", this.key).update(data).digest("hex");
+  }
+
   /** Whether a request's `jam_window` cookie is this hub's window key. */
   matches(value: string | null | undefined) {
     return !!value && safeEqual(value, this.key);

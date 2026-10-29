@@ -2,11 +2,12 @@
 // person has is borrowed once they confirm, and nothing is kept past the session. No real network: a stub
 // stands in for Fontsource and its CDN.
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forbiddenCommand } from "../src/canvas/canvas";
-import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
+import { cardText, decodeBase64, FontService, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { FONT_BODY_MAX, startHttp } from "../src/http";
@@ -348,12 +349,19 @@ const nobody = hub.auth.issue({ kind: "browser", label: "A laptop", ip: "10.0.0.
 const agent = hub.auth.issue({ kind: "agent", label: "Agents on Mac", ip: "10.0.0.5", ownerDeviceId: "host", personId: dana.id });
 const as = (t: { token: string }) => ({ ...remote, authorization: `Bearer ${t.token}` });
 const post = (path: string, who: { token: string }, body: unknown) => fetch(`${base}/api/fonts/${path}`, { method: "POST", headers: as(who), body: JSON.stringify(body) });
+/** A lend as the Mac app's lend_font makes it after its dialog: a ticket, then the files signed with the window's credential (the hub keeps its hash). */
+const lend = async (who: { token: string; device: { tokenHash: string } }, body: { family: string; files: string[]; personId?: string }) => {
+  const t = await post("lend-ticket", who, { family: body.family });
+  if (!t.ok) return t;
+  const { ticket } = (await t.json()) as { ticket: string };
+  return post("lend", who, { ...body, ticket, sig: createHmac("sha256", who.device.tokenHash).update(lendMessage(ticket, body.files)).digest("hex") });
+};
 
 test("over HTTP: Lee's canvas asks, Dana confirms and lends, Lee's canvas fetches it without it being cached", async () => {
   expect((await post("want", leesLaptop, { families: ["Helvetica Neue"] })).status).toBe(200);
   const state = await fetch(`${base}/api/state`, { headers: as(leesLaptop) }).then((r) => r.json() as Promise<any>);
   expect(state.fonts.wanted[0]).toMatchObject({ family: "Helvetica Neue", askedBy: [lee.id] });
-  const lent = await post("lend", danasMac, { family: "Helvetica Neue", files: [b64(makeFont("Helvetica Neue"))] });
+  const lent = await lend(danasMac, { family: "Helvetica Neue", files: [b64(makeFont("Helvetica Neue"))] });
   expect(lent.status).toBe(200);
   const after = await fetch(`${base}/api/state`, { headers: as(leesLaptop) }).then((r) => r.json() as Promise<any>);
   expect(after.fonts.available[0]).toMatchObject({ family: "Helvetica Neue", kind: "borrowed", lender: "Dana", faces: 1 });
@@ -392,21 +400,92 @@ test("over HTTP: a window with no person can ask but not lend; unpaired devices 
   expect((await post("decline", leesLaptop, { family: "Gotham" })).status).toBe(200);
   expect(hub.fonts.state().wanted.find((w) => w.family === "Gotham")?.declinedBy).toEqual([lee.id]);
   // A person can't lend as someone else by naming them.
-  const bad = await post("lend", leesLaptop, { family: "Gotham", personId: dana.id, files: [b64(makeFont("Gotham"))] });
+  const bad = await lend(leesLaptop, { family: "Gotham", personId: dana.id, files: [b64(makeFont("Gotham"))] });
   expect(bad.status).toBe(200);
   expect(hub.fonts.state().available.find((f) => f.family === "Gotham")?.lenderId).toBe(lee.id);
 });
 
+test("over HTTP: lent bytes come only from the Mac app's dialog: no ticket, a forged or reused signature, another family's or another window's ticket are refused", async () => {
+  await post("want", leesLaptop, { families: ["Futura"] });
+  const files = [b64(makeFont("Futura"))];
+  const ticket = async (who = danasMac, family = "Futura") => ((await (await post("lend-ticket", who, { family })).json()) as { ticket: string }).ticket;
+  const sign = (t: string, key = danasMac.device.tokenHash, f = files) => createHmac("sha256", key).update(lendMessage(t, f)).digest("hex");
+  // A page posting bytes itself, as lending worked before: no ticket, no signature.
+  expect((await post("lend", danasMac, { family: "Futura", files })).status).toBe(403);
+  // A ticket but no signature, or one made with the wrong key (the page doesn't have the window's credential).
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: await ticket() })).status).toBe(403);
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: await ticket(), sig: "ab".repeat(32) })).status).toBe(403);
+  const t1 = await ticket();
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t1, sig: sign(t1, "not the key") })).status).toBe(403);
+  // That ticket is spent even though the attempt failed.
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t1, sig: sign(t1) })).status).toBe(403);
+  // Signed for other files than the ones sent; a ticket for another family; Lee's ticket and key used from Dana's window.
+  const t2 = await ticket();
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t2, sig: sign(t2, danasMac.device.tokenHash, [b64(makeFont("Other"))]) })).status).toBe(403);
+  const t3 = await ticket(danasMac, "Gill Sans");
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t3, sig: sign(t3) })).status).toBe(403);
+  const t4 = await ticket(leesLaptop);
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t4, sig: sign(t4, leesLaptop.device.tokenHash) })).status).toBe(403);
+  // A signature with bytes that aren't hex at all is a refusal, not a crash.
+  const t5 = await ticket();
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t5, sig: "é".repeat(64) })).status).toBe(403);
+  expect(hub.fonts.has("Futura")).toBe(false);
+  // The real thing.
+  const t6 = await ticket();
+  expect((await post("lend", danasMac, { family: "Futura", files, ticket: t6, sig: sign(t6) })).status).toBe(200);
+  expect(hub.fonts.has("Futura")).toBe(true);
+});
+
+test("over HTTP: the host's own window lends with the window key the Mac app shares with the hub", async () => {
+  hub.session.store.setSetting("hostPersonId", dana.id);
+  const win = () => ({ "content-type": "application/json", cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` });
+  await post("want", leesLaptop, { families: ["Optima"] });
+  const files = [b64(makeFont("Optima"))];
+  const { ticket } = (await (await fetch(`${base}/api/fonts/lend-ticket`, { method: "POST", headers: win(), body: JSON.stringify({ family: "Optima" }) })).json()) as { ticket: string };
+  // Signed with the credential's hash instead (as through a relay): not this window's key.
+  const wrong = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: win(), body: JSON.stringify({ family: "Optima", files, ticket, sig: createHmac("sha256", danasMac.device.tokenHash).update(lendMessage(ticket, files)).digest("hex") }) });
+  expect(wrong.status).toBe(403);
+  const { ticket: t2 } = (await (await fetch(`${base}/api/fonts/lend-ticket`, { method: "POST", headers: win(), body: JSON.stringify({ family: "Optima" }) })).json()) as { ticket: string };
+  const ok = await fetch(`${base}/api/fonts/lend`, { method: "POST", headers: win(), body: JSON.stringify({ family: "Optima", files, ticket: t2, sig: hub.auth.windows.sign(lendMessage(t2, files)) }) });
+  expect(ok.status).toBe(200);
+  // Another process on the host can't even ask for a ticket.
+  expect((await fetch(`${base}/api/fonts/lend-ticket`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ family: "Optima" }) })).status).toBe(403);
+});
+
+test("a lend ticket is good once, for two minutes, for its window, person and family", () => {
+  const fonts = service();
+  const t = fonts.lendTicket("dev_a", "p1", "Gotham", 1000)!;
+  expect(fonts.redeemTicket(t, "dev_a", "p1", "GOTHAM ", 1000 + 60_000)).toBe(true);
+  expect(fonts.redeemTicket(t, "dev_a", "p1", "Gotham", 1000)).toBe(false);
+  const late = fonts.lendTicket("dev_a", "p1", "Gotham", 1000)!;
+  expect(fonts.redeemTicket(late, "dev_a", "p1", "Gotham", 1000 + 2 * 60_000 + 1)).toBe(false);
+  for (const [caller, person, family] of [["dev_b", "p1", "Gotham"], ["dev_a", "p2", "Gotham"], ["dev_a", "p1", "Avenir"]]) {
+    const x = fonts.lendTicket("dev_a", "p1", "Gotham", 1000)!;
+    expect(fonts.redeemTicket(x, caller, person, family, 1000)).toBe(false);
+  }
+  expect(fonts.lendTicket("dev_a", "p1", "", 1000)).toBeNull();
+  fonts.clear();
+  expect(fonts.lendTicket("dev_a", "p1", "Gotham", 1000)).toBeNull();
+});
+
+/** HMAC-SHA256 of that lend message under "k" x 64; app/src-tauri/src/fonts.rs checks the same value. */
+const LEND_VECTOR = "75c43a30bfcc15cb3e275553332244c7d3f3c48c2604862406d752454d23057a";
+
+test("the lend signature matches the Mac app's (fonts.rs lend_signature): same ticket, files and key, same hex", () => {
+  const msg = lendMessage("00112233445566778899aabbccddeeff", ["AAEC", "AwQF"]);
+  expect(createHmac("sha256", "k".repeat(64)).update(msg).digest("hex")).toBe(LEND_VECTOR);
+});
+
 test("over HTTP: a damaged lend, a lend nobody asked for and a repeated lend are answered plainly", async () => {
   await post("want", leesLaptop, { families: ["Avenir"] });
-  const dmg = await post("lend", danasMac, { family: "Avenir", files: [b64(new Uint8Array([9, 9, 9, 9]))] });
+  const dmg = await lend(danasMac, { family: "Avenir", files: [b64(new Uint8Array([9, 9, 9, 9]))] });
   expect(dmg.status).toBe(422);
   expect(((await dmg.json()) as any).error).toContain("font file");
-  expect((await post("lend", danasMac, { family: "Papyrus", files: [b64(makeFont("Papyrus"))] })).status).toBe(409);
-  const ok = await post("lend", danasMac, { family: "Avenir", files: [b64(makeFont("Avenir"))] });
+  expect((await lend(danasMac, { family: "Papyrus", files: [b64(makeFont("Papyrus"))] })).status).toBe(409);
+  const ok = await lend(danasMac, { family: "Avenir", files: [b64(makeFont("Avenir"))] });
   expect(ok.status).toBe(200);
   // The same request again (a retry after a lost answer) is fine and changes nothing.
-  const again = await post("lend", danasMac, { family: "Avenir", files: [b64(makeFont("Avenir"))] });
+  const again = await lend(danasMac, { family: "Avenir", files: [b64(makeFont("Avenir"))] });
   expect(((await again.json()) as any).already).toBe(true);
   expect(hub.fonts.state().available.filter((f) => f.family === "Avenir").length).toBe(1);
 });
@@ -419,7 +498,7 @@ test("over HTTP: the person leaving takes their fonts; the session ending ends t
   await post("want", leesLaptop, { families: ["Frutiger"] });
   hub.stop();
   expect(hub.fonts.state()).toEqual({ available: [], wanted: [] });
-  const late = await post("lend", leesLaptop, { family: "Frutiger", files: [b64(makeFont("Frutiger"))] });
+  const late = await lend(leesLaptop, { family: "Frutiger", files: [b64(makeFont("Frutiger"))] });
   expect(late.status).toBe(410);
   expect(hub.fonts.has("Gotham")).toBe(false);
 });

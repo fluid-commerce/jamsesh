@@ -191,6 +191,10 @@ impl Proxy {
             None => self.url(&format!("{WINDOW_START}?next={next}")),
         }
     }
+    /// The person's credential this relay adds for the app's own window, if this Mac is paired.
+    pub fn person_token(&self) -> Option<String> {
+        self.shared.token.read().ok().and_then(|t| t.clone())
+    }
     pub fn set_agents_token(&self, token: Option<String>) {
         if let Ok(mut t) = self.shared.agents.write() {
             *t = token;
@@ -514,6 +518,33 @@ pub async fn send(method: &str, origin: &str, path: &str, bearer: Option<&str>, 
 }
 
 async fn send_on(method: &str, origin: &str, path: &str, bearer: Option<&str>, body: &str, window: bool) -> Result<String, String> {
+    let (status, text) = request(method, origin, path, bearer, body.to_string(), window, 8).await?;
+    if !status.is_success() {
+        return Err(format!("{status}"));
+    }
+    Ok(text)
+}
+
+/// POSTs a JSON body as one of this app's windows to `origin` (the hub this app started, or this app's relay, which
+/// adds the window's credential), waiting up to `secs`. A refusal comes back as the hub's own words.
+pub async fn post_as_window_json(origin: &str, path: &str, body: String, secs: u64) -> Result<String, String> {
+    let (status, text) = request("POST", origin, path, None, body, true, secs).await?;
+    if status.is_success() {
+        return Ok(text);
+    }
+    let said = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["error"].as_str().map(str::to_string));
+    Err(said.unwrap_or_else(|| format!("The host said {status}.")))
+}
+
+async fn request(
+    method: &str,
+    origin: &str,
+    path: &str,
+    bearer: Option<&str>,
+    body: String,
+    window: bool,
+    secs: u64,
+) -> Result<(StatusCode, String), String> {
     let tls = tls_config()?;
     let connector = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config((*tls).clone()).https_or_http().enable_http1().build();
     let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
@@ -524,16 +555,14 @@ async fn send_on(method: &str, origin: &str, path: &str, bearer: Option<&str>, b
     if window && let Some(c) = window_cookie() {
         req = req.header(header::COOKIE, c);
     }
-    let req = req.body(Full::new(Bytes::from(body.to_string()))).map_err(|e| e.to_string())?;
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(8), client.request(req))
+    let req = req.body(Full::new(Bytes::from(body))).map_err(|e| e.to_string())?;
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(secs), client.request(req))
         .await
         .map_err(|_| "timed out".to_string())?
         .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("{}", resp.status()));
-    }
+    let status = resp.status();
     let bytes = resp.into_body().collect().await.map_err(|e| e.to_string())?.to_bytes();
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 #[cfg(test)]

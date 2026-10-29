@@ -1,12 +1,11 @@
-// Fonts from this Mac for this person's canvas.
+// Fonts from this Mac for the session's canvases (SPEC 12.4).
 //
-// A person's canvas is FigCraft's WebAssembly build, which can't see the Mac's installed fonts: text
-// an agent set in Helvetica Neue (drawn natively on the host) shows in a substitute there. The page
-// asks for the families its canvas reports missing, and this reads them from the Mac's own font
-// folders (system, local and the person's) so the page can hand them to the canvas with
-// `text.loadFont`. The bytes go to the page in this app's window, which is the host's page: whoever
-// hosts the session can ask for any installed family (capped per request below), so this is not a
-// boundary between a person's Mac and the host.
+// A canvas is FigCraft's WebAssembly build, which can't see the Mac's installed fonts: text an agent set
+// in Helvetica Neue (drawn natively on the host) shows in a substitute there. The session's pages may ask
+// only which families this Mac has (`installed`, names only). A font's files leave this Mac in one way:
+// `lend`, after a native dialog names the font, the session and who is waiting, and the person says
+// they may share it; main.rs `lend_font` then sends them to the hub itself, signed (`lend_signature`),
+// so the page that asked never holds them and the hub takes lent fonts from no one else.
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -74,7 +73,7 @@ fn lookup_files(families: &[String]) -> Vec<(String, Vec<PathBuf>)> {
 }
 
 /// Which of `families` this Mac has installed (as asked), without reading any font: the page uses
-/// it to know whether it can offer to lend one. Same limits as [`local_fonts`].
+/// it to know whether it can offer to lend one. Same limits as [`read_families`].
 pub fn installed(families: &[String]) -> Vec<String> {
     let mut wanted: Vec<String> = families.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty() && f.len() <= 200).collect();
     wanted.truncate(MAX_FAMILIES);
@@ -83,7 +82,7 @@ pub fn installed(families: &[String]) -> Vec<String> {
 
 /// The font files of the families this Mac has, read and base64-encoded: each file once, files
 /// over [`MAX_FILE`] skipped, and at most [`MAX_TOTAL`] in all. Families it doesn't have are left out.
-pub fn local_fonts(families: &[String]) -> Vec<LocalFont> {
+fn read_families(families: &[String]) -> Vec<LocalFont> {
     let mut wanted: Vec<String> = Vec::new();
     for f in families.iter().map(|f| f.trim()).filter(|f| !f.is_empty() && f.len() <= 200) {
         if !wanted.iter().any(|w| w.eq_ignore_ascii_case(f)) {
@@ -117,11 +116,27 @@ pub fn lend(family: &str, session: &str, askers: &[String], confirm: impl FnOnce
     if !confirm(&lend_prompt(family, session, &askers)) {
         return Err("You chose not to share it.".into());
     }
-    let fonts = local_fonts(&asked);
+    let fonts = read_families(&asked);
     if fonts.is_empty() {
         return Err("That font is too large to share, or couldn't be read.".into());
     }
     Ok(fonts)
+}
+
+/// Lowercase hex of SHA-256.
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What signs a lend for the hub (hub/src/fonts.ts `lendMessage`): HMAC-SHA256 under `key` of the hub's ticket
+/// and the SHA-256 of the files as sent (base64, joined by newlines), in hex.
+pub fn lend_signature(key: &[u8], ticket: &str, files: &[String]) -> String {
+    let message = format!("{ticket}\n{}", sha256_hex(files.join("\n").as_bytes()));
+    hex(ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), message.as_bytes()).as_ref())
 }
 
 fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Vec<LocalFont> {
@@ -193,7 +208,7 @@ mod tests {
 
     #[test]
     fn reads_each_file_once_and_leaves_out_what_this_mac_lacks() {
-        let fonts = local_fonts(&["Helvetica Neue".into(), "HELVETICA NEUE".into(), "No Such Family 7f3a".into()]);
+        let fonts = read_families(&["Helvetica Neue".into(), "HELVETICA NEUE".into(), "No Such Family 7f3a".into()]);
         assert!(!fonts.is_empty());
         assert!(fonts.iter().all(|f| f.family == "Helvetica Neue"));
         let bytes = base64::engine::general_purpose::STANDARD.decode(&fonts[0].data).unwrap_or_default();
@@ -210,7 +225,17 @@ mod tests {
         let many: Vec<(String, Vec<PathBuf>)> = (0..50).map(|i| (format!("f{i}"), one.clone())).collect();
         assert_eq!(read_files(many).len(), 1);
         let asked: Vec<String> = (0..100).map(|i| format!("Family {i}")).collect();
-        assert!(local_fonts(&asked).is_empty());
+        assert!(read_families(&asked).is_empty());
         const { assert!(MAX_FILE < MAX_TOTAL) };
+    }
+
+    #[test]
+    fn signs_a_lend_as_the_hub_checks_it() {
+        // The same vector as hub/test/fonts.test.ts LEND_VECTOR.
+        let files = ["AAEC".to_string(), "AwQF".to_string()];
+        let sig = lend_signature("k".repeat(64).as_bytes(), "00112233445566778899aabbccddeeff", &files);
+        assert_eq!(sig, "75c43a30bfcc15cb3e275553332244c7d3f3c48c2604862406d752454d23057a");
+        assert_ne!(lend_signature(b"other", "00112233445566778899aabbccddeeff", &files), sig);
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 }

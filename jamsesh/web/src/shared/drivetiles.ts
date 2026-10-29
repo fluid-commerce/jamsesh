@@ -1,3 +1,5 @@
+// How the tiles the big screen already has take a driver's input (SPEC 10.6): a live build's frame gets the event posted into it
+// (the dev proxy's script replays it there), and the canvas takes pan, zoom and select through FigCraft's own commands.
 import { pageAt, readView, type CanvasView } from "./pointer";
 import { api } from "./hub";
 import type { DriveTarget, TileEvent } from "./driving";

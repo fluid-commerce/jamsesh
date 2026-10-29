@@ -1605,6 +1605,7 @@ dependencies = [
  "mdns-sd",
  "objc2",
  "objc2-foundation",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
