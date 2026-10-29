@@ -4,7 +4,7 @@ import { encodeWav } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
 import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
-import { beginRead, carriesToOtherHosts, endRead, carryChoice, pullCopy, setCarryAllowed } from "../shared/voiceprint";
+import { beginRead, endRead } from "../shared/voiceprint";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
 export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person; brainName: string; onClose: () => void; micError?: string | null }) {
@@ -76,13 +76,6 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
   const [msg, setMsg] = useState("");
   const [secs, setSecs] = useState(0);
   const [script, setScript] = useState(FALLBACK_SCRIPT);
-  // Ticked unless this person said no before (the choice is theirs, not this device's).
-  const [carry, setCarry] = useState(true);
-  useEffect(() => {
-    let live = true;
-    carryChoice(me.id).then((c) => live && setCarry(c ?? true));
-    return () => void (live = false);
-  }, [me.id]);
   const rec = useRef<{ stop: () => void } | null>(null);
 
   useEffect(() => {
@@ -128,8 +121,6 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
           if (!res.ok) void endRead(me.id, true);
           const r = await res.json();
           if (r.ok) {
-            await setCarryAllowed(me.id, carry).catch(() => setCarry(false));
-            if (carry) await pullCopy(me.id);
             setState("done");
             setMsg(`${brainName} knows your voice.`);
           } else (setState("error"), setMsg(r.reason ?? r.error ?? "That didn't work. Try again."));
@@ -157,7 +148,7 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
   };
 
   const l = me.voiceLearned;
-  const learned = l && [l.read && `${l.read} from reading aloud`, l.corrections && `${l.corrections} correction${l.corrections === 1 ? "" : "s"}`, l.heard && `${l.heard} line${l.heard === 1 ? "" : "s"} heard`, l.carried && `${l.carried} brought from another host`].filter(Boolean);
+  const learned = l && [l.read && `${l.read} from reading aloud`, l.corrections && `${l.corrections} correction${l.corrections === 1 ? "" : "s"}`, l.heard && `${l.heard} line${l.heard === 1 ? "" : "s"} heard`].filter(Boolean);
 
   return (
     <div className="section">
@@ -171,28 +162,9 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
           <p key={s}>{s}</p>
         ))}
       </div>
-      <label className="check" style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "0 0 12px", fontSize: 13, color: "var(--muted)" }}>
-        <input
-          type="checkbox"
-          checked={carry}
-          onChange={(e) => {
-            setCarry(e.target.checked);
-            // Already known on this host: the copy for your next room is taken now, or dropped now.
-            if (state !== "recording") {
-              const on = e.target.checked;
-              setCarryAllowed(me.id, on)
-                .then(() => on && me.voiceSamples > 0 && pullCopy(me.id))
-                .catch((err) => (setCarry(!on), setState("error"), setMsg(`Couldn't save that: ${err instanceof Error ? err.message : String(err)}`)));
-            }
-          }}
-          style={{ marginTop: 2 }}
-        />
-        <span>
-          {carriesToOtherHosts()
-            ? "Keep my voice in the JamSesh app on this Mac and bring it to rooms I join. Only numbers that describe your voice, never a recording."
-            : "Keep my voice in this browser for this host. Only numbers that describe your voice, never a recording. To bring it to other hosts, join with the JamSesh Mac app."}
-        </span>
-      </label>
+      <p className="help" style={{ margin: "0 0 12px" }}>
+        This host keeps your voice so it knows you next time: numbers that describe it, never a recording. It isn't taken to other hosts; on a new one, read again. Reset in Settings forgets it.
+      </p>
       <div className="row">
         {state === "recording" ? (
           <button className="btn" onClick={() => rec.current?.stop()} style={{ borderColor: "rgba(255,107,94,.5)", color: "var(--warn)" }}>

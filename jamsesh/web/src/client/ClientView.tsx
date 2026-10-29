@@ -9,7 +9,6 @@ import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, m
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
-import { useVoiceprintSync } from "../shared/voiceprint";
 import { Stage, expandTile, stageTiles } from "../host/Stage";
 import { cast, putOnScreen } from "./CastPicker";
 import { InviteButton } from "./Invite";
@@ -39,9 +38,8 @@ export function ClientView() {
   // Which person the host has bound this window to (its acknowledged registration), or why it won't yet.
   const [registered, setRegistered] = useState<string | null>(null);
   const [refused, setRefused] = useState("");
-  // A voiceprint this device carries is offered to the host, once it knows this window is them, before the join read is asked for.
-  const voice = useVoiceprintSync(me, registered, connected);
-  const voiceReady = voice.ready;
+  // The join read is asked for once the host knows this window is them (only their own window may read for them).
+  const voiceReady = !!me && registered === me.id;
   const layout = useLayout();
 
   useEffect(() => {
@@ -166,16 +164,7 @@ export function ClientView() {
         overlays={
           <>
             <Toasts />
-            {(refused || voice.problem) && (
-              <div className="mic-notice info" role="status">
-                <span>{refused || voice.problem}</span>
-                {refused && (
-                  <button className="btn small" onClick={() => (setPref("personId", ""), setPersonId(""))}>
-                    Pick someone else
-                  </button>
-                )}
-              </div>
-            )}
+            {refused && <Refused text={refused} onPickAgain={() => (setPref("personId", ""), setPersonId(""))} />}
             <ShareRequestPrompt />
             {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
             {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
@@ -218,16 +207,7 @@ export function ClientView() {
         </div>
       </header>
       <MicNotice status={micStatus} onRetry={toggleMic} />
-      {(refused || voice.problem) && (
-        <div className="mic-notice info" role="status">
-          <span>{refused || voice.problem}</span>
-          {refused && (
-            <button className="btn small" onClick={() => (setPref("personId", ""), setPersonId(""))}>
-              Pick someone else
-            </button>
-          )}
-        </div>
-      )}
+      {refused && <Refused text={refused} onPickAgain={() => (setPref("personId", ""), setPersonId(""))} />}
 
       <main className="client-main" style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) 380px" }}>
         <section style={{ minHeight: 0, minWidth: 0, position: "relative" }}>
@@ -243,6 +223,18 @@ export function ClientView() {
       {profile && <ProfileDrawer me={me} micError={micStatus.error} brainName={state.settings.brainName} onClose={() => setProfile(false)} />}
       {voiceReady && !enrollAsked && me.voiceSamples === 0 && !micStatus.error && <EnrollModal me={me} brainName={state.settings.brainName} done={() => (setPref("enrollAsked", "1"), setEnrollAsked(true))} />}
       {settings && <SettingsDrawer host={false} onClose={() => setSettings(false)} />}
+    </div>
+  );
+}
+
+/** The host won't let this window be that person yet: say why, and let them pick someone else. */
+function Refused({ text, onPickAgain }: { text: string; onPickAgain: () => void }) {
+  return (
+    <div className="mic-notice info" role="status">
+      <span>{text}</span>
+      <button className="btn small" onClick={onPickAgain}>
+        Pick someone else
+      </button>
     </div>
   );
 }

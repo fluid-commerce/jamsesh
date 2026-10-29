@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
-import { forgetCopy } from "./voiceprint";
 
 export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: boolean }) {
   const { state, levels } = useHub();
@@ -270,12 +269,8 @@ function PersonRow({ p, mine }: { p: Person; mine: boolean }) {
         {mine && p.voiceSamples > 0 && (
           <button
             className="btn ghost small"
-            title="Forget your voice on this host and on this device"
-            onClick={() =>
-              api(`/people/${p.id}/voiceprint`, undefined, "DELETE")
-                .then(() => forgetCopy(p.id).catch((e) => alert(`Your voice was forgotten on this host, but this device still has a copy: ${e?.message ?? e}. Clear this site's data to remove it.`)))
-                .catch((e) => alert(e.message))
-            }
+            title="Forget your voice on this host (it isn't kept anywhere else)"
+            onClick={() => api(`/people/${p.id}/voiceprint`, undefined, "DELETE").catch((e) => alert(e.message))}
           >
             Reset
           </button>
