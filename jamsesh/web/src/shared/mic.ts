@@ -332,9 +332,15 @@ export class Mic {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("This page can't use the microphone over plain HTTP. Open the host's https address (set up Remote access on the host), or use the host itself.");
       }
-      this.stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false },
       });
+      // Switched off while the permission prompt was open: the answer arrives to a mic nobody wants, so it is let go at once.
+      if (!this.wanted) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      this.stream = stream;
       this.ctx = new AudioContext();
       // A context made without a click starts suspended in some browsers; a suspended one hears nothing.
       await this.ctx.resume().catch(() => {});

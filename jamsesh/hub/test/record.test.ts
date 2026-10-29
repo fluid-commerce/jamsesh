@@ -1130,6 +1130,39 @@ test("a prompt close whose later write fails leaves nothing behind, and its retr
   expect(r.s.annotations().length).toBe(1);
 }, 30_000);
 
+test("a close that a cancel overtakes gives the words it gathered to the room as ordinary speech, and makes no prompt or notes", async () => {
+  for (const mode of ["cancel", "replaced-then-cancelled"] as const) {
+    const r = room();
+    const base = Date.now() - 20_000;
+    r.at(base);
+    const tok = "rt_jjjjjjjjjjjjjjjj";
+    const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+    if (!a.ok) throw new Error("start");
+    line(r.hub, "make the logo bigger", r.maya.id, "mayaLaptop", base + 500);
+    r.at(base + 3000);
+    const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+    if (mode === "replaced-then-cancelled") r.hub.recordStart("mayaLaptop", r.maya.id);
+    r.hub.recordCancel("mayaLaptop", tok, "host");
+    expect(await stopping).toMatchObject({ ok: false, status: 409 });
+    const speech = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 });
+    expect(speech.some((e) => e.text.includes("make the logo bigger"))).toBe(true);
+    expect(speech.some((e) => e.data.recorded)).toBe(false);
+    expect((r.hub as any).noteRecs.has(a.id)).toBe(false);
+  }
+}, 60_000);
+
+test("the older ID-less prompt close, if its prompt can't be written, leaves its window open so the close can be tried again", async () => {
+  const r = room();
+  r.hub.promptStart("mayaLaptop", Date.now() - 2000);
+  const close = () => r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, typed: "make it bigger", pointer: [] });
+  const real = r.s.store.addEvent.bind(r.s.store);
+  let failed = false;
+  (r.s.store as any).addEvent = (e: any) => (failed ? real(e) : ((failed = true), (() => { throw new Error("database is locked"); })()));
+  await expect(close()).rejects.toThrow("locked");
+  expect((await close()).ok).toBe(true);
+  expect(r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).filter((e) => e.data.recorded).length).toBe(1);
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

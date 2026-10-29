@@ -432,13 +432,29 @@ export class Hub {
       // The recording's own start, so a close tried again after a failure (the speech window already closed) still has its bounds.
       const t0 = rec.t0;
       const win = open?.rec === rec.id ? open : undefined;
-      const out = await this.endRecording(rec, "window-close", () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, win, rec)), (lines) => this.promptFrom(w, lines, t0, t1));
+      const out = await this.endRecording(rec, "window-close", () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0, t1 }, win, rec)), (lines) => this.promptFrom(w, lines, t0, t1), (lines) => this.toRoom(lines));
       if (out.kind === "done") return out.value;
       return { ok: false, reason: out.kind === "busy" ? "That recording is being closed another way." : "That recording has already ended.", status: 409 };
     }
     if (!open || open.rec || open.t1 !== undefined) return { ok: false, reason: "There is no recording to stop.", status: 409 };
     const lines = await this.windowLines({ deviceId: w.deviceId, personId: w.personId, t0: open.t0, t1 }, open);
-    return this.promptFrom(w, lines, open.t0, t1);
+    try {
+      return this.promptFrom(w, lines, open.t0, t1);
+    } catch (e) {
+      // The prompt wasn't made: the window is open again, so this close can be tried once more and its words aren't lost.
+      open.t1 = undefined;
+      if (!this.promptMode.has(w.deviceId)) {
+        this.promptMode.set(w.deviceId, open);
+        open.timer = setTimeout(() => this.releasePrompt(w.deviceId, open), open.max + 1000);
+        open.timer.unref?.();
+      }
+      throw e;
+    }
+  }
+
+  /** A close that was overtaken (cancelled, swept) gives the words it had gathered to the room as ordinary speech, once. */
+  private toRoom(lines: Utterance[]) {
+    for (const u of lines) if (!u.eventId && !this.session.store.get("utterances", u.id)?.eventId) this.roomLine(u, true);
   }
 
   /** What a prompt-window close makes once the last words are in: one event for the brain. Synchronous, and run once per recording. */
@@ -609,9 +625,9 @@ export class Hub {
    * and only if nothing ended the recording during the wait). It goes live -> ending -> ended; a call while ending shares that close if it
    * is the same kind and is refused (busy) if it is another. If `gather` or `commit` fails the recording is live again with the error
    * kept, and the caller may try again. Without them (cancel, disconnect, cap, replaced) it ends at once, even while ending, and a wait
-   * that finishes after that makes nothing. The outcome is stored by `teardown`.
+   * that finishes after that makes nothing (`abort` hands what it gathered back, so words aren't lost). The outcome is stored by `teardown`.
    */
-  private endRecording<G, R>(rec: Rec, reason: EndReason, gather?: () => Promise<G>, commit?: (g: G) => R): Promise<Ended<R>> {
+  private endRecording<G, R>(rec: Rec, reason: EndReason, gather?: () => Promise<G>, commit?: (g: G) => R, abort?: (g: G) => void): Promise<Ended<R>> {
     if (!gather || !commit) {
       if (rec.state !== "ended") {
         // A replaced recording's window belongs to its replacement already; the others hand their held words to the room.
@@ -631,7 +647,7 @@ export class Hub {
       .then((g): Ended<R> => {
         // A Start that replaced this recording while it waited doesn't take its notes away; anything else that ended it does.
         const replaced = rec.state === "ended" && rec.outcome?.kind === "replaced";
-        if (rec.state !== "ending" && !replaced) return { kind: "ended", outcome: rec.outcome };
+        if (rec.state !== "ending" && !replaced) return abort?.(g), { kind: "ended", outcome: rec.outcome };
         const value = commit(g);
         if (replaced) this.keep(rec, { kind: reason, result: value });
         else this.teardown(rec, { kind: reason, result: value });
@@ -696,6 +712,7 @@ export class Hub {
       "stop",
       () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined, rec)),
       (lines) => this.stopNotes(w, rec, person, lines, t0, t1),
+      (lines) => this.toRoom(lines),
     );
     if (out.kind === "busy") return { ok: false, reason: "That recording is being closed another way.", status: 409 };
     if (out.kind === "ended") return { ok: false, reason: "That recording has already ended.", status: 409 };

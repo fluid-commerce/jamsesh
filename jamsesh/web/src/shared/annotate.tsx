@@ -756,8 +756,8 @@ const drivenScreen = (state: HubState | null, me: string) => (state ? ["main", .
  * The Record button that is mounted tells the page's scope how to toggle and whether it is recording, so another screen (the picture
  * viewer, which covers the header) can start and stop it too. The scope belongs to the page that provides it, and a button that unmounts takes itself out.
  */
-type RecordScopeValue = { toggle: { current: null | (() => void) }; live: ReturnType<typeof store<boolean>> };
-const newScope = (): RecordScopeValue => ({ toggle: { current: null }, live: store(false) });
+type RecordScopeValue = { toggle: { current: null | (() => void) }; live: ReturnType<typeof store<boolean>>; review: ReturnType<typeof store<Review | null>> };
+const newScope = (): RecordScopeValue => ({ toggle: { current: null }, live: store(false), review: store<Review | null>(null) });
 const RecordCtx = createContext<RecordScopeValue>(newScope());
 
 export function RecordScope({ children }: { children: ReactNode }) {
@@ -792,7 +792,10 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   const [rec, setRec] = useState<RecState>({ phase: "idle" });
   const [now, setNow] = useState(0);
   const [result, setResult] = useState<RecResult | null>(null);
-  const [review, setReview] = useState<Review | null>(null);
+  // The notes waiting to be tidied and sent belong to the page, not to this button: a layout change that remounts the button keeps them.
+  const scope = useContext(RecordCtx);
+  const review = scope.review.use();
+  const setReview = scope.review.set;
   const recorder = useRef<PointerRecorder | null>(null);
   const offDart = useRef<(() => void) | null>(null);
   const feed = useRef<TrailFeed>({ push: null });
@@ -819,6 +822,8 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   const pendingToken = useRef<string | null>(null);
   /** The recording this button owns, from the hub's answer to Start until the hub says it ended: kept through Stop so a leave can hand it over. */
   const held = useRef<{ id: string; token: string } | null>(null);
+  /** The mute that follows a recording, a moment later; a recording that starts in that moment takes the mic over instead. */
+  const micTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const micRef = useRef(mic);
   micRef.current = mic;
   const unmuted = useRef(false);
@@ -828,9 +833,12 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     const token = newRecordToken();
     pendingToken.current = token;
     try {
+      if (micTimer.current) (clearTimeout(micTimer.current), (micTimer.current = null), (unmuted.current = true));
       // Recording while muted would capture nothing: switch the mic on for the recording, or say why it can't be.
       if (mic && !mic.status.on && !typed.current) {
         const ok = await mic.ensureOn();
+        // The page went away while the permission prompt was open: the mic it asked for isn't wanted.
+        if (!alive.current) return void (ok && mic.stop());
         if (!ok) return fail(mic.status.error ? `Your mic is off and wouldn't turn on: ${mic.status.error}` : "Your mic is off, so there's nothing to record. Unmute it and try again.");
         unmuted.current = true;
       }
@@ -923,7 +931,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
     if (unmuted.current) {
       // Back to muted, once the last words have been through the mic.
       unmuted.current = false;
-      setTimeout(() => mic?.stop(), 1600);
+      micTimer.current = setTimeout(() => ((micTimer.current = null), mic?.stop()), 1600);
     }
   };
 
@@ -945,7 +953,6 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
   };
 
   const toggle = () => (recRef.current.phase === "live" ? void stop() : start());
-  const scope = useContext(RecordCtx);
   const mine = useRef(toggle);
   scope.toggle.current = mine.current = toggle;
   useEffect(() => {
@@ -973,7 +980,7 @@ export function RecordPrompt({ personId, brainName, text, mic }: { personId: str
 
   // Leaving mid-recording (the button remounts when the layout changes, the page closes) must still
   // close the hub's recording, or it keeps swallowing this laptop's speech and holding the big screen's
-  // lock. Nobody is left to tidy notes, so what was said goes to the brain as one prompt, as it always did.
+  // lock. The recording is handed to the hub to cancel by its token (its held words go to the room as ordinary speech), and a mic the recording switched on is given back.
   useEffect(() => {
     // Leaving: the recording (or a Start still in flight) is handed to the hub with a keepalive cancel by its token, then asked after.
     const letGoNow = () => {
