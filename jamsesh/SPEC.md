@@ -1162,8 +1162,9 @@ Every client window and the big screen capture audio; it's consolidated on the h
   10 dB above a tracked noise floor and above -58 dB. A segment starts after 60 ms of speech, keeps
   300 ms of lead-in, ends after 700 ms of silence or at 14 seconds, and is dropped if it has less
   than 400 ms of speech.
-- Each segment goes to the host as WAV with its device, host-clock start and end, level, and
-  noise floor. The device must be one the calling window registered (`POST /api/devices`, which
+- Each segment goes to the host as WAV with its device and host-clock start and end. The host
+  measures level and noise floor from the decoded audio; a level or noise value the device sends is
+  ignored. The device must be one the calling window registered (`POST /api/devices`, which
   binds it to that window): a device's owner names the speaker and teaches their voiceprint, so no
   window can send audio as another's microphone (403), and an unregistered device gets 404, which
   the window retries until its registration lands. Segments that end while the brain is speaking are dropped, so it doesn't transcribe
@@ -1191,7 +1192,11 @@ Every client window and the big screen capture audio; it's consolidated on the h
 - **One line, once.** Copies whose clocks disagree by a second or more (a laptop with a drifting
   clock, a late upload) can't be grouped by time. A new line is therefore also checked against the
   lines already shown in the same place, and is that line heard again only on positive evidence:
-  it starts within 3 seconds of it, came only from other laptops than that line's, and either
+  it starts within 3 seconds of it, came only from other laptops than that line's, **is the same
+  sound** (its loudness contour correlates with the line's kept best copy at 0.8 or more at some
+  offset up to a second, and their waveforms line up: the phase-only cross-correlation, GCC-PHAT,
+  peaks at least 10 deviations above the rest; one sound on two microphones does, the same words
+  said again by the same voice don't), and either
   - both copies have a voice embedding and they agree (cosine 0.6 or more; one voice on two
     microphones is 0.7 to 0.9, two voices saying the same words about 0.4 to 0.55) and the words
     mostly match (75 percent, four words or more), or
@@ -1200,9 +1205,11 @@ Every client window and the big screen capture audio; it's consolidated on the h
 
   Its copies join the line already shown, which is relabelled from every copy. Otherwise it is its
   own line: someone repeating what another said is two lines, and related sentences ("Make it blue
-  now." and "Make it blue now after lunch.") stay two. A copy so late its line can no longer be
-  joined (an offline buffer flushed) is transcribed like any other; lining up in time with a shown
-  line never drops it, and only exactly the same words from other laptops do.
+  now." and "Make it blue now after lunch.") stay two, and so does the same person saying the same
+  words again a moment later. Each line's best copy is kept for five minutes (8 kHz, at most 300
+  lines) for this check: a copy so late its line can no longer be joined (an offline buffer flushed)
+  is dropped only when it is that line's sound and words; a line whose sound isn't kept is never
+  merged.
 - **The join read stays out.** While someone reads the join sentences (from **Start reading** until
   25 seconds after it ends, 90 seconds at most), a line is dropped when the reader's own laptop heard
   it loudest and most of its words follow the script in order (runs of three or more script words),
@@ -1364,9 +1371,18 @@ for them: embeddings only (256 numbers per sample, up to 32, tagged with the mod
   window (`client`) may ask. The copy goes to every host the person joins, but only with their
   say-so: the first time it would go to a host it hasn't gone to before, the app asks in a native
   dialog, "Share Chey's voice with <room>? It's numbers that describe your voice, never a
-  recording.", with **Share** and **Not this room**. The answer is kept per host id (the `hostId`
-  in `/api/pair/info`, not the address), so each host is asked once; unticking the checkbox forgets
-  the answers too. Until a Share, the host's page sees the copy's version and dates but none of its
+  recording.", with **Share** and **Not this room**, naming the address the app reached it at and a
+  short fingerprint of its key. The answer is kept under the host's **public key**: every time, the
+  app sends a fresh random nonce to `GET /api/host-proof?nonce=` and the host answers with its
+  Ed25519 public key and a signature over `jamsesh-host-proof:v1:<nonce>`, made with a key it
+  generated once and keeps. A host that can't sign as the trusted one (another host at the same
+  address, claiming the same `hostId`) is a stranger and is asked again. The first answer for a key
+  is trust on first use. A host trusted with the voice may also replace the copy the app keeps (it
+  is the person's latest voice, from a host they chose); the app keeps only the hub's model
+  (`wespeaker_en`, 256 numbers, known sample kinds, no all-zero sample). Each host is asked once;
+  unticking the checkbox forgets the answers too. Known limit: over plain http on a LAN, an
+  attacker relaying between the app and the real host (not just replacing it) could pass the
+  real host's signature through; that needs the room's https address. Until a Share, the host's page sees the copy's version and dates but none of its
   samples. The choice, the copy and the answers change under one lock, each write through its own
   temporary file, so a "no" and a copy arriving together can't undo each other; a save that fails
   says so and the checkbox goes back.
@@ -1391,17 +1407,39 @@ A carried voiceprint replaces the person's earlier carried samples; it never pil
 the host already has (its own copy coming back from another host) aren't added twice. Only
 the person's own window or device may read, push, start a read for, record for, or delete their
 voiceprint: another person's device, an agent's credential (even one acting for that person), and a
-window with no person get 403. The host checks the model name, the 256-number size, that every
+window with no person get 403. Removing a person (which erases their voiceprint) is for the host's
+window or that person.
+
+**Who a browser may become** (one rule, `becomePerson` in http.ts, since the voiceprint and every
+owner-only answer follow it). A browser credential becomes a person when it registers a device for
+them, and only if it made that person itself (`POST /api/people` for someone new), or nobody has
+ever been them, they aren't the host window's person, and the host has no voice for them. Anyone
+else (on another laptop now, on a disconnected one before, or taught to the host by the room) is
+refused with 403, the request is shown to the host (a toast, and **Let in as <name>** beside that
+laptop in **Settings > Connected devices**), and only the host's window can let it in
+(`POST /api/paired/:id/allow`), which disconnects the person's other laptops. The laptop that was
+refused says so and offers **Pick someone else**; it asks again every 10 seconds. The window's
+voiceprint sync starts only after the host acknowledged its registration, and a failed sync is
+tried again on reconnect. The host checks the model name, the 256-number size, that every
 number is finite (also once stored as 32-bit floats and normalized: 1e100 is refused), that no
 sample is all zeros, and at most 32 samples.
 
 **Reset** (the person's own row in **Settings > People**, shown only to that person, the one the
 host lets delete it) forgets their voice on this host everywhere it could come back from: their
-samples; the voice embeddings kept with their lines in this session's history (so correcting an old
-line to them teaches nothing); lines of theirs still held in memory; and the device's copy (the
-browser's, or the Mac app's through `voiceprint_forget`, keeping the yes or no). The host remembers
-when (`voiceResetAt`) and refuses any carried copy made before then (409), and a device whose copy
-is refused that way deletes it, so another of the person's devices can't bring the old voice back.
+samples; the voice embeddings kept with their lines in this session's history; first samples held
+for confirmation; lines of theirs still held in memory; and the device's copy (the browser's, or the
+Mac app's through `voiceprint_forget`, keeping the yes or no). It starts a new **reset generation**
+(`voiceResets`: a counter and the host-clock moment, always later than the last). Every sample, by
+any path, goes through one gate (`Store.addVoiceSample`) with when its source was heard on the
+host's clock (a segment's synced start or its arrival, whichever is earlier; a line's event keeps
+it as `heardAt`): nothing heard at or before the reset teaches the voice again, so a line still
+being transcribed, a correction of an older "Someone" line, or a held first sample can't. Each copy
+the host gives out carries its seal (`stamp`: the generation, a moment, and an HMAC over the person,
+both and the exact samples, with a key only this host has). After a reset the host takes a carried
+copy only when it is sealed by this host in the current generation; one sealed in an earlier
+generation is stale (409 with `stale: true`), and the device deletes it, saying so if it can't; one
+without this host's seal (another host's copy) is refused (409, `stale: false`) and kept on the
+device. The device's clock plays no part.
 
 **Why voice matching might be off.** `voiceprintStatus()` (in `/api/engines` and the state the
 screens read) says `ok`, `missing-model`, `missing-library` or `load-failed`, with a `reason` and a `fix`
