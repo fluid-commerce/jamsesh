@@ -55,7 +55,13 @@ export class JoinWatch {
     this.reading = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const call = fc.execute("collab.peers", {});
+      // A bridge that throws instead of rejecting is a failed read too.
+      let call: Promise<any>;
+      try {
+        call = Promise.resolve(fc.execute("collab.peers", {}));
+      } catch {
+        return this.miss();
+      }
       const late = new Promise<typeof MISSED>((r) => (timer = setTimeout(() => r(MISSED), this.timeoutMs)));
       const peers = await Promise.race([call, late]).catch(() => FAILED);
       if (peers === MISSED) {

@@ -998,8 +998,9 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
         }, wait);
       }
     };
-    tick();
-    const t = setInterval(tick, 2000);
+    const safeTick = () => void tick().catch(() => {}); // a tick never leaves an unhandled rejection
+    safeTick();
+    const t = setInterval(safeTick, 2000);
     return () => {
       gone = true;
       clearInterval(t);

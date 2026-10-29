@@ -144,3 +144,14 @@ test("a font load that failed for a passing reason is tried again, with backoff;
   await loadLocalFonts(fc, invoke, tries);
   expect(asks).toBe(2);
 });
+
+test("a canvas bridge that throws instead of rejecting counts as failed reads, so the join fails and rejoins", async () => {
+  const fc = {
+    execute: (): Promise<any> => {
+      throw new Error("bridge gone");
+    },
+  };
+  const watch = new JoinWatch(20);
+  expect(await watch.poll(fc)).toBeNull();
+  expect(await watch.poll(fc)).toEqual({ state: "failed", reason: "The canvas stopped answering." });
+});
