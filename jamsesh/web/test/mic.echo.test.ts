@@ -60,3 +60,21 @@ test("the mic is lent to recordings: switched on if it was off, off again a mome
   (c.mic as any).ensureOn = async () => false;
   expect(await c.mic.lend()).toBeNull();
 }, 20_000);
+
+test("the person's own mute and unmute win over a loan's pending mute", async () => {
+  const mic: any = new Mic("dev");
+  let opens = 0;
+  mic.open = async () => (opens++, (mic.status = { ...mic.status, on: true }));
+  const stopsBefore = () => (mic.status.on ? 0 : 1);
+  const loan = await mic.lend();
+  expect(loan.turnedOn).toBe(true);
+  loan.release();
+  // Muted by hand and switched back on by hand inside the loan's last moment: the mic is theirs now, and the timer must not mute it.
+  mic.stop();
+  await mic.start();
+  expect(mic.status.on).toBe(true);
+  await Bun.sleep(1800);
+  expect(mic.status.on).toBe(true);
+  expect(opens).toBe(2);
+  expect(stopsBefore()).toBe(0);
+}, 20_000);

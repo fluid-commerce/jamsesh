@@ -1227,6 +1227,44 @@ test("the older ID-less close, failing to write, keeps its first end time for th
   expect(r2.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text)).toContain("kept words");
 }, 60_000);
 
+test("a close whose read failed releases only its own recording's words: a successor's held speech stays with the successor", async () => {
+  const r = room();
+  const base = Date.now() - 30_000;
+  r.at(base);
+  const tok = "rt_mmmmmmmmmmmmmmmm";
+  const a = r.hub.recordStart("mayaLaptop", r.maya.id, undefined, null, tok);
+  if (!a.ok) throw new Error("start");
+  line(r.hub, "A's own words", r.maya.id, "mayaLaptop", base + 500);
+  r.at(base + 3000);
+  (r.hub as any).windowLines = async () => (await Bun.sleep(150), Promise.reject(new Error("read failed")));
+  const stopping = r.hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId: r.maya.id, pointer: [] });
+  r.at(base + 3100);
+  const b = r.hub.recordStart("mayaLaptop", r.maya.id);
+  if (!b.ok) throw new Error("start");
+  line(r.hub, "B's words, still being recorded", r.maya.id, "mayaLaptop", base + 3200);
+  r.hub.recordCancel("mayaLaptop", tok, "host");
+  expect(await stopping).toMatchObject({ ok: false, status: 409 });
+  const texts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
+  expect(texts).toContain("A's own words");
+  expect(texts).not.toContain("B's words, still being recorded");
+  expect(r.hub.recordingOn("mayaLaptop")).toBe(true);
+}, 30_000);
+
+test("text typed with a failed older close is not lost: it goes to the room when a newer Start ends the retry, or when the retry window times out", async () => {
+  for (const how of ["newer-start", "timeout"] as const) {
+    const r = room();
+    r.hub.promptStart("mayaLaptop", Date.now() - 3000);
+    const real = r.s.store.addEvent.bind(r.s.store);
+    let failed = false;
+    (r.s.store as any).addEvent = (e: any) => (e.data?.recorded && !failed ? ((failed = true), (() => { throw new Error("database is locked"); })()) : real(e));
+    await expect(r.hub.promptWindow({ deviceId: "mayaLaptop", personId: r.maya.id, pointer: [], typed: "typed only note" })).rejects.toThrow("locked");
+    if (how === "timeout") (r.hub as any).releasePrompt("mayaLaptop", (r.hub as any).promptMode.get("mayaLaptop"));
+    else expect(r.hub.recordStart("mayaLaptop", r.maya.id).ok).toBe(true);
+    const texts = r.s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);
+    expect(texts.filter((t) => t === "typed only note").length).toBe(1);
+  }
+}, 30_000);
+
 test("the right to send and the receipt of the send are one record: past the cap both go together, and a retry after that sends nothing twice", async () => {
   const r = room();
   const stopOne = async (text: string) => {

@@ -306,6 +306,18 @@ export class Mic {
 
   /** Starts listening. The mic then stays wanted: if it dies (device change, sleep) it comes back by itself. */
   async start() {
+    this.dropLoan();
+    return this.begin();
+  }
+
+  /** The person's own start or stop makes the mic theirs: a loan's pending mute must not undo it. */
+  private dropLoan() {
+    if (this.muteTimer) (clearTimeout(this.muteTimer), (this.muteTimer = null));
+    this.lentOn = false;
+  }
+
+  /** Starts the mic without touching a loan (the mic's own reconnecting). */
+  private async begin() {
     this.wanted = true;
     if (this.status.on) return;
     this.starting ??= this.open().finally(() => (this.starting = null));
@@ -334,7 +346,7 @@ export class Mic {
         if (given) return;
         given = true;
         if (--this.leases > 0 || !this.lentOn) return;
-        this.muteTimer = setTimeout(() => ((this.muteTimer = null), (this.lentOn = false), this.leases === 0 && this.stop()), 1600);
+        this.muteTimer = setTimeout(() => ((this.muteTimer = null), this.leases === 0 && this.stop()), 1600);
       },
     };
   }
@@ -420,7 +432,7 @@ export class Mic {
     this.tries++;
     this.retry = setTimeout(() => {
       this.retry = null;
-      if (this.wanted && !this.status.on) void this.start().catch(() => {});
+      if (this.wanted && !this.status.on) void this.begin().catch(() => {});
     }, wait);
   }
 
@@ -447,6 +459,7 @@ export class Mic {
   }
 
   stop() {
+    this.dropLoan();
     this.wanted = false;
     if (this.retry) clearTimeout(this.retry);
     this.retry = null;

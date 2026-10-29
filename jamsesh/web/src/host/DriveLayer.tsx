@@ -49,7 +49,7 @@ interface Replay {
 }
 
 /** Tells the tiles a driver was over or pressing that they've gone: each lets go of any button or key it was holding for them. */
-function letGo(st: Replay | undefined, personId: string) {
+export function letGo(st: Replay | undefined, personId: string) {
   for (const t of new Set([st?.down, st?.hover])) t?.handle({ k: "leave" }, personId);
   if (st) st.down = st.hover = null;
 }
@@ -141,11 +141,8 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
       const st = replays.current.get(c.personId) ?? {};
       replays.current.set(c.personId, st);
       if (ev.k === "key") return void (st.down ?? st.hover)?.handle(ev, c.personId);
-      if (ev.k === "leave") {
-        st.hover?.handle({ k: "leave" }, c.personId);
-        st.hover = null;
-        return;
-      }
+      // A driver who left lets go of the tile they were over and the one they were pressing, so a later input never continues on the old one.
+      if (ev.k === "leave") return void letGo(st, c.personId);
       const r = root.getBoundingClientRect();
       const [x, y] = [r.left + ev.x * r.width, r.top + ev.y * r.height];
       // A press keeps going to the tile it started on, so a drag that leaves it still pans it.
@@ -178,7 +175,7 @@ export function DriveLayer({ screen, replay }: { screen: string; replay?: boolea
         setPeople((p) => (p.some((x) => x.id === c.personId) ? p : [...p, { id: c.personId, name: c.name, color: c.color }]));
       }
       s.seen = Date.now();
-      if (ev.k === "leave") s.hidden = true;
+      if (ev.k === "leave") ((s.hidden = true), (s.down = false));
       else {
         if (s.hidden) s.fresh = true;
         s.hidden = false;

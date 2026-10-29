@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { glide, textOn } from "../src/host/DriveLayer";
+import { glide, letGo, textOn } from "../src/host/DriveLayer";
 import { keyAction, travel } from "../src/shared/DriveSurface";
 import { driveScale, driverState, targetAt, registerDriveTarget, anyoneDriving } from "../src/shared/driving";
 
@@ -67,4 +67,20 @@ test("trackpad keys go to the big screen only while the trackpad has the keyboar
   expect(keyAction(k("r", { altKey: true, code: "KeyR" }), captured, true)).toBeNull();
   expect(keyAction(k("Shift", { repeat: true }), captured, true)).toBe("swallow");
   expect(keyAction(k("ArrowDown", { repeat: true }), captured, true)).toMatchObject({ key: "ArrowDown" });
+});
+
+test("a driver who leaves lets go of the tile they were pressing as well as the one they were over, so recapture elsewhere starts clean", () => {
+  const seen: string[] = [];
+  const tile = (n: string) => ({ el: {} as any, handle: (ev: { k: string }, who: string) => seen.push(`${n}:${ev.k}:${who}`) });
+  const a = tile("a");
+  const b = tile("b");
+  const st = { hover: a, down: b } as any;
+  letGo(st, "p1");
+  expect(seen.sort()).toEqual(["a:leave:p1", "b:leave:p1"]);
+  expect(st.down).toBeNull();
+  expect(st.hover).toBeNull();
+  // Nothing held: nothing to tell.
+  letGo(undefined, "p1");
+  letGo({}, "p1");
+  expect(seen.length).toBe(2);
 });
