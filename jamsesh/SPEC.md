@@ -385,7 +385,7 @@ which takes the agent out and, with `purge`, deletes the feed lines it caused.
 folder (any chat id, since an id is the chat's own word) is refused with "A chat in this folder was removed from the
 room. Ask someone to choose Settings > Removed chats > Allow again." Its `jam_join` is refused (by its chat id, which for Codex is its
 folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
-Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only). Nothing
+Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`; refused to any agent credential, so for people's windows and the host's own loopback, which is the host's person). Nothing
 an agent or its hook sends clears a removal: a removed chat that types "connect to jamsesh" is told by its
 hook "This chat was removed from the room. Ask someone to choose Settings > Removed chats > Allow
 again." (`/api/hooks/joined` answers `removed: true` and changes nothing). Removals are kept in the session, so a hub restart doesn't

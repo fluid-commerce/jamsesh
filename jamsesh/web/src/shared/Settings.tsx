@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
+import { ago, api, hub, removedChatsSource, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
 
@@ -286,7 +286,8 @@ function Paired({ host }: { host: boolean }) {
 
 /** Chats the room removed: they can't join again by themselves until someone lets them back in. */
 function RemovedChats() {
-  const { state, removedChatsRev } = useHub();
+  const snap = useHub();
+  const { state } = snap;
   const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number; inFolder: number }[]>([]);
   const [error, setError] = useState("");
   const [loadFailed, setLoadFailed] = useState(false);
@@ -294,7 +295,6 @@ function RemovedChats() {
   // meanwhile, reloads it, and an answer for an earlier request or room is dropped.
   const latest = useRef(0);
   const roomId = state?.session?.roomId;
-  const agentCount = state?.agents.length ?? 0;
   const load = () => {
     const mine = ++latest.current;
     return api("/removed-chats")
@@ -304,11 +304,11 @@ function RemovedChats() {
   useEffect(() => {
     setList([]);
     setError("");
-    void load();
   }, [roomId]);
+  const source = removedChatsSource(snap);
   useEffect(() => {
     void load();
-  }, [agentCount, removedChatsRev]);
+  }, [source]);
   // Letting a chat back in is a permission change: it is never queued for later, and a failure leaves the list as it was.
   const allow = (id: string) =>
     api(`/removed-chats/${id}/allow`, {}, "POST", { queue: false })

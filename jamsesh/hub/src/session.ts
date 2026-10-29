@@ -623,7 +623,7 @@ export class Session {
   rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }): RemovedChat | undefined {
     return this.removedChats().find(
       (r) =>
-        (!!chatId && r.chatId === chatId) ||
+        (!!chatId && r.chatId === chatId && (!folder || (r.machine === folder.machine && r.harness === folder.harness))) ||
         (!!agentId && r.agentId === agentId) ||
         (!!folder?.cwd && r.machine === folder.machine && r.cwd === folder.cwd && r.harness === folder.harness),
     );

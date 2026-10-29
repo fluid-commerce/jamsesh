@@ -377,6 +377,9 @@ class HubClient {
   }
 }
 
+/** What the Removed chats list depends on: the room, the connection (a reconnect may have missed a broadcast), and the list's own revision. */
+export const removedChatsSource = (s: Pick<Snapshot, "state" | "epoch" | "removedChatsRev">) => `${s.state?.session?.roomId ?? ""}|${s.epoch}|${s.removedChatsRev}`;
+
 export const hub = new HubClient();
 
 export function useHub() {

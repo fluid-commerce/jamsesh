@@ -32,3 +32,13 @@ test("Allow again is never queued: an unreachable hub, or a backlog, throws and 
     globalThis.fetch = realFetch;
   }
 });
+
+test("the Removed chats list reloads on a room switch, a reconnect that may have missed a broadcast, and a revision; not on unrelated changes", async () => {
+  const { removedChatsSource } = await import("../src/shared/hub");
+  const base = { state: { session: { roomId: "r1" }, agents: [] } as any, epoch: 1, removedChatsRev: 0 };
+  const key = removedChatsSource(base);
+  expect(removedChatsSource({ ...base, epoch: 2 })).not.toBe(key); // reconnected: Allow again may have happened meanwhile
+  expect(removedChatsSource({ ...base, removedChatsRev: 1 })).not.toBe(key);
+  expect(removedChatsSource({ ...base, state: { session: { roomId: "r2" }, agents: [] } as any })).not.toBe(key);
+  expect(removedChatsSource({ ...base, state: { session: { roomId: "r1" }, agents: [{ id: "a" }] } as any })).toBe(key);
+});

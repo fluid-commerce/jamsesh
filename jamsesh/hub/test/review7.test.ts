@@ -282,3 +282,13 @@ test("Allow again clears every removal for the same machine and folder together,
   // The other folder's removal is untouched.
   await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/group-other", chat: "brand-new-g" })).rejects.toThrow("A chat in this folder was removed");
 });
+
+test("a reused chat id from another Mac or harness is not the removed chat", async () => {
+  const a = s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "app", cwd: "/w/reuse", machine: win.device.id, chatId: "chat-reuse" }).agent;
+  s.removeAgent(a.id);
+  const rec = s.removedChats().find((r) => r.chatId === "chat-reuse")!;
+  expect(s.rejoinBlocked("chat-reuse", null, { machine: win.device.id, cwd: "/w/elsewhere", harness: "claude-code" })).toBeTruthy();
+  expect(s.rejoinBlocked("chat-reuse", null, { machine: "another-mac", cwd: "/w/elsewhere", harness: "claude-code" })).toBeUndefined();
+  expect(s.rejoinBlocked("chat-reuse", null, { machine: win.device.id, cwd: "/w/elsewhere", harness: "codex" })).toBeUndefined();
+  s.allowRejoin({ id: rec.id });
+});

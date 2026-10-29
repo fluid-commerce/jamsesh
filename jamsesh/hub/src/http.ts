@@ -534,7 +534,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return r.removed ? json(r) : bad("no such agent", 404);
   }
   // Chats the room removed (kept out of jam_join), and letting one back in: people only.
-  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : json(s.removedChats().map(({ id, name, ownerName, at, cwd, machine, harness }, _i, all) => ({ id, name, ownerName, at, inFolder: all.filter((r) => !!cwd && r.cwd === cwd && r.machine === machine && r.harness === harness).length })));
+  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : (() => {
+      const all = s.removedChats();
+      const folderKey = (r: (typeof all)[number]) => (r.cwd ? `${r.harness}\0${r.machine}\0${r.cwd}` : "");
+      const counts = new Map<string, number>();
+      for (const r of all) if (folderKey(r)) counts.set(folderKey(r), (counts.get(folderKey(r)) ?? 0) + 1);
+      return json(all.map((r) => ({ id: r.id, name: r.name, ownerName: r.ownerName, at: r.at, inFolder: counts.get(folderKey(r)) ?? 1 })));
+    })();
   const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
   if (rc && req.method === "POST") {
     const cleared = s.allowRejoin({ id: rc[1] });
