@@ -479,7 +479,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
     segmentsInFlight.add(segKey);
     try {
-      const bytes: Uint8Array = body?.__raw ?? new Uint8Array(await req.arrayBuffer());
+      // Read in full by readBody before the credential was checked again.
+      const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
       const seg = await hub.audio.ingest({
         deviceId,
         t0: Number(q.get("t0")),
@@ -1016,12 +1017,17 @@ function originOf(req: Request, url: URL) {
   return `${proto}://${host}`;
 }
 
+/**
+ * Reads the whole body, whatever its type, before any route runs: api() checks the credential again after this,
+ * so no route reads bytes later (when the credential may have been revoked meanwhile). Unknown types and bytes
+ * come back as `__raw`; an empty body as null.
+ */
 async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
   if (type.includes("application/json")) return req.json().catch(() => ({}));
-  if (type.includes("multipart/form-data")) return { __form: await req.formData() };
-  if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
-  return null;
+  if (type.includes("multipart/form-data")) return { __form: await req.formData().catch(() => new FormData()) };
+  const raw = new Uint8Array(await req.arrayBuffer().catch(() => new ArrayBuffer(0)));
+  return raw.length ? { __raw: raw } : null;
 }
 
 function file(p: string, root: string, cache = false): Response {

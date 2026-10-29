@@ -169,11 +169,11 @@ test("a request whose credential is disconnected while its body is on its way ac
   const p = hub.session.upsertPerson({ name: "Vic" });
   const old = browser("Vic's old laptop");
   expect((await call(old.token, "POST", "/devices", { deviceId: "d-vic-old", personId: p.id })).status).toBe(200);
-  // The old laptop's start: headers sent, body held.
-  let send!: (s: string) => void;
-  const held = new ReadableStream<Uint8Array>({ start: (c) => void (send = (s) => (c.enqueue(new TextEncoder().encode(s)), c.close())) });
-  const late = fetch(`${base}/api/people/${p.id}/voice/start`, { method: "POST", headers: { ...remote, authorization: `Bearer ${old.token}` }, body: held, duplex: "half" } as RequestInit);
-  await Bun.sleep(50);
+  // The old laptop's start: headers sent, body held. The host has seen the request (its credential was checked).
+  const h = holdBody(old.token, `/people/${p.id}/voice/start`, { "content-type": "application/json" });
+  await h.reached;
+  const late = h.response;
+  const send = h.send;
   // Meanwhile: a new laptop asks to be Vic, the host lets it in (disconnecting the old one), and it starts reading.
   const fresh = browser("Vic's new laptop");
   expect((await call(fresh.token, "POST", "/devices", { deviceId: "d-vic-new", personId: p.id })).status).toBe(403);
@@ -189,6 +189,58 @@ test("a request whose credential is disconnected while its body is on its way ac
 
 
 // ---- an adopted late copy is never its line's voice, through the hub's correction and Reset (review round 5)
+
+/**
+ * A request whose headers reach the host while its body is held. `reached` resolves once the host has checked its
+ * credential (an observable point on the server, not a sleep); `send` delivers the body.
+ */
+function holdBody(token: string, path: string, headers: Record<string, string>) {
+  let send!: (body: string | Uint8Array) => void;
+  const body = new ReadableStream<Uint8Array>({ start: (c) => void (send = (b) => (c.enqueue(typeof b === "string" ? new TextEncoder().encode(b) : b), c.close())) });
+  const check = hub.auth.check.bind(hub.auth);
+  let seen!: () => void;
+  const reached = new Promise<void>((r) => (seen = r));
+  hub.auth.check = ((t: string | null | undefined, ip?: string) => {
+    const d = check(t, ip);
+    if (t === token) ((hub.auth.check = check), seen());
+    return d;
+  }) as typeof hub.auth.check;
+  const response = fetch(`${base}/api${path}`, { method: "POST", headers: { ...remote, ...headers, authorization: `Bearer ${token}` }, body, duplex: "half" } as RequestInit);
+  return { reached, response, send };
+}
+
+test("audio whose laptop is disconnected while its body is on its way is never heard, whatever its content type", async () => {
+  for (const type of [{ "content-type": "audio/wav" }, { "content-type": "text/plain" }, {} as Record<string, string>]) {
+    const p = hub.session.upsertPerson({ name: `Ari${Object.values(type).join("")}` });
+    const lap = browser("Ari's laptop");
+    const dev = `d-ari-${Math.random()}`;
+    expect((await call(lap.token, "POST", "/devices", { deviceId: dev, personId: p.id })).status).toBe(200);
+    const t0 = Date.now() - 5000;
+    const before = hub.audio.pending;
+    const ingest = hub.audio.ingest.bind(hub.audio);
+    let heard = 0;
+    hub.audio.ingest = (async (x: any) => (heard++, ingest(x))) as any;
+    try {
+      // The credential's second look (api() after the body): it must not come before the body is in.
+      const get = hub.auth.get.bind(hub.auth);
+      let rechecked = false;
+      hub.auth.get = ((id: string | null | undefined) => (id === lap.device.id && (rechecked = true), get(id))) as typeof hub.auth.get;
+      const h = holdBody(lap.token, `/audio?deviceId=${dev}&t0=${t0}&t1=${t0 + 3000}&epoch=0`, type);
+      await h.reached;
+      // Let the host run everything it can without the body (a few turns of its event loop).
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+      hub.auth.get = get as typeof hub.auth.get;
+      expect([type, rechecked]).toEqual([type, false]);
+      hub.auth.revoke(lap.device.id);
+      h.send(encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 3).fill(0.1) }));
+      expect([type, (await h.response).status]).toEqual([type, 401]);
+      expect(heard).toBe(0);
+      expect(hub.audio.pending).toBe(before);
+    } finally {
+      hub.audio.ingest = ingest as any;
+    }
+  }
+});
 
 const RATE = 16000;
 const buzz = (pitch: number, rate: number, gain: number, seed: number) => {
