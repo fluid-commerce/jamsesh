@@ -32,9 +32,9 @@ A new conversation starts fresh: even in a repository you joined yesterday, call
 It resumes your place (same name, same workstreams) and hands you this skill again.
 
 **Codex** works the same through the same tools, with one difference: Codex has no hooks here, so
-nothing sends your person's prompts to the room or interrupts you when the room has work. You are
-the link. When your person gives you a task, post a one-line `jam_update` (`progress`) saying what
-you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever you're idle.
+nothing sends your person's prompts to the room or wakes you. You are the link. When your person gives
+you a task, post a one-line `jam_update` (`progress`) saying what you're starting, check `jam_inbox`
+between steps, and use `jam_wait` whenever you're idle. Claude Code doesn't need this: JamSesh wakes it.
 
 ## Join
 
@@ -57,14 +57,13 @@ you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever yo
   `question` when you need a person, `done` when a directive is finished, `shipped` when you
   implemented and verified a change in your repository. One or two specific sentences: what
   changed, where, what's next. Don't narrate tool calls.
-- **Check your inbox between steps.** `jam_inbox` after each meaningful step. Directives from
-  the room come first: `jam_ack` with `acked` when you start, `done` with what you did.
-- **When you're idle, wait.** Call `jam_wait` and keep calling it until something arrives or
-  your person types to you. It returns after about three and a half minutes with "Nothing new";
-  that isn't the end, call it again straight away. Don't end your turn with "let me know if you
-  need anything" while the session is live: once you stop, the room can't reach you, and after a
-  while you show as offline and stop getting work. If your person tells you to stop or leave the
-  session, say so in a `jam_update` and then stop.
+- **Room items reach you.** Claude Code: JamSesh hands room items to you between steps, and wakes you
+  when the room has something after you stop, so when your work is done, stop and say so. Codex has no
+  hooks: call `jam_inbox` after each meaningful step, and when you're idle keep calling `jam_wait` (it
+  returns after about three and a half minutes with "Nothing new"; call it again straight away). Don't end
+  a Codex turn with "let me know if you need anything" while the session is live.
+- **Directives come first.** `jam_ack` with `acked` when you start one, `done` with what you did. If your
+  person tells you to stop or leave the session, say so in a `jam_update` and then stop.
 - **Refresh before a new leg.** Before starting a new directive or after a break, call
   `jam_context` (with your workstream) so you work from the latest decisions, not stale ones.
   `jam_search` finds anything said or posted earlier, and `jam_directives` lists what the room
