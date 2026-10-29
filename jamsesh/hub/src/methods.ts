@@ -14,7 +14,7 @@ export async function methodAllowed(req: Request): Promise<Response | null> {
     case "DELETE":
       return null;
     case "HEAD":
-      return FILE_READ.test(path) || !path.startsWith("/api/") ? null : new Response(null, { status: 405, headers: { allow: "GET" } });
+      return FILE_READ.test(path) ? null : new Response(null, { status: 405, headers: { allow: "GET" } });
     case "OPTIONS":
       // No cross-site permission is ever given; the answer is only that nothing happens here.
       return new Response(null, { status: 204, headers: { allow: "GET, POST, PATCH, DELETE" } });

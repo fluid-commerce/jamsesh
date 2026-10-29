@@ -8,7 +8,7 @@ export const BODY_LIMITS = { json: 2 * 1024 * 1024, other: 1024 * 1024, media: 3
 const MEDIA_ROUTES = /^\/api\/(audio|attachments|upload|people\/[\w-]+\/(voice|photo))$/;
 export const READ_MS = { small: 15_000, media: 90_000 };
 /** What all bodies being read at once may hold in all: each read reserves its cap until it is done. */
-const BUDGET = 96 * 1024 * 1024;
+const BUDGET = 192 * 1024 * 1024;
 let reserved = 0;
 
 export function limitFor(req: Request): number {
@@ -47,20 +47,25 @@ export async function readBytes(req: Request, max: number, ms = READ_MS.media): 
 }
 
 /**
- * The request with its body already read (so a later `req.json()` or `arrayBuffer()` is bounded too), or the refusal to send.
- * Every route is reached through this, which is what keeps the body cap, the time limit and a "closing" check from being per-route.
+ * The request with its body already read (so a later `req.json()` or `arrayBuffer()` is bounded too), plus a `release` to call when the
+ * request has been answered, or the refusal to send. The memory a body may take stays charged to the shared budget until then, twice
+ * over (the bytes, and the copy a route parses). Every route is reached through this, which is what keeps the body cap, the time limit
+ * and a "closing" check from being per-route.
  */
-export async function buffered(req: Request): Promise<Request | { status: number; message: string }> {
-  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return req;
+export async function buffered(req: Request): Promise<{ req: Request; release: () => void } | { status: number; message: string }> {
+  if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return { req, release: () => {} };
   const max = limitFor(req);
-  if (reserved + max > BUDGET) return { status: 503, message: "The hub is busy receiving other requests. Try again in a moment." };
-  reserved += max;
-  try {
-    const bytes = await readBytes(req, max, max > BODY_LIMITS.json ? READ_MS.media : READ_MS.small);
-    if (bytes === "timeout") return { status: 408, message: "That request took too long to arrive." };
-    if (!bytes) return { status: 413, message: "That request is too large." };
-    return new Request(req.url, { method: req.method, headers: req.headers, body: new Blob([bytes as BlobPart]) });
-  } finally {
-    reserved -= max;
+  const charge = max * 2;
+  if (reserved + charge > BUDGET) return { status: 503, message: "The hub is busy receiving other requests. Try again in a moment." };
+  reserved += charge;
+  let released = false;
+  const release = () => {
+    if (!released) (released = true), (reserved -= charge);
+  };
+  const bytes = await readBytes(req, max, max > BODY_LIMITS.json ? READ_MS.media : READ_MS.small);
+  if (bytes === "timeout" || !bytes) {
+    release();
+    return bytes === "timeout" ? { status: 408, message: "That request took too long to arrive." } : { status: 413, message: "That request is too large." };
   }
+  return { req: new Request(req.url, { method: req.method, headers: req.headers, body: new Blob([bytes as BlobPart]) }), release };
 }

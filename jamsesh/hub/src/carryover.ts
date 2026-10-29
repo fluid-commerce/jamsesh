@@ -133,7 +133,7 @@ function openForWrite(home: string, slug: string, waitMs: number): Database {
       const d = db;
       d.transaction(() => {
         if (d.query("SELECT 1 FROM meta WHERE key = 'imported'").get()) return;
-        importJson(d, contextExport(home, slug));
+        importJson(d, contextExport(home, slug), n > 0);
         d.query("INSERT OR REPLACE INTO meta (key, value, changed_at, session) VALUES ('imported', '1', 0, '')").run();
       }).immediate();
       return d;
@@ -189,9 +189,10 @@ const reject = (why: string): never => {
  * with any malformed value, or an export that isn't sealed: ExportRejected, so the caller doesn't mark the database
  * imported and the start fails rather than going on empty.
  */
-function importJson(db: Database, file: string) {
+function importJson(db: Database, file: string, recovering = false) {
   if (db.query("SELECT 1 FROM items LIMIT 1").get()) return;
-  if (!existsSync(file)) return;
+  // No export is fine for a project that never had a database; a database started after an earlier one was lost has nothing to start from.
+  if (!existsSync(file)) return recovering ? reject("the project's database was lost and there is no export to restore it from") : undefined;
   let parsed: z.infer<typeof jsonSchema>;
   try {
     const raw = JSON.parse(readFileSync(file, "utf8"));
@@ -234,6 +235,13 @@ function importJson(db: Database, file: string) {
   if (parsed.generation) meta.run("generation", String(parsed.generation), at, session);
 }
 
+/** The save counter kept in the database: a safe non-negative integer, or the database can't be used. */
+function genOf(value: string): number {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`the database's generation (${value.slice(0, 40)}) isn't a count`);
+  return n;
+}
+
 /** Every row, checked: one value the reader can't use and none of it is used (nothing half-read seeds a session). */
 function readAll(db: Database): ProjectContext {
   const items = db.query("SELECT id, type, status, data, version, changed_at, session FROM items ORDER BY rowid").all() as ItemRow[];
@@ -257,7 +265,7 @@ function readAll(db: Database): ProjectContext {
   const brief = b ? briefRow.parse(JSON.parse(b.value)) : { brief: "", goal: "", glossary: [] };
   const people = meta.filter((m) => m.key.startsWith("person:")).map((m) => ({ name: m.key.slice(7), role: text(200).parse(m.value) }));
   for (const m of meta) updatedAt = Math.max(updatedAt, m.changed_at);
-  const generation = Number(meta.find((m) => m.key === "generation")?.value ?? 0);
+  const generation = genOf(meta.find((m) => m.key === "generation")?.value ?? "0");
   facts.sort((x, y) => x.ts - y.ts);
   return { version: 1, generation, updatedAt, fromSession: b?.session ?? "", ...brief, facts, workstreams, people, rows: { items, meta } };
 }
@@ -493,7 +501,7 @@ function apply(db: Database, ch: ContextChanges, result: CommitResult) {
   }
   const now = Date.now();
   for (const p of ch.people) meta.run(`person:${p.name}`, p.role, now, ch.session);
-  const gen = Number((db.query("SELECT value FROM meta WHERE key = 'generation'").get() as { value: string } | null)?.value ?? 0);
+  const gen = genOf((db.query("SELECT value FROM meta WHERE key = 'generation'").get() as { value: string } | null)?.value ?? "0");
   meta.run("generation", String(gen + 1), now, ch.session);
 }
 

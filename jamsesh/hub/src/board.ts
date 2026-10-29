@@ -41,6 +41,8 @@ export interface TaskProposal {
   by: string;
   origin?: TriageCard["origin"];
   sourceEventIds?: number[];
+  /** Files the request was made from, shown on the card. */
+  attachments?: TriageCard["attachments"];
   /** What it came from when there's no transcript line (a document someone attached). */
   note?: string;
 }
@@ -159,13 +161,13 @@ export class Board {
     // The same words for other agents, or another workstream, are another task.
     const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream);
     const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
-    if (same) return this.repeat(same, sources);
+    if (same) return this.repeat(same, sources, p.attachments);
     // Asked again after the room overruled it: a new card, so the veto stays on the old one for people to see and decide.
     const vetoed = this.match("task", text, (c) => purpose(c) && !!c.overruled && c.status === "open");
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, targetNames: this.namesOf(targets), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, targetNames: this.namesOf(targets), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }

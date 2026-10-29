@@ -554,7 +554,7 @@ test("HEAD and OPTIONS never act, and a GET can't pair an agent while the sessio
   }
 });
 
-test("a body that never finishes is dropped at the deadline, and bodies in flight share a memory budget", async () => {
+test("a body that never finishes is dropped at the deadline, and bodies share a memory budget that stays charged until the request is answered", async () => {
   const { buffered, READ_MS } = await import("../src/body");
   const old = { ...READ_MS };
   const stalled = (url: string) => {
@@ -568,20 +568,67 @@ test("a body that never finishes is dropped at the deadline, and bodies in fligh
     });
     return new Request(url, { method: "POST", headers: { "content-type": url.includes("/audio") ? "audio/wav" : "application/json" }, body, duplex: "half" } as any);
   };
+  const small = (url = "http://x/api/audio") => new Request(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array(10) });
   try {
     READ_MS.small = 200;
     expect(await buffered(stalled("http://x/api/say"))).toMatchObject({ status: 408 });
     READ_MS.media = 1000;
-    // Three media reads reserve the 96 MB budget while they are arriving; a fourth is turned away at once.
+    // Three media reads fill the budget while they are arriving; a fourth is turned away at once.
     const open = [1, 2, 3].map(() => buffered(stalled("http://x/api/audio")));
     await Bun.sleep(50);
-    expect(await buffered(new Request("http://x/api/audio", { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array(10) }))).toMatchObject({ status: 503 });
+    expect(await buffered(small())).toMatchObject({ status: 503 });
     expect((await Promise.all(open)).every((o) => "status" in o && o.status === 408)).toBe(true);
-    // Once they are done the budget is free again.
-    expect(await buffered(new Request("http://x/api/audio", { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array(10) }))).toBeInstanceOf(Request);
-    // And non-media routes take 1 MB of anything but JSON.
+    // A body that arrived stays charged until its request is answered.
+    const held = [1, 2, 3].map(() => buffered(small()));
+    const got = await Promise.all(held);
+    expect(got.every((g) => "req" in g)).toBe(true);
+    expect(await buffered(small())).toMatchObject({ status: 503 });
+    for (const g of got) if ("release" in g) g.release();
+    const again = await buffered(small());
+    expect("req" in again).toBe(true);
+    if ("release" in again) again.release();
+    // Non-media routes take 1 MB of anything but JSON.
     expect(await buffered(new Request("http://x/api/say", { method: "POST", headers: { "content-type": "text/plain" }, body: new Uint8Array(2 * 1024 * 1024) }))).toMatchObject({ status: 413 });
   } finally {
     Object.assign(READ_MS, old);
   }
 }, 20_000);
+
+test("a forged /Root in a PDF comment can't pick a different catalog", () => {
+  const obj = (n: number, body: string) => `${n} 0 obj\n<< /Length ${body.length} >>\nstream\n${body}\nendstream\nendobj\n`;
+  const doc = `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n${obj(4, "BT (VISIBLE) Tj ET")}5 0 obj\n<< /Type /Catalog /Pages 6 0 R >>\nendobj\n6 0 obj\n<< /Type /Pages /Kids [7 0 R] /Count 1 >>\nendobj\n7 0 obj\n<< /Type /Page /Parent 6 0 R /Contents 8 0 R >>\nendobj\n${obj(8, "BT (ORPHAN) Tj ET")}trailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n% trailer << /Root 5 0 R >>\n% /Root 5 0 R`;
+  expect(drawnText(new TextEncoder().encode(doc))).toBe("VISIBLE");
+});
+
+test("a database lost and replaced by a new generation with no export fails the start; a generation that isn't a count does too", () => {
+  const p = saved("Lost export");
+  rmSync(contextExport(dir, p.slug));
+  wipeDbs(p.slug);
+  writeFileSync(join(folderOf(p.slug), "context.db"), "this file is not a database, and is long enough to be read as one: ".repeat(40));
+  expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
+  const q = saved("Bad generation");
+  const db = new Database(join(folderOf(q.slug), "context.db"));
+  db.exec("UPDATE meta SET value = 'garbage' WHERE key = 'generation'");
+  db.close();
+  expect(() => readProjectContext(dir, q.slug)).toThrow(ContextUnavailable);
+  const r = room();
+  r.s.board.rememberNow({ text: "More", kind: "decision", by: "Chey" });
+  expect(saveProjectContext(dir, q.slug, "s9", r.s)).toBe("failed");
+});
+
+test("cards made from a file carry the file: a task, a decision, and a repeat", () => {
+  const r = room();
+  const att = { id: "att_9", name: "brief.pdf", type: "application/pdf", kind: "pdf" as const, size: 9 };
+  const ev = r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: "see the file", relevance: "work", data: { direct: true, attachments: [att] } });
+  const tools = (r.hub.brain as any).tools([ev], { effects: 0 }, "person", "direct");
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  return Promise.all([
+    tools.create_directive.execute({ targets: [agent.id], text: "Build it", mode: "implement", rationale: "the file asks" }, { toolCallId: "1", messages: [] }),
+    tools.record_decision.execute({ text: "Use the brief's grid" }, { toolCallId: "2", messages: [] }),
+  ]).then(() => {
+    const cards = r.s.board.open();
+    expect(cards.length).toBeGreaterThan(0);
+    for (const c of cards) expect(c.attachments).toEqual([att]);
+  });
+});
+

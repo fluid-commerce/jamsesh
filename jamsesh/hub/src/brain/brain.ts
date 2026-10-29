@@ -629,6 +629,8 @@ export class Brain {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
     const files = withFiles(batch);
+    // The files the pass was given: every card made from them shows them, so a person sees what they are approving.
+    const fileRefs = files ? ([...new Map(batch.flatMap((e) => (Array.isArray(e.data?.attachments) ? (e.data.attachments as AttachmentRef[]) : [])).map((a) => [a.id, a])).values()] as AttachmentRef[]) : [];
     // Overheard, or with a file in the pass: nothing changes until a person accepts a card. One flag, read by every tool that acts.
     const proposeOnly = route === "overheard" || files;
     const origin = files ? ("document" as const) : ("overheard" as const);
@@ -702,7 +704,7 @@ export class Brain {
           if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
           // Overheard work, and any work in a pass with a file, waits on the Tasks board for a person to send; what someone asked JamSesh for goes straight out.
           if (proposeOnly) {
-            const card = s.proposeTask({ text: i.text, mode: i.mode, targets, workstream: i.workstream, by: requester, sourceEventIds: sourceIds, origin });
+            const card = s.proposeTask({ text: i.text, mode: i.mode, targets, workstream: i.workstream, by: requester, sourceEventIds: sourceIds, origin, attachments: fileRefs });
             return card ? `Proposed on the Tasks board for ${targets.map((t) => s.agent(t)?.name).join(", ")} (card ${card.id}). A person sends it; it isn't sent yet.` : "Nothing to propose.";
           }
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
@@ -725,7 +727,7 @@ export class Brain {
         execute: async (i) => {
           // A decision someone asked JamSesh to record is theirs on the spot; one it overheard, read in a file, or an agent reported, waits for a person.
           if (proposeOnly || from !== "person") {
-            const card = s.proposeContext({ text: i.text, kind: "decision", workstream: i.workstream, by: requester, sourceEventIds: sourceIds, origin: from === "agent" ? "agent" : origin });
+            const card = s.proposeContext({ text: i.text, kind: "decision", workstream: i.workstream, by: requester, sourceEventIds: sourceIds, origin: from === "agent" ? "agent" : origin, attachments: fileRefs });
             return card ? `Proposed on the Tasks board (card ${card.id}); a person adds it.` : "Already known.";
           }
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
@@ -1011,7 +1013,7 @@ export class Brain {
             const text = `Work with ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ")}: ${goal} Ask them what you need with jam_ask, answer their questions with jam_answer, look at their frames with canvas_render, and post what you agreed and what still differs with jam_update.`;
             // Overheard pairing, or pairing with a file in the pass, waits on the Tasks board like any other proposed work.
             if (proposeOnly) {
-              const card = s.proposeTask({ text, mode: "coordinate", targets: [a.id], by: requester, sourceEventIds: sourceIds, origin });
+              const card = s.proposeTask({ text, mode: "coordinate", targets: [a.id], by: requester, sourceEventIds: sourceIds, origin, attachments: fileRefs });
               if (card) cards.push(card.id);
               continue;
             }

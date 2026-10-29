@@ -3,7 +3,7 @@ import type { Server, ServerWebSocket } from "bun";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
-import { BODY_LIMITS, buffered, readBytes } from "./body";
+import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
 import { methodAllowed } from "./methods";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
@@ -116,22 +116,30 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     maxRequestBodySize: 64 * 1024 * 1024,
     async fetch(incoming, srv) {
       const peer = srv.requestIP(incoming)?.address ?? "0.0.0.0";
-      // Every body is read here, bounded, before any route (or the closing check below) looks at the request.
-      const got = await methodAllowed(incoming) ?? (await buffered(incoming));
-      if (!(got instanceof Request)) return got instanceof Response ? got : bad(got.message, got.status);
-      const req = got;
-      const url = new URL(req.url);
+      const incomingUrl = new URL(incoming.url);
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
       // Mac app's relay (which carries agents' traffic) all mark their requests.
-      const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
+      const relayed = RELAY_HEADERS.some((h) => incoming.headers.has(h));
       const ip = relayed && isLocal(peer) ? "relayed" : peer;
-      const path = url.pathname;
       const local = isLocal(ip);
       // On the host, loopback alone isn't a person (every process here reaches it): the host's own
       // windows also carry the hub's window key (SPEC 14, HostWindows in auth.ts).
-      const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
+      const hostWindow = local && hub.auth.windows.matches(cookie(incoming, "jam_window"));
+      const refused = await methodAllowed(incoming);
+      if (refused) return refused;
+      // A route that takes a recording or a file is for someone paired (or the host's window): nobody else gets a big buffer.
+      if (limitFor(incoming) > BODY_LIMITS.json && !hostWindow && !(local ? fileReader(incoming) : hub.auth.check(tokenOf(incoming, incomingUrl), ip))) return local ? bad(NOT_THE_HOST_WINDOW, 403) : bad("This device isn't paired with this JamSesh host.", 401);
+      // Every body is read here, bounded, before any route (or the closing check below) looks at the request; its memory stays
+      // charged until the request has been answered.
+      const got = await buffered(incoming);
+      if (!("req" in got)) return bad(got.message, got.status);
+      const req = got.req;
+      const release = got.release;
+      const url = new URL(req.url);
+      const path = url.pathname;
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
-      if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
+      if (!knownHost(req, hub)) return (release(), bad("Unknown host name.", 421));
+      try {
       // Once the final save has begun nothing is written: every route that changes something is turned away here, after its body was read.
       if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
       try {
@@ -278,6 +286,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       } catch (e) {
         console.error("http:", path, e);
         return bad(e instanceof Error ? e.message : String(e), 500);
+      }
+      } finally {
+        release();
       }
     },
     websocket: {

@@ -42,7 +42,8 @@ export function drawnText(bytes: Uint8Array, limit = 200_000): string {
   // Only the content streams of pages the catalog's page tree reaches (an object an edit left behind, or a page no tree names,
   // isn't wording), in page order.
   const pages: number[][] = [];
-  const rootRef = [...src.matchAll(/\/Root\s+(\d+)\s+\d+\s+R/g)].at(-1)?.[1];
+  // The catalog the trailer names (a `trailer` at the start of a line, so text in a comment can't pose as one).
+  const rootRef = [...src.matchAll(/^trailer\s*<<([\s\S]*?)>>\s*(?:startxref|%%EOF|$)/gm)].map((t) => /\/Root\s+(\d+)\s+\d+\s+R/.exec(t[1])?.[1]).filter(Boolean).at(-1);
   const catalog = rootRef ? Number(rootRef) : [...objs].find(([, o]) => /\/Type\s*\/Catalog\b/.test(o.body))?.[0];
   const seen = new Set<number>();
   const walk = (n: number, depth: number) => {

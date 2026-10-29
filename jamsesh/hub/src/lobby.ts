@@ -1,7 +1,8 @@
 // The Projects picker before any session exists (JAMSESH_LOBBY=1): a small server for the Mac app's
 // first screen when hosting. It serves the web app and the project routes to this Mac's own windows
 // and nothing else. Choosing a project makes the app start the real hub for it.
-import { buffered } from "./body";
+import { BODY_LIMITS, buffered, limitFor } from "./body";
+import { methodAllowed } from "./methods";
 import { HostWindows, readWindowLinks } from "./auth";
 import { config } from "./config";
 import { cookie, hostWindowRoute, json, sameOrigin, webApp } from "./http";
@@ -14,9 +15,13 @@ export function startLobby(port = config.port) {
     port,
     hostname: "127.0.0.1",
     async fetch(incoming) {
+      const refused = await methodAllowed(incoming);
+      if (refused) return refused;
+      // The picker takes small JSON only.
+      if (limitFor(incoming) > BODY_LIMITS.json) return json({ error: "Pick a project first." }, 409);
       const got = await buffered(incoming);
-      if (!(got instanceof Request)) return json({ error: got.message }, got.status);
-      const req = got;
+      if (!("req" in got)) return json({ error: got.message }, got.status);
+      const req = got.req;
       const url = new URL(req.url);
       const path = url.pathname;
       const hostWindow = windows.matches(cookie(req, "jam_window"));
@@ -35,6 +40,8 @@ export function startLobby(port = config.port) {
       } catch (e) {
         console.error("lobby:", path, e);
         return json({ error: e instanceof Error ? e.message : String(e) }, 500);
+      } finally {
+        got.release();
       }
     },
   });
