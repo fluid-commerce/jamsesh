@@ -96,6 +96,9 @@ test("a share that no host screen shows stops after the grace period, and the sh
   s.store.put("shares", { ...sh, startedAt: Date.now() - 120_000 });
   const keep = s.startShare("felipe-laptop", "camera");
   s.store.put("shares", { ...keep, startedAt: Date.now() - 120_000 });
+  // Both were up; then the screen share was taken down.
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }, { kind: "screen", shareId: keep.id }] } }, "x");
+  s.sweepShares();
   s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: keep.id }] } }, "x");
   Session.SHARE_GRACE_MS = 30;
   try {
@@ -120,4 +123,14 @@ test("a share on an extra screen is not cut, and a brand-new share gets time to 
   const fresh = s.startShare("felipe-laptop", "camera");
   s.sweepShares();
   expect(s.store.get("shares", fresh.id)?.status).toBe("live");
+});
+
+test("a share that never went up says so when it stops", async () => {
+  const { s } = room();
+  const sh = s.startShare("felipe-laptop", "screen");
+  s.store.put("shares", { ...sh, startedAt: Date.now() - 120_000 });
+  s.sweepShares();
+  expect(s.store.get("shares", sh.id)?.status).toBe("ended");
+  const note = sent.find((m) => m.type === "share-ended" && m.shareId === sh.id);
+  expect(note && note.type === "share-ended" && note.text).toContain("wasn't put on the big screen");
 });
