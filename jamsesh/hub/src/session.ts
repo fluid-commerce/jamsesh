@@ -743,11 +743,17 @@ export class Session {
     return this.store.all("devices").filter((d) => d.personId === personId && d.kind === "client" && Date.now() - d.lastSeen < 10 * 60_000);
   }
 
-  /** The host asks someone to share; their JamSesh window asks them first. */
+  /**
+   * The host asks someone to share; their JamSesh window asks them first. A person has at most one
+   * share of each kind: asking again returns the pending request or the live share instead of
+   * starting a second capture.
+   */
   requestShare(personId: string, kind: Share["kind"], reason: string, by: string): Share | null {
     const person = this.person(personId);
     const devices = this.devicesOf(personId);
     if (!person || !devices.length) return null;
+    const existing = this.shares().find((x) => x.personId === personId && x.kind === kind);
+    if (existing) return existing;
     const share: Share = { id: newId("sh"), deviceId: devices[0].id, personId, personName: person.name, kind, label: `${person.name}'s ${kind}`, status: "requested", reason, startedAt: Date.now() };
     this.store.put("shares", share);
     bus.send({ type: "share-request", shareId: share.id, deviceIds: devices.map((d) => d.id), kind, reason, by });
@@ -759,8 +765,18 @@ export class Session {
     const device = this.store.get("devices", deviceId);
     const person = this.person(device?.personId);
     const existing = shareId ? this.store.get("shares", shareId) : undefined;
+    const id = existing?.id ?? newId("sh");
+    // One share of a kind per device: an earlier one from this device is replaced, and requests for
+    // the same thing that are still waiting are answered by this share.
+    for (const old of this.shares()) {
+      if (old.id === id || old.kind !== kind) continue;
+      if (old.status === "live" && old.deviceId === deviceId) {
+        this.endShare(old.id);
+        bus.send({ type: "share-ended", shareId: old.id, deviceId: old.deviceId, text: "" });
+      } else if (old.status === "requested" && person && old.personId === person.id) this.endShare(old.id);
+    }
     const share: Share = {
-      id: existing?.id ?? newId("sh"),
+      id,
       deviceId,
       personId: person?.id ?? null,
       personName: person?.name ?? device?.label ?? "Someone",
@@ -775,15 +791,81 @@ export class Session {
     return share;
   }
 
+  /** What each screen showed just before a share took it over, so the share's end can give it back. */
+  private beforeShare = new Map<string, Stage>();
+
+  /** Remember what the main screen shows now, ahead of a new share taking it over. */
+  rememberStageFor(shareId: string) {
+    if (this.beforeShare.has(shareId)) return;
+    const st = this.stage();
+    const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
+    if (tiles.length && tiles.every((t) => t.kind === "screen")) {
+      // Another share is all the screen shows: this one gives back what that one was hiding.
+      for (const t of tiles) {
+        const prior = t.kind === "screen" ? this.beforeShare.get(t.shareId) : undefined;
+        if (prior) return void this.beforeShare.set(shareId, prior);
+      }
+    }
+    this.beforeShare.set(shareId, st);
+  }
+
   endShare(id: string, status: Share["status"] = "ended") {
     const sh = this.store.get("shares", id);
     if (!sh) return;
     this.store.put("shares", { ...sh, status });
-    const st = this.stage();
-    if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
-      const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
-      this.setStage(tiles.length ? { ...st, layout: { tiles } } : { mode: "board" }, "JamSesh");
+    const before = this.beforeShare.get(id);
+    this.beforeShare.delete(id);
+    const hosts = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
+    for (const screen of hosts) {
+      const st = this.stage(screen);
+      if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
+        const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
+        // When the share was all the screen showed, the screen goes back to what it showed before.
+        const back = !tiles.length && screen === "main" && before && !(before.mode === "layout" && before.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? before : null;
+        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen);
+      }
     }
+  }
+
+  // ---- shares that left the big screen ----
+
+  private shareSweep: ReturnType<typeof setTimeout> | null = null;
+  /** Long enough for the brain to place a brand-new share before it counts as "not on screen". */
+  static SHARE_PLACE_MS = 60_000;
+  static SHARE_GRACE_MS = 5_000;
+
+  private shownShareIds(): Set<string> {
+    const ids = new Set<string>();
+    const screens = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
+    for (const screen of screens) {
+      const st = this.stage(screen);
+      if (st.mode === "layout") for (const t of st.layout?.tiles ?? []) if (t.kind === "screen") ids.add(t.shareId);
+    }
+    return ids;
+  }
+
+  /** After any stage change: a live share that no host screen shows stops, once the grace period passes. */
+  private scheduleShareSweep(delay = Session.SHARE_GRACE_MS) {
+    if (this.shareSweep) clearTimeout(this.shareSweep);
+    this.shareSweep = setTimeout(() => this.sweepShares(), delay);
+    this.shareSweep.unref?.();
+  }
+
+  sweepShares() {
+    this.shareSweep = null;
+    const shown = this.shownShareIds();
+    let recheck = 0;
+    for (const sh of this.shares()) {
+      if (sh.status !== "live" || shown.has(sh.id)) continue;
+      const young = Session.SHARE_PLACE_MS - (Date.now() - sh.startedAt);
+      if (young > 0) {
+        recheck = Math.max(recheck, young);
+        continue;
+      }
+      this.endShare(sh.id);
+      bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text: `Your ${sh.kind} left the big screen, so sharing stopped.` });
+    }
+    if (recheck) this.scheduleShareSweep(recheck + 50);
   }
 
   // ---- annotations ----
@@ -881,6 +963,7 @@ export class Session {
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
+      this.scheduleShareSweep();
       clearTimeout(this.screenReverts.get(screen));
       if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome")
         this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), 6 * 60_000));
@@ -888,6 +971,7 @@ export class Session {
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
+    this.scheduleShareSweep();
     if (this.bigScreens.size > 1) bus.changed("screens");
     if (this.stageRevert) clearTimeout(this.stageRevert);
     this.stageRevert = null;

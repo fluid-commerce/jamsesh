@@ -276,9 +276,10 @@ export class Brain {
       return;
     }
     const m = model(s, "presenter");
+    // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
+    s.rememberStageFor(share.id);
     const fallback = () => {
-      const keep: Tile[] = stage.mode === "layout" ? stage.layout?.tiles ?? [] : stage.items.slice(0, 2).map((id): Tile => ({ kind: "artifact", artifactId: id }));
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: ([{ kind: "screen", shareId: share.id, label: share.label }] as Tile[]).concat(keep).slice(0, 4) } }, "JamSesh");
+      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh");
     };
     if (!m) return fallback();
     const pass = { effects: 0 };
@@ -287,7 +288,7 @@ export class Brain {
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
         system: this.system(),
-        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout, next to whatever it's most useful beside (for example the mockup it should match, or the other platform's build). Keep it big enough to read.`,
+        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout as the only tile, filling the whole presentation area, so it is big enough to read. Add other tiles only if the room has just asked to see something beside it. The screen returns to what it showed before when the share ends.`,
         tools: { set_layout: this.tools([], pass).set_layout },
         stopWhen: isStepCount(2),
       });
@@ -644,8 +645,14 @@ export class Brain {
         execute: async ({ person, kind, reason }) => {
           const p = s.personByName(person);
           if (!p) return refuse(`No one named ${person}.`);
+          const asked = s.shares().some((x) => x.personId === p.id && x.kind === kind);
           const share = s.requestShare(p.id, kind, reason, "Room brain");
-          return share ? `Asked ${p.name}; it appears on screen when they accept.` : refuse(`${p.name} has no JamSesh window open.`);
+          if (!share) return refuse(`${p.name} has no JamSesh window open.`);
+          if (share.status === "live") {
+            void this.placeShare(share);
+            return `${p.name} is already sharing their ${kind}; it is going up on the big screen. Don't ask again.`;
+          }
+          return `Asked ${p.name}; it appears on screen when they accept.${asked ? " (An earlier request to them is still waiting; no second one was sent.)" : ""}`;
         },
       }),
       remember_feedback: tool({
