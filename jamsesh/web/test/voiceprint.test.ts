@@ -125,8 +125,11 @@ test("in the Mac app the app keeps the copy, for the person the page says, and a
       if (cmd === "voiceprint_get") return k;
       if (cmd === "voiceprint_consent") return void kept.set(args.personId, { consent: args.on, copy: args.on ? k.copy : null });
       if (cmd === "voiceprint_put") return void kept.set(args.personId, { ...k, copy: args.copy });
+      // The app's dialog, stubbed: this test's person says Share only when `share` is true.
+      if (cmd === "voiceprint_share") return share ? k.copy : null;
     },
   };
+  let share = false;
   expect(carriesToOtherHosts()).toBe(true);
   await setCarryAllowed("p1", true);
   reply = () => ({ status: 200, body: copy({ version: "b1", updatedAt: 5 }) });
@@ -137,6 +140,16 @@ test("in the Mac app the app keeps the copy, for the person the page says, and a
   expect(await localCopy("p2")).toBeNull();
   expect(await carryAllowed("p2")).toBe(false);
   expect(invoked.every((c) => typeof c.args.personId === "string")).toBe(true);
+  // A host with nothing gets the copy only after a Share in the app.
+  calls = [];
+  reply = (m) => ({ status: 200, body: m === "PUT" ? { ok: true } : copy({ samples: [], version: "", updatedAt: 0 }) });
+  await syncVoiceprint({ id: "p1" }, "hostC");
+  expect(calls.map((c) => c.method)).toEqual(["GET"]);
+  share = true;
+  calls = [];
+  await syncVoiceprint({ id: "p1" }, "hostC");
+  expect(calls.map((c) => c.method)).toEqual(["GET", "PUT", "GET"]);
+  expect(calls[1].body.samples).toHaveLength(1);
 });
 
 test("starting the join read fails out loud when the host didn't take it, and is never queued for later", async () => {

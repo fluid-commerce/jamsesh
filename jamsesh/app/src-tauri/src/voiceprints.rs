@@ -5,8 +5,15 @@
 //
 // A person is known across hosts by the name they go by, the one thing that is the same on every host
 // (person ids are each host's own).
+//
+// The samples never reach a host's page until that person has said yes to that host: the first time
+// their copy would go to a host it hasn't gone to before, the app asks in a native dialog, and keeps
+// the answer per host id (what the host's /api/pair/info says, not its address). Until then the page
+// sees the copy's version and dates only.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 /// What a device may carry, as the hub checks it (hub/src/audio/voiceprint.ts).
@@ -38,6 +45,47 @@ pub struct Copy {
 pub struct Kept {
     pub consent: Option<bool>,
     pub copy: Option<Copy>,
+    /// Hosts (by host id) this person said Share or Not this room to.
+    #[serde(default)]
+    pub hosts: BTreeMap<String, bool>,
+}
+
+/// What a host's page may see of the copy: everything once the person said Share to this host, else
+/// the copy without its samples (enough to tell which copy is newer), and never the other hosts' answers.
+pub fn for_page(mut kept: Kept, host_id: &str) -> Kept {
+    let shared = kept.hosts.get(host_id) == Some(&true);
+    kept.hosts.clear();
+    if !shared && let Some(c) = kept.copy.as_mut() {
+        c.samples.clear();
+    }
+    kept
+}
+
+/// Hands the copy over for the host `host_id`, asking the person the first time (`ask` shows the
+/// dialog; it says yes or no). The answer is kept, so each host is asked once. None: nothing to send,
+/// keeping is off, or they said no.
+pub async fn share<F, Fut>(dir: &Path, name: &str, host_id: &str, ask: F) -> Result<Option<Copy>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    if host_id.is_empty() || host_id.len() > 64 {
+        return Err("This host didn't say who it is.".into());
+    }
+    let kept = load(dir, name);
+    let (Some(true), Some(_)) = (kept.consent, kept.copy.as_ref()) else { return Ok(None) };
+    let yes = match kept.hosts.get(host_id) {
+        Some(&answer) => answer,
+        None => {
+            let answer = ask().await;
+            // Read again: the file may have changed while the dialog was up.
+            let mut now = load(dir, name);
+            now.hosts.insert(host_id.to_string(), answer);
+            save(dir, name, &now)?;
+            answer
+        }
+    };
+    Ok(if yes { load(dir, name).copy } else { None })
 }
 
 /// The file for the person who goes by `name`: their name in hex, so any name is a safe file name.
@@ -93,6 +141,7 @@ pub fn set_consent(dir: &Path, name: &str, on: bool) -> Result<(), String> {
     kept.consent = Some(on);
     if !on {
         kept.copy = None;
+        kept.hosts.clear();
     }
     save(dir, name, &kept)
 }
@@ -106,6 +155,19 @@ pub fn put(dir: &Path, name: &str, copy: Copy) -> Result<(), String> {
     }
     kept.copy = Some(copy);
     save(dir, name, &kept)
+}
+
+/// The host's id and the name to ask about ("Design review", else its address), from `/api/pair/info`.
+pub fn host_of(info: &str, fallback: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(info).ok()?;
+    let id = v.get("hostId")?.as_str()?.trim().to_string();
+    let name = v.get("name").and_then(|n| n.as_str()).map(str::trim).filter(|n| !n.is_empty()).unwrap_or(fallback);
+    (!id.is_empty()).then(|| (id, name.chars().take(60).collect()))
+}
+
+/// The question, in the dialog's words.
+pub fn question(person: &str, room: &str) -> String {
+    format!("Share {person}'s voice with {room}? It's numbers that describe your voice, never a recording.")
 }
 
 /// The window's person on the host it shows, from `/api/me` as the host answers it for this app's window:
@@ -155,7 +217,7 @@ mod tests {
         assert!(put(&d, "Pat", copy(2, 0.2)).is_err());
         // No forgets the copy.
         set_consent(&d, "Chey", false).unwrap();
-        assert_eq!(load(&d, "Chey"), Kept { consent: Some(false), copy: None });
+        assert_eq!(load(&d, "Chey"), Kept { consent: Some(false), copy: None, hosts: Default::default() });
         assert!(set_consent(&d, "  ", true).is_err());
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -176,6 +238,63 @@ mod tests {
             vec!["1e100"; DIM].join(",")
         ));
         assert!(big.is_err() || check(&big.unwrap()).is_err());
+    }
+
+    fn block<T>(f: impl Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    /// A stand-in for the dialog: answers `yes` and counts how often it was asked. Nothing is shown.
+    fn stub(yes: bool, asked: &std::cell::Cell<u32>) -> impl FnOnce() -> std::future::Ready<bool> + '_ {
+        move || {
+            asked.set(asked.get() + 1);
+            std::future::ready(yes)
+        }
+    }
+
+    #[test]
+    fn a_host_gets_the_voice_only_after_a_yes_and_each_host_is_asked_once() {
+        let d = dir();
+        let asked = std::cell::Cell::new(0);
+        // Nothing kept yet: nothing to send, nobody asked.
+        assert_eq!(block(share(&d, "Chey", "hostA", stub(true, &asked))).unwrap(), None);
+        set_consent(&d, "Chey", true).unwrap();
+        put(&d, "Chey", copy(3, 0.1)).unwrap();
+        // Before any answer the page sees the copy's dates, not its samples.
+        let seen = for_page(load(&d, "Chey"), "hostA");
+        assert!(seen.copy.as_ref().unwrap().samples.is_empty());
+        assert_eq!(seen.copy.as_ref().unwrap().version.as_deref(), Some("v1"));
+        // Not this room: nothing goes, and that room isn't asked again.
+        assert_eq!(block(share(&d, "Chey", "hostA", stub(false, &asked))).unwrap(), None);
+        assert_eq!(block(share(&d, "Chey", "hostA", stub(true, &asked))).unwrap(), None);
+        assert_eq!(asked.get(), 1);
+        // Another host is its own question. Share: it goes, now and later, without asking again.
+        assert_eq!(block(share(&d, "Chey", "hostB", stub(true, &asked))).unwrap(), Some(copy(3, 0.1)));
+        assert_eq!(block(share(&d, "Chey", "hostB", stub(false, &asked))).unwrap(), Some(copy(3, 0.1)));
+        assert_eq!(asked.get(), 2);
+        assert_eq!(for_page(load(&d, "Chey"), "hostB").copy.unwrap().samples.len(), 3);
+        assert!(for_page(load(&d, "Chey"), "hostB").hosts.is_empty());
+        // Another person on this Mac has their own answers.
+        set_consent(&d, "Pat", true).unwrap();
+        put(&d, "Pat", copy(1, 0.2)).unwrap();
+        assert_eq!(block(share(&d, "Pat", "hostB", stub(false, &asked))).unwrap(), None);
+        assert_eq!(asked.get(), 3);
+        // Turning keeping off forgets the answers too.
+        set_consent(&d, "Chey", false).unwrap();
+        assert!(load(&d, "Chey").hosts.is_empty());
+        assert!(block(share(&d, "Chey", "", stub(true, &asked))).is_err());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_host_is_known_by_its_id_and_named_by_its_room() {
+        assert_eq!(host_of(r#"{"name":"Design review","hostId":"ab12"}"#, "10.0.0.2:4747"), Some(("ab12".into(), "Design review".into())));
+        assert_eq!(host_of(r#"{"name":"","hostId":"ab12"}"#, "10.0.0.2:4747"), Some(("ab12".into(), "10.0.0.2:4747".into())));
+        assert_eq!(host_of(r#"{"name":"Design review"}"#, "x"), None);
+        assert_eq!(
+            question("Chey", "Design review"),
+            "Share Chey's voice with Design review? It's numbers that describe your voice, never a recording."
+        );
     }
 
     #[test]

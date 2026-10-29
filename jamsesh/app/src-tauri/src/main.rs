@@ -914,7 +914,7 @@ fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
 /// The person this app's window is on the host it shows, as that host says (not as the page says), and
 /// only for the person's own window. `person_id` is who the page thinks it is: a page that's behind
 /// (someone else picked who they are) gets nothing.
-async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Result<String, String> {
+async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Result<(String, u16), String> {
     if window.label() != "client" {
         return Err("Only your own window keeps your voice.".into());
     }
@@ -928,24 +928,61 @@ async fn voice_owner(window: &tauri::Window, state: &App, person_id: &str) -> Re
     if id != person_id {
         return Err("This window is someone else now.".into());
     }
-    Ok(name)
+    Ok((name, port))
 }
 
+/// The host the window shows: its id and its room's name (else its address), as the host says.
+async fn voice_host(state: &App, port: u16) -> Result<(String, String), String> {
+    let fallback = {
+        let inner = state.inner.lock().await;
+        inner.cfg.host_url.clone().unwrap_or_else(|| "this host".into()).replace("https://", "").replace("http://", "")
+    };
+    let (status, info) = proxy::get_as_window(port, "/api/pair/info").await?;
+    voiceprints::host_of(&info, &fallback).filter(|_| status.is_success()).ok_or_else(|| "This host didn't say who it is.".to_string())
+}
+
+/// The copy as this host's page may see it: without its samples until the person said Share to this host.
 #[tauri::command]
 async fn voiceprint_get(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String) -> Result<voiceprints::Kept, String> {
-    let name = voice_owner(&window, &state, &person_id).await?;
-    Ok(voiceprints::load(&state.dir, &name))
+    let (name, port) = voice_owner(&window, &state, &person_id).await?;
+    let (host_id, _) = voice_host(&state, port).await?;
+    Ok(voiceprints::for_page(voiceprints::load(&state.dir, &name), &host_id))
+}
+
+/// The whole copy, to send to this host: asks the person the first time, in a native dialog.
+#[tauri::command]
+async fn voiceprint_share(
+    app: AppHandle,
+    window: tauri::Window,
+    state: State<'_, Arc<App>>,
+    person_id: String,
+) -> Result<Option<voiceprints::Copy>, String> {
+    let (name, port) = voice_owner(&window, &state, &person_id).await?;
+    let (host_id, room) = voice_host(&state, port).await?;
+    let question = voiceprints::question(&name, &room);
+    let ask = || async move {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.dialog()
+            .message(question)
+            .title("Share your voice")
+            .buttons(MessageDialogButtons::OkCancelCustom("Share".into(), "Not this room".into()))
+            .show(move |yes| {
+                let _ = tx.send(yes);
+            });
+        rx.await.unwrap_or(false)
+    };
+    voiceprints::share(&state.dir, &name, &host_id, ask).await
 }
 
 #[tauri::command]
 async fn voiceprint_put(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, copy: voiceprints::Copy) -> Result<(), String> {
-    let name = voice_owner(&window, &state, &person_id).await?;
+    let (name, _) = voice_owner(&window, &state, &person_id).await?;
     voiceprints::put(&state.dir, &name, copy)
 }
 
 #[tauri::command]
 async fn voiceprint_consent(window: tauri::Window, state: State<'_, Arc<App>>, person_id: String, on: bool) -> Result<(), String> {
-    let name = voice_owner(&window, &state, &person_id).await?;
+    let (name, _) = voice_owner(&window, &state, &person_id).await?;
     voiceprints::set_consent(&state.dir, &name, on)
 }
 
@@ -996,6 +1033,7 @@ fn main() {
             heartbeat,
             voiceprint_get,
             voiceprint_put,
+            voiceprint_share,
             voiceprint_consent,
             screens::screens_state,
             screens::screens_preview,

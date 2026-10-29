@@ -24,6 +24,8 @@ interface CopyStore {
   setConsent(on: boolean): Promise<void>;
   get(): Promise<Carried | null>;
   put(copy: Carried): Promise<void>;
+  /** The whole copy, to send to this host (the Mac app asks the person first, once per host), or null. */
+  share(): Promise<Carried | null>;
 }
 
 interface Bridge {
@@ -34,6 +36,7 @@ const bridge = () => (globalThis as { __TAURI_INTERNALS__?: Bridge }).__TAURI_IN
 /**
  * The Mac app keeps one copy per person under the Mac user's app data. It asks the host which person
  * this window is and refuses a different one, so a shared app never hands one person's copy to another.
+ * The page sees the copy's samples only once the person said Share to this host in the app's dialog.
  */
 function appStore(b: Bridge, personId: string): CopyStore {
   const get = () => b.invoke("voiceprint_get", { personId }) as Promise<{ consent: boolean | null; copy: Carried | null }>;
@@ -42,6 +45,7 @@ function appStore(b: Bridge, personId: string): CopyStore {
     setConsent: async (on) => void (await b.invoke("voiceprint_consent", { personId, on })),
     get: async () => (await get()).copy,
     put: async (copy) => void (await b.invoke("voiceprint_put", { personId, copy })),
+    share: () => b.invoke("voiceprint_share", { personId }) as Promise<Carried | null>,
   };
 }
 
@@ -77,6 +81,8 @@ function browserStore(personId: string): CopyStore {
     },
     get: async () => read<Carried>(copyKey),
     put: async (copy) => write(copyKey, copy),
+    // Already this host's: a browser's copy never leaves the host's own address.
+    share: async () => read<Carried>(copyKey),
   };
 }
 
@@ -118,10 +124,10 @@ export async function pullCopy(personId: string, here = currentHostKey()): Promi
   }
 }
 
-/** Offers this device's copy to the host, then keeps what the host holds now (its copy and its version). */
-export async function pushCopy(personId: string, copy?: Carried | null, here = currentHostKey()): Promise<boolean> {
-  const c = copy ?? (await localCopy(personId));
-  if (!c) return false;
+/** Offers this device's copy to the host, if the person agrees, then keeps what the host holds now (its copy and its version). */
+export async function pushCopy(personId: string, here = currentHostKey()): Promise<boolean> {
+  const c = await quiet(() => storeFor(personId).share(), null);
+  if (!c?.samples?.length) return false;
   try {
     const r = await api<{ ok?: boolean }>(`/people/${personId}/voiceprint`, { model: c.model, dim: c.dim, samples: c.samples }, "PUT");
     if (!r?.ok) return false;
@@ -149,10 +155,10 @@ export async function syncVoiceprint(me: Pick<Person, "id">, here = currentHostK
   }
   const hostHas = !!host?.samples?.length;
   if (!copy) return void (hostHas && (await storeFor(me.id).put(tagged(host, here))));
-  if (!hostHas) return void (await pushCopy(me.id, copy, here));
+  if (!hostHas) return void (await pushCopy(me.id, here));
   if (here && copy.host === here) {
     if (copy.version !== host.version) await storeFor(me.id).put(tagged(host, here));
-  } else if ((copy.updatedAt ?? 0) > (host.updatedAt ?? 0)) await pushCopy(me.id, copy, here);
+  } else if ((copy.updatedAt ?? 0) > (host.updatedAt ?? 0)) await pushCopy(me.id, here);
   else await storeFor(me.id).put(tagged(host, here));
 }
 

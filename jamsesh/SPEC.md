@@ -1340,7 +1340,13 @@ for them: embeddings only (256 numbers per sample, up to 32, tagged with the mod
   go by (person ids are each host's own). The app asks the host which person its window is (`/api/me`
   as the host answers the app's window), never the page, and refuses a page that says it's someone
   else, so a Mac shared by several people never hands one person's copy or choice to another. Only
-  the person's own window (`client`) may ask. This copy goes to every host the person joins.
+  the person's own window (`client`) may ask. This copy goes to every host the person joins, but
+  only with their say-so: the first time it would go to a host it hasn't gone to before, the app
+  asks in a native dialog, "Share Chey's voice with <room>? It's numbers that describe your voice,
+  never a recording.", with **Share** and **Not this room**. The answer is kept per person and per
+  host id (the `hostId` in `/api/pair/info`, not the address), so each host is asked once; unticking
+  the checkbox forgets the answers too. Until a Share, the host's page sees the copy's version and
+  dates but none of its samples.
 - **In a browser** the copy and the choice are kept per person in the browser's storage, which
   belongs to the host's address: they are for this host only (they bring the voice back if the host
   forgets it). The checkbox says so and points to the Mac app for other hosts.

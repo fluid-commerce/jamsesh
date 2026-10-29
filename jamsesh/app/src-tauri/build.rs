@@ -19,6 +19,7 @@ const COMMANDS: &[&str] = &[
     "heartbeat",
     "voiceprint_get",
     "voiceprint_put",
+    "voiceprint_share",
     "voiceprint_consent",
     "screens_state",
     "screens_preview",
