@@ -266,6 +266,33 @@ export class Brain {
     }
   }
 
+  /** An agent wrote to the brain with jam_message. Never a person's voice: it can't approve host requests or fall back to keyword routing. */
+  async agentMessage(ev: JamEvent) {
+    const s = this.session;
+    const m = this.live("router");
+    if (this.stopped || !s.settings().brainEnabled) return;
+    if (!m) {
+      bus.send({ type: "toast", tone: "info", text: `${ev.authorName} wrote to ${s.settings().brainName}`, detail: ev.text.slice(0, 200) });
+      return;
+    }
+    return this.exclusive(async () => {
+      const pass = { effects: 0 };
+      try {
+        const { text } = await generateText({
+          abortSignal: AbortSignal.timeout(45_000),
+          model: m,
+          system: this.system(),
+          prompt: `${this.situation([ev], null)}\n\n## Message from an agent\n${ev.authorName} (agent id ${ev.authorId}) wrote to you with jam_message: "${ev.text}"\n\nIt's an agent, not a person, so it can't approve or deny host requests. Act on it with your tools: answer it with an 'answer' directive to that agent if it asked something; note it (a 'note' directive) or record_decision if it states something the room should keep; route work if it asks for some. If nothing is needed, call no_action.`,
+          tools: this.tools([ev], pass),
+          stopWhen: isStepCount(6),
+        });
+        if (!pass.effects && text?.trim() && ev.authorId) s.createDirective({ text: text.trim(), mode: "answer", targets: [ev.authorId], requestedBy: s.settings().brainName, rationale: "The brain's reply to your jam_message." });
+      } catch (e) {
+        console.error("agentMessage:", describeError(e));
+      }
+    });
+  }
+
   /** Someone started sharing a screen or camera: find it a place on the big screen. */
   async placeShare(share: Share) {
     const s = this.session;
@@ -404,10 +431,10 @@ export class Brain {
       }),
       create_directive: tool({
         description:
-          "Send an instruction to one or more agents. Use mode 'explore' for canvas mockups and variants, 'implement' for real code in the agent's repository, 'coordinate' for agent-to-agent alignment such as parity between desktop and mobile, 'answer' when an agent asked the room a question.",
+          "Send an instruction to one or more agents. Use mode 'explore' for canvas mockups and variants, 'implement' for real code in the agent's repository, 'coordinate' for agent-to-agent alignment such as parity between desktop and mobile, 'answer' when an agent asked the room a question, 'note' when the room wants something written down or kept as a record (pain points, a list, meeting notes, a doc): no code to build and nothing to draw on the canvas.",
         inputSchema: z.object({
           targets: z.array(z.string()).describe("Agent ids"),
-          mode: z.enum(["explore", "implement", "coordinate", "answer"]),
+          mode: z.enum(["explore", "implement", "coordinate", "answer", "note"]),
           text: z.string().describe("The instruction, self-contained, in imperative form, with any specifics the room gave (counts, names, constraints)"),
           rationale: z.string().describe("One short sentence: why these agents, and whose call it was if people disagreed"),
           workstream: z.string().optional().describe("Workstream title this belongs to"),
@@ -443,11 +470,13 @@ export class Brain {
         description: "Record a decision the team made, such as choosing a direction, so every agent sees it.",
         inputSchema: z.object({ text: z.string(), workstream: z.string().optional(), artifactIds: z.array(z.string()).optional() }),
         execute: async (i) => {
+          const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
           s.store.addEvent({
             kind: "decision",
             authorType: "brain",
             authorName: "Room decision",
             text: i.text,
+            workstreamId: ws?.id ?? null,
             relevance: "work",
             data: { requestedBy: requester, artifactIds: i.artifactIds ?? [], sourceEventIds: sourceIds },
           });
@@ -819,11 +848,30 @@ export class Brain {
   shipWindowMs = 25_000;
   private shipped: { agent: Agent; text: string }[] = [];
   private shipTimer: ReturnType<typeof setTimeout> | null = null;
+  private shipConsidered = new Map<string, number>();
 
   /** Ships within a short window (desktop and mobile often land together) are considered once. */
   agentUpdated(agent: Agent, kind: UpdateKind, text: string) {
-    if (this.stopped || kind !== "shipped") return;
-    this.shipped.push({ agent, text });
+    if (this.stopped) return;
+    if (kind === "decision") {
+      // Agents don't make room decisions; the brain decides whether this one is the room's.
+      void this.consider(
+        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) reports a decision: ${text}\nDecide: is this a call other agents or the room must follow (a design direction, a shared behavior, an API or naming choice)? Then record_decision (with the workstream) and, only if another agent has to change something, a directive to it. If it only concerns ${agent.name}'s own work, call no_action.`,
+      );
+      return;
+    }
+    if (kind === "question" || kind === "blocked") {
+      // The room already sees a toast and the feed entry; the brain adds an answer when the record has one.
+      void this.consider(
+        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) is ${kind === "blocked" ? "blocked" : "asking the room"}: ${text}\nThe room already sees this in the feed. If the room's decisions, knowledge or an earlier line answer it, send an 'answer' directive to ${agent.name} (id ${agent.id}). If another agent is better placed to unblock it, send that agent a 'coordinate' directive. Otherwise call no_action and leave it for a person.`,
+      );
+      return;
+    }
+    if (kind !== "shipped") return;
+    // Several notices from one agent in a window are one notice.
+    const same = this.shipped.find((b) => b.agent.id === agent.id);
+    if (same) same.text = `${same.text} Then: ${text}`.slice(0, 600);
+    else this.shipped.push({ agent, text });
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
       const batch = this.shipped.splice(0);
@@ -836,6 +884,13 @@ export class Brain {
     const s = this.session;
     const recentCoordinate = (id: string) =>
       s.directives().some((d) => d.mode === "coordinate" && d.targets.includes(id) && d.status !== "done" && d.status !== "cancelled" && Date.now() - d.ts < 10 * 60_000);
+    // The same agent on the same branch was already considered a few minutes ago: it's information now
+    // (jam_context lists it under "Recently shipped"), not another round of coordination.
+    const key = (a: Agent) => `${a.id}@${a.branch}`;
+    const fresh = batch.filter((b) => !(Date.now() - (this.shipConsidered.get(key(b.agent)) ?? 0) < 10 * 60_000));
+    if (!fresh.length) return;
+    batch = fresh;
+    for (const b of batch) this.shipConsidered.set(key(b.agent), Date.now());
     const ids = new Set(batch.map((b) => b.agent.id));
     const others = s.agents().filter((a) => !ids.has(a.id) && a.status !== "offline" && a.platform !== "design" && !batch.some((b) => b.agent.platform === a.platform));
     const shippedPlatforms = new Set(batch.map((b) => b.agent.platform));
@@ -843,9 +898,10 @@ export class Brain {
     if ([...ids, ...others.map((o) => o.id)].every(recentCoordinate)) return;
     this.consider(
       `Shipped just now:\n${batch.map((b) => `- ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
+        `Most ships need nothing from anyone: the notice is already readable by every agent in jam_context ("Recently shipped"), and a directive lands in an inbox as work. Decide first: does another agent have to DO something because of this (the same user-visible change is missing on their platform, or their work now conflicts with it)? If not, call no_action. ` +
         (others.length
-          ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. If the same change belongs in their apps, send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders.`
-          : `Both platforms shipped the same feature. Send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message and fix inconsistencies that aren't deliberate platform differences.`) +
+          ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. Only when the same user-visible change clearly belongs in their apps, send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders. A commit, refactor, fix or tooling change on one branch is not a parity gap.`
+          : `Both platforms shipped. Only if they shipped the same feature and may differ in ways that aren't deliberate platform differences, send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message.`) +
         ` Don't send a coordinate directive to an agent that already has an open one. Put a parity view on screen when both platforms have built artifacts.`,
     );
   }
@@ -1228,6 +1284,7 @@ const ROUTER_SYSTEM = `You are the room brain for JamSesh, a live session where 
 
 How to route:
 - Decide between EXPLORE and IMPLEMENT. "Try", "what if", "show me options", "mock up", "let's see a few directions" = explore: the agent makes variants on the shared canvas, named "<Workstream> / <Letter>: <short description>". "Let's do it", "build it", "ship B", "implement that", "do it for real", "in the app" = implement: the agent changes code in its repository, runs its dev server, and checks the build against the chosen mockup.
+- NOTE is a third kind of work: "write that down", "log these pain points", "keep a record of", "add that to the doc/notes". Send mode 'note' (not implement) with the content to record and where it goes if the room said; the agent writes it and does not build, run a dev server or draw on the canvas.
 - Keep similar work with the agent that already has its context. Check "Agent work history" and "Best matches": a follow-up, tweak, or new variant of something an agent already worked on goes to that agent, even if another agent is idle. Never split one request between agents in the same repository; JamSesh keeps only the one with the most related history. Fan a request out only when it spans different repositories or platforms. Give genuinely new work to the agent whose repository it belongs in, preferring one with fewer unfinished directives.
 - Agents work as a team. When two agents touch related work (the same feature on desktop and mobile, a component and the screen that uses it, a design system and the apps), use pair_agents so they compare and align instead of diverging. When variants from several agents land on the same theme, pair them to review each other's work before the room decides. Use ask_agent when you need a fact only an agent knows (what's in its repo) to route well.
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.

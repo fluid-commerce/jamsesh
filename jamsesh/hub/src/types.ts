@@ -98,7 +98,7 @@ export interface JamEvent {
   data: Record<string, any>;
 }
 
-export type DirectiveMode = "explore" | "implement" | "present" | "answer" | "coordinate";
+export type DirectiveMode = "explore" | "implement" | "present" | "answer" | "coordinate" | "note";
 export type DirectiveStatus = "pending" | "delivered" | "acked" | "done" | "cancelled";
 
 export interface Directive {

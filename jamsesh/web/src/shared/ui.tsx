@@ -456,7 +456,7 @@ function shortAgent(name?: string) {
 }
 
 export function modeLabel(mode: string) {
-  return mode === "explore" ? "Explore" : mode === "implement" ? "Build" : mode === "coordinate" ? "Coordinate" : mode === "answer" ? "Answer" : mode;
+  return mode === "explore" ? "Explore" : mode === "implement" ? "Build" : mode === "coordinate" ? "Coordinate" : mode === "answer" ? "Answer" : mode === "note" ? "Note" : mode;
 }
 
 function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: JamEvent; x: number; y: number; onClose: () => void }) {
