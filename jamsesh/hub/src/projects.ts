@@ -12,7 +12,7 @@
 // This file takes the home directory as an argument and imports nothing from config, so tests and
 // the migration can point it at a temp directory.
 import { Database } from "bun:sqlite";
-import { closeSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -281,52 +281,39 @@ export function migrateLegacy(home: string, waitMs = 60_000): MigrationRecord[] 
   // overwrite each other's record. The other start waits, then finds the work done.
   const root = projectsDir(home);
   mkdirSync(root, { recursive: true });
-  const lock = join(root, MIGRATION_LOCK);
-  // Who holds it: this process and this attempt, so releasing never removes another start's lock.
-  const mine = `${process.pid} ${crypto.randomUUID()}`;
-  const until = Date.now() + waitMs;
-  for (;;) {
-    try {
-      const fd = openSync(lock, "wx");
-      writeSync(fd, mine);
-      closeSync(fd);
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      if (lockAbandoned(lock)) {
-        rmSync(lock, { force: true });
-        continue;
-      }
-      // Still busy after the wait: the other start's work isn't done, so this one can't go on as if it were.
-      if (Date.now() > until) throw new Error("Another JamSesh start is still bringing the old sessions into projects. Try again in a minute.");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-    }
-  }
+  const release = takeMigrationLock(join(root, MIGRATION_LOCK), waitMs);
   try {
     return migrateNow(home);
   } finally {
-    try {
-      if (readFileSync(lock, "utf8") === mine) rmSync(lock, { force: true });
-    } catch {}
+    release();
   }
 }
 
-const MIGRATION_LOCK = ".migration.lock";
+const MIGRATION_LOCK = ".migration-lock.db";
 
 /**
- * A lock left by a process that's gone. A live holder keeps it however long its migration takes (a
- * start that can't wait that long leaves the work to it). With no process id in it, it was being written,
- * or its writer died before finishing: abandoned once that's been a few seconds.
+ * The migration lock: an exclusive transaction on a small SQLite file, which holds the operating system's
+ * advisory lock on it. Only one process holds it at a time, the system lets go the moment its holder exits or
+ * dies, and nothing is ever unlinked to take it over, so no start can judge a live lock abandoned or remove
+ * another's. A live holder keeps it however long its migration takes; a start that can't wait that long fails
+ * rather than going on with unfinished projects. Returns the release.
  */
-function lockAbandoned(lock: string) {
+function takeMigrationLock(path: string, waitMs: number): () => void {
+  const db = new Database(path);
   try {
-    const pid = Number.parseInt(readFileSync(lock, "utf8"), 10);
-    if (!pid) return Date.now() - statSync(lock).mtimeMs > 5_000;
-    process.kill(pid, 0);
-    return false;
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(waitMs))}`);
+    db.exec("BEGIN EXCLUSIVE");
   } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ESRCH";
+    db.close();
+    if (/busy|locked/i.test(String((e as { code?: string }).code ?? (e as Error).message))) throw new Error("Another JamSesh start is still bringing the old sessions into projects. Try again in a minute.");
+    throw e;
   }
+  return () => {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    db.close();
+  };
 }
 
 function migrateNow(home: string): MigrationRecord[] {
