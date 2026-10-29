@@ -301,44 +301,61 @@ test.skipIf(!voiceprintStatus().available)("a correction or Reset after a late c
   }
 });
 
-test("a photo or upload whose laptop is disconnected while its form is on its way saves nothing", async () => {
+test("a form's file bytes are all read before the credential is checked again (photo and upload)", async () => {
   for (const path of ["photo", "upload"] as const) {
     const p = hub.session.upsertPerson({ name: `Pia ${path}` });
     const lap = browser("Pia's laptop");
     expect((await call(lap.token, "POST", "/devices", { deviceId: `d-pia-${path}`, personId: p.id })).status).toBe(200);
     const form = new FormData();
-    form.append("file", new Blob([new Uint8Array(2048).fill(9)], { type: "image/png" }), "a.png");
-    const encoded = new Response(form);
-    const bytes = new Uint8Array(await encoded.arrayBuffer());
-    let saved = 0;
-    const photo = hub.savePhoto.bind(hub);
-    const upload = hub.saveUpload.bind(hub);
-    (hub as any).savePhoto = async (...a: any[]) => (saved++, photo(...(a as [any, any])));
-    (hub as any).saveUpload = async (...a: any[]) => (saved++, upload(...(a as [any, any, any])));
+    const png = new Uint8Array(2048);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    form.append("file", new Blob([png], { type: "image/png" }), "a.png");
+    // The order on the host: every Blob read, and the credential's second look (api() after the body).
+    const order: string[] = [];
+    const get = hub.auth.get.bind(hub.auth);
+    const read = Blob.prototype.arrayBuffer;
+    hub.auth.get = ((id: string | null | undefined) => (id === lap.device.id && order.push("recheck"), get(id))) as typeof hub.auth.get;
+    Blob.prototype.arrayBuffer = function (this: Blob) {
+      if (this.size === 2048) order.push("file bytes");
+      return read.call(this);
+    };
     try {
-      const h = holdBody(lap.token, path === "photo" ? `/people/${p.id}/photo` : "/upload", { "content-type": encoded.headers.get("content-type")! });
-      await h.reached;
-      hub.auth.revoke(lap.device.id);
-      h.send(bytes);
-      expect([path, (await h.response).status]).toEqual([path, 401]);
-      expect(saved).toBe(0);
+      const r = await fetch(`${base}/api${path === "photo" ? `/people/${p.id}/photo` : "/upload"}`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", authorization: `Bearer ${lap.token}` }, body: form });
+      expect(r.status).toBeLessThan(500);
     } finally {
-      (hub as any).savePhoto = photo;
-      (hub as any).saveUpload = upload;
+      hub.auth.get = get as typeof hub.auth.get;
+      Blob.prototype.arrayBuffer = read;
     }
+    expect([path, order.slice(0, 2)]).toEqual([path, ["file bytes", "recheck"]]);
+    expect(order.lastIndexOf("file bytes")).toBeLessThan(order.indexOf("recheck"));
   }
 });
 
-test("a request whose body doesn't arrive whole runs nothing: an interrupted Reset resets no voice", async () => {
+test("JSON can't pose as a form or raw body: an upload or photo sent as JSON is refused, not a 500", async () => {
+  const p = hub.session.upsertPerson({ name: "Jo" });
+  const lap = browser("Jo's laptop");
+  expect((await call(lap.token, "POST", "/devices", { deviceId: "d-jo", personId: p.id })).status).toBe(200);
+  const spoof = { __files: { file: [1, 2, 3] }, __form: {}, __raw: { 0: 1 } };
+  expect((await call(lap.token, "POST", "/upload", spoof)).status).toBe(400);
+  expect((await call(lap.token, "POST", `/people/${p.id}/photo`, spoof)).status).toBeLessThan(500);
+});
+
+test("a request whose body doesn't arrive whole runs nothing, and the same key sent again whole runs (not a replayed failure)", async () => {
   const p = hub.session.upsertPerson({ name: "Cy" });
   const lap = browser("Cy's laptop");
   expect((await call(lap.token, "POST", "/devices", { deviceId: "d-cy", personId: p.id })).status).toBe(200);
   const before = hub.session.store.voiceResetAt(p.id);
-  const h = holdBody(lap.token, `/people/${p.id}/voiceprint`, { "content-type": "application/octet-stream" }, "DELETE");
+  const idem = { "content-type": "application/octet-stream", "x-jam-idem": `idem-${Math.random()}` };
+  const h = holdBody(lap.token, `/people/${p.id}/voiceprint`, idem, "DELETE");
   await h.reached;
   h.fail();
   const r = await h.response.catch(() => null);
-  if (r) expect(r.status).toBe(400);
+  if (r) expect(r.status).toBe(408);
   await Bun.sleep(0);
   expect(hub.session.store.voiceResetAt(p.id)).toBe(before);
+  // The outbox sends it again with the same key, whole this time: it runs.
+  const again = await fetch(`${base}/api/people/${p.id}/voiceprint`, { method: "DELETE", headers: { "x-forwarded-for": "9.9.9.9", ...idem, authorization: `Bearer ${lap.token}` }, body: new Uint8Array([1]) });
+  expect(again.status).toBe(200);
+  expect(again.headers.get("x-jam-idem-replay")).toBeNull();
+  expect(hub.session.store.voiceResetAt(p.id)).toBeGreaterThan(before);
 });

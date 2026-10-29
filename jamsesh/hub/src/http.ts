@@ -405,7 +405,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     try {
       body = await readBody(req);
     } catch {
-      return new Response(JSON.stringify({ error: "The request didn't arrive whole. Try again." }), { status: 400, headers: { "content-type": "application/json" } });
+      // 408: the sender's outbox retries it, and idempotent() doesn't remember it (nothing ran).
+      return new Response(JSON.stringify({ error: "The request didn't arrive whole. Try again." }), { status: 408, headers: { "content-type": "application/json" } });
     }
   }
   // The credential is read again after the body arrived: one disconnected (or changed) while its request was
@@ -699,8 +700,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
-    const bytes: Uint8Array | undefined = body?.__files?.file;
-    if (!bytes) return bad("send the image as form field 'file'");
+    const bytes: unknown = body?.__files?.file;
+    if (!(form instanceof FormData) || !(bytes instanceof Uint8Array)) return bad("send the image as form field 'file'");
     const agent = s.agent(String(form!.get("agent") ?? "")) ?? null;
     const art = await hub.saveUpload(agent, bytes, {
       title: String(form!.get("title") ?? "Screenshot"),
@@ -839,7 +840,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   // ---- profile photos ----
   m = path.match(/^\/people\/([\w-]+)\/photo$/);
   if (m && req.method === "POST") {
-    const bytes: Uint8Array = body?.__raw ?? body?.__files?.file ?? new Uint8Array();
+    const sent: unknown = body?.__raw ?? body?.__files?.file;
+    const bytes = sent instanceof Uint8Array ? sent : new Uint8Array();
+    // What the sender got wrong (no file, not a JPEG or PNG) is a 400, not the host's error.
+    const isImage = (bytes[0] === 0xff && bytes[1] === 0xd8) || (bytes[0] === 0x89 && bytes[1] === 0x50);
+    if (!isImage) return bad("Send a JPEG or PNG.");
     return json(await hub.savePhoto(m[1], bytes));
   }
 
@@ -1007,7 +1012,8 @@ async function idempotent(hub: Hub, req: Request, path: string, run: () => Promi
     const body = await res.clone().text();
     // Server errors aren't remembered, so the retry can succeed.
     const reply = { status: res.status, body, type: res.headers.get("content-type") ?? "application/json" };
-    if (res.status >= 500) idemSeen.delete(key);
+    // Nor is a body that didn't arrive whole (408): nothing ran, so the same key sent again whole must run.
+    if (res.status >= 500 || res.status === 408) idemSeen.delete(key);
     else hub.session.store.saveReply(key, reply);
     settle(reply);
     return res;
@@ -1036,7 +1042,10 @@ async function readBody(req: Request): Promise<any> {
   if (type.includes("application/json")) {
     const text = await req.text();
     try {
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      // The internal fields of a form or raw body can't come from JSON.
+      if (parsed && typeof parsed === "object") for (const k of ["__raw", "__form", "__files"]) delete parsed[k];
+      return parsed;
     } catch {
       return {};
     }
