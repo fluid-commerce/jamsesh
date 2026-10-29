@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
+import { hooksOf } from "./hooks";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-news-"));
 const hubs: Hub[] = [];
@@ -66,10 +67,10 @@ test("an agent's decision is an update, not pushed to other agents; the brain's 
   expect(ev.kind).toBe("update");
   expect(ev.data.updateKind).toBe("decision");
   expect(s.store.recentEvents({ kinds: ["decision"] })).toHaveLength(0);
-  const out = hub.onPrompt({ agentId: mobile.id, prompt: "hi" }, "127.0.0.1");
+  const out = hooksOf(hub).prompt(mobile, { prompt: "hi" });
   expect(JSON.stringify(out)).not.toContain("sidebar");
   s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text: "Go with direction B", relevance: "work", data: {} });
-  expect(JSON.stringify(hub.onPrompt({ agentId: mobile.id, prompt: "hi again" }, "127.0.0.1"))).toContain("Go with direction B");
+  expect(JSON.stringify(hooksOf(hub).prompt(mobile, { prompt: "hi again" }))).toContain("Go with direction B");
   // The brain is asked about the agent's decision.
   expect(hub.mcp.context(mobile)).toContain("sidebar for desktop nav");
 });

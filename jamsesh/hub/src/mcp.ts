@@ -26,6 +26,8 @@ interface Ctx {
   sessionId?: string;
   /** The skill text has been handed over in this connection (a new conversation starts a new one). */
   skillSent?: boolean;
+  /** Who opened this session (see McpEndpoint.owner): every later request must come from the same. */
+  owner?: string;
 }
 
 /** A remote URL without the credentials some people have embedded in it. */
@@ -288,17 +290,32 @@ export class McpEndpoint {
     return [...JAM_TOOLS, ...canvas];
   }
 
+  /**
+   * Who may use an MCP session: the kind of credential and the machine it stands for, so the Mac app
+   * re-issuing its agents credential on a relaunch keeps the session, and nobody else can use it.
+   * The host's loopback is the host's agents (the app's relay hands any process there that credential).
+   */
+  private owner(device: string | null) {
+    if (!device || device === "host") return "agent:host";
+    const d = this.hub.auth.get(device);
+    return d ? `${d.kind}:${this.hub.auth.machineOf(device)}` : `?:${device}`;
+  }
+
   async handle(req: Request, ip: string, device: string | null = null, origin?: string): Promise<Response> {
     const sid = req.headers.get("mcp-session-id");
     if (sid && this.sessions.has(sid)) {
       const s = this.sessions.get(sid)!;
+      // A session id is only good from the credential's own machine: another paired device that
+      // learned it gets "not found", the same as a session that never existed.
+      if (s.ctx.owner !== this.owner(device)) return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
+      s.ctx.device = device;
       s.ctx.ip = ip;
       if (origin) s.ctx.origin = origin;
       return s.transport.handleRequest(req);
     }
     // An unknown session (the hub restarted): 404 tells the client to start a new one.
     if (sid || req.method !== "POST") return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
-    const ctx: Ctx = { agentId: null, ip, device, origin };
+    const ctx: Ctx = { agentId: null, ip, device, origin, owner: this.owner(device) };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: (id) => {
@@ -383,6 +400,10 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
+        const chatId = typeof args.chat === "string" && args.chat.trim() ? args.chat.trim().slice(0, 80) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined;
+        // A chat the room removed stays out until a person lets it back in.
+        if (s.rejoinBlocked(chatId, ctx.agentId))
+          throw new Error('The room removed this chat from the session, so it can\'t join again by itself. Your person can say "connect to jamsesh" in this chat to bring it back, or someone in the room can choose Allow again in Settings.');
         const observer = args.role === "observer";
         const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
@@ -395,7 +416,7 @@ export class McpEndpoint {
           machine,
           // Claude Code's hooks know the chat by its session id, which the SessionStart note hands the
           // agent. Without one (Codex has no hooks) the MCP connection is the chat.
-          chatId: typeof args.chat === "string" && args.chat.trim() ? args.chat.trim().slice(0, 80) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined,
+          chatId,
           platform: args.platform,
           focus: args.focus,
           name: args.name,
@@ -681,7 +702,7 @@ export class McpEndpoint {
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
-      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload" (JAMSESH_TOKEN is in ~/.jamsesh/client.env)`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H @"$HOME/.jamsesh/auth.header" "${origin}/api/upload"`,
       "",
       this.roster(true),
       "",
@@ -714,7 +735,7 @@ export class McpEndpoint {
   rejoinBriefing(agent: Agent, origin = this.hub.session.hubUrl) {
     return [
       `Reconnected to "${this.hub.session.settings().sessionName}" as ${agent.name} (agent id ${agent.id}); your workstreams and directives are as you left them.`,
-      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload"`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H @"$HOME/.jamsesh/auth.header" "${origin}/api/upload"`,
       "",
       this.inboxText(agent, false),
       "",

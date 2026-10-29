@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
+import { hooksOf } from "./hooks";
 import type { Agent, Artifact, Directive, JamEvent, Person, Stage } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -112,7 +113,7 @@ export function makeRoom(opts: { seed?: boolean } = {}): Room {
     },
     say: (who, text) => hub.typed(room.people[who].id, text),
     prompt: (agent, text) => {
-      hub.onPrompt({ agentId: room.agents[agent].id, prompt: text }, "127.0.0.1");
+      hooksOf(hub).prompt(room.agents[agent], { prompt: text });
     },
     async settle(timeoutMs = 90_000) {
       const t0 = Date.now();

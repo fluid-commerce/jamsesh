@@ -169,9 +169,8 @@ Ask a person to open, save or share files.
 5. Post the screenshot so the room sees mockup and build together:
 
    ```sh
-   . ~/.jamsesh/client.env
    curl -s -F file=@build.png -F title="Mobile nav / B: bottom tabs (built)" -F stage=built \
-     -F agent=<your agent id> -H "authorization: Bearer $JAMSESH_TOKEN" "{{HUB}}/api/upload"
+     -F agent=<your agent id> -H @"$HOME/.jamsesh/auth.header" "{{HUB}}/api/upload"
    ```
 
    Title it like the mockup it matches, with "(built)", so the screen can pair them.
