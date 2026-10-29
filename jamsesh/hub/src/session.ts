@@ -1263,7 +1263,9 @@ export class Session {
         const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
         // When the share was all the screen showed, the screen goes back to what it showed before.
         const back = !tiles.length && screen === "main" && before && !(before.mode === "layout" && before.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? before : null;
-        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true });
+        // A lock still held when the share ends stays with what comes back (the owner's share over their own cast, SPEC 10.5).
+        // One its owner let go of during the share stays gone.
+        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen, { override: true, keepLock: st.lock });
       }
     }
   }
@@ -1525,7 +1527,7 @@ export class Session {
     if (!opts.person && !opts.override && this.lockOf(screen)) return cur;
     const now = Date.now();
     const quiet = next.mode === "board" || next.mode === "welcome";
-    const lock: StageLock | undefined = opts.person && !opts.noLock && !quiet ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined;
+    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     this.commitStage(stage, screen);
@@ -1534,6 +1536,7 @@ export class Session {
   }
 
   private commitStage(stage: Stage, screen: string) {
+    this.expireAsksFor(screen, stage.lock);
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
@@ -1670,6 +1673,7 @@ export class Session {
       screen: item.screen,
       ownerId: lock.personId,
       ownerName: lock.by,
+      lockSince: lock.since,
       agentName: item.agentName,
       agentOwner: agent?.ownerName ?? "",
       label: item.label,
@@ -1683,10 +1687,17 @@ export class Session {
     return req;
   }
 
-  /** The lock's owner answered. Yes puts the item up (unlocked); no keeps their screen, and the item stays in the queue. */
+  /**
+   * The lock's owner answered. Yes puts the item up (unlocked); no keeps their screen, and the item stays in the queue.
+   * The answer is about one lock: once the screen's lock changed (unlocked, or someone else's cast), the question has
+   * expired and a late yes does nothing, nor does a yes for an item no longer waiting. The item stays queued either way.
+   */
   answerShowRequest(id: string, approve: boolean, by: string): ShowRequest | null {
     const req = this.showRequests().find((r) => r.id === id);
     if (!req || req.status !== "pending") return null;
+    const lock = this.lockOf(req.screen);
+    const waiting = this.readyToShow().some((r) => r.id === req.readyId);
+    if (!lock || lock.since !== req.lockSince || lock.personId !== req.ownerId || (approve && !waiting)) return this.expireShowRequest(req);
     const done: ShowRequest = { ...req, status: approve ? "approved" : "denied", decidedBy: by, at: approve ? req.at : Date.now() };
     this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === id ? done : r)));
     if (approve) this.showReady(req.readyId);
@@ -1694,6 +1705,19 @@ export class Session {
     this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: approve ? `${by} said yes: ${req.agentName}'s ${req.label} is on the big screen.` : `${by} is keeping their screen up. ${req.agentName}'s ${req.label} waits in the queue.`, relevance: "work", data: { showRequest: id } });
     bus.changed("showRequests");
     return done;
+  }
+
+  private expireShowRequest(req: ShowRequest): ShowRequest {
+    const gone: ShowRequest = { ...req, status: "expired" };
+    this.store.setSetting("showRequests", this.showRequests().map((r) => (r.id === req.id ? gone : r)));
+    bus.changed("showRequests");
+    return gone;
+  }
+
+  /** A screen's lock changed: questions about the lock it had are over (their items stay queued). */
+  private expireAsksFor(screen: string, lock: StageLock | undefined) {
+    for (const r of this.store.setting<ShowRequest[]>("showRequests", []))
+      if (r.screen === screen && r.status === "pending" && (!lock || lock.since !== r.lockSince)) this.expireShowRequest(r);
   }
 
   // ---- history: what each screen showed (3.6) ----
@@ -1746,6 +1770,8 @@ export interface StageOpts {
   override?: boolean;
   /** A person's action that shouldn't hold the screen (a share they started has its own hold). */
   noLock?: boolean;
+  /** The new stage keeps this lock: the owner's own share over their cast, and that cast coming back when it ends. */
+  keepLock?: StageLock;
 }
 
 /** A few words for a stage, for the history strip and the ready queue. */

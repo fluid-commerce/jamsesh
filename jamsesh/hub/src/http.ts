@@ -27,7 +27,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -579,6 +579,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // The lock's owner answers; so does the host's own window, where the room is looking at the question.
     if (asked && !hostWindow && (!who.id || asked.ownerId !== who.id)) return bad(`Only ${asked.ownerName} can answer that.`, 403);
     const done = s.answerShowRequest(m[1], !!body?.approve, who.name);
+    if (done?.status === "expired") return bad("The screen changed since that question, so it no longer applies. The item is still waiting.", 409);
     return done ? json(done) : bad("That question has already been answered.", 404);
   }
 
@@ -845,7 +846,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // The big screen reports its size so the brain can plan layouts for its shape.
-  if (path === "/display" && req.method === "POST" && isLocal(ip)) {
+  // A big-screen window reports or retires its display: only the host's own windows (not another process on the host).
+  if (path === "/display" && (req.method === "POST" || req.method === "DELETE") && !hostWindow) return bad("Only the host's own screens report themselves.", 403);
+  if (path === "/display" && req.method === "POST") {
     const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0);
     const info = { width: n(body?.width), height: n(body?.height), dpr: n(body?.dpr) || 1, screenX: n(body?.screenX), screenY: n(body?.screenY), at: Date.now() };
     const screen = /^[\w-]{1,32}$/.test(String(body?.screen ?? "")) ? String(body.screen) : "main";
@@ -860,7 +863,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
   }
   // A user-less big-screen window closed: it stops being a place to put things (main always stays).
-  if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
+  if (path === "/display" && req.method === "DELETE") {
     const screen = String(body?.screen ?? "");
     if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);
     return json({ ok: true });

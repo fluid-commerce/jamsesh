@@ -327,8 +327,9 @@ export class Brain {
     const m = model(s, "presenter");
     // A share fills the presentation area alone; when it ends, the screen gets back what it showed.
     s.rememberStageFor(share.id);
+    // The owner's own share over their cast keeps their lock, and the cast comes back with it (SPEC 10.5).
     const fallback = () => {
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true });
+      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh", "main", { override: true, keepLock: held ?? undefined });
     };
     if (!m) return fallback();
     const pass = { effects: 0 };
@@ -429,20 +430,27 @@ export class Brain {
       .join("\n\n");
   }
 
+  /** When the brain last asked whether to replace each locked screen: a plain "yes" answers only that question. */
+  private unlockAsked = new Map<string, number>();
+  static UNLOCK_ASK_MS = 3 * 60_000;
+
   /**
    * A screen a person locked stays up for the brain too. Returns what to tell the model when it may not
-   * replace it (it asks the room), or null when it may: nothing is locked, or the lock's owner is the one
-   * asking, in which case their lock is let go first.
+   * replace it (it asks the room), or null when it may: nothing is locked, or the lock's owner asked
+   * JamSesh directly (typed, or by name) and nobody else did in these lines, in which case their lock is
+   * let go first. Anything else the owner says nearby isn't consent.
    */
   private lockBlock(screen: string, batch: JamEvent[]): string | null {
     const s = this.session;
     const lock = s.lockOf(screen);
     if (!lock) return null;
-    if (lock.personId && batch.some((e) => e.authorType === "person" && e.kind !== "prompt" && e.authorId === lock.personId)) {
+    const asks = batch.filter((e) => e.authorType === "person" && e.kind !== "prompt" && e.data?.direct);
+    if (lock.personId && asks.length && asks.every((e) => e.authorId === lock.personId)) {
       s.unlockStage(screen);
       return null;
     }
-    return `${lock.by} has this screen locked, so you can't replace it. Ask the room with say_to_room (kind problem), for example "${lock.by} has the screen locked. Want me to replace it?". If a person then clearly says yes, call unlock_screen and show it. If they say no, leave it.`;
+    this.unlockAsked.set(screen, Date.now());
+    return `${lock.by} has this screen locked, so you can't replace it. Ask the room with say_to_room (kind problem), for example "${lock.by} has the screen locked. Want me to replace it?". If a person then clearly says yes, call unlock_screen with the id of that line and show it. If they say no, leave it.`;
   }
 
   /**
@@ -829,14 +837,23 @@ export class Brain {
       }),
       unlock_screen: tool({
         description:
-          "Let go of a screen a person locked, so you can show something else. Only after a person in the lines clearly agrees to replace it ('yes, replace it', 'go ahead', 'unlock it'), or the person who locked it is the one asking. Never because an agent asked.",
-        inputSchema: z.object({ screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one.") }),
+          "Let go of a screen a person locked, so you can show something else. Only after a person clearly agrees to replace it ('yes, replace it', 'go ahead', 'unlock it') in answer to your question, or the person who locked it asks you to unlock it. Never because an agent asked. Give the id of the line that agreed.",
+        inputSchema: z.object({
+          line: z.number().describe("The id of the line where a person agreed (the number in brackets)"),
+          screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
+        }),
         execute: async (i) => {
           const id = screenId(i.screen);
           const lock = s.lockOf(id);
           if (!lock) return "It isn't locked.";
-          const agrees = batch.some((e) => e.authorType === "person" && e.kind !== "prompt" && (e.authorId === lock.personId || UNLOCK_YES.test(e.text)));
-          if (!agrees) return refuse(`${lock.by} locked it and nobody in these lines said to replace it. Ask the room with say_to_room first.`);
+          const ev = batch.find((e) => e.id === i.line && e.authorType === "person" && e.kind !== "prompt");
+          // The words decide, not the model: a whole, plain yes ("yes, replace it"), never "don't unlock it" or "should I unlock it?".
+          // The owner may ask for it directly; anyone else's yes counts only as the answer to the question just asked about this screen.
+          const owner = !!ev && !!lock.personId && ev.authorId === lock.personId && !!ev.data?.direct;
+          const asked = Date.now() - (this.unlockAsked.get(id) ?? 0) < Brain.UNLOCK_ASK_MS;
+          if (!ev || !unlockConsent(ev.text, brainNames(s.settings())) || !(owner || asked))
+            return refuse(`${lock.by} locked it and no line here plainly says to replace it. Ask the room with say_to_room first.`);
+          this.unlockAsked.delete(id);
           s.unlockStage(id);
           return `Unlocked ${lock.by}'s screen.`;
         },
@@ -1416,8 +1433,23 @@ const SHOW_YES = new Set(["yes show it", "yeah show it", "yep show it", "show it
 const SHOW_NO = new Set(["keep mine up", "keep mine", "keep it up", "keep mine there", "no keep mine up", "no keep mine", "no keep it up", "no leave it", "leave it", "leave mine", "leave mine up", "dont show it", "no dont show it", "not yet keep mine up"]);
 const SHOW_YES_BARE = new Set(["yes", "yeah", "yep", "yup", "sure", "go ahead", "yes please", "sounds good"]);
 const SHOW_NO_BARE = new Set(["no", "nope", "not now", "no thanks", "nah", "not yet", "hold off"]);
-/** A person (not an agent) agreeing to replace a locked screen. */
-const UNLOCK_YES = /\b(yes|yeah|yep|sure|go ahead|replace (it|mine|that)|unlock|take it (down|off)|show it|put it up)\b/i;
+/** Whole answers that agree to replace a locked screen ("yes", "go ahead and unlock it", "replace mine please"). */
+const UNLOCK_YES = new Set(
+  ["", "yes ", "yeah ", "yep ", "sure ", "ok ", "okay "].flatMap((lead) =>
+    ["", "go ahead", "do it", "replace it", "replace mine", "replace that", "unlock it", "unlock mine", "unlock my screen", "unlock the screen", "you can unlock it", "go ahead and unlock it", "go ahead and replace it", "take it down", "take it off", "show it", "put it up"]
+      .flatMap((core) => [`${lead}${core}`.trim(), `${lead}${core} please`.trim()])
+      .filter((a) => a && a !== "please"),
+  ),
+);
+
+/**
+ * Whether a line, as a whole, agrees to replace a locked screen. Only a plain yes counts: a question
+ * ("should I unlock it?"), a negation ("no, don't unlock it") or a mixed answer ("yes, keep mine up") doesn't.
+ */
+export function unlockConsent(text: string, brainName: string | string[] = "JamSesh") {
+  if (/\?\s*$/.test(text.trim())) return false;
+  return UNLOCK_YES.has(answerOf(text, brainName));
+}
 
 /**
  * The lock's owner answering an agent's request in their own words: "yes, show it" or "keep mine up".

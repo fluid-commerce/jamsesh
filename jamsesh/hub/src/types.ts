@@ -332,6 +332,8 @@ export interface ShowRequest {
   screen: string;
   ownerId: string | null;
   ownerName: string;
+  /** The lock asked about (its `since`): an answer counts only while that same lock holds the screen. */
+  lockSince: number;
   agentName: string;
   /** Whose agent it is ("Felipe"), for the question: "Felipe's agent has the checkout build ready". */
   agentOwner: string;
