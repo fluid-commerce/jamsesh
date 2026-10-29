@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, hub, useHub, type Person, type Share } from "./hub";
-import { mediaAvailable, publish, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
+import { activePublication, mediaAvailable, publish, receiveStats, renamePublication, screenUnavailable, stopPublishing, useWatch, usePublications } from "./rtc";
 import "./share.css";
 
 const KIND_WORD = { screen: "screen", camera: "camera" } as const;
@@ -42,6 +42,30 @@ export function PhotoAvatar({ person, size = 28 }: { person: Pick<Person, "name"
 // Tile: a live share filling its parent
 // ---------------------------------------------------------------------------------------------
 
+const SHOW_STATS = typeof location !== "undefined" && new URLSearchParams(location.search).has("rtcstats");
+
+/** Debug overlay (add ?rtcstats to the big screen's address): the resolution, frame rate and bitrate actually arriving. */
+function StatsOverlay({ shareId }: { shareId: string }) {
+  const [text, setText] = useState("");
+  useEffect(() => {
+    let last = { bytes: 0, at: 0 };
+    const t = setInterval(async () => {
+      const st = await receiveStats(shareId).catch(() => null);
+      if (!st) return setText("no stats yet");
+      const now = Date.now();
+      const kbps = last.at ? Math.round(((st.bytes - last.bytes) * 8) / (now - last.at)) : 0;
+      last = { bytes: st.bytes, at: now };
+      setText(`${st.width}x${st.height} · ${st.fps} fps · ${kbps} kbps`);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [shareId]);
+  return (
+    <div className="shr-stats" data-testid="rtc-stats">
+      {text}
+    </div>
+  );
+}
+
 export function ShareTile({ share }: { share: Share }) {
   const { stream, status, attempts, failures } = useWatch(share);
   const video = useRef<HTMLVideoElement>(null);
@@ -74,6 +98,7 @@ export function ShareTile({ share }: { share: Share }) {
           </span>
         </div>
       )}
+      {SHOW_STATS && <StatsOverlay shareId={share.id} />}
       <div className="shr-chip">
         <span className="shr-dot" data-live={live} />
         <b>{share.personName}</b>
@@ -88,6 +113,9 @@ export function ShareTile({ share }: { share: Share }) {
 // ---------------------------------------------------------------------------------------------
 
 async function startShare(kind: Share["kind"], shareId?: string): Promise<Share> {
+  // Already capturing this kind: a second request is answered with the share that is running, not a second capture.
+  const running = activePublication(kind);
+  if (running) return api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: running.shareId });
   const pub = await publish(kind, shareId);
   try {
     const share = await api<Share>("/shares", { deviceId: hub.deviceId, kind, shareId: pub.shareId });
@@ -201,6 +229,8 @@ export function ShareRequestPrompt() {
   useEffect(() => {
     const off = hub.onMessage((m) => {
       if (m?.type !== "share-request" || !m.deviceIds?.includes(hub.deviceId)) return;
+      // They already said yes to this: answer with the share that is running instead of asking again.
+      if (activePublication(m.kind)) return void startShare(m.kind, m.shareId).catch(() => {});
       setQueue((q) => (q.some((r) => r.shareId === m.shareId) ? q : [...q, { shareId: m.shareId, kind: m.kind, reason: m.reason, by: m.by }]));
     });
     return () => void off();
@@ -236,7 +266,9 @@ export function ShareRequestPrompt() {
     setError(null);
     try {
       await startShare(req.kind, req.shareId);
-      pop();
+      // One yes answers every waiting request for the same thing.
+      setQueue((q) => q.filter((r) => r.kind !== req.kind));
+      setError(null);
     } catch (e) {
       setError(failText(e, req.kind) ?? "Sharing was cancelled. Try again, or choose Not now.");
     } finally {
@@ -257,10 +289,12 @@ export function ShareRequestPrompt() {
   }, [req, decline, share]);
   const declineBtn = useRef<HTMLButtonElement>(null);
 
-  if (!req) return null;
+  if (!req) return <SharingBar />;
   const what = req.kind === "screen" ? "your screen" : "your camera";
   const why = req.kind === "screen" ? screenUnavailable() : mediaAvailable();
   return (
+    <>
+    <SharingBar />
     <div className="shr-scrim" onMouseDown={(e) => e.target === e.currentTarget && decline()}>
       <div className="shr-card" role="alertdialog" aria-modal="true" aria-labelledby="shr-title" aria-describedby="shr-body">
         <div className="shr-card-ico">{req.kind === "screen" ? <ScreenIcon big /> : <CameraIcon big />}</div>
@@ -280,6 +314,23 @@ export function ShareRequestPrompt() {
         </div>
         {queue.length > 1 && <div className="shr-more">{queue.length - 1} more waiting</div>}
       </div>
+    </div>
+    </>
+  );
+}
+
+/** "You're sharing" with a Stop: always visible while this window is capturing, whatever tab is open. */
+function SharingBar() {
+  const pubs = usePublications();
+  if (!pubs.length) return null;
+  const what = pubs.length > 1 ? "your screen and camera" : pubs[0].kind === "screen" ? "your screen" : "your camera";
+  return (
+    <div className="shr-bar" role="status">
+      <span className="shr-dot" data-live="true" />
+      <span>You're sharing {what} with the room</span>
+      <button type="button" className="shr-btn stop" onClick={() => pubs.forEach((p) => void stopPublishing(p.shareId))}>
+        Stop
+      </button>
     </div>
   );
 }

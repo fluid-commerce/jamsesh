@@ -95,3 +95,8 @@
 @media (prefers-reduced-motion: reduce) {
   .shr-scrim, .shr-card, .shr-count { animation: none; }
 }
+
+/* A bar that is always on screen while this window is sharing, with a Stop. */
+.shr-bar { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 70; display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 14px; border-radius: 999px; background: var(--panel-2); border: 1px solid rgba(69, 224, 160, 0.4); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); font-size: 13px; color: var(--text); max-width: calc(100vw - 32px); }
+.shr-bar .shr-btn { height: 28px; }
+.shr-stats { position: absolute; top: 10px; left: 10px; padding: 3px 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.7); color: #9fe8c4; font: 12px/1.4 ui-monospace, Menlo, monospace; pointer-events: none; }
