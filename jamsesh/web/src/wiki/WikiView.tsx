@@ -6,7 +6,7 @@ import { api } from "../shared/hub";
 import { filesFrom, hasFiles, checkFile, uploadAttachment } from "../shared/attach";
 import { isTypingTarget, plain } from "../shared/keys";
 import { followsNatively, onWikiOpen, takePendingWikiPage } from "./nav";
-import { drafts, onRefresh, saveRev } from "./draft";
+import { onRefresh, pageAfterLoad, restore, saveRev, track } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
@@ -274,23 +274,24 @@ function GraphPane({ wiki, phone, onOpen }: { wiki: WikiData; phone: boolean; on
   );
 }
 
+const blankPage = (slug: string): WikiPage => ({ slug, title: slug.replace(/-/g, " "), category: "topics", frontMatter: {}, markdown: "", rev: "", backlinks: [], links: [], sources: [] });
+
 function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHistory }: { slug: string; wiki: WikiData; pageSet: Set<string>; phone: boolean; onOpen: (s: string) => void; onBack?: () => void; onSource: (id: string, at: string | null) => void; onHistory: () => void }) {
   const [page, setPage] = useState<WikiPage | null>(null);
   const [err, setErr] = useState<{ status?: number; message: string } | null>(null);
-  const [editing, setEditing] = useState<string | null>(() => drafts.get(slug)?.text ?? null);
+  const [editing, setEditing] = useState<string | null>(() => restore(slug).editing);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<WikiPage | null>(null);
   const [saveErr, setSaveErr] = useState<string | null>(null);
   // The revision the open edit started from. A refresh never changes it (draft.ts).
-  const [base, setBase] = useState(() => drafts.get(slug)?.base ?? "");
+  const [base, setBase] = useState(() => restore(slug).base);
   const meta = wiki.pages.find((p) => p.slug === slug);
   const draft = useRef({ editing, base });
   draft.current = { editing, base };
   const begin = (text: string, rev: string) => (setEditing(text), setBase(rev), setConflict(null));
   // The edit is kept outside this view (draft.ts): leaving the page any way at all leaves it there.
   useEffect(() => {
-    if (editing === null) drafts.drop(slug);
-    else drafts.hold(slug, editing, base);
+    track(slug, editing, base);
   }, [slug, editing, base]);
 
   useEffect(() => {
@@ -299,11 +300,17 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
       (p) => {
         if (!live) return;
         const r = onRefresh(draft.current.editing !== null, draft.current.base, p);
-        if (r.page) setPage(r.page);
+        // A page reopened into a held draft still loads: the draft decides what the editor shows, never whether there is a page.
+        setPage((cur) => pageAfterLoad(cur, p, r));
         if (r.theirs) setConflict(r.theirs);
         setErr(null);
       },
-      (e) => live && setErr({ status: e?.status, message: pretty(e, "Couldn't open this page.") }),
+      (e) => {
+        if (!live) return;
+        // A draft of a page nobody has saved yet: straight into the editor, not the "no page" screen.
+        if (e?.status === 404 && draft.current.editing !== null) return void (setPage((cur) => cur ?? blankPage(slug)), setErr(null));
+        setErr({ status: e?.status, message: pretty(e, "Couldn't open this page.") });
+      },
     );
     return () => void (live = false);
   }, [slug, wiki.version]);
@@ -348,7 +355,7 @@ function PageView({ slug, wiki, pageSet, phone, onOpen, onBack, onSource, onHist
         <h2>{err.status === 404 ? "No page called this yet" : "Couldn't open this page"}</h2>
         <p>{err.status === 404 ? "Someone linked to it before it was written. You can start it." : err.message}</p>
         {err.status === 404 ? (
-          <button className="btn primary" onClick={() => (setErr(null), setPage({ slug, title: slug.replace(/-/g, " "), category: "topics", frontMatter: {}, markdown: "", rev: "", backlinks: [], links: [], sources: [] }), begin("", ""))}>Start this page</button>
+          <button className="btn primary" onClick={() => (setErr(null), setPage(blankPage(slug)), begin("", ""))}>Start this page</button>
         ) : (
           <button className="btn" onClick={wiki.reload}>Try again</button>
         )}

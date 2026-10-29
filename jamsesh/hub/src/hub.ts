@@ -262,17 +262,20 @@ export class Hub {
 
   /** Stops, saving a final snapshot first when there is a canvas to save. */
   async shutdown() {
-    // First of all, close every way in: requests that would add something are refused, and the brain takes no new pass.
+    // One order, one deadline: (1) intake closes, so a request that would add something is refused; (2) requests already admitted
+    // finish (an upload still sending its body adds speech when it lands); (3) speech waiting is transcribed now, not on its timer,
+    // and finishes; (4) the brain triages what it heard, takes nothing new, and its pass finishes. Only then does it stop, and the
+    // local whisper after it. A step that overruns the deadline is given up on: what it adds afterwards is refused.
     this.closing = true;
-    this.brain.drain();
-    // Then what is already under way finishes, in this order: requests being answered (an upload still sending its body adds speech
-    // when it lands), then the speech waiting to be transcribed (now, not on its timer) and the brain's pass. The local whisper
-    // stops only after all of it. One deadline covers the lot.
     const until = Date.now() + Hub.SHUTDOWN_WAIT_MS;
-    const admitted = await this.quiet(until - Date.now());
+    const left = () => Math.max(0, until - Date.now());
+    let ok = await this.quiet(left());
     void this.track(this.audio.flush()).catch((e) => console.error("audio:", e));
+    ok = (await this.quiet(left())) && ok;
+    this.brain.drain();
     void this.track(this.brain.idle());
-    if (!(await this.quiet(until - Date.now())) || !admitted) console.warn("Still working at shutdown: anything it adds now is refused.");
+    ok = (await this.quiet(left())) && ok;
+    if (!ok) console.warn("Still working at shutdown: anything it adds now is refused.");
     this.brain.stop();
     this.transcriber.stop();
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);

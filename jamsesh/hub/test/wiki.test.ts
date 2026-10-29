@@ -2188,7 +2188,7 @@ test("a projects folder that is itself a link is refused, and nothing is made be
   expect(readdirSync(real)).toEqual([]);
 });
 
-test("shutdown lets the brain's active pass finish before it stops: queued passes and new lines are not taken", async () => {
+test("shutdown lets the brain's active and queued passes finish before it stops", async () => {
   const { hub } = room();
   const brain = hub.brain as any;
   let release!: () => void;
@@ -2211,7 +2211,7 @@ test("shutdown lets the brain's active pass finish before it stops: queued passe
   await done;
   await queued;
   expect(stoppedDuring).toBe(false); // it ran to its end, not cut off
-  expect(queuedRan).toBe(false);
+  expect(queuedRan).toBe(true);
   expect(brain.stopped).toBe(true);
 }, 30_000);
 
@@ -2228,4 +2228,47 @@ test("the card's old filing is the one the model was shown, not the page's after
   }) as Decider;
   const card = (await w.tick())!.card!;
   expect(card.wiki!.changes[0]!.meta!.from).toEqual({ category: "topics", workstreams: [] });
+});
+
+test("a message admitted just before the room closes is still triaged by the brain, then the brain stops", async () => {
+  const r = room();
+  const server = startHttp(r.hub, 0);
+  const brain = r.hub.brain as any;
+  const handled: string[] = [];
+  brain.handle = async (batch: { text: string }[]) => void handled.push(...batch.map((e) => e.text));
+  try {
+    const cookie = `jam_window=${r.hub.auth.windows.take(r.hub.auth.windows.mint())}`;
+    const held = await heldPost(server.port!, "/api/say", cookie, JSON.stringify({ text: "Admitted before the room closed, so triage it.", personId: r.chey.id }));
+    const done = r.hub.shutdown();
+    await Bun.sleep(100);
+    expect(await held.finish()).toBe(200);
+    await done;
+    expect(handled.join("\n")).toContain("Admitted before the room closed");
+    expect(brain.stopped).toBe(true);
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("a category-only edit whose write fails is refused and logs no edit: the unchanged page isn't mistaken for a landed one", () => {
+  const { w, dir } = room();
+  writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
+  adopt(dir);
+  const cur = readPage(dir, "pricing")!;
+  const before = sourceIds(dir);
+  const wikiDir = join(dir, "wiki");
+  chmodSync(wikiDir, 0o555);
+  let r;
+  const err = console.error;
+  console.error = () => {};
+  try {
+    r = w.editPage("pricing", cur.markdown, { rev: cur.rev, by: "Chey", category: "decisions" });
+  } finally {
+    chmodSync(wikiDir, 0o755);
+    console.error = err;
+  }
+  expect(r.ok).toBe(false);
+  expect(readPage(dir, "pricing")!.category).toBe("topics");
+  expect(sourceIds(dir)).toEqual(before);
+  expect(readLog(dir, 50).some((e: any) => JSON.stringify(e).includes("edited a page"))).toBe(false);
 });

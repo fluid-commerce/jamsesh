@@ -1107,7 +1107,9 @@ export class WikiService {
     } catch (e) {
       // The write can fail after the page landed (reading it back): then the edit happened, and its source stays.
       const now = readPage(this.dir, slug);
-      if (src && now && now.markdown.trim() === text) page = now;
+      // Landed means the whole record is what this edit makes: the text, the filing (category, workstreams) and the source it cites.
+      const landed = !!src && !!now && now.markdown.trim() === text && now.category === (opts.category ?? cur?.category ?? now.category) && sameList(now.frontMatter.workstreams, cur?.frontMatter.workstreams ?? now.frontMatter.workstreams) && now.frontMatter.sources.includes(src.id);
+      if (landed && now) page = now;
       else {
         // The page didn't change, so the source that says it did goes too.
         const raw = src && vaultDir(this.dir, "raw");

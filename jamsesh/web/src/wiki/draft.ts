@@ -30,5 +30,16 @@ export const drafts = {
   },
   get: (slug: string) => held.get(slug),
   drop: (slug: string) => void held.delete(slug),
-  count: () => held.size,
 };
+
+/** What PageView starts with when it mounts: the held draft (text and the revision it began from), or nothing. */
+export const restore = (slug: string): { editing: string | null; base: string } => {
+  const d = held.get(slug);
+  return { editing: d?.text ?? null, base: d?.base ?? "" };
+};
+
+/** Called by PageView whenever its editor text changes: a text is held, null (saved or cancelled) drops it. Unmounting calls nothing. */
+export const track = (slug: string, editing: string | null, base: string) => (editing === null ? drafts.drop(slug) : drafts.hold(slug, editing, base));
+
+/** The page to show once a fetch lands: the fetched one unless a refresh left the open one alone; a reopened draft with no page yet gets the fetched one too. */
+export const pageAfterLoad = (cur: WikiPage | null, latest: WikiPage, r: { page?: WikiPage }): WikiPage => r.page ?? cur ?? latest;

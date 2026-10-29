@@ -100,14 +100,18 @@ export class Brain {
     return true;
   }
 
-  /** Takes nothing new (no line is heard, no timer fires, no queued pass starts); the pass running now finishes. `stop()` ends the rest. */
+  /**
+   * Takes nothing new: lines heard before this are triaged first (their batch starts now, not on its timer), then no line is heard
+   * and no timer fires. Passes already queued and the one running finish; `stop()` ends the rest.
+   */
   drain() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    void this.flush();
     this.draining = true;
     clearInterval(this.digestTimer);
     clearInterval(this.nagTimer);
-    if (this.timer) clearTimeout(this.timer);
     if (this.shipTimer) clearTimeout(this.shipTimer);
-    this.timer = null;
     this.shipTimer = null;
   }
 
@@ -204,7 +208,7 @@ export class Brain {
     return this.queue;
   }
   private exclusive<T>(fn: () => Promise<T>): Promise<T | undefined> {
-    const guarded = () => (this.stopped || this.draining ? Promise.resolve(undefined) : fn());
+    const guarded = () => (this.stopped ? Promise.resolve(undefined) : fn());
     const run = this.queue.then(guarded, guarded);
     this.queue = run.catch(() => {});
     return run;
