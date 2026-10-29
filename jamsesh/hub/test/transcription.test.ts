@@ -297,6 +297,47 @@ test("turning it on in Settings starts the download (host only); turning it off 
   }
 }));
 
+test("off then on while the faster engine is still starting: it starts again and ends up running", async () => {
+  const hub = room();
+  const t = hub.transcriber as any;
+  const starts: ((url: string | null) => void)[] = [];
+  let stops = 0;
+  t.parakeet.start = () => new Promise<string | null>((r) => starts.push(r));
+  t.parakeet.stop = () => void stops++;
+  hub.session.updateSettings({ fastEngine: true });
+  const first = hub.transcriber.syncFastEngine();
+  await Bun.sleep(5);
+  expect(starts).toHaveLength(1);
+  // On again while starting: the same start, not a second one.
+  expect(hub.transcriber.syncFastEngine()).toBe(first);
+  hub.session.updateSettings({ fastEngine: false });
+  expect(await hub.transcriber.syncFastEngine()).toBe(false);
+  expect(stops).toBe(1);
+  hub.session.updateSettings({ fastEngine: true });
+  const again = hub.transcriber.syncFastEngine();
+  // The stopped start winds down first (its download sees the stop), then a new one begins.
+  await Bun.sleep(5);
+  expect(starts).toHaveLength(1);
+  starts[0](null);
+  expect(await first).toBe(false);
+  await Bun.sleep(5);
+  expect(starts).toHaveLength(2);
+  starts[1]("http://127.0.0.1:9");
+  expect(await again).toBe(true);
+  expect(engines(hub).has("parakeet")).toBe(true);
+  // A start that comes back running after an "off" doesn't join the pool.
+  hub.session.updateSettings({ fastEngine: false });
+  await hub.transcriber.syncFastEngine();
+  hub.session.updateSettings({ fastEngine: true });
+  const third = hub.transcriber.syncFastEngine();
+  hub.session.updateSettings({ fastEngine: false });
+  await hub.transcriber.syncFastEngine();
+  await Bun.sleep(5);
+  starts[2]?.("http://127.0.0.1:9");
+  expect(await third).toBe(false);
+  expect(engines(hub).has("parakeet")).toBe(false);
+});
+
 test("whisper's own invention on noise is dropped too when it's made only of the room's words", async () => {
   const hub = room();
   hub.transcriber.addWorker("laptop", "whisper", fakeEngine("Chey, FigCraft, Passport.").url);

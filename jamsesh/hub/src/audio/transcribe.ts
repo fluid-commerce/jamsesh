@@ -120,28 +120,42 @@ export class Transcriber {
   }
 
   private starting: Promise<boolean> | null = null;
+  /** Bumped by every "off": a start begun before it doesn't count, and one asked for after it begins again. */
+  private fastGen = 0;
+  private startingGen = -1;
   /**
    * Starts or stops Parakeet to match the "Faster engine" setting (off by default). Turning it on
    * downloads the model the first time (minutes, never offline) while whisper or the gateway carry
-   * the room; once it's ready it goes first. Resolves with whether it's running.
+   * the room; once it's ready it goes first. Resolves with whether it's running. Off then on while it
+   * was starting: the stopped start winds down first, then it starts again.
    */
   syncFastEngine(): Promise<boolean> {
     if (!this.fastWanted()) {
+      this.fastGen++;
       this.parakeet.stop();
       this.engines.delete("parakeet");
       return Promise.resolve(false);
     }
     if (this.engines.has("parakeet")) return Promise.resolve(true);
-    this.starting ??= (async () => {
+    if (this.starting && this.startingGen === this.fastGen) return this.starting;
+    const gen = this.fastGen;
+    const before = this.starting;
+    const run = (async () => {
+      if (before) await before.catch(() => false);
+      if (gen !== this.fastGen || !this.fastWanted()) return false;
       this.parakeet.onExit = () => this.engines.delete("parakeet");
       const url = await this.parakeet.start(!config.offline);
-      if (!url) return false;
-      if (!this.fastWanted()) return this.parakeet.stop(), false;
+      // Turned off meanwhile: that "off" stopped it, and a later "on" has its own start.
+      if (!url || gen !== this.fastGen) return false;
       this.engines.set("parakeet", { id: "parakeet", label: "host Parakeet", kind: "parakeet", url, inflight: 0, failures: 0, lastOk: Date.now() });
       this.trouble = null;
       return true;
-    })().finally(() => (this.starting = null));
-    return this.starting;
+    })().finally(() => {
+      if (this.starting === run) this.starting = null;
+    });
+    this.starting = run;
+    this.startingGen = gen;
+    return run;
   }
 
   /** Says so once in a while, in the feed and on screen, instead of the room going silently deaf. */
