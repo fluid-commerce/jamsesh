@@ -105,7 +105,8 @@
           const b = document.createElement("button");
           b.className = "primary";
           b.textContent = "Reopen";
-          b.onclick = () => invoke("relaunch");
+          // The app says so itself if the session couldn't save first; then it stays open.
+          b.onclick = () => ((b.disabled = true), invoke("relaunch").catch(() => (b.disabled = false)));
           actions.append(b);
         } else {
           const allow = document.createElement("button");
