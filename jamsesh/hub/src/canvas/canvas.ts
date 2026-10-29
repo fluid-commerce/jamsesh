@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { config } from "../config";
 import type { Session } from "../session";
 import type { Agent, Platform } from "../types";
+import { withParentWatch } from "../children";
 import { FigcraftMcp, type ToolResult } from "./figcraft-mcp";
 
 interface FrameInfo {
@@ -122,7 +123,7 @@ export class Canvas {
     if (!existsSync(config.figcraftServerBin) && config.figcraftServerBin.includes("/")) {
       throw new Error(`figcraft-server not found at ${config.figcraftServerBin}. Run jamsesh/install.sh.`);
     }
-    this.serverProc = Bun.spawn([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir], {
+    this.serverProc = Bun.spawn(withParentWatch([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir]), {
       stdout: "ignore",
       stderr: "pipe",
     });
