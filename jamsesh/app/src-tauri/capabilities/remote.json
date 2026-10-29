@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-drag",
-  "description": "The session's pages (served by the host through this Mac) may only drag their window by its header.",
-  "windows": ["client", "bigscreen", "remote"],
+  "description": "The session's pages (served by the host through this Mac) may drag their window by its header and emit events (the heartbeat the watchdog listens for).",
+  "windows": ["client", "bigscreen", "bigscreen-*", "remote"],
   "remote": { "urls": ["http://127.0.0.1:*"] },
-  "permissions": ["core:window:allow-start-dragging"]
+  "permissions": ["core:window:allow-start-dragging", "core:event:allow-emit"]
 }
