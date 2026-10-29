@@ -104,7 +104,8 @@ function Diff({ c }: { c: WikiChange }) {
       <pre className="wk-diff scrollbars-thin" tabIndex={0} aria-label={`Changes to ${c.title}`}>
         {v.lines.map((l, i) => (
           <span key={i} className={l.startsWith("+") ? "add" : l.startsWith("-") ? "del" : /^\(/.test(l) ? "note" : ""}>
-            {l || " "}
+            <span className="wk-gut">{l[0] === "+" ? "+" : l[0] === "-" ? "−" : " "}</span>
+            {l[0] === "+" || l[0] === "-" ? l.slice(1) : l || " "}
             {"\n"}
           </span>
         ))}

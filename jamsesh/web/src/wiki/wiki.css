@@ -943,6 +943,12 @@ button.wk-chip:hover:not(:disabled) {
 .wk-diff .del {
   color: var(--warn);
 }
+.wk-gut {
+  display: inline-block;
+  width: 2ch;
+  color: var(--dim);
+  user-select: none;
+}
 
 /* ---- the Work tab's links to the settled pages ---- */
 .settled-row {
