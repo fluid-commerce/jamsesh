@@ -716,11 +716,11 @@ export class Hub {
   // ---------- host build requests (approved by people, by voice or a button) ----------
 
   /** An approved build opened an app: stream it live and put it on the big screen (unless a person's screen is locked). */
-  private async showLive(app: { kind: "ios" } | { kind: "mac"; name: string }, by: string) {
+  private async showLive(app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) {
     let r: Awaited<ReturnType<LiveApps["startIos"]>> = "";
     // A Mac app's window takes a moment to appear.
     for (let i = 0; i < (app.kind === "mac" ? 8 : 1); i++) {
-      r = app.kind === "ios" ? await this.live.startIos(undefined, by) : await this.live.startMac(app.name, by);
+      r = app.kind === "ios" ? await this.live.startIos(undefined, by) : await this.live.startMac({ name: app.name, bundle: app.bundle }, by);
       if (typeof r !== "string" || !/No window/.test(r)) break;
       await Bun.sleep(2000);
     }

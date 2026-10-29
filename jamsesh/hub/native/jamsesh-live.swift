@@ -55,16 +55,32 @@ if args.count >= 2 && args[1] == "--check" {
   exit(0)
 }
 
-func windowInfos(_ owner: String) -> [[String: Any]] {
+// An app is named by its bundle id, and its windows are the ones its processes own: never another app whose
+// name happens to contain the same words.
+func pids(_ bundle: String) -> Set<pid_t> {
+  Set(NSRunningApplication.runningApplications(withBundleIdentifier: bundle).map(\.processIdentifier))
+}
+
+func windowInfos(_ owners: Set<pid_t>) -> [[String: Any]] {
   guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
   return list.filter { w in
-    guard (w[kCGWindowLayer as String] as? Int) == 0, let o = w[kCGWindowOwnerName as String] as? String else { return false }
-    return o.lowercased().contains(owner.lowercased())
+    guard (w[kCGWindowLayer as String] as? Int) == 0, let pid = w[kCGWindowOwnerPID as String] as? Int32 else { return false }
+    return owners.contains(pid)
   }
 }
 
+// The running apps with windows of their own, for the hub to find an app by its exact name.
+if args.count >= 2 && args[1] == "--apps" {
+  let out: [[String: Any]] = NSWorkspace.shared.runningApplications.compactMap { a in
+    guard a.activationPolicy == .regular, let bundle = a.bundleIdentifier, let name = a.localizedName else { return nil }
+    return ["pid": Int(a.processIdentifier), "bundle": bundle, "name": name]
+  }
+  if let d = try? JSONSerialization.data(withJSONObject: out), let s = String(data: d, encoding: .utf8) { print(s) }
+  exit(0)
+}
+
 if args.count >= 3 && args[1] == "--windows" {
-  let out: [[String: Any]] = windowInfos(args[2]).compactMap { w in
+  let out: [[String: Any]] = windowInfos(pids(args[2])).compactMap { w in
     guard let id = w[kCGWindowNumber as String] as? UInt32, let b = w[kCGWindowBounds as String] as? [String: CGFloat], let width = b["Width"], let height = b["Height"] else { return nil }
     return ["id": Int(id), "title": (w[kCGWindowName as String] as? String) ?? "", "w": Int(width), "h": Int(height)]
   }
@@ -72,8 +88,8 @@ if args.count >= 3 && args[1] == "--windows" {
   exit(0)
 }
 
-guard args.count >= 2, !args[1].isEmpty else { fail("args", "Usage: jamsesh-live <app name> [fps] [--window id] [--crop x,y,w,h]") }
-let appName = args[1].lowercased()
+guard args.count >= 2, !args[1].isEmpty else { fail("args", "Usage: jamsesh-live <bundle id> [fps] [--window id] [--crop x,y,w,h]") }
+let bundle = args[1]
 var fps = 30
 var wantWindow: UInt32?
 var crop: CGRect?
@@ -101,13 +117,11 @@ struct Target {
 var current: Target?
 let lock = NSLock()
 
+/** The app's largest window (or the one asked for), from the app's own processes only. */
 func findWindow() -> Target? {
-  guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
   var best: Target?
-  for w in list {
-    guard (w[kCGWindowLayer as String] as? Int) == 0,
-      let owner = w[kCGWindowOwnerName as String] as? String, owner.lowercased().contains(appName),
-      let id = w[kCGWindowNumber as String] as? UInt32, let pid = w[kCGWindowOwnerPID as String] as? Int32,
+  for w in windowInfos(pids(bundle)) {
+    guard let id = w[kCGWindowNumber as String] as? UInt32, let pid = w[kCGWindowOwnerPID as String] as? Int32,
       let b = w[kCGWindowBounds as String] as? [String: CGFloat],
       let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"], width > 60, height > 60
     else { continue }
@@ -119,8 +133,22 @@ func findWindow() -> Target? {
   return best
 }
 
-guard let first = findWindow() else { fail("nowindow", "No window of \(args[1]) is on screen.") }
+guard let first = findWindow() else { fail("nowindow", "No window of \(bundle) is on screen.") }
 current = first
+
+/**
+ * Where the captured window is now: the same window, still owned by the same process of the same app. Nil once it
+ * has closed, gone off screen, or its process has been replaced, and then capture and input stop.
+ */
+func sameWindow() -> Target? {
+  guard NSRunningApplication(processIdentifier: first.pid)?.bundleIdentifier == bundle,
+    let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], first.id) as? [[String: Any]],
+    let w = list.first, (w[kCGWindowNumber as String] as? UInt32) == first.id, (w[kCGWindowOwnerPID as String] as? Int32) == first.pid,
+    (w[kCGWindowIsOnscreen as String] as? Bool) ?? false,
+    let b = w[kCGWindowBounds as String] as? [String: CGFloat], let x = b["X"], let y = b["Y"], let width = b["Width"], let height = b["Height"]
+  else { return nil }
+  return Target(id: first.id, pid: first.pid, bounds: CGRect(x: x, y: y, width: width, height: height))
+}
 
 // ---- input ----
 let canInput = AXIsProcessTrusted()
@@ -243,10 +271,11 @@ Task {
 let timer = DispatchSource.makeTimerSource(queue: .global())
 timer.schedule(deadline: .now() + 0.25, repeating: 0.25)
 timer.setEventHandler {
-  guard let t = findWindow() else { return }
+  let t = sameWindow()
   lock.lock()
-  if t.id == first.id || current == nil { current = t }
+  current = t
   lock.unlock()
+  if t == nil { fail("nowindow", "The window closed.") }
 }
 timer.resume()
 RunLoop.main.run()

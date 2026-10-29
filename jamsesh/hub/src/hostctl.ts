@@ -206,7 +206,7 @@ export class HostControl {
   /** Set by the hub: a preview build finished (opened, or failed), so the brain can arrange the result. */
   onBuilt: (label: string, ok: boolean, text: string) => void = () => {};
   /** Set by the hub: an approved build opened an app (an iPhone build in the Simulator, or a Mac app by name), so it can stream live (6.3). */
-  onOpened: (app: { kind: "ios" } | { kind: "mac"; name: string }, by: string) => void = () => {};
+  onOpened: (app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) => void = () => {};
   /** The latest Simulator screenshot: taps and swipes are given in its pixels. */
   private simShot: { udid: string; name: string; px: number; py: number } | null = null;
 
@@ -515,7 +515,11 @@ export class HostControl {
         const opened = inside ? await run(["open", target]) : { code: 1, out: "that path is outside the checkout" };
         ok = !opened.code;
         result = opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
-        if (ok && target.endsWith(".app")) this.onOpened({ kind: "mac", name: (await run(["/usr/bin/defaults", "read", join(target, "Contents", "Info"), "CFBundleName"])).out.trim() || (target.split("/").pop() ?? "").replace(/\.app$/, "") }, o.by);
+        if (ok && target.endsWith(".app")) {
+          const info = (key: string) => run(["/usr/bin/defaults", "read", join(target, "Contents", "Info"), key]).then((r) => (r.code ? "" : r.out.trim()));
+          // Its bundle id is how the live tile finds this app's window, and no other app's.
+          this.onOpened({ kind: "mac", name: (await info("CFBundleName")) || (target.split("/").pop() ?? "").replace(/\.app$/, ""), bundle: (await info("CFBundleIdentifier")) || undefined }, o.by);
+        }
       } else {
         result = `${label} is built on the host (${dir}).`;
       }

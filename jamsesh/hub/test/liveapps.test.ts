@@ -248,15 +248,25 @@ test("a Mac app's helper: frames come out, input goes in, and its errors become 
   writeFileSync(
     fake,
     `#!/bin/bash
+[ "$1" = "--apps" ] && { echo '[{"pid":41,"bundle":"com.example.fake","name":"Fake App"},{"pid":42,"bundle":"com.example.fakehelper","name":"Fake App Helper"},{"pid":43,"bundle":"com.example.twin1","name":"Twin"},{"pid":44,"bundle":"com.example.twin2","name":"twin"}]'; exit 0; }
+echo "$@" > "${dir}/mac-args"
 echo '{"event":"window","w":800,"h":600}' >&2
 printf '\\x00\\x00\\x00\\x06\\xff\\xd8ab\\xff\\xd9'
 while read -r line; do echo "$line" >> "${dir}/mac-input"; done
 `,
   );
   chmodSync(fake, 0o755);
-  const r = await hub.live.startMac("Fake App", "Maya", [fake]);
+  // An app is found by its exact name (any case), never by part of one, and two apps with that name are refused.
+  expect(String(await hub.live.startMac({ name: "Fake" }, "Maya", [fake]))).toContain("No running app is called Fake");
+  expect(String(await hub.live.startMac({ name: "App" }, "Maya", [fake]))).toContain("No running app");
+  expect(String(await hub.live.startMac({ name: "Twin" }, "Maya", [fake]))).toContain("Two running apps");
+  expect(String(await hub.live.startMac({ name: "Fake App", bundle: "com.x; rm -rf ~" }, "Maya", [fake]))).toContain("bundle id");
+  expect(hub.live.list().filter((a) => a.status === "live")).toHaveLength(0);
+  const r = await hub.live.startMac({ name: "fake app" }, "Maya", [fake]);
   if (typeof r === "string") throw new Error(r);
-  expect(r).toMatchObject({ kind: "mac", name: "Fake App", width: 800, height: 600, canTap: true });
+  expect(r).toMatchObject({ kind: "mac", name: "fake app", width: 800, height: 600, canTap: true });
+  // The helper is told the app's bundle id: it captures and sends input to that app's own process only.
+  expect(readFileSync(join(dir, "mac-args"), "utf8").trim()).toBe("com.example.fake 30");
   let frames = 0;
   const off = hub.live.subscribe(r.id, () => frames++)!;
   expect(frames).toBe(1);
@@ -272,7 +282,7 @@ while read -r line; do echo "$line" >> "${dir}/mac-input"; done
   const bad = join(dir, "bad-live");
   writeFileSync(bad, `#!/bin/bash\necho '{"event":"error","code":"screen","text":"Screen Recording isn'"'"'t allowed for JamSesh on this Mac."}' >&2\nexit 3\n`);
   chmodSync(bad, 0o755);
-  const refused = await hub.live.startMac("Fake App", "Maya", [bad]);
+  const refused = await hub.live.startMac({ name: "Fake App", bundle: "com.example.fake" }, "Maya", [bad]);
   expect(String(refused)).toContain("Screen Recording");
   expect(hub.live.list().filter((a) => a.status === "live")).toHaveLength(0);
 });
@@ -318,7 +328,8 @@ function fakeHelper(name: string, opts: { screen: boolean; windows: unknown[]; f
     f,
     `#!/bin/bash
 [ "$1" = "--check" ] && { echo '{"screen":${opts.screen},"accessibility":true}'; exit 0; }
-[ "$1" = "--windows" ] && { echo '${JSON.stringify(opts.windows)}'; exit 0; }
+# Simulator's windows are asked for by its bundle id, not a name another app could share.
+[ "$1" = "--windows" ] && { [ "$2" = "com.apple.iphonesimulator" ] && echo '${JSON.stringify(opts.windows)}' || echo '[]'; exit 0; }
 echo "$@" > "${dir}/${name}.args"
 ${opts.frames === false ? "exit 0" : `printf '\\x00\\x00\\x00\\x08\\xff\\xd8win!\\xff\\xd9'; sleep 30`}
 `,
@@ -345,7 +356,7 @@ test("a Simulator with Screen Recording and its window open streams the window, 
   const n = readFileSync(join(dir, "n"), "utf8");
   await Bun.sleep(500);
   expect(readFileSync(join(dir, "n"), "utf8")).toBe(n);
-  expect(readFileSync(join(dir, "live-ok.args"), "utf8")).toMatch(/Simulator 30 --window 77 --crop [\d.]+,[\d.]+,[\d.]+,[\d.]+/);
+  expect(readFileSync(join(dir, "live-ok.args"), "utf8")).toMatch(/^com\.apple\.iphonesimulator 30 --window 77 --crop [\d.]+,[\d.]+,[\d.]+,[\d.]+/);
   // Rotating drops to screenshots (the window isn't the screen's shape any more); the person is told why nothing is wrong.
   await post(`/apps/${id}/control`, { action: "take" }, samHeaders);
   await post(`/apps/${id}/input`, { t: "rotate" }, samHeaders);

@@ -985,7 +985,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (!m[1] && req.method === "POST") {
       if (!hostWindow) return bad("Only the host can put an app on a tile.", 403);
       if (!s.settings().hostControl) return bad("Host control is turned off in Settings.", 409);
-      const r = body?.kind === "mac" ? await hub.live.startMac(String(body?.name ?? ""), person.name) : await hub.live.startIos(body?.device ? String(body.device) : undefined, person.name);
+      const r = body?.kind === "mac" ? await hub.live.startMac({ name: String(body?.name ?? ""), bundle: typeof body?.bundle === "string" ? body.bundle : undefined }, person.name) : await hub.live.startIos(body?.device ? String(body.device) : undefined, person.name);
       return typeof r === "string" ? bad(r, 409) : json({ app: r });
     }
     if (m[1] && !m[2] && req.method === "DELETE") return hostWindow || hub.live.drives(m[1], who.personId) ? (hub.live.stop(m[1]) ? json({ ok: true }) : bad("No such app.", 404)) : bad("Only the host or whoever is driving can stop it.", 403);

@@ -93,6 +93,9 @@ export function planCapture(o: { helper: boolean; screenAccess: boolean; windows
   return { mode: "window", window: w };
 }
 
+/** Simulator's bundle id: its windows are captured by process, not by a name another app could share. */
+const SIMULATOR = "com.apple.iphonesimulator";
+const BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,199}$/;
 const finite = (...v: unknown[]) => v.every((n) => typeof n === "number" && Number.isFinite(n));
 const unit = (n: number) => Math.min(1, Math.max(0, n));
 
@@ -190,13 +193,21 @@ export class LiveApps {
     return { ...r.info };
   }
 
-  /** A Mac app's window (by app name) as a live tile; needs the jamsesh-live helper (built from source on first use). */
-  async startMac(appName: string, by: string, helper?: string[]): Promise<LiveApp | string> {
-    if (!appName.trim() || appName.length > 80) return "Give the app's name.";
+  /**
+   * A Mac app's window as a live tile; needs the jamsesh-live helper (built from source on first use). The app is
+   * found by its bundle id: given (an app the host opened), or the one running app whose name is exactly `name`.
+   * The helper captures and sends input to that app's process only, never one whose name merely contains it.
+   */
+  async startMac(target: { name: string; bundle?: string }, by: string, helper?: string[]): Promise<LiveApp | string> {
+    const appName = target.name.trim();
+    if (!appName || appName.length > 80) return "Give the app's name.";
     const cmd = helper ?? (await this.helper());
     if (typeof cmd === "string") return cmd;
-    const proc = Bun.spawn([...cmd, appName.trim(), "30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-    const live = this.add({ kind: "mac", name: appName.trim(), width: 0, height: 0, orientation: "portrait", appearance: null, canTap: true, startedBy: by }, { proc });
+    const bundle = target.bundle ?? (await this.bundleOf(cmd, appName));
+    if (bundle.startsWith("!")) return bundle.slice(1);
+    if (!BUNDLE_ID.test(bundle)) return "That isn't an app's bundle id.";
+    const proc = Bun.spawn([...cmd, bundle, "30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const live = this.add({ kind: "mac", name: appName, width: 0, height: 0, orientation: "portrait", appearance: null, canTap: true, startedBy: by }, { proc });
     if (typeof live === "string") return (proc.kill(), live);
     void this.readHelper(live, proc);
     // The first word from the helper says whether it's capturing; an error ends the tile at once.
@@ -209,6 +220,19 @@ export class LiveApps {
     }
     this.log(`${by} put ${appName} (Mac app) on a live tile.`);
     return { ...live.info };
+  }
+
+  /** The bundle id of the one running app called exactly `name` (any case), or "!" and why there's none. */
+  private async bundleOf(cmd: string[], name: string): Promise<string> {
+    let apps: { bundle?: unknown; name?: unknown }[] = [];
+    try {
+      apps = JSON.parse((await run([...cmd, "--apps"])).out);
+    } catch {}
+    const want = name.toLowerCase();
+    const hits = [...new Set((Array.isArray(apps) ? apps : []).filter((a) => typeof a?.name === "string" && a.name.toLowerCase() === want && typeof a.bundle === "string").map((a) => a.bundle as string))];
+    if (!hits.length) return `!No running app is called ${name}. Open it on the host first.`;
+    if (hits.length > 1) return `!Two running apps are called ${name}, so JamSesh can't tell which to show.`;
+    return hits[0]!;
   }
 
   /** Picks how a Simulator's picture is captured: its window at 30 fps if the host allows it, else screenshots. Starts as screenshots and upgrades. */
@@ -225,7 +249,7 @@ export class LiveApps {
       access = (await run([...cmd, "--check"])).out.includes('"screen":true');
       if (access) {
         try {
-          windows = JSON.parse((await run([...cmd, "--windows", "Simulator"])).out) as SimWindow[];
+          windows = JSON.parse((await run([...cmd, "--windows", SIMULATOR])).out) as SimWindow[];
         } catch {}
       }
     }
@@ -239,7 +263,7 @@ export class LiveApps {
     // The screen sits inside the window's frame: crop to it so taps map onto the picture.
     const rect = simScreenRect({ x: 0, y: 0, width: plan.window.w, height: plan.window.h }, live.screen.widthPx, live.screen.heightPx, live.screen.density);
     if (!rect) return void this.update(live, { capture: "screenshots", hint: undefined });
-    const proc = Bun.spawn([...cmd, "Simulator", "30", "--window", String(plan.window.id), "--crop", `${rect.x},${rect.y},${rect.width},${rect.height}`], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn([...cmd, SIMULATOR, "30", "--window", String(plan.window.id), "--crop", `${rect.x},${rect.y},${rect.width},${rect.height}`], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     live.proc = proc;
     this.update(live, { capture: "window", hint: undefined });
     void this.readHelper(live, proc);
