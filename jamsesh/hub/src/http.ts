@@ -591,7 +591,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
     // With this room's id: a hook keeps it with the chat, so a prompt queued while the host is away
     // is only ever sent to this room.
-    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine), room: s.roomId() });
+    if (hook === "joined") return json({ ...hub.chatJoined(b, machine), room: s.roomId() });
     // Sent for one room (a queued prompt, or a call made just before this Mac's relay switched hosts):
     // refused before anything is recorded, read or acknowledged, so the hook keeps it for that room. A call
     // that doesn't name its room (an older hook, or a direct caller) can't show it is meant for this one.

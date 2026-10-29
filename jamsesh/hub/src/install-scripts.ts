@@ -83,8 +83,10 @@ fi
 if ! printf '%s' "$ans" | grep -q '"joined":true'; then
   rm -f "$mark"
   # Not joined. The person asking to connect is the one moment this chat needs its id: the agent
-  # passes it to jam_join. Saying so also lets a chat the room removed join again.
-  if [ "$connect" = true ]; then
+  # passes it to jam_join. A chat the room removed is told who can let it back in: asking doesn't.
+  if [ "$connect" = true ] && printf '%s' "$ans" | grep -q '"removed":true'; then
+    printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"This chat was removed from the room. Ask someone to choose Settings > Removed chats > Allow again."}}'
+  elif [ "$connect" = true ]; then
     printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"JamSesh chat id for jam_join (pass it as chat): %s"}}' "$sid"
   fi
   exit 0

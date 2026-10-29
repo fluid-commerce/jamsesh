@@ -383,9 +383,10 @@ which takes the agent out and, with `purge`, deletes the feed lines it caused.
 
 **A removed chat stays out.** Its `jam_join` is refused (by its chat id, which for Codex is its
 folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
-Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only), or its
-own person saying "connect to jamsesh" in that chat, which its hook reports from the same machine
-(`/api/hooks/joined` with `connect: true`). Removals are kept in the session, so a hub restart doesn't
+Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`, people only). Nothing
+an agent or its hook sends clears a removal: a removed chat that types "connect to jamsesh" is told by its
+hook "This chat was removed from the room. Ask someone to choose Settings > Removed chats > Allow
+again." (`/api/hooks/joined` answers `removed: true` and changes nothing). Removals are kept in the session, so a hub restart doesn't
 undo them, and they never expire on their own. A join that doesn't name its chat (a Claude Code
 `jam_join` without `chat`, say on a fresh MCP session) can't show it isn't the removed chat, so it
 is also refused from the machine, folder and harness of a removed chat until someone lets that chat
@@ -410,9 +411,7 @@ ids and read or acknowledge that chat's room items, post a prompt as Chey for it
 "connect to jamsesh" for a chat Chey's Mac had removed. It cannot do any of that for a chat on another
 Mac, and it cannot act as a person (person-only routes need a person's window). Chats on one machine
 are told apart for routing (each its own agent and inbox), not as a security boundary. A removed
-chat is let back in by its person's words only through its own machine's joined check (the hook
-sends `connect: true` only when the prompt starts by asking to connect, so "don't connect to jamsesh"
-doesn't count), or by a person choosing Allow again.
+chat is let back in only by a person choosing Allow again.
 
 **Removing an agent ends everything waiting on it.** Its listener, any `jam_wait`, and any `jam_ask` it is waiting on end at once
 with nothing (a wait that ends checks the agent is still in the room), handovers it hadn't

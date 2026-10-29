@@ -615,10 +615,10 @@ export class Session {
     );
   }
 
-  /** Lets a removed chat join again. By chat id, only a removal from the same machine (the chat's own hook asking). */
-  allowRejoin(match: { id?: string; chatId?: string; machine?: string }): boolean {
+  /** Lets a removed chat join again: only a person's Allow again (a people-only route) calls this. */
+  allowRejoin(match: { id: string }): boolean {
     const all = this.removedChats();
-    const gone = all.filter((r) => (match.id ? r.id === match.id : !!match.chatId && r.chatId === match.chatId && r.machine === match.machine));
+    const gone = all.filter((r) => r.id === match.id);
     if (!gone.length) return false;
     for (const r of gone) this.removedAgents.delete(r.agentId);
     this.store.setSetting("removedChats", all.filter((r) => !gone.includes(r)));

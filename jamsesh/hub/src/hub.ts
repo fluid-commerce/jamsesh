@@ -457,12 +457,15 @@ export class Hub {
   }
 
   /**
-   * Whether this chat has joined (a hook asks before it sends anything). `connect`: its person just
-   * said "connect to jamsesh" in it, which lets a chat the room removed join again (from its own machine).
+   * Whether this chat has joined (a hook asks before it sends anything), and, if it isn't in the room,
+   * whether the room removed it from this machine (the hook then tells its person who can let it back in).
+   * Asking changes nothing: only a person's Allow again clears a removal.
    */
-  chatJoined(body: any, machine?: string | null): boolean {
-    if (body?.connect === true && typeof body.session_id === "string" && machine) this.session.allowRejoin({ chatId: body.session_id, machine });
-    return !!this.hookAgent(body, "", machine);
+  chatJoined(body: any, machine?: string | null): { joined: boolean; removed?: boolean } {
+    if (this.hookAgent(body, "", machine)) return { joined: true };
+    const chat = typeof body?.session_id === "string" ? body.session_id : "";
+    const removed = !!chat && !!machine && this.session.removedChats().some((r) => r.chatId === chat && r.machine === machine);
+    return removed ? { joined: false, removed: true } : { joined: false };
   }
 
   /** UserPromptSubmit: the prompt goes into context; new room items come back as context. */

@@ -34,8 +34,11 @@ test("a removed Claude Code chat can't rejoin through a fresh MCP session that d
   const otherWin = hub.auth.issue({ kind: "browser", label: "Mo's Mac", ip: "10.0.0.6" });
   const other = hub.auth.issue({ kind: "agent", label: "Mo's agents", ip: "10.0.0.6", ownerDeviceId: otherWin.device.id });
   expect((await hub.mcp.call(fresh(other.device.id), "jam_join", { owner: "Mo", harness: "claude-code", repo: "app", cwd: "/w/app" })).isError).toBeFalsy();
-  // Its person saying "connect to jamsesh" in that chat lets it back, with or without its chat id.
-  await (await fetch(`${base}/api/hooks/joined`, { method: "POST", headers: { ...remote, authorization: `Bearer ${cred.token}` }, body: JSON.stringify({ session_id: "chat-gone7", connect: true }) })).body?.cancel();
+  // "connect to jamsesh" in that chat doesn't let it back, however it is sent: only a person's Allow again does.
+  const said = await (await fetch(`${base}/api/hooks/joined`, { method: "POST", headers: { ...remote, authorization: `Bearer ${cred.token}` }, body: JSON.stringify({ session_id: "chat-gone7", connect: true }) })).json();
+  expect(said).toMatchObject({ joined: false, removed: true });
+  await expect(hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).rejects.toThrow("removed this chat");
+  expect(s.allowRejoin({ id: s.removedChats().find((r) => r.chatId === "chat-gone7")!.id })).toBe(true);
   expect((await hub.mcp.call(fresh(), "jam_join", { harness: "claude-code", repo: "app", cwd: "/w/app" })).isError).toBeFalsy();
 });
 

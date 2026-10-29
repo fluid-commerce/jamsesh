@@ -195,8 +195,16 @@ test("a removed chat can't join again until a person allows it, or its person sa
   // Another machine saying "connect" for this chat doesn't let it back.
   expect((await (await hook("joined", macB.token, { session_id: "chat-gone", connect: true })).json()).joined).toBe(false);
   await expect(join(ctx(macA.device.id))).rejects.toThrow("removed this chat");
-  // Its own person typing "connect to jamsesh" in it (the hook says so) does.
-  await (await hook("joined", macA.token, { session_id: "chat-gone", connect: true })).body?.cancel();
+  // Its own chat saying "connect" doesn't either (an agent could say it for itself): the hook is only told
+  // it was removed, so it can tell its person who can allow it.
+  const ans = await (await hook("joined", macA.token, { session_id: "chat-gone", connect: true })).json();
+  expect(ans).toMatchObject({ joined: false, removed: true });
+  await expect(join(ctx(macA.device.id))).rejects.toThrow("removed this chat");
+  expect(s.removedChats().some((r) => r.chatId === "chat-gone")).toBe(true);
+  // A person's Allow again does (their window, not an agent's credential).
+  const rec0 = s.removedChats().find((r) => r.chatId === "chat-gone")!;
+  expect((await fetch(`${base}/api/removed-chats/${rec0.id}/allow`, { method: "POST", headers: bearer(macA.token), body: "{}" })).status).toBe(403);
+  expect((await fetch(`${base}/api/removed-chats/${rec0.id}/allow`, { method: "POST", headers: bearer(felipeWindow.token), body: "{}" })).status).toBe(200);
   expect((await join(ctx(macA.device.id))).isError).toBeFalsy();
 
   // A Codex chat (its MCP connection is the chat): out until someone allows it again, people only.
@@ -291,6 +299,7 @@ test("hook.sh records what it passed on and acknowledges it with its next call; 
 test("hook.sh sends nothing more for a chat once the room removed it, or after a host switch", async () => {
   // A fake host that records every hook body it receives.
   let joined = true;
+  let removed = false;
   const bodies: { path: string; body: string }[] = [];
   const fake = Bun.serve({
     port: 0,
@@ -298,7 +307,7 @@ test("hook.sh sends nothing more for a chat once the room removed it, or after a
       const path = new URL(req.url).pathname;
       const body = await req.text();
       bodies.push({ path, body });
-      if (path.endsWith("/hooks/joined")) return Response.json({ joined });
+      if (path.endsWith("/hooks/joined")) return Response.json(removed ? { joined, removed: true } : { joined });
       return Response.json({}, { headers: { "x-jam-joined": joined ? "1" : "0" } });
     },
   });
@@ -322,6 +331,13 @@ test("hook.sh sends nothing more for a chat once the room removed it, or after a
     const c = await run("prompt", { session_id: "chat-m", prompt: "connect to jamsesh" });
     expect(JSON.parse(bodies[0]!.body)).toEqual({ session_id: "chat-m", connect: true });
     expect(c.out).toContain("JamSesh chat id for jam_join (pass it as chat): chat-m");
+    expect(bodies).toHaveLength(1);
+    // If the room removed it, the chat is told plainly who can let it back in, and still sends nothing.
+    removed = true;
+    bodies.length = 0;
+    const gone = await run("prompt", { session_id: "chat-m", prompt: "connect to jamsesh" });
+    expect(gone.out).toContain("This chat was removed from the room. Ask someone to choose Settings > Removed chats > Allow again.");
+    expect(gone.out).not.toContain("chat id for jam_join");
     expect(bodies).toHaveLength(1);
   } finally {
     fake.stop(true);
