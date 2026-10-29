@@ -5,11 +5,16 @@
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/geist-mono": "^5.3.0",
+    "d3-force": "3.0.0",
+    "dompurify": "3.4.0",
+    "markdown-it": "14.1.0",
     "qrcode-generator": "^2.0.4",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
+    "@types/d3-force": "3.0.10",
+    "@types/markdown-it": "14.1.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",

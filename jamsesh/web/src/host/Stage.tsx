@@ -13,6 +13,7 @@ function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
 }
 import { StageBar } from "../shared/StageControls";
 import { cast } from "../client/CastPicker";
+import { WikiStage } from "../wiki/WikiStage";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
@@ -42,6 +43,9 @@ export function Stage({ state, interactive, tilePins = true, bar }: { state: Hub
       break;
     case "join":
       body = <JoinStage state={state} />;
+      break;
+    case "wiki":
+      body = <WikiStage />;
       break;
     case "spotlight":
       body = <Columns title={stage.title} caption={stage.caption} items={pick(stage.items)} state={state} big />;

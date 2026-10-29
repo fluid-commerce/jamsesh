@@ -628,9 +628,9 @@ export class Brain {
       }),
       show_on_screen: tool({
         description:
-          "Change the big screen. 'board' = live bento of newest work; 'spotlight' = one or two artifacts large; 'compare' = variants side by side (labelled A, B, C); 'parity' = columns, for example desktop beside mobile; 'agents' = every agent's live activity; 'canvas' = the live shared canvas with everyone's cursors; 'join' = how to join, full screen: a big QR code, the host's address, the 4-character code (it changes every 30 seconds and the screen keeps it current), and steps for phones, laptops and agents. Use 'join' when someone asks how to join or connect, for the code, the QR code, the address, or how to get on with their phone. 'custom' = your own HTML (use build_custom_view instead).",
+          "Change the big screen. 'board' = live bento of newest work; 'spotlight' = one or two artifacts large; 'compare' = variants side by side (labelled A, B, C); 'parity' = columns, for example desktop beside mobile; 'agents' = every agent's live activity; 'canvas' = the live shared canvas with everyone's cursors; 'join' = how to join, full screen: a big QR code, the host's address, the 4-character code (it changes every 30 seconds and the screen keeps it current), and steps for phones, laptops and agents. Use 'join' when someone asks how to join or connect, for the code, the QR code, the address, or how to get on with their phone. 'wiki' = the project wiki's link graph, drawn large: every page a dot coloured by kind, linked pages joined, pages the wiki just learned about pulsing. Use it when someone asks to see the wiki, the wiki graph, or the map of what we know. 'custom' = your own HTML (use build_custom_view instead).",
         inputSchema: z.object({
-          mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas", "join"]),
+          mode: z.enum(["board", "spotlight", "compare", "parity", "agents", "canvas", "join", "wiki"]),
           title: z.string().optional(),
           caption: z.string().optional(),
           artifactIds: z.array(z.string()).optional(),
@@ -655,7 +655,7 @@ export class Brain {
               caption: i.caption ?? "",
               items,
               columns: i.columns?.map((c) => ({ label: c.label, items: c.artifactIds.filter((a) => known.has(a)) })),
-              pinned: i.pin ?? false,
+              pinned: i.pin ?? i.mode === "wiki",
               follow: i.mode === "canvas" ? i.follow ?? null : null,
               page: i.mode === "canvas" ? i.page ?? null : null,
             },
@@ -1630,6 +1630,7 @@ How to route:
 - When the room changes its mind, or a higher-weight person overrules work already sent, cancel_directive the old one and create_directive the new work (explore or implement). Mode "answer" is only for answering an agent's question, never for changing or cancelling work.
 - A decision ("I like B", "go with direction A") should usually do three things: record_decision, then an implement directive to the agent that owns it (mentioning the chosen artifact by title), and spotlight the chosen artifact.
 - "How do I join?", "what's the code?", "put the QR up", "how do I get on with my phone?" = show_on_screen with mode "join". Say nothing else about the code out loud: the screen shows it and it changes every 30 seconds.
+- "Show the wiki", "put the wiki graph up", "what do we know so far (on the screen)" = show_on_screen with mode "wiki".
 - "Bring that up", "show me", "pull up" = show_on_screen. Use search_artifacts if the ids aren't obvious. "That one" usually means what is on screen or the latest artifact.
 - If an agent asked the room a question and someone answered, send an 'answer' directive to that agent.
 - Write directives as complete instructions an agent can act on without hearing the room: include counts, names, constraints, and which mockup.

@@ -1742,7 +1742,7 @@ export function stageLabel(stage: Partial<Stage> & { mode: string }, titleOf: (i
   const first = stage.items?.map(titleOf).find(Boolean);
   if (first) return stage.items!.length > 1 ? `${first} and ${stage.items!.length - 1} more` : first;
   if (stage.mode === "layout") return `${stage.layout?.tiles.length ?? 0} tiles`;
-  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
+  return ({ spotlight: "Spotlight", compare: "Compare", parity: "Side by side", agents: "What everyone is doing", wiki: "The wiki", canvas: "The canvas", custom: "Custom view" } as Record<string, string>)[stage.mode] ?? stage.mode;
 }
 
 export function publicEvent(e: JamEvent): JamEvent {

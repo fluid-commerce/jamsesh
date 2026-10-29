@@ -223,7 +223,7 @@ export interface DevServer {
   downSince?: number;
 }
 
-export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";
+export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join" | "wiki";
 
 /** One cell of a layout the brain (or a person) puts on the big screen. */
 export type Tile =

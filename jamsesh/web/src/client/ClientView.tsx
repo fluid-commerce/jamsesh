@@ -19,6 +19,7 @@ import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
 import { TasksView, triageCount } from "../shared/Tasks";
+import { WikiView } from "../wiki/WikiView";
 import { AttachButton, AttachTray, filesFrom, hasFiles, useAttachments } from "../shared/attach";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
 
@@ -26,7 +27,7 @@ const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
 const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 
-type Tab = "canvas" | "screen" | "work" | "tasks" | "pins" | "agents";
+type Tab = "canvas" | "screen" | "work" | "wiki" | "tasks" | "pins" | "agents";
 
 export function ClientView() {
   const { state, connected } = useHub();
@@ -224,8 +225,8 @@ function BigScreenChip({ stage }: { stage: StageState }) {
 }
 
 type Tab_ = Tab;
-const TABS: Tab_[] = ["canvas", "screen", "work", "tasks", "pins", "agents"];
-const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", tasks: "Tasks", pins: "Pins", agents: "Agents" };
+const TABS: Tab_[] = ["canvas", "screen", "work", "wiki", "tasks", "pins", "agents"];
+const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", wiki: "Wiki", tasks: "Tasks", pins: "Pins", agents: "Agents" };
 
 function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setTab: (t: Tab) => void; phone?: boolean }) {
   const open = state.annotations.filter((a) => a.status === "open").length;
@@ -267,7 +268,7 @@ function EnrollModal({ me, brainName, done }: { me: HubState["people"][number]; 
   );
 }
 
-/** The six views, the same on every screen size except the Screen tab, which a phone scales down. */
+/** The seven views, the same on every screen size except the Screen tab, which a phone scales down. */
 function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me: HubState["people"][number]; layout: Layout }) {
   const phone = layout !== "desktop";
   return (
@@ -297,6 +298,11 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
           </div>
         ))}
       {tab === "work" && <WorkGallery state={state} personId={me.id} />}
+      {tab === "wiki" && (
+        <div className="tab-pane wiki-pane">
+          <WikiView />
+        </div>
+      )}
       {tab === "tasks" && (
         <div className="tab-pane tasks-pane">
           <TasksView state={state} personId={me.id} />
