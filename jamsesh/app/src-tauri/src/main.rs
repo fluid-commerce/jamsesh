@@ -7,6 +7,7 @@ mod discover;
 mod fonts;
 mod host;
 mod perms;
+mod projects;
 mod proxy;
 mod screens;
 mod watchdog;
@@ -15,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use projects::Launch;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -46,12 +48,17 @@ struct Config {
     /// menu). Off unless this is set or `JAMSESH_DEVTOOLS=1`: it's for finding out why a page froze.
     #[serde(default)]
     devtools: bool,
+    /// The project this Mac hosted last (its slug), so relaunching continues it.
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Default)]
 struct Inner {
     cfg: Config,
     hub: Option<host::Hub>,
+    /// The hub running is only the Projects picker: no session has begun.
+    lobby: bool,
     relay: Option<proxy::Proxy>,
     /// Join mode: the host's dev-server ports, mirrored on this Mac (see `Proxy::mirror`).
     mirrors: std::collections::HashMap<u16, proxy::Proxy>,
@@ -121,6 +128,17 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
     Ok(())
 }
 
+/// Shows a window at `url`: a new one, or an existing one carried over to it (a session's windows
+/// stay where they are when the project changes).
+fn show_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(), String> {
+    let Some(w) = app.get_webview_window(label) else { return open_window(app, label, url, title) };
+    let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    w.navigate(parsed).map_err(|e| e.to_string())?;
+    let _ = w.show();
+    let _ = w.set_focus();
+    Ok(())
+}
+
 fn open_start(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("start") {
         let _ = w.show();
@@ -145,12 +163,31 @@ fn close_start(app: &AppHandle) {
 
 // ---- sessions ----
 
-async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
+async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(), String> {
     let mut inner = state.inner.lock().await;
     let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
-    let hub = host::Hub::start(&state.dir.join("logs"), resources.as_deref()).await?;
+    let hub = host::Hub::start(&state.dir.join("logs"), resources.as_deref(), &launch).await?;
     let origin = hub.origin();
+    let port = hub.port;
     inner.hub = Some(hub);
+    // Hosting begins at the Projects picker: one window, no session until a project is chosen.
+    if let Launch::Lobby { new_project } = launch {
+        inner.lobby = true;
+        inner.cfg.role = Some("host".into());
+        state.save(&inner.cfg);
+        drop(inner);
+        let path = if new_project { "/projects?new=1" } else { "/projects" };
+        show_window(app, "client", &host::window_url(&origin, path), "JamSesh")?;
+        close_start(app);
+        refresh_tray(app).await;
+        return Ok(());
+    }
+    inner.lobby = false;
+    // Remember which project this was, for the menu bar and for relaunching into it.
+    let current = proxy::get_as_window(port, "/api/projects").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok());
+    if let Some(slug) = current.as_ref().and_then(|v| v["current"].as_str()) {
+        inner.cfg.project = Some(slug.to_string());
+    }
     // Agents on this Mac reach the session through the same local address as on any joined Mac.
     if let Some(old) = inner.relay.take() {
         old.stop();
@@ -167,9 +204,15 @@ async fn start_hosting(app: &AppHandle, state: &App) -> Result<(), String> {
     let setup_done = inner.cfg.host_setup_done;
     let userless = inner.cfg.userless;
     drop(inner);
+    if userless {
+        // Nobody uses this Mac: a picker window left from before the project was chosen goes.
+        if let Some(w) = app.get_webview_window("client") {
+            let _ = w.close();
+        }
+    }
     screens::arrange_and_offer(app, &origin).await?;
     if !userless {
-        open_window(app, "client", &host::window_url(&origin, "/client"), "JamSesh")?;
+        show_window(app, "client", &host::window_url(&origin, "/client"), "JamSesh")?;
     }
     close_start(app);
     refresh_tray(app).await;
@@ -341,6 +384,7 @@ async fn leave(app: &AppHandle, state: &App) {
         tauri::async_runtime::spawn_blocking(move || h.stop());
     }
     inner.cfg.role = None;
+    inner.lobby = false;
     state.save(&inner.cfg);
     drop(inner);
     // Every window the session opened, including a user-less host's extra screens.
@@ -428,11 +472,12 @@ async fn sync_mirrors(state: &App, st: &serde_json::Value) {
 
 async fn refresh_tray(app: &AppHandle) {
     let state = app.state::<Arc<App>>();
-    let (role, label, hub_port, relay_port, userless) = {
+    let (role, label, hub_port, relay_port, userless, lobby, project) = {
         let inner = state.inner.lock().await;
         let label = inner.cfg.host_name.clone().or(inner.cfg.host_url.clone()).unwrap_or_default();
-        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port), inner.cfg.userless)
+        (inner.cfg.role.clone(), label, inner.hub.as_ref().map(|h| h.port), inner.relay.as_ref().map(|r| r.port), inner.cfg.userless, inner.lobby, inner.cfg.project.clone())
     };
+    let recent = if role.as_deref() == Some("host") { projects::recent(8) } else { Vec::new() };
     let st = match relay_port {
         Some(p) => proxy::get(p, "/api/state").await.ok().and_then(|(_, b)| serde_json::from_str::<serde_json::Value>(&b).ok()),
         None => None,
@@ -468,7 +513,7 @@ async fn refresh_tray(app: &AppHandle) {
         None => None,
     };
     let Some(tray) = app.tray_by_id("main") else { return };
-    let shown = format!("{role:?}|{label}|{code:?}|{present:?}|{userless}");
+    let shown = format!("{role:?}|{label}|{code:?}|{present:?}|{userless}|{lobby}|{project:?}|{recent:?}");
     if let Ok(mut last) = state.tray_shown.lock() {
         if *last == shown {
             return;
@@ -478,12 +523,22 @@ async fn refresh_tray(app: &AppHandle) {
     let build = || -> tauri::Result<Menu<tauri::Wry>> {
         let menu = Menu::new(app)?;
         match role.as_deref() {
+            Some("host") if lobby => {
+                menu.append(&MenuItem::with_id(app, "status", "Choosing a project", false, None::<&str>)?)?;
+                menu.append(&PredefinedMenuItem::separator(app)?)?;
+                menu.append(&MenuItem::with_id(app, "open", "Open the Projects window", true, None::<&str>)?)?;
+                menu.append(&projects_submenu(app, &recent, None)?)?;
+                menu.append(&PredefinedMenuItem::separator(app)?)?;
+                menu.append(&MenuItem::with_id(app, "leave", "Stop hosting", true, None::<&str>)?)?;
+            }
             Some("host") => {
                 menu.append(&MenuItem::with_id(app, "status", "Hosting a session", false, None::<&str>)?)?;
                 if let Some(p) = &present {
                     menu.append(&MenuItem::with_id(app, "present", p, false, None::<&str>)?)?;
                 }
                 menu.append(&MenuItem::with_id(app, "code", format!("Join code: {}", code.as_deref().unwrap_or("…")), false, None::<&str>)?)?;
+                menu.append(&PredefinedMenuItem::separator(app)?)?;
+                menu.append(&projects_submenu(app, &recent, project.as_deref())?)?;
                 menu.append(&PredefinedMenuItem::separator(app)?)?;
                 menu.append(&MenuItem::with_id(app, "open", "Open my window", true, None::<&str>)?)?;
                 menu.append(&MenuItem::with_id(app, "mute", "Mute or unmute my mic", true, None::<&str>)?)?;
@@ -530,18 +585,52 @@ async fn refresh_tray(app: &AppHandle) {
     }
 }
 
+/// The Projects submenu of the menu bar: the recent projects (the open one checked), all of them,
+/// and New project…. Choosing one ends this session and opens that project (`projects_menu_action`).
+fn projects_submenu(app: &AppHandle, recent: &[projects::Recent], current: Option<&str>) -> tauri::Result<Submenu<tauri::Wry>> {
+    let sub = Submenu::with_id(app, "projects", "Projects", true)?;
+    for p in recent {
+        let name: String = if p.name.chars().count() > 42 { p.name.chars().take(41).chain(['…']).collect() } else { p.name.clone() };
+        sub.append(&CheckMenuItem::with_id(app, format!("project:{}", p.slug), name, true, current == Some(p.slug.as_str()), None::<&str>)?)?;
+    }
+    if !recent.is_empty() {
+        sub.append(&PredefinedMenuItem::separator(app)?)?;
+        sub.append(&MenuItem::with_id(app, "projects-all", "All projects…", true, None::<&str>)?)?;
+    }
+    sub.append(&MenuItem::with_id(app, "project-new", "New project…", true, None::<&str>)?)?;
+    Ok(sub)
+}
+
+async fn projects_menu_action(app: &AppHandle, state: &App, id: &str) {
+    let launch = match id.strip_prefix("project:") {
+        Some(slug) => {
+            let inner = state.inner.lock().await;
+            // The project that's open already: nothing to end.
+            if !inner.lobby && inner.cfg.project.as_deref() == Some(slug) {
+                return;
+            }
+            Launch::Project(slug.to_string())
+        }
+        None => Launch::Lobby { new_project: id == "project-new" },
+    };
+    if let Err(e) = switch_project(app, state, launch).await {
+        app.dialog().message(e).title("Couldn't open the project").kind(MessageDialogKind::Warning).show(|_| {});
+    }
+}
+
 fn on_menu(app: &AppHandle, id: &str) {
     let app = app.clone();
     let id = id.to_string();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<Arc<App>>().inner().clone();
-        let (role, hub_origin, relay) = {
+        let (role, hub_origin, relay, userless, lobby) = {
             let inner = state.inner.lock().await;
             let relay = inner.relay.as_ref().map(|r| r.window_url("/client"));
-            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay)
+            (inner.cfg.role.clone(), inner.hub.as_ref().map(|h| h.origin()), relay, inner.cfg.userless, inner.lobby)
         };
         match id.as_str() {
             "open" => match (role.as_deref(), hub_origin, relay) {
+                (Some("host"), Some(o), _) if lobby => drop(show_window(&app, "client", &host::window_url(&o, "/projects"), "JamSesh")),
                 (Some("host"), Some(o), _) => drop(open_window(&app, "client", &host::window_url(&o, "/client"), "JamSesh")),
                 (Some("join"), _, Some(u)) => drop(open_window(&app, "client", &u, "JamSesh")),
                 _ => open_start(&app),
@@ -589,6 +678,7 @@ fn on_menu(app: &AppHandle, id: &str) {
                 _ => on_menu(&app, "open"),
             },
             "leave" => leave(&app, &state).await,
+            id if id == "projects-all" || id == "project-new" || id.starts_with("project:") => projects_menu_action(&app, &state, id).await,
             "quit" => app.exit(0),
             _ => {}
         }
@@ -628,7 +718,47 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 
 #[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
-    start_hosting(&app, &state).await
+    start_hosting(&app, &state, Launch::Lobby { new_project: false }).await
+}
+
+/// Opens a project: ends the session running now (the hub saves and exits first, so nothing is lost),
+/// then starts the project's session, or today's again. Called from the picker and the menu bar.
+#[tauri::command]
+async fn open_project(app: AppHandle, state: State<'_, Arc<App>>, slug: Option<String>, name: Option<String>) -> Result<(), String> {
+    let launch = match (slug, name) {
+        (Some(slug), _) if !slug.is_empty() => Launch::Project(slug),
+        (_, Some(name)) if !name.trim().is_empty() => Launch::New(name),
+        _ => return Err("Pick a project, or name a new one.".into()),
+    };
+    switch_project(&app, &state, launch).await
+}
+
+async fn switch_project(app: &AppHandle, state: &App, launch: Launch) -> Result<(), String> {
+    let (hub, relay, mirrors) = {
+        let mut inner = state.inner.lock().await;
+        inner.lobby = false;
+        (inner.hub.take(), inner.relay.take(), inner.mirrors.drain().map(|(_, m)| m).collect::<Vec<_>>())
+    };
+    if let Some(r) = relay {
+        r.stop();
+    }
+    for m in mirrors {
+        m.stop();
+    }
+    // Wait for the old session to save and stop before the next one opens its files.
+    if let Some(mut h) = hub {
+        let _ = tauri::async_runtime::spawn_blocking(move || h.stop()).await;
+    }
+    for (label, w) in app.webview_windows() {
+        if label.starts_with("bigscreen") {
+            let _ = w.close();
+        }
+    }
+    let started = start_hosting(app, state, launch).await;
+    if started.is_err() {
+        leave(app, state).await;
+    }
+    started
 }
 
 #[tauri::command]
@@ -739,6 +869,7 @@ fn main() {
             start_info,
             nearby_hosts,
             host_here,
+            open_project,
             join,
             perm_status,
             perm_request,
@@ -782,7 +913,7 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let resumed = match (cfg.role.as_deref(), cfg.host_url.clone()) {
-                    (Some("host"), _) => start_hosting(&handle, &state).await,
+                    (Some("host"), _) => start_hosting(&handle, &state, cfg.project.clone().map_or(Launch::Last, Launch::Project)).await,
                     (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
                     _ => Err(String::new()),
                 };

@@ -5,6 +5,7 @@ import { HostView } from "./host/HostView";
 import { ExtraScreen } from "./host/ExtraScreen";
 import { ConnectView } from "./connect/ConnectView";
 import { SetupView } from "./setup/SetupView";
+import { ProjectsView } from "./projects/ProjectsView";
 import { deviceId, hub } from "./shared/hub";
 import "./styles.css";
 import { tileSlots } from "./host/Stage";
@@ -31,7 +32,8 @@ const isHost = location.pathname.startsWith("/host");
 const extraScreen = isHost ? new URLSearchParams(location.search).get("screen") : null;
 const isConnect = location.pathname.startsWith("/connect");
 const isSetup = location.pathname.startsWith("/setup");
-if (!isConnect && !isSetup) hub.start(deviceId(extraScreen ? extraScreen : isHost ? "host" : "client"));
+const isProjects = location.pathname.startsWith("/projects");
+if (!isConnect && !isSetup && !isProjects) hub.start(deviceId(extraScreen ? extraScreen : isHost ? "host" : "client"));
 
 registerServiceWorker();
 
@@ -46,14 +48,14 @@ if ("__TAURI_INTERNALS__" in window) {
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
-      {isConnect ? <ConnectView /> : isSetup ? <SetupView /> : extraScreen ? <ExtraScreen id={extraScreen} /> : isHost ? <HostView /> : <ClientView />}
+      {isConnect ? <ConnectView /> : isProjects ? <ProjectsView /> : isSetup ? <SetupView /> : extraScreen ? <ExtraScreen id={extraScreen} /> : isHost ? <HostView /> : <ClientView />}
     </ErrorBoundary>
-    {!isConnect && !isSetup && (
+    {!isConnect && !isSetup && !isProjects && (
       <ErrorBoundary label="The connection banner">
         <ConnectionBanner />
       </ErrorBoundary>
     )}
-    {!isConnect && !isSetup && !extraScreen && <BuildRequests big={isHost} />}
-    {!isConnect && !isSetup && !isHost && <CastHost />}
+    {!isConnect && !isSetup && !isProjects && !extraScreen && <BuildRequests big={isHost} />}
+    {!isConnect && !isSetup && !isProjects && !isHost && <CastHost />}
   </StrictMode>,
 );

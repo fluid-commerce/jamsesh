@@ -259,6 +259,14 @@ export class Store {
     return (this.db.query(sql).all(...args) as any[]).map(rowToEvent).reverse();
   }
 
+  /** The people who spoke or typed in this session, most recent first. */
+  speakers(limit = 24): string[] {
+    const rows = this.db
+      .query("SELECT author_name AS n FROM events WHERE author_type = 'person' AND author_name NOT IN ('', 'Someone') GROUP BY author_name ORDER BY MAX(id) DESC LIMIT ?")
+      .all(limit) as { n: string }[];
+    return rows.map((r) => r.n);
+  }
+
   /** How many events there are (before an id, of some kinds), for "N more" counts. */
   countEvents(opts: { beforeId?: number; kinds?: EventKind[] } = {}): number {
     const where: string[] = [];

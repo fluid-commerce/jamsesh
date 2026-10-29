@@ -160,7 +160,7 @@ and one whenever someone says "JamSesh, save this as …". Each snapshot holds t
 readable session notes. **Settings > Saved** lists them with download links. The brain can also
 save a screen layout by name ("save this as the review layout") and bring it back later.
 
-`jamsesh new` starts the next day fresh; the previous session is archived, not deleted.
+Sessions live in projects. The app's Projects picker (or `jamsesh host --project NAME`) opens one, and today's session continues; `jamsesh host --new-session` starts a new one.
 
 ## Canvas pages
 
@@ -279,8 +279,9 @@ cd ~/jamsesh/jamsesh/hub && bun ../scripts/demo.ts http://127.0.0.1:4747
 
 | Path | What |
 | --- | --- |
-| `~/.jamsesh/host/` | The session: SQLite context store, canvas server data, renders |
-| `~/.jamsesh/host/snapshots/` | Versioned snapshots: `canvas.figcraft`, `context.json`, `notes.md` |
+| `~/.jamsesh/projects/<project>/` | A project: `project.json`, `thumbnail.png`, and `sessions/<id>/` |
+| `~/.jamsesh/projects/<project>/sessions/<id>/` | A session: SQLite context store, canvas server data, renders |
+| `~/.jamsesh/projects/<project>/sessions/<id>/snapshots/` | Versioned snapshots: `canvas.figcraft`, `context.json`, `notes.md` |
 | `~/.jamsesh/bin/` | FigCraft binaries the host runs |
 | `~/.jamsesh/.env` | Gateway key fallback (`jamsesh key` sets it) |
 | `jamsesh/hub/` | The hub (Bun): API, MCP endpoint, brain, audio, canvas bridge |

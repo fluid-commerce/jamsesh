@@ -300,6 +300,19 @@ export class Canvas {
     return shot();
   }
 
+  /** The newest frame drawn small, for the project's thumbnail; null when there is no canvas or nothing on it. */
+  async thumbnail(maxSize = 480): Promise<Uint8Array | null> {
+    if (!this.host) return null;
+    const art = this.session
+      .artifacts()
+      .filter((a) => a.kind === "frame" && a.nodeId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!art?.nodeId) return null;
+    const r = await this.host.call("screenshot", { ids: [Number(art.nodeId)], maxSize });
+    const img = r.content.find((c) => c.type === "image") as { data: string } | undefined;
+    return img && !r.isError ? new Uint8Array(Buffer.from(img.data, "base64")) : null;
+  }
+
   async frames() {
     if (!this.host) return [];
     let doc = await this.host.json("inspect_document", { depth: 64, allPages: true });
