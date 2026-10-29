@@ -28,8 +28,10 @@ When your person says "connect to jamsesh" (or similar), connect without asking 
   Settings > Privacy & Security > Open Anyway. Until then they can use the room in a browser at the
   address on the host's JamSesh screen, and setting up their agents still works.
 
-A new conversation starts fresh: even in a repository you joined yesterday, call `jam_join` again.
-It resumes your place (same name, same workstreams) and hands you this skill again.
+A new conversation starts fresh: even in a repository you joined yesterday, call `jam_join` again
+when your person asks. In Claude Code a new conversation is a new chat, so it joins as a new agent
+(the old chat's tasks stay with the old agent until the room reassigns them). Codex resumes its place in the same folder on the
+same computer (same name, same workstreams).
 
 **Codex** works the same through the same tools, with one difference: Codex has no hooks here, so
 nothing sends your person's prompts to the room or wakes you. You are the link. When your person gives

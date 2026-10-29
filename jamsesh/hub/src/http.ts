@@ -588,7 +588,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
     if (!machine) return bad("This device isn't paired with this JamSesh host.", 401);
     const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
-    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine) });
+    // With this room's id: a hook keeps it with the chat, so a prompt queued while the host is away
+    // is only ever sent to this room.
+    if (hook === "joined") return json({ joined: hub.chatJoined(b, machine), room: s.roomId() });
     // What the hook script passed on to the agent since its last call (see Hub.offer).
     const promptId = req.headers.get("x-jam-prompt-id") ?? "";
     if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;

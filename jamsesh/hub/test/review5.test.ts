@@ -3,7 +3,7 @@
 // hook, old open tasks stay in the state, a blocked report survives its own hook and Stop, and
 // "asked for" is judged by time.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
@@ -96,7 +96,7 @@ test("a slow host never holds the hook: queued prompts replay in the background"
     idleTimeout: 30,
     fetch: async (req) => {
       const path = new URL(req.url).pathname;
-      if (path.endsWith("/hooks/joined")) return Response.json({ joined: true });
+      if (path.endsWith("/hooks/joined")) return Response.json({ joined: true, room: "room-1" });
       if (path.endsWith("/hooks/prompt")) {
         const body = await req.text();
         await Bun.sleep(3500); // each replay is slow, but answers inside the hook's 4-second limit
@@ -109,9 +109,10 @@ test("a slow host never holds the hook: queued prompts replay in the background"
     const home = mkdtempSync(join(dir, "client-"));
     writeFileSync(join(home, "client.env"), `JAMSESH_HUB='http://127.0.0.1:${fake.port}'\nJAMSESH_ACTIVE=1\n`);
     mkdirSync(join(home, "chats"), { recursive: true });
-    writeFileSync(join(home, "chats/chat-slow"), "");
+    writeFileSync(join(home, "chats/chat-slow"), "room-1");
     const now = Math.floor(Date.now() / 1000);
-    writeFileSync(join(home, "outbox.jsonl"), [1, 2].map((i) => `${now}\tq${i}\t${JSON.stringify({ session_id: "chat-slow", prompt: `queued ${i}` })}\n`).join(""));
+    mkdirSync(join(home, "outbox"), { recursive: true });
+    for (const i of [1, 2]) writeFileSync(join(home, "outbox", `${now}_q${i}_room-1`), JSON.stringify({ session_id: "chat-slow", prompt: `queued ${i}` }));
     const t0 = Date.now();
     const proc = Bun.spawn(["bash", "-c", hookScript(hub), "hook", "tool"], {
       stdin: new Blob([JSON.stringify({ session_id: "chat-slow", tool_name: "Edit" })]),
@@ -122,9 +123,9 @@ test("a slow host never holds the hook: queued prompts replay in the background"
     await proc.exited;
     // The hook ended right after its own call (two slow replays in the foreground would take over 7 seconds).
     expect(Date.now() - t0).toBeLessThan(3000);
-    for (let i = 0; i < 200 && (replays.length < 2 || existsSync(join(home, "outbox.jsonl.lock"))); i++) await Bun.sleep(50);
+    for (let i = 0; i < 200 && (replays.length < 2 || existsSync(join(home, "outbox/.replaying"))); i++) await Bun.sleep(50);
     expect(replays.map((b) => JSON.parse(b).prompt).sort()).toEqual(["queued 1", "queued 2"]);
-    expect(readFileSync(join(home, "outbox.jsonl"), "utf8")).toBe("");
+    expect(readdirSync(join(home, "outbox"))).toEqual([]);
   } finally {
     fake.stop(true);
   }

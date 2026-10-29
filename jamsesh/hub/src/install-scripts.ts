@@ -25,14 +25,13 @@ if [ "$1" = "prompt" ] && printf '%s' "$body" | grep -Eq '"prompt"[[:space:]]*:[
   exit 0
 fi
 dir="\${JAMSESH_DIR:-$HOME/.jamsesh}"
-outbox="\${JAMSESH_OUTBOX:-$dir/outbox.jsonl}"
+outbox="\${JAMSESH_OUTBOX:-$dir/outbox}"
 down="$dir/hub-down"
 mark="$dir/chats/$sid"
 acks="$dir/acks/$sid"
 hdr="$dir/.headers.$$"
 now="$(date +%s)"
-locked=""
-trap 'rm -f "$hdr"; [ -z "$locked" ] || rmdir "$outbox.lock" 2>/dev/null' EXIT
+trap 'rm -f "$hdr"' EXIT
 hub_down() { [ -f "$down" ] && [ $((now - $(cat "$down" 2>/dev/null || echo 0))) -lt 45 ]; }
 # The credential is in a file (mode 600) that curl reads, so it never shows in a process list. With
 # none, the JamSesh app's relay on this Mac adds it.
@@ -51,24 +50,23 @@ joined() { printf '{"session_id":"%s","connect":%s}' "$1" "\${2:-false}" | post 
 # Each prompt has an id that goes with it, and stays with it in the outbox, so the host records it once
 # however often it arrives (a send whose answer was lost, then the same prompt replayed).
 pid="p$now-$$-$RANDOM$RANDOM"
-# Every chat's hooks share the outbox: one at a time changes it. A lock left by a hook that was
-# killed holding it is cleared after a minute.
-lock() {
-  local i=0
-  find "$outbox.lock" -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null
-  until mkdir "$outbox.lock" 2>/dev/null; do i=$((i + 1)); [ "$i" -ge 30 ] && return 1; sleep 0.1; done
-  locked=1
-}
-unlock() { rmdir "$outbox.lock" 2>/dev/null; locked=""; }
+# The room this chat was last seen joined to (the host's room id, kept in the chat's marker): a
+# queued prompt belongs to that room and is never sent to another.
+room="$(tr -cd 'A-Za-z0-9-' < "$mark" 2>/dev/null)"
 # The host was unreachable a moment ago: don't make every prompt wait for it again. A chat this Mac
-# saw joined keeps its prompts until the host is back.
+# saw joined keeps its prompts until the host is back. Each queued prompt is its own file, written
+# whole and then moved in, so hooks running at once never wait on each other or lose one; its name
+# carries when, its id and its room. Only the newest 50 are kept.
 queue() {
-  [ "$1" = "prompt" ] && [ -f "$mark" ] || return 0
-  lock || return 0
-  printf '%s\\t%s\\t%s\\n' "$now" "$pid" "$(printf '%s' "$body" | tr -d '\\n')" >> "$outbox"
-  # Keep the newest 50 only.
-  if [ "$(wc -l < "$outbox")" -gt 50 ]; then tail -n 50 "$outbox" > "$outbox.tmp" && mv -f "$outbox.tmp" "$outbox"; fi
-  unlock
+  [ "$1" = "prompt" ] && [ -n "$room" ] || return 0
+  local t
+  if mkdir -p "$outbox" && t="$(mktemp "$outbox/.new.XXXXXXXX")" && printf '%s' "$body" > "$t" && mv -f "$t" "$outbox/\${now}_\${pid}_\${room}"; then
+    ls "$outbox" 2>/dev/null | sort -r | tail -n +51 | while read -r old; do rm -f "$outbox/$old"; done
+    return 0
+  fi
+  [ -n "$t" ] && rm -f "$t"
+  echo "JamSesh couldn't keep this prompt for the room while the host is unreachable (writing to $outbox failed)." >&2
+  exit 1
 }
 if hub_down; then queue "$1"; exit 0; fi
 
@@ -90,7 +88,9 @@ if ! printf '%s' "$ans" | grep -q '"joined":true'; then
   fi
   exit 0
 fi
-mkdir -p "$dir/chats" && : > "$mark"
+# Remembered with the room it joined, so a prompt queued while the host is away goes to that room only.
+room="$(printf '%s' "$ans" | sed -n 's/.*"room"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9-]*\\)".*/\\1/p' | head -n 1)"
+mkdir -p "$dir/chats" && printf '%s' "$room" > "$mark"
 rm -f "$down"
 
 # listen runs in the background after the agent stops (asyncRewake): it holds until the room has
@@ -122,33 +122,36 @@ printf '%s' "$out"
 handed_over
 gone && rm -f "$mark"
 # Back in touch: what was queued while the host was away is sent in the background, so this hook ends
-# as soon as the room's answer is printed and a slow host never runs it past its time limit. An
-# entry leaves the outbox only once the host has it, it's too old to matter (ten minutes: a prompt
-# from hours ago would only confuse the room), or its chat isn't in the room any more. A replay
-# stops after a minute; what's left goes with a later hook.
+# as soon as the room's answer is printed and a slow host never runs it past its time limit. One
+# replay runs at a time (a lock folder, cleared after a minute if a replay was killed); queueing
+# never waits for it. A prompt goes only to the room it was queued for, once the host confirms that
+# room has its chat; it leaves the outbox once the host has it, when it's ten minutes old (a prompt
+# from hours ago would only confuse the room), or when its chat isn't in that room any more. A replay
+# stops after 45 seconds; what's left goes with a later hook.
 replay() {
-  locked=""
-  trap '[ -z "$locked" ] || rmdir "$outbox.lock" 2>/dev/null' EXIT
-  lock || return 0
-  local stop=$(($(date +%s) + 60))
-  : > "$outbox.keep"
-  while IFS=$'\\t' read -r ts qid line; do
+  find "$outbox/.replaying" -maxdepth 0 -mmin +1 -exec rmdir {} \\; 2>/dev/null
+  mkdir "$outbox/.replaying" 2>/dev/null || return 0
+  trap 'rmdir "$outbox/.replaying" 2>/dev/null' EXIT
+  local stop=$(($(date +%s) + 45)) f ts qid qroom qsid ans
+  for f in $(ls "$outbox" 2>/dev/null | sort); do
+    IFS=_ read -r ts qid qroom <<< "$f"
     case "$ts" in ''|*[!0-9]*) continue ;; esac
-    # Queued by an older hook.sh, without an id: one made from the line stays the same on every try.
-    [ -n "$line" ] || { line="$qid"; qid="q$ts-$(printf '%s' "$line" | cksum | cut -d ' ' -f 1)"; }
-    [ $(($(date +%s) - ts)) -le 600 ] && [ -n "$line" ] || continue
-    keep() { printf '%s\\t%s\\t%s\\n' "$ts" "$qid" "$line" >> "$outbox.keep"; }
-    [ "$(date +%s)" -lt "$stop" ] || { keep; continue; }
-    qsid="$(printf '%s' "$line" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' | head -n 1)"
-    [ -n "$qsid" ] || continue
-    ans="$(joined "$qsid")" || { keep; continue; }
-    printf '%s' "$ans" | grep -q '"joined":true' || continue
-    printf '%s' "$line" | post --max-time 4 -H "x-jam-prompt-id: $qid" --data-binary @- "$hub/api/hooks/prompt" >/dev/null 2>&1 || keep
-  done < "$outbox"
-  mv -f "$outbox.keep" "$outbox"
-  unlock
+    if [ $(($(date +%s) - ts)) -gt 600 ] || [ -z "$qroom" ]; then rm -f "$outbox/$f"; continue; fi
+    [ "$(date +%s)" -lt "$stop" ] || break
+    qsid="$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([A-Za-z0-9_-]*\\)".*/\\1/p' "$outbox/$f" | head -n 1)"
+    [ -n "$qsid" ] || { rm -f "$outbox/$f"; continue; }
+    ans="$(joined "$qsid")" || continue
+    # Another room now (this Mac switched hosts): not this one's to have. It waits, in case the chat
+    # goes back, until it's too old.
+    printf '%s' "$ans" | grep -q "\\"room\\":\\"$qroom\\"" || continue
+    printf '%s' "$ans" | grep -q '"joined":true' || { rm -f "$outbox/$f"; continue; }
+    post --max-time 4 -H "x-jam-prompt-id: $qid" --data-binary @"$outbox/$f" "$hub/api/hooks/prompt" >/dev/null 2>&1 && rm -f "$outbox/$f"
+  done
+  rmdir "$outbox/.replaying" 2>/dev/null
 }
-if [ -s "$outbox" ]; then replay </dev/null >/dev/null 2>&1 & fi
+# The outbox of an earlier hook.sh (one file, no room) can't be told apart by room: it goes.
+rm -f "$dir/outbox.jsonl" "$dir/outbox.jsonl.keep" 2>/dev/null
+if [ -n "$(ls "$outbox" 2>/dev/null)" ]; then replay </dev/null >/dev/null 2>&1 & fi
 `;
 }
 
@@ -191,6 +194,7 @@ my $real = abs_path($path) // exit 0;
 open(my $in, '<:raw', $real) or exit 0;
 my $text = do { local $/; <$in> };
 close $in;
+my $before = $text;
 my @blocks = (${OLD_BLOCKS.map((b) => `'${b.replace(/[\\']/g, "\\$&")}'`).join(", ")});
 my $changed = 0;
 for my $old (@blocks) {
@@ -221,6 +225,14 @@ binmode $o;
 print $o $text;
 close $o or die "JamSesh: can't write $tmp: $!\n";
 chmod $mode, $tmp;
+# Edited by someone else since it was read (an editor saving): theirs stays, and nothing of it is lost.
+select(undef, undef, undef, $ENV{JAMSESH_STRIP_PAUSE}) if $ENV{JAMSESH_STRIP_PAUSE}; # tests widen the window
+my $now = do { open(my $again, '<:raw', $real) or do { unlink $tmp; exit 0 }; local $/; <$again> };
+if (!defined $now || $now ne $before) {
+  unlink $tmp;
+  print STDERR "JamSesh: $path changed while the old JamSesh block was being taken out, so it was left as it is. Connect again to take the block out.\n";
+  exit 0;
+}
 rename $tmp, $real or die "JamSesh: can't replace $real: $!\n";
 `;
 

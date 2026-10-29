@@ -491,4 +491,3 @@ export function ago(ts: number, now = Date.now()) {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   return `${Math.floor(s / 3600)}h`;
 }
-

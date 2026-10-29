@@ -81,8 +81,18 @@ export class DevProxy {
       generation: (existing?.generation ?? 0) + 1,
       up: false,
     };
+    // The new generation is on record before anything is awaited: a refresh still holding the old one
+    // sees it changed and leaves this registration (and its listener) alone.
+    this.session.store.put("devservers", d, false);
     await this.listen(d);
     const up = await this.check(d);
+    // Registered again (or removed) meanwhile: this registration is no longer the one to publish.
+    const now = this.session.store.get("devservers", d.id);
+    if (!now) {
+      this.close(d.id); // taken off the board meanwhile: its port closes again
+      return d;
+    }
+    if ((now.generation ?? 0) !== d.generation) return now;
     this.session.store.put("devservers", { ...d, up, problem: undefined, downSince: undefined });
     const agent = this.session.agent(opts.agentId);
     this.session.upsertArtifact({

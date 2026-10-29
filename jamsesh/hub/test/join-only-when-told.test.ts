@@ -78,6 +78,20 @@ describe("removing the block an earlier install wrote", () => {
     expect(readdirSync(d).sort()).toEqual(["AGENTS.md", "AGENTS.md.jamsesh-tmp"]);
     expect(STRIP_BLOCK_PL).toContain("File::Temp::tempfile");
   });
+  test("an edit someone makes while the block is being taken out is kept, not overwritten", async () => {
+    const d = tmp();
+    const file = join(d, "AGENTS.md");
+    writeFileSync(file, `# Mine\n\n${BLOCK}`);
+    const proc = Bun.spawn(["perl", "-", file], { stdin: new Blob([STRIP_BLOCK_PL]), stderr: "pipe", env: { ...process.env, JAMSESH_STRIP_PAUSE: "0.5" } });
+    await Bun.sleep(150);
+    writeFileSync(file, `# Mine, edited\n\n${BLOCK}`);
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toContain("changed while");
+    expect(readFileSync(file, "utf8")).toBe(`# Mine, edited\n\n${BLOCK}`);
+    expect(readdirSync(d)).toEqual(["AGENTS.md"]);
+    // Run again with nobody editing: the block goes.
+    expect(await strip(readFileSync(file, "utf8"))).toBe("# Mine, edited\n");
+  });
   test("a symlinked file is edited at its target and stays a symlink", async () => {
     const d = tmp();
     const target = join(d, "shared-instructions.md");

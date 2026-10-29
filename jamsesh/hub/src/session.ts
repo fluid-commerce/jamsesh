@@ -839,6 +839,13 @@ export class Session {
 
   // ---- directives ----
 
+  /** This room's id (one per session, kept with it): what a hook ties a queued prompt to. */
+  roomId(): string {
+    let id = this.store.setting<string>("roomId", "");
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) this.store.setSetting("roomId", (id = crypto.randomUUID()));
+    return id;
+  }
+
   /** What the live state carries: the newest 60, plus every open one however old, so each agent's tile has all its tasks (and their Reassign offers). */
   stateDirectives(): Directive[] {
     const all = this.directives();

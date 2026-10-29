@@ -126,3 +126,40 @@ test("a check that was running when the build was registered again doesn't touch
     fresh.stop(true);
   }
 });
+
+test("a stale refresh finishing while the build is being registered again never closes the new listener", async () => {
+  const { hub, s, agent } = room();
+  const old = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("old") });
+  const fresh = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("new") });
+  try {
+    const d = await hub.devproxy.register({ agentId: agent.id, name: "Web build", target: `127.0.0.1:${old.port}` });
+    // The old build has been down long enough to be taken off the board.
+    s.store.patch("devservers", d.id, { up: false, downSince: Date.now() - hub.devproxy.goneMs - 60_000, problem: "down" });
+    const real = hub.devproxy.check.bind(hub.devproxy);
+    let releaseOld!: () => void;
+    let releaseNew!: () => void;
+    const oldHeld = new Promise<void>((r) => (releaseOld = r));
+    const newHeld = new Promise<void>((r) => (releaseNew = r));
+    hub.devproxy.check = async (x) => {
+      if (x.target.endsWith(`:${old.port}`)) return await oldHeld, false;
+      await newHeld; // the registration's own check waits too, so the stale refresh ends in the gap
+      return real(x);
+    };
+    const refreshing = hub.devproxy.refresh();
+    await Bun.sleep(20);
+    const registering = hub.devproxy.register({ agentId: agent.id, name: "Web build", target: `127.0.0.1:${fresh.port}` });
+    await Bun.sleep(50); // registration is now waiting on its check, its new listener open
+    releaseOld();
+    await refreshing; // the stale refresh finishes here, mid-registration
+    releaseNew();
+    const again = await registering;
+    hub.devproxy.check = real;
+    expect(again.id).toBe(d.id);
+    expect(s.devservers().find((x) => x.id === d.id)).toMatchObject({ up: true, target: `127.0.0.1:${fresh.port}` });
+    // Its forwarding port still answers.
+    expect(await (await fetch(again.url.replace(/^http:\/\/[^:]+/, "http://127.0.0.1"))).text()).toBe("new");
+  } finally {
+    old.stop(true);
+    fresh.stop(true);
+  }
+});

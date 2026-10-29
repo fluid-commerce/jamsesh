@@ -378,15 +378,21 @@ tasks so the room can hand them to someone else; other targets of a shared task 
 `hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
 asks the host whether the chat has joined, every time (the question carries the session id only),
 so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
-have a 4-second limit (the joined question 3). Replays run in the background after the hook has printed its
-answer (a minute at most per run; what's left goes with a later hook), so a slow host never keeps a
-hook past its time limit. Each prompt carries an id (`x-jam-prompt-id`), and the hub
-records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once. When
-the host is unreachable, prompts of a chat this Mac saw joined go to `~/.jamsesh/outbox.jsonl` with
-their id. Later hook calls replay them, two per call, each after a fresh joined check; an entry is
-removed only once the host has taken it, it is over ten minutes old, or its chat is no longer in the
-room. Every change to the outbox happens under a lock (`outbox.jsonl.lock`, a folder; one left by a
-killed hook is cleared after a minute), so hooks running at once don't lose each other's prompts.
+have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the
+hub records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once.
+
+**Prompts queued while the host is away belong to one room.** The joined answer carries the room's
+id (`room`, one per session), and the chat's marker (`~/.jamsesh/chats/<session id>`) keeps the room
+it last joined. When the host is unreachable, that chat's prompts are queued in
+`~/.jamsesh/outbox/`, one file each (written whole, then moved in, so hooks running at once never
+wait on each other or lose a prompt; the newest 50 are kept), named for when, the prompt id and the
+room. If a prompt can't be queued at all, the hook says so and fails. A later hook replays the
+outbox in the background, after printing its own answer, so a slow host never keeps a hook past
+its time limit: one replay at a time (a lock folder, cleared after a minute if a replay was killed;
+queueing never takes it), at most 45 seconds per run, each entry after a fresh joined check. An entry
+goes only to the room it was queued for: if the host's room is a different one (this Mac switched
+hosts), it isn't sent. It is removed once the host has it, when it is ten minutes old, or when its
+chat is no longer in its room. An older `outbox.jsonl` (no room) is dropped.
 
 ### 4.6 Remote access
 
