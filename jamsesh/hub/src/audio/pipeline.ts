@@ -33,7 +33,7 @@ export interface Segment {
   pcm: Pcm;
   wav: Uint8Array;
   arrivedAt: number;
-  /** When it was heard, on this host's clock: its synced start, or its arrival if that's earlier. */
+  /** When it was heard, on this host's clock: its synced start, its arrival, or its reset epoch's end, whichever is earliest. */
   heardAt: number;
   embedding?: Float32Array | null;
   /** Its transcription, once asked for: a copy is never sent to whisper twice. */
@@ -171,7 +171,8 @@ export class AudioPipeline {
     return this.lag.get(deviceId)?.ms ?? 0;
   }
 
-  async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array }): Promise<Segment> {
+  /** `epoch`: the reset epoch the device had when it captured the segment (Store.voiceEpoch); none for audio the host captured now. */
+  async ingest(input: { deviceId: string; t0: number; t1: number; wav: Uint8Array; epoch?: number }): Promise<Segment> {
     const raw = decodeWav(input.wav);
     const pcm = resample(raw, 16000);
     const measured = speechLevelDb(pcm);
@@ -191,7 +192,7 @@ export class AudioPipeline {
       pcm,
       wav: pcm === raw ? input.wav : encodeWav(pcm),
       arrivedAt: now,
-      heardAt: Number.isFinite(input.t0) ? Math.min(now, input.t0) : now,
+      heardAt: Math.min(Number.isFinite(input.t0) ? Math.min(now, input.t0) : now, input.epoch === undefined ? now : this.session.store.heardBy(input.epoch)),
     };
     const location = this.session.store.get("devices", seg.deviceId)?.location ?? "room";
     const lag = Math.max(0, now - seg.t1);
@@ -715,11 +716,14 @@ export class AudioPipeline {
 
   /**
    * A person read the join sentences. The read replaces any earlier one, and it is kept as three-second
-   * chunks so the voiceprint starts with variety.
+   * chunks so the voiceprint starts with variety. `epoch` is the reset epoch the hub gave when the read
+   * started: a read begun before this person's voice was reset teaches nothing.
    */
-  enrol(personId: string, pcm: Pcm): { ok: true; samples: number } | { ok: false; reason: string } {
+  enrol(personId: string, pcm: Pcm, epoch: number): { ok: true; samples: number } | { ok: false; reason: string } {
     // Taken or refused, the read is over: copies on their way get the grace, then the room is heard again.
     this.endEnrolment(personId);
+    const heardAt = Math.min(Date.now(), this.session.store.heardBy(epoch));
+    if (heardAt <= this.session.store.voiceResetAt(personId)) return { ok: false, reason: "Your voice was reset while you read, so that read wasn't kept. Read again." };
     const { levelDb, noiseDb } = speechLevelDb(pcm);
     if (levelDb - noiseDb < 8 || levelDb < -50) return { ok: false, reason: "That was too quiet. Hold the laptop closer and try again." };
     const chunk = 16000 * 3;
@@ -729,7 +733,7 @@ export class AudioPipeline {
       if (e) fresh.push(e);
     }
     if (!fresh.length) return { ok: false, reason: "Couldn't hear enough speech. Try reading the whole thing." };
-    this.voiceprints.replaceEnrol(personId, fresh, Date.now());
+    this.voiceprints.replaceEnrol(personId, fresh, heardAt);
     return { ok: true, samples: this.voiceprints.learnedFrom(personId).enrol };
   }
 

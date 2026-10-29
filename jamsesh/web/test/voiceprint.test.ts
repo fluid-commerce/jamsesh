@@ -25,8 +25,9 @@ test("starting the join read fails out loud when the host didn't take it, and is
   };
   await expect(beginRead("p1")).rejects.toThrow();
   reply = () => ({ status: 200, body: { ok: true } });
-  (globalThis as any).fetch = async (url: string, init: RequestInit = {}) => (calls.push({ method: init.method ?? "GET", path: String(url), body: null }), new Response('{"ok":true}', { status: 200 }));
-  await expect(beginRead("p1")).resolves.toMatchObject({ ok: true });
+  (globalThis as any).fetch = async (url: string, init: RequestInit = {}) => (calls.push({ method: init.method ?? "GET", path: String(url), body: null }), new Response('{"ok":true,"epoch":3}', { status: 200 }));
+  // The host's reset epoch, which the recording goes back with.
+  await expect(beginRead("p1")).resolves.toBe(3);
   expect(calls.at(-1)).toMatchObject({ method: "POST", path: "/api/people/p1/voice/start" });
 });
 

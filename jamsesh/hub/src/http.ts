@@ -285,7 +285,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const m = JSON.parse(String(raw));
           if (m.type === "level" && ws.data.deviceId) {
             bus.send({ type: "level", deviceId: ws.data.deviceId, level: m.level });
-          } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
+          } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now(), voiceEpoch: hub.session.store.voiceEpoch() }));
           else if (m.type === "rtc" && ws.data.deviceId && typeof m.to === "string") {
             const msg = JSON.stringify({ type: "rtc", from: ws.data.deviceId, to: m.to, data: m.data });
             for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
@@ -481,6 +481,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
         t0: Number(q.get("t0")),
         t1: Number(q.get("t1")),
         wav: bytes,
+        // A device that sent no epoch is an old one: its audio counts as captured before every reset.
+        epoch: q.has("epoch") ? Number(q.get("epoch")) : -1,
       });
       remember(recentSegments, segKey, 4000);
       return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
@@ -532,7 +534,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "POST") {
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
-    return (hub.audio.beginEnrolment(m[1]), json({ ok: true }));
+    // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
+    return (hub.audio.beginEnrolment(m[1]), json({ ok: true, epoch: s.store.voiceEpoch() }));
   }
   // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
   // whether anything was said aloud, which earns the grace for copies still on their way.
@@ -805,7 +808,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
     try {
-      return json(hub.enrollVoice(m[1], bytes));
+      return json(hub.enrollVoice(m[1], bytes, url.searchParams.has("epoch") ? Number(url.searchParams.get("epoch")) : -1));
     } catch (e) {
       if (e instanceof BadWav) return bad(e.message);
       throw e;

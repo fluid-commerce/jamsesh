@@ -68,6 +68,8 @@ export interface AudioSeg {
   wav: ArrayBuffer;
   /** Stamped before the first clock sample arrived; shifted by the clock offset at upload. */
   unsynced?: boolean;
+  /** The host's reset epoch when it was captured: audio from before a Reset never teaches that voice. */
+  epoch?: number;
 }
 
 export interface AudioBufferState {
@@ -192,7 +194,7 @@ export class AudioBuffer {
 async function postSegment(s: AudioSeg): Promise<PostResult> {
   // Segments stamped before the clock synced get the offset now (drain waits for the sync).
   const shift = s.unsynced ? hub.get().clockOffset : 0;
-  const q = new URLSearchParams({ deviceId: s.deviceId, t0: String(Math.round(s.t0 + shift)), t1: String(Math.round(s.t1 + shift)), level: s.level.toFixed(1), noise: s.noise.toFixed(1) });
+  const q = new URLSearchParams({ deviceId: s.deviceId, t0: String(Math.round(s.t0 + shift)), t1: String(Math.round(s.t1 + shift)), level: s.level.toFixed(1), noise: s.noise.toFixed(1), epoch: String(s.epoch ?? -1) });
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 20_000);
   try {
@@ -487,7 +489,7 @@ export class Mic {
     const level = levels.slice(Math.floor(levels.length / 2)).reduce((a, b) => a + b, 0) / Math.max(1, levels.length - Math.floor(levels.length / 2));
     // The brain's own voice coming back through the speakers is not a person.
     if (isEchoSegment(level, this.noise, Date.now() < this.suppressUntil)) return;
-    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced });
+    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced, epoch: hub.get().voiceEpoch });
   }
 }
 

@@ -374,7 +374,7 @@ export class Hub {
   }
 
   /** A deliberate voice sample: the join sentences, read aloud. */
-  enrollVoice(personId: string, bytes: Uint8Array) {
+  enrollVoice(personId: string, bytes: Uint8Array, epoch: number) {
     if (!this.session.person(personId)) throw new Error("No such person.");
     let pcm;
     try {
@@ -383,7 +383,7 @@ export class Hub {
       this.audio.endEnrolment(personId);
       throw e;
     }
-    return this.audio.enrol(personId, pcm);
+    return this.audio.enrol(personId, pcm, epoch);
   }
 
   /**

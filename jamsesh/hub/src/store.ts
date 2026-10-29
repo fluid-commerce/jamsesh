@@ -44,6 +44,7 @@ const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
 const TEAM_SETTINGS = new Set<string>([
   "hostId",
   "voiceResetAt",
+  "voiceResets",
   "personKeepers",
   "gatewayKey",
   "brainName",
@@ -347,9 +348,30 @@ export class Store {
   /** A reset, at a moment later than any before it even if the clock stepped back. */
   markVoiceReset(personId: string): number {
     const all = this.setting<Record<string, number>>("voiceResetAt", {});
-    const at = Math.max(Date.now(), (all[personId] ?? 0) + 1);
+    const resets = this.setting<number[]>("voiceResets", []);
+    const at = Math.max(Date.now(), (all[personId] ?? 0) + 1, (resets.at(-1) ?? 0) + 1);
     this.setSetting("voiceResetAt", { ...all, [personId]: at });
+    this.setSetting("voiceResets", [...resets, at]);
     return at;
+  }
+
+  /**
+   * The reset epoch: how many resets this host has made, anyone's. The hub hands it out (with each clock pong,
+   * and when a read starts); a device stamps it on audio as it captures it, and a read sends back the one it began with.
+   */
+  voiceEpoch(): number {
+    return this.setting<number[]>("voiceResets", []).length;
+  }
+
+  /**
+   * The latest moment audio captured in `epoch` can count as heard: the first reset after that epoch began, so
+   * nothing captured before a reset teaches that voice, however late it arrives or whatever its timestamp says.
+   * The current epoch has no limit; anything that isn't an epoch this host issued counts as the oldest.
+   */
+  heardBy(epoch: number): number {
+    const resets = this.setting<number[]>("voiceResets", []);
+    if (epoch === resets.length) return Infinity;
+    return Number.isInteger(epoch) && epoch >= 0 && epoch < resets.length ? resets[epoch] : (resets[0] ?? Infinity);
   }
 
   /**

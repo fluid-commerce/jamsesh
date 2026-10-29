@@ -91,8 +91,9 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
     if (blocked) return setState("error"), setMsg(blocked);
     // Every laptop hears the read, yours loudest: the host keeps it out of the transcript while you read.
     // If it can't, don't read, or the room would see it.
+    let epoch: number;
     try {
-      await beginRead(me.id);
+      epoch = await beginRead(me.id);
     } catch (e) {
       setState("error");
       return setMsg(`The host couldn't get ready for your read, so nothing was recorded. ${e instanceof Error ? e.message : ""}`.trim());
@@ -116,7 +117,7 @@ export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName
         setState("saving");
         try {
           const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
-          const res = await fetch(`/api/people/${me.id}/voice`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav });
+          const res = await fetch(`/api/people/${me.id}/voice?epoch=${epoch}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav });
           // The host ends the read itself once it has the recording (taken or refused); anything else, we end it.
           if (!res.ok) void endRead(me.id, true);
           const r = await res.json();

@@ -1,4 +1,4 @@
-// Phase 5, sixth review: who may change a voice by correcting a line. Synthetic embeddings only; nothing makes sound.
+// Phase 5, sixth review: who may change a voice by correcting a line, and what a Reset makes stale. Synthetic embeddings only; nothing makes sound.
 import "./voices.env";
 import { afterAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { voiceprintStatus } from "../src/audio/voiceprint";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
+import { encodeWav } from "../src/audio/wav";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r6-"));
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
@@ -116,4 +117,87 @@ voiced("over HTTP: another paired browser relabels only; the named person's own 
   const second = taughtLine(ana.id, 7);
   expect(await (await asHostWindow("POST", `/utterances/${second.id}/assign`, { personId: bob.id })).json()).toMatchObject({ personId: bob.id, learning: { learned: true } });
   expect(count(bob.id)).toBeGreaterThan(0);
+});
+
+// ---- the reset epoch: issued by the hub at read start and stamped on each segment; older ones teach nothing
+
+/** Something the speaker model embeds and the read's level check takes: a buzzy voice in syllables. */
+function readWav(seconds: number) {
+  const x = new Float32Array(16000 * seconds);
+  for (let i = 0; i < x.length; i++) {
+    const t = i / 16000;
+    x[i] = 0.3 * Math.max(0, Math.sin(2 * Math.PI * 3.3 * t)) ** 2 * (Math.sin(2 * Math.PI * (130 + 20 * Math.sin(t)) * t) + 0.4 * Math.sin(2 * Math.PI * 390 * t));
+  }
+  return encodeWav({ sampleRate: 16000, samples: x });
+}
+const upload = (token: string, personId: string, epoch: number | null) =>
+  fetch(`${base}/api/people/${personId}/voice${epoch === null ? "" : `?epoch=${epoch}`}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${token}` }, body: readWav(8) as unknown as BodyInit });
+
+voiced("a read started before Reset and finished after it teaches nothing; one started after does", async () => {
+  const p = hub.session.upsertPerson({ name: "Rae" });
+  const rae = hub.auth.issue({ kind: "browser", label: "Rae's laptop", ip: "10.0.0.41" });
+  expect((await call(rae.token, "POST", "/devices", { deviceId: "d-rae", personId: p.id })).status).toBe(200);
+  const before = (await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json()).epoch;
+  expect(before).toBe(hub.session.store.voiceEpoch());
+  expect((await call(rae.token, "DELETE", `/people/${p.id}/voiceprint`)).status).toBe(200);
+  const stale = await (await upload(rae.token, p.id, before)).json();
+  expect(stale).toMatchObject({ ok: false });
+  expect(stale.reason).toContain("reset while you read");
+  expect(count(p.id)).toBe(0);
+  // No epoch at all (an old page) counts as before every reset.
+  expect(await (await upload(rae.token, p.id, null)).json()).toMatchObject({ ok: false });
+  const after = (await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json()).epoch;
+  expect(after).toBe(before + 1);
+  expect(await (await upload(rae.token, p.id, after)).json()).toMatchObject({ ok: true });
+  expect(count(p.id)).toBeGreaterThan(0);
+});
+
+test("a segment captured in an older epoch counts as heard before the reset that ended it, whatever its timestamp says", async () => {
+  const store = hub.session.store;
+  const p = hub.session.upsertPerson({ name: "Ola" });
+  hub.session.touchDevice("d-ola", { personId: p.id, location: "room" });
+  const old = store.voiceEpoch();
+  const resetAt = store.markVoiceReset(p.id);
+  expect(store.voiceEpoch()).toBe(old + 1);
+  const wav = readWav(1);
+  // Buffered across the Reset with a device clock an hour ahead: still before it.
+  const ahead = await hub.audio.ingest({ deviceId: "d-ola", t0: Date.now() + 3_600_000, t1: Date.now() + 3_601_000, wav, epoch: old });
+  expect(ahead.heardAt).toBe(resetAt);
+  expect(hub.audio.voiceprints.add(p.id, unit(30), "auto", ahead.heardAt)).toBe(false);
+  // Not an epoch this host issued (garbage, the future, none): the oldest.
+  for (const epoch of [-1, Number.NaN, 1.5, old + 99]) expect(store.heardBy(epoch)).toBe(store.heardBy(0));
+  // Captured in the current epoch: heard when it says (or when it arrived), and it may teach.
+  await new Promise((r) => setTimeout(r, 5));
+  const now = await hub.audio.ingest({ deviceId: "d-ola", t0: resetAt + 1, t1: resetAt + 1001, wav, epoch: old + 1 });
+  expect(now.heardAt).toBeGreaterThan(resetAt);
+  expect(hub.audio.voiceprints.add(p.id, unit(31), "auto", now.heardAt)).toBe(true);
+  await hub.audio.flush();
+});
+
+test("over HTTP, a segment's epoch comes from the device, and one without counts as the oldest", async () => {
+  const p = hub.session.upsertPerson({ name: "Uma" });
+  const uma = hub.auth.issue({ kind: "browser", label: "Uma's laptop", ip: "10.0.0.42" });
+  expect((await call(uma.token, "POST", "/devices", { deviceId: "d-uma", personId: p.id })).status).toBe(200);
+  const store = hub.session.store;
+  store.markVoiceReset(p.id);
+  const heard: number[] = [];
+  const ingest = hub.audio.ingest.bind(hub.audio);
+  hub.audio.ingest = async (input) => {
+    const seg = await ingest(input);
+    heard.push(seg.heardAt);
+    return seg;
+  };
+  try {
+    await new Promise((r) => setTimeout(r, 5));
+    const t0 = store.voiceResetAt(p.id) + 1;
+    const send = (q: string, t: number) => fetch(`${base}/api/audio?deviceId=d-uma&t0=${t}&t1=${t + 1000}${q}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${uma.token}` }, body: readWav(1) as unknown as BodyInit });
+    expect((await send("", t0)).status).toBe(200);
+    expect((await send(`&epoch=${store.voiceEpoch()}`, t0 + 1)).status).toBe(200);
+    expect(heard[0]).toBe(store.heardBy(0));
+    expect(heard[0]).toBeLessThanOrEqual(store.voiceResetAt(p.id));
+    expect(heard[1]).toBe(t0 + 1);
+  } finally {
+    hub.audio.ingest = ingest;
+    await hub.audio.flush();
+  }
 });

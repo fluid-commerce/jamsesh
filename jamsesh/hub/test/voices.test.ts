@@ -263,7 +263,7 @@ sim("the join read gives every person a voice from the first line", async () => 
   expect(s.right / s.lines).toBeGreaterThanOrEqual(0.6);
 }, T);
 
-// ---------------------------------------------------------------- 5.3 voiceprints that travel
+// ---------------------------------------------------------------- 5.3 a voice stays on its host
 
 const dir = mkdtempSync(join(tmpdir(), "jam-voices-hub-"));
 const hubA = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "a") });
@@ -283,7 +283,7 @@ function wavOf(key: Key, text: string) {
 
 sim("a voice stays on the host that learned it: another host doesn't know it until the person reads there", async () => {
   const anaA = hubA.session.upsertPerson({ name: "Ana" });
-  expect(hubA.enrollVoice(anaA.id, wavOf("ana", ENROL_TEXT.ana))).toMatchObject({ ok: true });
+  expect(hubA.enrollVoice(anaA.id, wavOf("ana", ENROL_TEXT.ana), hubA.session.store.voiceEpoch())).toMatchObject({ ok: true });
   expect(hubA.audio.voiceprints.count(anaA.id)).toBeGreaterThan(0);
   // Host B has never heard her, and there is no way to bring it there.
   const anaB = hubB.session.upsertPerson({ name: "Ana" });
@@ -301,7 +301,7 @@ sim("a voice stays on the host that learned it: another host doesn't know it unt
   await hear(Date.now() - 60_000);
   expect(hubB.session.store.all("utterances").at(-1)?.personId).not.toBe(anaB.id);
   // She reads on B: from then on B knows her.
-  expect(hubB.enrollVoice(anaB.id, wavOf("ana", ENROL_TEXT.ana))).toMatchObject({ ok: true });
+  expect(hubB.enrollVoice(anaB.id, wavOf("ana", ENROL_TEXT.ana), hubB.session.store.voiceEpoch())).toMatchObject({ ok: true });
   await hear(Date.now() - 20_000);
   const heard = hubB.session.store.all("utterances").sort((a, b) => a.t0 - b.t0).at(-1)!;
   expect(heard.speakerName).toBe("Ana");
@@ -335,10 +335,10 @@ test("the join read's window closes when the read fails: a refused recording, ba
   hubB.audio.beginEnrolment(p.id);
   expect(open()!.until).toBeGreaterThan(Date.now() + 60_000);
   // Too quiet: refused, and the window is down to the grace for copies on their way.
-  expect(hubB.enrollVoice(p.id, encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }))).toMatchObject({ ok: false });
+  expect(hubB.enrollVoice(p.id, encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }), hubB.session.store.voiceEpoch())).toMatchObject({ ok: false });
   expect(open()!.until).toBeLessThanOrEqual(Date.now() + 25_000);
   hubB.audio.beginEnrolment(p.id);
-  expect(() => hubB.enrollVoice(p.id, new Uint8Array([1, 2, 3]))).toThrow();
+  expect(() => hubB.enrollVoice(p.id, new Uint8Array([1, 2, 3]), hubB.session.store.voiceEpoch())).toThrow();
   expect(open()!.until).toBeLessThanOrEqual(Date.now() + 25_000);
   // Over HTTP: no microphone, so nothing was read: closed at once. Only the person's own window may.
   hubB.audio.beginEnrolment(p.id);
@@ -418,6 +418,6 @@ sim("each speech line records whether it was typed, said to JamSesh, or overhear
 
 sim("people who read the join sentences are in the room's vocabulary", () => {
   const dee = hubA.session.upsertPerson({ name: "Deedee" });
-  expect(hubA.enrollVoice(dee.id, wavOf("dee", ENROL_TEXT.dee))).toMatchObject({ ok: true });
+  expect(hubA.enrollVoice(dee.id, wavOf("dee", ENROL_TEXT.dee), hubA.session.store.voiceEpoch())).toMatchObject({ ok: true });
   expect(hubA.transcriber.vocabulary().map((v) => v.term)).toContain("Deedee");
 });
