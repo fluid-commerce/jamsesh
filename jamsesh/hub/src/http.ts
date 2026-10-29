@@ -47,6 +47,10 @@ const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request|devices
 /** Settings only the host machine may change (SPEC 14, host-only). */
 const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled"] as const;
 
+/** Per request, what releases its count at once: a request that is only waiting for the room (a hook's listen) isn't work in flight. */
+const waiting = new WeakMap<Request, () => void>();
+const markWaiting = (req: Request) => waiting.get(req)?.();
+
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
 /** Host names this hub answers to: loopback, any IP address, this Mac's own .local names, and its own domains. */
@@ -128,13 +132,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 
   const PUBLIC_FILES = /^\/(assets\/|icons\/|fonts\/|favicon\.svg$|manifest\.webmanifest$|sw\.js$)/;
 
-  const server = Bun.serve<WsData, any>({
-    port,
-    hostname: "0.0.0.0",
-    ...(tls ? { tls } : {}),
-    idleTimeout: 255,
-    maxRequestBodySize: 64 * 1024 * 1024,
-    async fetch(incoming, srv) {
+  const route = async (incoming: Request, srv: Server<WsData>): Promise<Response | undefined> => {
       const peer = srv.requestIP(incoming)?.address ?? "0.0.0.0";
       const incomingUrl = new URL(incoming.url);
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
@@ -155,6 +153,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       if (!("req" in got)) return bad(got.message, got.status);
       const req = got.req;
       const release = got.release;
+      const early = waiting.get(incoming);
+      if (early) waiting.set(req, early);
       const url = new URL(req.url);
       const path = url.pathname;
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
@@ -270,8 +270,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
         if (path === "/mcp") {
-          // Counted as work in flight until it is answered.
-          return await hub.track("an agent's request", Promise.resolve(hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url))));
+          // An agent's stream can stay open for minutes (waiting for the room): its tool calls are counted where they run (mcp.ts), not here.
+          markWaiting(req);
+          return await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
         }
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
@@ -312,6 +313,51 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       } finally {
         release();
       }
+    };
+
+  const server = Bun.serve<WsData, any>({
+    port,
+    hostname: "0.0.0.0",
+    ...(tls ? { tls } : {}),
+    idleTimeout: 255,
+    maxRequestBodySize: 64 * 1024 * 1024,
+    // Every request is counted from the moment it is admitted until its response has been fully sent, here once, for every route.
+    async fetch(incoming, srv) {
+      const release = hub.admit(`${incoming.method} ${new URL(incoming.url).pathname}`);
+      waiting.set(incoming, release);
+      let res: Response | undefined;
+      try {
+        res = await route(incoming, srv);
+      } catch (e) {
+        release();
+        throw e;
+      }
+      // An upgrade has no response; a body is released when its last byte has gone (or the client left).
+      if (!res || !res.body) {
+        release();
+        return res;
+      }
+      const reader = res.body.getReader();
+      const out = new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(c) {
+            try {
+              const { done, value } = await reader.read();
+              if (done) (c.close(), release());
+              else c.enqueue(value);
+            } catch (e) {
+              release();
+              c.error(e);
+            }
+          },
+          cancel(reason) {
+            release();
+            return reader.cancel(reason);
+          },
+        }),
+        res,
+      );
+      return out;
     },
     websocket: {
       idleTimeout: 120,
@@ -827,6 +873,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const joined = !!hub.hookAgent(b, ip, machine);
     const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
     if (hook === "listen") {
+      // Held open until the room has something for the idle agent: waiting, not work.
+      markWaiting(req);
       // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
       const r = joined ? await hub.listen(b, ip, machine) : { text: "", delivery: null };
       if (r.delivery) headers["x-jam-delivery"] = r.delivery;

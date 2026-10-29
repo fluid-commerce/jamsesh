@@ -349,6 +349,19 @@ export class Session {
     return n.length >= 3 ? only(all.filter((p) => p.name.toLowerCase().startsWith(n))) : undefined;
   }
 
+  /**
+   * The title the project already has for someone (carried in when the session started), taken when they join, and remembered as the
+   * version this session saw so it isn't saved back as a change of its own. One place, whenever a person appears.
+   */
+  adoptCarriedTitle(name: string): string | undefined {
+    const carried = this.store.setting<Record<string, { role: string; version: number }>>("carriedTitles", {})[name.trim().toLowerCase()];
+    if (!carried?.role) return undefined;
+    const bases = { ...this.store.setting<Record<string, { v: number; sig: string }>>("carryBase", {}) };
+    bases[`person:${name.trim().slice(0, 200)}`] = { v: carried.version, sig: carried.role };
+    this.store.setSetting("carryBase", bases);
+    return carried.role;
+  }
+
   upsertPerson(fields: { id?: string; name: string; role?: string; weight?: number }): Person {
     const existing = fields.id ? this.store.get("people", fields.id) : this.personByName(fields.name);
     if (existing) {
@@ -357,20 +370,23 @@ export class Session {
       const shortened = !fields.id && !!incoming && existing.name.toLowerCase().startsWith(incoming.toLowerCase());
       const name = shortened ? existing.name : incoming || existing.name;
       if (name !== existing.name) this.renameOwned(existing, name);
+      // Untitled when they come back: the project's title for them.
+      const role = fields.role ?? (existing.role || this.adoptCarriedTitle(name) || existing.role);
       return this.store.put("people", {
         ...existing,
         name,
-        role: fields.role ?? existing.role,
+        role: role,
         // A new title brings its weight with it, unless someone set the weight by hand.
-        weight: fields.weight ?? (fields.role !== undefined && fields.role !== existing.role && existing.weight === weightForRole(existing.role) ? weightForRole(fields.role) : existing.weight),
+        weight: fields.weight ?? (role !== existing.role && existing.weight === weightForRole(existing.role) ? weightForRole(role) : existing.weight),
       });
     }
     const count = this.store.all("people").length;
+    const role = fields.role ?? this.adoptCarriedTitle(fields.name) ?? "";
     const p: Person = {
       id: newId("p"),
       name: fields.name.trim(),
-      role: fields.role ?? "",
-      weight: fields.weight ?? weightForRole(fields.role ?? ""),
+      role,
+      weight: fields.weight ?? weightForRole(role),
       color: PALETTE[count % PALETTE.length],
       hasVoiceprint: false,
       voiceSamples: 0,

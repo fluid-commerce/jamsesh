@@ -10,7 +10,7 @@ process.env.JAMSESH_SILENT = "1";
 
 const { Hub } = await import("../src/hub");
 const { acceptedEvent } = await import("../src/brain/brain");
-const { ContextUnavailable, contextExport, readProjectContext, saveProjectContext, seedFromProject } = await import("../src/carryover");
+const { ContextUnavailable, contextExport, readProjectContext, saveProjectContext, seedFromProject, snapshotContext } = await import("../src/carryover");
 const { createProject } = await import("../src/projects");
 const { weightForRole } = await import("../src/session");
 const { Attachments } = await import("../src/attachments");
@@ -412,7 +412,7 @@ test("every body-bearing route is capped: pairing, audio of an odd type, and MCP
     const big = new Uint8Array(3 * 1024 * 1024).fill(32);
     expect((await fetch(`${base}/api/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: big })).status).toBe(413);
     const dev = r.hub.auth.issue({ kind: "browser", label: "L", ip: "127.0.0.1", personId: r.chey.id });
-    const mcp = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${dev.token}` }, body: big });
+    const mcp = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${dev.token}` }, body: new Uint8Array(18 * 1024 * 1024).fill(32) });
     expect(mcp.status).toBe(413);
     const bigMedia = new Uint8Array(33 * 1024 * 1024);
     const audio = await fetch(`${base}/api/audio?deviceId=d&t0=1&t1=2`, { method: "POST", headers: { "content-type": "audio/wav", authorization: `Bearer ${dev.token}` }, body: bigMedia });
@@ -900,4 +900,138 @@ test("the first-join briefing shows each file link once, from the agent's addres
   expect(brief).toContain(`https://room.example.net/api/attachments/${att.id}`);
   const seven = Array.from({ length: 7 }, (_, i) => ({ ...att, id: `att_${i}` }));
   expect(() => r.s.createDirective({ text: "Too many", mode: "note", targets: [agent.id], requestedBy: "Chey", attachments: seven })).toThrow();
+});
+
+// ---------- round 24 ----------
+
+test("shutdown waits for any MCP tool call still writing, and a call that only waits for the room doesn't hold it up", async () => {
+  const r = room();
+  const mcp = r.hub.mcp as any;
+  let wrote = false;
+  mcp.callTool = async (_c: unknown, name: string) => {
+    if (name === "jam_wait") return new Promise(() => {});
+    await Bun.sleep(250);
+    wrote = true;
+    return { content: [{ type: "text", text: "ok" }] };
+  };
+  void mcp.call({ agentId: null }, "jam_wait", {});
+  void mcp.call({ agentId: null }, "jam_post_image", {});
+  expect(r.hub.working()).toEqual(["the jam_post_image call"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(wrote).toBe(true);
+});
+
+test("a host screenshot being kept is counted until its artifact exists", async () => {
+  const r = room();
+  const file = join(dir, "shot.png");
+  writeFileSync(file, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+  const before = r.s.artifacts().length;
+  (r.hub.host as any).onImage(file, "Simulator");
+  expect(r.hub.working()).toEqual(["a screenshot being kept"]);
+  expect(await r.hub.shutdown()).toBe(true);
+  expect(r.s.artifacts().length).toBe(before + 1);
+});
+
+test("the transport counts a request until its response has been sent; a hook's listen is waiting, not work", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    r.hub.auth.windows.adopt("dd".repeat(32));
+    const base = `http://127.0.0.1:${server.port}`;
+    // A body still arriving is work in flight.
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    let step = 0;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(c) {
+        if (step++ === 0) c.enqueue(new TextEncoder().encode('{"text":"x'));
+        else (await gate, c.enqueue(new TextEncoder().encode('"}')), c.close());
+      },
+    });
+    const sending = fetch(`${base}/api/say`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${"dd".repeat(32)}` }, body, duplex: "half" } as any);
+    await Bun.sleep(100);
+    expect(r.hub.working()).toEqual(["POST /api/say"]);
+    release();
+    await sending;
+    await Bun.sleep(50);
+    expect(r.hub.working()).not.toContain("POST /api/say");
+    // An ordinary read is counted and released too.
+    await (await fetch(`${base}/api/state`, { headers: { cookie: `jam_window=${"dd".repeat(32)}` } })).text();
+    await Bun.sleep(30);
+    expect(r.hub.working()).not.toContain("GET /api/state");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a person joining a fresh project session gets their saved title and its weight, and it isn't saved back as their change", () => {
+  const p = createProject(dir, "Join titles");
+  const base = room();
+  base.s.upsertPerson({ name: "Dana", role: "Director" });
+  expect(saveProjectContext(dir, p.slug, "S", base.s)).toBe("written");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, `bare${Math.random()}`), teamDir: join(dir, `team${Math.random()}`) });
+  hubs.push(hub);
+  clearInterval((hub.brain as any).digestTimer);
+  const fresh = { s: hub.session };
+  seedFromProject(dir, p.slug, "N", fresh.s);
+  expect(fresh.s.personByName("Dana")).toBeUndefined();
+  const dana = fresh.s.upsertPerson({ name: "Dana" });
+  expect(dana.role).toBe("Director");
+  expect(dana.weight).toBe(weightForRole("Director"));
+  expect(snapshotContext(fresh.s, "N").people).toEqual([]);
+  // Back later with no title: the same.
+  fresh.s.store.put("people", { ...dana, role: "", weight: 1 });
+  expect(fresh.s.upsertPerson({ name: "Dana" }).role).toBe("Director");
+});
+
+test("the same instruction with a new file is not 'already sent': it becomes a card showing the file", async () => {
+  const r = room();
+  const att = (n: number) => ({ id: `att_n${n}`, name: `n${n}.txt`, type: "text/plain", kind: "text" as const, size: 5 });
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  r.s.createDirective({ text: "Build the page", mode: "implement", targets: [agent.id], requestedBy: "Chey", attachments: [att(1)] });
+  const ev = (a: ReturnType<typeof att>) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: "build the page", relevance: "work", data: { direct: true, attachments: [a] } });
+  const run = async (e: any) => (r.hub.brain as any).tools([e], { effects: 0 }, "person", "direct").create_directive.execute({ targets: [agent.id], text: "Build the page", mode: "implement", rationale: "x" }, { toolCallId: "1", messages: [] });
+  expect(await run(ev(att(1)))).toContain("Already sent");
+  const out = await run(ev(att(2)));
+  expect(out).toContain("Proposed on the Tasks board");
+  expect(r.s.board.open().at(-1)!.attachments).toEqual([att(2)]);
+});
+
+test("files past six are refused visibly on the card, never dropped silently", () => {
+  const r = room();
+  const att = (n: number) => ({ id: `att_x${n}`, name: `x${n}.txt`, type: "text/plain", kind: "text" as const, size: 5 });
+  const card = r.s.proposeContext({ text: "Eight files", kind: "fact", by: "Chey", attachments: [1, 2, 3, 4, 5, 6, 7, 8].map(att) })!;
+  expect(card.attachments).toHaveLength(6);
+  expect(card.extraFiles).toBe(2);
+});
+
+test("/mcp takes a base64 image at the stated limit, from one shared constant, and refuses past it", async () => {
+  const { MAX_IMAGE_BYTES, MCP_BODY_BYTES } = await import("../src/limits");
+  const { limitFor } = await import("../src/body");
+  expect(limitFor(new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json" } }))).toBe(MCP_BODY_BYTES);
+  expect(MCP_BODY_BYTES).toBeGreaterThan(Math.ceil((MAX_IMAGE_BYTES * 4) / 3));
+  const tool = (r0: any) => r0.toolList().find((t: any) => t.name === "jam_post_image");
+  expect(tool(room().hub.mcp).description).toContain(`${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+  expect(readFileSync(join(import.meta.dir, "../../SPEC.md"), "utf8")).toContain(`at most ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const dev = r.hub.auth.issue({ kind: "agent", label: "A", ip: "127.0.0.1", personId: r.chey.id });
+    const post = (n: number) => fetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${dev.token}` }, body: new Uint8Array(n).fill(32) });
+    expect((await post(Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 1000)).status).not.toBe(413);
+    expect((await post(MCP_BODY_BYTES + 1)).status).toBe(413);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a cancellation for another reason is another card; the same reason joins", () => {
+  const r = room();
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const d = r.s.createDirective({ text: "Build it", mode: "implement", targets: [agent.id], requestedBy: "Chey" });
+  const a = r.s.board.proposeCancel({ directive: d, reason: "Scrap it", by: "Chey" })!;
+  expect(r.s.board.proposeCancel({ directive: d, reason: "scrap it.", by: "Felipe" })!.id).toBe(a.id);
+  expect(r.s.board.proposeCancel({ directive: d, reason: "The client changed their mind", by: "Felipe" })!.id).not.toBe(a.id);
 });

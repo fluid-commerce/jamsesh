@@ -704,7 +704,9 @@ export class Brain {
           const dupe = s.directives().find(
             (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && restates(d.text, i.text),
           );
-          if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
+          // Already sent, and nothing new with it. Files that weren't on the sent directive go to a card for a person to see and send.
+          const newFiles = fileRefs.filter((f) => !(dupe?.attachments ?? []).some((a) => a.id === f.id));
+          if (dupe && !newFiles.length) return `Already sent as ${dupe.id}; not sending it again.`;
           // Overheard work, and any work in a pass with a file, waits on the Tasks board for a person to send; what someone asked JamSesh for goes straight out.
           if (proposeOnly) {
             const card = s.proposeTask({ text: i.text, mode: i.mode, targets, workstream: i.workstream, by: requester, sourceEventIds: sourceIds, origin, attachments: fileRefs });

@@ -13,6 +13,7 @@ import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
+import { MAX_IMAGE_BYTES } from "./limits";
 import { Attachments, pdfText, type AttachmentRef } from "./attachments";
 import { seedFromProject } from "./carryover";
 import { Auth } from "./auth";
@@ -109,10 +110,17 @@ export class Hub {
     this.session.onShowRequest = (r) => this.onShowRequest(r);
     // Simulator and host screenshots become artifacts the room and the brain can see.
     this.host.onImage = (path, title) => {
-      void Bun.file(path)
-        .bytes()
-        .then((bytes) => this.saveUpload(null, bytes, { title, stage: "built", note: "Captured on the host" }))
-        .catch((e) => console.warn(`[host] couldn't keep the screenshot: ${e?.message ?? e}`));
+      // Counted until the artifact is recorded, so a capture accepted before shutdown is in the final snapshot.
+      void this.track(
+        "a screenshot being kept",
+        Bun.file(path)
+          .bytes()
+          .then((bytes) => this.saveUpload(null, bytes, { title, stage: "built", note: "Captured on the host" }))
+          .catch((e) => {
+            this.workLost = true;
+            console.warn(`[host] couldn't keep the screenshot: ${e?.message ?? e}`);
+          }),
+      );
     };
     // A finished preview build lands in the feed for the room and the brain's context, but isn't
     // room speech: running it through hear() would let the rules router turn it into a directive.
@@ -191,7 +199,7 @@ export class Hub {
     this.brain.quiesce();
     const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
     if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
-    const docs = !unfinished.length && !this.documentLost;
+    const docs = !unfinished.length && !this.workLost;
     // A snapshot whose canvas copy failed is not a final save.
     const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
@@ -217,11 +225,22 @@ export class Hub {
 
   private intervals: ReturnType<typeof setInterval>[] = [];
   /** Every unit of accepted work still running (requests to the brain, a prompt window, a document card), by what it is. */
-  private inflight = new Map<Promise<unknown>, string>();
-  /** Registers accepted work: shutdown waits for it. Failures stay the caller's to report; the registry only needs to know it ended. */
+  private inflight = new Map<object, string>();
+
+  /**
+   * Registers a unit of accepted work, and returns what releases it. Shutdown waits for every unreleased one. This is the one place
+   * work is counted from the transport (every HTTP request, every MCP tool call) and the registry the rest of the hub uses.
+   */
+  admit(what: string): () => void {
+    const key = {};
+    this.inflight.set(key, what);
+    return () => void this.inflight.delete(key);
+  }
+
+  /** Registers work that is already a promise: counted until it settles. Failures stay the caller's to report. */
   track<T>(what: string, work: Promise<T>): Promise<T> {
-    const done: Promise<unknown> = work.then(() => {}, () => {}).finally(() => this.inflight.delete(done));
-    this.inflight.set(done, what);
+    const release = this.admit(what);
+    work.then(release, release);
     return work;
   }
 
@@ -244,8 +263,8 @@ export class Hub {
     return [];
   }
 
-  /** A document card that couldn't be made: its message is in the feed without the card it promised, so the final save is reported incomplete. */
-  private documentLost = false;
+  /** Accepted work that couldn't be finished (a document card, a kept screenshot): the final save is reported incomplete. */
+  private workLost = false;
   /** Set when shutdown begins: no new message is taken in, so nothing arrives after the last document card is waited for. */
   closing = false;
 
@@ -350,7 +369,7 @@ export class Hub {
     });
     if (document) {
       const pending = this.proposeDocument(ev, attached).catch((e) => {
-        this.documentLost = true;
+        this.workLost = true;
         console.error("document card:", e instanceof Error ? e.message : e);
       });
       this.track("a document card", pending);
@@ -495,7 +514,7 @@ export class Hub {
     const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
     const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
     if (!isJpeg && !isPng) throw new Error("Upload a PNG or JPEG.");
-    if (bytes.length > 12 * 1024 * 1024) throw new Error("Images must be under 12 MB.");
+    if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`Images must be under ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`);
     const file = `${newId("up")}.${isJpeg ? "jpg" : "png"}`;
     await Bun.write(join(this.uploadsDir, file), bytes);
     const size = imageSize(bytes);

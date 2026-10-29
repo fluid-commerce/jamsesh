@@ -2,8 +2,10 @@
 // budget, before any route sees it. Past the cap nothing more is kept (the rest is read and dropped, so the sender gets its
 // answer on a clean connection).
 
+import { MCP_BODY_BYTES } from "./limits";
+
 /** The most a request body may be: JSON is small; only the routes that take files carry media. */
-export const BODY_LIMITS = { json: 2 * 1024 * 1024, other: 1024 * 1024, media: 32 * 1024 * 1024, photo: 8 * 1024 * 1024 };
+export const BODY_LIMITS = { json: 2 * 1024 * 1024, mcp: MCP_BODY_BYTES, other: 1024 * 1024, media: 32 * 1024 * 1024, photo: 8 * 1024 * 1024 };
 /** Routes that take a file or a recording. */
 const MEDIA_ROUTES = /^\/api\/(audio|attachments|upload|people\/[\w-]+\/(voice|photo))$/;
 export const READ_MS = { small: 15_000, media: 90_000 };
@@ -14,6 +16,7 @@ let reserved = 0;
 export function limitFor(req: Request): number {
   const path = new URL(req.url).pathname;
   if (/^\/api\/people\/[\w-]+\/photo$/.test(path)) return BODY_LIMITS.photo;
+  if (path === "/mcp") return BODY_LIMITS.mcp;
   if (MEDIA_ROUTES.test(path)) return BODY_LIMITS.media;
   return (req.headers.get("content-type") ?? "").includes("application/json") ? BODY_LIMITS.json : BODY_LIMITS.other;
 }

@@ -334,6 +334,8 @@ export interface TriageCard {
   attachments?: AttachmentRef[];
   /** Its wording is only a placeholder (a file with no text JamSesh could read): a person writes the fact before Add. */
   needsWording?: boolean;
+  /** Files offered with the request past the six a card holds: they were not added, and the card says so. */
+  extraFiles?: number;
   /** A task card that cancels this directive when a person sends it; its text is the reason the agents read. */
   cancels?: string;
   /** A later line in the room overruled this proposal; it waits for a person to dismiss it like any other. */

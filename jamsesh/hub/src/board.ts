@@ -31,8 +31,11 @@ export type BoardResult<T = {}> = ({ ok: true; card: TriageCard } & T) | { ok: f
 
 const fail = (error: string, status = 400): { ok: false; error: string; status: number } => ({ ok: false, error, status });
 const clean = (t: unknown) => String(t ?? "").replace(/\s+/g, " ").trim().slice(0, TEXT_MAX);
-/** A card carries at most the files one message can: the same limit its Send delivers. */
-const capFiles = (list: TriageCard["attachments"]) => (list ? [...new Map(list.map((a) => [a.id, a])).values()].slice(0, MAX_PER_MESSAGE) : undefined);
+/** A card carries at most the files one message can (the limit its Send delivers); those past it are counted, and the card says so. */
+const splitFiles = (list: TriageCard["attachments"]) => {
+  const all = list ? [...new Map(list.map((a) => [a.id, a])).values()] : [];
+  return { kept: all.slice(0, MAX_PER_MESSAGE), over: Math.max(0, all.length - MAX_PER_MESSAGE) };
+};
 const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
@@ -161,7 +164,8 @@ export class Board {
   // ---- proposing ----
 
   proposeTask(p: TaskProposal): TriageCard | null {
-    p = { ...p, attachments: capFiles(p.attachments) };
+    const { kept, over } = splitFiles(p.attachments);
+    p = { ...p, attachments: kept };
     const text = clean(p.text);
     if (!text) return null;
     const mode = MODES.includes(p.mode) ? p.mode : "explore";
@@ -178,13 +182,14 @@ export class Board {
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, targetNames: this.namesOf(targets), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, targetNames: this.namesOf(targets), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
 
   proposeContext(p: ContextProposal): TriageCard | null {
-    p = { ...p, attachments: capFiles(p.attachments) };
+    const { kept, over } = splitFiles(p.attachments);
+    p = { ...p, attachments: kept };
     const text = clean(p.text);
     if (!text) return null;
     const kind = p.kind && KINDS.includes(p.kind) ? p.kind : "fact";
@@ -205,7 +210,7 @@ export class Board {
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "context", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode: "note", targets: [], kind, workstream, conflictsWith: conflict?.id ?? null, ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(p.needsWording ? { needsWording: true } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode: "note", targets: [], kind, workstream, conflictsWith: conflict?.id ?? null, ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), ...(p.needsWording ? { needsWording: true } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -463,17 +468,19 @@ export class Board {
    * tells its agents); nothing an agent is doing changes until a person sends it.
    */
   proposeCancel(p0: { directive: Directive; reason: string; by: string; sourceEventIds?: number[]; origin?: TriageCard["origin"]; attachments?: TriageCard["attachments"] }): TriageCard | null {
-    const p = { ...p0, attachments: capFiles(p0.attachments) };
+    const { kept, over } = splitFiles(p0.attachments);
+    const p = { ...p0, attachments: kept };
     const d = p.directive;
     if (d.status === "done" || d.status === "cancelled") return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, p.reason);
-    const open = this.open().find((c) => c.cancels === d.id && !c.overruled);
-    if (open && this.fits(open, p.attachments)) return this.repeat(open, sources, p.attachments);
     const text = clean(p.reason) || "The room changed its mind";
+    // The same directive cancelled for the same reason joins the card; another reason is another card, so neither is lost.
+    const open = this.open().find((c) => c.cancels === d.id && !c.overruled && restates(c.text, text));
+    if (open && this.fits(open, p.attachments)) return this.repeat(open, sources, p.attachments);
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode: d.mode, targets: d.targets, kind: "fact", workstream: "", conflictsWith: null, cancels: d.id, ...(p.attachments?.length ? { attachments: p.attachments } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode: d.mode, targets: d.targets, kind: "fact", workstream: "", conflictsWith: null, cancels: d.id, ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }

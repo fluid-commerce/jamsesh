@@ -1,6 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { MAX_IMAGE_BYTES } from "./limits";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -209,7 +210,7 @@ const JAM_TOOLS = [
   {
     name: "jam_post_image",
     description:
-      "Post a screenshot to the big screen and the session (for example your running build, to compare with its mockup). Prefer the HTTP upload in the skill for large files; base64 PNG or JPEG here is fine under 3 MB.",
+      `Post a screenshot to the big screen and the session (for example your running build, to compare with its mockup). Prefer the HTTP upload in the skill for large files; base64 PNG or JPEG here is fine up to ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -371,7 +372,9 @@ export class McpEndpoint {
   }
 
   async call(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
-    const out = await this.callTool(ctx, name, args, extra);
+    // Counted from the call until its last write, for shutdown: here once for every tool, whoever calls. A call that only waits for the room isn't work.
+    const release = name === "jam_wait" ? () => {} : this.hub.admit(`the ${name} call`);
+    const out = await this.callTool(ctx, name, args, extra).finally(release);
     // An agent with no hooks (Codex) hears the room only when it asks, so every JamSesh call it makes
     // says if something is waiting. Claude Code's hooks hand the items over themselves.
     const id = ctx.agentId;

@@ -180,9 +180,10 @@ export class Attachments {
           parts.push({ type: "file", data: bytes, mediaType: r.type });
         }
       } else {
-        const body = new TextDecoder().decode(bytes).slice(0, Math.min(budget, 30_000));
+        const whole = new TextDecoder().decode(bytes);
+        const body = whole.slice(0, Math.min(budget, 30_000));
         budget -= body.length;
-        texts.push(`### ${r.name}\n${body}${body.length < bytes.length ? "\n(cut off)" : ""}`);
+        texts.push(`### ${r.name}\n${body}${body.length < whole.length ? "\n(cut off)" : ""}`);
       }
     }
     return { text: texts.join("\n\n"), parts };

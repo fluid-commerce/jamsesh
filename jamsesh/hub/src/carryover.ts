@@ -614,6 +614,8 @@ export function seedFromProject(home: string, slug: string, sessionId: string, s
     bases[w.id] = { v: w.version, sig: wsSig(w) };
     n++;
   }
+  // Remembered for people who join later: Session.adoptCarriedTitle gives each their project title when they appear.
+  s.store.setSetting("carriedTitles", Object.fromEntries(ctx.people.filter((p) => p.role).map((p) => [p.name.trim().toLowerCase(), { role: p.role, version: p.version }])));
   for (const p of ctx.people) {
     // What this session saw for the title: only a different one later is its own change to save.
     bases[`person:${p.name}`] = { v: p.version, sig: p.role };

@@ -304,6 +304,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
         <div className="tk-files">
           <FeedAttachments list={card.attachments} />
           {card.needsWording && <span className="tk-hint">JamSesh couldn't read text in it. Open it and write what to keep.</span>}
+          {card.extraFiles ? <span className="tk-hint">{card.extraFiles} more {card.extraFiles === 1 ? "file wasn't" : "files weren't"} added: a card holds six. Send {card.extraFiles === 1 ? "it" : "them"} in another message.</span> : null}
         </div>
       ) : null}
 

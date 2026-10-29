@@ -593,7 +593,7 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_agents` | The roster: people (name, title, weight) and agents (platform, repo, status, card, focus, workstreams). |
 | `jam_devserver` | Put a dev server on the host (see [6.6](#66-dev-servers-on-the-host)) [B18]. |
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
-| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact; the same screen again (same title, or `replaces`) is its next version ([10.5](#105-locks-queue-history-and-versions)). |
+| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB, the one limit the tool, the hub and the /mcp request cap all derive from `limits.ts`) as a **Built** or **Mockup** artifact; the same screen again (same title, or `replaces`) is its next version ([10.5](#105-locks-queue-history-and-versions)). |
 | `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen; a screen a person locked queues it as "ready to show" instead. |
 | `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first; pages with `offset` and says how many more there are. |
 | `jam_directives` | List the session's directives (the context leaves the older ones out), newest first, by words or status; pages with `offset`. |
