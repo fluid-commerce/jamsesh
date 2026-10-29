@@ -591,6 +591,10 @@ export interface WikiState {
   need?: string[];
   /** Each page as the wiki last knew it (file time and hash): a page that differs was changed by hand in the vault. Absent until the first look, which only records. */
   seen?: Record<string, { mtime: number; rev: string }>;
+  /** The wiki's own page write in progress (the page and the hash of the bytes it will hold), recorded before the write so a crash can't make it look like a hand edit. */
+  own?: { slug: string; rev: string };
+  /** The hand change being filed as a source (page, hash, the source's id), recorded before filing so a retry files nothing twice. */
+  filing?: { slug: string; rev: string; id: string };
 }
 
 const stateFile = (dir: string) => join(dir, ".wiki-state.json");
@@ -618,6 +622,13 @@ function parseState(j: unknown): WikiState {
   const queued = j.queued;
   if (queued !== undefined && !(Array.isArray(queued) && queued.every((q) => isRec(q) && KINDS.includes(q.kind as string) && typeof q.title === "string" && typeof q.text === "string" && typeof q.by === "string"))) throw new Error("bad queue");
   const seen = recOf(j.seen, (x): x is { mtime: number; rev: string } => isRec(x) && isNat(x.mtime) && typeof x.rev === "string");
+  const pair = <T extends object>(v: unknown, ok: (x: Record<string, unknown>) => boolean): T | undefined => {
+    if (v === undefined) return undefined;
+    if (!isRec(v) || !ok(v)) throw new Error("bad shape");
+    return v as T;
+  };
+  const own = pair<{ slug: string; rev: string }>(j.own, (x) => typeof x.slug === "string" && typeof x.rev === "string");
+  const filing = pair<{ slug: string; rev: string; id: string }>(j.filing, (x) => typeof x.slug === "string" && typeof x.rev === "string" && isSourceId(x.id));
   const need = j.need;
   if (need !== undefined && !(Array.isArray(need) && need.every((x) => typeof x === "string"))) throw new Error("bad need");
   if (j.migrated !== undefined && typeof j.migrated !== "boolean") throw new Error("bad migrated");
@@ -633,6 +644,8 @@ function parseState(j: unknown): WikiState {
     ...(queued ? { queued: queued as NonNullable<WikiState["queued"]> } : {}),
     ...(need ? { need: need as string[] } : {}),
     ...(seen ? { seen } : {}),
+    ...(own ? { own } : {}),
+    ...(filing ? { filing } : {}),
   };
 }
 
