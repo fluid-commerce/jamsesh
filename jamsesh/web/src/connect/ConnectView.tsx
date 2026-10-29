@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { QrScanner } from "./QrScanner";
+import { canScan, type Scanned } from "./joinHelp";
 
 const ALPHABET = /[23456789ABCDEFGHJKMNPQRSTUVWXYZ]/;
 
@@ -17,6 +19,7 @@ export function ConnectView() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState<{ name: string; brainName: string } | null>(null);
   const boxes = useRef<(HTMLInputElement | null)[]>([]);
+  const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     fetch("/api/pair/info").then((r) => r.json()).then(setInfo).catch(() => {});
@@ -66,6 +69,16 @@ export function ConnectView() {
     else boxes.current[Math.min(j, 3)]?.focus();
   };
 
+  // A scanned code for this room fills the boxes; one for another room goes there.
+  function scanned(s: Scanned) {
+    setScanning(false);
+    if (s.origin !== location.origin) return void location.assign(`${s.origin}/connect${s.code ? `?c=${s.code}` : ""}`);
+    if (!s.code) return void (setState("error"), setError("That QR code has no code in it. Type the code on the big screen."));
+    if (s.code.length === 8) return void submit(s.code);
+    setChars(s.code.split(""));
+    submit(s.code);
+  }
+
   return (
     <div className="connect">
       <div className="connect-card">
@@ -75,7 +88,11 @@ export function ConnectView() {
           <circle cx="40" cy="32" r="10" fill="#3E8BFF" fillOpacity=".9" />
         </svg>
         <h1>Join {info?.name ?? "the session"}</h1>
-        <p>Enter the code under the QR code on the big screen. It changes every 30 seconds.</p>
+        <p>
+          The code is on the big screen, under the QR code. It changes every 30 seconds.
+          <br />
+          <span className="connect-where">Not up? Ask JamSesh “what's the code?”, or ask the host.</span>
+        </p>
         <div className={`code-boxes ${state}`} onPaste={(e) => (e.preventDefault(), type(0, e.clipboardData.getData("text"), true))}>
           {chars.map((c, i) => (
             <input
@@ -107,6 +124,13 @@ export function ConnectView() {
             />
           ))}
         </div>
+        {!canScan() && <span className="connect-where">Or open your phone's Camera app and point it at the QR code.</span>}
+        {canScan() && !scanning && (
+          <button type="button" className="connect-paste" disabled={state === "joining"} onClick={() => setScanning(true)}>
+            Scan the QR code
+          </button>
+        )}
+        {scanning && <QrScanner onScan={scanned} onClose={() => setScanning(false)} />}
         <button
           type="button"
           className="connect-paste"

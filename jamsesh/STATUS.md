@@ -12,6 +12,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Host mode from the app alone (bundled hub, canvas, big screen, your window) | Tested live | Clean home folder, no checkout. Hub up in about 1.5 seconds. |
 | Join mode: pairing, name, live session, shared canvas, through the local relay | Tested live | Pairing and the canvas relay checked through the app's relay address. |
 | Hosts found on the local network (Bonjour) | Tested live | The host advertises; the app lists it. |
+| Join help: why no room was found, type the address, scan the big screen's QR code, and where the code is | Simulated | Reasons checked in Rust unit tests with made-up results; the QR scan checked in headless Chromium with a fake camera, in the app's start page (stubbed commands) and the browser pairing page. Not run in the real Mac app or on a network that blocks Bonjour. |
 | "Connect my agents" setup, then "connect to jamsesh" | Tested live | A real Claude Code joined with no address, code, or name; posted its repo card and claimed a workstream. |
 | Codex "connect to jamsesh" | Simulated | Setup writes Codex's MCP server, skill and prompt; not run with a real Codex session tonight. |
 | Permission setup window | Simulated | Rendered and laid out; the macOS prompts themselves weren't clicked through. |
