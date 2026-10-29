@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { withParentWatch } from "../src/children";
+import { stopHelper, withParentWatch } from "../src/children";
 
 const alive = (pid: number) => {
   try {
@@ -55,4 +55,26 @@ test("stopping the wrapper stops the helper at once", async () => {
 test("a helper that exits on its own passes its exit status through", async () => {
   const p = Bun.spawn(withParentWatch(["sh", "-c", "exit 7"]), { stdio: ["ignore", "ignore", "ignore"] });
   expect(await p.exited).toBe(7);
+});
+
+test("stopping the wrapper returns only after the helper has let go", async () => {
+  const p = Bun.spawn(withParentWatch(["sleep", "300"]), { stdio: ["ignore", "ignore", "ignore"] });
+  await Bun.sleep(400);
+  const sleeper = Number(Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim().split("\n")[0]);
+  p.kill();
+  await p.exited;
+  // No polling: the wrapper waited for it.
+  expect(alive(sleeper)).toBe(false);
+});
+
+test("a helper that ignores SIGTERM is killed after the grace", async () => {
+  const p = Bun.spawn(withParentWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"]), { stdio: ["ignore", "ignore", "ignore"] });
+  await Bun.sleep(500);
+  const hung = Number(Bun.spawnSync(["pgrep", "-P", String(p.pid)]).stdout.toString().trim().split("\n")[0]);
+  expect(alive(hung)).toBe(true);
+  const t0 = Date.now();
+  await stopHelper(p, 600);
+  expect(Date.now() - t0).toBeGreaterThanOrEqual(500);
+  expect(alive(hung)).toBe(false);
+  expect(alive(p.pid)).toBe(false);
 });

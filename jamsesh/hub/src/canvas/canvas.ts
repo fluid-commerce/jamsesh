@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { config } from "../config";
 import type { Session } from "../session";
 import type { Agent, Platform } from "../types";
-import { withParentWatch } from "../children";
+import { stopHelper, withParentWatch } from "../children";
 import { FigcraftMcp, type ToolResult } from "./figcraft-mcp";
 
 interface FrameInfo {
@@ -507,7 +507,8 @@ export class Canvas {
    * data, rejoin the session file, and announce it again so people's canvases rejoin too. */
   private async revive() {
     console.warn("canvas: the canvas server stopped; starting it again");
-    this.serverProc?.kill();
+    // Wait for the old server to let go of its port, so the new one comes up on the same links.
+    if (this.serverProc) await stopHelper(this.serverProc);
     this.serverProc = null;
     await this.startServer();
     const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
