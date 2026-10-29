@@ -30,7 +30,7 @@ export function histories(session: Session): AgentHistory[] {
   const events = session.store.recentEvents({ kinds: ["update", "artifact", "decision"], limit: 400 });
   const directives = session.directives();
   return session
-    .agents()
+    .workers()
     .filter((a) => a.status !== "offline")
     .map((agent) => {
       const workstreams = session.store.all("workstreams").filter((w) => w.ownerAgentId === agent.id).map((w) => w.title);

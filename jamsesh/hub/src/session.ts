@@ -3,6 +3,7 @@
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
+import { affinity } from "./brain/affinity";
 import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
@@ -27,6 +28,11 @@ import type {
 
 /** An agent quiet this long shows as offline (and its record can be taken over by a rejoin). */
 export const AGENT_OFFLINE_MS = 20 * 60_000;
+/** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
+export const TASK_STALE_MS = 20 * 60_000;
+export const TASK_OFFER_MS = 10 * 60_000;
+/** A person prompt this recent means the agent's own work was asked for. */
+const ASKED_WINDOW_MS = 30 * 60_000;
 
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
@@ -403,6 +409,16 @@ export class Session {
       .sort((a, b) => a.joinedAt - b.joinedAt);
   }
 
+  /** The agents that do the room's product work: observers only watch. */
+  workers(): Agent[] {
+    return this.agents().filter((a) => a.role !== "observer");
+  }
+
+  /** An observer that opted out of room-wide messages. */
+  private skipsBroadcasts(a: Agent | undefined) {
+    return a?.role === "observer" && a.broadcasts === false;
+  }
+
   agent(id: string | null | undefined) {
     return id ? this.store.get("agents", id) : undefined;
   }
@@ -417,6 +433,8 @@ export class Session {
     platform?: Platform;
     focus?: string;
     name?: string;
+    role?: "worker" | "observer";
+    broadcasts?: boolean;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
     sameMachine?: (machine: string) => boolean;
   }): { agent: Agent; resumed: boolean; quietMs: number | null } {
@@ -461,14 +479,20 @@ export class Session {
       lastSeen: Date.now(),
       joinedAt: existing?.joinedAt ?? Date.now(),
       canvas: existing?.canvas ?? "none",
+      ...(info.role || existing?.role ? { role: info.role ?? existing?.role } : {}),
+      ...((info.role ?? existing?.role) === "observer" ? { broadcasts: info.broadcasts ?? existing?.broadcasts ?? true } : {}),
     };
     this.store.put("agents", agent);
+    this.resumeWorkstreams(agent);
     this.store.addEvent({
       kind: "system",
       authorType: "agent",
       authorId: agent.id,
       authorName: agent.name,
-      text: `${agent.name} ${existing ? "rejoined" : "joined"}: ${shortRepo(agent.repo)}${agent.branch ? ` @ ${agent.branch}` : ""}${agent.focus ? `, ${agent.focus}` : ""}.`,
+      text:
+        agent.role === "observer"
+          ? `${agent.name} ${existing ? "rejoined" : "joined"} as an observer${agent.focus ? `: ${agent.focus}` : ""}.`
+          : `${agent.name} ${existing ? "rejoined" : "joined"}: ${shortRepo(agent.repo)}${agent.branch ? ` @ ${agent.branch}` : ""}${agent.focus ? `, ${agent.focus}` : ""}.`,
       data: { platform: agent.platform },
     });
     return { agent, resumed: !!existing, quietMs: existing ? Date.now() - existing.lastSeen : null };
@@ -481,6 +505,7 @@ export class Session {
     const next = { ...a, ...fields, status, lastSeen: Date.now() };
     const visible = a.status !== next.status || a.activity !== next.activity || a.canvas !== next.canvas || a.focus !== next.focus;
     this.store.put("agents", next, visible);
+    if (a.status === "offline" || Date.now() - a.lastSeen > AGENT_OFFLINE_MS) this.resumeWorkstreams(next);
   }
 
   findAgentByCwd(cwd: string, machine?: string, harness?: Agent["harness"]): Agent | undefined {
@@ -519,7 +544,7 @@ export class Session {
       data: { updateKind: kind, ...(extra.data ?? {}) },
     });
     const status = kind === "blocked" || kind === "question" ? "blocked" : kind === "done" || kind === "shipped" ? "idle" : "working";
-    this.touchAgent(agentId, { status, activity: text.slice(0, 140) });
+    this.touchAgent(agentId, { status, activity: (kind === "done" || kind === "shipped" ? `Done: ${text}` : text).slice(0, 140) });
     if (kind === "question" || kind === "blocked") bus.send({ type: "toast", tone: "warn", text: `${agent.name} needs the room`, detail: text });
     this.onUpdate?.(this.agent(agentId)!, kind, text, ev);
     return ev;
@@ -545,9 +570,118 @@ export class Session {
     this.store.put("workstreams", ws);
     this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
-      this.store.addEvent({ kind: "system", authorType: "agent", authorId: agentId, authorName: agent.name, text: `${agent.name} took "${ws.title}".`, workstreamId: ws.id });
+      // Work nobody asked for (no open task, no prompt from its person lately) is announced as such.
+      const onItsOwn = !!existing && existing.ownerAgentId === agentId && existing.status === "active" ? false : this.startedOnItsOwn(agent);
+      this.store.addEvent({
+        kind: "system",
+        authorType: "agent",
+        authorId: agentId,
+        authorName: agent.name,
+        text: onItsOwn ? `${agent.name} started "${ws.title}" on its own; nobody asked for it.` : `${agent.name} took "${ws.title}".`,
+        workstreamId: ws.id,
+        data: onItsOwn ? { onItsOwn: true } : {},
+      });
+      if (onItsOwn) bus.send({ type: "toast", tone: "info", text: `${agent.name} started something on its own`, detail: ws.title });
     }
     return { workstream: ws, conflict: null as Agent | null };
+  }
+
+  /** True when nobody asked this agent for work: no open task for it and no prompt from its person lately. */
+  private startedOnItsOwn(agent: Agent) {
+    if (this.openFor(agent.id).length || this.directives().some((d) => d.targets.includes(agent.id) && (d.progress?.[agent.id] ?? d.status) === "pending")) return false;
+    // Only Claude Code reports its person's prompts; for other agents we can't tell, so they aren't accused.
+    if (agent.harness !== "claude-code") return false;
+    const since = Date.now() - ASKED_WINDOW_MS;
+    return !this.store.recentEvents({ kinds: ["prompt"], limit: 60 }).some((e) => e.ts >= since && e.data.agentId === agent.id);
+  }
+
+  /** A workstream pauses when its owner goes offline, and picks up again when the owner is back. */
+  private resumeWorkstreams(agent: Agent) {
+    for (const w of this.store.all("workstreams")) {
+      if (w.ownerAgentId !== agent.id || w.status !== "paused") continue;
+      this.store.put("workstreams", { ...w, status: "active", updatedAt: Date.now() });
+      this.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `${agent.name} is back; "${w.title}" is active again.`, workstreamId: w.id });
+    }
+  }
+
+  /**
+   * Housekeeping, run every minute by the hub: pause workstreams whose owner went offline, ask
+   * agents about tasks that sat without an ack or a report, and offer the room a reassignment
+   * when asking didn't help.
+   */
+  tick(now = Date.now()) {
+    const agents = new Map(this.agents().map((a) => [a.id, a]));
+    for (const w of this.store.all("workstreams")) {
+      const owner = w.ownerAgentId ? agents.get(w.ownerAgentId) : undefined;
+      if (w.status !== "active" || !owner || owner.status !== "offline") continue;
+      this.store.put("workstreams", { ...w, status: "paused", updatedAt: now });
+      this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${owner.name} went offline; "${w.title}" is paused until it's back or someone takes it.`, workstreamId: w.id });
+    }
+    for (const d of this.openDirectives()) {
+      if (d.mode !== "explore" && d.mode !== "implement") continue;
+      for (const t of d.targets) {
+        const state = d.progress?.[t] ?? d.status;
+        if (state === "done" || state === "cancelled") continue;
+        const agent = agents.get(t);
+        if (!agent || now - this.lastSign(d, t) < TASK_STALE_MS) continue;
+        const nudgeAt = d.nudgedAt?.[t];
+        const nudged = nudgeAt && nudgeAt > this.lastSign(d, t) ? nudgeAt : undefined; // an answer to the nudge starts the clock again
+        // An agent that's gone can't answer a nudge: the room is offered the reassignment right away.
+        if (agent.status === "offline" || (nudged && now - nudged >= TASK_OFFER_MS)) {
+          if (!d.reassignOfferedAt) this.offerReassign(d, agent, now);
+        } else if (!nudged) {
+          this.store.patch("directives", d.id, { nudgedAt: { ...(d.nudgedAt ?? {}), [t]: now } });
+          this.store.addEvent({
+            kind: "message",
+            authorType: "system",
+            authorId: null,
+            authorName: "JamSesh",
+            text: `It has been ${Math.round((now - this.lastSign(d, t)) / 60_000)} minutes since you reported on directive ${d.id} ("${d.text.slice(0, 100)}"). jam_ack it if you've started, post a jam_update with where you are, or say if you're stuck.`,
+            relevance: "work",
+            data: { to: t, toName: agent.name, nudge: d.id },
+          });
+          this.wake(t);
+        }
+      }
+    }
+  }
+
+  openDirectives() {
+    return this.directives().filter((d) => d.status !== "done" && d.status !== "cancelled");
+  }
+
+  /** The last time anything moved on this task for this agent: when it reached the agent, was acked, or the agent reported since. */
+  private lastSign(d: Directive, agentId: string) {
+    const acked = (d.progress?.[agentId] ?? d.status) === "acked";
+    const last = this.store.recentEvents({ kinds: ["update"], limit: 200 }).filter((e) => e.authorId === agentId).pop();
+    return Math.max(d.ts, d.deliveredAt ?? 0, acked ? d.updatedAt : 0, last && last.ts > d.ts ? last.ts : 0);
+  }
+
+  private offerReassign(d: Directive, agent: Agent, now: number) {
+    const mins = Math.round((now - d.ts) / 60_000);
+    this.store.patch("directives", d.id, { reassignOfferedAt: now });
+    this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${agent.name} hasn't reported on "${d.text.slice(0, 100)}" in ${mins} minutes. Reassign it from the agent's tile.`, data: { directiveId: d.id, reassignOffer: true } });
+    bus.send({ type: "toast", tone: "warn", text: `${agent.name} is quiet on a task`, detail: `${mins} minutes on "${d.text.slice(0, 80)}". Reassign it from its tile.` });
+  }
+
+  /** Moves a stalled task to another worker (the best match for it, or `to`); the old target is released. */
+  reassignDirective(id: string, by: string, to?: string): Directive | undefined {
+    const d = this.store.get("directives", id);
+    if (!d || d.status === "done" || d.status === "cancelled") return undefined;
+    const from = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
+    const taken = new Set(d.targets);
+    const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
+    const pick = (to ? live.find((a) => a.id === to) : undefined) ?? (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
+    if (!pick) {
+      bus.send({ type: "toast", tone: "warn", text: "Nobody else is free to take it", detail: d.text.slice(0, 100) });
+      return undefined;
+    }
+    for (const t of from) {
+      this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
+      this.wake(t);
+    }
+    this.store.patch("directives", id, { reassignOfferedAt: undefined });
+    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
   }
 
   // ---- directives ----
@@ -566,6 +700,8 @@ export class Session {
     sourceEventIds?: number[];
     workstreamId?: string | null;
   }): Directive {
+    // Observers only watch: product work never goes to them (answers and notes still can).
+    if (d.mode !== "answer" && d.mode !== "note") d = { ...d, targets: d.targets.filter((t) => this.agent(t)?.role !== "observer") };
     const directive: Directive = {
       id: newId("d"),
       ts: Date.now(),
@@ -651,9 +787,10 @@ export class Session {
       .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
+    const quiet = this.skipsBroadcasts(this.agent(agentId));
     const messages = this.store
       .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId)));
+      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet)));
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");
@@ -737,7 +874,7 @@ export class Session {
       data: { to: target?.id ?? "all", toName: target?.name ?? "everyone", ...data },
     });
     if (target) this.wake(target.id);
-    else for (const a of this.store.all("agents")) if (a.id !== from.id) this.wake(a.id);
+    else for (const a of this.store.all("agents")) if (a.id !== from.id && !this.skipsBroadcasts(a)) this.wake(a.id);
     return ev;
   }
 

@@ -65,7 +65,9 @@ describe("agent setup script", () => {
     expect(r.stdout).toContain("ok  Claude Code");
     const data = JSON.parse(readFileSync(settings, "utf8"));
     expect(data.theme).toBe("dark");
-    expect(data.hooks.Stop.map((e: { hooks: { command: string }[] }) => e.hooks[0]!.command)).toEqual(["mine.sh", `${box.home}/.jamsesh/hook.sh stop`]);
+    expect(data.hooks.Stop.map((e: { hooks: { command: string }[] }) => e.hooks[0]!.command)).toEqual(["mine.sh", `${box.home}/.jamsesh/hook.sh stop`, `${box.home}/.jamsesh/hook.sh listen`]);
+    expect(data.hooks.PostToolUse).toHaveLength(1);
+    expect(data.hooks.Stop[2].hooks[0].asyncRewake).toBe(true);
     expect(data.hooks.UserPromptSubmit).toHaveLength(1);
     expect(existsSync(`${settings}.jamsesh-tmp`)).toBe(false);
     expect(readFileSync(box.log, "utf8")).toContain(`mcp add --transport http -s user jamsesh ${origin}/mcp`);

@@ -49,8 +49,10 @@ const JAM_TOOLS = [
         platform: { type: "string", enum: PLATFORMS, description: "What this repository builds" },
         focus: { type: "string", description: "One line: what you're working on today" },
         name: { type: "string", description: "Optional display name; default is \"<Owner>'s Claude\" or \"<Owner>'s Codex\"" },
+        role: { type: "string", enum: ["worker", "observer"], description: "worker (default) does the room's product work and needs repo and platform. observer only watches: no repository, never given product tasks." },
+        broadcasts: { type: "boolean", description: "Observers only: false opts out of room-wide messages (to everyone). Default true." },
       },
-      required: ["harness", "repo", "cwd", "platform"],
+      required: ["harness", "cwd"],
     },
   },
   {
@@ -155,6 +157,9 @@ const JAM_TOOLS = [
         branch: { type: "string" },
         recentChanges: { type: "string", description: "What changed recently, including uncommitted work" },
         notes: { type: "string" },
+        repo: { type: "string", description: "Repository name or remote URL, when you moved to a different one" },
+        platform: { type: "string", enum: PLATFORMS, description: "What this repository builds, when it changed" },
+        focus: { type: "string", description: "One line: what you're working on now" },
       },
       required: ["stack", "designSystem"],
     },
@@ -338,6 +343,16 @@ export class McpEndpoint {
   }
 
   async call(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
+    const out = await this.callTool(ctx, name, args, extra);
+    // An agent with no hooks (Codex) hears the room only when it asks, so every JamSesh call it makes
+    // says if something is waiting. Claude Code's hooks hand the items over themselves.
+    const id = ctx.agentId;
+    if (id && !out.isError && !/^jam_(join|inbox|wait|ask)$/.test(name) && !name.startsWith("canvas_") && !this.hub.hooked(id) && this.hub.session.hasInbox(id) && !out.content.some((c: any) => /call jam_inbox/.test(c.text ?? "")))
+      return { ...out, content: [...out.content, { type: "text", text: "You have new items from the room: call jam_inbox." }] };
+    return out;
+  }
+
+  private async callTool(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
     const s = this.hub.session;
     const text = (t: string): ToolOut => ({ content: [{ type: "text", text: t }] });
     const json = (v: unknown): ToolOut => text(JSON.stringify(v, null, 1));
@@ -361,10 +376,13 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
+        const observer = args.role === "observer";
         const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
           harness: args.harness ?? "other",
-          repo: cleanRepo(String(args.repo ?? "")),
+          repo: observer ? "" : cleanRepo(String(args.repo ?? "")),
+          role: observer ? "observer" : "worker",
+          broadcasts: observer && typeof args.broadcasts === "boolean" ? args.broadcasts : undefined,
           branch: args.branch,
           cwd: args.cwd,
           machine,
@@ -487,8 +505,13 @@ export class McpEndpoint {
           notes: String(args.notes ?? ""),
           updatedAt: Date.now(),
         };
-        s.touchAgent(agent.id, { card, branch: card.branch || agent.branch });
+        // The card is the agent's word on where it is now: the tile follows it.
+        const repo = typeof args.repo === "string" && args.repo.trim() ? cleanRepo(args.repo) : agent.repo;
+        const platform = PLATFORMS.includes(args.platform) ? args.platform : agent.platform;
+        const focus = typeof args.focus === "string" && args.focus.trim() ? args.focus.trim().slice(0, 200) : agent.focus;
+        s.touchAgent(agent.id, { card, branch: card.branch || agent.branch, repo, platform, focus });
         s.store.put("agents", s.agent(agent.id)!);
+        if (repo !== agent.repo) s.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `${agent.name} moved to ${shortRepo(repo)}${focus ? `: ${focus}` : ""}.` });
         return text("Repo card saved. Other agents and the room brain can see it.");
       }
       case "jam_agents": {
@@ -674,7 +697,7 @@ export class McpEndpoint {
       "Agents:",
       ...agents.map(
         (a) =>
-          `- ${a.name} (${a.id}): ${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, ${a.status}${a.card ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${a.focus}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
+          `- ${a.name} (${a.id}): ${a.role === "observer" ? "observer (only watches)" : `${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}`}}, ${a.status}${a.card ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${a.focus}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
       ),
     ].join("\n");
   }

@@ -26,7 +26,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -525,6 +525,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   m = path.match(/^\/directives\/([\w-]+)$/);
   if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
+  m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
+  if (m && req.method === "POST") {
+    const moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" ? body.to : undefined);
+    return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
+  }
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
@@ -542,6 +547,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
   if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
+  if (path === "/hooks/tool" && req.method === "POST") return json(hub.onTool(body, ip, hub.auth.machineOf(paired?.id)));
+  // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
+  if (path === "/hooks/listen" && req.method === "POST") return new Response(await hub.onListen(body, ip, hub.auth.machineOf(paired?.id)), { headers: { "content-type": "text/plain; charset=utf-8" } });
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");

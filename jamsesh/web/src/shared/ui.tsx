@@ -642,12 +642,22 @@ export function stripMd(t: string): string {
     .replace(/^\s{0,3}(#{1,6}|>|[-*+])\s+/gm, "");
 }
 
+/** Open tasks an agent has taken or been handed, oldest first. */
+export function openTasksFor(state: HubState, agentId: string) {
+  return state.directives
+    .filter((d) => d.targets.includes(agentId) && ["pending", "delivered", "acked"].includes(d.progress?.[agentId] ?? d.status))
+    .sort((x, y) => x.ts - y.ts);
+}
+
 export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubState; compact?: boolean }) {
   const now = useNow(5000);
   const color = colorFor(state, { agentId: agent.id });
   const ws = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "active");
+  const paused = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "paused");
+  const tasks = agent.role === "observer" ? [] : openTasksFor(state, agent.id);
   const repo = agent.repo.split(/[/:]/).pop()?.replace(/\.git$/, "");
   const owner = state.people.find((p) => p.id === agent.ownerId);
+  const where = agent.role === "observer" ? "observer" : `${agent.platform} · ${repo}`;
   return (
     <div className="agent-row" style={{ opacity: agent.status === "offline" ? 0.45 : 1, padding: compact ? "8px 0" : "10px 0" }}>
       <span style={{ position: "relative", flex: "none" }}>
@@ -657,20 +667,41 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
       <div className="agent-row-text">
         <div className="agent-row-line">
           <strong className="ellipsis" style={{ fontWeight: 600, fontSize: compact ? 14 : 15 }}>{agent.name}</strong>
-          {!compact && <span className="chip" style={{ fontSize: 12, flex: "none" }}>{agent.platform} · {repo}</span>}
+          {!compact && <span className="chip" style={{ fontSize: 12, flex: "none" }}>{where}</span>}
           <span className="chip mono" style={{ fontSize: 12, color: "var(--dim)", marginLeft: "auto", flex: "none" }}>
             {ago(agent.lastSeen, now)}
           </span>
         </div>
         <div className="ellipsis" style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>
-          {compact ? `${agent.platform} · ${repo} · ` : ""}
-          {statusText(agent)}
-          {agent.activity && agent.status !== "offline" ? ` · ${stripMd(agent.activity)}` : ""}
+          {compact ? `${where} · ` : ""}
+          {statusLine(agent)}
         </div>
         {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
+        {paused.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--warn)", marginTop: 2 }}>Paused while offline: {paused.map((w) => w.title).join(", ")}</div>}
+        {tasks.slice(0, compact ? 1 : 3).map((d) => (
+          <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
+            <span className="chip mono" style={{ flex: "none" }}>{ago(d.ts, now)}</span>
+            <span className="ellipsis grow">{d.progress?.[agent.id] === "acked" ? "On it" : "Not picked up"}: {stripMd(d.text)}</span>
+            {d.reassignOfferedAt && (
+              <button className="btn small" style={{ flex: "none" }} onClick={() => api(`/api/directives/${d.id}/reassign`, {}).catch(() => {})}>
+                Reassign
+              </button>
+            )}
+          </div>
+        ))}
+        {tasks.length > (compact ? 1 : 3) && <div style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>and {tasks.length - (compact ? 1 : 3)} more open</div>}
       </div>
     </div>
   );
+}
+
+/** "Working · what it's doing", or "Done: what it finished" until its next task. */
+export function statusLine(a: Agent) {
+  const act = a.activity && a.status !== "offline" ? stripMd(a.activity) : "";
+  if (act.startsWith("Done:") && (a.status === "idle" || a.status === "waiting")) return act;
+  // Generic activity words only repeat the status.
+  if (!act || /^(idle|waiting for work|working)$/i.test(act)) return statusText(a);
+  return act.startsWith("Working on:") ? act : `${statusText(a)} · ${act}`;
 }
 
 export function StatusDot({ status }: { status: Agent["status"] }) {

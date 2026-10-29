@@ -180,7 +180,7 @@ export class Brain {
     const recent = this.session.store
       .recentEvents({ kinds: ["speech", "prompt", "directive"], limit: 14 })
       .filter((e) => !batch.some((b) => b.id === e.id));
-    const agents = this.session.agents().filter((a) => a.status !== "offline");
+    const agents = this.session.workers().filter((a) => a.status !== "offline");
     const result = await generateText({
       abortSignal: AbortSignal.timeout(15_000),
       model: m,
@@ -360,7 +360,8 @@ export class Brain {
   situation(batch: JamEvent[], triage: Triage | null): string {
     const s = this.session;
     const people = s.people();
-    const agents = s.agents();
+    const agents = s.workers();
+    const observers = s.agents().filter((a) => a.role === "observer" && a.status !== "offline");
     const workstreams = s.store.all("workstreams").filter((w) => w.status === "active");
     const open = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled").slice(0, 12);
     const room = s.store.recentEvents({ kinds: ["speech", "prompt"], limit: 40 });
@@ -374,6 +375,7 @@ export class Brain {
     return [
       `## People\n${people.map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""} (weight ${p.weight})${s.store.all("devices").some((d) => d.personId === p.id && d.location === "remote") ? ", remote (sees the big screen in their Screen tab, hears your voice on their laptop)" : ""}`).join("\n") || "(nobody named yet)"}`,
       `## Agents\n${agents.filter((a) => a.status !== "offline").map(fmtAgent).join("\n") || "(no agents connected)"}`,
+      observers.length ? `## Observers (they only watch: never target them with product work)\n${observers.map((a) => `- ${a.name}`).join("\n")}` : "",
       historyBrief(s, batch.map((e) => e.text).join(" ")),
       agents.some((a) => a.card) ? `## Repo cards (what each agent's repository is)\n${agents.filter((a) => a.card && a.status !== "offline").map((a) => `- ${a.name}: ${a.card!.stack}. Design system: ${a.card!.designSystem.slice(0, 200)}${a.card!.components ? `. Components: ${a.card!.components.slice(0, 160)}` : ""}${a.card!.recentChanges ? `. Recent: ${a.card!.recentChanges.slice(0, 160)}` : ""}`).join("\n")}` : "",
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,
@@ -455,8 +457,8 @@ export class Brain {
         }),
         execute: async (i) => {
           const known = agentIds();
-          const valid = i.targets.filter((t) => known.has(t));
-          if (!valid.length) return refuse("No valid agent ids. Use the ids from the Agents list.");
+          const valid = i.targets.filter((t) => known.has(t) && (i.mode === "answer" || i.mode === "note" || s.agent(t)?.role !== "observer"));
+          if (!valid.length) return refuse("No valid agent ids. Use the ids from the Agents list (observers only watch and can't be given work).");
           // One request, one agent per repository: the one that already has the context. Answers
           // and coordination go to everyone they're addressed to.
           const { kept: targets, dropped } = i.mode === "answer" || i.mode === "coordinate" ? { kept: valid, dropped: [] as Agent[] } : oneAgentPerRepo(s, valid, i.text);
@@ -829,7 +831,7 @@ export class Brain {
   ruleRoute(batch: JamEvent[], triage: Triage) {
     if (this.stopped) return;
     const s = this.session;
-    const agents = s.agents().filter((a) => a.status !== "offline");
+    const agents = s.workers().filter((a) => a.status !== "offline");
     for (const line of triage.lines) {
       const ev = batch.find((e) => e.id === line.id);
       if (!ev || !roomTalk(ev)) continue;
@@ -923,7 +925,7 @@ export class Brain {
     batch = fresh;
     for (const b of batch) this.shipConsidered.set(key(b.agent), Date.now());
     const ids = new Set(batch.map((b) => b.agent.id));
-    const others = s.agents().filter((a) => !ids.has(a.id) && a.status !== "offline" && a.platform !== "design" && !batch.some((b) => b.agent.platform === a.platform));
+    const others = s.workers().filter((a) => !ids.has(a.id) && a.status !== "offline" && a.platform !== "design" && !batch.some((b) => b.agent.platform === a.platform));
     const shippedPlatforms = new Set(batch.map((b) => b.agent.platform));
     if (!others.length && shippedPlatforms.size < 2) return;
     if ([...ids, ...others.map((o) => o.id)].every(recentCoordinate)) return;

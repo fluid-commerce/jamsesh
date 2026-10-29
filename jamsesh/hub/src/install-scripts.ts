@@ -5,7 +5,7 @@ import type { Hub } from "./hub";
 export function hookScript(hub: Hub) {
   void hub;
   return `#!/usr/bin/env bash
-# JamSesh hook for Claude Code: hook.sh prompt|stop|start, with the hook's JSON on stdin.
+# JamSesh hook for Claude Code: hook.sh prompt|tool|stop|listen|start, with the hook's JSON on stdin.
 # Sends your prompts into the room's context, picks up directives the room sends you, and
 # at the start of a session reminds the agent to join the room.
 # Does nothing unless this machine is connected (jamsesh-client on).
@@ -32,6 +32,17 @@ if [ "$1" = "start" ]; then
     mv -f "$skill.new" "$skill"
   fi
   printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"JamSesh: this computer is connected to a live room session. Before you start work in a repository, join it: load the jamsesh skill, then call jam_join (harness claude-code, this directory), post your jam_repo_card, and jam_claim your workstream. If you already joined in this conversation, carry on. When you have nothing to do, keep calling jam_wait so the room can reach you."}}'
+  exit 0
+fi
+
+# listen runs in the background after the agent stops (asyncRewake): it holds until the room has
+# something for the idle agent, prints it and exits 2, which wakes the agent. No news is exit 0.
+if [ "$1" = "listen" ]; then
+  end=$((now + \${JAMSESH_LISTEN_SECONDS:-3000}))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    out="$(printf '%s' "$body" | curl -fs --max-time 230 -X POST -H 'content-type: application/json' -H "authorization: Bearer $JAMSESH_TOKEN" --data-binary @- "$JAMSESH_HUB/api/hooks/listen" 2>/dev/null)" || exit 0
+    if [ -n "$out" ]; then printf '%s\\n' "$out" >&2; exit 2; fi
+  done
   exit 0
 fi
 
@@ -200,10 +211,12 @@ if (-e $path) {
 $data->{hooks} = {} unless ref $data->{hooks} eq 'HASH';
 my $hooks = $data->{hooks};
 my $plain = JSON::PP->new->allow_nonref;
-for my $pair (['SessionStart', 'start'], ['UserPromptSubmit', 'prompt'], ['Stop', 'stop']) {
+for my $pair (['SessionStart', 'start'], ['UserPromptSubmit', 'prompt'], ['PostToolUse', 'tool'], ['Stop', 'stop']) {
   my ($event, $arg) = @$pair;
   my @kept = grep { index($plain->encode($_), 'jamsesh') < 0 } (ref $hooks->{$event} eq 'ARRAY' ? @{ $hooks->{$event} } : ());
   push @kept, { hooks => [{ type => 'command', command => "$hook $arg", timeout => 5 }] };
+  # An idle agent is woken by a background listener that holds until the room has something for it.
+  push @kept, { hooks => [{ type => 'command', command => "$hook listen", timeout => 3600, asyncRewake => JSON::PP::true }] } if $event eq 'Stop';
   $hooks->{$event} = \\@kept;
 }
 my $tmp = "$path.jamsesh-tmp";

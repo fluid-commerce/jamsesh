@@ -49,6 +49,10 @@ export interface Agent {
   canvas: "none" | "joining" | "live" | "failed";
   /** What this agent's repository is, as the agent describes it. */
   card?: RepoCard | null;
+  /** An observer only watches: no repository, never routed product tasks. Absent means a worker. */
+  role?: "worker" | "observer";
+  /** An observer can opt out of room-wide messages (to "all"); absent means it gets them. */
+  broadcasts?: boolean;
 }
 
 export interface RepoCard {
@@ -118,6 +122,10 @@ export interface Directive {
   result: string;
   deliveredAt: number | null;
   updatedAt: number;
+  /** When JamSesh asked each target how it's going (an open task with no progress for a while). */
+  nudgedAt?: Record<string, number>;
+  /** When the room was offered a reassignment; the tile shows a Reassign button until the task moves. */
+  reassignOfferedAt?: number;
 }
 
 export type ArtifactKind = "frame" | "screenshot" | "devserver" | "html" | "note";

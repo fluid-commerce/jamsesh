@@ -302,7 +302,7 @@ The setup installs, for each harness found:
 | Harness | What's installed |
 |---|---|
 | Both | `~/.jamsesh/client.env` (hub, token, name, `JAMSESH_ACTIVE`), `~/.jamsesh/hook.sh` |
-| Claude Code | User-scope MCP server `jamsesh` (HTTP, bearer token); the skill at `~/.claude/skills/jamsesh/SKILL.md`; the `/jamsesh [focus]` command; `UserPromptSubmit` and `Stop` hooks (5-second timeout) |
+| Claude Code | User-scope MCP server `jamsesh` (HTTP, bearer token); the skill at `~/.claude/skills/jamsesh/SKILL.md`; the `/jamsesh [focus]` command; `SessionStart`, `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks (5-second timeout), plus a background `Stop` listener (`asyncRewake`, up to an hour; see 6.3) |
 | Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the prompt `~/.codex/prompts/jamsesh.md`; a marked block in `~/.codex/AGENTS.md` so "connect to jamsesh" starts the prompt; prompt-capture and turn-end hooks equivalent to Claude Code's |
 
 `hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. It posts to the hub with
@@ -447,7 +447,7 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_message` | Message another agent by name or id, or `all` [A27a]. |
 | `jam_ask` | Ask another agent a question and wait for the answer (default 120 seconds, 5 to 300) [A27b]. |
 | `jam_answer` | Answer a question by its id. |
-| `jam_repo_card` | Describe the repository: stack, design system, components, branch, recent changes, notes. |
+| `jam_repo_card` | Describe the repository: stack, design system, components, branch, recent changes, notes; optionally the repository, platform, and focus when they changed (the tile follows). |
 | `jam_agents` | The roster: people (name, title, weight) and agents (platform, repo, status, card, focus, workstreams). |
 | `jam_devserver` | Put a dev server on the host (see [6.6](#66-dev-servers-on-the-host)) [B18]. |
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
@@ -479,15 +479,44 @@ share, rename itself, or save behavior notes.
 A **directive** is a routed instruction with target agents, a mode (`explore`, `implement`,
 `coordinate`, or `answer`), text, a rationale, an optional workstream, and per-agent progress
 (`pending`, `delivered`, `acked`, `done`, `cancelled`). Its overall status follows the slowest
-target. Directives reach agents four ways [B14, B16]:
+target. Agents work and listen at the same time [B14, B16]: a busy agent hears the room between
+steps, and an idle agent goes back to its person and is woken when the room has something for it.
 
-1. **Prompt hook.** When a person prompts their own agent, the hook delivers new directives,
-   messages, questions (to answer first), and decisions made since the agent last looked, as added
-   context.
-2. **Turn-end hook.** When an agent's turn ends with work waiting, the hook keeps it working on
-   that work. Otherwise the agent goes idle.
-3. **`jam_wait`.** An idle agent blocks on it and wakes on a directive, message, or question.
-4. **`jam_inbox`.** Agents check it between steps.
+**Claude Code** (hooks, installed by the setup; `hook.sh` is the hooks' one script):
+
+1. **Between steps.** `PostToolUse` posts to `/api/hooks/tool`. New directives, messages, questions
+   (to answer first), and room decisions come back as added context, so a busy agent folds them
+   into the work it is doing. The agent's own `jam_inbox`, `jam_wait`, and `jam_ask` calls are
+   skipped (they already carry their items).
+2. **Each prompt.** `UserPromptSubmit` delivers the same items alongside the person's prompt, and
+   ends any waiting listener (the person is talking to the agent now).
+3. **Turn end.** `Stop` (`/api/hooks/stop`) keeps the agent working if work is waiting. Otherwise
+   the agent goes idle and **stops, back to its person**: it is no longer told to sit in `jam_wait`.
+4. **Wake-up.** A second `Stop` hook, `hook.sh listen`, runs in the background (`asyncRewake`).
+   It calls `/api/hooks/listen`, which the hub holds open (up to about 200 seconds, which the
+   server's idle limit allows) until the room has something for that agent; the script calls again
+   until about 50 minutes pass. With news it prints it and exits with code 2, which wakes the agent
+   with that text as its next turn. A newer listener for the same agent, or the person's next
+   prompt, ends the old one empty; an agent that is itself in `jam_wait` or `jam_ask` is left to
+   get its items there.
+
+**Codex** has no hooks. Its agent keeps the older loop: check `jam_inbox` between steps; when idle,
+call `jam_wait` and call it again whenever it returns empty. To help a busy Codex agent hear the
+room, every JamSesh tool result it gets (except `jam_join`, `jam_inbox`, `jam_wait`, `jam_ask`, and
+the canvas tools) ends with "You have new items from the room: call jam_inbox." when something is
+waiting. A Codex agent that makes no JamSesh calls and no `jam_wait` hears nothing until its person
+prompts it; there is nothing else the host can do for it. The notice is not added for a Claude Code
+agent whose hooks have reached the hub in the last five minutes, since the hooks hand the items
+over themselves.
+
+**No item is handed over twice.** Every path above (the hooks, the listener, `jam_inbox`,
+`jam_wait`) takes items from the same inbox and marks them delivered in the same step. Room
+decisions use a per-agent "seen" mark the same way. Room-wide messages (to everyone) skip the
+sender and observers that opted out (6.3b).
+
+The hub rewrites nothing on the person's machine to do this, but an install made before this
+version has no `PostToolUse` or listener hook, so its agents only get the prompt and turn-end
+hooks until **Connect my agents** (or `/agent/setup.sh`) runs again.
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate
@@ -497,10 +526,48 @@ record: pain points, a list, meeting notes; no code to build and nothing to draw
 People steer agents that misread something [B17] by prompting their own agent, by telling the
 room brain, or by sending a directive from the client.
 
+**Open tasks age.** An open `explore` or `implement` directive with no ack or report from its agent
+for 20 minutes (counted from delivery) is asked about: the agent gets a message from JamSesh to
+ack it, report where it is, or say it's stuck. An answer starts the clock again. If nothing moves
+10 minutes after the ask, or the agent is offline, the room sees "<agent> hasn't reported on ...
+Reassign it from the agent's tile" (an event and a toast), and the tile shows a **Reassign**
+button. Reassigning (`POST /api/directives/<id>/reassign`, people only) cancels the task for its
+agent and sends it to the best-matching free worker (or the one named), saying who it came from.
+The hub checks every minute (`Session.tick`).
+
 A directive sent to an agent that's offline (or silent for 20 minutes) shows a notice that it gets
 the work when it's back. If an explore or implement directive is still untouched after 45 seconds
 and its agent isn't waiting for work, the room sees "<agent> hasn't picked this up yet" with what
 its person can do: type anything to it, or tell it to wait for the room.
+
+### 6.3a What an agent's tile says
+
+- **Status text.** Working shows what the agent is on ("Working on: <the prompt>" or its latest
+  update). When an agent finishes (a `done` or `shipped` update, or a turn that ends) the tile reads
+  "Done: <summary>" until its next task starts: its person prompting it, or an ack, claim, or
+  progress update.
+- **Repository, platform, focus.** `jam_repo_card` takes optional `repo`, `platform`, and `focus`;
+  whenever they're sent the agent's tile follows, and a changed repository posts "<agent> moved
+  to <repo>". Fields left out stay as they were.
+- **Open tasks** show on the tile with their age, oldest first ("35m Not picked up: ..." or "On it:
+  ..."), and the Reassign button once the room has been offered one (see above).
+- **Workstreams.** A workstream pauses when its owner goes offline (20 minutes quiet): the room sees
+  "<agent> went offline; <workstream> is paused", the tile shows "Paused while offline", and anyone
+  may take it. It is active again, with a line in the feed, when the owner comes back.
+- **Work nobody asked for.** When a Claude Code agent claims a workstream while it has no open task
+  and its person hasn't prompted it in the last 30 minutes, the room sees "<agent> started
+  <workstream> on its own; nobody asked for it" in the feed and as a toast. Codex agents are never
+  flagged this way: no prompts reach the hub for them, so it can't tell.
+
+### 6.3b Observers
+
+`jam_join` takes `role: "observer"` (default `worker`) and, for observers, `broadcasts: false`.
+An observer needs no repository or platform (its tile says "observer"). The brain never targets it
+with product work (`explore`, `implement`, `coordinate`: it's dropped from the targets, and the
+brain is told so); `answer` and `note` directives and direct messages still reach it. With
+`broadcasts: false`, room-wide messages (to everyone) don't reach it. Observers are left out of
+affinity routing and the brain's agent list (listed separately, as not to be given work). Joining
+again without `role` leaves the role as it was.
 
 ### 6.4 Prompts as context
 
