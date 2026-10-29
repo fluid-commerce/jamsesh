@@ -291,11 +291,7 @@ export function shellCommands(text: string, o: { comments?: boolean } = {}): str
 
 /** decodeURIComponent that never throws: a malformed escape is left as it is. */
 function safeDecode(s: string): string {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
+  return decodeURIComponent(s); // a malformed escape throws; urlValueProblem treats that as "refuse"
 }
 
 /** A secret-named field written as JSON or a quoted assignment: "password": "x", 'api_key': 'x', token="x". */
@@ -313,8 +309,12 @@ function urlValueProblem(url: string, o: { allowGitUser?: boolean }): boolean {
   if (authority.includes("@") && !(o.allowGitUser && u.username === "git" && u.protocol === "ssh:" && !u.password)) return true; // any userinfo, even an empty one
   if (u.password) return true;
   if (u.username && !(o.allowGitUser && u.username === "git" && u.protocol === "ssh:")) return true;
-  // Fields separated by & or ; (the URL class splits on & only), in the query and the fragment.
+  // Fields separated by & or ; (the URL class splits on & only), in the query and the fragment. A malformed %-escape can't be read, so it is refused.
+  try {
   for (const part of [u.search.slice(1), u.hash.slice(1)]) for (const field of part.split(/[&;]/)) if (SECRET_PARAM.test(safeDecode(field.split("=")[0]).replace(/\+/g, " ").trim())) return true;
+  } catch {
+    return true;
+  }
   return false;
 }
 
@@ -430,6 +430,7 @@ export function confine(dir: string, rel: string): string | null {
 export function redactSecrets(text: string): string {
   let out = redactUrls(text).replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g, "***private key***");
   for (const r of TOKEN_FORMATS) out = out.replace(new RegExp(r.source, r.flags.includes("g") ? r.flags : `${r.flags}g`), "***");
+  out = out.replace(/(["']?[\w.-]*(?:token|secret|password|passwd|api[_-]?key|apikey|access[_-]?key|private[_-]?key|authorization|cookie)[\w.-]*["']?\s*[:=]\s*)("[^"]*"|'[^']*')/gi, "$1***"); // a quoted value, spaces and all
   out = out.replace(new RegExp(JSON_SECRET.source.replace(/\[\^\\s"',\}\\\]\]$/, "[^\\s\"',}\\]]+"), "gi"), "***");
   return out.replace(/(\b[\w.-]*?(?:token|secret|password|passwd|api[_-]?key|apikey|access[_-]?key|auth(?:orization)?(?![a-z])|cookie)[\w.-]*\s*[=:]\s*)(?:Bearer\s+)?\S+/gi, "$1***");
 }

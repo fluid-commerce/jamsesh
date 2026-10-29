@@ -585,11 +585,11 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
         {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
       </div>
       {away && !big && (
-        <button className="feed-latest" onClick={jump} aria-label={gap ? "Jump to the latest, new lines" : fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
+        <button className="feed-latest" onClick={jump} aria-label={gap ? "Jump to the latest, you may have missed lines" : fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="m6 9 6 6 6-6" />
           </svg>
-          {gap ? "New lines" : fresh ? `${fresh} new ${fresh === 1 ? "line" : "lines"}` : "Latest"}
+          {gap ? "Catch up" : fresh ? `${fresh} new ${fresh === 1 ? "line" : "lines"}` : "Latest"}
         </button>
       )}
     </div>

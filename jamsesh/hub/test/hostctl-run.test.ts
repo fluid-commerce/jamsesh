@@ -509,7 +509,8 @@ test("JSON and quoted secret fields are refused and masked; a bad percent escape
     expect([bad, credentialProblem(bad)]).toEqual([bad, CREDENTIALS_REFUSED]);
   expect(credentialProblem("git commit -m 'update password reset page'")).toBeNull();
   expect(redactSecrets('{"password": "hunter2", "ok": 1}')).not.toContain("hunter2");
-  expect(() => openProblem("https://example.com/?%E0%A4%A=1")).not.toThrow();
+  expect(openProblem("https://example.com/?%E0%A4%A=1")).not.toBeNull(); // a malformed escape is refused, not accepted or thrown
+  expect(redactSecrets('{"password":"alpha beta","x":1}')).not.toContain("beta");
   const hc: any = Object.create(HostControl.prototype);
   hc.requests = new Map();
   hc.onRequest = () => {};
