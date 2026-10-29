@@ -21,7 +21,11 @@ const auth = { authorization: `Bearer ${agent.token}`, "x-forwarded-for": "9.9.9
 const get = (path: string) => fetch(`${base}/api${path}`, { headers: auth }).then((r) => r.json() as Promise<any>);
 
 const a = s.registerAgent({ ownerName: "Jonathan", harness: "claude-code", repo: "acme/desktop", cwd: "/d", machine: "m1", platform: "desktop" }).agent;
-for (let i = 0; i < 90; i++) s.createDirective({ text: `directive ${i}`, mode: "explore", targets: [a.id], requestedBy: "Felipe" });
+for (let i = 0; i < 90; i++) {
+  const d = s.createDirective({ text: `directive ${i}`, mode: "explore", targets: [a.id], requestedBy: "Felipe" });
+  // The 30 oldest are finished: an open task stays in the state however old it is (2.11), a finished one pages.
+  s.store.put("directives", { ...d, ts: 1_000 + i, ...(i < 30 ? { status: "done" as const } : {}) });
+}
 for (let i = 0; i < 150; i++) s.upsertArtifact({ kind: "screenshot", title: `shot ${i}`, agentId: a.id, updatedAt: 1_000 + i } as any, { announce: false });
 for (let i = 0; i < 300; i++) s.store.addEvent({ kind: "speech", authorType: "person", authorName: "Sam", text: `line ${i}` });
 
