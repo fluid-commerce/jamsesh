@@ -120,6 +120,8 @@ describe("silent mode reaches the page", () => {
     // Sound back on: the next reply takes the spoken path at once, not held back as if something had just been said.
     delete process.env.JAMSESH_SILENT;
     expect(await speak(hub.session, "Next.", { source: "voice", kind: "answer" })).toBe("spoken");
+    // Chosen to be spoken (an event marked spoken), not throttled to text by a gap the silent reply started.
+    expect(hub.session.store.recentEvents({ kinds: ["brain"], limit: 1 })[0]?.data).toMatchObject({ spoken: true });
     process.env.JAMSESH_SILENT = "1";
   });
 
