@@ -12,15 +12,16 @@ function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
 import { StageBar } from "../shared/StageControls";
+import { cast } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
-export function Stage({ state, interactive, tilePins = true }: { state: HubState; interactive?: boolean; tilePins?: boolean }) {
+export function Stage({ state, interactive, tilePins = true, bar }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string }) {
   const stage = state.stage;
   const byId = useMemo(() => new Map(state.artifacts.map((a) => [a.id, a])), [state.artifacts]);
   const pick = (ids: string[]) => ids.map((id) => byId.get(id)).filter(Boolean) as Artifact[];
-  const spotlight = (a: Artifact) => interactive && api("/stage", { mode: "spotlight", items: [a.id], title: a.title, pinned: false, by: "Someone in the room" });
+  const spotlight = (a: Artifact) => interactive && cast({ mode: "spotlight", items: [a.id], title: a.title, pinned: false, by: "Someone in the room" });
 
   let body: ReactElement;
   switch (stage.mode) {
@@ -56,7 +57,7 @@ export function Stage({ state, interactive, tilePins = true }: { state: HubState
   }
   return (
     <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
-      {interactive && tilePins && <StageBar state={state} />}
+      {(interactive || bar) && tilePins && <StageBar state={state} screen={bar ?? state.stage.screenId ?? "main"} />}
       <TilePins.Provider value={tilePins}>{body}</TilePins.Provider>
     </div>
   );

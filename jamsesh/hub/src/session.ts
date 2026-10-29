@@ -1293,11 +1293,38 @@ export class Session {
 
   // ---- big screens: "main", plus one per display on a user-less host ----
 
-  private bigScreens = new Map<string, Omit<ScreenInfo, "stage">>();
+  private bigScreens = new Map<string, Omit<ScreenInfo, "stage" | "name" | "role">>();
+  /** What the host app says each screen is: its name and role (setting "screenNames", by id). */
+  private screenNames(): Record<string, { name: string; role: "main" | "extra" }> {
+    return this.store.setting("screenNames", {});
+  }
+
+  /** The host app tells the hub the room's screens, named as the person set them up ("Left TV"). */
+  configureScreens(list: { id: string; name: string; role?: string }[]) {
+    const next: Record<string, { name: string; role: "main" | "extra" }> = {};
+    for (const sc of list) {
+      if (!/^[\w-]{1,32}$/.test(String(sc?.id))) continue;
+      const name = String(sc.name ?? "").trim().slice(0, 40);
+      next[sc.id] = { name: name || (sc.id === "main" ? "Main screen" : `Screen ${sc.id.replace(/\D/g, "") || sc.id}`), role: sc.id === "main" ? "main" : "extra" };
+    }
+    if (JSON.stringify(next) === JSON.stringify(this.screenNames())) return;
+    this.store.setSetting("screenNames", next);
+    bus.changed("screens");
+  }
+
+  /** A screen by its id or by what it's called ("left tv", "the Left TV"); undefined when nothing fits. */
+  findScreen(ref?: string): ScreenInfo | undefined {
+    const want = (ref ?? "").toLowerCase().replace(/^the\s+/, "").trim();
+    if (!want) return undefined;
+    const all = this.screens();
+    const plain = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    return all.find((sc) => sc.id === want) ?? all.find((sc) => plain(sc.name) === plain(want)) ?? all.find((sc) => plain(sc.name).includes(plain(want)) || plain(want).includes(plain(sc.name)));
+  }
+
   private screenReverts = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** A big-screen window reported its size; windows that stop reporting drop off after 3 minutes. */
-  reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage">) {
+  reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
     const known = this.bigScreens.has(id);
     this.bigScreens.set(id, { id, ...info });
     if (!known) bus.changed("screens");
@@ -1317,7 +1344,12 @@ export class Session {
     return [...this.bigScreens.values()]
       .filter((sc) => now - sc.at < 3 * 60_000)
       .sort((a, b) => (a.id === "main" ? -1 : b.id === "main" ? 1 : a.screenX - b.screenX))
-      .map((sc) => ({ ...sc, stage: this.stage(sc.id) }));
+      .map((sc, i, all) => {
+        const known = this.screenNames()[sc.id];
+        // With no names from the host app, a screen is called by where it sits (left to right).
+        const name = known?.name ?? (sc.id === "main" ? "Main screen" : `Screen ${i + 1}`);
+        return { ...sc, name, role: sc.id === "main" ? ("main" as const) : ("extra" as const), stage: this.stage(sc.id) };
+      });
   }
 
   stage(screen = "main"): Stage {
@@ -1355,7 +1387,7 @@ export class Session {
     const quiet = next.mode === "board" || next.mode === "welcome";
     const lock: StageLock | undefined = opts.person && !opts.noLock && !quiet ? { by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined;
     const { lock: _drop, ...rest } = next;
-    const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, ...(lock ? { lock } : {}) };
+    const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     this.commitStage(stage, screen);
     this.recordHistory(stage, screen);
     return stage;

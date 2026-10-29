@@ -455,8 +455,8 @@ export class Brain {
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
     // approves (button, or a clear spoken answer to that request), whoever or whatever asked.
-    // A screen id from Screens, or the main one.
-    const screenId = (id?: string) => (id && s.screens().some((sc) => sc.id === id) ? id : "main");
+    // A screen by id or by name ("the left TV") from Screens, or the main one.
+    const screenId = (ref?: string) => s.findScreen(ref)?.id ?? "main";
     const source = speechSource(batch);
     const requester = batch[batch.length - 1]?.authorName ?? "JamSesh";
     const agentIds = () => new Set(s.agents().map((a) => a.id));
@@ -549,7 +549,7 @@ export class Brain {
           artifactIds: z.array(z.string()).optional(),
           columns: z.array(z.object({ label: z.string(), artifactIds: z.array(z.string()) })).optional(),
           pin: z.boolean().optional().describe("Keep it up until someone changes it"),
-          screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
+          screen: z.string().optional().describe("Which big screen, by its name or id from Screens (\"Left TV\", \"screen-2\"). Leave out for the main one, or when the room didn't name one."),
           follow: z.string().optional().describe("For canvas: follow a person by name, so the screen shows what they're looking at. Agents have no viewport: follow people only."),
           page: z.string().optional().describe("For canvas: open this canvas page"),
         }),
@@ -599,7 +599,7 @@ export class Brain {
         inputSchema: z.object({
           title: z.string(),
           html: z.string().describe("Sized for the screen it's on: check its width and height in Screens"),
-          screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
+          screen: z.string().optional().describe("Which big screen, by its name or id from Screens (\"Left TV\", \"screen-2\"). Leave out for the main one, or when the room didn't name one."),
         }),
         execute: async (i) => {
           const held = this.lockBlock(screenId(i.screen), batch);
@@ -700,7 +700,7 @@ export class Brain {
             .max(9),
           grid: z.object({ columns: z.string(), rows: z.string(), areas: z.array(z.string()) }).optional(),
           pin: z.boolean().optional(),
-          screen: z.string().optional().describe("Which big screen (an id from Screens). Leave out for the main one."),
+          screen: z.string().optional().describe("Which big screen, by its name or id from Screens (\"Left TV\", \"screen-2\"). Leave out for the main one, or when the room didn't name one."),
         }),
         execute: async (i) => {
           const tiles: Tile[] = [];
@@ -1192,8 +1192,8 @@ function describeBigScreens(s: Session): string[] {
   const screens = s.screens();
   if (screens.length < 2) return [];
   return [
-    `This host has ${screens.length} big screens (no one uses this Mac's desktop). Pass screen to show_on_screen, set_layout, and build_custom_view to use them; plan each for its own size and shape, and spread related things across them (for example the canvas on one, the build on another).`,
-    ...screens.map((sc) => `- Screen "${sc.id}"${sc.id === "main" ? " (main: has the join code and the room feed)" : ""}: ${sc.width}×${sc.height} (${aspect(sc.width, sc.height)}), showing ${sc.stage.mode}${sc.stage.title ? ` "${sc.stage.title}"` : ""}.`),
+    `This host has ${screens.length} big screens. When someone says where to put it (\"put it on the left TV\"), pass that screen's name as screen; with no screen named, the main one is used. Pass screen to show_on_screen, set_layout, and build_custom_view to use them; plan each for its own size and shape, and spread related things across them (for example the canvas on one, the build on another).`,
+    ...screens.map((sc) => `- Screen "${sc.name}" (id ${sc.id})${sc.id === "main" ? " (main: has the join code and the room feed)" : ""}: ${sc.width}×${sc.height} (${aspect(sc.width, sc.height)}), showing ${sc.stage.mode}${sc.stage.title ? ` "${sc.stage.title}"` : ""}.`),
   ];
 }
 

@@ -282,6 +282,8 @@ export interface Stage {
   pinned: boolean;
   since: number;
   by: string;
+  /** Which big screen this is the stage of ("main", or "screen-2"...); a stage with none is the main screen's. */
+  screenId?: string;
   /** Set when a person put this up: agents and the brain don't replace it until it's unlocked (3.1). */
   lock?: StageLock;
 }
@@ -396,6 +398,9 @@ export interface BuildRequest {
 /** One big-screen window. "main" is the one with the header; user-less hosts add one per display. */
 export interface ScreenInfo {
   id: string;
+  /** What the room calls it ("Left TV"); the host app sets it (see Session.configureScreens). */
+  name: string;
+  role: "main" | "extra";
   width: number;
   height: number;
   dpr: number;

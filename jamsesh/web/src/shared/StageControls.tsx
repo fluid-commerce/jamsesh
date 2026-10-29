@@ -32,10 +32,10 @@ const Lock = () => (
 );
 
 /** Above the stage: who holds the screen, and what's waiting to go up. Nothing when neither applies. */
-export function StageBar({ state, screen = "main" }: { state: HubState; screen?: string }) {
+export function StageBar({ state, screen = state.stage.screenId ?? "main" }: { state: HubState; screen?: string }) {
   const [open, setOpen] = useState(false);
   const lock = state.stage.lock;
-  const ready = screen === "main" ? state.readyToShow.filter((r) => r.screen === screen) : [];
+  const ready = state.readyToShow.filter((r) => r.screen === screen);
   if (!lock && !ready.length) return null;
   const me = pref("personId");
   return (

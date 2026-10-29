@@ -518,13 +518,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const p = id ? s.person(id) : undefined;
     return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
   };
-  const screenOf = () => (typeof body?.screen === "string" && body.screen ? body.screen : "main");
+  // With several screens, the caller says which (an id or a name); none, or one that isn't there, is the main one.
+  const screenOf = () => s.findScreen(typeof body?.screen === "string" ? body.screen : undefined)?.id ?? "main";
 
   if (path === "/stage" && req.method === "POST") {
     const stage = body as Partial<Stage> & { mode: Stage["mode"] };
     if (!stage?.mode) return bad("mode is required");
     const who = actor();
-    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screenOf(), { person: who }));
+    const screen = screenOf();
+    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who }));
   }
   if (path === "/stage/unlock" && req.method === "POST") {
     s.unlockStage(screenOf());
@@ -774,6 +776,11 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (screen === "main") hub.host.bigScreen = info;
     s.reportScreen(screen, info);
     return json({ ok: true });
+  }
+  // The host app names the room's screens ("Left TV") after setting them up.
+  if (path === "/screens/config" && req.method === "POST" && isLocal(ip)) {
+    s.configureScreens(Array.isArray(body?.screens) ? body.screens : []);
+    return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
   }
   // A user-less big-screen window closed: it stops being a place to put things (main always stays).
   if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
