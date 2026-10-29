@@ -451,7 +451,8 @@ export class Board {
     const c = this.get(id);
     if (!c || c.status !== "open") return null;
     const why = clean(reason).slice(0, 200) || "Overruled in the room";
-    const vetoes = [...(c.vetoes ?? []), { reason: why, by, at: Date.now(), eventIds: eventIds.slice(0, SOURCES_MAX) }].slice(-SOURCES_MAX);
+    // The whole history is kept; anything that shows it limits only what it shows.
+    const vetoes = [...(c.vetoes ?? []), { reason: why, by, at: Date.now(), eventIds: [...eventIds] }];
     return this.s.store.put("triage", { ...c, overruled: why, vetoes, updatedAt: this.stamp() });
   }
 
