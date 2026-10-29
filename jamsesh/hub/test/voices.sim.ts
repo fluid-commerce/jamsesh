@@ -266,7 +266,8 @@ export const pct = (n: number, of: number) => `${((100 * n) / (of || 1)).toFixed
 export function enrol(room: Room, key: Key) {
   const p = room.pipeline as any;
   const samples = say(key, ENROL_TEXT[key], 165);
-  if (typeof p.enrol === "function") return p.enrol(room.people[key].id, { sampleRate: 16000, samples });
+  // In process: the current reset epoch, and no read window (null).
+  if (typeof p.enrol === "function") return p.enrol(room.people[key].id, { sampleRate: 16000, samples }, p.session.store.voiceEpoch(), null);
   // Before 5.3: what Hub.enrollVoice did, three-second chunks added one by one.
   const { embed } = require("../src/audio/voiceprint");
   const chunk = 16000 * 3;

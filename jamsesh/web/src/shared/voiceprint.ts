@@ -54,12 +54,13 @@ deviceCopiesProblem();
 /**
  * Tells the host this person starts the join read, so the room's copies of it stay out of the transcript.
  * Never queued for later: it throws when the host didn't take it, and then the read mustn't start.
- * Returns the host's reset epoch, which the recording is sent with (a Reset during the read makes it stale).
+ * Returns the host's reset epoch, which the recording is sent with (a Reset during the read makes it stale), and the
+ * read's id, which its end and its recording carry (the host closes or takes only that read).
  */
-export const beginRead = (personId: string) => api<{ epoch: number }>(`/people/${personId}/voice/start`, {}, "POST", { queue: false }).then((r) => r.epoch);
+export const beginRead = (personId: string) => api<{ epoch: number; read: string }>(`/people/${personId}/voice/start`, {}, "POST", { queue: false }).then((r) => ({ epoch: r.epoch, read: r.read }));
 
 /**
  * The read stopped without the host getting it (no microphone, a failed upload): the host stops keeping
  * the room's script-like lines out. `read`: something was said aloud, so copies on their way still are, briefly.
  */
-export const endRead = (personId: string, read: boolean) => api(`/people/${personId}/voice/end`, { read }, "POST", { queue: false }).catch(() => {});
+export const endRead = (personId: string, id: string, read: boolean) => api(`/people/${personId}/voice/end`, { read, id }, "POST", { queue: false }).catch(() => {});

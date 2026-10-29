@@ -535,7 +535,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
     // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
-    return (hub.audio.beginEnrolment(m[1]), json({ ok: true, epoch: s.store.voiceEpoch() }));
+    // Its id goes with its end and its recording: only this read is closed or taken by them.
+    return json({ ok: true, epoch: s.store.voiceEpoch(), read: hub.audio.beginEnrolment(m[1]) });
   }
   // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
   // whether anything was said aloud, which earns the grace for copies still on their way.
@@ -543,8 +544,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "POST") {
     const refused = own(m[1]);
     if (refused) return bad(refused, 403);
-    if (body?.read) hub.audio.endEnrolment(m[1]);
-    else hub.audio.cancelEnrolment(m[1]);
+    const read = typeof body?.id === "string" ? body.id : "";
+    if (body?.read) hub.audio.endEnrolment(m[1], read);
+    else hub.audio.cancelEnrolment(m[1], read);
     return json({ ok: true });
   }
 
@@ -808,7 +810,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
     try {
-      return json(hub.enrollVoice(m[1], bytes, url.searchParams.has("epoch") ? Number(url.searchParams.get("epoch")) : -1));
+      // Over HTTP a recording always names its read; one without (or for a closed read) isn't taken.
+      return json(hub.enrollVoice(m[1], bytes, url.searchParams.has("epoch") ? Number(url.searchParams.get("epoch")) : -1, url.searchParams.get("read") ?? ""));
     } catch (e) {
       if (e instanceof BadWav) return bad(e.message);
       throw e;

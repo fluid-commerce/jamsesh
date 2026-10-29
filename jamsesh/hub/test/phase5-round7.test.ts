@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
+import { encodeWav } from "../src/audio/wav";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-p5r7-"));
 const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "d") });
@@ -72,4 +73,42 @@ test("the exact approval grants that person, once; replaying it after changes no
   expect(hub.auth.get(max.own.device.id)).toBeNull();
   // Replayed later: the laptop isn't asking anymore.
   expect((await asHostWindow("POST", `/paired/${max.other.device.id}/allow`, { personId: max.p.id })).status).toBe(404);
+});
+
+// ---- each join read has an id: its end and its recording touch only that read (office review round 2: 1, 2)
+
+test("an earlier read's late end can't close a newer read, and a recording is taken only for the open read", async () => {
+  const p = hub.session.upsertPerson({ name: "Ren" });
+  const ren = browser("Ren's laptop");
+  expect((await call(ren.token, "POST", "/devices", { deviceId: "d-ren", personId: p.id })).status).toBe(200);
+  const window = () => (hub.audio as any).enrolling.get(p.id) as { read: string; open: boolean; until: number } | undefined;
+  const start = async () => (await (await call(ren.token, "POST", `/people/${p.id}/voice/start`, {})).json()).read as string;
+  const end = (id: unknown, read: boolean) => call(ren.token, "POST", `/people/${p.id}/voice/end`, { read, id });
+  const upload = (read: string | null) =>
+    fetch(`${base}/api/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}${read === null ? "" : `&read=${read}`}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${ren.token}` }, body: encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }) as unknown as BodyInit }).then((r) => r.json());
+
+  const older = await start();
+  const newer = await start();
+  expect(older).not.toBe(newer);
+  // The closed profile's end arrives after the new read began: the new read stays open and held out.
+  for (const read of [false, true]) expect((await end(older, read)).status).toBe(200);
+  for (const junk of [undefined, 5, "", "read_nope"]) expect((await end(junk, false)).status).toBe(200);
+  expect(window()).toMatchObject({ read: newer, open: true });
+  expect(window()!.until).toBeGreaterThan(Date.now() + 60_000);
+  // The old read's recording, or one naming no read, isn't taken.
+  for (const read of [older, null, ""]) expect(await upload(read)).toMatchObject({ ok: false, reason: expect.stringContaining("read was closed") });
+  expect(window()).toMatchObject({ read: newer, open: true });
+  // The newer read's own recording is heard (too quiet here, so refused for that), which closes it.
+  expect(await upload(newer)).toMatchObject({ ok: false, reason: expect.stringContaining("too quiet") });
+  expect(window()!.open).toBe(false);
+  // Closed by its end (the profile closed while the upload was on its way): the upload arriving after isn't taken.
+  const third = await start();
+  expect((await end(third, true)).status).toBe(200);
+  expect(await upload(third)).toMatchObject({ ok: false, reason: expect.stringContaining("read was closed") });
+  // Cancelled (no microphone): the window goes, but only for that read.
+  const fourth = await start();
+  expect((await end(third, false)).status).toBe(200);
+  expect(window()?.read).toBe(fourth);
+  expect((await end(fourth, false)).status).toBe(200);
+  expect(window()).toBeUndefined();
 });

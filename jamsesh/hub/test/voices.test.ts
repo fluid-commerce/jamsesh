@@ -29,11 +29,11 @@ sim("the join read stays out of the transcript, even though every laptop heard i
   const room = makeRoom();
   const r = rng(1);
   const t = base();
-  room.pipeline.beginEnrolment(room.people.ana.id);
+  const anaRead = room.pipeline.beginEnrolment(room.people.ana.id);
   // Heard at once by all three laptops, as the three sentences and as one run.
   for (const [i, sentence] of ENROL_SCRIPT.entries()) await play(room, line("ana", sentence, t + i * 6000), r);
   expect(ofRoom(room)).toHaveLength(0);
-  room.pipeline.endEnrolment(room.people.ana.id);
+  room.pipeline.endEnrolment(room.people.ana.id, anaRead);
   // Ordinary talk right after still shows up, whoever it is.
   await play(room, line("ben", "The build finished on my side, so I can push the new checkout screen now.", t + 30_000), r);
   expect(ofRoom(room).map((u) => u.speakerName)).toEqual(["Ben"]);
@@ -345,19 +345,19 @@ test("resetting a voice forgets it everywhere it could come back from: samples, 
 test("the join read's window closes when the read fails: a refused recording, bad audio, or no microphone", async () => {
   const p = hubB.session.upsertPerson({ name: "Reader" });
   const open = () => (hubB.audio as any).enrolling.get(p.id) as { until: number } | undefined;
-  hubB.audio.beginEnrolment(p.id);
+  let read = hubB.audio.beginEnrolment(p.id);
   expect(open()!.until).toBeGreaterThan(Date.now() + 60_000);
   // Too quiet: refused, and the window is down to the grace for copies on their way.
-  expect(hubB.enrollVoice(p.id, encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }), hubB.session.store.voiceEpoch())).toMatchObject({ ok: false });
+  expect(hubB.enrollVoice(p.id, encodeWav({ sampleRate: 16000, samples: new Float32Array(16000 * 4) }), hubB.session.store.voiceEpoch(), read)).toMatchObject({ ok: false });
   expect(open()!.until).toBeLessThanOrEqual(Date.now() + 25_000);
-  hubB.audio.beginEnrolment(p.id);
-  expect(() => hubB.enrollVoice(p.id, new Uint8Array([1, 2, 3]), hubB.session.store.voiceEpoch())).toThrow();
+  read = hubB.audio.beginEnrolment(p.id);
+  expect(() => hubB.enrollVoice(p.id, new Uint8Array([1, 2, 3]), hubB.session.store.voiceEpoch(), read)).toThrow();
   expect(open()!.until).toBeLessThanOrEqual(Date.now() + 25_000);
   // Over HTTP: no microphone, so nothing was read: closed at once. Only the person's own window may.
-  hubB.audio.beginEnrolment(p.id);
+  read = hubB.audio.beginEnrolment(p.id);
   const mine = hubB.auth.issue({ kind: "browser", label: "Reader's laptop", ip: "10.0.0.9", personId: p.id });
   const someone = hubB.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.10" });
-  const end = (token: string) => fetch(`${url}/api/people/${p.id}/voice/end`, { method: "POST", headers: { ...remote, authorization: `Bearer ${token}` }, body: JSON.stringify({ read: false }) });
+  const end = (token: string) => fetch(`${url}/api/people/${p.id}/voice/end`, { method: "POST", headers: { ...remote, authorization: `Bearer ${token}` }, body: JSON.stringify({ read: false, id: read }) });
   expect((await end(someone.token)).status).toBe(403);
   expect(open()).toBeDefined();
   expect((await end(mine.token)).status).toBe(200);

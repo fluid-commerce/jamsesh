@@ -374,16 +374,17 @@ export class Hub {
   }
 
   /** A deliberate voice sample: the join sentences, read aloud. */
-  enrollVoice(personId: string, bytes: Uint8Array, epoch: number) {
+  /** `read`: the id beginEnrolment gave the read (null for an in-process caller with no read window). */
+  enrollVoice(personId: string, bytes: Uint8Array, epoch: number, read: string | null = null) {
     if (!this.session.person(personId)) throw new Error("No such person.");
     let pcm;
     try {
       pcm = resample(decodeWav(bytes), 16000);
     } catch (e) {
-      this.audio.endEnrolment(personId);
+      if (read !== null) this.audio.endEnrolment(personId, read);
       throw e;
     }
-    return this.audio.enrol(personId, pcm, epoch);
+    return this.audio.enrol(personId, pcm, epoch, read);
   }
 
   /**

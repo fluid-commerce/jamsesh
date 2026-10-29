@@ -134,7 +134,7 @@ export class AudioPipeline {
   private candidates = new Map<string, Heard[][]>();
   voiceprints: Voiceprints;
   /** People reading the join sentence right now: what the room's laptops hear of it is not conversation. */
-  private enrolling = new Map<string, { since: number; until: number }>();
+  private enrolling = new Map<string, { since: number; until: number; read: string; open: boolean }>();
   /** How lines have been labelled since the host started (a host that never uses the voice should say so). */
   stats = { lines: 0, voice: 0, someone: 0 };
   /** Called with each new or updated room line. */
@@ -424,21 +424,31 @@ export class AudioPipeline {
     bus.send({ type: "utterance", utterance: u });
   }
 
-  /** A person starts reading the join sentence. */
-  beginEnrolment(personId: string) {
+  /**
+   * A person starts reading the join sentence. Returns the read's id: its end and its recording name it, and
+   * only the person's latest read is open, so an earlier read's late end or upload can't touch a newer one.
+   */
+  beginEnrolment(personId: string): string {
     const now = Date.now();
-    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS });
+    const read = newId("read");
+    this.enrolling.set(personId, { since: now - 1000, until: now + ENROL_WINDOW_MS, read, open: true });
+    return read;
   }
 
-  /** The read never happened (the microphone didn't start): nothing is held out. */
-  cancelEnrolment(personId: string) {
-    this.enrolling.delete(personId);
+  /** The read never happened (the microphone didn't start): nothing is held out. Only for that read. */
+  cancelEnrolment(personId: string, read: string) {
+    if (this.enrolling.get(personId)?.read === read) this.enrolling.delete(personId);
   }
 
-  /** The read is over; copies still on their way from slow laptops are held out for a little longer. */
-  endEnrolment(personId: string) {
+  /**
+   * The read is over: copies still on their way from slow laptops are held out for a little longer, and its
+   * recording is no longer taken (a profile closed mid-read). Only for that read.
+   */
+  endEnrolment(personId: string, read: string) {
     const w = this.enrolling.get(personId);
-    if (w) w.until = Date.now() + ENROL_GRACE_MS;
+    if (!w || w.read !== read) return;
+    w.until = Date.now() + ENROL_GRACE_MS;
+    w.open = false;
   }
 
   /**
@@ -482,8 +492,19 @@ export class AudioPipeline {
       .sort((a, b) => Math.abs(a.t0 - g.t0) - Math.abs(b.t0 - g.t0))[0];
     if (!twin) return false;
     const home = this.finalized.find((x) => x.utteranceId === twin.id);
-    // Its group is gone (a copy flushed late): the same words from another laptop then, so it isn't shown twice.
-    if (!home) return true;
+    // Its group is gone (a copy flushed late): the same words from another laptop then, so it isn't shown twice. It
+    // still joins that line: its devices are added (the line's other copies are gone, so its speaker stands).
+    if (!home) {
+      const known = new Set(twin.devices.map((d) => d.deviceId));
+      const added = g.segments.filter((x) => !known.has(x.deviceId)).map((x) => ({ deviceId: x.deviceId, level: round(x.levelDb), snr: round(x.snr) }));
+      if (added.length) {
+        const next: Utterance = { ...twin, devices: [...twin.devices, ...added] };
+        this.session.store.put("utterances", next);
+        this.onLine?.(next, false);
+        bus.send({ type: "utterance", utterance: next });
+      }
+      return true;
+    }
     // The copies become late copies of that line, decided by its own queue; anything still sent to g follows them.
     this.finalized = this.finalized.filter((x) => x !== g);
     g.mergedInto = home;
@@ -782,9 +803,12 @@ export class AudioPipeline {
    * chunks so the voiceprint starts with variety. `epoch` is the reset epoch the hub gave when the read
    * started: a read begun before this person's voice was reset teaches nothing.
    */
-  enrol(personId: string, pcm: Pcm, epoch: number): { ok: true; samples: number } | { ok: false; reason: string } {
+  enrol(personId: string, pcm: Pcm, epoch: number, read: string | null): { ok: true; samples: number } | { ok: false; reason: string } {
+    // A recording is taken only for the person's open read (`null`: an in-process caller with no read window).
+    const w = this.enrolling.get(personId);
+    if (read !== null && !(w && w.read === read && w.open)) return { ok: false, reason: "That read was closed before it arrived, so it wasn't kept. Read again." };
     // Taken or refused, the read is over: copies on their way get the grace, then the room is heard again.
-    this.endEnrolment(personId);
+    if (read !== null) this.endEnrolment(personId, read);
     const heardAt = Math.min(Date.now(), this.session.store.heardBy(epoch));
     if (heardAt <= this.session.store.voiceResetAt(personId)) return { ok: false, reason: "Your voice was reset while you read, so that read wasn't kept. Read again." };
     const { levelDb, noiseDb } = speechLevelDb(pcm);

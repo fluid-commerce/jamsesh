@@ -132,25 +132,28 @@ function readWav(seconds: number) {
   }
   return encodeWav({ sampleRate: 16000, samples: x });
 }
-const upload = (token: string, personId: string, epoch: number | null) =>
-  fetch(`${base}/api/people/${personId}/voice${epoch === null ? "" : `?epoch=${epoch}`}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${token}` }, body: readWav(8) as unknown as BodyInit });
+const upload = (token: string, personId: string, epoch: number | null, read = "") =>
+  fetch(`${base}/api/people/${personId}/voice?read=${read}${epoch === null ? "" : `&epoch=${epoch}`}`, { method: "POST", headers: { ...remote, "content-type": "audio/wav", authorization: `Bearer ${token}` }, body: readWav(8) as unknown as BodyInit });
 
 voiced("a read started before Reset and finished after it teaches nothing; one started after does", async () => {
   const p = hub.session.upsertPerson({ name: "Rae" });
   const rae = hub.auth.issue({ kind: "browser", label: "Rae's laptop", ip: "10.0.0.41" });
   expect((await call(rae.token, "POST", "/devices", { deviceId: "d-rae", personId: p.id })).status).toBe(200);
-  const before = (await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json()).epoch;
+  const first = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json();
+  const before = first.epoch;
   expect(before).toBe(hub.session.store.voiceEpoch());
   expect((await call(rae.token, "DELETE", `/people/${p.id}/voiceprint`)).status).toBe(200);
-  const stale = await (await upload(rae.token, p.id, before)).json();
+  const stale = await (await upload(rae.token, p.id, before, first.read)).json();
   expect(stale).toMatchObject({ ok: false });
   expect(stale.reason).toContain("reset while you read");
   expect(count(p.id)).toBe(0);
   // No epoch at all (an old page) counts as before every reset.
-  expect(await (await upload(rae.token, p.id, null)).json()).toMatchObject({ ok: false });
-  const after = (await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json()).epoch;
+  const again = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json();
+  expect(await (await upload(rae.token, p.id, null, again.read)).json()).toMatchObject({ ok: false });
+  const second = await (await call(rae.token, "POST", `/people/${p.id}/voice/start`, {})).json();
+  const after = second.epoch;
   expect(after).toBe(before + 1);
-  expect(await (await upload(rae.token, p.id, after)).json()).toMatchObject({ ok: true });
+  expect(await (await upload(rae.token, p.id, after, second.read)).json()).toMatchObject({ ok: true });
   expect(count(p.id)).toBeGreaterThan(0);
 });
 
@@ -246,6 +249,9 @@ test("a WAV with a missing, late, short or doubled fmt, a chunk past its end or 
     ["chunk after data runs past the end", (() => { const w = riff(["fmt ", fmt16], ["data", pcm(320)], ["LIST", pcm(40)]).slice(0, -20); new DataView(w.buffer).setUint32(4, w.length - 8, true); return w; })()],
     ["half a chunk header after data", (() => { const a = riff(["fmt ", fmt16], ["data", pcm(320)]); const w = new Uint8Array(a.length + 5); w.set(a); new DataView(w.buffer).setUint32(4, w.length - 8, true); return w; })()],
     ["two data", riff(["fmt ", fmt16], ["data", pcm(320)], ["data", pcm(320)])],
+    // Round 2: a RIFF size one byte too big is the missing-pad allowance only when a pad really is missing.
+    ["RIFF size one too big, nothing missing", (() => { const w = riff(["fmt ", fmt16], ["data", pcm(320)]); new DataView(w.buffer).setUint32(4, w.length - 7, true); return w; })()],
+    ["RIFF size one too big, odd last chunk padded", (() => { const w = riff(["fmt ", fmt16], ["data", pcm(320)], ["LIST", pcm(5)]); new DataView(w.buffer).setUint32(4, w.length - 7, true); return w; })()],
   ];
   // A chunk after data that is whole is fine (LIST metadata), and so is a last odd chunk without its pad byte.
   expect(decodeWav(riff(["fmt ", fmt16], ["data", pcm(320)], ["LIST", pcm(6)])).samples.length).toBe(160);
@@ -269,8 +275,10 @@ test("over HTTP a malformed WAV is a 400 for a segment and for a read, never a 5
   const t0 = Date.now() - 5000;
   const zeroRiff = riff(["fmt ", fmt16], ["data", pcm(320)]);
   new DataView(zeroRiff.buffer).setUint32(4, 0, true);
+  const oneTooBig = encodeWav({ sampleRate: 16000, samples: new Float32Array(160) });
+  new DataView(oneTooBig.buffer).setUint32(4, oneTooBig.length - 7, true);
   const junkAfter = riff(["fmt ", fmt16], ["data", pcm(320)], ["\u0000\u0001\u0002\u0003", pcm(4)]);
-  for (const [i, w] of [riff(["fmt ", fmt16.slice(0, 4)], ["data", pcm(320)]), riff(["data", pcm(320)], ["fmt ", fmt16]), riff(["fmt ", fmt16]).slice(0, 26), zeroRiff, junkAfter].entries()) {
+  for (const [i, w] of [riff(["fmt ", fmt16.slice(0, 4)], ["data", pcm(320)]), riff(["data", pcm(320)], ["fmt ", fmt16]), riff(["fmt ", fmt16]).slice(0, 26), zeroRiff, junkAfter, oneTooBig].entries()) {
     expect((await post(`/audio?deviceId=d-wes&t0=${t0 + i}&t1=${t0 + i + 1000}&epoch=0`, w)).status).toBe(400);
     expect((await post(`/people/${p.id}/voice?epoch=${hub.session.store.voiceEpoch()}`, w)).status).toBe(400);
   }

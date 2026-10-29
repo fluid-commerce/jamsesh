@@ -21,12 +21,12 @@ interface Recorder {
 }
 
 export interface ReadDeps {
-  beginRead: (personId: string) => Promise<number>;
-  endRead: (personId: string, read: boolean) => Promise<unknown>;
+  beginRead: (personId: string) => Promise<{ epoch: number; read: string }>;
+  endRead: (personId: string, id: string, read: boolean) => Promise<unknown>;
   getUserMedia: () => Promise<MediaStream>;
   recorder: (stream: MediaStream) => Recorder;
   toWav: (blob: Blob) => Promise<ArrayBuffer>;
-  upload: (personId: string, epoch: number, wav: ArrayBuffer) => Promise<Response>;
+  upload: (personId: string, epoch: number, read: string, wav: ArrayBuffer, signal: AbortSignal) => Promise<Response>;
   /** The longest read before it stops by itself. */
   maxMs: number;
 }
@@ -37,7 +37,7 @@ export const browserReadDeps = (toWav: (blob: Blob) => Promise<ArrayBuffer>): Re
   getUserMedia: () => navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } }),
   recorder: (stream) => new MediaRecorder(stream) as unknown as Recorder,
   toWav,
-  upload: (personId, epoch, wav) => fetch(`/api/people/${personId}/voice?epoch=${epoch}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav }),
+  upload: (personId, epoch, read, wav, signal) => fetch(`/api/people/${personId}/voice?epoch=${epoch}&read=${encodeURIComponent(read)}`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav, signal }),
   maxMs: 45_000,
 });
 
@@ -84,6 +84,10 @@ export class VoiceRead {
     let ended = false;
     /** The host took the start: from then on it must hear the end (not before, or the end could overtake it). */
     let begun = false;
+    /** The read's id from the host: its end and its recording carry it, so they never touch another read. */
+    let readId = "";
+    /** Aborts the upload when the profile closes while it's on its way. */
+    const sending = new AbortController();
     const release = () => {
       clearInterval(tick);
       clearTimeout(auto);
@@ -93,7 +97,7 @@ export class VoiceRead {
     const end = (read: boolean) => {
       if (ended) return;
       ended = true;
-      void d.endRead(pid, read).catch(() => {});
+      void d.endRead(pid, readId, read).catch(() => {});
     };
     const run = {
       cancelled: false,
@@ -105,7 +109,10 @@ export class VoiceRead {
           if (rec.state === "recording") rec.stop();
         }
         release();
+        // Closed on the host before the upload is stopped: a recording arriving after this isn't taken. One the host
+        // took already stays taken (the read was finished: Done was pressed or its time ran out).
         if (begun) end(spoke);
+        sending.abort();
         if (this.run === run) this.run = null;
       },
     };
@@ -117,7 +124,7 @@ export class VoiceRead {
 
     let epoch: number;
     try {
-      epoch = await d.beginRead(pid);
+      ({ epoch, read: readId } = await d.beginRead(pid));
     } catch (e) {
       // The host never started holding lines out: nothing to end.
       ended = true;
@@ -144,7 +151,7 @@ export class VoiceRead {
         try {
           const wav = await d.toWav(new Blob(chunks, { type: r.mimeType }));
           if (run.cancelled) return;
-          const res = await d.upload(pid, epoch, wav);
+          const res = await d.upload(pid, epoch, readId, wav, sending.signal);
           // Taken or refused by the host, the read is over there; only a failed upload needs ending.
           if (res.ok) ended = true;
           else end(true);
@@ -152,6 +159,7 @@ export class VoiceRead {
           done(body.ok ? { state: "done", msg: `${this.brainName} knows your voice.` } : { state: "error", msg: body.reason ?? body.error ?? "That didn't work. Try again." });
         } catch (e) {
           end(true);
+          if (run.cancelled) return;
           done({ state: "error", msg: e instanceof Error ? e.message : String(e) });
         }
       };
