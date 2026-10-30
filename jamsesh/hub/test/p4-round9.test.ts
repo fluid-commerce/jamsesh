@@ -1431,3 +1431,131 @@ test("the inbox scan resumes after lines already seen not to be for the agent, a
   r.s.sendMessage(other.id, agent.id, "for you");
   expect(r.s.inbox(agent.id, true).messages.map((m) => m.text)).toEqual(["for you"]);
 });
+
+// ---------- round 32 ----------
+
+test("a dev-server link works once: the code becomes the dev origin's own cookie, the address loses it, and the preview never sees a credential", async () => {
+  const r = room();
+  const seen: { url: string; cookie: string | null; auth: string | null }[] = [];
+  const preview = Bun.serve({ port: 0, fetch: (req) => (seen.push({ url: new URL(req.url).pathname + new URL(req.url).search, cookie: req.headers.get("cookie"), auth: req.headers.get("authorization") }), new Response("preview")) });
+  try {
+    const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+    const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: `127.0.0.1:${preview.port}` });
+    seen.length = 0; // registering probed the target
+    const base = `http://127.0.0.1:${dev.hostPort}`;
+    const device = r.hub.auth.issue({ kind: "browser", label: "Phone", ip: "10.0.0.7", personId: r.chey.id });
+    const links = r.hub.auth.devLinks;
+    const code = links.mint(device.device.id);
+    // Redeeming sends the browser on without the code, with a cookie for this origin only.
+    const first = await fetch(`${base}/app?x=1&jam_code=${code}`, { redirect: "manual" });
+    expect(first.status).toBe(302);
+    expect(first.headers.get("location")).toBe("/app?x=1");
+    const set = first.headers.get("set-cookie")!;
+    expect(set).toContain("HttpOnly");
+    expect(set).toContain("SameSite=Strict");
+    expect(set).not.toContain("Domain");
+    expect(seen).toEqual([]);
+    // A reused code is refused.
+    expect((await fetch(`${base}/app?jam_code=${code}`, { redirect: "manual" })).status).toBe(401);
+    // An expired one, and one for a revoked device, too.
+    const old = links.mint(device.device.id, Date.now() - 120_000);
+    expect(links.redeem(old)).toBeNull();
+    const revoked = links.mint(device.device.id);
+    r.hub.auth.revoke(device.device.id);
+    expect(links.redeem(revoked)).toBeNull();
+    // What the preview receives: nothing of ours, in the address, the cookies or the headers.
+    const dev2 = r.hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.8", personId: r.chey.id });
+    const session = links.open(dev2.device.id);
+    expect(links.deviceOf(session)).toBe(dev2.device.id);
+    await (await fetch(`${base}/page?token=${dev2.token}&jam_code=zzz&keep=1`.replace("&jam_code=zzz", ""), { headers: { cookie: `jam_dev=${session}; jam_token=${dev2.token}; theme=dark`, authorization: `Bearer ${dev2.token}` } })).text();
+    const got = seen.at(-1)!;
+    expect(got.url).toBe("/page?keep=1");
+    expect(got.cookie).toBe("theme=dark");
+    expect(got.auth).toBeNull();
+    expect(JSON.stringify(got)).not.toContain(dev2.token);
+    expect(JSON.stringify(got)).not.toContain(session);
+  } finally {
+    preview.stop(true);
+  }
+});
+
+test("on the public address, the dev subdomain takes the same one-time code and sends nothing of ours on", async () => {
+  const r = room();
+  const seen: { url: string; cookie: string | null }[] = [];
+  const preview = Bun.serve({ port: 0, fetch: (req) => (seen.push({ url: new URL(req.url).pathname + new URL(req.url).search, cookie: req.headers.get("cookie") }), new Response("preview")) });
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+    const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: `127.0.0.1:${preview.port}` });
+    seen.length = 0;
+    (r.hub.net as any).status = () => ({ domain: "room.example.net" });
+    const device = r.hub.auth.issue({ kind: "browser", label: "Phone", ip: "10.0.0.7", personId: r.chey.id });
+    const host = `dev-${dev.hostPort}.room.example.net`;
+    const code = r.hub.auth.devLinks.mint(device.device.id);
+    const base = `http://127.0.0.1:${server.port}`;
+    const entry = await fetch(`${base}/x?jam_code=${code}`, { redirect: "manual", headers: { host } });
+    expect(entry.status).toBe(302);
+    expect(entry.headers.get("location")).toBe("/x");
+    const cookieValue = entry.headers.get("set-cookie")!.match(/jam_dev=([^;]+)/)![1];
+    await (await fetch(`${base}/x?token=${device.token}`, { headers: { host, cookie: `jam_dev=${cookieValue}; a=b` } })).text();
+    expect(seen.at(-1)).toEqual({ url: "/x", cookie: "a=b" });
+    expect((await fetch(`${base}/x?jam_code=${code}`, { redirect: "manual", headers: { host } })).status).toBe(401);
+  } finally {
+    server.stop(true);
+    preview.stop(true);
+  }
+});
+
+test("a person's device asks the hub for a dev-server link and gets a one-time code on it", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+    const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: "127.0.0.1:1" });
+    const person = r.hub.auth.issue({ kind: "browser", label: "L", ip: "10.0.0.5", personId: r.chey.id });
+    const bot = r.hub.auth.issue({ kind: "agent", label: "A", ip: "10.0.0.6", personId: r.chey.id });
+    const ask = (token: string, url: string) => fetch(`http://127.0.0.1:${server.port}/api/devserver/link`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-forwarded-for": "10.0.0.5" }, body: JSON.stringify({ url }) });
+    const ok = await ask(person.token, `${dev.url}/page`);
+    expect(ok.status).toBe(200);
+    const link = new URL((await ok.json()).url);
+    expect(link.searchParams.get("jam_code")).toBeTruthy();
+    expect(r.hub.auth.devLinks.redeem(link.searchParams.get("jam_code"))).toBe(person.device.id);
+    expect((await ask(bot.token, dev.url)).status).toBe(403);
+    expect((await ask(person.token, "http://evil.example/")).status).toBe(404);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("accepting a card whose final wording a saved fact already has is refused inside the save, for Add and Replace", () => {
+  const r = room();
+  const a = r.s.proposeContext({ text: "Use the left nav", kind: "decision", by: "Chey" })!;
+  const b = r.s.proposeContext({ text: "Keep the footer slim", kind: "decision", by: "Chey" })!;
+  expect(r.s.board.add(a.id, "Chey").ok).toBe(true);
+  // The second card is edited to say what the first already saved.
+  const dup = r.s.board.add(b.id, "Chey", { text: "use the left nav." });
+  expect(dup).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.facts().filter((f) => f.status === "active" && f.text.toLowerCase().includes("left nav"))).toHaveLength(1);
+  expect(r.s.board.get(b.id)!.status).toBe("open");
+  // Replace: the old fact must still stand, and the new wording must not duplicate another.
+  const old = r.s.board.rememberNow({ text: "Header is 64px", kind: "requirement", by: "Chey" })!;
+  const other = r.s.board.rememberNow({ text: "Header is 72px", kind: "requirement", by: "Chey" })!;
+  const rep = r.s.proposeContext({ text: "Header is 72px", kind: "requirement", by: "Felipe", replaces: old.id });
+  expect(rep).not.toBeNull();
+  expect(r.s.board.replace(rep!.id, "Chey", old.id)).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.store.get("facts", old.id)!.status).toBe("active");
+  void other;
+});
+
+test("a stored title version that isn't a positive integer fails the start, and doesn't wait for the next save to block it", () => {
+  const p = createProject(dir, "Bad personver");
+  const a = room();
+  a.s.upsertPerson({ name: "Dana", role: "Designer" });
+  expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
+  const db = new Database(join(folderOf(p.slug), "context.db"));
+  db.exec("UPDATE meta SET value = '1.5' WHERE key LIKE 'personver:%'");
+  db.close();
+  expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
+});

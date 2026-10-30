@@ -389,10 +389,18 @@ export class Board {
     if (!r.ok) return r;
     if (!this.worded(c, r.card)) return fail("Write what the file says to keep first: Edit, then Add.");
     return this.commit(() => {
+      // Checked here, inside the save, against the facts as they are now: another card accepted a moment ago, or this one's edit, may have made it a duplicate.
+      const same = this.twin(r.card);
+      if (same) return fail("A saved fact already says exactly that. Merge it, or dismiss this card.", 409);
       const fact = this.s.store.put("facts", this.newFact(r.card));
       this.announceDecision(r.card, by);
       return { ok: true as const, card: this.done(r.card, "added", by, { factId: fact.id }), factId: fact.id };
     });
+  }
+
+  /** An active fact that says exactly what this card would add (same kind and workstream, the same words), other than `except`. */
+  private twin(card: TriageCard, except?: string): Fact | undefined {
+    return this.s.store.all("facts").find((f) => f.status === "active" && f.id !== except && f.kind === card.kind && sameName(f.workstream, card.workstream) && restates(f.text, card.text));
   }
 
   private announceDecision(card: TriageCard, by: string) {
@@ -451,6 +459,10 @@ export class Board {
     if (!this.worded(c, r.card)) return fail("Write what the file says to keep first: Edit, then Replace.");
     // The old fact is retired only together with its replacement being saved.
     return this.commit(() => {
+      const standing = this.s.store.get("facts", old.id);
+      if (!standing || standing.status !== "active") return fail("There's no saved fact left to replace. Add it instead.", 409);
+      const same = this.twin(r.card, old.id);
+      if (same) return fail("A saved fact already says exactly that. Merge it, or dismiss this card.", 409);
       this.s.store.put("facts", { ...old, status: "superseded", note: `Replaced by ${by} from the Tasks board`, updatedAt: Date.now() });
       const fact = this.s.store.put("facts", this.newFact(r.card));
       this.announceDecision(r.card, by);

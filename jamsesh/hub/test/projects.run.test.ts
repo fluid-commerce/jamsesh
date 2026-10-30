@@ -49,7 +49,8 @@ async function start(home: string, env: Record<string, string>, pipeOut = false)
   proc.stdin.flush();
   const origin = `http://127.0.0.1:${port}`;
   for (let i = 0; i < 100; i++) {
-    if (await fetch(`${origin}/healthz`).then((r) => r.ok).catch(() => false)) return { proc, origin };
+    // Up means listening; the stop-signal handlers are set a moment later, so a signal sent at once would still kill it outright.
+    if (await fetch(`${origin}/healthz`).then((r) => r.ok).catch(() => false)) return (await Bun.sleep(600), { proc, origin });
     await Bun.sleep(100);
   }
   throw new Error("the hub didn't start");

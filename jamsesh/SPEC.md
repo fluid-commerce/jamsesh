@@ -1882,7 +1882,7 @@ it.
   DNS rebinding. Browser WebSockets must come from the hub's own origin (or the Mac app's relay).
   Remote-access setup accepts JSON bodies only.
 - **Tokens** are random, stored on the host only as hashes, and kept in an HttpOnly cookie, the
-  Keychain, or a mode-600 file. Tokens never go in URLs except the one-time dev-server sign-in.
+  Keychain, or a mode-600 file. Device tokens never go in URLs. The one thing a URL carries is the one-time dev-server sign-in code (`jam_code`, `POST /api/devserver/link`): made for one paired device, good once and for about 60 seconds. Opening it gives the dev origin its own cookie (`jam_dev`: HttpOnly, SameSite=Strict, no Domain) and redirects to the same address without the code. The proxy strips the code, any `token`, and the hub's cookies and bearer from every request it forwards, HTTP and WebSocket, so the agent's preview never sees a credential.
 - **Two credentials per Mac.** The Mac app holds the person's credential for its window and a
   separate agents' credential (issued from the window, kind `agent`) for everything else that
   talks to its relay. On the host, the app's relay uses an agents' credential too, so agents on the

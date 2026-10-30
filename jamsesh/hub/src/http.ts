@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
+import { DEV_CODE_PARAM, DevLinks, scrubHeaders, withoutCredentials } from "./devlinks";
 import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
 import { methodAllowed } from "./methods";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
@@ -32,7 +33,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|attachments|host\/open-url|layouts|snapshots|devserver\/link)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -116,14 +117,15 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
   const tokenOf = (req: Request, _url: URL) =>
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token");
 
-  // The dev app may send its own Authorization header, so the paired token can be in the cookie instead.
-  const anyToken = (hub: Hub, req: Request, url: URL, ip: string) => {
+  // The dev app may send its own Authorization header, so the paired token can be in the cookie instead; or the dev origin's own
+  // sign-in cookie (devlinks.ts). Never the address.
+  const anyToken = (hub: Hub, req: Request, _url: URL, ip: string) => {
     const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-    for (const t of [bearer, cookie(req, "jam_token"), url.searchParams.get("token")]) {
+    for (const t of [bearer, cookie(req, "jam_token")]) {
       const d = t ? hub.auth.check(t, ip) : null;
       if (d) return d;
     }
-    return null;
+    return hub.auth.get(hub.auth.devLinks.deviceOf(cookie(req, DevLinks.cookieName)));
   };
 
   /** The credential on a loopback request: the Authorization header or the jam_token cookie, never the address. */
@@ -178,10 +180,17 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
         const dev = devTarget(req, hub);
         if (dev) {
+          // A one-time sign-in link: the code becomes this origin's own cookie and the address loses it.
+          const code = url.searchParams.get(DEV_CODE_PARAM);
+          if (code) {
+            const device = hub.auth.devLinks.redeem(code);
+            if (!device) return new Response("That link has been used or has expired. Open the dev server again from JamSesh.", { status: 401, headers: { "cache-control": "no-store" } });
+            return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": hub.auth.devLinks.setCookie(hub.auth.devLinks.open(device), url.protocol === "https:" || req.headers.get("x-forwarded-proto") === "https"), "cache-control": "no-store" } });
+          }
           if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             const who = local ? null : anyToken(hub, req, url, ip);
-            if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
+            if (srv.upgrade(req, { data: { deviceId: null, collab: withoutCredentials(url), devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
           }
           return proxyHttp(req, url, dev);
         }
@@ -490,10 +499,11 @@ function devTarget(req: Request, hub: Hub): number | null {
 
 async function proxyHttp(req: Request, url: URL, port: number): Promise<Response> {
   const headers = new Headers(req.headers);
-  headers.delete("cookie");
+  // The dev server sees none of ours: no cookies of the hub's, no token in the address, no bearer.
+  scrubHeaders(headers);
   headers.set("host", `127.0.0.1:${port}`);
   try {
-    const r = await fetch(`http://127.0.0.1:${port}${url.pathname}${url.search}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual" });
+    const r = await fetch(`http://127.0.0.1:${port}${withoutCredentials(url)}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual" } as RequestInit);
     return new Response(r.body, { status: r.status, headers: r.headers });
   } catch {
     return new Response("That dev server isn't answering.", { status: 502 });
@@ -831,6 +841,18 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
   }
 
+
+  // A link to a dev server for this device: carries a code that works once, for about a minute (devlinks.ts).
+  if (path === "/devserver/link" && req.method === "POST") {
+    const device = paired?.kind === "browser" ? paired.id : null;
+    if (!device) return bad("Only a paired device asks for a dev-server link.", 403);
+    const target = String(body?.url ?? "");
+    const known = s.devservers().find((d) => d.url === target || (target.startsWith(d.url) && /^[/?#]/.test(target.slice(d.url.length))));
+    if (!known) return bad("That isn't one of this session's dev servers.", 404);
+    const u = new URL(target);
+    u.searchParams.set(DEV_CODE_PARAM, hub.auth.devLinks.mint(device));
+    return json({ url: u.toString(), expiresInSeconds: 60 });
+  }
 
   // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
   // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.

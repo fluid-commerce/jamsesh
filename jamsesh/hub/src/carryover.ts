@@ -267,7 +267,7 @@ function readAll(db: Database): ProjectContext {
   const meta = db.query("SELECT key, value, changed_at, session FROM meta ORDER BY key").all() as MetaRow[];
   const b = meta.find((m) => m.key === "brief");
   const brief = b ? briefRow.parse(JSON.parse(b.value)) : { brief: "", goal: "", glossary: [] };
-  const people = meta.filter((m) => m.key.startsWith("person:")).map((m) => ({ name: m.key.slice(7), role: text(200).parse(m.value), version: Number(meta.find((v) => v.key === `personver:${m.key.slice(7)}`)?.value ?? 1) || 1 }));
+  const people = meta.filter((m) => m.key.startsWith("person:")).map((m) => ({ name: m.key.slice(7), role: text(200).parse(m.value), version: version.parse(Number(meta.find((v) => v.key === `personver:${m.key.slice(7)}`)?.value ?? 1)) }));
   for (const m of meta) updatedAt = Math.max(updatedAt, m.changed_at);
   const generation = genOf(meta.find((m) => m.key === "generation")?.value ?? "0");
   facts.sort((x, y) => x.ts - y.ts);
@@ -522,7 +522,7 @@ function apply(db: Database, ch: ContextChanges, result: CommitResult) {
   for (const p of ch.people) {
     const cur = db.query("SELECT value FROM meta WHERE key = ?").get(`person:${p.name}`) as { value: string } | null;
     const ver = db.query("SELECT value FROM meta WHERE key = ?").get(`personver:${p.name}`) as { value: string } | null;
-    const curV = cur ? Number(ver?.value ?? 1) || 1 : 0;
+    const curV = cur ? version.parse(Number(ver?.value ?? 1)) : 0;
     if (cur && cur.value === p.role) {
       result.peopleApplied?.set(p.name, curV);
     } else if (!cur || p.base === curV) {

@@ -134,6 +134,7 @@ export class Hub {
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
+    this.devproxy.links = this.auth.devLinks;
     this.mcp = new McpEndpoint(this);
     this.session.extraAddresses = () => {
       const st = this.net.status();
