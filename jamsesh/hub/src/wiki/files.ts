@@ -106,8 +106,7 @@ export function readPlain(file: string): string | null {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw e;
   }
-  if (tooBig(file)) return null;
-  return readFileSync(file, "utf8");
+  return readCapped(file)?.toString("utf8") ?? null; // (too big is an error, never "absent": nothing would then be written over it)
 }
 
 /** Makes the vault in `dir` if it isn't one yet, and starts a git history when git is there. Safe to call every time. */
@@ -417,10 +416,11 @@ const validRef = (r: unknown): r is string => typeof r === "string" && /^refs\/h
 function readFollow(gitDir: string): Follow[] {
   let text: string;
   try {
-    text = readFileSync(followFile(gitDir), "utf8");
+    const got = readCapped(followFile(gitDir), 1024 * 1024);
+    if (!got) return [];
+    text = got.toString("utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw e; // a note that can't be read is not "no note": the caller leaves everything as it is
+    throw e; // a note that can't be read (or is far too big) is not "no note": the caller leaves everything as it is
   }
   const j = JSON.parse(text); // a damaged note throws too
   const bad = () => new Error("the index note is damaged");
@@ -637,15 +637,35 @@ const archiveMemo = new Map<string, { mtimeMs: number; treeSha: string | null; s
  * on this one read, never by opening the path again. Parent folders are checked to be real folders. Throws ENOENT when gone,
  * ELOOP for a link, and an error for anything that isn't a regular file.
  */
-/** Whether a file is over the size the wiki will read (logged); every read of a vault file for its text goes through this or readOnce. */
-export function tooBig(file: string): boolean {
+/**
+ * A file's bytes, read through one open handle with the size checked on that handle before anything is allocated (so the check and
+ * the read can't be split by a replacement). Null when it isn't there; throws ETOOBIG (logged) when it is over `max`, so a huge file
+ * is an error where it is read and is never taken for an absent one.
+ */
+export function readCapped(file: string, max = MAX_FILE_BYTES): Buffer | null {
+  let fd: number;
   try {
-    const size = statSync(file).size;
-    if (size <= MAX_FILE_BYTES) return false;
-    console.error(`wiki: ${file.split("/").slice(-2).join("/")} is ${size} bytes, over the ${MAX_FILE_BYTES} the wiki will read; it is left out`);
-    return true;
-  } catch {
-    return false;
+    fd = openSync(file, fsc.O_RDONLY);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (st.size > max) {
+      console.error(`wiki: ${file.split("/").slice(-2).join("/")} is ${st.size} bytes, over the ${max} the wiki will read`);
+      throw Object.assign(new Error(`${file.split("/").pop()} is larger than ${max} bytes`), { code: "ETOOBIG" });
+    }
+    const buf = Buffer.alloc(Math.min(st.size, max));
+    let got = 0;
+    while (got < buf.length) {
+      const n = readSync(fd, buf, got, buf.length - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return got === buf.length ? buf : buf.subarray(0, got);
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -842,8 +862,15 @@ export function readPage(dir: string, slug: string): Page | null {
     return null;
   }
   if (!file || !plainFile(file)) return null;
-  if (tooBig(file)) return null; // a stray huge file is not read into memory as a page
-  const bytes = readFileSync(file);
+  let bytes: Buffer;
+  try {
+    const got = readCapped(file);
+    if (!got) return null;
+    bytes = got;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ETOOBIG") return null; // reads as absent for display only; writePage refuses to overwrite what it could not read
+    throw e;
+  }
   const text = bytes.toString("utf8");
   const { fm, body } = parseFrontMatter(text);
   const type = fm.type && TYPES[fm.type] ? fm.type : "topic";
@@ -948,6 +975,7 @@ export function writePage(dir: string, slug: string, body: string, opts: { categ
   const file = pageFile(dir, slug, true)!;
   if (body.length > PAGE_MAX) throw new Error(`A page can hold ${PAGE_MAX.toLocaleString("en-US")} characters; split this one.`);
   const prior = readPage(dir, slug);
+  if (!prior && existsSync(file)) throw new Error("That page can't be read (it is too large or not a page), so it isn't overwritten."); // absent-looking is not absent
   if (!prior && pageSlugs(dir).length >= MAX_PAGES) throw new Error("This wiki is full.");
   if (existsSync(file) && !plainFile(file)) throw new Error("That page can't be written.");
   const type = opts.category ? typeOf(opts.category) : (prior?.frontMatter.type ?? "topic");
@@ -1128,8 +1156,16 @@ export function archiveSources(dir: string, ids: string[]): number {
 export function readSource(dir: string, id: string): Source | null {
   if (!isSourceId(id)) return null;
   const file = sourceFile(dir, id);
-  if (!file || tooBig(file)) return null;
-  const text = readFileSync(file, "utf8");
+  if (!file) return null;
+  let text: string;
+  try {
+    const got = readCapped(file);
+    if (!got) return null;
+    text = got.toString("utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ETOOBIG") return null;
+    throw e;
+  }
   const m = text.match(/^---\nkind: (\w+)\ntitle: (".*")\nby: (".*")\nts: (\d+)\n---\n/);
   if (!m) return { id, title: id, kind: "document", ts: statSync(file).mtimeMs, by: "", text };
   try {

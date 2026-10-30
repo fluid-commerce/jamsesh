@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { settleIndex, commitPaths, readOnce, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { settleIndex, commitPaths, readOnce, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3282,17 +3282,39 @@ test("the host's wiki status says whether history is kept, and why not", () => {
   expect(historyStatus(dir)).toMatchObject({ state: "off", why: "no branch is checked out" });
 });
 
-test("a huge hand-edited page is never read into memory: the page reads as absent, logged, and the sync and index carry on", () => {
+test("a huge file is an error where it is read, never taken for an absent one: it is not read into memory and nothing is written over it", () => {
   const { w, dir } = room();
   w.editPage("small", "# Small\n\nA page.", { by: "Chey" });
-  writeFileSync(join(dir, "wiki", "huge.md"), Buffer.alloc(MAX_FILE_BYTES + 1, 97));
-  const logged: string[] = [];
   const err = console.error;
+  const logged: string[] = [];
   console.error = (...a: unknown[]) => void logged.push(a.join(" "));
   try {
-    expect(readPage(dir, "huge")).toBeNull();
+    // a page
+    const huge = join(dir, "wiki", "huge.md");
+    writeFileSync(huge, Buffer.alloc(MAX_FILE_BYTES + 1, 97));
+    expect(readPage(dir, "huge")).toBeNull(); // reads as nothing to show
     expect(listPages(dir).map((p) => p.slug)).toEqual(["small"]);
     expect(() => w.syncVault()).not.toThrow();
+    const r = w.editPage("huge", "# Huge\n\nTry to replace it.", { by: "Chey" }); // no revision: looks like a new page
+    expect(r.ok).toBe(false);
+    expect(statSync(huge).size).toBe(MAX_FILE_BYTES + 1); // untouched
+    // the log
+    const log = join(dir, "log.md");
+    const before = readFileSync(log);
+    writeFileSync(log, Buffer.alloc(MAX_FILE_BYTES + 1, 98));
+    expect(() => readPlain(log)).toThrow(/larger than/);
+    try {
+      appendLog(dir, "a change", ["small"], Date.now());
+    } catch {}
+    expect(statSync(log).size).toBe(MAX_FILE_BYTES + 1); // not replaced by a new header and one line
+    writeFileSync(log, before);
+    // the state
+    const state = join(dir, ".wiki-state.json");
+    const goodState = readFileSync(state);
+    writeFileSync(state, Buffer.alloc(MAX_FILE_BYTES + 1, 99));
+    expect(() => readState(dir)).toThrow();
+    expect(statSync(state).size).toBe(MAX_FILE_BYTES + 1);
+    writeFileSync(state, goodState);
   } finally {
     console.error = err;
   }
