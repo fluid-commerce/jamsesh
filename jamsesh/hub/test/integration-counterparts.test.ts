@@ -100,3 +100,14 @@ test("over HTTP a comparison card whose partner left is recovered by naming a ne
     hub.stop();
   }
 });
+
+test("a comparison is sent among exactly the approved agents: if one partner left, nothing is sent and the card says so", () => {
+  const { s, a, b, c } = room();
+  const card = s.proposeTask({ text: "Compare the header", mode: "coordinate", targets: [a.id], counterparts: [b.id, c.id], by: "Chey" })!;
+  s.removeAgent(b.id);
+  const sent = s.board.send(card.id, "Chey");
+  expect(sent).toMatchObject({ ok: false, status: 409 });
+  expect((sent as any).error).toContain("Ben");
+  expect(s.directives()).toHaveLength(0);
+  expect(s.board.get(card.id)).toMatchObject({ status: "open" });
+});

@@ -209,7 +209,12 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     if (task) {
       if (draft.mode !== card.mode) e.mode = draft.mode;
       if (draft.agent && draft.agent !== card.targets.join()) e.targets = [draft.agent];
-      if (draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && draft.partner !== partnerOf(card)) e.counterparts = draft.partner ? [draft.partner] : [];
+      // The partners the card shows are the ones it sends with: one chosen here replaces them, a change of target keeps them,
+      // and a comparison among three or more (several partners) is left as it is unless the partners are changed by Edit over the API.
+      if (draft.mode === "coordinate" && (draft.agent || card.targets.length === 1)) {
+        if (draft.partner !== partnerOf(card)) e.counterparts = draft.partner ? [draft.partner] : [];
+        else if (e.targets) e.counterparts = card.counterparts ?? [];
+      }
     } else if (draft.kind !== card.kind) e.kind = draft.kind;
     if (draft.workstream.trim() !== card.workstream) e.workstream = draft.workstream;
     return e;
@@ -264,7 +269,10 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
                     ))}
                   </select>
                 </label>
-                {draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (
+                {draft.mode === "coordinate" && (card.counterparts ?? []).filter((c) => !card.targets.includes(c)).length > 1 ? (
+                  <span className="tk-times">Compares with {agentNames(state, (card.counterparts ?? []).filter((c) => !card.targets.includes(c)), card.targetNames).join(", ")}</span>
+                ) : null}
+                {draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (card.counterparts ?? []).filter((c) => !card.targets.includes(c)).length <= 1 && (
                   <label>
                     <span>Compare with</span>
                     <select value={draft.partner} onChange={(e) => setDraft({ ...draft, partner: e.target.value })}>

@@ -1401,8 +1401,8 @@ agent's credential and a process on the host without the window key get 403, and
 
 | Route | Does |
 |---|---|
-| `PATCH /triage/<id>` | Edit the wording, `mode`, `targets`, `workstream`, `kind`. Records who changed what. |
-| `POST /triage/<id>/send` | Task: apply any edits in the body, then `createDirective` (requested by the original speaker, with the card's source events). 400 with no agent. |
+| `PATCH /triage/<id>` | Edit the wording, `mode`, `targets`, `counterparts` (a comparison's partners), `workstream`, `kind`. Records who changed what. |
+| `POST /triage/<id>/send` | Task: apply any edits in the body, then `createDirective` (requested by the original speaker, with the card's source events). 400 with no agent. 409 when a target or a named comparison partner has left or only watches (all are named; nothing is sent, and Edit changes them), or a comparison has no partner. |
 | `POST /triage/<id>/add` | Context: save the (edited) fact. A decision also becomes a room decision event, so the agents of its workstream see it. |
 | `POST /triage/<id>/merge` | Context: `factId` and the combined `text` (default: the fact, then the card). The fact keeps both sources. |
 | `POST /triage/<id>/replace` | Context: supersede the fact it conflicts with (or `factId`) and add this one. 409 if no saved fact is left. |

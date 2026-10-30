@@ -191,7 +191,7 @@ export class Board {
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, ...(mode === "coordinate" && p.counterparts?.length ? { counterparts: p.counterparts } : {}), targetNames: this.namesOf(targets), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, ...(mode === "coordinate" && p.counterparts?.length ? { counterparts: p.counterparts } : {}), targetNames: this.namesOf(comparisonSet(targets, mode === "coordinate" ? p.counterparts : undefined)), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -363,10 +363,11 @@ export class Board {
       this.s.store.put("triage", { ...c, unavailable: gone, updatedAt: this.stamp() });
       return fail(`Not sent: ${gone.join(", ")} ${gone.length === 1 ? "isn't" : "aren't"} in the session any more, or only ${gone.length === 1 ? "watches" : "watch"}. Change the agents with Edit.`, 409);
     }
-    // A comparison needs another agent to compare with, still in the session and not an observer: say so, don't fail inside the write.
+    // A comparison is sent among exactly the agents that were approved: if a partner has left or only watches, nothing is sent and the card says who.
     if (card.mode === "coordinate") {
-      const partners = [...new Set([...targets, ...(card.counterparts ?? []).filter((x) => this.s.agent(x) && this.s.agent(x)?.role !== "observer")])];
-      if (targets.some((x) => !partners.some((y) => y !== x))) return fail("A comparison needs another agent to compare with: choose two or more agents (or a partner) with Edit.", 409);
+      const gonePartners = (card.counterparts ?? []).filter((x) => !this.s.agent(x) || this.s.agent(x)?.role === "observer");
+      if (gonePartners.length) return fail(`Not sent: ${gonePartners.map((x) => this.s.agent(x)?.name ?? card.targetNames?.[x] ?? "An agent that left").join(", ")} can't take part in the comparison any more. Change the partners with Edit.`, 409);
+      if (targets.some((x) => !comparisonSet(targets, card.counterparts).some((y) => y !== x))) return fail("A comparison needs another agent to compare with: choose two or more agents (or a partner) with Edit.", 409);
     }
     const ws = card.workstream ? this.s.store.all("workstreams").find((w) => w.title.toLowerCase() === card.workstream.toLowerCase()) : undefined;
     return this.commit(() => {
@@ -374,7 +375,7 @@ export class Board {
         text: card.text,
         mode: card.mode,
         targets,
-        ...(card.mode === "coordinate" ? { counterparts: [...new Set([...targets, ...(card.counterparts ?? []).filter((x) => this.s.agent(x) && this.s.agent(x)?.role !== "observer")])] } : {}),
+        ...(card.mode === "coordinate" ? { counterparts: comparisonSet(targets, card.counterparts) } : {}),
         requestedBy: card.by,
         sourceEventIds: card.sources.map((x) => x.eventId).filter((x): x is number => x != null),
         // Exactly the files the card showed: what was reviewed is what the agent receives.
