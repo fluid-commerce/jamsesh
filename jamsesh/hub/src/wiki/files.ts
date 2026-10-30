@@ -359,7 +359,10 @@ export function commitPaths(dir: string, message: string, paths: string[], accep
       const names = [...lines.map((l) => l.slice(l.indexOf("\t") + 1, -1)), ...removals];
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
-      if (head && tree === headTree) return "nothing"; // nothing of these differs from history
+      if (head && tree === headTree) {
+        for (const p of lines) { const n = p.slice(p.indexOf("\t") + 1, -1); if (/^log-older-/.test(n)) committedLogs.add(`${dir}\0${n}`); } // identical to history: already committed
+        return "nothing"; // nothing of these differs from history
+      }
       // (The message goes in on stdin, not in the command line: what the wiki writes into a subject is not shown in a process list.)
       const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : [])], {}, msg + "\n")?.trim();
       if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return "failed";
@@ -402,6 +405,7 @@ export function commitPaths(dir: string, message: string, paths: string[], accep
       } finally {
         lock.release();
       }
+      if (moved) for (const n of names) if (/^log-older-/.test(n)) committedLogs.add(`${dir}\0${n}`);
       if (moved) settleIndex(dir); // the index follows (and if it can't right now, the note stays for the next pass)
       if (moved) return "done";
     }
@@ -1085,7 +1089,9 @@ const LOG_KEEP = 2 * 1024 * 1024;
 function rotateLog(dir: string, cur: string): string {
   const header = "# Log\n\nWhat changed in this wiki, newest last.\n";
   const cut = cur.indexOf("\n", cur.length - LOG_KEEP) + 1;
-  const live = new Set(sourceIds(dir));
+  // (the folder is listed strictly: if it can't be, nothing is rotated, rather than treating every source as gone)
+  const rawFolder = rawDir(dir);
+  const live = new Set(rawFolder ? readdirSync(rawFolder).filter((f) => f.endsWith(".md") && isSourceId(f.slice(0, -3))).map((f) => f.slice(0, -3)) : []);
   const kept: string[] = [];
   const moved: string[] = [];
   for (const line of cur.slice(0, cut).split("\n")) {
@@ -1095,10 +1101,21 @@ function rotateLog(dir: string, cur: string): string {
   }
   if (moved.length) {
     const body = moved.join("\n") + "\n";
+    const text = `# Log (older)\n\n${body}`;
+    const name = join(dir, `log-older-${createHash("sha1").update(body).digest("hex").slice(0, 10)}.md`);
+    // Written whole to a temp file, then linked to its name (which fails rather than replace one): the segment is all there or not there at all.
+    const tmp = `${name}.${process.pid}.tmp`;
     try {
-      io.write(join(dir, `log-older-${createHash("sha1").update(body).digest("hex").slice(0, 10)}.md`), `# Log (older)\n\n${body}`, { flag: "wx" });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // the same lines already moved there: nothing to write again
+      io.write(tmp, text, { flag: "wx" });
+      try {
+        io.link(tmp, name);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        // Already there (a retry): it must hold exactly these lines before they leave the active log.
+        if (readCapped(name)?.toString("utf8") !== text) throw new Error("A rotated log file with this name exists but isn't what it should be; the log is left as it is.");
+      }
+    } finally {
+      rmSync(tmp, { force: true });
     }
   }
   return header + (kept.length ? kept.join("\n") + "\n" : "") + cur.slice(cut);
@@ -1392,10 +1409,13 @@ export function historyStatus(dir: string): { state: "on" | "off"; why?: string 
   return { state: "on" };
 }
 
-/** The rotated-out log files in the vault (log-older-<hash>.md), for a commit to name. */
+/** Rotated log files this process has seen committed (they never change): not named, read or hashed again by later commits. */
+const committedLogs = new Set<string>();
+
+/** The rotated-out log files in the vault (log-older-<hash>.md) not yet committed here, for a commit to name. */
 export function rotatedLogs(dir: string): string[] {
   try {
-    return readdirSync(dir).filter((f) => /^log-older-[0-9a-f]{10}\.md$/.test(f));
+    return readdirSync(dir).filter((f) => /^log-older-[0-9a-f]{10}\.md$/.test(f) && !committedLogs.has(`${dir}\0${f}`));
   } catch {
     return [];
   }

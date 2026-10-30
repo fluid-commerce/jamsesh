@@ -1675,7 +1675,8 @@ Obsidian vault with nothing to set up:
 ```text
 projects/<slug>/WIKI.md   the schema for people: how pages are kept (one topic per page, [[links]], citations, front matter)
               index.md    every page by category; rebuilt by the hub after every change
-              log.md      one line per change, newest last
+              log.md      one line per change, newest last (the newest part: older lines are rotated out)
+              log-older-<hash>.md   older log lines, one file per rotation, written once and never edited
               raw/        sources: YYYY-MM-DD_slug.md, written once and never edited
               wiki/       pages: <slug>.md
               .git        one commit per change set, of the wiki's own files only, when `git` is installed (optional)

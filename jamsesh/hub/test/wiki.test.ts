@@ -3570,14 +3570,14 @@ test("log.md is rotated before it can reach the read cap: older lines go to a fi
   const active = readFileSync(join(dir, "log.md"), "utf8");
   expect(active.length).toBeLessThan(2.5 * 1024 * 1024);
   expect(active).toContain(`%%src:${live}%%`); // a live source keeps its line, so the catch-up does not log it again
-  const older = rotatedLogs(dir);
+  const older = readdirSync(dir).filter((f) => /^log-older-[0-9a-f]{10}\.md$/.test(f));
   expect(older.length).toBe(1);
   expect(readFileSync(join(dir, older[0]!), "utf8")).toContain("filler line number 0 ");
   expect(readLog(dir, 5)[0]!.pages).toContain("two");
   // A retry of the same rotation (the active log replacement had failed) finds the file and makes no second one.
   writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${keyed}${filler}`);
   w.editPage("three", "# Three\n\nMore.", { by: "Chey" });
-  expect(rotatedLogs(dir).length).toBe(1);
+  expect(readdirSync(dir).filter((f) => /^log-older-/.test(f)).length).toBe(1);
   // The rotated file is in git history.
   if (gitAvailable()) expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain(older[0]!);
 }, 60_000);
@@ -3594,3 +3594,32 @@ test("the log route clamps its limit: zero and negative values give one entry at
     expect(n).toBeLessThanOrEqual(limit === "abc" || limit === "0" ? 100 : 1);
   }
 });
+
+test("a rotated log file that is not what it should be stops the rotation (the log is left as it is); committed ones are not named again", () => {
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const filler = Array.from({ length: 20000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
+  const text = `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`;
+  writeFileSync(join(dir, "log.md"), text);
+  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  const seg = rotatedLogs(dir);
+  // Once committed (by "two"), the segment is not named, read or hashed by later commits.
+  if (gitAvailable()) {
+    expect(seg).toEqual([]);
+    expect(gitOutOf(dir, "ls-tree", "--name-only", "HEAD")).toMatch(/log-older-[0-9a-f]{10}\.md/);
+  }
+  // A segment of that name that is damaged (an interrupted write) is never taken for the real one.
+  const names = readdirSync(dir).filter((f) => /^log-older-/.test(f));
+  expect(names.length).toBe(1);
+  writeFileSync(join(dir, names[0]!), "# Log (older)\n\n- partial");
+  writeFileSync(join(dir, "log.md"), text);
+  const err = console.error;
+  console.error = () => {};
+  try {
+    w.editPage("three", "# Three\n\nMore.", { by: "Chey" }); // its log write fails; the page lands
+  } finally {
+    console.error = err;
+  }
+  expect(readFileSync(join(dir, "log.md"), "utf8").length).toBeGreaterThan(4 * 1024 * 1024); // not trimmed on the strength of a damaged segment
+  expect(readFileSync(join(dir, names[0]!), "utf8")).toContain("- partial");
+}, 60_000);
