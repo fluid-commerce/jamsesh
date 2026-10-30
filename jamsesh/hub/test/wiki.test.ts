@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3349,4 +3349,72 @@ test("readCapped does not follow a link, refuses a folder, and refuses a file re
   rmSync(log);
   symlinkSync(real, log);
   expect(() => readLog(dir)).toThrow();
+});
+
+test("a source whose update is blocked by an unreadable page stays pending, not marked ingested", async () => {
+  const { w, dir } = room();
+  w.editPage("small", "# Small\n\nA page.", { by: "Chey" });
+  writeFileSync(join(dir, "wiki", "huge.md"), Buffer.alloc(MAX_FILE_BYTES + 1, 97));
+  const src = w.addSource("document", "Note", "Something that updates the huge page.", "Chey");
+  w.decide = (async () => ({ summary: "Huge", pages: [page("huge", "Huge", "topic", "Replacement text.")] })) as Decider;
+  const err = console.error;
+  console.error = () => {};
+  try {
+    const res = await w.tick();
+    expect(res?.card ?? null).toBeNull();
+  } finally {
+    console.error = err;
+  }
+  expect(w.pendingSources()).toContain(src.id); // still waiting, not consumed without the update
+});
+
+test("an archive snapshot with changes not yet committed is never taken for settled: a failed commit is found again", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const ids = Array.from({ length: 3 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  archiveSources(dir, ids); // moved to raw/archive, not committed
+  const first = rawPaths(dir)!;
+  expect(first.some((f) => f.startsWith("raw/archive/"))).toBe(true);
+  const again = rawPaths(dir)!; // the commit failed (none was made): the same changes are still there
+  expect(again.sort()).toEqual(first.sort());
+});
+
+test("a dangling link at a page's name is never written over", () => {
+  const { w, dir } = room();
+  symlinkSync(join(root, "nowhere-at-all"), join(dir, "wiki", "dangle.md"));
+  expect(present(join(dir, "wiki", "dangle.md"))).toBe(true);
+  expect(existsSync(join(dir, "wiki", "dangle.md"))).toBe(false); // (existsSync would call it absent)
+  const r = w.editPage("dangle", "# Dangle\n\nTry to write it.", { by: "Chey" });
+  expect(r.ok).toBe(false);
+  expect(lstatSync(join(dir, "wiki", "dangle.md")).isSymbolicLink()).toBe(true);
+});
+
+test("a FIFO at a vault name does not hold the reader", () => {
+  const { dir } = room();
+  const fifo = join(dir, "wiki", "pipe.md");
+  const made = Bun.spawnSync(["mkfifo", fifo]);
+  if (made.exitCode !== 0) return;
+  expect(() => readOnce(dir, "wiki/pipe.md")).toThrow(/regular/);
+  expect(() => readCapped(fifo)).toThrow(/regular/);
+});
+
+test("readOnce refuses a file rewritten during the read, for real: the file changes between the first stat and the second", () => {
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const file = join(dir, "wiki", "one.md");
+  const original = readFileSync(file);
+  let mutated = false;
+  expect(() =>
+    readOnce(dir, "wiki/one.md", () => {
+      mutated = true;
+      const copy = Buffer.from(original);
+      copy[copy.length - 3] ^= 1; // same length, one bit different
+      writeFileSync(file, copy);
+      const later = new Date(Date.now() + 9000);
+      utimesSync(file, later, later);
+    }),
+  ).toThrow(/changed while/);
+  expect(mutated).toBe(true);
+  expect(readFileSync(file).equals(original)).toBe(false); // the change was real
 });

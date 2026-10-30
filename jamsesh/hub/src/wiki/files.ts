@@ -97,6 +97,17 @@ export function vaultDir(dir: string, name: "wiki" | "raw" | "raw/archive" | ".p
 const wikiDir = (dir: string, make = false) => vaultDir(dir, "wiki", make);
 const rawDir = (dir: string, make = false) => vaultDir(dir, "raw", make);
 
+/** Whether anything is at a path, a dangling link included (existsSync follows links, so a link to nowhere reads as absent and would be written over). Only ENOENT is absence. */
+export function present(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw e;
+  }
+}
+
 /** A file of the vault's own (WIKI.md, log.md, the state), read only when it is a plain file: null when it isn't there. */
 export function readPlain(file: string): string | null {
   try {
@@ -114,10 +125,10 @@ export function initWiki(dir: string): void {
   mkdirSync(dir, { recursive: true });
   wikiDir(dir, true);
   rawDir(dir, true);
-  if (!existsSync(join(dir, "WIKI.md"))) writeAtomic(join(dir, "WIKI.md"), SCHEMA);
-  if (!existsSync(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
-  if (!existsSync(join(dir, "index.md"))) rebuildIndex(dir);
-  if (!existsSync(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.proposals/\n*.tmp\n");
+  if (!present(join(dir, "WIKI.md"))) writeAtomic(join(dir, "WIKI.md"), SCHEMA);
+  if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
+  if (!present(join(dir, "index.md"))) rebuildIndex(dir);
+  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.proposals/\n*.tmp\n");
   if (gitAvailable() && !existsSync(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
@@ -598,6 +609,7 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
     }
     // Each file's blob id as its bytes are on disk, taken from one read of it (readOnce: no link followed, regular files only).
     const onDisk = new Map<string, string>();
+    let memoNext: { mtimeMs: number; treeSha: string | null; shas: Map<string, string> } | null = null;
     for (const sub of subs) {
       const d = dirs.get(sub);
       if (!d) continue;
@@ -611,7 +623,7 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
         onDisk.set(f, sha);
         seen.set(n, sha);
       }
-      if (sub === "raw/archive") archiveMemo.set(dir, { mtimeMs: archiveMtime, treeSha: archiveTree, shas: seen });
+      if (sub === "raw/archive") memoNext = { mtimeMs: archiveMtime, treeSha: archiveTree, shas: seen };
     }
     const gone = [...inHead.keys()].filter((f) => {
       try {
@@ -623,6 +635,11 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
       }
     });
     const changed = [...onDisk].filter(([f, sha]) => inHead.get(f) !== sha).map(([f]) => f);
+    // The archive is remembered only as it stands in HEAD: a snapshot with changes still to be committed (or one whose commit then fails) is never taken for settled.
+    if (memoNext) {
+      if ([...changed, ...gone].some((f) => f.startsWith("raw/archive/"))) archiveMemo.delete(dir);
+      else archiveMemo.set(dir, memoNext);
+    }
     return [...new Set([...changed, ...gone])];
   } catch {
     return null;
@@ -645,7 +662,7 @@ const archiveMemo = new Map<string, { mtimeMs: number; treeSha: string | null; s
 export function readCapped(file: string, max = MAX_FILE_BYTES): Buffer | null {
   let fd: number;
   try {
-    fd = openSync(file, fsc.O_RDONLY | fsc.O_NOFOLLOW); // a link is never followed
+    fd = openSync(file, fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK); // a link is never followed, and a FIFO can't hold the open before the regular-file check
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw e;
@@ -679,7 +696,7 @@ export const MAX_FILE_BYTES = 16 * 1024 * 1024;
 export function readOnce(dir: string, rel: string, between?: () => void): Buffer {
   const parts = rel.split("/");
   if (parts[0] === "wiki" || parts[0] === "raw") vaultDir(dir, parts.length === 3 ? "raw/archive" : (parts[0] as "wiki" | "raw")); // throws for a linked folder
-  const fd = openSync(join(dir, rel), fsc.O_RDONLY | fsc.O_NOFOLLOW);
+  const fd = openSync(join(dir, rel), fsc.O_RDONLY | fsc.O_NOFOLLOW | fsc.O_NONBLOCK); // (non-blocking, so a FIFO can't hold the open before the regular-file check)
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) throw Object.assign(new Error(`${rel} is not a regular file`), { code: "ENOTREG" });
@@ -980,9 +997,9 @@ export function writePage(dir: string, slug: string, body: string, opts: { categ
   const file = pageFile(dir, slug, true)!;
   if (body.length > PAGE_MAX) throw new Error(`A page can hold ${PAGE_MAX.toLocaleString("en-US")} characters; split this one.`);
   const prior = readPage(dir, slug);
-  if (!prior && existsSync(file)) throw new Error("That page can't be read (it is too large or not a page), so it isn't overwritten."); // absent-looking is not absent
+  if (!prior && present(file)) throw new Error("That page can't be read (it is too large or not a page), so it isn't overwritten."); // absent-looking is not absent
   if (!prior && pageSlugs(dir).length >= MAX_PAGES) throw new Error("This wiki is full.");
-  if (existsSync(file) && !plainFile(file)) throw new Error("That page can't be written.");
+  if (present(file) && !plainFile(file)) throw new Error("That page can't be written.");
   const type = opts.category ? typeOf(opts.category) : (prior?.frontMatter.type ?? "topic");
   const fm: FrontMatter = {
     type,
@@ -1151,7 +1168,7 @@ export function archiveSources(dir: string, ids: string[]): number {
   let n = 0;
   for (const id of ids) {
     // Never over a source already archived under that name.
-    if (!raw || !to || !isSourceId(id) || !plainFile(join(raw, `${id}.md`)) || existsSync(join(to, `${id}.md`))) continue;
+    if (!raw || !to || !isSourceId(id) || !plainFile(join(raw, `${id}.md`)) || present(join(to, `${id}.md`))) continue;
     io.rename(join(raw, `${id}.md`), join(to, `${id}.md`));
     n++;
   }
@@ -1281,7 +1298,7 @@ export function stateDamaged(dir: string): never {
   const file = stateFile(dir);
   const aside = `${file}.damaged`;
   try {
-    if (!existsSync(aside)) copyFileSync(file, aside);
+    if (!present(aside)) copyFileSync(file, aside);
   } catch {}
   throw Object.assign(new Error(".wiki-state.json in the wiki folder is damaged; a copy is kept as .wiki-state.json.damaged. Fix or remove it to carry on."), { code: "ESTATE" });
 }

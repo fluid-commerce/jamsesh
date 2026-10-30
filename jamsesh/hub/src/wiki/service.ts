@@ -17,6 +17,7 @@ import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
+  present,
   historyStatus,
   type Take,
   settleIndex,
@@ -877,6 +878,7 @@ export class WikiService {
     const seen = new Set<string>();
     // What the answer holds that can't be written because the model never saw that page whole: not lost, asked for again.
     const unseen = new Set<string>();
+    let blocked = false;
     const over = out.pages.length > MAX_PAGES_PER_INGEST;
     for (const p of out.pages.slice(0, MAX_PAGES_PER_INGEST)) {
       const slug = isPageSlug(p.slug) ? p.slug : slugifyTitle(p.title || p.slug);
@@ -884,7 +886,12 @@ export class WikiService {
       const body = cleanBody(p.markdown);
       if (!body || body.length > PAGE_MAX) continue;
       const cur = readPage(this.dir, slug);
-      if (!cur && existsSync(join(this.dir, "wiki", `${slug}.md`))) continue; // a file is there that can't be read as a page (too large, a link): no proposal that could never be applied
+      if (!cur && present(join(this.dir, "wiki", `${slug}.md`))) {
+        // A file is there that can't be read as a page (too large, a link): no proposal that could never be applied, and the sources
+        // stay pending (not marked ingested without the update) until the file is put right.
+        blocked = true;
+        continue;
+      }
       // The page already says this, and is filed the way the model means it: nothing to change. (Sources aren't compared: citing a new one on a page that already reads the same isn't worth a card.)
       if (cur && cur.markdown.trim() === body && cur.category === categoryOf(p.type) && sameList(cur.frontMatter.workstreams, p.workstreams.slice(0, 12))) continue;
       if (cur && !shown.has(slug)) {
@@ -907,7 +914,7 @@ export class WikiService {
     }
     // Only a page that could be shown whole next time is worth another pass; one too big to show is let go.
     const needs = [...unseen].filter((slug) => (readPage(this.dir, slug)?.markdown.length ?? Infinity) <= MAX_EXISTING_CHARS);
-    const again = needs.length || over ? batch.map((b) => b.id) : [];
+    const again = needs.length || over || blocked ? batch.map((b) => b.id) : [];
     if (!changes.length) return { card: null, sources: prop.sources, changes: 0, again, needs };
     if (again.length) prop.again = again;
     const text = `Wiki: ${out.summary.trim().slice(0, 160) || `${changes.length} page${changes.length === 1 ? "" : "s"} to update`}`;
@@ -1300,7 +1307,7 @@ export class WikiService {
     const put = (slug: string, title: string, category: Category, lines: string[], workstreams: string[] = []) => {
       if (!lines.length) return;
       const cur = readPage(this.dir, slug);
-      if (cur || existsSync(join(this.dir, "wiki", `${slug}.md`))) {
+      if (cur || present(join(this.dir, "wiki", `${slug}.md`))) {
         if (!cur?.frontMatter.sources.includes(src.id)) theirs++;
         return;
       }
