@@ -218,6 +218,9 @@ function refState(dir: string, ref: string): { sha: string } | "missing" | "unkn
   }
 }
 
+/** Most bytes of files held at once while they are written into the repository. */
+const BATCH_BYTES = 8 * 1024 * 1024;
+
 const ZERO = "0000000000000000000000000000000000000000";
 
 /**
@@ -255,25 +258,39 @@ export function commitPaths(dir: string, message: string, paths: string[], prere
       rmSync(idx, { force: true });
       if (head ? gitOut(dir, ["read-tree", head], env) === null : false) return "failed";
       // Each named file is read once (or was, by the caller, in `preread`): those bytes are what is checked, hashed and committed.
-      // Gone is ENOENT and nothing else; a link, a non-regular file or a linked folder stops the commit.
-      const bytes = new Map<string, Buffer>();
+      // Gone is ENOENT and nothing else; a link, a non-regular file or a linked folder stops the commit. Files go into the repository
+      // in batches of a bounded size (each batch is written to git and let go before the next is read), so a large backlog is never held whole.
       const gone: string[] = [];
+      const lines: string[] = [];
+      let batch: Buffer[] = [];
+      let batchBytes = 0;
+      const flush = () => {
+        const ok = writeBlobs(dir, batch);
+        batch = [];
+        batchBytes = 0;
+        return ok;
+      };
       try {
         for (const p of own) {
-          const pre = preread.get(p);
-          if (pre) bytes.set(p, pre);
-          else
+          let bytes = preread.get(p);
+          if (!bytes)
             try {
-              bytes.set(p, readOnce(dir, p));
+              bytes = readOnce(dir, p);
             } catch (e) {
               if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
               gone.push(p);
+              continue;
             }
+          lines.push(`100644 ${blobId(bytes)}\t${p}\0`);
+          batch.push(bytes);
+          batchBytes += bytes.length;
+          if (batchBytes >= BATCH_BYTES && !flush()) return "failed";
         }
       } catch (e) {
         console.error("wiki: not committing, a vault file or folder is a link or not a regular file:", e instanceof Error ? e.message : e);
         return "failed";
       }
+      if (!flush()) return "failed";
       // A file that is gone is a deletion only if HEAD has it. (A failed listing is an error, never "HEAD has nothing".)
       let inHead = new Set<string>();
       if (head && gone.length) {
@@ -282,13 +299,10 @@ export function commitPaths(dir: string, message: string, paths: string[], prere
         inHead = new Set(listing.split("\0").filter(Boolean));
       }
       const removals = gone.filter((p) => inHead.has(p));
-      const names = [...bytes.keys(), ...removals];
-      if (!names.length) return "nothing";
-      // The bytes go into the repository from memory and into the private index by the ids computed from them (no clean filters, no line-ending conversion, nothing reopened by path).
-      const here = [...bytes.keys()];
-      if (!writeBlobs(dir, here.map((p) => bytes.get(p)!))) return "failed";
-      const info = [...here.map((p) => `100644 ${blobId(bytes.get(p)!)}\t${p}\0`), ...removals.map((p) => `0 ${ZERO}\t${p}\0`)].join("");
+      if (!lines.length && !removals.length) return "nothing";
+      const info = [...lines, ...removals.map((p) => `0 ${ZERO}\t${p}\0`)].join("");
       if (gitOut(dir, ["update-index", "-z", "--index-info"], env, info) === null) return "failed";
+      const names = [...lines.map((l) => l.slice(l.indexOf("\t") + 1, -1)), ...removals];
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history

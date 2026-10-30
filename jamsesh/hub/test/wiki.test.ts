@@ -3196,3 +3196,18 @@ test("what the wiki writes into a commit subject never appears in a git command 
   expect(seenArgs.join(" ")).not.toContain("sk-live");
   expect(gitOutOf(dir, "log", "--pretty=format:%s")).toContain("sk-live-5555"); // it is in the history, as intended
 });
+
+test("a backlog of large files is written to git in batches and committed whole", () => {
+  if (!gitAvailable()) return;
+  const dir = join(root, `big-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+  const names: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const n = `raw/2026-10-29_big-${i}.md`;
+    writeFileSync(join(dir, n), Buffer.alloc(5 * 1024 * 1024, 97 + i)); // 20 MB in all: more than one batch
+    names.push(n);
+  }
+  expect(commitPaths(dir, "Big", names)).toBe("done");
+  for (let i = 0; i < 4; i++) expect(Number(gitOutOf(dir, "cat-file", "-s", `HEAD:raw/2026-10-29_big-${i}.md`))).toBe(5 * 1024 * 1024);
+}, 60_000);
