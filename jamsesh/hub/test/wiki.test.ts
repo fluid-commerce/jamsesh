@@ -2806,11 +2806,13 @@ test("a linked, missing or unreadable wiki folder stops the sync: no page is fil
   expect(() => w.syncVault()).toThrow(/missing/);
   // unreadable
   renameSync(moved, real);
-  chmodSync(real, 0o000);
-  try {
-    expect(() => w.syncVault()).toThrow();
-  } finally {
-    chmodSync(real, 0o755);
+  if (process.getuid?.() !== 0) {
+    chmodSync(real, 0o000); // (root reads anything: the unreadable case only means something for everyone else)
+    try {
+      expect(() => w.syncVault()).toThrow();
+    } finally {
+      chmodSync(real, 0o755);
+    }
   }
   expect(sourceIds(dir).length).toBe(sourcesBefore); // nothing was filed as a deletion
   expect(w.syncVault()).toEqual([]); // and with the folder back, nothing is gone
@@ -2958,4 +2960,48 @@ test("a damaged index note is never mistaken for no note: it is left, with the i
   }
   expect(readFileSync(note, "utf8")).toBe("{ damaged");
   rmSync(note);
+});
+
+test("the index note is all-or-nothing: one invalid entry makes the whole note unreadable, not shorter", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const note = join(dir, ".git", "jamsesh-follow.json");
+  const text = JSON.stringify([{ old: null, new: "a".repeat(40), paths: ["wiki/one.md"] }, { new: 5, paths: "x" }]);
+  writeFileSync(note, text);
+  const err = console.error;
+  console.error = () => {};
+  try {
+    settleIndex(dir);
+  } finally {
+    console.error = err;
+  }
+  expect(readFileSync(note, "utf8")).toBe(text);
+  rmSync(note);
+});
+
+test("a source with a valid name that is a link is not committed; a missing index of theirs is repaired from the old commit", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const outside = join(dir, "outside.txt");
+  writeFileSync(outside, "not a source");
+  symlinkSync(outside, join(dir, "raw", "2026-10-29_linked.md"));
+  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("2026-10-29_linked.md");
+  // Their index is gone (never made, or removed): the wiki's next commit and its follow-up still leave a clean view.
+  rmSync(join(dir, ".git", "index"), { force: true });
+  w.editPage("three", "# Three\n\nMore.", { by: "Chey" });
+  expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki").trim()).toBe("");
+});
+
+test("before the first look at the vault (no record of known pages yet) the pages present are committed, not held back", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const st = readState(dir);
+  delete st.seen;
+  writeState(dir, st);
+  writePage(dir, "migrated", "# Migrated\n\nA page from before.");
+  (w as any).commitOwn("Migrated", ["wiki/migrated.md"]);
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/migrated.md");
 });

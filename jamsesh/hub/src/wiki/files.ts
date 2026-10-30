@@ -253,7 +253,9 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
         // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
         if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) {
           // A miss on the compare-and-swap, or the ref already at the new commit, or a real failure: told apart by where HEAD is now.
-          const now = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"])?.trim() ?? null;
+          const nowRaw = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"]);
+          if (nowRaw === null && head !== null) return "failed"; // can't tell whether the ref moved: the note stays and the next pass settles it
+          const now = nowRaw?.trim() ?? null;
           if (now === commit) {
             moved = true; // it did move (the answer was lost): the note stays and the index follows
           } else if (now !== head) {
@@ -320,7 +322,8 @@ function readFollow(gitDir: string): Follow[] {
   }
   const j = JSON.parse(text); // a damaged note throws too
   if (!Array.isArray(j)) throw new Error("the index note is damaged");
-  return j.filter((e) => e && typeof e.new === "string" && Array.isArray(e.paths));
+  for (const e of j) if (!e || typeof e.new !== "string" || !(e.old === null || typeof e.old === "string") || !Array.isArray(e.paths) || !e.paths.every((p: unknown) => typeof p === "string")) throw new Error("the index note is damaged");
+  return j as Follow[];
 }
 
 function writeFollow(gitDir: string, list: Follow[]) {
@@ -373,6 +376,8 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
       const only = (m: Map<string, string>) => new Map([...m].filter(([p]) => wanted.has(p)));
       const env = { GIT_INDEX_FILE: mine };
       // (the working copy of the index: the real one with the earlier notes applied)
+      // No index of theirs yet means nothing staged: it stands where the old commit does.
+      if (!existsSync(mine) && e.old) must(gitOut(dir, ["read-tree", e.old], env));
       const index = only(entries(existsSync(mine) ? must(gitOut(dir, ["ls-files", "-s", "-z"], env)) : "", "index"));
       const before = only(entries(e.old ? must(gitOut(dir, ["ls-tree", "-r", "-z", e.old])) : "", "tree"));
       const after = only(entries(must(gitOut(dir, ["ls-tree", "-r", "-z", e.new])), "tree"));
@@ -384,7 +389,6 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
         info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
       }
       if (!info) continue;
-      if (!existsSync(mine) && e.old) must(gitOut(dir, ["read-tree", e.old], env)); // they have no index yet: start from the old commit's
       must(gitOut(dir, ["update-index", "-z", "--index-info"], env, info));
       changedAny = true;
     }
@@ -432,7 +436,15 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
   const changed = hasHead ? gitOut(dir, ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--", folder]) : "";
   const fresh = gitOut(dir, ["ls-files", "-o", "--exclude-standard", "-z", "--", folder]);
   if (changed === null || fresh === null) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
-  return [...new Set([...changed.split("\0"), ...fresh.split("\0")].filter((f) => f && own(f)))];
+  // Named like the wiki's own and, if there at all, a regular file: a link with a valid name is never the wiki's to commit.
+  const real = (f: string) => {
+    try {
+      return lstatSync(join(dir, f)).isFile();
+    } catch {
+      return true; // gone: a deletion
+    }
+  };
+  return [...new Set([...changed.split("\0"), ...fresh.split("\0")].filter((f) => f && own(f) && real(f)))];
 }
 
 /** The source files in raw/ and raw/archive/ that changed: new ones, and the two sides of a move to the archive. */
