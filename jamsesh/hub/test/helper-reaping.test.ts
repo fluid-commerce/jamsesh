@@ -85,8 +85,15 @@ test("a local whisper dies within seconds of its hub being killed outright", asy
   `;
   const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit", env: { ...process.env, JAMSESH_SILENT: "1", JAMSESH_OFFLINE: "1", JAMSESH_WHISPER_SERVER: bin, JAMSESH_WHISPER_MODEL: join(dir, "model.bin") } });
   try {
-    const { value } = await hub.stdout.getReader().read();
-    expect(new TextDecoder().decode(value).trim().split("\n").pop()).toBe("true");
+    // Its log line and its answer can arrive in separate chunks: read until the answer.
+    const reader = hub.stdout.getReader();
+    let said = "";
+    while (!/^(true|false)$/m.test(said)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      said += new TextDecoder().decode(value);
+    }
+    expect(said.trim().split("\n").pop()).toBe("true");
     expect(existsSync(pidFile)).toBe(true);
     const pid = Number(readFileSync(pidFile, "utf8"));
     expect(alive(pid)).toBe(true);
