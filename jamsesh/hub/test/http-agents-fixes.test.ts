@@ -23,15 +23,15 @@ const browser = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.6
 // The host's own window: it opened a one-time host link, so it holds the window key (SPEC 14).
 const hostWindow = { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` };
 
-test("an agent credential is refused on human routes whether it comes as a header or ?token=", async () => {
+test("an agent credential is refused on human routes by header, and a ?token= in the URL is no credential at all", async () => {
   const body = JSON.stringify({ text: "hi", personId: "p1" });
   const h = { ...remote, "content-type": "application/json" };
   const viaHeader = await fetch(`${base}/api/say`, { method: "POST", headers: { ...h, authorization: `Bearer ${agent.token}` }, body });
   expect(viaHeader.status).toBe(403);
   const viaQuery = await fetch(`${base}/api/say?token=${agent.token}`, { method: "POST", headers: h, body });
-  expect(viaQuery.status).toBe(403);
+  expect(viaQuery.status).toBe(401);
   const stage = await fetch(`${base}/api/stage?token=${agent.token}`, { method: "POST", headers: h, body: JSON.stringify({ stage: { mode: "board" } }) });
-  expect(stage.status).toBe(403);
+  expect(stage.status).toBe(401);
 });
 
 test("agents can't change people, settings, directives or transcription workers", async () => {
