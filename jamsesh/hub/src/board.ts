@@ -177,7 +177,8 @@ export class Board {
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const workstream = clean(p.workstream);
     // The same words for other agents, or another workstream, are another task.
-    const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream);
+    const wants = mode === "coordinate" ? p.counterparts ?? [] : [];
+    const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream) && sameSet(c.counterparts ?? [], wants);
     const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
     // Files past what one card can carry make another card.
     if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments, over);
@@ -282,7 +283,7 @@ export class Board {
       if (!Array.isArray(e.targets)) return { error: "targets is a list of agent ids." };
       const targets = this.validTargets(e.targets, next.mode);
       if (targets.length !== e.targets.length) return { error: "One of those agents isn't in the session, or only watches." };
-      if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), (next.targetNames = this.namesOf(targets)), fields.push("targets");
+      if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), (next.targetNames = this.namesOf(targets)), (next.counterparts = undefined), fields.push("targets"); // who it compares with was chosen for the old targets
     }
     if (e.workstream !== undefined) {
       const w = clean(e.workstream);

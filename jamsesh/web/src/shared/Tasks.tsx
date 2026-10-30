@@ -351,6 +351,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
       {(task || (card.workstream && !editing) || card.count > 1 || card.edits.length > 0) && (
         <div className="tk-chips">
           {task && <AgentTag state={state} ids={card.targets} known={card.targetNames} />}
+          {task && card.mode === "coordinate" && card.counterparts?.length ? <span className="tk-times" title="The agents they compare with">Compares with {agentNames(state, card.counterparts.filter((c) => !card.targets.includes(c)), card.targetNames).join(", ") || "each other"}</span> : null}
           {card.workstream && !editing && <span className="tk-tag ws">{card.workstream}</span>}
           {card.count > 1 && <span className="tk-times" title="Said more than once; the repeats are on this card">Heard {card.count} times</span>}
           {card.edits.length > 0 && <span className="tk-times">Edited</span>}

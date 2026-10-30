@@ -1369,7 +1369,7 @@ agents' own reports; `acceptedEvent`), never overheard talk. Curation still read
 **Other workers' entry points** (so a feature that finds a task or a piece of context can use the board):
 
 ```ts
-session.proposeTask({ text, mode, targets, workstream?, by, origin?: "overheard" | "agent" | "document", sourceEventIds?, attachments?, note? }): TriageCard | null
+session.proposeTask({ text, mode, targets, counterparts?, workstream?, by, origin?: "overheard" | "agent" | "document", sourceEventIds?, attachments?, note? }): TriageCard | null
 session.proposeContext({ text, kind, workstream?, by, origin?, sourceEventIds?, attachments?, replaces?, note? }): TriageCard | null
 session.board.rememberNow({ text, kind, workstream?, by, sourceEventIds? }): Fact | null   // on purpose: saved at once
 ```

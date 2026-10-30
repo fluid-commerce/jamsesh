@@ -1000,7 +1000,7 @@ export class Session {
       }
       const left = this.store.get("directives", id);
       if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
-      return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds, ...(d.attachments?.length ? { attachments: d.attachments } : {}) });
+      return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds, attachments: d.attachments ?? [] });
     });
     for (const t of from) this.wake(t);
     return made;
