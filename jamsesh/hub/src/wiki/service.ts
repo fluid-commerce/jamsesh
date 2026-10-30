@@ -17,6 +17,8 @@ import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
+  settleIndex,
+  pageSlugsStrict,
   pagePaths,
   rawPaths,
 } from "./files";
@@ -258,12 +260,14 @@ export class WikiService {
     try {
       seen = readState(this.dir).seen ?? {};
     } catch {}
-    const wikis = changed.filter((f) => {
-      const slug = f.slice(5, -3);
-      const page = readPage(this.dir, slug);
-      return page ? seen[slug]?.rev === page.rev : !seen[slug]; // a deletion counts once the sync has filed it (the record is gone)
+    // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed.
+    const wikis = [...new Set([...paths, ...changed])].filter((f) => {
+      const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
+      if (!m) return true; // not a page (index, log, sources): the wiki's own files by name
+      const page = readPage(this.dir, m[1]);
+      return page ? seen[m[1]]?.rev === page.rev : !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
     });
-    commitPaths(this.dir, message, [...new Set([...paths, ...wikis])].concat(["index.md", "log.md", ...raw]));
+    commitPaths(this.dir, message, [...new Set(wikis)].concat(["index.md", "log.md", ...raw]));
   }
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
@@ -679,6 +683,7 @@ export class WikiService {
    * reconciling any write of the wiki's own that was cut short.
    */
   syncVault(): string[] {
+    settleIndex(this.dir); // a commit's index update that was left undone (a busy index, a stop) is finished first
     for (const p of this.proposals()) if (p.prop.writing) this.reconcile(p.id, p.prop);
     const st = readState(this.dir);
     // A hand change filed by a pass that stopped before recording it: recorded now, and finished below like a new one.
@@ -690,10 +695,11 @@ export class WikiService {
     const gone: string[] = filed?.rev.startsWith("gone-") ? [filed.slug] : [];
     const here = new Set<string>();
     try {
-      for (const info of listPages(this.dir)) {
-        const page = readPage(this.dir, info.slug);
+      // The folder must be read for this pass to say anything is gone; a page that is listed but can't be read is still there.
+      for (const slug of pageSlugsStrict(this.dir, Object.keys(base).length)) {
+        here.add(slug);
+        const page = readPage(this.dir, slug);
         if (!page) continue;
-        here.add(page.slug);
         const known = base[page.slug];
         if (known?.rev === page.rev) continue;
         if (first) {

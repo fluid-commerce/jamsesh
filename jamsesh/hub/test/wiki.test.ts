@@ -2651,7 +2651,7 @@ test("commitOwn leaves a page a person is editing (staged or not) alone until th
   gitOut_(dir, "add", "wiki/mine.md");
   writeFileSync(file, readFileSync(file, "utf8") + "Unstaged line.\n");
   const staged = gitOutOf(dir, "diff", "--cached", "--", "wiki/mine.md");
-  writePage(dir, "other", "# Other\n\nUnrelated.");
+  (w as any).write("other", "# Other\n\nUnrelated."); // the wiki's own write (it records the page as its own)
   (w as any).commitOwn("Add other", ["wiki/other.md"]); // the real method, as an unrelated wiki action calls it
   expect(gitOutOf(dir, "show", "--name-only", "--pretty=format:", "HEAD")).toContain("wiki/other.md");
   expect(gitOutOf(dir, "show", "--name-only", "--pretty=format:", "HEAD")).not.toContain("wiki/mine.md");
@@ -2790,3 +2790,111 @@ test("a commit is not made while the person's git holds the index; it is made on
   expect(existsSync(lock)).toBe(false);
   expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki/two.md").trim()).toBe("");
 }, 20_000);
+
+test("a linked, missing or unreadable wiki folder stops the sync: no page is filed as deleted", () => {
+  const { w, dir } = room();
+  w.editPage("keep", "# Keep\n\nA page.", { by: "Chey" });
+  const real = join(dir, "wiki");
+  const moved = join(dir, "wiki-moved");
+  const sourcesBefore = sourceIds(dir).length;
+  // linked
+  renameSync(real, moved);
+  symlinkSync(moved, real);
+  expect(() => w.syncVault()).toThrow(/link/);
+  rmSync(real);
+  // missing
+  expect(() => w.syncVault()).toThrow(/missing/);
+  // unreadable
+  renameSync(moved, real);
+  chmodSync(real, 0o000);
+  try {
+    expect(() => w.syncVault()).toThrow();
+  } finally {
+    chmodSync(real, 0o755);
+  }
+  expect(sourceIds(dir).length).toBe(sourcesBefore); // nothing was filed as a deletion
+  expect(w.syncVault()).toEqual([]); // and with the folder back, nothing is gone
+  expect(readPage(dir, "keep")).not.toBeNull();
+});
+
+test("git runs in a clean environment: an inherited GIT_DIR, GIT_INDEX_FILE or GIT_WORK_TREE cannot redirect the wiki's commits", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const other = join(root, `elsewhere-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(other, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: other });
+  const saved = { ...process.env };
+  process.env.GIT_DIR = join(other, ".git");
+  process.env.GIT_INDEX_FILE = join(other, ".git", "index");
+  process.env.GIT_WORK_TREE = other;
+  try {
+    w.editPage("clean", "# Clean\n\nA page.", { by: "Chey" });
+  } finally {
+    for (const k of ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"]) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+  expect(gitOutOf(dir, "log", "--name-only", "--pretty=format:")).toContain("wiki/clean.md");
+  expect(gitOutOf(other, "log", "--oneline")).toBe(""); // the other repository was never touched
+});
+
+test("the index follow-up is resumable: a failure after the branch moved leaves a note, and the next pass and a restart finish it", () => {
+  if (!gitAvailable()) return;
+  const { w, dir, s } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  (w as any).write("two", "# Two\n\nSecond.");
+  const note = join(dir, ".git", "jamsesh-follow.json");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    // Hold the lock file's destination: a directory named index makes the final rename fail.
+    const indexPath = join(dir, ".git", "index");
+    const keep = existsSync(indexPath) ? readFileSync(indexPath) : null;
+    rmSync(indexPath, { force: true });
+    mkdirSync(indexPath); // renaming a file over a directory fails
+    expect(commitPaths(dir, "Add two", ["wiki/two.md"])).toBe("done"); // the branch moved
+    expect(existsSync(note)).toBe(true); // and the index update is noted as undone
+    expect(existsSync(join(dir, ".git", "index.lock"))).toBe(false); // no lock left behind
+    rmSync(indexPath, { recursive: true });
+    if (keep) writeFileSync(indexPath, keep);
+  } finally {
+    console.error = err;
+  }
+  // A restart: a new service settles it at its first sync.
+  const again = new WikiService(s, dir, s.sessionId);
+  again.syncVault();
+  expect(existsSync(note)).toBe(false);
+  expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki/two.md").trim()).toBe("");
+});
+
+test("the compare-and-swap: a commit made by someone else between the read and the move makes the wiki start again from the new HEAD", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  writePage(dir, "racy", "# Racy\n\nA page.");
+  // A real concurrent commit: a hook-free wrapper lands another commit just as the wiki's commit object is written, by
+  // committing from a second git process the moment the first update-ref is attempted.
+  const headBefore = gitOutOf(dir, "rev-parse", "HEAD").trim();
+  let fired = false;
+  const spawn = Bun.spawnSync.bind(Bun);
+  const original = Bun.spawnSync;
+  (Bun as any).spawnSync = (cmd: string[], opts: any) => {
+    if (!fired && cmd.includes("update-ref")) {
+      fired = true;
+      // Another process commits with plumbing (as the wiki itself does; a porcelain commit couldn't, the index being held).
+      const out = (args: string[]) => spawn(["git", "-c", "user.name=T", "-c", "user.email=t@t", ...args], { cwd: dir, stdout: "pipe" }).stdout.toString().trim();
+      out(["update-ref", "HEAD", out(["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "theirs"]), out(["rev-parse", "HEAD"])]);
+    }
+    return spawn(cmd as any, opts);
+  };
+  try {
+    expect(commitPaths(dir, "Add racy", ["wiki/racy.md"])).toBe("done");
+  } finally {
+    (Bun as any).spawnSync = original;
+  }
+  expect(fired).toBe(true);
+  const log = gitOutOf(dir, "log", "--pretty=format:%s");
+  expect(log).toContain("theirs");
+  expect(log).toContain("Add racy"); // made on top of theirs
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/racy.md");
+  expect(gitOutOf(dir, "rev-parse", `HEAD~2`).trim()).toBe(headBefore);
+});

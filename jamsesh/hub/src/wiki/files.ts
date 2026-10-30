@@ -168,11 +168,14 @@ export function gitAvailable(): boolean {
 }
 
 function git(dir: string, args: string[]) {
-  try {
-    return Bun.spawnSync(["git", "-c", "user.name=JamSesh", "-c", "user.email=jamsesh@localhost", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", ...args], { cwd: dir, stdout: "ignore", stderr: "ignore", timeout: 15_000 }).exitCode === 0;
-  } catch {
-    return false;
-  }
+  return gitOut(dir, args) !== null;
+}
+
+/** The environment git runs in: ours, without a single GIT_* variable (none can redirect it to another repository or index), plus only the ones we choose. */
+function cleanEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("GIT_")) env[k] = v;
+  return { ...env, GIT_TERMINAL_PROMPT: "0", ...extra };
 }
 
 const GIT_ID = ["-c", "user.name=JamSesh", "-c", "user.email=jamsesh@localhost", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
@@ -180,7 +183,7 @@ const GIT_ID = ["-c", "user.name=JamSesh", "-c", "user.email=jamsesh@localhost",
 /** Runs git in the vault and returns its output (null on failure). `env` is added to the environment; `input` goes to stdin. */
 function gitOut(dir: string, args: string[], env: Record<string, string> = {}, input?: string): string | null {
   try {
-    const r = Bun.spawnSync(["git", ...GIT_ID, ...args], { cwd: dir, env: { ...process.env, ...env }, stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    const r = Bun.spawnSync(["git", ...GIT_ID, ...args], { cwd: dir, env: cleanEnv(env), stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
     return r.exitCode === 0 ? r.stdout.toString() : null;
   } catch {
     return null;
@@ -226,21 +229,28 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history
       const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : []), "-m", msg])?.trim();
       if (!commit) return "failed";
-      // The person's index is held (git's own lock) while the branch moves and the index follows: a commit is not made at all if it can't be held.
+      settleIndex(dir); // an earlier commit's index update that didn't finish goes first
+      // The person's index is held (git's own lock) while the branch moves: a commit is not made at all if it can't be held.
       const lock = lockIndex(gitDir);
       if (!lock) {
         console.error("wiki: the git index was busy; the commit waits for the next pass");
         return "failed";
       }
       let moved = false;
+      const entry = { old: head, new: commit, paths: names };
       try {
+        // Written before the branch moves: if anything after it fails or the app stops, the next pass finishes the index update from this note.
+        addFollow(gitDir, entry);
         // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
-        if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) continue; // someone committed meanwhile: again from the new HEAD
+        if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) {
+          dropFollow(gitDir, entry);
+          continue; // someone committed meanwhile: again from the new HEAD
+        }
         moved = true;
-        followHead(dir, head, commit, names, lock);
       } finally {
         lock.release();
       }
+      if (moved) settleIndex(dir); // the index follows (and if it can't right now, the note stays for the next pass)
       if (moved) return "done";
     }
     return "failed";
@@ -278,19 +288,47 @@ function lockIndex(gitDir: string): IndexLock | null {
   return null;
 }
 
+type Follow = { old: string | null; new: string; paths: string[] };
+
+const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
+
+function readFollow(gitDir: string): Follow[] {
+  try {
+    const j = JSON.parse(readFileSync(followFile(gitDir), "utf8"));
+    return Array.isArray(j) ? j.filter((e) => e && typeof e.new === "string" && Array.isArray(e.paths)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeFollow(gitDir: string, list: Follow[]) {
+  if (!list.length) return void rmSync(followFile(gitDir), { force: true });
+  const tmp = `${followFile(gitDir)}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(list));
+  renameSync(tmp, followFile(gitDir));
+}
+
+const addFollow = (gitDir: string, e: Follow) => writeFollow(gitDir, [...readFollow(gitDir), e]);
+const dropFollow = (gitDir: string, e: Follow) => writeFollow(gitDir, readFollow(gitDir).filter((x) => x.new !== e.new));
+
 /**
- * After the wiki's commit: the person's index entry for each file it changed follows HEAD, unless the person had staged
- * something different there. The caller holds git's index lock, so nothing they stage meanwhile can be overwritten. If
- * anything can't be read the index is left exactly as it was (and that is logged): their view then shows the wiki's files
- * as changes until their next `git add` or `git reset`.
+ * Brings the person's index up to date with the wiki's commits that haven't been followed yet (the note in
+ * .git/jamsesh-follow.json). For each path, an entry that still equals the old commit's goes to the new commit's; any other
+ * entry is the person's staging and stays. Idempotent, so it can be run again after a failure or a restart; the note is
+ * deleted only when the index was put in place. The caller holds git's index lock. If anything can't be read the index is
+ * left exactly as it was and the note stays (their view shows the wiki's files as changes until it succeeds).
  */
-function followHead(dir: string, oldHead: string | null, newHead: string, names: string[], lock: IndexLock) {
+function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
+  const list = readFollow(gitDir);
+  if (!list.length) return;
   const mine = `${lock.path}.jamsesh-${process.pid}`;
   try {
     const must = (out: string | null) => {
       if (out === null) throw new Error("git could not be read");
       return out;
     };
+    // A note for a commit that isn't (any more) part of HEAD's history never got its branch move: dropped.
+    const live = list.filter((e) => gitOut(dir, ["merge-base", "--is-ancestor", e.new, "HEAD"]) !== null);
     // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
     const entries = (text: string, kind: "index" | "tree") => {
       const m = new Map<string, string>();
@@ -301,28 +339,52 @@ function followHead(dir: string, oldHead: string | null, newHead: string, names:
       }
       return m;
     };
-    const wanted = new Set(names);
-    const only = (m: Map<string, string>) => new Map([...m].filter(([p]) => wanted.has(p)));
-    const index = only(entries(existsSync(lock.real) ? must(gitOut(dir, ["ls-files", "-s", "-z"])) : "", "index"));
-    const before = only(entries(oldHead ? must(gitOut(dir, ["ls-tree", "-r", "-z", oldHead])) : "", "tree"));
-    const after = only(entries(must(gitOut(dir, ["ls-tree", "-r", "-z", newHead])), "tree"));
-    let info = "";
-    for (const p of names) {
-      if ((index.get(p) ?? "") !== (before.get(p) ?? "")) continue; // the person staged something different here: theirs stays
-      info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
-    }
-    if (!info) return;
-    // Work on a copy of their index (or HEAD's tree if they have none), then put it in place the way git does: rename the lock file over the index.
     if (existsSync(lock.real)) copyFileSync(lock.real, mine);
-    else if (oldHead) must(gitOut(dir, ["read-tree", oldHead], { GIT_INDEX_FILE: mine }));
-    must(gitOut(dir, ["update-index", "-z", "--index-info"], { GIT_INDEX_FILE: mine }, info));
-    copyFileSync(mine, lock.path);
-    renameSync(lock.path, lock.real);
-    lock.taken();
+    let changedAny = false;
+    for (const e of live) {
+      const wanted = new Set(e.paths);
+      const only = (m: Map<string, string>) => new Map([...m].filter(([p]) => wanted.has(p)));
+      const env = { GIT_INDEX_FILE: mine };
+      // (the working copy of the index: the real one with the earlier notes applied)
+      const index = only(entries(existsSync(mine) ? must(gitOut(dir, ["ls-files", "-s", "-z"], env)) : "", "index"));
+      const before = only(entries(e.old ? must(gitOut(dir, ["ls-tree", "-r", "-z", e.old])) : "", "tree"));
+      const after = only(entries(must(gitOut(dir, ["ls-tree", "-r", "-z", e.new])), "tree"));
+      let info = "";
+      for (const p of e.paths) {
+        const have = index.get(p) ?? "";
+        if (have !== (before.get(p) ?? "")) continue; // the person staged something different here (or it already follows): left alone
+        if (have === (after.get(p) ?? "")) continue;
+        info += `${after.get(p) ?? `0 ${ZERO}`}\t${p}\0`;
+      }
+      if (!info) continue;
+      if (!existsSync(mine) && e.old) must(gitOut(dir, ["read-tree", e.old], env)); // they have no index yet: start from the old commit's
+      must(gitOut(dir, ["update-index", "-z", "--index-info"], env, info));
+      changedAny = true;
+    }
+    if (changedAny) {
+      copyFileSync(mine, lock.path);
+      renameSync(lock.path, lock.real);
+      lock.taken();
+    }
+    writeFollow(gitDir, []);
   } catch (e) {
-    console.error("wiki: couldn't bring the git index up to date with the wiki's commit; it was left as it was:", e instanceof Error ? e.message : e);
+    console.error("wiki: couldn't bring the git index up to date with the wiki's commit; it was left as it was and is tried again at the next pass:", e instanceof Error ? e.message : e);
   } finally {
     rmSync(mine, { force: true });
+  }
+}
+
+/** Finishes any index update an earlier commit left undone (the pass and startup call this). Quietly does nothing if the index is busy. */
+export function settleIndex(dir: string): void {
+  if (!existsSync(join(dir, ".git")) || !gitAvailable()) return;
+  const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
+  if (!gitDir || !readFollow(gitDir).length) return;
+  const lock = lockIndex(gitDir);
+  if (!lock) return;
+  try {
+    resumeFollow(dir, gitDir, lock);
+  } finally {
+    lock.release();
   }
 }
 
@@ -485,6 +547,22 @@ const summaryOf = (body: string) => {
   const line = body.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#") && !l.startsWith("---")) ?? "";
   return line.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, a, b) => b ?? a).replace(/[*_`>]/g, "").slice(0, 140);
 };
+
+/**
+ * Every page file in wiki/, or an error: a wiki/ that is a link, a file, unreadable, or (when `expected` pages were known) gone
+ * is not "no pages". The vault sync uses this, so a folder it cannot read never turns into a list of deleted pages.
+ */
+export function pageSlugsStrict(dir: string, expected = 0): string[] {
+  const d = wikiDir(dir); // throws for a link or a file
+  if (!d) {
+    if (expected > 0) throw new Error("wiki/ is missing from the wiki folder; JamSesh won't treat that as every page deleted.");
+    return [];
+  }
+  return readdirSync(d) // throws when unreadable
+    .filter((f) => f.endsWith(".md") && isPageSlug(f.slice(0, -3)) && plainFile(join(d, f)))
+    .map((f) => f.slice(0, -3))
+    .sort();
+}
 
 export function listPages(dir: string): PageInfo[] {
   const pages = pageSlugs(dir).map((s) => readPage(dir, s)).filter((p): p is Page => !!p);
