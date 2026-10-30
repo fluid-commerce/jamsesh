@@ -275,6 +275,10 @@ const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip =
 /** A jam_wait call as the HTTP request carrying it sees it: `drop` when the client leaves or the reply fails, `sent` once the reply has gone. */
 export interface LiveCall {
   signal: AbortSignal;
+  /** Set by the HTTP layer: the request stops counting as work (the call is only waiting now). */
+  idle: () => void;
+  /** The request has ended: forget this call (a dropped one stays findable until then, so a call dispatched late still sees it was dropped). */
+  gone(): void;
   afterSent(fn: () => void): void;
   onDrop(fn: () => void): void;
   sent(): void;
@@ -389,43 +393,58 @@ export class McpEndpoint {
    * What an /mcp request is, from its parsed top-level message: an open stream (GET) or a jam_wait call is idle; anything else is work. A wait
    * gets a LiveCall so the call can see its client leave and learn when its reply has been sent.
    */
-  async classify(req: Request): Promise<{ idle: boolean; live?: LiveCall }> {
+  async classify(req: Request): Promise<{ idle: boolean; live?: LiveCall; reject?: string }> {
     if (req.method !== "POST") return { idle: true };
-    // A wait is a few hundred bytes; a big body is never one.
-    if (Number(req.headers.get("content-length") ?? 0) > 64 * 1024) return { idle: false };
+    let msg: any;
     try {
-      const msg = JSON.parse(await req.clone().text());
-      if (msg?.method !== "tools/call" || msg?.params?.name !== "jam_wait") return { idle: false };
-      const sid = req.headers.get("mcp-session-id");
-      if (!sid || msg.id == null) return { idle: true };
-      const key = `${sid}:${msg.id}`;
-      const ctrl = new AbortController();
-      const sent: (() => void)[] = [];
-      const dropped: (() => void)[] = [];
-      let done = false;
-      const live: LiveCall = {
-        signal: ctrl.signal,
-        afterSent: (fn) => void sent.push(fn),
-        onDrop: (fn) => void dropped.push(fn),
-        sent: () => {
-          if (done) return;
-          done = true;
-          this.lives.delete(key);
-          for (const fn of sent) fn();
-        },
-        drop: () => {
-          if (done) return;
-          done = true;
-          this.lives.delete(key);
-          ctrl.abort();
-          for (const fn of dropped) fn();
-        },
-      };
-      this.lives.set(key, live);
-      return { idle: true, live };
+      msg = JSON.parse(await req.clone().text());
     } catch {
       return { idle: false };
     }
+    // A batch with a wait in it isn't supported: it could not be tied to one reply.
+    if (Array.isArray(msg)) return msg.some((m) => m?.method === "tools/call" && m?.params?.name === "jam_wait") ? { idle: false, reject: "Send jam_wait as a message of its own, not in a batch." } : { idle: false };
+    if (msg?.method !== "tools/call" || msg?.params?.name !== "jam_wait") return { idle: false };
+    const sid = req.headers.get("mcp-session-id");
+    if (!sid || msg.id == null) return { idle: false };
+    // Keyed by the id with its type (1 and "1" are two requests), and removed only by the record that made it.
+    const key = `${sid}:${typeof msg.id}:${msg.id}`;
+    const ctrl = new AbortController();
+    const sent: (() => void)[] = [];
+    const dropped: (() => void)[] = [];
+    let done = false;
+    const gone = () => {
+      if (this.lives.get(key) === live) this.lives.delete(key);
+    };
+    const finish = () => {
+      done = true;
+    };
+    const live: LiveCall = {
+      signal: ctrl.signal,
+      idle: () => {},
+      afterSent: (fn) => void sent.push(fn),
+      onDrop: (fn) => void dropped.push(fn),
+      gone,
+      sent: () => {
+        if (done) return;
+        finish();
+        gone();
+        for (const fn of sent) fn();
+      },
+      drop: () => {
+        if (done) return;
+        finish();
+        ctrl.abort();
+        for (const fn of dropped) fn();
+      },
+    };
+    this.lives.set(key, live);
+    // Admitted as work until the call itself says it is idle (after dispatch): parsing and handing over are inside.
+    return { idle: false, live };
+  }
+
+  /** Shutdown: every wait still open ends now (nothing is read for it, what is waiting stays), so none wakes and writes after the final save. */
+  endWaits() {
+    for (const live of [...this.lives.values()]) live.drop();
   }
 
   /** Tool calls (other than waits) running now; `whenQuiet` resolves when there are none. */
@@ -562,11 +581,12 @@ export class McpEndpoint {
         const agent = this.requireAgent(ctx);
         const secs = Math.max(5, Math.min(230, Number(args.seconds ?? 200)));
         // This call's link to the HTTP request that carries it: its disconnect (abort) and the moment its reply has been sent.
-        const live = this.lives.get(`${ctx.sessionId}:${extra?.requestId}`);
+        const live = this.lives.get(`${ctx.sessionId}:${typeof extra?.requestId}:${extra?.requestId}`);
         // The writes before and after the idle wait are work; the wait itself is not.
         const before = this.hub.admit("a jam_wait starting");
         s.touchAgent(agent.id, { status: "waiting", activity: "Waiting for work" });
         before();
+        live?.idle(); // from here the call only waits for the room
         const token = extra?._meta?.progressToken;
         const keepAlive = token != null && extra?.sendNotification
           ? setInterval(() => extra.sendNotification!({ method: "notifications/progress", params: { progressToken: token, progress: 0, message: "waiting" } }).catch(() => {}), 20_000)

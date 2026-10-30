@@ -194,6 +194,8 @@ export class Hub {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
     // Intake stops first; then accepted work still running (requests to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
     this.closing = true;
+    // Open waits end now, so none wakes and writes after the final save.
+    this.mcp.endWaits();
     // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
     for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
     this.brain.quiesce();

@@ -1012,6 +1012,9 @@ export class Session {
   /** Marks exactly these items as handed over (read): what a reply carried, once it has been sent. Messages are marked up to the last one carried. */
   markInbox(agentId: string, taken: { directives: Directive[]; messages: JamEvent[] }) {
     for (const d of taken.directives) {
+      // Only while still new for this agent: another reader may have delivered it, and the agent may have finished it since.
+      const now = this.store.get("directives", d.id);
+      if (!now || (now.progress?.[agentId] ?? now.status) !== "pending") continue;
       this.setDirectiveFor(d.id, agentId, "delivered");
       this.setDirective(d.id, { deliveredAt: d.deliveredAt ?? Date.now() });
     }

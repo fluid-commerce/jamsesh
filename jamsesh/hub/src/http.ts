@@ -278,8 +278,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           // Counted until its response ends: parsing the body, dispatching the tool and its last write are all inside. Only a call that
           // waits for the room (jam_wait, known from the parsed top-level tool name) and the agent's open stream are idle.
           const kind = await hub.mcp.classify(req);
+          if (kind.reject) return bad(kind.reject, 400);
           if (kind.idle) markWaiting(req);
-          if (kind.live) liveCalls.set(incoming, kind.live);
+          if (kind.live) {
+            liveCalls.set(incoming, kind.live);
+            kind.live.idle = () => markWaiting(req);
+          }
           const res = await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
           holdsBudget = true;
           budgetHeld.set(res, release);
@@ -351,6 +355,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         release();
         budget?.();
         live?.drop(); // nothing was sent: what it would have carried stays unread
+        live?.gone();
         return res;
       }
       const reader = res.body.getReader();
@@ -359,12 +364,13 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           async pull(c) {
             try {
               const { done, value } = await reader.read();
-              if (done) (c.close(), release(), budget?.(), live?.sent());
+              if (done) (c.close(), release(), budget?.(), live?.sent(), live?.gone());
               else c.enqueue(value);
             } catch (e) {
               release();
               budget?.();
               live?.drop();
+              live?.gone();
               c.error(e);
             }
           },
@@ -373,6 +379,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             // The client left, but a tool it started may still hold the payload: the charge goes when the tools have settled.
             if (budget) void hub.mcp.whenQuiet().then(budget);
             live?.drop();
+            live?.gone();
             return reader.cancel(reason);
           },
         }),

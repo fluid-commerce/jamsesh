@@ -1223,7 +1223,7 @@ test("jam_wait: what a wake carries is marked read only once the reply is sent; 
   const call = async (id: number) => {
     const req = new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": "s1", "content-length": "200" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "jam_wait", arguments: { seconds: 5 } } }) });
     const kind = await mcp.classify(req);
-    expect(kind.idle).toBe(true);
+    expect(kind.live).toBeDefined();
     const ctx = { agentId: agent.id, ip: "127.0.0.1", device: null, sessionId: "s1", owner: "host" };
     const out = await mcp.call(ctx, "jam_wait", { seconds: 5 }, { requestId: id });
     return { kind, out };
@@ -1254,4 +1254,57 @@ test("a card remembers every line it took in: replaying the oldest one after thi
   expect(card.count).toBe(14);
   const replay = r.s.proposeContext({ text: "Same call again", kind: "fact", by: "Felipe", sourceEventIds: [ids[0]] })!;
   expect(replay.count).toBe(14);
+});
+
+
+// ---------- round 28 ----------
+
+test("every accepted jam_wait is tied to its request: a large body is classified, a batch with a wait is refused, and 1 and \"1\" are two requests", async () => {
+  const r = room();
+  const mcp = r.hub.mcp as any;
+  const wait = (id: unknown, pad = 0) => new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": "s9" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "jam_wait", arguments: { seconds: 5, pad: "x".repeat(pad) } } }) });
+  expect((await mcp.classify(wait(7, 80_000))).live).toBeDefined();
+  const batch = new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": "s9" }, body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "jam_wait", arguments: {} } }]) });
+  expect((await mcp.classify(batch)).reject).toContain("batch");
+  const one = (await mcp.classify(wait(1))).live;
+  const text = (await mcp.classify(wait("1"))).live;
+  expect(mcp.lives.size).toBe(3);
+  one.sent();
+  expect(mcp.lives.size).toBe(2);
+  expect(mcp.lives.get("s9:string:1")).toBe(text);
+  text.drop();
+  text.gone();
+  expect(text.signal.aborted).toBe(true);
+  expect(one.signal.aborted).toBe(false);
+});
+
+test("an accepted wait counts as work through dispatch and until it is idle; shutdown ends open waits so none wakes after the save", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const { rpc, sid, agent } = await mcpSession(r, server);
+    const waiting = rpc({ jsonrpc: "2.0", id: 20, method: "tools/call", params: { name: "jam_wait", arguments: { seconds: 60 } } }, sid).then((x) => x.text()).catch(() => "");
+    await Bun.sleep(150);
+    expect(r.s.isWaiting(agent.id)).toBe(true);
+    expect(r.hub.working().filter((w) => w.includes("mcp") || w.includes("jam_wait"))).toEqual([]);
+    expect(await r.hub.shutdown()).toBe(true);
+    expect(r.s.isWaiting(agent.id)).toBe(false);
+    await waiting;
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("a delivery that lands late never moves finished work backward", () => {
+  const r = room();
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "other", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const d = r.s.createDirective({ text: "Do the thing", mode: "implement", targets: [agent.id], requestedBy: "Chey" });
+  const taken = r.s.inbox(agent.id, false, true);
+  expect(taken.directives.map((x) => x.id)).toEqual([d.id]);
+  // Another reader delivers it, and the agent finishes, before the first reader's reply goes out.
+  r.s.inbox(agent.id, true);
+  r.s.setDirectiveFor(d.id, agent.id, "done", "ok");
+  r.s.markInbox(agent.id, taken);
+  expect(r.s.store.get("directives", d.id)!.progress[agent.id]).toBe("done");
 });
