@@ -201,7 +201,7 @@ function cleanEnv(extra: Record<string, string> = {}): Record<string, string> {
 /**
  * Every git command runs with these: our identity, no signing, and nothing that can launch a program on the wiki's behalf (hooks,
  * the file-system monitor, ssh, external diff and textconv helpers, the pager, the editor, credential helpers, file:// transports).
- * The repository's clean/smudge filters are never involved: files are hashed with `hash-object --no-filters`, not added.
+ * The repository's clean/smudge filters are never involved: files are read and hashed in process and written with `fast-import`, never added by git.
  */
 const GIT_SAFE = ["user.name=JamSesh", "user.email=jamsesh@localhost", "commit.gpgsign=false", "core.hooksPath=/dev/null", "core.fsmonitor=false", "core.sshCommand=", "core.pager=cat", "core.editor=true", "core.askPass=", "credential.helper=", "diff.external=", "protocol.file.allow=never", "gc.auto=0", "maintenance.auto=false"].flatMap((c) => ["-c", c]);
 
@@ -1183,13 +1183,10 @@ function sourceFile(dir: string, id: string): string | null {
   return null;
 }
 
+/** Whether a source id is held in raw/archive/. Only a folder that isn't there (ENOENT) means no: any other failure reaching it is an error, so an id is never reused while the archive can't be looked at. */
 const archived = (dir: string, id: string): boolean => {
-  try {
-    const d = vaultDir(dir, "raw/archive");
-    return !!d && present(join(d, `${id}.md`));
-  } catch {
-    return false;
-  }
+  const d = vaultDir(dir, "raw/archive"); // null when the folder isn't there; throws for a link or anything unreadable
+  return !!d && present(join(d, `${id}.md`));
 };
 
 /** Moves read-in sources out of raw/ into raw/archive/, where they can still be read and cited but no longer count toward the cap. */

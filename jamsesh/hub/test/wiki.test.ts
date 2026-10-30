@@ -3368,17 +3368,6 @@ test("a source whose update is blocked by an unreadable page stays pending, not 
   expect(w.pendingSources()).toContain(src.id); // still waiting, not consumed without the update
 });
 
-test("an archive snapshot with changes not yet committed is never taken for settled: a failed commit is found again", () => {
-  if (!gitAvailable()) return;
-  const { w, dir } = room();
-  const ids = Array.from({ length: 3 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
-  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
-  archiveSources(dir, ids); // moved to raw/archive, not committed
-  const first = rawPaths(dir)!;
-  expect(first.some((f) => f.startsWith("raw/archive/"))).toBe(true);
-  const again = rawPaths(dir)!; // the commit failed (none was made): the same changes are still there
-  expect(again.sort()).toEqual(first.sort());
-});
 
 test("a dangling link at a page's name is never written over", () => {
   const { w, dir } = room();
@@ -3473,6 +3462,9 @@ test("a real .git folder whose common directory is elsewhere is never used", () 
   writeFileSync(join(vault, ".git", "commondir"), `${join(other, ".git")}\n`); // refs and objects are in the other repository
   writeFileSync(join(vault, "index.md"), "one");
   const theirs = gitOutOf(other, "rev-parse", "HEAD");
+  // The precondition: git itself says the common directory is the other repository's, so a guard that only looked at the git dir would pass.
+  expect(realpathSync(gitOutOf(vault, "rev-parse", "--path-format=absolute", "--git-common-dir").trim())).toBe(realpathSync(join(other, ".git")));
+  expect(realpathSync(gitOutOf(vault, "rev-parse", "--absolute-git-dir").trim())).toBe(realpathSync(join(vault, ".git")));
   const err = console.error;
   console.error = () => {};
   try {
@@ -3482,6 +3474,7 @@ test("a real .git folder whose common directory is elsewhere is never used", () 
   }
   expect(historyStatus(vault)).toMatchObject({ state: "off" });
   expect(gitOutOf(other, "rev-parse", "HEAD")).toBe(theirs);
+  expect(gitOutOf(other, "rev-parse", "refs/heads/master")).toBe(theirs); // the exact ref the vault names, in the other repository, did not move
   expect(gitOutOf(other, "log", "--pretty=format:%s")).toBe("theirs");
 });
 
@@ -3524,4 +3517,21 @@ test("a failing commit of archived sources is found again by the next scan and c
     expect(files).toContain(`raw/archive/${id}.md`);
     expect(files).not.toContain(`raw/${id}.md`);
   }
+});
+
+test("an archive folder that can't be looked at stops an id being reused: no second source is written beside an inaccessible archived one", () => {
+  if (process.getuid?.() === 0) return; // a closed folder means nothing to root
+  const { w, dir } = room();
+  const src = w.addSource("document", "Old", "Archived.", "Chey", { id: "2026-10-29_report-bbbbbb-1" });
+  archiveSources(dir, [src.id]);
+  chmodSync(join(dir, "raw", "archive"), 0o000);
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(() => w.addSource("document", "Old", "Again.", "Chey", { id: src.id })).toThrow();
+  } finally {
+    console.error = err;
+    chmodSync(join(dir, "raw", "archive"), 0o755);
+  }
+  expect(existsSync(join(dir, "raw", `${src.id}.md`))).toBe(false); // nothing written, so no two sources share the id once access returns
 });

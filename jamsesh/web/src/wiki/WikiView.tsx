@@ -158,7 +158,7 @@ function Index({ wiki, q, setQ, search, current, onOpen, onGraph, onAdd, graphOn
   const list = useRef<HTMLDivElement>(null);
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-    const items = [...(list.current?.querySelectorAll<HTMLElement>(".wk-item") ?? [])];
+    const items = [...(list.current?.querySelectorAll<HTMLElement>(".wk-item, .wk-hit") ?? [])];
     const i = items.indexOf(document.activeElement as HTMLElement);
     const next = items[e.key === "ArrowDown" ? Math.min(items.length - 1, i + 1) : i - 1];
     e.preventDefault();
@@ -178,7 +178,7 @@ function Index({ wiki, q, setQ, search, current, onOpen, onGraph, onAdd, graphOn
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") (e.preventDefault(), list.current?.querySelector<HTMLElement>(".wk-item")?.focus());
+            if (e.key === "ArrowDown") (e.preventDefault(), list.current?.querySelector<HTMLElement>(".wk-item, .wk-hit")?.focus());
             if (e.key === "Escape") (setQ(""), search.current?.blur());
             if (e.key === "Enter") { const first = hits ? hits[0] : local[0]; if (first) onOpen(first.slug); } // (an answered search that found nothing opens nothing, not the local fallback)
           }}
