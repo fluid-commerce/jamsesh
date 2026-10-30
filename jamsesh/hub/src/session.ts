@@ -1002,9 +1002,16 @@ export class Session {
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const quiet = this.skipsBroadcasts(this.agent(agentId));
-    const messages = this.store
-      .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet)));
+    // This agent's messages, oldest first, up to 50: chosen before the limit (newer messages for others can't hide one, and the read
+    // mark never moves past one that wasn't carried).
+    const mineOf = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
+    const messages: JamEvent[] = [];
+    for (let after = lastRead; messages.length < 50; ) {
+      const page = this.store.eventsAfter(after, ["message"], 200);
+      for (const e of page) if (mineOf(e) && messages.length < 50) messages.push(e);
+      if (page.length < 200 || messages.length >= 50) break;
+      after = page[page.length - 1].id;
+    }
     if (markDelivered) this.markInbox(agentId, { directives, messages });
     return { directives, messages };
   }

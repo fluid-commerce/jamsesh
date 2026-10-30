@@ -1308,3 +1308,42 @@ test("a delivery that lands late never moves finished work backward", () => {
   r.s.markInbox(agent.id, taken);
   expect(r.s.store.get("directives", d.id)!.progress[agent.id]).toBe("done");
 });
+
+// ---------- round 29 ----------
+
+test("an inbox never skips a message: more than 50 for one agent arrive in order across calls, and newer ones for others hide nothing", () => {
+  const r = room();
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "other", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const other = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "a/o", cwd: "/o", machine: "fm", platform: "mobile" }).agent;
+  const third = r.s.registerAgent({ ownerName: "Sam", harness: "claude-code", repo: "a/t", cwd: "/t", machine: "sm", platform: "mobile" }).agent;
+  for (let i = 0; i < 55; i++) r.s.sendMessage(other.id, agent.id, `note ${i}`);
+  for (let i = 0; i < 60; i++) r.s.sendMessage(other.id, third.id, `for someone else ${i}`);
+  const first = r.s.inbox(agent.id, true).messages.map((m) => m.text);
+  expect(first).toHaveLength(50);
+  expect(first[0]).toBe("note 0");
+  const second = r.s.inbox(agent.id, true).messages.map((m) => m.text);
+  expect(second).toEqual(["note 50", "note 51", "note 52", "note 53", "note 54"]);
+  expect(r.s.inbox(agent.id, true).messages).toHaveLength(0);
+});
+
+test("a wait dispatched after shutdown began returns at once and touches nothing; the shutdown still completes", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const { rpc, sid, agent } = await mcpSession(r, server);
+    const mcp = r.hub.mcp as any;
+    const real = mcp.callTool.bind(mcp);
+    mcp.callTool = async (...a: unknown[]) => (await Bun.sleep(300), real(...a));
+    const before = r.s.agent(agent.id)!.activity;
+    const waiting = rpc({ jsonrpc: "2.0", id: 30, method: "tools/call", params: { name: "jam_wait", arguments: { seconds: 60 } } }, sid).then((x) => x.text()).catch(() => "");
+    await Bun.sleep(100);
+    const shutting = r.hub.shutdown();
+    expect(await shutting).toBe(true);
+    await waiting;
+    expect(r.s.isWaiting(agent.id)).toBe(false);
+    expect(r.s.agent(agent.id)!.activity).toBe(before);
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);

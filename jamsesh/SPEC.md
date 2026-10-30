@@ -584,7 +584,7 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_update` | Post `progress`, `done`, `shipped`, `question`, `blocked`, `handoff`, or `decision`, optionally for a workstream and a directive. Naming a workstream claims it. `done` or `shipped` with a directive marks it done for this agent. `question` and `blocked` raise a "needs the room" toast. |
 | `jam_claim` | Claim a workstream. If another active agent owns it, the agent is told who, and must coordinate instead of duplicating (`force` overrides) [B20]. |
 | `jam_inbox` | Pending directives, messages, questions, and answers. Marks them delivered. |
-| `jam_wait` | Block until a directive, message, or question arrives (default 4 minutes, at most 9). Sends progress every 20 seconds. |
+| `jam_wait` | Block until a directive, message, or question arrives (200 seconds unless `seconds` is given; between 5 and 230). When the caller supplied a progress token it sends a progress notification every 20 seconds, so a long wait isn't cut off. |
 | `jam_ack` | Acknowledge, finish, or drop a directive, with a result. |
 | `jam_message` | Message another agent by name or id, or `all` [A27a]. |
 | `jam_ask` | Ask another agent a question and wait for the answer (default 120 seconds, 5 to 300) [A27b]. |

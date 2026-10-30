@@ -395,6 +395,7 @@ export class McpEndpoint {
    */
   async classify(req: Request): Promise<{ idle: boolean; live?: LiveCall; reject?: string }> {
     if (req.method !== "POST") return { idle: true };
+    if (this.hub.closing) return { idle: false, reject: "The session is saving and closing." };
     let msg: any;
     try {
       msg = JSON.parse(await req.clone().text());
@@ -579,6 +580,8 @@ export class McpEndpoint {
         return text(this.inboxText(this.requireAgent(ctx), true, ctx.origin));
       case "jam_wait": {
         const agent = this.requireAgent(ctx);
+        // Shutting down: no new wait starts (it would write after the final save).
+        if (this.hub.closing) return text("");
         const secs = Math.max(5, Math.min(230, Number(args.seconds ?? 200)));
         // This call's link to the HTTP request that carries it: its disconnect (abort) and the moment its reply has been sent.
         const live = this.lives.get(`${ctx.sessionId}:${typeof extra?.requestId}:${extra?.requestId}`);
@@ -586,6 +589,7 @@ export class McpEndpoint {
         const before = this.hub.admit("a jam_wait starting");
         s.touchAgent(agent.id, { status: "waiting", activity: "Waiting for work" });
         before();
+        if (this.hub.closing) return text(""); // shutdown began during the writes above: end here, nothing left running
         live?.idle(); // from here the call only waits for the room
         const token = extra?._meta?.progressToken;
         const keepAlive = token != null && extra?.sendNotification
