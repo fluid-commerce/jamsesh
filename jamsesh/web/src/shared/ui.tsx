@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
+import { useSilent } from "./sound";
 import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
@@ -131,7 +132,7 @@ export function artifactTarget(a: Artifact): SlotTarget {
 }
 
 function useRecording() {
-  return useSyncExternalStore(pointerRecording.sub, pointerRecording.get);
+  return useSyncExternalStore(pointerRecording.sub, pointerRecording.get, pointerRecording.get);
 }
 
 /**
@@ -242,7 +243,27 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
 }
 
 /** `fill`: draw the page at the box's own size instead of scaling a fixed-size page to it (an expanded desktop build gets the real viewport). */
-export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked, fill, bare }: { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean }) {
+type ScaledFrameProps = { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean };
+
+/** A live page in a frame. A silent room doesn't load one: a page can play sound on its own, and nothing in a frame can be muted from here. */
+export function ScaledFrame(p: ScaledFrameProps) {
+  return useSilent() ? <QuietFrame url={p.src} title={p.title} bare={p.bare} /> : <LiveFrame {...p} />;
+}
+
+/** What stands in for a live page while the room is silent. */
+export function QuietFrame({ url, title, bare }: { url: string; title: string; bare?: boolean }) {
+  return (
+    <div className="empty-note" role="status" data-quiet-frame style={{ position: "absolute", inset: bare ? 0 : "50px 18px 18px", display: "grid", placeItems: "center", textAlign: "center", padding: 24 }}>
+      <div>
+        <div style={{ color: "var(--text)", marginBottom: 6 }}>{title}</div>
+        <div className="ellipsis" style={{ maxWidth: 520 }}>{url}</div>
+        <div style={{ marginTop: 10 }}>This room is silent, so live pages stay off. They come back when sound is on.</div>
+      </div>
+    </div>
+  );
+}
+
+function LiveFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked, fill, bare }: ScaledFrameProps) {
   const src = localize(raw);
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
@@ -725,6 +746,11 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
         {e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
         {(e.kind === "speech" || e.kind === "prompt") && <SourceTag source={e.data.source} brainName={state.settings.brainName} />}
+        {e.kind === "brain" && e.data.shownNotSpoken && (
+          <span className="tag" title="Shown, not spoken" style={{ color: "var(--faint)", marginLeft: 8 }}>
+            Shown, not spoken
+          </span>
+        )}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
@@ -1186,7 +1212,20 @@ function Countdown({ at, attempt }: { at: number | null; attempt: number }) {
 
 const figcraftIn = (iframe: HTMLIFrameElement | null) => (iframe?.contentWindow as any)?.figcraft as { execute: (c: string, p?: unknown) => Promise<any> } | undefined;
 
-export function CanvasFrame({ kind, name, title, follow, page, panels }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string; panels?: boolean }) {
+type CanvasFrameProps = { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string; panels?: boolean };
+
+/** The live canvas. A silent room doesn't load it: it is a page in a frame, and nothing in a frame can be muted from here. */
+export function CanvasFrame(p: CanvasFrameProps) {
+  return useSilent() ? (
+    <div style={{ position: "relative", height: "100%" }}>
+      <QuietFrame url="" title={p.title} bare />
+    </div>
+  ) : (
+    <LiveCanvas {...p} />
+  );
+}
+
+function LiveCanvas({ kind, name, title, follow, page, panels }: CanvasFrameProps) {
   const frame = useRef<HTMLIFrameElement>(null);
   // Follow a participant (by name): the canvas shows what they're looking at. A reload or reconnect gives them
   // a new client id, so this keeps checking and follows the new one.

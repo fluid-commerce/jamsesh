@@ -278,6 +278,21 @@ Developers can run the host from a checkout without the app:
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.
 
+**Silent mode.** With `JAMSESH_SILENT=1` the hub sends no audio (`speak` carries text only), no
+chimes, no voice samples and never falls back to the Mac's `say`; a reply the room would have heard
+is sent whole as text, recorded and labelled "Shown, not spoken" (`speak` returns `muted`; a reply
+that was text anyway stays `shown`, "Shown as text"); its state says `silent`. The page then plays nothing of
+its own: no clips (the audio element is never made), no chime, and nothing in a frame. A clip already
+playing stops the moment the page learns the room is silent, and the chime comes back when sound does.
+A live page frame (a dev server, a web tile, the canvas) is not loaded: a page in a frame cannot be
+muted from outside, so a quiet card stands in for it. Silent mode is set when the hub launches and
+the page learns it from the first state message; a page that reconnects to a hub that restarted
+silent may therefore keep running frames for the moment before that message arrives. That short
+window is accepted (owner decision), not a defect. A scripted HTML tile or custom stage is drawn
+inert (no clicks or keys reach it, so no link can navigate it), with an empty sandbox (no scripts or
+popups, no navigating the page that holds it) and a content policy of `media-src 'none'; script-src 'none'`. A shared screen or camera is captured without audio, its `<video>` is
+muted, and any audio track that arrives is stopped.
+
 ### 3.6 Projects
 
 A **project** holds many sessions. It is what the host opens, so starting new work is a choice in

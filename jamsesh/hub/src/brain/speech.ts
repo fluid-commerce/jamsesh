@@ -90,7 +90,13 @@ export function trimForSpeech(text: string) {
   return sentences.slice(0, 2).map((x) => x.trim()).join(" ");
 }
 
+/** True when nothing may make a sound: JAMSESH_SILENT=1 stops the hub's `say`, the audio it sends to pages, and chimes. */
+export function silent() {
+  return process.env.JAMSESH_SILENT === "1";
+}
+
 export function chime(session: Session, deviceId?: string) {
+  if (silent()) return;
   bus.send({ type: "chime", deviceId: deviceId ?? null } as any);
   void session;
 }
@@ -106,11 +112,18 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   }
   const decision = speechDecision({ voiceReplies: s.voiceReplies, source, kind, quietRoom: quietRoom(s.brainNotes), sinceLastMs: Date.now() - lastSpokeAt });
   const spoken = decision === "speak";
-  const words = spoken ? trimForSpeech(text) : text;
-  session.store.addEvent({ kind: "brain", authorType: "brain", authorName: s.brainName, text: words, relevance: "work", data: { spoken, source, speechKind: kind } });
+  // A silent hub sends the reply as text only, whole (nothing is said, so there is nothing to keep short): record that it was shown, not said.
+  const muted = spoken && silent();
+  const words = spoken && !muted ? trimForSpeech(text) : text;
+  session.store.addEvent({ kind: "brain", authorType: "brain", authorName: s.brainName, text: words, relevance: "work", data: { spoken: spoken && !muted, shownNotSpoken: muted, source, speechKind: kind } });
   if (!spoken) {
     bus.send({ type: "toast", tone: kind === "problem" ? "warn" : "info", text: s.brainName, detail: text });
     return "shown";
+  }
+  // Silent: the text still shows, but no speech is made or sent, and it doesn't count as the last thing said.
+  if (silent()) {
+    bus.send({ type: "speak", audio: null, mime: "", text: words });
+    return "muted";
   }
   lastSpokeAt = Date.now();
   let reason = "";
@@ -125,8 +138,7 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   bus.send({ type: "speak", audio: null, mime: "", text: words });
   const mac = process.platform === "darwin";
   // Tests never talk out loud: bun test sets NODE_ENV=test, and hubs they spawn inherit it.
-  const silent = process.env.JAMSESH_SILENT === "1" || process.env.NODE_ENV === "test";
-  if (mac && !silent) {
+  if (mac && process.env.NODE_ENV !== "test") {
     Bun.spawn(["say", words], { stdout: "ignore", stderr: "ignore" });
   }
   // Said in a worse voice than the room chose: tell them why, once in a while.

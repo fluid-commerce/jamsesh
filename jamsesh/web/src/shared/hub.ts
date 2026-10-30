@@ -410,7 +410,7 @@ export const removedChatsSource = (s: Pick<Snapshot, "state" | "epoch" | "remove
 export const hub = new HubClient();
 
 export function useHub() {
-  return useSyncExternalStore(hub.subscribe, hub.get);
+  return useSyncExternalStore(hub.subscribe, hub.get, hub.get);
 }
 
 /** Calls that must never wait in the outbox: they only make sense live. */

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ago, api, hub, removedChatsSource, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
+import { clip, soundAllowed } from "./sound";
 
 export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: boolean }) {
   const { state, levels } = useHub();
@@ -456,10 +457,16 @@ function VoicePicker({ voice, model, onChange }: { voice: string; model: string;
   const [err, setErr] = useState("");
   const listed = voicesFor(model);
   const preview = async () => {
+    if (!soundAllowed()) {
+      setErr("This room is silent, so voice samples are off.");
+      return setPhase("error");
+    }
     setPhase("busy");
     try {
       const r = await api<{ audio: string; mime: string }>("/voice-preview", { voice: chosen }, undefined, { queue: false, timeoutMs: 30000 });
-      await new Audio(`data:${r.mime};base64,${r.audio}`).play();
+      const a = clip(r.mime, r.audio);
+      if (!a) throw new Error("This room is silent, so voice samples are off.");
+      await a.play();
       setPhase("idle");
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Couldn't play the sample");
