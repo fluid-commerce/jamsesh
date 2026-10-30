@@ -3270,11 +3270,31 @@ test("a backlog of large files is written to git in batches and committed whole"
   for (let i = 0; i < 4; i++) expect(Number(gitOutOf(dir, "cat-file", "-s", `HEAD:raw/2026-10-29_big-${i}.md`))).toBe(5 * 1024 * 1024);
 }, 60_000);
 
-test("the host's wiki status says whether history is kept: on, off with why, or none", () => {
+test("the host's wiki status says whether history is kept, and why not", () => {
+  if (!gitAvailable()) return;
   const { dir, w } = room();
-  expect(w.info().history.state).toBe(gitAvailable() ? "on" : "none");
+  expect(w.info().history).toEqual({ state: "on" });
   const bare = join(root, `nogit-${Math.random().toString(36).slice(2)}`);
   mkdirSync(bare, { recursive: true });
-  expect(historyStatus(bare)).toEqual({ state: "none" });
-  void dir;
+  expect(historyStatus(bare)).toMatchObject({ state: "off" });
+  expect(historyStatus(bare).why).toContain("isn't a git repository");
+  writeFileSync(join(dir, ".git", "HEAD"), "0123456789012345678901234567890123456789\n"); // detached
+  expect(historyStatus(dir)).toMatchObject({ state: "off", why: "no branch is checked out" });
+});
+
+test("a huge hand-edited page is never read into memory: the page reads as absent, logged, and the sync and index carry on", () => {
+  const { w, dir } = room();
+  w.editPage("small", "# Small\n\nA page.", { by: "Chey" });
+  writeFileSync(join(dir, "wiki", "huge.md"), Buffer.alloc(MAX_FILE_BYTES + 1, 97));
+  const logged: string[] = [];
+  const err = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+  try {
+    expect(readPage(dir, "huge")).toBeNull();
+    expect(listPages(dir).map((p) => p.slug)).toEqual(["small"]);
+    expect(() => w.syncVault()).not.toThrow();
+  } finally {
+    console.error = err;
+  }
+  expect(logged.join("\n")).toContain("over the");
 });

@@ -106,6 +106,7 @@ export function readPlain(file: string): string | null {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw e;
   }
+  if (tooBig(file)) return null;
   return readFileSync(file, "utf8");
 }
 
@@ -636,6 +637,18 @@ const archiveMemo = new Map<string, { mtimeMs: number; treeSha: string | null; s
  * on this one read, never by opening the path again. Parent folders are checked to be real folders. Throws ENOENT when gone,
  * ELOOP for a link, and an error for anything that isn't a regular file.
  */
+/** Whether a file is over the size the wiki will read (logged); every read of a vault file for its text goes through this or readOnce. */
+export function tooBig(file: string): boolean {
+  try {
+    const size = statSync(file).size;
+    if (size <= MAX_FILE_BYTES) return false;
+    console.error(`wiki: ${file.split("/").slice(-2).join("/")} is ${size} bytes, over the ${MAX_FILE_BYTES} the wiki will read; it is left out`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The most one vault file may be for the wiki to commit it (a page is capped far below this; it bounds what a stray huge file can cost). */
 export const MAX_FILE_BYTES = 16 * 1024 * 1024;
 
@@ -829,6 +842,7 @@ export function readPage(dir: string, slug: string): Page | null {
     return null;
   }
   if (!file || !plainFile(file)) return null;
+  if (tooBig(file)) return null; // a stray huge file is not read into memory as a page
   const bytes = readFileSync(file);
   const text = bytes.toString("utf8");
   const { fm, body } = parseFrontMatter(text);
@@ -1114,7 +1128,7 @@ export function archiveSources(dir: string, ids: string[]): number {
 export function readSource(dir: string, id: string): Source | null {
   if (!isSourceId(id)) return null;
   const file = sourceFile(dir, id);
-  if (!file) return null;
+  if (!file || tooBig(file)) return null;
   const text = readFileSync(file, "utf8");
   const m = text.match(/^---\nkind: (\w+)\ntitle: (".*")\nby: (".*")\nts: (\d+)\n---\n/);
   if (!m) return { id, title: id, kind: "document", ts: statSync(file).mtimeMs, by: "", text };
@@ -1246,10 +1260,12 @@ export function writeState(dir: string, st: WikiState): void {
 
 export { writeAtomic };
 
-/** Whether the wiki keeps a git history here: on, off (with why) or none (the folder is not a repository). Shown to the host, so no history is never silent. */
-export function historyStatus(dir: string): { state: "on" | "off" | "none"; why?: string } {
-  if (!existsSync(join(dir, ".git"))) return { state: "none" };
-  if (!gitAvailable()) return { state: "off", why: "git can't be run" };
+/** Whether the wiki keeps a git history here: on, or off with why. Shown to the host, so no history is never silent. */
+export function historyStatus(dir: string): { state: "on" | "off"; why?: string } {
+  if (!gitAvailable()) return { state: "off", why: "git can't be run here" };
+  if (!existsSync(join(dir, ".git"))) return { state: "off", why: "the folder isn't a git repository" };
   if (!sha1Repo(dir)) return { state: "off", why: "the repository uses SHA-256 object ids, which the wiki can't write" };
+  const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
+  if (!validRef(ref)) return { state: "off", why: "no branch is checked out" };
   return { state: "on" };
 }
