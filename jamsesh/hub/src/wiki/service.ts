@@ -256,15 +256,24 @@ export class WikiService {
     if (!raw || !changed) return;
     // The changed pages that are the wiki's: the ones it wrote or has filed (the file is what it last recorded). A page a person is
     // still editing (staged or not) is theirs until the sync has filed it, and is never committed under an unrelated change.
-    let seen: NonNullable<WikiState["seen"]> = {};
+    let seen: NonNullable<WikiState["seen"]>;
     try {
       seen = readState(this.dir).seen ?? {};
-    } catch {}
+    } catch (e) {
+      return void console.error("wiki: the state can't be read, so no commit is made this time (ownership unknown):", errText(e));
+    }
     // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed.
     const wikis = [...new Set([...paths, ...changed])].filter((f) => {
       const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
       if (!m) return true; // not a page (index, log, sources): the wiki's own files by name
+      let present = true;
+      try {
+        lstatSync(join(this.dir, f));
+      } catch {
+        present = false;
+      }
       const page = readPage(this.dir, m[1]);
+      if (present && !page) return false; // there is something there that isn't a page of ours (a link, a folder): never committed
       return page ? seen[m[1]]?.rev === page.rev : !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
     });
     commitPaths(this.dir, message, [...new Set(wikis)].concat(["index.md", "log.md", ...raw]));

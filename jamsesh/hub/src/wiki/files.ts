@@ -190,6 +190,15 @@ function gitOut(dir: string, args: string[], env: Record<string, string> = {}, i
   }
 }
 
+/** The exit code of a git command (null if it could not be run). */
+function gitCode(dir: string, args: string[]): number | null {
+  try {
+    return Bun.spawnSync(["git", ...GIT_ID, ...args], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 15_000 }).exitCode;
+  } catch {
+    return null;
+  }
+}
+
 const ZERO = "0000000000000000000000000000000000000000";
 
 /**
@@ -243,8 +252,17 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
         addFollow(gitDir, entry);
         // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
         if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) {
-          dropFollow(gitDir, entry);
-          continue; // someone committed meanwhile: again from the new HEAD
+          // A miss on the compare-and-swap, or the ref already at the new commit, or a real failure: told apart by where HEAD is now.
+          const now = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"])?.trim() ?? null;
+          if (now === commit) {
+            moved = true; // it did move (the answer was lost): the note stays and the index follows
+          } else if (now !== head) {
+            dropFollow(gitDir, entry);
+            continue; // someone committed meanwhile: again from the new HEAD
+          } else {
+            dropFollow(gitDir, entry);
+            return "failed"; // HEAD is where it was and the move was refused: nothing happened
+          }
         }
         moved = true;
       } finally {
@@ -293,12 +311,16 @@ type Follow = { old: string | null; new: string; paths: string[] };
 const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
 
 function readFollow(gitDir: string): Follow[] {
+  let text: string;
   try {
-    const j = JSON.parse(readFileSync(followFile(gitDir), "utf8"));
-    return Array.isArray(j) ? j.filter((e) => e && typeof e.new === "string" && Array.isArray(e.paths)) : [];
-  } catch {
-    return [];
+    text = readFileSync(followFile(gitDir), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e; // a note that can't be read is not "no note": the caller leaves everything as it is
   }
+  const j = JSON.parse(text); // a damaged note throws too
+  if (!Array.isArray(j)) throw new Error("the index note is damaged");
+  return j.filter((e) => e && typeof e.new === "string" && Array.isArray(e.paths));
 }
 
 function writeFollow(gitDir: string, list: Follow[]) {
@@ -319,16 +341,21 @@ const dropFollow = (gitDir: string, e: Follow) => writeFollow(gitDir, readFollow
  * left exactly as it was and the note stays (their view shows the wiki's files as changes until it succeeds).
  */
 function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
-  const list = readFollow(gitDir);
-  if (!list.length) return;
   const mine = `${lock.path}.jamsesh-${process.pid}`;
   try {
+    const list = readFollow(gitDir);
+    if (!list.length) return;
     const must = (out: string | null) => {
       if (out === null) throw new Error("git could not be read");
       return out;
     };
     // A note for a commit that isn't (any more) part of HEAD's history never got its branch move: dropped.
-    const live = list.filter((e) => gitOut(dir, ["merge-base", "--is-ancestor", e.new, "HEAD"]) !== null);
+    const live = list.filter((e) => {
+      const code = gitCode(dir, ["merge-base", "--is-ancestor", e.new, "HEAD"]);
+      if (code === 0) return true;
+      if (code === 1) return false; // really not in HEAD's history
+      throw new Error("git could not say whether the commit is in HEAD's history");
+    });
     // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
     const entries = (text: string, kind: "index" | "tree") => {
       const m = new Map<string, string>();
@@ -378,7 +405,13 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
 export function settleIndex(dir: string): void {
   if (!existsSync(join(dir, ".git")) || !gitAvailable()) return;
   const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
-  if (!gitDir || !readFollow(gitDir).length) return;
+  if (!gitDir) return;
+  try {
+    if (!readFollow(gitDir).length) return;
+  } catch {
+    console.error("wiki: the note about the git index can't be read; the index was left as it was");
+    return;
+  }
   const lock = lockIndex(gitDir);
   if (!lock) return;
   try {
@@ -558,10 +591,14 @@ export function pageSlugsStrict(dir: string, expected = 0): string[] {
     if (expected > 0) throw new Error("wiki/ is missing from the wiki folder; JamSesh won't treat that as every page deleted.");
     return [];
   }
-  return readdirSync(d) // throws when unreadable
-    .filter((f) => f.endsWith(".md") && isPageSlug(f.slice(0, -3)) && plainFile(join(d, f)))
-    .map((f) => f.slice(0, -3))
-    .sort();
+  const out: string[] = [];
+  for (const f of readdirSync(d)) { // throws when unreadable
+    if (!f.endsWith(".md") || !isPageSlug(f.slice(0, -3))) continue;
+    // A page file that is now a link or something else is not a deleted page: the pass stops until it is put right.
+    if (!plainFile(join(d, f))) throw new Error(`wiki/${f} is not a regular file; JamSesh won't treat that as the page deleted.`);
+    out.push(f.slice(0, -3));
+  }
+  return out.sort();
 }
 
 export function listPages(dir: string): PageInfo[] {

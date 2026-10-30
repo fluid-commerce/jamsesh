@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { commitPaths, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { settleIndex, commitPaths, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -2897,4 +2897,65 @@ test("the compare-and-swap: a commit made by someone else between the read and t
   expect(log).toContain("Add racy"); // made on top of theirs
   expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/racy.md");
   expect(gitOutOf(dir, "rev-parse", `HEAD~2`).trim()).toBe(headBefore);
+});
+
+test("a known page replaced by a link stops the sync: it is not filed as deleted", () => {
+  const { w, dir } = room();
+  w.editPage("keep", "# Keep\n\nA page.", { by: "Chey" });
+  const file = join(dir, "wiki", "keep.md");
+  const target = join(dir, "elsewhere.md");
+  writeFileSync(target, "# Keep\n\nSomewhere else.");
+  rmSync(file);
+  symlinkSync(target, file);
+  const before = sourceIds(dir).length;
+  expect(() => w.syncVault()).toThrow(/regular file/);
+  expect(sourceIds(dir).length).toBe(before);
+});
+
+test("a new page that is a link is never committed by an unrelated wiki commit", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const target = join(dir, "outside.md");
+  writeFileSync(target, "# Outside\n\nNot a page.");
+  symlinkSync(target, join(dir, "wiki", "linked.md"));
+  (w as any).write("two", "# Two\n\nA page.");
+  (w as any).commitOwn("Add two", ["wiki/two.md", "wiki/linked.md"]);
+  const files = gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD");
+  expect(files).toContain("wiki/two.md");
+  expect(files).not.toContain("wiki/linked.md");
+});
+
+test("an unreadable state means no commit is made, not that nothing is owned", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const head = gitOutOf(dir, "rev-parse", "HEAD");
+  (w as any).write("two", "# Two\n\nA page.");
+  writeFileSync(join(dir, ".wiki-state.json"), "{ not json");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    (w as any).commitOwn("Add two", ["wiki/two.md"]);
+  } finally {
+    console.error = err;
+  }
+  expect(gitOutOf(dir, "rev-parse", "HEAD")).toBe(head);
+});
+
+test("a damaged index note is never mistaken for no note: it is left, with the index, as it was", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const note = join(dir, ".git", "jamsesh-follow.json");
+  writeFileSync(note, "{ damaged");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    settleIndex(dir); // can't read the note: leaves it, and the index, alone
+  } finally {
+    console.error = err;
+  }
+  expect(readFileSync(note, "utf8")).toBe("{ damaged");
+  rmSync(note);
 });
