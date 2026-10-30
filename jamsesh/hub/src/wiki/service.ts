@@ -17,6 +17,7 @@ import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
+  readOnce,
   settleIndex,
   pageSlugsStrict,
   pagePaths,
@@ -262,28 +263,31 @@ export class WikiService {
     } catch (e) {
       return void console.error("wiki: the state can't be read, so no commit is made this time (ownership unknown):", errText(e));
     }
-    // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed.
+    // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. Each page is read
+    // once, and the bytes that decide ownership are the very bytes handed to the commit (no reopening by path, so an edit can't slip in between).
+    const read = new Map<string, Buffer>();
     let wikis: string[];
     try {
       wikis = [...new Set([...paths, ...changed])].filter((f) => {
         const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
         if (!m) return true; // not a page (index, log, sources): the wiki's own files by name
-        let present = true;
+        let bytes: Buffer;
         try {
-          lstatSync(join(this.dir, f));
+          bytes = readOnce(this.dir, f);
         } catch (e) {
-          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; // only a missing file is a deletion
-          present = false;
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === "ENOENT") return seen === undefined || !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
+          if (code === "ELOOP" || code === "ENOTREG") return false; // something there that isn't a page of ours (a link, a folder): never committed
+          throw e; // anything else stops the pass
         }
-        const page = readPage(this.dir, m[1]);
-        if (present && !page) return false; // there is something there that isn't a page of ours (a link, a folder): never committed
-        if (seen === undefined) return true; // no first look yet (a migration, a new vault): there is no record to compare with, and the pages present are the wiki's
-        return page ? seen[m[1]]?.rev === page.rev : !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
+        if (seen !== undefined && seen[m[1]]?.rev !== revOf(bytes.toString("utf8"))) return false; // not as the wiki left it: theirs until filed
+        read.set(f, bytes); // no first look yet (seen undefined) means the pages present are the wiki's
+        return true;
       });
     } catch (e) {
       return void console.error("wiki: couldn't look at the page files, so no commit is made this time:", errText(e));
     }
-    commitPaths(this.dir, message, [...new Set(wikis)].concat(["index.md", "log.md", ...raw]));
+    commitPaths(this.dir, message, [...new Set(wikis)].concat(["index.md", "log.md", ...raw]), read);
   }
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */

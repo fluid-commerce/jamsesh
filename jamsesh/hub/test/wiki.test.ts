@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { settleIndex, commitPaths, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { settleIndex, commitPaths, readOnce, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -2558,16 +2558,6 @@ test("an agent report that can't be written when the session ends is carried to 
   expect(sourceIds(dir).map((id) => readSource(dir, id)!.text).join("\n")).toContain("carry-over screen");
 });
 
-test("a commit names only what changed in raw/, not the whole archive", () => {
-  if (!gitAvailable()) return;
-  const { w, dir } = room();
-  const ids = Array.from({ length: 5 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
-  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
-  archiveSources(dir, ids);
-  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
-  const fresh = w.addSource("document", "Later", "A later source", "Chey");
-  expect(rawPaths(dir)).toEqual([`raw/${fresh.id}.md`]); // the archive is already in history
-});
 
 test("assertLive throws for work from a request past the deadline, after any await, and not for the room's own work", async () => {
   const { assertLive } = await import("../src/room-context");
@@ -3113,25 +3103,44 @@ test("a linked raw/archive folder or a linked top-level vault file is never foll
   expect(gitOutOf(dir, "log", "--pretty=format:%s")).not.toContain("Try the log");
 });
 
-test("a big archive is hashed once: a second look at unchanged sources makes no hash-object call over them", () => {
+test("change detection spawns no hashing process: files are read once in process and compared with HEAD's blob ids", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
   const ids = Array.from({ length: 20 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
   w.editPage("one", "# One\n\nA page.", { by: "Chey" });
   archiveSources(dir, ids);
   w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
-  rawPaths(dir); // the memo is warm
-  let hashed = 0;
+  const calls: string[][] = [];
   const spawn = Bun.spawnSync.bind(Bun);
   const original = Bun.spawnSync;
-  (Bun as any).spawnSync = (cmd: string[], opts: any) => {
-    if (cmd.includes("hash-object")) hashed += (opts?.stdin ? String(opts.stdin).split("\n").filter(Boolean).length : 0) || 1;
-    return spawn(cmd as any, opts);
-  };
+  (Bun as any).spawnSync = (cmd: string[], opts: any) => (calls.push(cmd), spawn(cmd as any, opts));
   try {
     expect(rawPaths(dir)).toEqual([]);
+    expect(rawPaths(dir)).toEqual([]); // and again with the archive unchanged
   } finally {
     (Bun as any).spawnSync = original;
   }
-  expect(hashed).toBe(0);
+  expect(calls.some((c) => c.includes("hash-object") || c.includes("add") || c.includes("diff"))).toBe(false);
+});
+
+test("readOnce reads a regular file once and refuses a link, a folder and a linked parent; the commit uses the bytes it was given, not what the path holds by then", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const outside = join(root, `ro-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "x.md"), "outside");
+  symlinkSync(join(outside, "x.md"), join(dir, "wiki", "linkpage.md"));
+  expect(() => readOnce(dir, "wiki/linkpage.md")).toThrow();
+  expect(() => readOnce(dir, "wiki/missing.md")).toThrow(/ENOENT|no such/i);
+  mkdirSync(join(dir, "wiki", "folder.md"));
+  expect(() => readOnce(dir, "wiki/folder.md")).toThrow();
+  expect(readOnce(dir, "wiki/one.md").toString()).toContain("# One");
+  // The commit takes the bytes handed to it even if the file changes on disk meanwhile.
+  writePage(dir, "swap", "# Swap\n\nValidated bytes.");
+  const given = readOnce(dir, "wiki/swap.md");
+  writePage(dir, "swap", "# Swap\n\nBytes that arrived after the check.");
+  expect(commitPaths(dir, "Swap", ["wiki/swap.md"], new Map([["wiki/swap.md", given]]))).toBe("done");
+  expect(gitOutOf(dir, "show", "HEAD:wiki/swap.md")).toContain("Validated bytes.");
+  expect(gitOutOf(dir, "show", "HEAD:wiki/swap.md")).not.toContain("arrived after");
 });

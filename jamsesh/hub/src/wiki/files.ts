@@ -10,7 +10,7 @@
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { pastDeadline } from "../room-context";
 import { createHash } from "node:crypto";
-import { closeSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { constants as fsc, closeSync, copyFileSync, fstatSync, readSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -228,7 +228,7 @@ const ZERO = "0000000000000000000000000000000000000000";
  * that for the files this commit changed it follows HEAD where the person had not staged anything different. Does nothing
  * without a repository, and never throws.
  */
-export function commitPaths(dir: string, message: string, paths: string[]): "done" | "nothing" | "failed" {
+export function commitPaths(dir: string, message: string, paths: string[], preread: Map<string, Buffer> = new Map()): "done" | "nothing" | "failed" {
   if (!existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
   const own = [...new Set(paths)].filter((p) => followPath(p) && !p.split("/").includes(".git")); // only the vault's own files (the same rule the index note holds to)
@@ -250,27 +250,40 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       if (head && !headTree) return "failed";
       rmSync(idx, { force: true });
       if (head ? gitOut(dir, ["read-tree", head], env) === null : false) return "failed";
-      // The named files that exist, or that HEAD has (a deletion): HEAD is only asked when one is missing.
-      const missing = own.filter((p) => !existsSync(join(dir, p)));
-      const inHead = new Set(head && missing.length ? (gitOut(dir, ["ls-tree", "-r", "--name-only", "-z", head]) ?? "").split("\0").filter(Boolean) : []);
-      const names = own.filter((p) => existsSync(join(dir, p)) || inHead.has(p));
-      if (!names.length) return "nothing";
-      // The files go into the private index as their bytes on disk (no clean filters, no line-ending conversion), on stdin so a long backlog can't hit the argument limit.
-      const here = names.filter((p) => existsSync(join(dir, p)));
-      // Each file must be a regular file in a real folder (never a link, or a path through one): hash-object would follow it and commit what it points at.
+      // Each named file is read once (or was, by the caller, in `preread`): those bytes are what is checked, hashed and committed.
+      // Gone is ENOENT and nothing else; a link, a non-regular file or a linked folder stops the commit.
+      const bytes = new Map<string, Buffer>();
+      const gone: string[] = [];
       try {
-        for (const p of here) {
-          if (!lstatSync(join(dir, p)).isFile()) throw new Error(`${p} is not a regular file`);
-          const parts = p.split("/");
-          if (parts[0] === "wiki" || parts[0] === "raw") vaultDir(dir, parts.length === 3 ? "raw/archive" : (parts[0] as "wiki" | "raw"));
+        for (const p of own) {
+          const pre = preread.get(p);
+          if (pre) bytes.set(p, pre);
+          else
+            try {
+              bytes.set(p, readOnce(dir, p));
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+              gone.push(p);
+            }
         }
       } catch (e) {
         console.error("wiki: not committing, a vault file or folder is a link or not a regular file:", e instanceof Error ? e.message : e);
         return "failed";
       }
-      const written = here.length ? gitOut(dir, ["hash-object", "-w", "--no-filters", "--stdin-paths"], {}, here.join("\n") + "\n")?.trim().split("\n") : [];
-      if (!written || written.length !== here.length || !written.every((s) => SHA.test(s))) return "failed";
-      const info = names.map((p) => (here.includes(p) ? `100644 ${written[here.indexOf(p)]}\t${p}\0` : `0 ${ZERO}\t${p}\0`)).join("");
+      // A file that is gone is a deletion only if HEAD has it. (A failed listing is an error, never "HEAD has nothing".)
+      let inHead = new Set<string>();
+      if (head && gone.length) {
+        const listing = gitOut(dir, ["ls-tree", "-r", "--name-only", "-z", head]);
+        if (listing === null) return "failed";
+        inHead = new Set(listing.split("\0").filter(Boolean));
+      }
+      const removals = gone.filter((p) => inHead.has(p));
+      const names = [...bytes.keys(), ...removals];
+      if (!names.length) return "nothing";
+      // The bytes go into the repository from memory and into the private index by the ids computed from them (no clean filters, no line-ending conversion, nothing reopened by path).
+      const here = [...bytes.keys()];
+      if (!writeBlobs(dir, here.map((p) => bytes.get(p)!))) return "failed";
+      const info = [...here.map((p) => `100644 ${blobId(bytes.get(p)!)}\t${p}\0`), ...removals.map((p) => `0 ${ZERO}\t${p}\0`)].join("");
       if (gitOut(dir, ["update-index", "-z", "--index-info"], env, info) === null) return "failed";
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
@@ -504,25 +517,36 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
       if (own(rec.slice(tab + 1))) inHead.set(rec.slice(tab + 1), f[2]);
     }
   }
-  // The files on disk that could be the wiki's: named like them and regular (a link with a valid name never is). Only ENOENT is "gone".
-  const onDisk: string[] = [];
   try {
+    // Each file's blob id as its bytes are on disk, taken from one read of it (readOnce: no link followed, regular files only).
+    const onDisk = new Map<string, string>();
     const folders = folder === "raw" ? ["raw", "raw/archive"] : ["wiki"];
     for (const sub of folders) {
-      let names: string[];
+      let d: string | null;
       try {
-        const d = vaultDir(dir, sub as "wiki" | "raw" | "raw/archive"); // throws for a folder that is a link: never followed
-        if (!d) continue;
-        names = readdirSync(d);
+        d = vaultDir(dir, sub as "wiki" | "raw" | "raw/archive"); // throws for a folder that is a link: never followed
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw e;
       }
+      if (!d) continue;
+      const names = readdirSync(d).filter((n) => own(`${sub}/${n}`));
+      // Archived sources never change: while the archive folder's own time and its names are as when they were last seen here, its files are not looked at again.
+      const dst = sub === "raw/archive" ? lstatSync(d) : null;
+      const memo = dst ? archiveMemo.get(dir) : undefined;
+      if (dst && memo && memo.mtimeMs === dst.mtimeMs && memo.shas.size === names.length && names.every((n) => memo.shas.has(n))) {
+        for (const n of names) onDisk.set(`${sub}/${n}`, memo.shas.get(n)!);
+        continue;
+      }
+      const seen = new Map<string, string>();
       for (const n of names) {
         const f = `${sub}/${n}`;
-        if (!own(f)) continue;
-        if (lstatSync(join(dir, f)).isFile()) onDisk.push(f);
+        const sha = blobIdOf(dir, f);
+        if (sha === null) continue; // not a regular file (a link, a folder): never the wiki's
+        onDisk.set(f, sha);
+        seen.set(n, sha);
       }
+      if (dst) archiveMemo.set(dir, { mtimeMs: dst.mtimeMs, shas: seen });
     }
     const gone = [...inHead.keys()].filter((f) => {
       try {
@@ -533,48 +557,81 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
         throw e;
       }
     });
-    const hashed = blobShasCached(dir, onDisk);
-    if (!hashed) return null;
-    const changed = onDisk.filter((f) => inHead.get(f) !== hashed.get(f));
+    const changed = [...onDisk].filter(([f, sha]) => inHead.get(f) !== sha).map(([f]) => f);
     return [...new Set([...changed, ...gone])];
   } catch {
     return null;
   }
 }
 
+const archiveMemo = new Map<string, { mtimeMs: number; shas: Map<string, string> }>();
+
 /**
- * Blob ids as blobShas gives them, but a file whose size and times are as when it was last hashed here keeps that id: a
- * big archive of read sources is hashed once, not at every commit. (Only this process remembers; the first look hashes all.)
+ * A file's bytes, read once: opened without following a link (O_NOFOLLOW), checked to be a regular file on the open handle, read
+ * whole from that handle. Whatever is decided about these bytes (who owns them, what they hash to, what is committed) is decided
+ * on this one read, never by opening the path again. Parent folders are checked to be real folders. Throws ENOENT when gone,
+ * ELOOP for a link, and an error for anything that isn't a regular file.
  */
-const hashMemo = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string }>();
-function blobShasCached(dir: string, files: string[]): Map<string, string> | null {
-  const out = new Map<string, string>();
-  const todo: string[] = [];
-  const stats = new Map<string, { size: number; mtimeMs: number; ctimeMs: number }>();
-  for (const f of files) {
-    const st = lstatSync(join(dir, f));
-    const s = { size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs };
-    stats.set(f, s);
-    const m = hashMemo.get(`${dir}\0${f}`);
-    if (m && m.size === s.size && m.mtimeMs === s.mtimeMs && m.ctimeMs === s.ctimeMs) out.set(f, m.sha);
-    else todo.push(f);
+export function readOnce(dir: string, rel: string): Buffer {
+  const parts = rel.split("/");
+  if (parts[0] === "wiki" || parts[0] === "raw") vaultDir(dir, parts.length === 3 ? "raw/archive" : (parts[0] as "wiki" | "raw")); // throws for a linked folder
+  const fd = openSync(join(dir, rel), fsc.O_RDONLY | fsc.O_NOFOLLOW);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(`${rel} is not a regular file`), { code: "ENOTREG" });
+    const buf = Buffer.alloc(st.size);
+    let got = 0;
+    while (got < st.size) {
+      const n = readSync(fd, buf, got, st.size - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    return got === st.size ? buf : buf.subarray(0, got);
+  } finally {
+    closeSync(fd);
   }
-  const fresh = blobShas(dir, todo);
-  if (!fresh) return null;
-  for (const [f, sha] of fresh) {
-    out.set(f, sha);
-    hashMemo.set(`${dir}\0${f}`, { ...stats.get(f)!, sha });
-  }
-  return out;
 }
 
-/** The git blob id of each file's bytes exactly as they are on disk (no filters, nothing written), or null if git couldn't say. */
-function blobShas(dir: string, files: string[]): Map<string, string> | null {
-  if (!files.length) return new Map();
-  const out = gitOut(dir, ["hash-object", "--no-filters", "--stdin-paths"], {}, files.join("\n") + "\n");
-  const lines = out?.trim().split("\n");
-  if (!lines || lines.length !== files.length) return null;
-  return new Map(files.map((f, i) => [f, lines[i]]));
+/** The git blob id of some bytes (SHA-1 repositories: the ones the wiki makes). */
+export const blobId = (b: Buffer) => createHash("sha1").update(`blob ${b.length}\0`).update(b).digest("hex");
+
+/** A file's blob id from one read (or null if it is not a regular file), remembering it while its size and times stand. */
+const hashMemo = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string }>();
+function blobIdOf(dir: string, rel: string): string | null {
+  let st;
+  try {
+    st = lstatSync(join(dir, rel));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw e;
+  }
+  if (!st.isFile()) return null;
+  const m = hashMemo.get(`${dir}\0${rel}`);
+  if (m && m.size === st.size && m.mtimeMs === st.mtimeMs && m.ctimeMs === st.ctimeMs) return m.sha;
+  let bytes: Buffer;
+  try {
+    bytes = readOnce(dir, rel);
+  } catch (e) {
+    const c = (e as NodeJS.ErrnoException).code;
+    if (c === "ELOOP" || c === "ENOTREG") return null;
+    throw e;
+  }
+  const sha = blobId(bytes);
+  hashMemo.set(`${dir}\0${rel}`, { size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, sha });
+  return sha;
+}
+
+/** Writes blobs into the repository from bytes we hold (one `git fast-import`), so no file is opened by git. Returns false on any failure. */
+function writeBlobs(dir: string, blobs: Buffer[]): boolean {
+  if (!blobs.length) return true;
+  const parts: Buffer[] = [];
+  for (const b of blobs) parts.push(Buffer.from(`blob\ndata ${b.length}\n`), b, Buffer.from("\n"));
+  try {
+    const r = Bun.spawnSync(["git", ...GIT_SAFE, "fast-import", "--quiet"], { cwd: dir, env: cleanEnv(), stdin: Buffer.concat(parts), stdout: "ignore", stderr: "ignore", timeout: 60_000 });
+    return r.exitCode === 0;
+  } catch {
+    return false;
+  }
 }
 
 /** The source files in raw/ and raw/archive/ that changed: new ones, and the two sides of a move to the archive. */
