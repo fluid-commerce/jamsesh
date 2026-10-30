@@ -263,20 +263,26 @@ export class WikiService {
       return void console.error("wiki: the state can't be read, so no commit is made this time (ownership unknown):", errText(e));
     }
     // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed.
-    const wikis = [...new Set([...paths, ...changed])].filter((f) => {
-      const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
-      if (!m) return true; // not a page (index, log, sources): the wiki's own files by name
-      let present = true;
-      try {
-        lstatSync(join(this.dir, f));
-      } catch {
-        present = false;
-      }
-      const page = readPage(this.dir, m[1]);
-      if (present && !page) return false; // there is something there that isn't a page of ours (a link, a folder): never committed
-      if (seen === undefined) return true; // no first look yet (a migration, a new vault): there is no record to compare with, and the pages present are the wiki's
-      return page ? seen[m[1]]?.rev === page.rev : !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
-    });
+    let wikis: string[];
+    try {
+      wikis = [...new Set([...paths, ...changed])].filter((f) => {
+        const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
+        if (!m) return true; // not a page (index, log, sources): the wiki's own files by name
+        let present = true;
+        try {
+          lstatSync(join(this.dir, f));
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; // only a missing file is a deletion
+          present = false;
+        }
+        const page = readPage(this.dir, m[1]);
+        if (present && !page) return false; // there is something there that isn't a page of ours (a link, a folder): never committed
+        if (seen === undefined) return true; // no first look yet (a migration, a new vault): there is no record to compare with, and the pages present are the wiki's
+        return page ? seen[m[1]]?.rev === page.rev : !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
+      });
+    } catch (e) {
+      return void console.error("wiki: couldn't look at the page files, so no commit is made this time:", errText(e));
+    }
     commitPaths(this.dir, message, [...new Set(wikis)].concat(["index.md", "log.md", ...raw]));
   }
 

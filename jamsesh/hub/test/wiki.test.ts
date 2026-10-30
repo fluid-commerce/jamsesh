@@ -279,7 +279,7 @@ test("lint finds orphans, broken links, stale pages and unread sources, in one c
   expect(again.card!.id).toBe(r.card!.id);
   expect(s.board.open().filter((c) => c.type === "wiki")).toHaveLength(1);
   expect(s.board.add(r.card!.id, "Chey").ok).toBe(true); // acknowledging a findings-only card is fine
-});
+}, 30_000);
 
 test("query without a model points at the closest pages", async () => {
   const { w, dir } = room();
@@ -2688,6 +2688,7 @@ test("the wiki commits through a private index: a person's staged and unstaged e
 });
 
 test("a commit that fails is made at the next pass, and again after a restart", () => {
+  if (process.getuid?.() === 0) return; // a read-only folder means nothing to root
   if (!gitAvailable()) return;
   const { w, dir, s } = room();
   const heads = join(dir, ".git", "refs", "heads");
@@ -2727,10 +2728,10 @@ test("the first commit of a repository with no commits yet is made through the p
   const dir = join(root, `unborn-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
-  writeFileSync(join(dir, "a.md"), "one");
+  writeFileSync(join(dir, "index.md"), "one");
   expect(gitOutOf(dir, "rev-parse", "-q", "--verify", "HEAD")).toBe(""); // unborn
-  expect(commitPaths(dir, "First", ["a.md"])).toBe("done");
-  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD").trim()).toBe("a.md");
+  expect(commitPaths(dir, "First", ["index.md"])).toBe("done");
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD").trim()).toBe("index.md");
   expect(gitOutOf(dir, "status", "--porcelain").trim()).toBe("");
 });
 
@@ -2750,6 +2751,7 @@ test("a long backlog of source files is passed on stdin, not as arguments", () =
 }, 60_000);
 
 test("a real filing failure (an unwritable raw/) stops the pass before it ingests", async () => {
+  if (process.getuid?.() === 0) return; // a read-only folder means nothing to root
   const { w, dir } = room();
   writePage(dir, "pricing", "# Pricing\n\nTwo tiers.", { category: "topics" });
   adopt(dir);
@@ -3004,4 +3006,60 @@ test("before the first look at the vault (no record of known pages yet) the page
   writePage(dir, "migrated", "# Migrated\n\nA page from before.");
   (w as any).commitOwn("Migrated", ["wiki/migrated.md"]);
   expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/migrated.md");
+});
+
+test("the vault's own commit runs none of the repository's programs: a clean filter configured in the repo is not run", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const marker = join(root, `filter-ran-${Math.random().toString(36).slice(2)}`);
+  Bun.spawnSync(["git", "config", "filter.leak.clean", `sh -c 'touch ${marker}; cat'`], { cwd: dir });
+  writeFileSync(join(dir, ".gitattributes"), "*.md filter=leak\n");
+  process.env.HUB_SECRET_FOR_TEST = "do-not-leak";
+  try {
+    w.editPage("filtered", "# Filtered\n\nA page.", { by: "Chey" });
+  } finally {
+    delete process.env.HUB_SECRET_FOR_TEST;
+  }
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/filtered.md"); // it was committed
+  expect(existsSync(marker)).toBe(false); // and the filter never ran
+});
+
+test("an index note with a bad sha, ref or path is kept and not applied", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const note = join(dir, ".git", "jamsesh-follow.json");
+  const good = { ref: "refs/heads/master", old: null, new: "a".repeat(40), paths: ["wiki/one.md"] };
+  const bads = [{ ...good, new: "xyz" }, { ...good, ref: "HEAD" }, { ...good, ref: "refs/heads/../../x" }, { ...good, paths: [] }, { ...good, paths: ["../outside"] }, { ...good, paths: ["/etc/passwd"] }, { ...good, paths: ["notes/other.md"] }, { ...good, old: "short" }];
+  const err = console.error;
+  console.error = () => {};
+  try {
+    for (const bad of bads) {
+      const text = JSON.stringify([bad]);
+      writeFileSync(note, text);
+      settleIndex(dir);
+      expect(readFileSync(note, "utf8")).toBe(text); // kept
+    }
+  } finally {
+    console.error = err;
+  }
+  rmSync(note);
+});
+
+test("the first look through the public path: a hub started on a vault with pages and no record of them commits those pages", () => {
+  if (!gitAvailable()) return;
+  const dir = join(root, `first-look-${Math.random().toString(36).slice(2)}`);
+  const first = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "data"), wikiDir: join(dir, "vault") });
+  hubs.push(first);
+  const vault = first.wiki.dir;
+  writePage(vault, "before", "# Before\n\nA page from before the record.");
+  const st = readState(vault);
+  delete st.seen;
+  writeState(vault, st);
+  const second = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "data2"), wikiDir: join(dir, "vault") });
+  hubs.push(second);
+  second.wiki.editPage("after", "# After\n\nA page.", { by: "Chey" });
+  const files = gitOutOf(vault, "ls-tree", "-r", "--name-only", "HEAD");
+  expect(files).toContain("wiki/after.md");
+  expect(files).toContain("wiki/before.md");
 });

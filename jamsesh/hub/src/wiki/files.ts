@@ -171,19 +171,44 @@ function git(dir: string, args: string[]) {
   return gitOut(dir, args) !== null;
 }
 
-/** The environment git runs in: ours, without a single GIT_* variable (none can redirect it to another repository or index), plus only the ones we choose. */
+/**
+ * The environment git runs in: built from an allowlist, never copied. Nothing of the hub's (API keys, GIT_* variables that could
+ * point git at another repository or index) reaches git; only what git needs to find itself and a home, plus what we choose.
+ */
 function cleanEnv(extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("GIT_")) env[k] = v;
-  return { ...env, GIT_TERMINAL_PROMPT: "0", ...extra };
+  for (const k of ["PATH", "HOME", "LANG", "TMPDIR"]) if (process.env[k] !== undefined) env[k] = process.env[k]!;
+  return { ...env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", ...extra };
 }
 
-const GIT_ID = ["-c", "user.name=JamSesh", "-c", "user.email=jamsesh@localhost", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"];
+/**
+ * Every git command runs with these: our identity, no signing, and nothing that can launch a program on the wiki's behalf (hooks,
+ * the file-system monitor, ssh, external diff and textconv helpers, the pager, the editor, credential helpers, file:// transports).
+ */
+const GIT_SAFE = ["user.name=JamSesh", "user.email=jamsesh@localhost", "commit.gpgsign=false", "core.hooksPath=/dev/null", "core.fsmonitor=false", "core.sshCommand=", "core.pager=cat", "core.editor=true", "core.askPass=", "credential.helper=", "diff.external=", "protocol.file.allow=never", "gc.auto=0", "maintenance.auto=false"].flatMap((c) => ["-c", c]);
+
+/** The repository's own clean/smudge/process filters, named so each can be switched off (they run programs when files are added). Cached by config time. */
+const filterCache = new Map<string, { at: number; args: string[] }>();
+function filterOff(dir: string): string[] {
+  let at = 0;
+  try {
+    at = statSync(join(dir, ".git", "config")).mtimeMs;
+  } catch {}
+  const hit = filterCache.get(dir);
+  if (hit && hit.at === at) return hit.args;
+  const args: string[] = [];
+  try {
+    const r = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "config", "--local", "--name-only", "--get-regexp", "^(filter|diff|merge)\\..*\\.(clean|smudge|process|textconv|driver|command)$"], { cwd: dir, env: cleanEnv(), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    for (const name of r.stdout.toString().split("\n").filter(Boolean)) args.push("-c", `${name}=`);
+  } catch {}
+  filterCache.set(dir, { at, args });
+  return args;
+}
 
 /** Runs git in the vault and returns its output (null on failure). `env` is added to the environment; `input` goes to stdin. */
 function gitOut(dir: string, args: string[], env: Record<string, string> = {}, input?: string): string | null {
   try {
-    const r = Bun.spawnSync(["git", ...GIT_ID, ...args], { cwd: dir, env: cleanEnv(env), stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    const r = Bun.spawnSync(["git", ...GIT_SAFE, ...filterOff(dir), ...args], { cwd: dir, env: cleanEnv(env), stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
     return r.exitCode === 0 ? r.stdout.toString() : null;
   } catch {
     return null;
@@ -193,9 +218,20 @@ function gitOut(dir: string, args: string[], env: Record<string, string> = {}, i
 /** The exit code of a git command (null if it could not be run). */
 function gitCode(dir: string, args: string[]): number | null {
   try {
-    return Bun.spawnSync(["git", ...GIT_ID, ...args], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 15_000 }).exitCode;
+    return Bun.spawnSync(["git", ...GIT_SAFE, ...filterOff(dir), ...args], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 15_000 }).exitCode;
   } catch {
     return null;
+  }
+}
+
+/** Where a ref is, asked once: its commit, "missing" (git says it isn't there), or "unknown" (git could not say). */
+function refState(dir: string, ref: string): { sha: string } | "missing" | "unknown" {
+  try {
+    const r = Bun.spawnSync(["git", ...GIT_SAFE, ...filterOff(dir), "rev-parse", "-q", "--verify", ref], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    if (r.exitCode === 0) return { sha: r.stdout.toString().trim() };
+    return r.exitCode === 1 ? "missing" : "unknown";
+  } catch {
+    return "unknown";
   }
 }
 
@@ -212,18 +248,23 @@ const ZERO = "0000000000000000000000000000000000000000";
 export function commitPaths(dir: string, message: string, paths: string[]): "done" | "nothing" | "failed" {
   if (!existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
-  const own = [...new Set(paths)].filter((p) => /^[\w.-]+(\/[\w.-]+){0,2}$/.test(p) && !p.startsWith("-") && !p.split("/").includes("..") && !p.split("/").includes(".git"));
+  const own = [...new Set(paths)].filter((p) => followPath(p) && !p.split("/").includes(".git")); // only the vault's own files (the same rule the index note holds to)
   if (!own.length) return "nothing";
   const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
   if (!gitDir) return "failed";
   const msg = message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200);
+  // The branch is read once, by its exact name, and every later step uses that name: a checkout meanwhile can't redirect the move.
+  const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
+  if (!ref || !/^refs\/heads\/[\w./-]+$/.test(ref)) return "failed"; // detached, or not a branch: no commit is made
   const idx = join(gitDir, `jamsesh-index-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
   const env = { GIT_INDEX_FILE: idx };
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const both = gitOut(dir, ["rev-parse", "HEAD", "HEAD^{tree}"])?.trim().split("\n");
-      const head = both?.[0] ?? null; // null: no commit yet
-      const headTree = both?.[1] ?? null;
+      const state = refState(dir, ref);
+      if (state === "unknown") return "failed";
+      const head = state === "missing" ? null : state.sha; // null: no commit yet
+      const headTree = head ? gitOut(dir, ["rev-parse", `${head}^{tree}`])?.trim() ?? null : null;
+      if (head && !headTree) return "failed";
       rmSync(idx, { force: true });
       if (head ? gitOut(dir, ["read-tree", head], env) === null : false) return "failed";
       // The named files that exist, or that HEAD has (a deletion): HEAD is only asked when one is missing.
@@ -237,7 +278,7 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       if (!tree) return "failed";
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history
       const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : []), "-m", msg])?.trim();
-      if (!commit) return "failed";
+      if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return "failed";
       settleIndex(dir); // an earlier commit's index update that didn't finish goes first
       // The person's index is held (git's own lock) while the branch moves: a commit is not made at all if it can't be held.
       const lock = lockIndex(gitDir);
@@ -246,24 +287,31 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
         return "failed";
       }
       let moved = false;
-      const entry = { old: head, new: commit, paths: names };
+      const entry: Follow = { ref, old: head, new: commit, paths: names };
       try {
         // Written before the branch moves: if anything after it fails or the app stops, the next pass finishes the index update from this note.
-        addFollow(gitDir, entry);
-        // Moves the branch HEAD points to, only if it is still where this started (all zeros: still unborn).
-        if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, "HEAD", commit, head ?? ZERO]) === null) {
-          // A miss on the compare-and-swap, or the ref already at the new commit, or a real failure: told apart by where HEAD is now.
-          const nowRaw = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"]);
-          if (nowRaw === null && head !== null) return "failed"; // can't tell whether the ref moved: the note stays and the next pass settles it
-          const now = nowRaw?.trim() ?? null;
-          if (now === commit) {
+        // (A note that is already there and can't be read stops the commit: it is never overwritten.)
+        try {
+          addFollow(gitDir, entry);
+        } catch (e) {
+          console.error("wiki: the note about the git index can't be used, so no commit is made:", e instanceof Error ? e.message : e);
+          return "failed";
+        }
+        // Moves the branch, only if it is still where this started (all zeros: still unborn).
+        if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, ref, commit, head ?? ZERO]) === null) {
+          // A miss on the compare-and-swap, the ref already at the new commit, or a real failure: told apart by one look at the exact ref.
+          const now = refState(dir, ref);
+          if (now === "unknown") return "failed"; // can't tell whether it moved: the note stays and the next pass settles it
+          if (now !== "missing" && now.sha === commit) {
             moved = true; // it did move (the answer was lost): the note stays and the index follows
-          } else if (now !== head) {
+          } else if (now === "missing" ? head === null : now.sha === head) {
             dropFollow(gitDir, entry);
-            continue; // someone committed meanwhile: again from the new HEAD
+            return "failed"; // the ref is where it was and the move was refused: nothing happened
+          } else if (now === "missing") {
+            return "failed"; // the branch was there and is gone: not ours to settle; the note stays
           } else {
             dropFollow(gitDir, entry);
-            return "failed"; // HEAD is where it was and the move was refused: nothing happened
+            continue; // someone committed meanwhile: again from the new tip
           }
         }
         moved = true;
@@ -308,10 +356,16 @@ function lockIndex(gitDir: string): IndexLock | null {
   return null;
 }
 
-type Follow = { old: string | null; new: string; paths: string[] };
+type Follow = { ref: string; old: string | null; new: string; paths: string[] };
 
 const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
 
+const SHA = /^[0-9a-f]{40}$/;
+const FOLLOW_TOP = new Set(["index.md", "log.md", "WIKI.md", ".gitignore"]);
+/** A path a note may name: relative, no "..", under wiki/ or raw/ (or one of the vault's top-level files). */
+const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && !p.startsWith("/") && !p.split("/").includes("..") && (FOLLOW_TOP.has(p) || /^(wiki|raw)(\/[\w.-]+){1,2}$/.test(p));
+
+/** The note, or an error: every field is checked, and one bad entry makes the whole note unusable (it is kept, never trimmed or dropped). */
 function readFollow(gitDir: string): Follow[] {
   let text: string;
   try {
@@ -321,8 +375,11 @@ function readFollow(gitDir: string): Follow[] {
     throw e; // a note that can't be read is not "no note": the caller leaves everything as it is
   }
   const j = JSON.parse(text); // a damaged note throws too
-  if (!Array.isArray(j)) throw new Error("the index note is damaged");
-  for (const e of j) if (!e || typeof e.new !== "string" || !(e.old === null || typeof e.old === "string") || !Array.isArray(e.paths) || !e.paths.every((p: unknown) => typeof p === "string")) throw new Error("the index note is damaged");
+  const bad = () => new Error("the index note is damaged");
+  if (!Array.isArray(j)) throw bad();
+  for (const e of j) {
+    if (!e || typeof e !== "object" || typeof e.ref !== "string" || !/^refs\/heads\/[\w./-]+$/.test(e.ref) || !SHA.test(e.new) || !(e.old === null || SHA.test(e.old)) || !Array.isArray(e.paths) || !e.paths.length || !e.paths.every(followPath)) throw bad();
+  }
   return j as Follow[];
 }
 
@@ -354,10 +411,10 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
     };
     // A note for a commit that isn't (any more) part of HEAD's history never got its branch move: dropped.
     const live = list.filter((e) => {
-      const code = gitCode(dir, ["merge-base", "--is-ancestor", e.new, "HEAD"]);
+      const code = gitCode(dir, ["merge-base", "--is-ancestor", e.new, e.ref]);
       if (code === 0) return true;
       if (code === 1) return false; // really not in HEAD's history
-      throw new Error("git could not say whether the commit is in HEAD's history");
+      throw new Error("git could not say whether the commit is in the branch's history");
     });
     // path -> "mode sha"; ls-files -s gives "mode sha stage", ls-tree gives "mode type sha".
     const entries = (text: string, kind: "index" | "tree") => {
@@ -433,18 +490,23 @@ export function settleIndex(dir: string): void {
 function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boolean): string[] | null {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
   const hasHead = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"]) !== null;
-  const changed = hasHead ? gitOut(dir, ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--", folder]) : "";
+  const changed = hasHead ? gitOut(dir, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "--no-renames", "HEAD", "--", folder]) : "";
   const fresh = gitOut(dir, ["ls-files", "-o", "--exclude-standard", "-z", "--", folder]);
   if (changed === null || fresh === null) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
   // Named like the wiki's own and, if there at all, a regular file: a link with a valid name is never the wiki's to commit.
   const real = (f: string) => {
     try {
       return lstatSync(join(dir, f)).isFile();
-    } catch {
-      return true; // gone: a deletion
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // gone: a deletion
+      throw e; // any other failure is not "deleted": the pass stops
     }
   };
-  return [...new Set([...changed.split("\0"), ...fresh.split("\0")].filter((f) => f && own(f) && real(f)))];
+  try {
+    return [...new Set([...changed.split("\0"), ...fresh.split("\0")].filter((f) => f && own(f) && real(f)))];
+  } catch {
+    return null;
+  }
 }
 
 /** The source files in raw/ and raw/archive/ that changed: new ones, and the two sides of a move to the archive. */
