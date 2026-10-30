@@ -1,8 +1,8 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
 import { BadImage, checkImage } from "./image";
 import { HelperRegistry } from "./children";
-import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
+import { join, normalize, sep } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
 import { learningNote, voiceprintStatus, type Learning } from "./audio/voiceprint";
@@ -12,6 +12,7 @@ import { Canvas } from "./canvas/canvas";
 import { config } from "./config";
 import { DevProxy } from "./devproxy";
 import { HostControl } from "./hostctl";
+import { LiveApps } from "./liveapps";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
@@ -20,42 +21,16 @@ import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, BuildRequest, Platform, ShowRequest, Utterance } from "./types";
+import type { Agent, Annotation, Artifact, BuildRequest, NotePin, Platform, RecordMark, RecordNote, ShowRequest, Utterance } from "./types";
+import { alignNotes, describeNote, ownerOf } from "./record";
 import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
-
-/** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
-export interface PointerMark {
-  t: number;
-  kind: "dwell" | "click" | "drag" | "move";
-  x: number;
-  y: number;
-  dur?: number;
-  target: Annotation["target"];
-  word?: string;
-}
+import { FontService } from "./fonts";
 
 function where(x: number, y: number) {
   const v = y < 0.33 ? "top" : y > 0.66 ? "bottom" : "middle";
   const h = x < 0.33 ? "left" : x > 0.66 ? "right" : "center";
   return v === "middle" && h === "center" ? "the center" : `${v} ${h}`;
-}
-
-/** Ties each pointer moment to the word being said at that time (words spread evenly over a line). */
-export function describePointer(marks: PointerMark[], lines: Utterance[]): string[] {
-  return marks
-    .filter((m) => m.kind !== "move")
-    .map((m) => {
-      const u = lines.find((l) => m.t >= l.t0 - 300 && m.t <= l.t1 + 300);
-      if (u) {
-        const words = u.text.split(/\s+/);
-        const i = Math.max(0, Math.min(words.length - 1, Math.floor(((m.t - u.t0) / Math.max(1, u.t1 - u.t0)) * words.length)));
-        m.word = words.slice(Math.max(0, i - 2), i + 3).join(" ");
-      }
-      const what = `${m.target.kind} "${m.target.label}"${m.target.nodeId ? ` (node ${m.target.nodeId})` : ""}`;
-      const action = m.kind === "click" ? "clicked" : m.kind === "drag" ? "dragged across" : `held on${m.dur ? ` for ${(m.dur / 1000).toFixed(1)}s` : ""}`;
-      return `${action} ${what} at ${where(m.x, m.y)}${m.word ? ` while saying “…${m.word}…”` : ""}`;
-    });
 }
 
 export interface HubOptions {
@@ -74,10 +49,59 @@ export function sharedOnce<T>(fn: () => Promise<T>): () => Promise<T> {
   return () => (run ??= fn());
 }
 
+type RecordSendResult = { ok: true; sent: { agentId: string; agentName: string; notes: number; directiveId: string }[]; brain: number; pins: string[] } | { ok: false; reason: string; status?: number };
+
+/** How many stopped recordings' notes the hub remembers. */
+export const NOTE_RECS_MAX = 200;
+
+/** A recording laptop's open window: when it started (hub clock), when Stop closed it, and the recording (if any) it belongs to. */
+interface PromptWindow {
+  t0: number;
+  t1?: number;
+  max: number;
+  timer?: ReturnType<typeof setTimeout>;
+  rec?: string;
+}
+
+/**
+ * A recording's life on the hub: live -> ending (a close that has to wait for the last words) -> ended. It begins live: the page's
+ * "starting" is the time between its token and the hub's answer, and the token's cancel covers it. Only `endRecording` moves it.
+ */
+type EndReason = "stop" | "cancel" | "disconnect" | "cap" | "replaced";
+interface Rec {
+  id: string;
+  deviceId: string;
+  t0: number;
+  personId: string | null;
+  screenId: string | null;
+  lock: { personId?: string | null; since: number } | null;
+  keep?: ReturnType<typeof setInterval>;
+  cap?: ReturnType<typeof setTimeout>;
+  missed: number;
+  state: "live" | "ending" | "ended";
+  ending?: { reason: EndReason; promise: Promise<unknown> };
+  /** Why the last close failed (it went back to live, so it can be tried again). */
+  error?: string;
+  nextT0?: number;
+  token?: string;
+  outcome?: Outcome;
+  /** The hub's clock when its Stop began: its speech runs to 300 ms after this. */
+  closeAt?: number;
+  /** Text typed with a Stop that has not committed, kept so a recording that ends some other way still gives it to the room. */
+  typed?: string;
+}
+/** What a recording came to, kept on the hub: how it ended and, for a close that made something, what it made. The hub is the only source of truth for it. */
+type Outcome = { kind: EndReason | "unknown"; result?: unknown };
+type Ended<R> = { kind: "done"; value: R } | { kind: "ended"; outcome?: Outcome };
+
+type StopAnswer = { ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number };
+type SendProgress = { brain?: boolean; owners?: Map<string, string | null> };
+
 export class Hub {
   store: Store;
   session: Session;
   host: HostControl;
+  live: LiveApps;
   brain: Brain;
   transcriber: Transcriber;
   audio: AudioPipeline;
@@ -88,6 +112,8 @@ export class Hub {
   /** Records the project this session belongs to (people, last used, thumbnail); idle without a project. */
   keeper: ProjectKeeper;
   auth: Auth;
+  /** The fonts canvases draw with this session: open ones fetched, others borrowed. Memory only. */
+  fonts: FontService;
   awake: KeepAwake;
   /** Reachability from anywhere (DuckDNS, certificates, router); team-level, so it survives sessions. */
   net: Network;
@@ -111,6 +137,24 @@ export class Hub {
     this.awake = new KeepAwake(() => this.peopleOnline + this.session.agents().filter((a) => a.status !== "offline" && Date.now() - a.lastSeen < 10 * 60_000).length);
     this.session = new Session(this.store);
     this.host = new HostControl(this.session);
+    this.live = new LiveApps(this.session);
+    this.live.pickSim = (d) => this.host.pickSimShort(d);
+    this.live.log = (text) => this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text });
+    this.session.liveApps = () => this.live.list();
+    this.session.onStageCommit = () => this.live.syncHeld();
+    // A tile on a locked big screen is driven by that screen's drivers (6.1).
+    this.live.screenFor = (appId) => {
+      const s = this.session;
+      for (const id of ["main", ...s.screens().map((x) => x.id)]) {
+        const lock = s.lockOf(id);
+        const st = s.stage(id);
+        if (!lock || st.mode !== "layout" || !st.layout?.tiles.some((t) => t.kind === "app" && t.appId === appId)) continue;
+        const drivers = s.driversOf(id).map((pid) => s.person(pid)).filter(Boolean).map((p) => ({ personId: p!.id, name: p!.name }));
+        return { screen: id, owner: lock.by, since: lock.since, drivers };
+      }
+      return null;
+    };
+    this.host.onOpened = (app, by) => void this.showLive(app, by);
     this.session.buildRequests = () => this.host.buildRequests();
     this.host.onRequest = (r) => this.onBuildRequest(r);
     this.session.onShowRequest = (r) => this.onShowRequest(r);
@@ -130,6 +174,11 @@ export class Hub {
     this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
     this.canvas = new Canvas(this.session, this.helpers);
+    this.fonts = new FontService(() => this.session.agents(), (id) => this.session.person(id)?.name);
+    this.session.fonts = () => this.fonts.state();
+    // The host's own canvas and its agents' participants draw frames too: they get the fonts as well.
+    this.canvas.fonts = () => this.fonts.all();
+    this.fonts.onFace = (_family, data) => void this.canvas.loadFont(data);
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
@@ -187,6 +236,8 @@ export class Hub {
     if (this.opts.whisper !== false) void this.transcriber.syncFastEngine().then((ok) => console.log(ok ? "parakeet: ready" : `parakeet: ${this.transcriber.parakeet.status().detail}`));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
+    // Agents already here (a restart) may have named fonts in their repo cards.
+    void this.fonts.scan().catch(() => {});
     this.autosave.start();
     this.keeper.start();
     this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000));
@@ -222,13 +273,17 @@ export class Hub {
   /** Stops everything; true when every helper process was seen to exit. */
   stop(): Promise<boolean> {
     this.offRevoked();
+    this.live.stopAll();
     this.awake.stop();
     this.autosave.stop();
     this.keeper.stop();
     this.brain.stop();
     this.canvas.halt();
     this.devproxy.stop();
+    this.fonts.clear();
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
+    for (const r of this.recs.values()) (clearInterval(r.keep), clearTimeout(r.cap));
+    clearInterval(this.recSweep);
     for (const t of this.intervals.splice(0)) clearInterval(t);
     this.session.stop();
     this.transcriber.stop(); // whisper and Parakeet: no new start or download (their servers are in the helper list below)
@@ -239,28 +294,36 @@ export class Hub {
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
-  private promptMode = new Map<string, { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> }>();
+  private promptMode = new Map<string, PromptWindow>();
+  /** The hub's own clock: every recording window is bounded by it, never by a time a caller sent (tests move it). */
+  clock: () => number = () => Date.now();
   /** A prompt window stays open this long at most (SPEC 11.3). */
   static PROMPT_MAX_MS = 2 * 60_000;
 
-  promptStart(deviceId: string, t0: number) {
+  promptStart(deviceId: string, t0 = this.clock(), max = Hub.PROMPT_MAX_MS): PromptWindow {
     // A new recording on a laptop whose last one never got its Stop: that one's held words go to the room.
     this.releasePrompt(deviceId);
-    const w: { t0: number; t1?: number; timer?: ReturnType<typeof setTimeout> } = { t0 };
+    const w: PromptWindow = { t0, max };
     // The window ends on its own (SPEC 11.3) if Stop never arrives; nothing said in it is lost.
-    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), Hub.PROMPT_MAX_MS + 1000);
+    w.timer = setTimeout(() => this.releasePrompt(deviceId, w), max + 1000);
     w.timer.unref?.();
     this.promptMode.set(deviceId, w);
+    return w;
+  }
+
+  /** Whether a recording (started with Record) is running on this laptop. */
+  recordingOn(deviceId: string): boolean {
+    return this.recs.has(deviceId);
   }
 
   /** Closes a window that never got Stop and hands what it held back to the room as ordinary speech. */
-  private releasePrompt(deviceId: string, only?: { t0: number; t1?: number }) {
+  private releasePrompt(deviceId: string, only?: PromptWindow) {
     const w = this.promptMode.get(deviceId);
     if (!w || (only && w !== only) || w.t1 !== undefined) return;
     clearTimeout(w.timer);
     this.promptMode.delete(deviceId);
     for (const u of this.session.store.all("utterances")) {
-      if (u.eventId || u.t1 < w.t0 - 500 || u.t0 > w.t0 + Hub.PROMPT_MAX_MS || !this.fromRecorder(u, deviceId)) continue;
+      if (u.eventId || u.t0 < w.t0 || u.t0 > w.t0 + w.max || (w.t1 !== undefined && u.t0 > w.t1 + 300) || !this.fromRecorder(u, deviceId)) continue;
       this.roomLine(u, true);
     }
   }
@@ -280,16 +343,23 @@ export class Hub {
     return !u.personId || !owner || u.personId === owner;
   }
 
+  /** Whether a line that began at `t` belongs to a recording's window: after its start, within its cap, up to 300 ms after its close, and before the next recording's start. One rule for holding speech and for collecting it. */
+  private inSpan(t: number, s: { t0: number; max: number; t1?: number; nextT0?: number }) {
+    return t >= s.t0 && t <= s.t0 + s.max && (s.t1 === undefined || t <= s.t1 + 300) && t < (s.nextT0 ?? Infinity);
+  }
+
   private inPrompt(u: Utterance) {
     // Inside the recording only: once Stop is pressed, or past the window's cap, what the person says is ordinary speech.
-    for (const [deviceId, w] of this.promptMode) if (u.t1 >= w.t0 - 500 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && (w.t1 === undefined || u.t0 <= w.t1 + 300) && this.fromRecorder(u, deviceId)) return true;
+    for (const [deviceId, w] of this.promptMode) if (this.inSpan(u.t0, w) && this.fromRecorder(u, deviceId)) return true;
+    // A recording whose Stop is still gathering words keeps its speech even after a newer recording took the window.
+    for (const [deviceId, recs] of this.stoppingRecs) for (const r of recs) if (this.inSpan(u.t0, { t0: r.t0, max: Hub.RECORD_MAX_MS, t1: r.closeAt, nextT0: r.nextT0 }) && this.fromRecorder(u, deviceId, r.personId)) return true;
     return false;
   }
 
   /** A transcribed line from the room (new, or updated after a late copy or a label). */
   private roomLine(u: Utterance, isNew: boolean) {
     const s = this.session;
-    // The recorder's own words belong to the prompt (promptWindow reads them from the store);
+    // The recorder's own words belong to its recording (a Stop reads them from the store);
     // a feed line as well would show them twice.
     if (isNew && this.inPrompt(u)) return;
     if (isNew) {
@@ -333,60 +403,450 @@ export class Hub {
     return ev;
   }
 
-  /**
-   * Record-to-prompt finished: everything this device heard in the window, plus where
-   * the person pointed while talking, goes to the brain as one prompt.
-   */
-  async promptWindow(w: { deviceId: string; personId: string | null; t0: number; t1: number; pointer: PointerMark[]; typed?: string }) {
+  /** What this device heard in a closed recording window, once the last words are transcribed (about 7 s at most). */
+  private async windowLines(w: { deviceId: string; personId: string | null; t0: number; t1: number }, open: PromptWindow | undefined, rec?: { nextT0?: number }): Promise<Utterance[]> {
     const s = this.session;
     // Wait for the window's last words to come back from transcription.
     // Lines still settling or being transcribed from this laptop count: the last sentence is
     // usually the one that is, because Stop lands right after it was said.
     // Stop was pressed: the window ends here, even while its last words are still being transcribed.
-    const open = this.promptMode.get(w.deviceId);
     if (open) open.t1 = w.t1;
     // SPEC 11.3: answer within about 7 s, before the client gives up waiting.
     // Words still in transcription after that reach the feed as ordinary room speech (the window is closed by then).
     const deadline = Date.now() + 7000;
-    const heard = () => s.store.all("utterances").filter((u) => u.t1 >= w.t0 - 500 && u.t0 <= w.t1 + 300 && u.t0 <= w.t0 + Hub.PROMPT_MAX_MS && this.fromRecorder(u, w.deviceId, w.personId));
+    const max = open?.max ?? Hub.PROMPT_MAX_MS;
+    // A line belongs to this recording if it began after the recording did and before it stopped. Only the stopping recording gets the
+    // 300 ms for a last word still being transcribed, and never past the start of the next recording on this device: no line is in two.
+    // The bound is the start of the recording that followed this one, written on this recording when that start happened: it holds
+    // however that successor ends, and nothing is dropped from it to make room.
+    const span = () => ({ t0: w.t0, max, t1: w.t1, nextT0: rec?.nextT0 });
+    // (Lines already published to the room are not this recording's: a retry after a failed Stop must not read them again.)
+    const heard = () => s.store.all("utterances").filter((u) => !u.eventId && this.inSpan(u.t0, span()) && this.fromRecorder(u, w.deviceId, w.personId));
     let lines: Utterance[] = [];
     let stable = 0;
-    while (Date.now() < deadline) {
-      const now = heard();
-      stable = now.length === lines.length && Date.now() > w.t1 + 1500 && this.audio.pendingFor(w.deviceId) === 0 ? stable + 1 : 0;
-      lines = now;
-      if (stable >= 2) break;
-      await Bun.sleep(400);
+    try {
+      while (Date.now() < deadline) {
+        const now = heard();
+        stable = now.length === lines.length && Date.now() > w.t1 + 1500 && this.audio.pendingFor(w.deviceId) === 0 ? stable + 1 : 0;
+        lines = now;
+        if (stable >= 2) break;
+        await Bun.sleep(400);
+      }
+    } catch (e) {
+      // The read failed with the window closed: it is open again (its own timer still bounds it), so a cancel or the timer can give its words to the room.
+      if (open) open.t1 = undefined;
+      throw e;
     }
     // Only this window's entry: a new recording may have started while this one waited.
     if (open && this.promptMode.get(w.deviceId) === open) {
       clearTimeout(open.timer);
       this.promptMode.delete(w.deviceId);
     }
-    lines.sort((a, b) => a.t0 - b.t0);
-    const person = s.person(w.personId) ?? s.person(lines[0]?.personId);
-    const said = [w.typed?.trim(), ...lines.map((u) => u.text)].filter(Boolean).join(" ");
-    const marks = describePointer(w.pointer, lines);
-    if (!said && !marks.length) return { ok: false, reason: "Nothing was heard in that recording." };
-    const pointed = w.pointer
-      .filter((m) => m.kind !== "move")
-      .map((m) => s.addAnnotation({ personId: person?.id ?? null, target: m.target, x: m.x, y: m.y, text: m.word ? `“${m.word}”` : "pointed here", source: "pointer" }));
-    const ev = s.store.addEvent({
-      kind: "speech",
-      authorType: "person",
-      authorId: person?.id ?? null,
-      authorName: person?.name ?? "Someone",
-      text: said || "(pointed without speaking)",
-      relevance: "work",
-      // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, ...this.audio.voiceFor(lines[0].id) } : {}) },
-    });
-    // One spoken line: it can be relabelled from the prompt, like any line in the feed.
-    if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
-    // Pointer marks already went out with this prompt; keep them visible, but don't send them again.
-    for (const a of pointed) s.store.patch("annotations", a.id, { status: "sent", promptEventId: ev.id });
-    this.brain.direct(ev, marks.length ? `While talking, ${person?.name ?? "they"} pointed at:\n${marks.map((m) => `- ${m}`).join("\n")}` : "");
-    return { ok: true, eventId: ev.id, text: said, pointed: marks };
+    return lines.sort((a, b) => a.t0 - b.t0);
+  }
+
+  /**
+   * A close that was overtaken (cancelled, swept, a failed read) gives what it held, the words gathered and any text typed with it, to the
+   * room as ordinary speech. The one place that happens. Without gathered lines it reads what is still held from the store.
+   */
+  private release(rec: Rec | undefined, personId: string | null, deviceId: string, t0: number, lines: Utterance[] | undefined, typed?: string, t1?: number) {
+    // The recording's speech window goes first: while it stands its lines are held for the recording, not given to the room.
+    const win = this.promptMode.get(deviceId);
+    if (win && rec && win.rec === rec.id) (clearTimeout(win.timer), this.promptMode.delete(deviceId));
+    // Only this recording's own speech: from its start, to its close (and the same slack) and never past the next recording's start.
+    const end = Math.min(t0 + Hub.RECORD_MAX_MS, t1 === undefined ? Infinity : t1 + 300);
+    const held = lines ?? this.session.store.all("utterances").filter((u) => !u.eventId && u.t0 >= t0 && u.t0 <= end && u.t0 < (rec?.nextT0 ?? Infinity) && this.fromRecorder(u, deviceId, personId));
+    for (const u of held) if (!u.eventId && !this.session.store.get("utterances", u.id)?.eventId) this.roomLine(u, true);
+    if (typed?.trim()) this.typed(personId, typed);
+  }
+
+  // ---------- Record (6.2): talk and point, and it becomes notes ----------
+
+  /** A recording runs this long at most; the screen's lock is kept fresh until then. */
+  static RECORD_MAX_MS = 10 * 60_000;
+  /**
+   * Recording laptops. `lock` is the screen lock this recording took (its owner and `since`), so only
+   * that lock is given back: never one someone took after it.
+   */
+  private recs = new Map<string, Rec>();
+  /** Recordings stopped and still gathering their last words, by device: a Start in that time writes its time on each (`nextT0`). */
+  private stoppingRecs = new Map<string, Set<Rec>>();
+  private async waiting<T>(deviceId: string, rec: Rec | undefined, run: () => Promise<T>): Promise<T> {
+    if (!rec) return run();
+    const set = this.stoppingRecs.get(deviceId) ?? new Set();
+    this.stoppingRecs.set(deviceId, set.add(rec));
+    try {
+      return await run();
+    } finally {
+      set.delete(rec);
+      if (!set.size) this.stoppingRecs.delete(deviceId);
+    }
+  }
+  /** How each recording ended (the last 200), so a close sent again, a cancel after a finish, or a page asking later all get that one outcome. A Stop sent again, because its reply was lost, gets the same answer and does nothing twice. */
+  private outcomes = new Map<string, { deviceId: string; token?: string; caller?: string; outcome: Outcome }>();
+  private recSweep = (() => {
+    const t = setInterval(() => this.sweepRecordings(), 15_000);
+    t.unref?.();
+    return t;
+  })();
+  /**
+   * Each stopped recording's notes: the window (`caller`) and person they were handed to, and the send once it has begun. One record, so
+   * the right to send and the receipt of the send are kept and dropped together (the oldest 200 go): a record that is gone is a 404,
+   * never a send that happens a second time. A repeated send (a lost reply, a double click) gets the same answer and does nothing twice.
+   */
+  private noteRecs = new Map<string, { caller: string; personId: string | null; sending?: Promise<RecordSendResult>; sig?: string; done: SendProgress }>();
+
+  /**
+   * Begins a recording. On a big screen the person must be driving it (or the screen free, which this takes); the lock stays until the last
+   * recording there ends. A device's earlier recording whose Stop never came ends first, but only the same person's: the caller has
+   * already shown the device is its window's.
+   */
+  recordStart(deviceId: string, personId: string | null, t0 = this.clock(), screen?: string | null, token?: string): { ok: true; id: string } | { ok: false; reason: string; status: number } {
+    const s = this.session;
+    const person = s.person(personId);
+    if (token && s.store.tokenCancelled(deviceId, token)) return { ok: false, reason: "That recording was cancelled.", status: 409 };
+    const earlier = this.recs.get(deviceId);
+    if (earlier?.personId && earlier.personId !== person?.id) return { ok: false, reason: "Someone else is recording in this window.", status: 409 };
+    // Everything that can refuse is checked first: a rejected Start leaves the earlier recording running.
+    let sc: { id: string } | undefined;
+    if (screen) {
+      sc = screen === "main" ? { id: "main" } : s.findScreen(screen);
+      if (!sc) return { ok: false, reason: "That screen isn't connected.", status: 404 };
+      if (!person) return { ok: false, reason: "Pick who you are before recording the big screen.", status: 403 };
+      const lock = s.lockOf(sc.id);
+      // The earlier recording's own lock is this person's, so ending it can't turn this into a refusal.
+      if (lock && !s.driversOf(sc.id).includes(person.id) && lock.personId !== person.id) return { ok: false, reason: `${lock.by} is driving the big screen. Ask them to pass control or drive together first.`, status: 409 };
+    }
+    // Ended before the lock is taken, so giving back its lock can't release the one this recording relies on.
+    // The first start after a recording is that recording's bound, kept on the recording itself (also while it still waits for its last words).
+    for (const r of [earlier, ...(this.stoppingRecs.get(deviceId) ?? [])]) if (r && r.nextT0 === undefined) r.nextT0 = t0;
+    if (earlier) void this.endRecording(earlier, "replaced");
+    let screenId: string | null = null;
+    let lockTaken: { personId?: string | null; since: number } | null = null;
+    if (sc && person) {
+      screenId = sc.id;
+      if (!s.lockOf(screenId)) {
+        s.holdScreen(screenId, person);
+        const held = s.lockOf(screenId);
+        lockTaken = held ? { personId: held.personId, since: held.since } : null;
+      } else if (!s.driversOf(screenId).includes(person.id)) {
+        // Recording a screen is driving it: its owner starts driving again.
+        s.drive("start", screenId, person.id);
+      }
+    }
+    const id = newId("rec");
+    const prompt = this.promptStart(deviceId, t0, Hub.RECORD_MAX_MS);
+    prompt.rec = id;
+    const rec: Rec = { id, deviceId, t0, personId: person?.id ?? null, screenId, lock: lockTaken, missed: 0, state: "live", ...(token ? { token } : {}) };
+    // A recording whose Stop never comes (the window crashed or its laptop slept) still ends: at the cap, or once its window is gone.
+    (rec.cap = setTimeout(() => void this.endRecording(rec, "cap"), Hub.RECORD_MAX_MS + 1000)).unref?.();
+    // The lock goes quiet after 20 minutes untouched; a recording is somebody being there.
+    if (screenId) (rec.keep = setInterval(() => s.touchLock(screenId), 60_000)).unref?.();
+    this.recs.set(deviceId, rec);
+    s.setRecording({ id, deviceId, personId: rec.personId, personName: person?.name ?? "Someone", screenId, since: Date.now() });
+    return { ok: true, id };
+  }
+
+  /**
+   * A window's recording token (made before its Start) is cancelled, because the page is going away. Whichever came first wins: a
+   * recording already begun under it ends, and a Start that arrives later is refused. The words said are not kept.
+   */
+  recordCancel(deviceId: string, token: string, caller?: string): { state: "ended"; outcome: Outcome } {
+    this.session.store.cancelToken(deviceId, token);
+    const rec = this.recs.get(deviceId);
+    if (rec?.token === token) void this.endRecording(rec, "cancel");
+    // A recording a Start replaced while its Stop waited is cancelled too: its notes are not made.
+    for (const r of this.stoppingRecs.get(deviceId) ?? []) if (r.token === token && r.state === "ended") this.keep(r, { kind: "cancel" });
+    // A recording that had already finished keeps what it made: the cancel answers with that, and doesn't undo it.
+    const done = [...this.outcomes.values()].find((o) => o.deviceId === deviceId && o.token === token);
+    return { state: "ended", outcome: done ? this.visibleTo(done, caller) : { kind: "cancel" as EndReason } };
+  }
+
+  /** What a recording is now, for the window that owns it: the page asks this rather than guess from a missing entry or an error. */
+  recordStatus(deviceId: string, id: string, caller?: string): { state: "live" | "ending" | "ended"; error?: string; outcome?: Outcome } {
+    const rec = this.recs.get(deviceId);
+    if (rec?.id === id) return { state: rec.state, ...(rec.error ? { error: rec.error } : {}) };
+    const done = this.outcomes.get(id);
+    // A recording this hub has no record of is not running here (the hub may have restarted): that is an answer, and it is "ended".
+    return { state: "ended", outcome: done && done.deviceId === deviceId ? this.visibleTo(done, caller) : { kind: "unknown" } };
+  }
+
+  /** The outcome without what it made, unless the caller is the window it was made for. */
+  private visibleTo(done: { caller?: string; outcome: Outcome }, caller?: string): Outcome {
+    return !done.caller || done.caller === caller ? done.outcome : { kind: done.outcome.kind };
+  }
+
+  /** Ends recordings whose window has been gone for two checks in a row (this runs every 15 s). */
+  sweepRecordings() {
+    for (const [deviceId, rec] of [...this.recs]) {
+      rec.missed = this.session.deviceOnline(deviceId) ? 0 : rec.missed + 1;
+      if (rec.missed >= 2) void this.endRecording(rec, "disconnect");
+    }
+  }
+
+  /**
+   * The one way a recording ends. Every route calls it: Stop, a cancel, the disconnect sweep, the cap and a
+   * replacing Start. A close that waits for the last words gives `gather` (the wait) and `commit` (what it makes: synchronous, run once,
+   * and only if nothing ended the recording during the wait). It goes live -> ending -> ended; a Stop sent again while ending
+   * shares its result. If `gather` or `commit` fails the recording is live again with the error
+   * kept, and the caller may try again. Without them (cancel, disconnect, cap, replaced) it ends at once, even while ending, and a wait
+   * that finishes after that makes nothing (`abort` hands what it gathered back, so words aren't lost). The outcome is stored by `teardown`.
+   */
+  private endRecording<G, R>(rec: Rec, reason: EndReason, gather?: () => Promise<G>, commit?: (g: G) => R, abort?: (g?: G) => void): Promise<Ended<R>> {
+    if (!gather || !commit) {
+      if (rec.state !== "ended") {
+        // A replaced recording's window belongs to its replacement already; the others hand their held words to the room.
+        // Text typed with a Stop that failed stays with the recording until now; one still in flight gives its own through `abort`.
+        if (reason !== "replaced" && this.recs.get(rec.deviceId) === rec) this.release(rec, rec.personId, rec.deviceId, rec.t0, undefined, rec.state === "ending" ? undefined : rec.typed);
+        this.teardown(rec, { kind: reason });
+      }
+      return Promise.resolve({ kind: "done", value: undefined as R });
+    }
+    if (rec.state === "ended") return Promise.resolve({ kind: "ended", outcome: rec.outcome });
+    // A Stop sent again while one is under way shares its result.
+    if (rec.state === "ending") return rec.ending!.promise as Promise<Ended<R>>;
+    rec.state = "ending";
+    rec.error = undefined;
+    let released = false;
+    const run: Promise<Ended<R>> = gather()
+      .then((g): Ended<R> => {
+        // A Start that replaced this recording while it waited doesn't take its notes away; anything else that ended it does.
+        const replaced = rec.state === "ended" && rec.outcome?.kind === "replaced";
+        if (rec.state !== "ending" && !replaced) return (released = true), abort?.(g), { kind: "ended", outcome: rec.outcome };
+        const value = commit(g);
+        if (replaced) this.keep(rec, { kind: reason, result: value });
+        else this.teardown(rec, { kind: reason, result: value });
+        return { kind: "done", value };
+      })
+      .catch((e): Ended<R> => {
+        if (rec.state === "ending") {
+          (rec.state = "live"), (rec.ending = undefined), (rec.error = e instanceof Error ? e.message : String(e));
+          // The recording goes on: its speech window is put back (the read took it away), so what is said before the retry is still its own.
+          if (!this.promptMode.get(rec.deviceId)) this.promptStart(rec.deviceId, rec.t0, Hub.RECORD_MAX_MS).rec = rec.id;
+        }
+        else if (!released) return (released = true), abort?.(), { kind: "ended", outcome: rec.outcome };
+        else if (released) return { kind: "ended", outcome: rec.outcome };
+        throw e;
+      });
+    rec.ending = { reason, promise: run };
+    return run;
+  }
+
+  /** Writes down how a recording came out, where the page can ask for it. */
+  private keep(rec: Rec, outcome: Outcome) {
+    rec.outcome = outcome;
+    this.outcomes.set(rec.id, { deviceId: rec.deviceId, ...(rec.token ? { token: rec.token } : {}), outcome });
+    if (this.outcomes.size > NOTE_RECS_MAX) this.outcomes.delete(this.outcomes.keys().next().value!);
+  }
+
+  /** Forgets the recording, keeps its outcome and, if it was the last on its screen and took the lock, gives the screen back. Only `endRecording` calls this. */
+  private teardown(rec: Rec, outcome: Outcome) {
+    if (rec.state === "ended") return;
+    rec.state = "ended";
+    this.keep(rec, outcome);
+    const deviceId = rec.deviceId;
+    if (this.recs.get(deviceId) !== rec) return;
+    clearInterval(rec.keep);
+    clearTimeout(rec.cap);
+    this.recs.delete(deviceId);
+    this.session.setRecording(null, deviceId);
+    if (!rec.screenId || !rec.lock) return;
+    const others = [...this.recs.values()].filter((r) => r.screenId === rec.screenId);
+    // Whoever is left inherits the duty of letting go.
+    if (others[0]) return void (others[0].lock ??= rec.lock);
+    // Only the lock this recording took: not a later one (the owner cast again, or someone took the free screen after a release).
+    const cur = this.session.lockOf(rec.screenId);
+    if (cur && cur.since === rec.lock.since && cur.personId === rec.lock.personId) this.session.releaseLock(rec.screenId, { owner: rec.lock.personId ?? null });
+  }
+
+  /** The pointer moments that fall inside a window the hub opened (a little slack either side for the pointer's own clock). */
+  private inWindow<T extends { t: number }>(marks: T[], t0: number, t1: number): T[] {
+    return (Array.isArray(marks) ? marks : []).filter((m) => Number.isFinite(m?.t) && m.t >= t0 - 1000 && m.t <= t1 + 1000);
+  }
+
+  /** Stop was pressed: the words and the pointer lined up into notes for the person to tidy. Nothing is sent yet. */
+  async recordStop(w: { deviceId: string; recordingId: string; caller: string; personId: string | null; pointer: RecordMark[]; typed?: string }): Promise<StopAnswer> {
+    // A Stop sent again (its reply was lost) gets the answer the first one got, from the same window.
+    const prior = this.outcomes.get(w.recordingId);
+    if (prior && prior.deviceId === w.deviceId && prior.caller === w.caller && prior.outcome.kind === "stop") return prior.outcome.result as StopAnswer;
+    // A Stop names the recording it ends. One that arrives after that recording ended (a replacement Start, a cancel) ends nothing.
+    const rec = this.recs.get(w.deviceId);
+    if (!rec || rec.id !== w.recordingId) return { ok: false, reason: "That recording has already ended.", status: 409 };
+    if (rec.personId && w.personId && rec.personId !== w.personId) return { ok: false, reason: "That recording belongs to someone else.", status: 403 };
+    const person = this.session.person(w.personId ?? rec.personId);
+    // The window is the one the hub opened: its start is the hub's record of Start, not the caller's.
+    const t0 = rec.t0;
+    const t1 = this.clock();
+    // Only the Stop that starts the close sets its time and text; one sent again while it runs shares that close and changes nothing.
+    if (rec.state === "live") {
+      if (w.typed?.trim()) rec.typed = w.typed;
+      rec.closeAt = t1;
+    }
+    const open = this.promptMode.get(w.deviceId);
+    const out = await this.endRecording(
+      rec,
+      "stop",
+      () => this.waiting(w.deviceId, rec, () => this.windowLines({ deviceId: w.deviceId, personId: person?.id ?? w.personId, t0, t1 }, open?.rec === rec.id ? open : undefined, rec)),
+      (lines) => this.stopNotes(w, rec, person, lines, t0, t1),
+      (lines) => this.release(rec, person?.id ?? w.personId, w.deviceId, t0, lines, w.typed, t1),
+    );
+    if (out.kind === "ended") return { ok: false, reason: "That recording has already ended.", status: 409 };
+    const kept = this.outcomes.get(rec.id);
+    if (kept) kept.caller = w.caller;
+    return out.value;
+  }
+
+  /** What a Stop makes once the last words are in: the notes. Synchronous, and run once by `endRecording`. */
+  private stopNotes(w: { caller: string; pointer: RecordMark[]; typed?: string }, rec: Rec, person: { id: string } | undefined, lines: Utterance[], t0: number, t1: number): StopAnswer {
+    const s = this.session;
+    const marks = this.inWindow(Array.isArray(w.pointer) ? w.pointer : [], t0, t1).slice(0, 200).map((m) => ({ ...m, driverId: person?.id ?? null }));
+    const notes = alignNotes(lines, marks, { screenId: rec.screenId });
+    const typed = w.typed?.trim();
+    if (typed) notes.unshift({ id: "typed", text: typed, t0, t1: t0, personId: person?.id ?? null, pin: null, ...(rec.screenId ? { screenId: rec.screenId } : {}) });
+    if (!notes.length) return { ok: false, reason: "Nothing was heard in that recording." };
+    for (const n of notes) {
+      const owner = ownerOf(s, n.pin?.target);
+      n.ownerId = owner;
+      n.ownerName = owner ? s.agent(owner)?.name ?? null : null;
+    }
+    const recordingId = rec.id;
+    this.noteRecs.set(recordingId, { caller: w.caller, personId: person?.id ?? null, done: {} });
+    if (this.noteRecs.size > NOTE_RECS_MAX) this.noteRecs.delete(this.noteRecs.keys().next().value!);
+    return { ok: true, recordingId, notes };
+  }
+
+  /** A picture of the spot: a slice of the item's image around the pin, made with the system's own image tool. Null when it can't be. */
+  private async cropFor(art: Artifact | undefined, pin: NotePin): Promise<string | null> {
+    if (!art?.image || process.platform !== "darwin") return null;
+    try {
+      const rel = normalize(decodeURIComponent(art.image.replace(/^\/renders\//, "").split("?")[0]));
+      if (rel.startsWith("..") || rel.includes(`${sep}..`)) return null;
+      // Both ends resolved through any links: the picture is read from the renders and written to the uploads, nowhere else.
+      const renders = realpathSync(this.canvas.rendersDir);
+      const src = realpathSync(join(renders, rel));
+      if (!src.startsWith(renders + sep)) return null;
+      const f = Bun.file(src);
+      if (!(await f.exists())) return null;
+      const size = imageSize(await f.bytes());
+      if (!size?.width || !size.height) return null;
+      const w = Math.min(size.width, Math.max(240, Math.round(size.width * 0.45)));
+      const h = Math.min(size.height, Math.max(180, Math.round(size.height * 0.35)));
+      const left = Math.max(0, Math.min(size.width - w, Math.round(pin.x * size.width - w / 2)));
+      const top = Math.max(0, Math.min(size.height - h, Math.round(pin.y * size.height - h / 2)));
+      // The file's name is the hub's own, never anything a caller sent.
+      const name = `${newId("crop")}.png`;
+      mkdirSync(this.uploadsDir, { recursive: true });
+      const out = join(realpathSync(this.uploadsDir), name);
+      const p = Bun.spawn(["sips", "-s", "format", "png", "-c", String(h), String(w), "--cropOffset", String(top), String(left), src, "--out", out], { stdout: "ignore", stderr: "ignore" });
+      return (await p.exited) === 0 ? `/renders/uploads/${name}` : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The tidied notes go out: each one becomes a pin on its item, and the notes for each agent's builds
+   * and frames go to that agent as one directive. Notes on nothing an agent owns go to the room brain.
+   */
+  recordSend(w: { caller: string; personId: string | null; recordingId: string; notes: RecordNote[] }): Promise<RecordSendResult> {
+    const person = this.session.person(w.personId);
+    if (!person) return Promise.resolve({ ok: false, reason: "Pick who you are before sending notes.", status: 403 });
+    // Only a recording this hub stopped, sent from the window it was stopped in, by the person it was handed to.
+    const owner = this.noteRecs.get(w.recordingId);
+    if (!owner) return Promise.resolve({ ok: false, reason: "That recording isn't one of this session's. Record again.", status: 404 });
+    if (owner.caller !== w.caller || (owner.personId && owner.personId !== person.id)) return Promise.resolve({ ok: false, reason: "Those notes belong to someone else.", status: 403 });
+    // What is sent is frozen at the first attempt: a retry says the same, and different notes are refused rather than half-applied.
+    const notes = this.normalizeNotes(person, w.notes);
+    if (!notes.length) return Promise.resolve({ ok: false, reason: "There are no notes to send." });
+    const sig = JSON.stringify(notes);
+    if (owner.sig && owner.sig !== sig) return Promise.resolve({ ok: false, reason: "Those notes were already sent. Record again to change them.", status: 409 });
+    owner.sig = sig;
+    // Reserved before anything waits, so two sends at once share one.
+    if (owner.sending) return owner.sending;
+    // Nothing went out (no notes, or it failed): the reservation goes, so a corrected send may follow.
+    const sending: Promise<RecordSendResult> = this.sendNotes(person, w.recordingId, notes, owner.done).then(
+      (r) => (r.ok || owner.sending !== sending || (owner.sending = undefined), r),
+      (e) => {
+        if (owner.sending === sending) owner.sending = undefined;
+        throw e;
+      },
+    );
+    owner.sending = sending;
+    return sending;
+  }
+
+  /** The notes as they will be sent: cleaned, capped, and owned by the person sending. */
+  private normalizeNotes(person: { id: string }, raw: RecordNote[]): RecordNote[] {
+    const clamp = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
+    return (Array.isArray(raw) ? raw : [])
+      .slice(0, 80)
+      .map((n, i) => ({
+        id: String(n?.id ?? `n${i}`).slice(0, 60),
+        text: String(n?.text ?? "").trim().slice(0, 2000),
+        t0: Number(n?.t0) || 0,
+        t1: Number(n?.t1) || 0,
+        personId: person.id,
+        screenId: typeof n?.screenId === "string" ? n.screenId : null,
+        pin: n?.pin?.target?.kind && typeof n.pin.target.ref === "string" ? { ...n.pin, x: clamp(n.pin.x), y: clamp(n.pin.y) } : null,
+      }))
+      .filter((n) => n.text);
+  }
+
+  /** `done` is what this recording has already delivered to the brain; directives are found by their key, so a retried send repeats none of it. */
+  private async sendNotes(person: { id: string; name: string }, recordingId: string, notes: RecordNote[], done: SendProgress): Promise<RecordSendResult> {
+    const s = this.session;
+    const w = { recordingId };
+    const pins: Annotation[] = [];
+    const byAgent = new Map<string, { n: RecordNote; crop: string | null }[]>();
+    const loose: { n: RecordNote; crop: string | null }[] = [];
+    // Who each note goes to is decided the first time and kept: a retry after a part-way failure must not send a note somewhere else.
+    const owners = (done.owners ??= new Map());
+    // Every note's destination is fixed before anything waits (a crop is made with a wait in it).
+    for (const n of notes) if (!owners.has(n.id)) owners.set(n.id, ownerOf(s, n.pin?.target) ?? null);
+    for (const n of notes) {
+      const owner = owners.get(n.id) ?? undefined;
+      let crop: string | null = null;
+      if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin);
+      if (n.pin) {
+        const have = s.store.all("annotations").find((a) => a.recordingId === w.recordingId && a.noteId === n.id);
+        const ann = have ?? s.addAnnotation({ personId: person.id, target: n.pin.target, x: n.pin.x, y: n.pin.y, text: n.text, source: "pin", scroll: n.pin.scroll ?? null, screenId: n.screenId ?? null, recordingId: w.recordingId, noteId: n.id, crop });
+        pins.push(ann);
+        if (!have && ann.target.kind === "canvas" && ann.target.canvasX != null) this.canvas.comment(ann).catch(() => {});
+      }
+      const item = { n, crop };
+      if (owner) byAgent.set(owner, [...(byAgent.get(owner) ?? []), item]);
+      else loose.push(item);
+    }
+
+    const sent: { agentId: string; agentName: string; notes: number; directiveId: string }[] = [];
+    for (const [agentId, items] of byAgent) {
+      const lines = items.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
+      const d = s.createDirective({
+        text: `Notes from ${person.name}'s recording (${items.length}). Each is what they said while pointing at the spot described:\n${lines.join("\n")}`,
+        mode: "implement",
+        rationale: "Notes pinned to this agent's work from a recording.",
+        targets: [agentId],
+        requestedBy: person.name,
+        key: `${recordingId}:${agentId}`,
+      });
+      sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: d.id });
+    }
+    if (loose.length && !done.brain) {
+      const lines = loose.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
+      const ev = s.store.addEvent({
+        kind: "speech",
+        authorType: "person",
+        authorId: person.id,
+        authorName: person.name,
+        text: `Notes from ${person.name}'s recording (${loose.length}):\n${lines.join("\n")}`,
+        relevance: "work",
+        data: { direct: true, typed: true, recorded: true, recordingId: w.recordingId },
+      });
+      this.brain.direct(ev, "These notes were pinned to things no agent owns (or to nothing). Decide who should handle each, send one directive per agent quoting the note and where it was pinned, and say so if there is no one.");
+      done.brain = true;
+    }
+    for (const a of pins) s.store.patch("annotations", a.id, { status: "sent" });
+    return { ok: true, sent, brain: loose.length, pins: pins.map((p) => p.id) };
   }
 
   /** All open annotations (or the given ones) go to the brain as one prompt. */
@@ -499,6 +959,19 @@ export class Hub {
   }
 
   // ---------- host build requests (approved by people, by voice or a button) ----------
+
+  /** An approved build opened an app: stream it live and put it on the big screen (unless a person's screen is locked). */
+  private async showLive(app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) {
+    let r: Awaited<ReturnType<LiveApps["startIos"]>> = "";
+    // A Mac app's window takes a moment to appear.
+    for (let i = 0; i < (app.kind === "mac" ? 8 : 1); i++) {
+      r = app.kind === "ios" ? await this.live.startIos(undefined, by) : await this.live.startMac({ name: app.name, bundle: app.bundle }, by);
+      if (typeof r !== "string" || !/No window/.test(r)) break;
+      await Bun.sleep(2000);
+    }
+    if (typeof r === "string") return void this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `Couldn't stream the app live: ${r}` });
+    this.session.setStage({ mode: "layout", title: r.name, layout: { tiles: [{ kind: "app", appId: r.id, label: r.name }] } }, "JamSesh", "main", { claim: this.session.stageClaim() });
+  }
 
   private onBuildRequest(r: BuildRequest) {
     const s = this.session;
@@ -793,3 +1266,19 @@ export class Hub {
 
 /** One handover by a hook or the listener, waiting for the hook script to acknowledge it (Hub.offer). */
 type Delivery = { id: string; at: number; via: "hook" | "listen"; directives: string[]; msgUpTo: number; decisionUpTo: number };
+
+function imageSize(b: Uint8Array): { width: number; height: number } | null {
+  if (b[0] === 0x89 && b[1] === 0x50) {
+    const v = new DataView(b.buffer, b.byteOffset);
+    return { width: v.getUint32(16), height: v.getUint32(20) };
+  }
+  let i = 2;
+  while (i + 9 < b.length) {
+    if (b[i] !== 0xff) return null;
+    const marker = b[i + 1];
+    const len = (b[i + 2] << 8) | b[i + 3];
+    if (marker >= 0xc0 && marker <= 0xc3) return { height: (b[i + 5] << 8) | b[i + 6], width: (b[i + 7] << 8) | b[i + 8] };
+    i += 2 + len;
+  }
+  return null;
+}

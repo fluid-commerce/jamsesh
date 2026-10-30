@@ -136,6 +136,8 @@ export interface Directive {
   /** The agents a coordinate directive's target compares with: finishing it needs a reply from one of them. */
   counterparts?: string[];
   status: DirectiveStatus;
+  /** Set when the directive is made for something that must happen once (a recording's notes for one agent): a repeat finds this one. */
+  key?: string;
   /** Each target agent's own progress; status is done only when every target is. */
   progress: Record<string, DirectiveStatus>;
   priority: number;
@@ -233,12 +235,41 @@ export type Tile =
   | { kind: "screen"; shareId: string; label?: string }
   | { kind: "agent"; agentId: string; label?: string }
   | { kind: "html"; html: string; label?: string }
-  | { kind: "feed"; label?: string };
+  | { kind: "feed"; label?: string }
+  | { kind: "app"; appId: string; label?: string };
 
 export interface Layout {
   tiles: Tile[];
   /** CSS grid; omitted = JamSesh picks a bento for the tile count. */
   grid?: { columns: string; rows: string; areas: string[] };
+}
+
+/** An iPhone build in the Simulator, or a Mac app, streaming live from the host (6.3). */
+export interface LiveApp {
+  id: string;
+  kind: "ios" | "mac";
+  name: string;
+  status: "live" | "gone";
+  /** The screen in points (a Mac app's window; 0 until its first frame). Taps are mapped onto this. */
+  width: number;
+  height: number;
+  orientation: "portrait" | "landscape-left";
+  appearance: "light" | "dark" | null;
+  /** iOS: how the picture is captured: the Simulator's window at 30 fps, or screenshots (about 8 to 15 fps). */
+  capture?: "window" | "screenshots";
+  /** One line on how to get the faster capture, when it isn't on. */
+  hint?: string;
+  /** Whether taps can reach it. Watching works without. */
+  canTap: boolean;
+  /** Who is driving: one person at a time. */
+  controller: { personId: string | null; name: string; since: number } | null;
+  /** On a locked big screen the screen's drivers (6.1) drive the tile, not its own controller: who they are, and which screen. */
+  drivers?: { personId: string; name: string }[];
+  viaScreen?: string;
+  startedBy: string;
+  startedAt: number;
+  /** Why it can't be driven, or why it ended, in words for the tile. */
+  note?: string;
 }
 
 /** A live screen or camera someone shares from their device. */
@@ -283,7 +314,18 @@ export interface Annotation {
     nodeId?: string | null;
     canvasX?: number | null;
     canvasY?: number | null;
+    /** The page of the build or canvas it was on when pinned. */
+    page?: string | null;
   };
+  /** Scroll position of the page or viewer at the moment it was pinned. */
+  scroll?: { x: number; y: number } | null;
+  /** Set when pinned from a recording on a big screen: which one. */
+  screenId?: string | null;
+  /** The recording this pin came from, and its note, so a repeated send never doubles it. */
+  recordingId?: string;
+  noteId?: string;
+  /** A picture of the spot (a crop of the item), when one could be made. */
+  crop?: string | null;
   /** Position inside the target, 0..1. */
   x: number;
   y: number;
@@ -291,6 +333,55 @@ export interface Annotation {
   source: "pin" | "pointer";
   status: "open" | "sent" | "done";
   promptEventId: number | null;
+}
+
+/** One pointer moment in a recording (after CursorCap's dwell/click model), with where it happened. */
+export interface RecordMark {
+  t: number;
+  kind: "dwell" | "click" | "drag" | "move";
+  x: number;
+  y: number;
+  dur?: number;
+  target: Annotation["target"];
+  /** Who was pointing, when more than one person drives the same screen. */
+  driverId?: string | null;
+  scroll?: { x: number; y: number } | null;
+  word?: string;
+}
+
+/** What a note is pinned to. */
+export interface NotePin {
+  target: Annotation["target"];
+  x: number;
+  y: number;
+  kind: RecordMark["kind"];
+  scroll?: { x: number; y: number } | null;
+}
+
+/** A thing said while pointing, ready to tidy and send. */
+export interface RecordNote {
+  id: string;
+  text: string;
+  t0: number;
+  t1: number;
+  personId: string | null;
+  pin: NotePin | null;
+  /** The big screen it was said on, or none for the person's own screen. */
+  screenId?: string | null;
+  /** Who gets it: the agent that owns the item pinned, or null (the room brain decides). */
+  ownerId?: string | null;
+  ownerName?: string | null;
+}
+
+/** A recording in progress, so every window can show who is recording and where. */
+export interface ActiveRecording {
+  id: string;
+  deviceId: string;
+  personId: string | null;
+  personName: string;
+  /** The big screen being recorded, or null for the person's own screen. */
+  screenId: string | null;
+  since: number;
 }
 
 export interface Stage {
@@ -337,6 +428,8 @@ export interface StageLock {
   personId: string | null;
   since: number;
   lastActive: number;
+  /** People driving this screen right now (6.1): the owner, and whoever they passed control to. Ends with the lock. */
+  drivers?: string[];
 }
 
 /** What an agent wanted to show while a screen was locked; it waits here until someone shows or dismisses it. */
@@ -460,6 +553,34 @@ export interface ScreenInfo {
   stage: Stage;
 }
 
+/** A font the room can draw with. Names and counts only: the bytes are served to canvases and never listed. */
+export interface FontInfo {
+  key: string;
+  family: string;
+  /** "open": an OFL or Apache font fetched for the repositories; "borrowed": lent by one person for the session. */
+  kind: "open" | "borrowed";
+  source: string;
+  license: string | null;
+  faces: number;
+  bytes: number;
+  lenderId?: string;
+  lender?: string;
+}
+
+/** A family some canvas shows in a substitute, and who has been asked. */
+export interface FontWant {
+  key: string;
+  family: string;
+  askedBy: string[];
+  declinedBy: string[];
+  since: number;
+}
+
+export interface FontsState {
+  available: FontInfo[];
+  wanted: FontWant[];
+}
+
 export interface HubState {
   session: { roomId: string; name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
   settings: Settings;
@@ -475,8 +596,14 @@ export interface HubState {
   stage: Stage;
   shares: Share[];
   annotations: Annotation[];
+  /** Recordings running now. */
+  recordings: ActiveRecording[];
   facts: Fact[];
   buildRequests: BuildRequest[];
+  /** Simulator and Mac apps streaming live from the host (6.3). */
+  liveApps: LiveApp[];
+  /** The fonts canvases draw with, and the ones nobody has yet (SPEC 12.4). */
+  fonts: FontsState;
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];
   /** Agents' items waiting because a screen was locked (3.1). */
@@ -507,6 +634,14 @@ export interface CanvasInfo {
   generation: number;
 }
 
+/** One bit of a driver's input, positions as fractions 0..1 of the screen's stage area (SPEC 10.6). */
+export type DriveEvent =
+  | { k: "move"; x: number; y: number }
+  | { k: "down" | "up"; x: number; y: number; b?: number; n?: number }
+  | { k: "wheel"; x: number; y: number; dx: number; dy: number; ctrl?: boolean }
+  | { k: "key"; key: string; code?: string; down: boolean; mods?: { shift?: boolean; ctrl?: boolean; alt?: boolean; meta?: boolean } }
+  | { k: "leave" };
+
 export type BusMessage =
   | { type: "state"; state: HubState }
   | { type: "event"; event: JamEvent }
@@ -521,6 +656,7 @@ export type BusMessage =
   | { type: "level"; deviceId: string; level: number }
   | { type: "thinking"; on: boolean; label?: string }
   | { type: "rtc"; from: string; to: string; data: any }
+  | { type: "drive"; screen: string; personId: string; name: string; color: string; ev: DriveEvent; t: number }
   | { type: "chime"; deviceId: string | null }
   | { type: "share-ended"; shareId: string; deviceId: string; text: string }
   | { type: "share-request"; shareId: string; deviceIds: string[]; kind: "screen" | "camera"; reason: string; by: string };

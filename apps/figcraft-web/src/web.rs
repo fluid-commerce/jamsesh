@@ -44,6 +44,11 @@ pub fn start() {
                     // `?canvas` (or `?jamsesh`): just the live canvas; `?name=` is the display name.
                     let canvas = crate::query::canvas(&query());
                     fig.ui.canvas_only = canvas;
+                    // `&panels`: a person's canvas, with buttons for its panels; what they last chose stays.
+                    fig.ui.canvas_panels = canvas && crate::query::panels(&query());
+                    if fig.ui.canvas_panels {
+                        fig.session.prefs.canvas_panels = crate::panels::read();
+                    }
                     if let Some(name) = crate::query::name(&query()) {
                         fig.session.prefs.user_name = name;
                     }
@@ -65,7 +70,8 @@ pub fn start() {
                             log::error!("couldn't install window.figcraft: {e:?}");
                         }
                     }
-                    Ok(Box::new(WebShell { fig }))
+                    let panels = fig.session.prefs.canvas_panels;
+                    Ok(Box::new(WebShell { fig, panels }))
                 }),
             )
             .await;
@@ -84,6 +90,8 @@ fn query() -> String {
 
 struct WebShell {
     fig: FigApp,
+    /// The panels kept in this browser last (a change is written once).
+    panels: (bool, bool),
 }
 
 impl eframe::App for WebShell {
@@ -99,6 +107,10 @@ impl eframe::App for WebShell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.fig.control_queue.extend(crate::api::take_requests());
         self.fig.ui(ui);
+        if self.fig.ui.canvas_panels && self.panels != self.fig.session.prefs.canvas_panels {
+            self.panels = self.fig.session.prefs.canvas_panels;
+            crate::panels::write(self.panels);
+        }
         crate::api::poll_replies();
     }
 }

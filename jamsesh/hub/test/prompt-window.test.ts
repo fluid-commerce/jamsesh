@@ -21,6 +21,16 @@ function room() {
   return { hub, s, maya, ben };
 }
 
+/** Starts a recording on Maya's laptop at t0 and returns what Stop gives (the notes' words, joined). */
+async function recorded(hub: Hub, personId: string, t0: number, typed?: string) {
+  const a = hub.recordStart("mayaLaptop", personId, t0);
+  if (!a.ok) throw new Error(a.reason);
+  return { id: a.id, stop: async () => {
+    const r = await hub.recordStop({ deviceId: "mayaLaptop", recordingId: a.id, caller: "host", personId, pointer: [], typed });
+    return { ok: r.ok, text: r.ok ? r.notes.map((n) => n.text).join(" ") : "" };
+  } };
+}
+
 let n = 0;
 function line(hub: Hub, text: string, personId: string | null, loudest: string, t0: number, t1 = t0 + 1500): Utterance {
   const u: Utterance = {
@@ -49,28 +59,30 @@ function line(hub: Hub, text: string, personId: string | null, loudest: string, 
 test("a recorded prompt holds only the recorder's words; others keep flowing as room speech", async () => {
   const { hub, s, maya, ben } = room();
   const t0 = Date.now() - 6000;
-  hub.promptStart("mayaLaptop", t0);
+  const rec = await recorded(hub, maya.id, t0);
   line(hub, "put the nav on the big screen", maya.id, "mayaLaptop", t0 + 500);
   line(hub, "I think the footer is wrong", ben.id, "benLaptop", t0 + 2200);
   line(hub, "and make it blue", maya.id, "mayaLaptop", t0 + 4000);
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 5500, pointer: [] });
+  const r = await rec.stop();
   expect(r.ok).toBe(true);
-  expect((r as any).text).toBe("put the nav on the big screen and make it blue");
+  expect(r.text).toContain("put the nav on the big screen");
+  expect(r.text).toContain("make it blue");
+  expect(r.text).not.toContain("footer");
   const speech = s.store.recentEvents({ kinds: ["speech"], limit: 20 });
-  // Ben's line is in the feed as his own; Maya's words appear once, in the prompt.
+  // Ben's line is in the feed as his own; Maya's words are in her notes, not also in the feed.
   expect(speech.filter((e) => e.text.includes("footer")).length).toBe(1);
-  expect(speech.filter((e) => e.text.includes("nav on the big screen")).length).toBe(1);
+  expect(speech.filter((e) => e.text.includes("nav on the big screen")).length).toBe(0);
   hub.stop();
 });
 
 test("a line the recording laptop heard but nobody it owns said is not the recorder's", async () => {
   const { hub, maya, ben } = room();
   const t0 = Date.now() - 6000;
-  hub.promptStart("mayaLaptop", t0);
+  const rec = await recorded(hub, maya.id, t0, "show the footer");
   // Ben is loudest at his own laptop, and Maya's laptop also heard him.
   line(hub, "we should ship friday", ben.id, "benLaptop", t0 + 1000);
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 5500, pointer: [], typed: "show the footer" });
-  expect((r as any).text).toBe("show the footer");
+  const r = await rec.stop();
+  expect(r.text).toBe("show the footer");
   hub.stop();
 });
 
@@ -116,11 +128,11 @@ test("onPrompt drops the harness's own injected text", () => {
 test("words transcribed after the window answered reach the feed as room speech, not nowhere", async () => {
   const { hub, s, maya } = room();
   const t0 = Date.now() - 3000;
-  hub.promptStart("mayaLaptop", t0);
+  const rec = await recorded(hub, maya.id, t0);
   line(hub, "put the nav up", maya.id, "mayaLaptop", t0 + 500);
   (hub as any).audio.pendingFor = () => 1;
-  const r = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 2000, pointer: [] });
-  expect((r as any).text).toBe("put the nav up");
+  const r = await rec.stop();
+  expect(r.text).toBe("put the nav up");
   // The last words finish after the window closed.
   line(hub, "and make it blue", maya.id, "mayaLaptop", t0 + 1800);
   const speech = s.store.recentEvents({ kinds: ["speech"], limit: 20 }).map((e) => e.text);

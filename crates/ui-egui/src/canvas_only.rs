@@ -1,7 +1,8 @@
 //! Canvas-only mode (`UiState::canvas_only`): the window is just the live canvas. These are the
 //! two things it adds over the canvas itself: a presence pill (who is here, and a dot when the
 //! session isn't up) at the top right, a zoom chip at the bottom right, and the placeholder shown
-//! while no file has opened yet (a join still connecting).
+//! while no file has opened yet (a join still connecting). A person's canvas (`UiState::canvas_panels`)
+//! also gets two buttons in its top corners that slide the layers and properties panels in.
 
 use egui::{Align2, Color32, CornerRadius, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use figcraft_engine::live::Status;
@@ -10,6 +11,7 @@ use serde_json::json;
 use crate::FigApp;
 use crate::a11y::Tip;
 use crate::i18n::{tr, trf};
+use crate::icons::{self, Icon};
 use crate::live::{avatar, color, failure_text};
 use crate::theme::{Tokens, regular, semibold};
 
@@ -19,6 +21,25 @@ const PAD: f32 = 5.0;
 const MARGIN: f32 = 12.0;
 /// The most avatars drawn before the rest collapse into a "+n".
 const MAX_SHOWN: usize = 8;
+/// The panel buttons' size, and how long a panel takes to slide.
+const BUTTON: f32 = 32.0;
+const SLIDE: f32 = 0.22;
+/// The strip along the top of a slid-in panel that holds these buttons (and, beside the left one, the
+/// page bar JamSesh's page draws over the canvas), so the panel's own content starts below them.
+pub const TOP_BAND: f32 = 48.0;
+
+/// How far each panel has slid in (0 out, 1 in, eased), left then right. Without panel buttons,
+/// or with motion reduced, a change is immediate.
+pub fn slide(app: &FigApp, ctx: &egui::Context) -> (f32, f32) {
+    if !app.ui.canvas_only || !app.ui.canvas_panels {
+        return (0.0, 0.0);
+    }
+    let time = if app.reduce_motion() { 0.0 } else { SLIDE };
+    let (l, r) = app.session.prefs.canvas_panels;
+    let ease =
+        |id: &str, on| ctx.animate_bool_with_time_and_easing(egui::Id::unique(("canvas_panel_slide", id)), on, time, egui::emath::easing::cubic_out);
+    (ease("canvas_panel_left", l), ease("canvas_panel_right", r))
+}
 
 /// A pill-shaped backdrop in the panel colours, so the overlay reads on any canvas.
 fn pill(painter: &egui::Painter, r: Rect, t: &Tokens) {
@@ -41,6 +62,9 @@ fn status_note(status: &Status, t: &Tokens) -> Option<(Color32, String)> {
 /// The presence pill (top right) and zoom chip (bottom right) over `canvas`.
 pub fn overlay(app: &mut FigApp, ctx: &egui::Context, canvas: Rect, zoom: Option<f64>) {
     presence(app, ctx, canvas);
+    if app.ui.canvas_panels {
+        panel_buttons(app, ctx);
+    }
     if let Some(z) = zoom {
         zoom_chip(app, ctx, canvas, z);
     }
@@ -68,7 +92,9 @@ fn presence(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
     let count = 1 + shown + usize::from(more > 0);
     let width = PAD * 2.0 + note_w + 2.0 * R + (count - 1) as f32 * STEP;
     let size = vec2(width, 2.0 * R + 2.0 * PAD);
-    let rect = Rect::from_min_size(pos2(canvas.max.x - MARGIN - size.x, canvas.min.y + MARGIN), size);
+    // The properties button takes the corner while its panel is out (in, it sits in the panel's own corner).
+    let corner = if app.ui.canvas_panels { (BUTTON + 8.0) * (1.0 - slide(app, ctx).1) } else { 0.0 };
+    let rect = Rect::from_min_size(pos2(canvas.max.x - MARGIN - corner - size.x, canvas.min.y + MARGIN), size);
     let mut clicked = None;
     egui::Area::new(egui::Id::unique("canvas_only_presence")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
         ui.set_clip_rect(rect.expand(4.0));
@@ -111,6 +137,50 @@ fn presence(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
     if let Some(id) = clicked {
         let params = if follow == Some(id) { json!({}) } else { json!({"client": id}) };
         app.run("collab.follow", params);
+    }
+}
+
+/// The layers button (top left) and the properties button (top right) of the window, over a panel
+/// that is in; the one whose panel is in shows pressed.
+fn panel_buttons(app: &mut FigApp, ctx: &egui::Context) {
+    let window = ctx.content_rect();
+    let t = Tokens::get(ctx);
+    let (left, right) = app.session.prefs.canvas_panels;
+    let mut toggle = None;
+    for (side, icon, name, on, x) in [
+        ("left", Icon::PanelLeft, tr("Layers"), left, window.min.x + MARGIN),
+        ("right", Icon::PanelRight, tr("Design"), right, window.max.x - MARGIN - BUTTON),
+    ] {
+        let rect = Rect::from_min_size(pos2(x, window.min.y + MARGIN), vec2(BUTTON, BUTTON));
+        egui::Area::new(egui::Id::unique(("canvas_only_panel", side))).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
+            let resp = ui.interact(rect, ui.scope_id().with("button"), Sense::click()).tip(name);
+            let radius = CornerRadius::same((BUTTON / 2.0) as u8);
+            let painter = ui.painter();
+            pill(painter, rect, &t);
+            if on {
+                painter.rect_filled(rect, radius, t.accent);
+            } else if resp.hovered() {
+                painter.rect_filled(rect, radius, t.hover);
+            }
+            icons::paint(
+                painter,
+                rect.shrink(8.0),
+                icon,
+                if on {
+                    t.accent_on
+                } else if resp.hovered() {
+                    t.text
+                } else {
+                    t.icon
+                },
+            );
+            if resp.clicked() {
+                toggle = Some(side);
+            }
+        });
+    }
+    if let Some(side) = toggle {
+        app.run("view.canvasPanel", json!({"side": side}));
     }
 }
 

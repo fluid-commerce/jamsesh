@@ -3,6 +3,7 @@
 // built screen's earlier versions (3.5).
 import { useState } from "react";
 import { createPortal } from "react-dom";
+import { DriveControls } from "./DriveControls";
 import { api, pref, useHub, type Artifact, type HubState, type ShowRequest } from "./hub";
 import { useNow } from "./ui";
 import "./stagecontrols.css";
@@ -38,7 +39,7 @@ export async function stageAction(path: string, body: Record<string, unknown>): 
 }
 
 /** Above the stage: who holds the screen, and what's waiting to go up. Nothing when neither applies. */
-export function StageBar({ state, screen = state.stage.screenId ?? "main", asPerson }: { state: HubState; screen?: string; asPerson: boolean }) {
+export function StageBar({ state, screen = state.stage.screenId ?? "main", asPerson, drive }: { state: HubState; screen?: string; asPerson: boolean; drive?: boolean }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
   const lock = state.stage.lock;
@@ -60,6 +61,7 @@ export function StageBar({ state, screen = state.stage.screenId ?? "main", asPer
             )}
           </span>
         )}
+        {lock && drive && <DriveControls state={state} screen={screen} />}
         {ready.length > 0 && (
           <button className={`stage-ready ${open ? "open" : ""}`} onClick={() => setOpen(!open)} aria-expanded={open}>
             Ready to show <b>{ready.length}</b>

@@ -72,6 +72,7 @@ const REPLAY_MS = 7 * 86_400_000;
 
 /** Where a voice sample came from: heard in passing, read aloud, or a correction. */
 export type VoiceKind = "auto" | "enrol" | "correction";
+const CANCEL_KEEP_MS = 60 * 60_000;
 
 export class Store {
   db: Database;
@@ -108,6 +109,7 @@ export class Store {
         person_id TEXT NOT NULL, ts INTEGER NOT NULL, embedding BLOB NOT NULL
       );
       CREATE TABLE IF NOT EXISTS digests (scope TEXT PRIMARY KEY, text TEXT NOT NULL, updated INTEGER NOT NULL, through_event INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS cancels (device TEXT NOT NULL, token TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (device, token));
       CREATE TABLE IF NOT EXISTS replies (key TEXT PRIMARY KEY, status INTEGER NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL);
     `);
     // Older stores kept voice samples with no kind: they were all learned automatically.
@@ -179,19 +181,25 @@ export class Store {
     // The depth counts only a transaction that really began: a BEGIN that throws leaves it at 0.
     this.db.exec("BEGIN IMMEDIATE");
     this.txDepth = 1;
+    // Announcements wait for the commit: clients never hear of a write that rolled back.
+    const held: (() => void)[] = (this.held = []);
+    let out: T;
     try {
-      const out = fn();
+      out = fn();
       this.db.exec("COMMIT");
-      return out;
     } catch (e) {
       try {
         this.db.exec("ROLLBACK");
       } catch {}
+      this.held = null;
       this.cache.clear();
       throw e;
     } finally {
       this.txDepth = 0;
     }
+    this.held = null;
+    for (const f of held) f();
+    return out;
   }
 
   // ---- replayed calls: the first answer to each idempotency key, kept across restarts for as long
@@ -218,6 +226,22 @@ export class Store {
   }
 
   // ---- events ----
+
+  private held: (() => void)[] | null = null;
+  private announce(f: () => void) {
+    if (this.held) this.held.push(f);
+    else f();
+  }
+
+  /** A recording token a window cancelled (kept an hour, longer than any Start can be in flight). Only that window's own cancels push out its oldest. */
+  cancelToken(device: string, token: string, now = Date.now()) {
+    this.db.query("DELETE FROM cancels WHERE at < ?").run(now - CANCEL_KEEP_MS);
+    this.db.query("INSERT OR REPLACE INTO cancels (device, token, at) VALUES (?, ?, ?)").run(device, token, now);
+    this.db.query("DELETE FROM cancels WHERE device = ? AND token NOT IN (SELECT token FROM cancels WHERE device = ? ORDER BY at DESC LIMIT 200)").run(device, device);
+  }
+  tokenCancelled(device: string, token: string, now = Date.now()): boolean {
+    return !!this.db.query("SELECT 1 FROM cancels WHERE device = ? AND token = ? AND at >= ?").get(device, token, now - CANCEL_KEEP_MS);
+  }
 
   addEvent(e: {
     kind: EventKind;
@@ -259,7 +283,7 @@ export class Store {
       workstreamId: e.workstreamId ?? null,
       data: e.data ?? {},
     };
-    bus.send({ type: "event", event });
+    this.announce(() => bus.send({ type: "event", event }));
     return event;
   }
 

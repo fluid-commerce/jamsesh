@@ -589,6 +589,8 @@ export class McpEndpoint {
         const focus = typeof args.focus === "string" && args.focus.trim() ? args.focus.trim().slice(0, 200) : agent.focus;
         s.touchAgent(agent.id, { card, branch: card.branch || agent.branch, repo, platform, focus });
         s.store.put("agents", s.agent(agent.id)!);
+        // The open fonts the card names are fetched for every canvas (fonts.ts).
+        void this.hub.fonts.scan().catch(() => {});
         if (repo !== agent.repo) s.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `${agent.name} moved to ${shortRepo(repo)}${focus ? `: ${focus}` : ""}.` });
         return text("Repo card saved. Other agents and the room brain can see it.");
       }

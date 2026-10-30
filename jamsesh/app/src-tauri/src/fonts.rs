@@ -1,12 +1,11 @@
-// Fonts from this Mac for this person's canvas.
+// Fonts from this Mac for the session's canvases (SPEC 12.4).
 //
-// A person's canvas is FigCraft's WebAssembly build, which can't see the Mac's installed fonts: text
-// an agent set in Helvetica Neue (drawn natively on the host) shows in a substitute there. The page
-// asks for the families its canvas reports missing, and this reads them from the Mac's own font
-// folders (system, local and the person's) so the page can hand them to the canvas with
-// `text.loadFont`. The bytes go to the page in this app's window, which is the host's page: whoever
-// hosts the session can ask for any installed family (capped per request below), so this is not a
-// boundary between a person's Mac and the host.
+// A canvas is FigCraft's WebAssembly build, which can't see the Mac's installed fonts: text an agent set
+// in Helvetica Neue (drawn natively on the host) shows in a substitute there. The session's pages may ask
+// only which families this Mac has (`installed`, names only). A font's files leave this Mac in one way:
+// `lend`, after a native dialog names the font, the session and who is waiting, and the person says
+// they may share it; main.rs `lend_font` then sends them to the hub itself, signed (`lend_signature`),
+// so the page that asked never holds them and the hub takes lent fonts from no one else.
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -73,74 +72,90 @@ fn lookup_files(families: &[String]) -> Vec<(String, Vec<PathBuf>)> {
     out
 }
 
-/// What one request returns: the font files found, and the families it didn't get to.
-#[derive(Serialize, Debug, Default)]
-pub struct LocalFonts {
-    /// One entry per font file, so a family kept in several files (Regular, Bold …) sends each.
-    pub fonts: Vec<LocalFont>,
-    /// Families that were asked for but not looked at (past [`MAX_FAMILIES`]) or that didn't fit in
-    /// this response ([`MAX_TOTAL`]): ask for them again. A family absent from both lists and from
-    /// `fonts` is one this Mac doesn't have.
-    pub deferred: Vec<String>,
-    /// Families this Mac has but that did not arrive whole: a file over [`MAX_FILE`], one that
-    /// couldn't be read, or too many for one response. The page keeps showing them as substituted.
-    pub incomplete: Vec<String>,
+/// Which of `families` this Mac has installed (as asked), without reading any font: the page uses
+/// it to know whether it can offer to lend one. Same limits as [`read_families`].
+pub fn installed(families: &[String]) -> Vec<String> {
+    let mut wanted: Vec<String> = families.iter().map(|f| f.trim().to_string()).filter(|f| !f.is_empty() && f.len() <= 200).collect();
+    wanted.truncate(MAX_FAMILIES);
+    lookup_files(&wanted).into_iter().filter(|(_, files)| !files.is_empty()).map(|(f, _)| f).collect()
 }
 
 /// The font files of the families this Mac has, read and base64-encoded: each file once, files
-/// over [`MAX_FILE`] skipped, and at most [`MAX_TOTAL`] in all. A family goes whole or not at all
-/// (so its faces stay together) unless it is alone too big, then as many of its files as fit.
-/// Families it doesn't have are left out; families it didn't get to are named in `deferred`.
-pub fn local_fonts(families: &[String]) -> LocalFonts {
+/// over [`MAX_FILE`] skipped, and at most [`MAX_TOTAL`] in all. Families it doesn't have are left out.
+fn read_families(families: &[String]) -> Vec<LocalFont> {
     let mut wanted: Vec<String> = Vec::new();
     for f in families.iter().map(|f| f.trim()).filter(|f| !f.is_empty() && f.len() <= 200) {
         if !wanted.iter().any(|w| w.eq_ignore_ascii_case(f)) {
             wanted.push(f.to_string());
         }
     }
-    let rest = wanted.split_off(wanted.len().min(MAX_FAMILIES));
-    let mut out = read_files(lookup_files(&wanted));
-    out.deferred.extend(rest);
-    out
+    wanted.truncate(MAX_FAMILIES);
+    read_files(lookup_files(&wanted))
 }
 
-fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> LocalFonts {
-    read_files_capped(found, MAX_TOTAL)
+/// What the native dialog asks before a font leaves this Mac: the font, the session and who is waiting for it.
+pub fn lend_prompt(family: &str, session: &str, askers: &[String]) -> String {
+    let who = if askers.is_empty() { "A canvas".to_string() } else { askers.join(" and ") };
+    format!(
+        "Share \u{201c}{family}\u{201d} with \u{201c}{session}\u{201d}?\n\n{who} is drawing text in it. If you share it, everyone's canvas in this session can use it until the session ends. It is never saved on anyone's Mac. Only share it if your licence allows that."
+    )
 }
 
-fn read_files_capped(found: Vec<(String, Vec<PathBuf>)>, max_total: u64) -> LocalFonts {
+/// Lending a font: `confirm` (the native dialog) is asked with the prompt first, and only a yes reads the files.
+/// The page never gets font bytes any other way. Errors are plain sentences for the page to show.
+pub fn lend(family: &str, session: &str, askers: &[String], confirm: impl FnOnce(&str) -> bool) -> Result<Vec<LocalFont>, String> {
+    let family = family.trim();
+    if family.is_empty() || family.len() > 200 || session.len() > 200 {
+        return Err("That font name isn't valid.".into());
+    }
+    let asked = [family.to_string()];
+    if installed(&asked).is_empty() {
+        return Err("This Mac no longer has that font.".into());
+    }
+    let askers: Vec<String> = askers.iter().take(5).map(|a| a.chars().take(60).collect()).collect();
+    if !confirm(&lend_prompt(family, session, &askers)) {
+        return Err("You chose not to share it.".into());
+    }
+    let fonts = read_families(&asked);
+    if fonts.is_empty() {
+        return Err("That font is too large to share, or couldn't be read.".into());
+    }
+    Ok(fonts)
+}
+
+/// Lowercase hex of SHA-256.
+pub fn sha256_hex(data: &[u8]) -> String {
+    hex(ring::digest::digest(&ring::digest::SHA256, data).as_ref())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What signs a lend for the hub (hub/src/fonts.ts `lendMessage`): HMAC-SHA256 under `key` of the hub's ticket
+/// and the SHA-256 of the files as sent (base64, joined by newlines), in hex.
+pub fn lend_signature(key: &[u8], ticket: &str, files: &[String]) -> String {
+    let message = format!("{ticket}\n{}", sha256_hex(files.join("\n").as_bytes()));
+    hex(ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), message.as_bytes()).as_ref())
+}
+
+fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Vec<LocalFont> {
     let mut sent = BTreeSet::new();
     let mut total = 0u64;
-    let mut out = LocalFonts::default();
+    let mut out = Vec::new();
     for (family, files) in found {
-        let mut whole = true;
-        let mut sizes: Vec<(PathBuf, u64)> = Vec::new();
-        for p in files.into_iter().filter(|p| !sent.contains(p)) {
-            match std::fs::metadata(&p) {
-                Ok(m) if m.len() <= MAX_FILE => sizes.push((p, m.len())),
-                _ => whole = false, // too big, or can't be read
-            }
-        }
-        let size: u64 = sizes.iter().map(|(_, len)| len).sum();
-        if total > 0 && total + size > max_total {
-            out.deferred.push(family);
-            continue;
-        }
-        for (path, len) in sizes {
-            if total + len > max_total {
-                whole = false; // a family too big for one response sends what fits
+        for path in files {
+            if sent.contains(&path) {
                 continue;
             }
-            let Ok(bytes) = std::fs::read(&path) else {
-                whole = false;
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            if meta.len() > MAX_FILE || total + meta.len() > MAX_TOTAL {
                 continue;
-            };
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
             total += bytes.len() as u64;
             sent.insert(path);
-            out.fonts.push(LocalFont { family: family.clone(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
-        }
-        if !whole {
-            out.incomplete.push(family);
+            out.push(LocalFont { family: family.clone(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
         }
     }
     out
@@ -162,10 +177,38 @@ mod tests {
     }
 
     #[test]
+    fn says_which_families_are_installed_without_reading_them() {
+        let asked: Vec<String> = ["Helvetica Neue", "No Such Family 7f3a", "  ", "HELVETICA NEUE"].map(String::from).to_vec();
+        assert_eq!(installed(&asked), vec!["Helvetica Neue".to_string(), "HELVETICA NEUE".to_string()]);
+        let many: Vec<String> = (0..MAX_FAMILIES + 10).map(|i| format!("No Such Family {i}")).collect();
+        assert!(installed(&many).is_empty());
+    }
+
+    #[test]
+    fn a_font_is_read_only_after_the_dialog_says_yes() {
+        let askers = vec!["Lee".to_string()];
+        let mut shown = String::new();
+        let no = lend("Helvetica Neue", "Design review", &askers, |p| {
+            shown = p.to_string();
+            false
+        });
+        assert_eq!(no.unwrap_err(), "You chose not to share it.");
+        assert!(shown.contains("Helvetica Neue") && shown.contains("Design review") && shown.contains("Lee"), "{shown}");
+        let yes = lend("helvetica neue", "Design review", &askers, |_| true).unwrap();
+        assert!(!yes.is_empty() && !yes[0].data.is_empty());
+    }
+
+    #[test]
+    fn no_dialog_for_a_font_this_mac_lacks_or_a_bad_name() {
+        let never = |_: &str| -> bool { panic!("no dialog for this") };
+        assert!(lend("No Such Family 7f3a", "S", &[], never).is_err());
+        assert!(lend("  ", "S", &[], never).is_err());
+        assert!(lend(&"x".repeat(300), "S", &[], never).is_err());
+    }
+
+    #[test]
     fn reads_each_file_once_and_leaves_out_what_this_mac_lacks() {
-        let got = local_fonts(&["Helvetica Neue".into(), "HELVETICA NEUE".into(), "No Such Family 7f3a".into()]);
-        assert!(got.deferred.is_empty());
-        let fonts = got.fonts;
+        let fonts = read_families(&["Helvetica Neue".into(), "HELVETICA NEUE".into(), "No Such Family 7f3a".into()]);
         assert!(!fonts.is_empty());
         assert!(fonts.iter().all(|f| f.family == "Helvetica Neue"));
         let bytes = base64::engine::general_purpose::STANDARD.decode(&fonts[0].data).unwrap_or_default();
@@ -180,47 +223,19 @@ mod tests {
         let one = path.first().cloned().into_iter().collect::<Vec<_>>();
         // The same file under many names is read once.
         let many: Vec<(String, Vec<PathBuf>)> = (0..50).map(|i| (format!("f{i}"), one.clone())).collect();
-        assert_eq!(read_files(many).fonts.len(), 1);
+        assert_eq!(read_files(many).len(), 1);
         let asked: Vec<String> = (0..100).map(|i| format!("Family {i}")).collect();
-        let got = local_fonts(&asked);
-        assert!(got.fonts.is_empty());
-        // The 76 it didn't look at are named, not mistaken for fonts this Mac lacks.
-        assert_eq!(got.deferred.len(), 100 - MAX_FAMILIES);
-        assert_eq!(got.deferred[0], format!("Family {MAX_FAMILIES}"));
+        assert!(read_families(&asked).is_empty());
         const { assert!(MAX_FILE < MAX_TOTAL) };
     }
 
     #[test]
-    fn a_family_keeps_all_its_files_and_one_that_does_not_fit_waits() {
-        let dir = std::env::temp_dir().join(format!("jamsesh-fonts-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = |n: &str, len: usize| {
-            let p = dir.join(n);
-            std::fs::write(&p, vec![7u8; len]).unwrap();
-            p
-        };
-        let (reg, bold) = (file("r.ttf", 10), file("b.ttf", 20));
-        let found = vec![("Mine".to_string(), vec![reg.clone(), bold.clone()])];
-        let got = read_files(found);
-        // Regular and Bold in separate files both go.
-        assert_eq!(got.fonts.len(), 2);
-        assert!(got.deferred.is_empty());
-        // Past the cap, a family waits whole (its faces stay together); a smaller one after it still fits.
-        let (big, small) = (file("big.ttf", 15), file("small.ttf", 5));
-        let found = vec![("A".to_string(), vec![reg, bold]), ("B".to_string(), vec![big]), ("C".to_string(), vec![small])];
-        let got = read_files_capped(found, 40);
-        let names: Vec<_> = got.fonts.iter().map(|f| f.family.as_str()).collect();
-        assert_eq!(names, ["A", "A", "C"]);
-        assert_eq!(got.deferred, ["B"]);
-        assert!(got.incomplete.is_empty());
-        // A family that doesn't arrive whole is named, so the page doesn't settle it: here the cap fits one of its two files…
-        let got = read_files_capped(vec![("D".to_string(), vec![file("d1.ttf", 30), file("d2.ttf", 30)])], 40);
-        assert_eq!(got.fonts.len(), 1);
-        assert_eq!(got.incomplete, ["D"]);
-        // …and a file that can't be read (gone) does the same.
-        let got = read_files_capped(vec![("E".to_string(), vec![file("e1.ttf", 3), dir.join("missing.ttf")])], 40);
-        assert_eq!(got.fonts.len(), 1);
-        assert_eq!(got.incomplete, ["E"]);
-        let _ = std::fs::remove_dir_all(&dir);
+    fn signs_a_lend_as_the_hub_checks_it() {
+        // The same vector as hub/test/fonts.test.ts LEND_VECTOR.
+        let files = ["AAEC".to_string(), "AwQF".to_string()];
+        let sig = lend_signature("k".repeat(64).as_bytes(), "00112233445566778899aabbccddeeff", &files);
+        assert_eq!(sig, "75c43a30bfcc15cb3e275553332244c7d3f3c48c2604862406d752454d23057a");
+        assert_ne!(lend_signature(b"other", "00112233445566778899aabbccddeeff", &files), sig);
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 }

@@ -279,7 +279,9 @@ impl FigApp {
         let mobile = self.ui.mobile_panel.filter(|_| narrow);
         self.ui.narrow = narrow;
         // A narrow window shows the right panel when its button asks for it, a board's too.
-        let right_open = (self.right_panel_shown(hidden) && !narrow) || mobile == Some(MobilePanel::Right);
+        // A room canvas's panels slide in from its corner buttons (nothing otherwise).
+        let slid = canvas_only::slide(self, &ctx);
+        let right_open = (self.right_panel_shown(hidden) && !narrow) || mobile == Some(MobilePanel::Right) || slid.1 > 0.0;
         if !hidden && (!narrow || mobile == Some(MobilePanel::Left)) {
             egui::Panel::left("left_rail")
                 .exact_size(56.0)
@@ -291,13 +293,16 @@ impl FigApp {
                 });
         }
         // The panels are as wide as asked, less in a window too small for them and the canvas.
-        let left_open = !hidden && if narrow { mobile == Some(MobilePanel::Left) } else { !self.ui.left_collapsed };
+        let left_open = (!hidden && if narrow { mobile == Some(MobilePanel::Left) } else { !self.ui.left_collapsed }) || slid.0 > 0.0;
         let (left_w, right_w) = if narrow {
             let w = (ui.available_width() - MOBILE_STRIP).max(0.0);
             (if left_open { w } else { 0.0 }, w)
         } else {
             fit_panels(ui.available_width(), left_open.then_some(self.ui.left_width), right_open.then_some(self.ui.right_width))
         };
+        let (left_w, right_w) = if self.ui.canvas_only { (left_w * slid.0, right_w * slid.1) } else { (left_w, right_w) };
+        // A room canvas's panels start below the strip its corner buttons (and JamSesh's page bar) use.
+        let panel_band = egui::Margin { top: if self.ui.canvas_only { canvas_only::TOP_BAND as i8 } else { 0 }, ..Default::default() };
         let rows = ui.available_rect_before_wrap().y_range();
         let mut edges: Vec<(&str, f32, f32, f32)> = Vec::new();
         if left_open {
@@ -307,7 +312,7 @@ impl FigApp {
             egui::Panel::left("left_panel")
                 .resizable(false)
                 .exact_size(left_w)
-                .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)))
+                .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)).inner_margin(panel_band))
                 .show(ui, |ui| {
                     let label = match self.ui.left_tab {
                         _ if self.ui.versions.open => i18n::tr("Version history"),
@@ -325,7 +330,7 @@ impl FigApp {
             egui::Panel::right("right_panel")
                 .resizable(false)
                 .exact_size(right_w)
-                .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)))
+                .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)).inner_margin(panel_band))
                 .show(ui, |ui| {
                     let label = match self.ui.right_tab {
                         RightTab::Design => i18n::tr("Design"),

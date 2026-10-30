@@ -301,16 +301,60 @@ export class Mic {
 
   /** Starts listening. The mic then stays wanted: if it dies (device change, sleep) it comes back by itself. */
   async start() {
+    this.dropLoan();
+    return this.begin();
+  }
+
+  /** The person's own start or stop makes the mic theirs: a loan's pending mute must not undo it. */
+  private dropLoan() {
+    this.control++;
+    if (this.muteTimer) (clearTimeout(this.muteTimer), (this.muteTimer = null));
+    this.lentOn = false;
+  }
+
+  /** Starts the mic without touching a loan (the mic's own reconnecting). */
+  private async begin() {
     this.wanted = true;
     if (this.status.on) return;
     this.starting ??= this.open().finally(() => (this.starting = null));
     return this.starting;
   }
 
+  private leases = 0;
+  /** Counts the person's own start/stop, so a loan still switching the mic on can tell the mic became theirs meanwhile. */
+  private control = 0;
+  private lentOn = false;
+  private muteTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The mic for something that needs it listening (a recording). A mic that was off is switched on and, when the last borrower lets go,
+   * switched off again a moment later (so the last words get through); a borrower that comes in that moment keeps it on. A mic the
+   * person had on stays on. The mic itself holds all of this, so no screen that unmounts can leave it open or mute someone else's use.
+   * Null when it can't be switched on. `release` may be called more than once.
+   */
+  async lend(): Promise<{ release: () => void; turnedOn: boolean } | null> {
+    if (this.muteTimer) (clearTimeout(this.muteTimer), (this.muteTimer = null));
+    const wasOn = this.status.on;
+    const gen = this.control;
+    if (!wasOn && !(await this.ensureOn())) return null;
+    // Switched on by this loan, unless the person took over the mic while it was starting: then it is theirs and no loan mutes it.
+    if (!wasOn && this.control === gen) this.lentOn = true;
+    this.leases++;
+    let given = false;
+    return {
+      turnedOn: this.lentOn,
+      release: () => {
+        if (given) return;
+        given = true;
+        if (--this.leases > 0 || !this.lentOn) return;
+        this.muteTimer = setTimeout(() => ((this.muteTimer = null), this.leases === 0 && this.stop()), 1600);
+      },
+    };
+  }
+
   /** Turns the mic on if it is off; false (with the reason on status.error) when it can't be. */
   async ensureOn() {
     try {
-      await this.start();
+      await this.begin();
       return this.status.on;
     } catch {
       return false;
@@ -327,9 +371,15 @@ export class Mic {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error("This page can't use the microphone over plain HTTP. Open the host's https address (set up Remote access on the host), or use the host itself.");
       }
-      this.stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false },
       });
+      // Switched off while the permission prompt was open: the answer arrives to a mic nobody wants, so it is let go at once.
+      if (!this.wanted) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      this.stream = stream;
       this.ctx = new AudioContext();
       // A context made without a click starts suspended in some browsers; a suspended one hears nothing.
       await this.ctx.resume().catch(() => {});
@@ -382,7 +432,7 @@ export class Mic {
     this.tries++;
     this.retry = setTimeout(() => {
       this.retry = null;
-      if (this.wanted && !this.status.on) void this.start().catch(() => {});
+      if (this.wanted && !this.status.on) void this.begin().catch(() => {});
     }, wait);
   }
 
@@ -409,6 +459,7 @@ export class Mic {
   }
 
   stop() {
+    this.dropLoan();
     this.wanted = false;
     if (this.retry) clearTimeout(this.retry);
     this.retry = null;

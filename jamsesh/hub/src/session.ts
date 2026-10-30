@@ -12,6 +12,7 @@ import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
   Agent,
+  ActiveRecording,
   Annotation,
   Artifact,
   ArtifactVersion,
@@ -31,7 +32,7 @@ import type {
   Share,
   Stage,
   Workstream,
- BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock, StageTileKey } from "./types";
+ BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock, StageTileKey, FontsState, LiveApp } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
 export const LONG_TEXT = 1200;
@@ -241,6 +242,9 @@ export class Session {
 
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
+  /** Live Simulator and Mac app tiles; LiveApps owns them. */
+  liveApps: () => LiveApp[] = () => [];
+  fonts: () => FontsState = () => ({ available: [], wanted: [] });
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
   voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", code: "ok", fix: "", enrolled: 0, lines: 0, byVoice: 0, neverUsed: false });
 
@@ -276,8 +280,11 @@ export class Session {
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
+      recordings: this.recordings(),
       facts: this.facts(),
       buildRequests: this.buildRequests(),
+      liveApps: this.liveApps(),
+      fonts: this.fonts(),
       screens: this.screens(),
       readyToShow: this.readyToShow(),
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
@@ -355,6 +362,8 @@ export class Session {
         return { key, value: this.shares() };
       case "annotations":
         return { key, value: this.annotations() };
+      case "recordings":
+        return { key, value: this.recordings() };
       case "facts":
         return { key, value: this.facts() };
       case "settings":
@@ -368,6 +377,10 @@ export class Session {
         return { key, value: this.screens() };
       case "buildRequests":
         return { key, value: this.buildRequests() };
+      case "liveApps":
+        return { key, value: this.liveApps() };
+      case "fonts":
+        return { key, value: this.fonts() };
       case "readyToShow":
         return { key, value: this.readyToShow() };
       case "showRequests":
@@ -985,7 +998,13 @@ export class Session {
     requestedBy: string;
     sourceEventIds?: number[];
     workstreamId?: string | null;
+    /** Once per key: asking again for the same key returns the directive already made. */
+    key?: string;
   }): Directive {
+    if (d.key) {
+      const had = this.store.all("directives").find((x) => x.key === d.key);
+      if (had) return had;
+    }
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") {
       const workers = d.targets.filter((t) => this.agent(t)?.role !== "observer");
@@ -999,6 +1018,7 @@ export class Session {
     if (d.mode === "coordinate" && (!d.targets.length || d.targets.some((t) => !counterparts.some((c) => c !== t)))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
     const directive: Directive = {
       id: newId("d"),
+      ...(d.key ? { key: d.key } : {}),
       ts: Date.now(),
       text: d.text,
       mode: d.mode,
@@ -1015,8 +1035,10 @@ export class Session {
       deliveredAt: null,
       updatedAt: Date.now(),
     };
-    this.store.put("directives", directive);
     const names = d.targets.map((t) => this.agent(t)?.name).filter(Boolean);
+    // The directive and its event are one write: a failure between them leaves neither, so a retry can't double it.
+    this.store.atomic(() => {
+    this.store.put("directives", directive, false);
     this.store.addEvent({
       kind: "directive",
       authorType: "brain",
@@ -1026,6 +1048,8 @@ export class Session {
       workstreamId: directive.workstreamId,
       data: { directiveId: directive.id, mode: d.mode, targets: d.targets, targetNames: names, requestedBy: d.requestedBy, rationale: directive.rationale },
     });
+    });
+    bus.changed("directives");
     bus.send({
       type: "toast",
       tone: "directive",
@@ -1662,6 +1686,17 @@ export class Session {
     this.checkShares(true);
   }
 
+  // ---- recordings in progress ----
+
+  private active = new Map<string, ActiveRecording>();
+  recordings(): ActiveRecording[] {
+    return [...this.active.values()];
+  }
+  setRecording(r: ActiveRecording | null, deviceId?: string) {
+    if (r) this.active.set(r.deviceId, r);
+    else if (deviceId) this.active.delete(deviceId);
+    bus.changed("recordings");
+  }
   // ---- annotations ----
 
   annotations(): Annotation[] {
@@ -1874,6 +1909,7 @@ export class Session {
   private revertsToBoard(stage: Stage) {
     if (stage.pinned || stage.lock || stage.mode === "board" || stage.mode === "welcome") return false;
     if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && this.store.get("shares", t.shareId)?.status === "live")) return false;
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "app")) return false;
     return true;
   }
 
@@ -1989,7 +2025,10 @@ export class Session {
     }
     const now = Date.now();
     const quiet = next.mode === "board" || next.mode === "welcome";
-    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { id: newId("lk"), by: opts.person.name, personId: opts.person.id, since: now, lastActive: now } : undefined);
+    // An owner who re-casts while driving keeps driving the new stage; anyone they handed control to is cut off.
+    const cur = this.stage(screen);
+    const keeps = opts.person?.id && cur.lock?.personId === opts.person.id && cur.lock.drivers?.includes(opts.person.id);
+    const lock: StageLock | undefined = quiet ? undefined : opts.keepLock ?? (opts.person && !opts.noLock ? { id: newId("lk"), by: opts.person.name, personId: opts.person.id, since: now, lastActive: now, ...(keeps ? { drivers: [opts.person.id!] } : {}) } : undefined);
     const { lock: _drop, ...rest } = next;
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...rest, since: now, by, screenId: screen, ...(lock ? { lock } : {}) };
     // The checks every stage passes before it is stored, whoever wrote it: what the read path would reject, or what would draw nothing, isn't written.
@@ -2076,6 +2115,9 @@ export class Session {
     return out;
   }
 
+  /** Called after any screen's stage, lock or drivers change (live app tiles let go of presses whose driver is out). */
+  onStageCommit?: () => void;
+
   /**
    * Stores a stage and tells everyone. Every stage write is part of a transaction (the revision, the questions it expires
    * and the store move together or not at all). The return-to-board deadline is saved with the stage: a write that
@@ -2086,7 +2128,12 @@ export class Session {
     stage.revertAt = opts.keepDeadline ? stage.revertAt ?? stage.since + Session.STAGE_REVERT_MS : Date.now() + Session.STAGE_REVERT_MS;
     this.stageRevs.set(screen, this.stageRev(screen) + 1);
     this.expireAsksFor(screen, stage.lock);
-    this.after(() => bus.changed("stageTiles"));
+    this.after(() => {
+      bus.changed("stageTiles");
+      // A live app tile on this screen is driven by whoever the lock says drives.
+      bus.changed("liveApps");
+      this.onStageCommit?.();
+    });
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       this.after(() => {
@@ -2266,12 +2313,75 @@ export class Session {
     return { error: "That screen isn't connected any more." };
   }
 
+  /** A person takes a free screen's lock, driving it, without changing what it shows (they start recording on it). */
+  holdScreen(screen: string, person: { id: string; name: string }) {
+    const cur = this.stage(screen);
+    if (cur.lock) return;
+    const now = Date.now();
+    this.atomically(() => this.commitStage({ ...cur, lock: { id: newId("lk"), by: person.name, personId: person.id, since: now, lastActive: now, drivers: [person.id] } }, screen));
+  }
+
   /** The owner did something with their screen: it counts as activity. */
   touchLock(screen = "main") {
     const cur = this.stage(screen);
     const lock = cur.lock;
     if (!lock) return;
     this.atomically(() => this.commitStage({ ...cur, lock: { ...lock, lastActive: Date.now() } }, screen));
+  }
+
+  // ---- driving: a cursor of your own on the big screen (6.1) ----
+
+  /** Whether a person has a window open right now (the host's own window counts for the person at the host). */
+  personOnline(personId: string) {
+    const atHost = personId === this.store.setting<string>("hostPersonId", "");
+    return this.store.all("devices").some((d) => (d.personId === personId || (atHost && d.kind === "host")) && this.deviceOnline(d.id));
+  }
+
+  /** The people with a window open right now. */
+  onlinePeople(): string[] {
+    return this.people().filter((p) => this.personOnline(p.id)).map((p) => p.id);
+  }
+
+  /** Who is driving a screen: always a subset of the lock's owner and whoever they handed control to. */
+  driversOf(screen = "main"): string[] {
+    return this.lockOf(screen)?.drivers ?? [];
+  }
+
+  private setDrivers(screen: string, drivers: string[]) {
+    const cur = this.stage(screen);
+    if (!cur.lock) return;
+    const { drivers: _old, ...lock } = cur.lock;
+    this.atomically(() => this.commitStage({ ...cur, lock: { ...lock, lastActive: Date.now(), ...(drivers.length ? { drivers } : {}) } }, screen));
+  }
+
+  /**
+   * Start, stop, pass or share driving. `by` is the person asking. Only the lock's owner starts, passes or shares; anyone driving
+   * can stop themselves, and the owner can stop anyone. Says why when it can't.
+   */
+  drive(action: "start" | "stop" | "pass" | "together", screen: string, by: string | null, to?: string | null): { ok: true; drivers: string[] } | { ok: false; error: string; status: number } {
+    const lock = this.lockOf(screen);
+    const no = (error: string, status = 403) => ({ ok: false as const, error, status });
+    if (!by || !this.person(by)) return no("Pick who you are in this window first.");
+    if (!lock) return no("Put something on the screen first; driving belongs to whoever holds it.", 409);
+    const drivers = lock.drivers ?? [];
+    const owner = lock.personId === by;
+    if (action === "stop") {
+      const who = to && owner ? to : by;
+      if (who !== by && !owner) return no(`Only ${lock.by} can stop someone else.`);
+      this.setDrivers(screen, drivers.filter((d) => d !== who));
+      return { ok: true, drivers: this.driversOf(screen) };
+    }
+    if (!owner) return no(`Only ${lock.by}, who holds the screen, can ${action === "start" ? "start driving it" : action === "pass" ? "pass control" : "drive together"}.`);
+    if (action === "start") {
+      if (!drivers.includes(by)) this.setDrivers(screen, [...drivers, by]);
+      return { ok: true, drivers: this.driversOf(screen) };
+    }
+    const target = to ? this.person(to) : undefined;
+    if (!target) return no("Pass it to a person in the room.", 404);
+    if (target.id === by) return no("That's you already.", 400);
+    if (!this.personOnline(target.id)) return no(`${target.name} isn't in the room right now.`, 409);
+    this.setDrivers(screen, action === "pass" ? [target.id] : [...new Set([...drivers, by, target.id])]);
+    return { ok: true, drivers: this.driversOf(screen) };
   }
 
   /** Locks whose owners left or went quiet let go even when nobody asks (a timer runs this). */

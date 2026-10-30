@@ -14,9 +14,11 @@ export interface JamTarget {
   nodeId?: string | null;
   canvasX?: number | null;
   canvasY?: number | null;
+  /** The page of the build or canvas the pointer was on. */
+  page?: string | null;
 }
 
-/** What the hub's /api/prompt-window takes. */
+/** One distilled pointer moment of a recording, as /api/record/stop takes it. */
 export interface PointerMark {
   t: number;
   kind: "dwell" | "click" | "drag";
@@ -24,6 +26,8 @@ export interface PointerMark {
   y: number;
   dur?: number;
   target: JamTarget;
+  /** How far the page or viewer was scrolled at that moment. */
+  scroll?: { x: number; y: number } | null;
 }
 
 // ---------- targets ----------
@@ -181,12 +185,60 @@ export function isOpaqueFrame(f: HTMLIFrameElement | null) {
  * the pins are placed in, so a pointed-at spot lands where a pin dropped there would), else the tile.
  */
 function frameBox(root: HTMLElement) {
-  return root.querySelector<HTMLElement>(".an-layer") ?? root;
+  return root.querySelector<HTMLElement>(".an-layer, [data-jam-box]") ?? root;
+}
+
+/** Where a pointed-at element's page was scrolled to, and which page of a build it was (same-origin frames only). */
+function contextOf(root: HTMLElement | null, el: Element | null): { scroll: { x: number; y: number } | null; page: string | null } {
+  let scroll: { x: number; y: number } | null = null;
+  let page: string | null = null;
+  try {
+    for (let cur: Element | null = el; cur && cur !== root?.parentElement; cur = cur.parentElement) {
+      if (cur.scrollTop || cur.scrollLeft) {
+        scroll = { x: Math.round(cur.scrollLeft), y: Math.round(cur.scrollTop) };
+        break;
+      }
+    }
+    const win = el?.ownerDocument.defaultView;
+    if (win && win !== window) {
+      if (!scroll && (win.scrollX || win.scrollY)) scroll = { x: Math.round(win.scrollX), y: Math.round(win.scrollY) };
+      page = `${win.location.pathname}${win.location.search}`.slice(0, 200) || null;
+    }
+  } catch {}
+  return { scroll, page };
+}
+
+/**
+ * Where a driver's dart is over a stage, read from this window's own copy of that stage (the mirror carries the same tiles, so a
+ * fraction of the stage area is the same spot everywhere). Nothing under it, or no mirror showing, leaves `target` null.
+ */
+export function dartAt(screen: string, x: number, y: number, down: boolean, t: number): DartPoint {
+  const body = document.querySelector<HTMLElement>(`[data-drive-screen="${CSS.escape(screen)}"] .stage-body`);
+  const pt: DartPoint = { t, down, target: null, x, y };
+  if (!body) return pt;
+  const r = body.getBoundingClientRect();
+  const px = r.left + x * r.width;
+  const py = r.top + y * r.height;
+  const root = targetRoot(document.elementFromPoint(px, py));
+  const target = readTarget(root);
+  if (!root || !target) return pt;
+  const box = frameBox(root).getBoundingClientRect();
+  return { t, down, target, x: clamp01((px - box.left) / Math.max(1, box.width)), y: clamp01((py - box.top) / Math.max(1, box.height)) };
+}
+
+/** One position of a driver's dart on the big screen, with what is under it. */
+export interface DartPoint {
+  t: number;
+  down: boolean;
+  /** What the dart is over, and where inside it (0..1). */
+  target: JamTarget | null;
+  x: number;
+  y: number;
 }
 
 // ---------- recorder ----------
 
-type Ev = { t: number; x: number; y: number; type: "move" | "down" | "up" | "leave"; el: Element | null };
+type Ev = { t: number; x: number; y: number; type: "move" | "down" | "up" | "leave"; el: Element | null; ctx?: { scroll: { x: number; y: number } | null; page: string | null }; fixed?: { target: JamTarget; x: number; y: number } };
 export type TrailSample = { t: number; x: number; y: number; down: boolean };
 
 const RADIUS = 6; // px a point may wander and still count as held
@@ -200,22 +252,34 @@ export class PointerRecorder {
   private timers: ReturnType<typeof setInterval>[] = [];
   private views = new Map<HTMLIFrameElement, { t: number; view: CanvasView }[]>();
   private down = false;
+  private ctx: Ev["ctx"] | null = null;
+  private ctxAt = 0;
   private t0 = 0;
   running = false;
   /** Live samples for the on-screen trail. */
   onSample: ((s: TrailSample) => void) | null = null;
 
-  start() {
+  /** `dom: false` records a driver's dart on the big screen (fed with `feedDart`) instead of this window's own pointer. */
+  start(opts: { dom?: boolean } = {}) {
     this.events = [];
     this.views.clear();
     this.t0 = hub.now();
     this.running = true;
     setRecording(true);
+    if (opts.dom === false) return;
     this.attach(document, null);
     this.scanFrames();
     this.timers.push(setInterval(() => this.scanFrames(), 400));
     this.timers.push(setInterval(() => void this.pollViews(), 250));
     void this.pollViews();
+  }
+
+  /** A dart position from the big screen (6.1). Samples with nothing under them still move the trail but make no marks. */
+  feedDart(d: DartPoint) {
+    if (!this.running) return;
+    const type: Ev["type"] = d.down && !this.down ? "down" : !d.down && this.down ? "up" : "move";
+    this.down = d.down;
+    this.events.push({ t: d.t, x: d.x, y: d.y, type, el: null, ...(d.target ? { fixed: { target: d.target, x: d.x, y: d.y } } : {}) });
   }
 
   private scanFrames() {
@@ -269,7 +333,13 @@ export class PointerRecorder {
       if ((type === "down" || type === "up") && pe.button !== 0) return;
       const p = type === "leave" ? { x: 0, y: 0 } : toViewport(pe);
       const t = hub.now();
-      this.events.push({ t, x: p.x, y: p.y, type, el: type === "leave" ? null : (pe.target as Element) });
+      const el = type === "leave" ? null : (pe.target as Element);
+      // Scroll and page are read as the pointer acts, not at the end, when the viewer may be gone; moves share a reading for a moment.
+      if (el && (type === "down" || t - this.ctxAt > 250)) {
+        this.ctxAt = t;
+        this.ctx = contextOf(targetRoot(el), el);
+      }
+      this.events.push({ t, x: p.x, y: p.y, type, el, ...(el && this.ctx ? { ctx: this.ctx } : {}) });
       if (type === "down") this.down = true;
       if (type === "up" || type === "leave") this.down = false;
       if (type !== "leave") this.onSample?.({ t, x: p.x, y: p.y, down: this.down });
@@ -306,7 +376,7 @@ export class PointerRecorder {
   }
 
   private async distill(events: Ev[], t1: number): Promise<PointerMark[]> {
-    type Raw = { t: number; kind: PointerMark["kind"]; x: number; y: number; dur?: number; el: Element | null; score: number; downT?: number };
+    type Raw = { t: number; kind: PointerMark["kind"]; x: number; y: number; dur?: number; el: Element | null; score: number; downT?: number; ctx?: Ev["ctx"]; fixed?: Ev["fixed"] };
     const raw: Raw[] = [];
     const inDrag: [number, number][] = [];
     const clickSpans: { t0: number; t1: number; x: number; y: number }[] = [];
@@ -331,10 +401,10 @@ export class PointerRecorder {
       const end = u?.t ?? t1;
       if (moved) {
         inDrag.push([d.t, end]);
-        raw.push({ t: d.t, kind: "drag", x: (minX + maxX) / 2, y: (minY + maxY) / 2, dur: end - d.t, el: d.el, score: 80 });
+        raw.push({ t: d.t, kind: "drag", x: (minX + maxX) / 2, y: (minY + maxY) / 2, dur: end - d.t, el: d.el, score: 80, ctx: d.ctx, fixed: d.fixed });
       } else {
         clickSpans.push({ t0: d.t, t1: end, x: d.x, y: d.y });
-        raw.push({ t: d.t, kind: "click", x: d.x, y: d.y, el: d.el, score: 100 });
+        raw.push({ t: d.t, kind: "click", x: d.x, y: d.y, el: d.el, score: 100, ctx: d.ctx, fixed: d.fixed });
       }
       i = j;
     }
@@ -352,14 +422,19 @@ export class PointerRecorder {
       if (dur >= MIN_DWELL && !absorbed) {
         const mx = span.reduce((a, s) => a + s.x, 0) / span.length;
         const my = span.reduce((a, s) => a + s.y, 0) / span.length;
-        raw.push({ t: seq[k].t, kind: "dwell", x: mx, y: my, dur, el: span[Math.floor(span.length / 2)].el, score: 3 + dur / 100 });
+        const mid = span[Math.floor(span.length / 2)];
+        raw.push({ t: seq[k].t, kind: "dwell", x: mx, y: my, dur, el: mid.el, score: 3 + dur / 100, ctx: mid.ctx, fixed: mid.fixed });
       }
       k = j + 1;
     }
 
     // 3. Tie each to its tile, drop what landed outside any, keep the most meaningful.
-    const resolved: { raw: Raw; root: HTMLElement; target: JamTarget }[] = [];
+    const resolved: { raw: Raw; root: HTMLElement | null; target: JamTarget }[] = [];
     for (const r of raw) {
+      if (r.fixed) {
+        resolved.push({ raw: r, root: null, target: r.fixed.target });
+        continue;
+      }
       const root = targetRoot(r.el);
       const target = readTarget(root);
       if (root && target) resolved.push({ raw: r, root, target });
@@ -369,10 +444,17 @@ export class PointerRecorder {
 
     return Promise.all(
       kept.map(async ({ raw: r, root, target }): Promise<PointerMark> => {
+        const t: JamTarget = { ...target };
+        // A dart's position is already inside the item it is over.
+        if (!root) {
+          const mark: PointerMark = { t: Math.round(r.t), kind: r.kind, x: round3(clamp01(r.fixed!.x)), y: round3(clamp01(r.fixed!.y)), target: t };
+          if (r.dur) mark.dur = Math.round(r.dur);
+          return mark;
+        }
         const box = frameBox(root).getBoundingClientRect();
         const x = clamp01((r.x - box.left) / Math.max(1, box.width));
         const y = clamp01((r.y - box.top) / Math.max(1, box.height));
-        const t: JamTarget = { ...target };
+        if (r.ctx?.page && !t.page) t.page = r.ctx.page;
         if (target.kind === "canvas") {
           const f = canvasIframe(root);
           if (f) {
@@ -388,6 +470,7 @@ export class PointerRecorder {
         }
         const mark: PointerMark = { t: Math.round(r.t), kind: r.kind, x: round3(x), y: round3(y), target: t };
         if (r.dur) mark.dur = Math.round(r.dur);
+        if (r.ctx?.scroll) mark.scroll = r.ctx.scroll;
         return mark;
       }),
     );

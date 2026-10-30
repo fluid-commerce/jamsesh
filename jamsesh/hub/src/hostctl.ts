@@ -562,6 +562,8 @@ export class HostControl {
   onImage: (path: string, title: string) => void = () => {};
   /** Set by the hub: a preview build finished (opened, or failed), so the brain can arrange the result. */
   onBuilt: (label: string, ok: boolean, text: string) => void = () => {};
+  /** Set by the hub: an approved build opened an app (an iPhone build in the Simulator, or a Mac app by name), so it can stream live (6.3). */
+  onOpened: (app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) => void = () => {};
   /** The latest Simulator screenshot: taps and swipes are given in its pixels. */
   private simShot: { udid: string; name: string; px: number; py: number } | null = null;
 
@@ -914,6 +916,7 @@ export class HostControl {
             const launch = idr.code ? idr : await step(["xcrun", "simctl", "launch", "booted", idr.out.trim()], HostControl.STEP_MS);
             if (!launch) return "";
             ok = !launch.code;
+            if (ok) this.onOpened({ kind: "ios" }, o.by);
             return launch.code ? `Built ${label}, but the Simulator couldn't run it: ${launch.out.slice(0, 300)}` : `${label} is running in the Simulator.`;
           }
           if (o.open) {
@@ -923,6 +926,14 @@ export class HostControl {
             const opened = await step(["open", target], HostControl.STEP_MS);
             if (!opened) return "";
             ok = !opened.code;
+            if (ok && target.endsWith(".app")) {
+              const info = async (key: string) => {
+                const r = await step(["/usr/bin/defaults", "read", join(target, "Contents", "Info"), key], HostControl.STEP_MS);
+                return r && !r.code ? r.out.trim() : "";
+              };
+              // Its bundle id is how the live tile finds this app's window, and no other app's.
+              this.onOpened({ kind: "mac", name: (await info("CFBundleName")) || (target.split("/").pop() ?? "").replace(/\.app$/, ""), bundle: (await info("CFBundleIdentifier")) || undefined }, o.by);
+            }
             return opened.code ? `Built ${label}, but couldn't open ${o.open}: ${opened.out.slice(0, 200)}` : `${label} is built and open on the host.`;
           }
           ok = true;
@@ -959,7 +970,7 @@ export class HostControl {
   }
 
   /** The simulator to act on: the booted one that matches, else one that's booted for it. */
-  private async pickSimShort(device?: string) {
+  async pickSimShort(device?: string) {
     return (await this.pickSim(device, shortExec)) ?? "The Simulator is busy."; // the short exec never reports "couldn't stop" as null
   }
 

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
-import { ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
+import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
+import { LiveAppView } from "../shared/liveapp";
 import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, ExpandButton, ExpandCtx, RecordCatch, RoomFeed, ScaledFrame, Slot, TileKeyCtx, artifactTarget, colorFor, stripMd, tileSlots, useIsExpanded, useNow, type SlotTarget } from "../shared/ui";
 
 export { tileSlots };
@@ -12,13 +13,24 @@ function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
 import { StageBar, stageAction } from "../shared/StageControls";
+import { DriveSurface } from "../shared/DriveSurface";
+import { useDriverState } from "../shared/driving";
+import { DriveLayer } from "./DriveLayer";
+import { ScreenRecording } from "../shared/ScreenRecording";
 import { cast, tellNote } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
+/** What a stage does with driving (SPEC 10.6): "replay" is the big screen (it plays drivers' input into its tiles), "trackpad" is the driver's own app (it can turn the mirror into a trackpad). Every stage draws the cursors. */
+export type DriveMode = "replay" | "trackpad";
+
+function Trackpad({ screen }: { screen: string }) {
+  return useDriverState(screen).me.driving ? <DriveSurface screen={screen} /> : null;
+}
+
 /** `asPerson`: this is a person's own window (not the host's), which matters for who may unlock a lock held by no one in particular. */
-export function Stage({ state, interactive, tilePins = true, bar, asPerson }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string; asPerson: boolean }) {
+export function Stage({ state, interactive, tilePins = true, bar, asPerson, drive }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string; asPerson: boolean; drive?: DriveMode }) {
   const stage = state.stage;
   // Which screen this stage is: an extra display passes its id (`bar`), a mirror shows the main one.
   const screen = bar ?? stage.screenId ?? "main";
@@ -68,12 +80,20 @@ export function Stage({ state, interactive, tilePins = true, bar, asPerson }: { 
     default:
       body = <Board state={state} onPick={spotlight} />;
   }
+  // The cursors and the trackpad cover the stage below the lock bar, so a fraction means the same spot in every window.
   return (
-    <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
-      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} asPerson={asPerson} />}
-      <TilePins.Provider value={tilePins}>
-        <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
-      </TilePins.Provider>
+    <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }} data-drive-screen={screen}>
+      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} asPerson={asPerson} drive={drive === "trackpad"} />}
+      <div className="stage-body" style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        <ScreenRecording state={state} screen={screen} />
+        <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
+          <TilePins.Provider value={tilePins}>
+            <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
+          </TilePins.Provider>
+        </div>
+        <DriveLayer screen={screen} replay={drive === "replay"} />
+        {drive === "trackpad" && <Trackpad screen={screen} />}
+      </div>
     </div>
   );
 }
@@ -124,6 +144,8 @@ function tileLabel(t: Tile, state: HubState): string {
       return state.agents.find((a) => a.id === t.agentId)?.name ?? "Agent";
     case "screen":
       return t.label ?? state.shares.find((x) => x.id === t.shareId)?.label ?? "Shared screen";
+    case "app":
+      return (state.liveApps ?? []).find((x) => x.id === t.appId)?.name ?? t.label ?? "Live app";
     default:
       return t.label ?? KIND_LABEL[t.kind] ?? t.kind;
   }
@@ -376,6 +398,15 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
       if (!a) return <TileFrame label="Agent" kind="agent"><div className="empty-note">Agent left.</div></TileFrame>;
       return <AgentCard agent={a} state={state} />;
     }
+    case "app": {
+      const app = (state.liveApps ?? []).find((x) => x.id === tile.appId);
+      if (!app) return <TileFrame label={tile.label ?? "Live app"} kind="app"><div className="empty-note">This app is no longer live.</div></TileFrame>;
+      return (
+        <TileFrame label={tile.label ?? app.name} kind="app">
+          <LiveAppView app={app} people={state.people} />
+        </TileFrame>
+      );
+    }
     case "feed":
       return (
         <TileFrame label={tile.label ?? "The room"} kind="feed">
@@ -402,7 +433,7 @@ function hostOf(url: string) {
   }
 }
 
-const KIND_LABEL: Record<string, string> = { web: "Browser", screen: "Live share", canvas: "Canvas", agent: "Agent", feed: "Room", html: "Custom view", artifact: "Artifact" };
+const KIND_LABEL: Record<string, string> = { app: "Live app", web: "Browser", screen: "Live share", canvas: "Canvas", agent: "Agent", feed: "Room", html: "Custom view", artifact: "Artifact" };
 const shortHost = (u: string) => {
   try {
     return new URL(u).host.replace(/^www\./, "");

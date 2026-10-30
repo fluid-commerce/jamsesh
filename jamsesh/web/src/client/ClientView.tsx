@@ -18,7 +18,7 @@ import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
-import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, useAnnotateMode } from "../shared/annotate";
+import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, RecordScope, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
@@ -27,6 +27,14 @@ const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 type Tab = "canvas" | "screen" | "work" | "pins" | "agents";
 
 export function ClientView() {
+  return (
+    <RecordScope>
+      <ClientViewBody />
+    </RecordScope>
+  );
+}
+
+function ClientViewBody() {
   const { state, connected } = useHub();
   const [personId, setPersonId] = useState(pref("personId"));
   const [tab, setTab] = useState<Tab>((pref("tab") as Tab) || "canvas");
@@ -309,14 +317,14 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
   return (
     <>
       <div data-jam-target={JSON.stringify({ kind: "canvas", ref: "canvas", label: "Canvas" })} style={{ position: "absolute", inset: 0, display: tab === "canvas" ? "block" : "none" }}>
-        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" />
+        <CanvasFrame kind={phone ? "view" : "edit"} name={me.name} title="Shared canvas" panels={!phone} />
         <PinSlot target={{ kind: "canvas", ref: "canvas", label: "Canvas" }} personId={me.id} />
       </div>
       {tab === "screen" &&
         (phone ? (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "0 12px" }}>
             <div style={{ flex: "none", paddingTop: 8 }}>
-              <StageBar state={state} asPerson />
+              <StageBar state={state} asPerson drive />
             </div>
             <div style={{ position: "relative", flex: 1, minHeight: 0, margin: "0 -12px" }}>
               <MirrorStage state={state} personId={me.id} scale={PHONE_MIRROR_SCALE[layout as "phone" | "landscape"]} />
@@ -327,7 +335,7 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
         ) : (
           <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column" }}>
             <div style={{ flex: 1, minHeight: 0 }}>
-              <Stage state={state} interactive asPerson />
+              <Stage state={state} interactive asPerson drive="trackpad" />
             </div>
             <HistoryStrip state={state} />
           </div>
@@ -559,7 +567,7 @@ function MirrorStage({ state, personId, scale }: { state: HubState; personId: st
       ) : (
         // Laid out larger and scaled down, in percentages, so it follows a resize in the same frame.
         <div className="m-mirror-inner" style={{ width: `${100 / scale}%`, height: `${100 / scale}%`, transform: `scale(${scale})` }}>
-          <Stage state={state} interactive tilePins={false} asPerson />
+          <Stage state={state} interactive tilePins={false} asPerson drive="trackpad" />
         </div>
       )}
       {pinAll && <PinLayer target={target} personId={personId} enabled={mode.on} />}

@@ -388,6 +388,7 @@ export class Brain {
       `## Recent artifacts (newest first)\n${artifacts.map((a) => `- ${a.id}: [${a.stage}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.platform ? ` (${a.platform})` : ""}${a.page ? `, page ${a.page}` : ""}`).join("\n") || "(none)"}`,
       openPins.length ? `## Open pins (people's notes on the screen, not sent yet)\n${openPins.map((a) => `- ${a.authorName} on ${a.target.label || a.target.kind}: ${a.text || "(no text)"}`).join("\n")}` : "",
       `## Live shares\n${s.shares().filter((x) => x.status === "live").map((x) => `- ${x.id}: ${x.label}`).join("\n") || "(none)"}`,
+      `## Live apps (running on the host, streaming)\n${s.liveApps().filter((a) => a.status === "live").map((a) => `- ${a.id}: ${a.name} (${a.kind === "ios" ? "iPhone Simulator" : "Mac app"}, started by ${a.startedBy})`).join("\n") || "(none)"}`,
       `## Dev servers on the host\n${s.devservers().map((d) => `- ${d.name}: ${d.url}${d.up ? "" : " (down)"}`).join("\n") || "(none)"}`,
       `## Canvas pages (one per workstream)\n${this.pages().map((p) => `- ${p.name} (${p.frames} frames)`).join("\n") || "(starter page only)"}`,
       `## Saved layouts\n${Object.keys(s.savedLayouts()).join(", ") || "(none)"}`,
@@ -722,15 +723,15 @@ export class Brain {
       }),
       set_layout: tool({
         description:
-          "Design the big screen yourself: a grid of tiles. Tile kinds: artifact (an artifact id), canvas (the live canvas, optionally following a person or agent by name so it shows what they're looking at), web (any URL: a dev server on the host, a reference site the room asked for), screen (a live screen or camera share by share id), agent (one agent's live activity), feed (the room transcript), html (your own self-contained HTML). Leave grid out and JamSesh picks a bento for the tile count; give grid (CSS columns, rows, and one grid-area per tile) for a specific arrangement.",
+          "Design the big screen yourself: a grid of tiles. Tile kinds: app (a live iPhone Simulator or Mac app from Live apps: ref is its id, or part of its name or who started it), artifact (an artifact id), canvas (the live canvas, optionally following a person or agent by name so it shows what they're looking at), web (any URL: a dev server on the host, a reference site the room asked for), screen (a live screen or camera share by share id), agent (one agent's live activity), feed (the room transcript), html (your own self-contained HTML). Leave grid out and JamSesh picks a bento for the tile count; give grid (CSS columns, rows, and one grid-area per tile) for a specific arrangement.",
         inputSchema: z.object({
           title: z.string().optional(),
           caption: z.string().optional(),
           tiles: z
             .array(
               z.object({
-                kind: z.enum(["artifact", "canvas", "web", "screen", "agent", "feed", "html"]),
-                ref: z.string().optional().describe("artifact id, share id, agent id, or URL"),
+                kind: z.enum(["artifact", "canvas", "web", "screen", "agent", "feed", "html", "app"]),
+                ref: z.string().optional().describe("artifact id, share id, agent id, live app id (or its name), or URL"),
                 follow: z.string().optional().describe("canvas: name of the person or agent to follow"),
                 page: z.string().optional().describe("canvas: page to show (pages are named after workstreams)"),
                 html: z.string().optional(),
@@ -756,10 +757,15 @@ export class Brain {
             }
             else if (t.kind === "screen" && t.ref && s.store.get("shares", t.ref)) tiles.push({ kind: "screen", shareId: t.ref, label: t.label });
             else if (t.kind === "agent" && t.ref && s.agent(t.ref)) tiles.push({ kind: "agent", agentId: t.ref, label: t.label });
-            else if (t.kind === "feed") tiles.push({ kind: "feed", label: t.label });
+            else if (t.kind === "app" && t.ref) {
+              // A live Simulator or Mac app, by id or by (part of) its name.
+              const want = t.ref.toLowerCase();
+              const app = s.liveApps().find((a) => a.status === "live" && (a.id === t.ref || a.name.toLowerCase().includes(want) || a.startedBy.toLowerCase().includes(want)));
+              if (app) tiles.push({ kind: "app", appId: app.id, label: t.label ?? app.name });
+            } else if (t.kind === "feed") tiles.push({ kind: "feed", label: t.label });
             else if (t.kind === "html" && t.html) tiles.push({ kind: "html", html: t.html, label: t.label });
           }
-          if (!tiles.length) return refuse("None of those tiles resolved. Use artifact ids, share ids and agent ids from the lists, dev server URLs from 'Dev servers on the host', or full public URLs.");
+          if (!tiles.length) return refuse("None of those tiles resolved. Use artifact ids, share ids, agent ids and live app ids from the lists, dev server URLs from 'Dev servers on the host', or full public URLs.");
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
           const screen = bind && !i.screen ? bind.screen : screenId(i.screen);
           if (!screen) return noScreen();

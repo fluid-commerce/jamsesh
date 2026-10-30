@@ -1739,6 +1739,91 @@ and the join view are not kept; neither are shares). Showing the same thing agai
 top. People's apps show the earlier ones as a strip of chips that bring one back (`POST
 /api/stage/restore`), and the brain's `restore_screen` does the same by name.
 
+### 10.6 Driving the big screen (6.1)
+
+Whoever holds a screen's lock ([10.5](#105-locks-queue-history-and-versions)) can **drive** it from their own app:
+a cursor of their own on the big screen that scrolls, clicks and types in what is showing, while the
+host's real cursor never moves. Nothing is injected into the host's operating system; every event is
+replayed inside the page.
+
+**Who may drive.** The lock's owner, and anyone the owner handed control to. `StageLock.drivers` lists
+the people driving right now (person ids). A new cast, an unlock, or a lock that lapses replaces the
+lock, so the list goes with it and a stale driver's events are dropped at once. Agents never drive:
+an agent's credential is refused, and an agent has no person to hold a lock.
+
+- **Start** (`POST /api/drive/start {screen}`): the owner joins `drivers`. Anyone else gets 403.
+- **Pass control** (`POST /api/drive/pass {screen, to}`): `drivers` becomes just `to`. Only the owner
+  passes, and `to` must be a person with a window open right now (409 otherwise). The owner can start
+  again any time to take it back.
+- **Drive together** (`POST /api/drive/together {screen, to}`): `to` joins `drivers`; the owner keeps
+  driving. Both have cursors at once.
+- **Stop** (`POST /api/drive/stop {screen}`): the caller leaves `drivers`. The owner can also stop
+  someone else with `{who}`. The lock stays.
+
+**Wire format.** Events travel on the session WebSocket, not HTTP, so they cost no round trip:
+the driver's window sends `{type:"drive", screen, ev}` and the hub, if that window's person is in
+`drivers`, checks it and sends `{type:"drive", screen, personId, name, color, ev, t}` to every window.
+Windows that are not drivers are dropped silently and get `{type:"drive-denied", screen, why}` once
+a second at most. Events are capped at 120 per second per person, across all of that person's windows.
+
+`ev` is one of (all positions are fractions 0..1 of the screen's stage area, so any window size works):
+
+| `k` | Fields |
+|---|---|
+| `move` | `x`, `y` |
+| `down`, `up` | `x`, `y`, `b` (button, 0 left), `n` (click count) |
+| `wheel` | `x`, `y`, `dx`, `dy` (pixels), `ctrl` (pinch) |
+| `key` | `key`, `code`, `down` (true or false), `mods` (`{shift, ctrl, alt, meta}`) |
+| `leave` | none: the cursor fades |
+
+**The cursor.** Drawn once per person in a layer above every tile (`web/src/host/DriveLayer.tsx`),
+from FigCraft's own collaborator pointer (`crates/ui-egui/src/live.rs`): a notched dart whose points
+are (0,0), (3.5,15.5), (7.5,8.5), (15.5,4) in the person's colour with a 1.5 px white edge, and a name
+tag at (+12,+16): 11 px semibold, 6 x 3 padding, 4 px corners, black or white text by luminance
+(`0.299 R + 0.587 G + 0.114 B > 170` is black). It glides: each frame the shown position moves
+`1 - exp(-dt * 20)` of the way to the reported one (dt capped at 0.1 s) and snaps within half a
+pixel. With Reduce Motion it jumps. On a big screen the dart and tag are scaled up by `driveScale` (the window's width over 960, so 2x on a 1920-wide screen, between 1x and 3x) with the tip fixed and proportions unchanged; mirrors in apps stay at 1x. While anyone drives, FigCraft's own collaborator cursors on the big screen's canvas are hidden (FigCraft can only hide all of them), so each person has one cursor. An owner who re-casts while driving keeps driving the new stage; anyone handed control is cut off. `GET /api/drive/online` (people's windows only) lists who is here, and Pass control greys out the rest.
+
+**Replaying input** (host window only; windows that only mirror the stage draw cursors but replay
+nothing). The layer finds the tile under the cursor and hands it the event in the tile's local
+coordinates:
+
+- Live builds: the dev proxy adds a small script to the HTML it forwards, before any meta
+  Content-Security-Policy (a header policy gets the script's hash in `script-src-elem` and `script-src`, or
+  `default-src` when it has neither). It takes input only from its parent page at exactly the host's big-screen
+  origin (`http://127.0.0.1:<hub port>`; scheme, host and port) carrying the session's frame key, which the
+  big screen gets from `GET /api/drive/frame-key` (the host's own windows only); the page holds only the key's
+  SHA-256. The big screen passes on only the events the hub sent it from a screen's drivers. The script
+  dispatches mouse events at the point, scrolls the nearest scrollable parent for wheel, and types into the
+  focused field. It keeps what it replayed per driver: when a driver leaves (blur, pointer-lock loss, removed, the tile unmounting), it
+  lets go of any button and key still held for them, and it lets go of everything after 8 seconds without input.
+- The canvas: wheel pans, ctrl-wheel zooms, a click selects the frame or layer under the cursor
+  through FigCraft's own commands (`view.set`, `select.set`).
+- Anything else: a tile registers itself with `registerDriveTarget(el, handler)` and gets
+  `{k, lx, ly, ...}` with `lx`, `ly` as fractions of that tile (the device tiles of 6.3 use this).
+- Screen shares are not drivable.
+
+**The driver's side.** After putting something up, the owner's app shows **Drive**. It turns the
+stage mirror into a trackpad: with Pointer Lock the trackpad's relative motion moves the dart
+(the dart stays where it was left when the finger lifts, and the macOS pointer acceleration applies);
+where Pointer Lock is unavailable (WKWebView, phones) the pointer's position over the mirror maps
+straight to the stage. Esc releases the capture; **Stop driving** ends it. Keys go to the big screen
+only while the trackpad is captured and has the keyboard itself; clicking or tabbing to another field lets go,
+so typing elsewhere in the app is never sent by mistake.
+
+**Client API** (`web/src/shared/driving.ts`, used by 6.2's recorder and 6.3's tiles):
+
+```ts
+driveScale(width, bigScreen): number           // the dart's scale; 6.2's trail uses the same factor
+driverState(screen?): { screen, owner: Person | null, drivers: Person[], me: { canDrive, driving } }
+useDriverState(screen?)                       // the same, reactive
+startDriving(screen?): Promise<DriveHandle>   // POST /drive/start, then { send(ev), stop() }
+stopDriving(screen?) / passControl(to, screen?) / driveTogether(to, screen?)
+onCursor(fn: (c: DriveCursor) => void): Unsub // raw events from everyone: { screen, personId, name, color, ev, t }
+onGlide(fn: (g: Glide[]) => void): Unsub      // each frame on the big screen: the smoothed { personId, name, color, x, y, down } of every shown cursor, in stage fractions
+registerDriveTarget(el, handler): Unsub       // see "Replaying input"
+```
+
 ## 11. Client
 
 ### 11.1 Desktop layout
@@ -1782,30 +1867,82 @@ There are three ways to address the brain directly instead of talking in the roo
 
 - Say its name: "JamSesh, put the mobile build next to the mockup" [A8d, A10].
 - Type in the **Ask <name>** box (`Say to the room` switches it to a plain room line) [A8a].
-- Press **Record** (or `R`), talk while pointing, and press **Stop** [A8b, A9].
+- Press **Record** (or `R`), talk while pointing, and press **Stop**; the notes you tidy go to the agents that own the work, and to the brain when no agent does [A8b, A9].
 
 The room can give the brain other names to answer to ("call it Computah"): the display name plus
 up to 8 **aliases** (`brainAliases`, 40 characters each, kept as trimmed, unique strings). Saying
 any of them addresses the brain, and the transcriber is primed with them so they're spelled right.
 
-### 11.3 Record a prompt
+### 11.3 Record: talk and point, and it becomes notes
 
-The mic is already recording. **Record** marks a window of it as a prompt for the brain [A8b]:
+One feature, one name: **Record** (`R`, or Option+R while your trackpad is captured, since typing then goes to the big screen), on your own screen or, when you are driving it, the big
+screen [A8b, A9]. Record borrows the mic: if it was off it is switched on for the recording and off again a moment after the last words (a recording that starts in that moment keeps it on, and the person's own mute or unmute always wins); a mic the person had on is left on. It marks a window of the mic and watches the pointer.
 
-- Start marks the time in host time and tells the host; lines from that device in the window are
-  held for the prompt instead of being triaged one by one. Stop sends the window.
-- The host waits up to 7 seconds for the last words to be transcribed, then sends the brain one
-  prompt: the words, plus where the person pointed. A window that is never stopped (the person
-  closes the window) ends on its own after 2 minutes.
-- While recording, the screen edges glow, a trail follows the pointer, and a timer and level bars
-  show. Afterward a toast shows what was sent and how many things were pointed at.
+- **On your own screen.** Press **Record**, then look through a mockup, a build, the canvas, or the
+  picture viewer (the Work tab's viewer has its own **Record** button, since it covers the header) and
+  talk. Nothing on the big screen changes. Start marks the time in host time and tells the host
+  (`POST /api/record/start`), which answers with the recording's `id`; Record shows as live only once it has one. Lines from that device in the window are held instead of being triaged
+  one by one.
+- **On the big screen.** When you are driving a screen (6.1 puts a dart on it), **Record** records the
+  dart instead of your own pointer, and locks the screen for as long as it runs. A free screen's lock
+  is taken (and given back at the end); a screen someone else holds refuses with their name, unless
+  they are one of the lock's `drivers` (10.6: handed control, or **Drive together**); the owner who passed control starts driving again by recording. Record taking a free lock makes its taker a driver. Each driver presses
+  their own **Record** and is recorded on their own, with their own mic and dart. The lock goes back
+  only when the last recording on the screen ends, and only if Record took it. While any recording
+  runs, the screen's lock is kept fresh (`touchLock`, which keeps `drivers`, so a refresh never cuts anyone off).
+- **The rainbow trail.** While recording, a trail follows the pointer (on the big screen, the dart)
+  and fades out behind it over about a second. The spectrum runs along the trail by age (the point under the pointer to where the stroke has mostly faded, or its start if shorter),
+  with the whole spectrum (red at the head to violet at the tail) shown across every stroke however short, drifting slowly; it is drawn on a canvas overlay at display rate, and
+  runs only while something is fading (an idle recording costs nothing). With reduced motion it is
+  shorter (under half a second), thinner and fainter, in a calm band of colour. On the big screen the
+  overlay also shows a chip, "Recording · <name>", and every recording driver has their own trail.
+  Model: `web/src/shared/trailmodel.ts`; drawing: `trail.tsx`; big screen: `ScreenRecording.tsx`.
+- **What it produces.** Stop (`POST /api/record/stop`) names the recording it ends (`recordingId`, from Start) The window runs from the
+  hub's clock at Start to the hub's clock when Stop arrives: a time sent by the caller is never used, and pointer moments outside it
+  (with a second of slack) are dropped. The older prompt-window routes (`POST /api/prompt-window/start` and `/api/prompt-window`, which turned a recording into one prompt for the brain) are retired: the hub serves the web client, so after an upgrade no page calls them, and a recording has one lifecycle. A page makes a recording token before Start and sends it; if the page closes with Start in flight it sends `POST /api/record/cancel` (keepalive) with the token: a recording already begun under it ends, and a Start that arrives later is refused (409), so the Start can't outlive the page. A recording has one state on the hub (live, ending, ended) and one way to end it, which every route uses: Stop, a cancel, the disconnect sweep (about 30 seconds, two sweeps), the 10-minute cap and a replacing Start. The hub keeps each recording's outcome (how it ended and what the close made: the notes; the last 200) and `GET /api/record/:id?deviceId=` returns its state and outcome (a recording the hub has no record of is `ended`, outcome `unknown`). A close that waits for the last words makes what it makes once, and only if nothing ended the recording during the wait: a cancel, the sweep or the cap wins and the close answers 409; a Start that replaces it does not take its notes away. A Stop sent again while one is under way shares its result; a close that fails leaves the recording live with the error kept. A Stop repeated from the same window gets the first answer, and a cancel after a finished close answers with that outcome and undoes nothing. The page treats a recording as ended only when a close response or this GET says so, never from an error or a missing entry: it resends Stop with backoff, asks the hub, waits for a close under way, cancels by its token if the hub still has it live, and if nothing is acknowledged it stays recording with its id so Stop can be pressed again. When a page unmounts or closes mid-recording it hands the recording to the hub with a keepalive cancel and remembers it; whichever Record button mounts next asks after it, and the disconnect sweep ends the rest. A pointer that can't be read is sent as no marks. Cancelled tokens are kept in the store per device for an hour, are not pushed out by other windows' cancels (each window keeps its last 200), and the hub announces a write only after it is committed. A send is frozen when first made: the same notes answer the same, different notes for that recording are refused (409, "Record again to change them"); each agent's directive and its event are one write keyed by recording and agent, so a retry after any failure finds what was delivered and repeats nothing. A line belongs to the recording it began in: it began at or after Start and before Stop, with
+  300 ms more for the recording being stopped (a last word still in transcription), never past the Start of the next recording on the
+  same device (the next Start writes its time on the earlier recording, including one still waiting for its last words, so the bound stands however that next recording ends, with nothing to evict), so no line is in two recordings. A line that began before Start is ordinary speech. A Stop for a recording that already ended or was replaced (a replacement Start, a cancel) is refused with 409 and ends nothing; a Stop repeated after its own reply was lost gets that reply again. It waits up to 7 seconds for the last words, then
+  returns **notes**, one per thing said, each pinned to the spot being pointed at while it was said.
+  Nothing is sent yet. A note keeps the item, the position in it, the page of a build, the scroll
+  position, the canvas frame or node id and canvas point, the big screen it was on, and who said it.
+  Alignment (`hub/src/record.ts`): a pointer moment counts as "while saying it" from 0.4 s before the
+  words to 0.3 s after; pointing up to 2.5 s before speaking, or up to 0.8 s after, still counts;
+  further apart is a note with no pin. A line that crosses to a different spot is split there, in
+  proportion to when each word was said, and a sliver under two words joins its neighbour. A line
+  never takes another driver's pointer; an unattributed voice may use anyone's.
+- **Tidy, then send.** Stopping opens **Your notes**: edit what it misheard, **Join up** two notes,
+  **Delete** one, or **Discard** all. Each note says where it is pinned and who gets it. **Send**
+  (`POST /api/record/send`) pins each note on its item as an annotation (kept, numbered, and shown on
+  tiles and in the picture viewer), and sends each agent that owns something pinned one directive
+  listing its notes with the pinned locations (item, node, page, position, scroll, canvas point,
+  screen) and, for pictures, a **crop of the spot** (made with the system's image tool; skipped where
+  it can't be made). An item's owner is the agent that made the artifact or frame (a canvas note finds
+  its frame by node id, a build by its dev server URL); observers own nothing. Notes on nothing an
+  agent owns, or on nothing at all, go to the room brain as one prompt, and the sender is told how
+  many went where. A repeated send (a lost reply, a double click, two at once) does nothing twice: the hub
+  reserves the send by recording id before any work starts, and keeps each pin by its note id. The right to send a recording's notes
+  and the receipt of its send are one record, so they are kept and dropped together: the hub keeps the last 200 stopped recordings, and
+  a send for one it no longer keeps is refused (404), never sent a second time. A recording
+  id is the hub's own (from Record or Stop); an id it didn't issue is refused (404). A crop's file name is
+  the hub's own too, and the picture is read from the renders folder and written to its uploads folder only
+  (paths resolved through links).
+- **Who can.** People only: the three routes are human-only (an agent's credential is refused), a
+  window acts as its own person, records only on its own device (the device must be one that window
+  registered; another window's device id is refused), notes are sent only from the window and by the person
+  they were handed to, another person can't stop or replace your recording, and a
+  big screen refuses someone who isn't driving it. A recording whose Stop never comes ends on its own
+  at 10 minutes, or about 30 seconds after its window disconnects, and gives back any lock it took.
+  If the page closes mid-recording, the recording is cancelled by its token: it ends, its lock is given back and the words held in it go to the room as ordinary speech, not as a prompt.
 
-**Pointer context** [A9]: while recording, the client watches the pointer over every tile and the
-canvas, including the canvas, artifacts, dev servers, and shared screens, and distills it into up
-to 40 marks: clicks, drags, and dwells of 300 ms or more. Each mark records the tile, the position
-in it, the canvas frame under the pointer (with its page coordinates), and the words said at that
-moment. The brain gets "held on frame "Nav / B" at top center while saying 'make this one…'".
-Each mark also becomes a pin.
+**Pointer context** [A9]: while recording, the client watches the pointer over every tile, the
+canvas, artifacts, dev servers and shared screens, and distills it into up to 40 marks: clicks, drags
+and dwells of 300 ms or more. Each mark records the tile, the position in it (inside the picture
+itself when a viewer letterboxes it), the scroll position and, for a same-origin build, its page, plus
+the canvas frame under the pointer with its page coordinates. A dart on the big screen arrives with
+its target resolved from this window's own copy of the stage (the mirror carries the same tiles, so a
+fraction of the stage area is the same spot everywhere); with no mirror showing, the dart makes no marks
+and the words become unpinned notes. The dart comes from 6.1's `onCursor` stream (10.6); the trail on the
+big screen follows the drawn dart through `onGlide`, at the dart's own `scale`.
 
 ### 11.4 Mute
 
@@ -1894,11 +2031,20 @@ On a phone [A28c]:
 
 ### 12.1 Canvas-only mode
 
-The canvas is FigCraft in **canvas-only mode**: no layers panel, no Design panel, no menus, tab bar,
-or home screen [B2]. Artboards, connections, cursors, comments, and presence stay. A presence pill
+The canvas is FigCraft in **canvas-only mode**: no menus, tab bar, or home screen, and no layers or
+Design panel unless asked for (below) [B2]. Artboards, connections, cursors, comments, and presence stay. A presence pill
 and a zoom chip float over it. The mode is a flag in FigCraft's UI crate, so it works in the native
 app (`figcraft --jamsesh <link>`) and in the WebAssembly build (`/canvas/?canvas#join=<link>`) that
 JamSesh's windows embed [B1].
+
+**Panels on demand.** A person's canvas (`/canvas/?canvas&panels`) has two small buttons in its top
+corners: the left one slides FigCraft's layers panel in, the right one its Design (properties) panel.
+Both start out, only the page bar shows, and each slides over about 0.2 seconds (instantly with
+reduced motion). The panels start below a 48 px strip that holds the buttons, and beside the left
+button the page bar. What a person chose is kept in their browser (local storage, per person) and comes
+back after a reload or rejoin. The big screen's canvas leaves `&panels` off: no buttons, no panels.
+In a room canvas the properties panel has no Share button and no people bar (JamSesh's page has both). The buttons run the FigCraft command `view.canvasPanel {side: "left"|"right", on?}`, so the control
+channel and MCP can slide a panel too (it does nothing on a canvas without the buttons).
 
 The host runs `figcraft-server` on `127.0.0.1:47900` (or the next free port) and a headless host
 participant named after the brain that publishes the session's file. People reach the canvas
@@ -1935,6 +2081,65 @@ When to make a new page [A19b]:
 - Throwaway work goes on a `Scratch` page.
 - When the brain routes work that doesn't fit an existing workstream, it names a new workstream,
   and with it a new page; follow-ups to existing work stay on that work's page.
+
+### 12.4 Fonts
+
+A canvas draws text in the fonts its agents designed in. A person's canvas (FigCraft's WebAssembly
+build) can't see any computer's installed fonts, so the host serves them. A canvas fills what it lacks in this order, and
+never loads a font twice:
+
+1. **The room's fonts.** *Open fonts* (SIL OFL or Apache 2.0 only; the Ubuntu Font Licence is not taken
+   without asking) come from two places, with no question asked: the host reads each joined agent's
+   repo card (design system, stack, components, notes) for font names whenever a card is saved, checks
+   each name against Fontsource's catalogue (which lists every Google font and its licence), and fetches
+   Regular and Bold, upright and italic, from Google Fonts (`fonts.googleapis.com` stylesheet, files on
+   `fonts.gstatic.com`), falling back to Fontsource's CDN. A canvas that shows a font no card named gets
+   the same on demand. A download is kept only if it is a font file of that family within the size caps.
+   *Borrowed fonts* are the second kind, below.
+2. **Ask the room.** What is still missing is reported to the host (`POST /api/fonts/want`). Open fonts
+   are fetched; anything else becomes a question to the people whose Macs might have it.
+
+**Borrowing.** A person's Mac app answers `has_fonts` (names only) for the families someone is waiting
+for. If it has one, their window shows a card: *Share <font> with <session name>?*, naming who is drawing
+in it, what sharing means (everyone's canvas uses it until the session ends; it's never saved on anyone's Mac), and
+that they should share it only if their licence allows. **I'm allowed to share it** asks the Mac app to lend
+it; **Don't share** is remembered for that person and that font, and the canvas keeps its marked substitute.
+The first person to confirm wins. A person who shared sees a row, *Sharing <font> until the session ends*,
+with **Stop sharing**. The page's card is the friendly first step; the Mac enforces the consent itself, and
+no page ever holds a Mac's font files (session pages are served by whoever hosts, so the Mac app gives them
+font *names* only). The app's `lend_font` command shows a native macOS dialog (the font, the session, who is
+waiting; **I'm allowed to share it** / **Don't share**), reads the files only on a yes, and sends them to the
+hub itself: it asks for a one-time ticket (`POST /api/fonts/lend-ticket`, two minutes, bound to that window,
+person and family) and posts the files with an HMAC-SHA256 signature over the ticket and the files' SHA-256
+(`POST /api/fonts/lend`). The key is one no page can read: the window key the app shares with the hub it
+started, or, for a host joined through the relay, the SHA-256 of the window's own credential (the relay adds
+the credential; the hub keeps only its hash). The hub refuses a lend without a valid, unused ticket and
+signature, so lent fonts come from that dialog and nowhere else. Tickets are given only for a font the room is waiting for (or just
+lent, for a retry), at most 8 per window and 100 in all; a full pool drops its oldest ticket.
+
+**Rules the host keeps.**
+- Fonts live in the hub's memory only. Nothing is written to a session folder, and a lent font is never
+  installed or saved. `GET /api/fonts/<key>/<n>` is `no-store`; font calls skip the offline outbox,
+  so a file is never queued in a browser's storage. A canvas holds a font in memory, like any
+  `text.loadFont`. Ending the session (`Hub.stop`) overwrites and drops every font and refuses any later
+  lend; a fetch in flight is aborted. A person who is removed from the room takes their lent fonts with
+  them; **Stop sharing** does the same on request (a canvas that already drew with it keeps it until it reloads).
+- Only people act: `want`, `lend-ticket`, `lend`, `decline` and `withdraw` are human-only, and a font file
+  goes only to a person's window, a paired one or the host's own (an agent's credential, and any other
+  process on the host without the window key, gets 403; agents see names and counts in the state). A person lends as
+  their own person; a lend must be for a font someone is waiting for, so a font can't be pushed
+  unasked. An agent's FigCraft tools refuse `text.loadFont` too.
+- A lend request body is read at most 45 MB (413 past it, before parsing). An open font's download is
+  refused from its Content-Length when that is over the cap, and is otherwise read only up to the cap
+  (the catalogue, a family's details and a stylesheet too).
+- Limits: 24 MB per file, 12 files and 32 MB per family, 128 MB lent and 96 MB open in all (a download speaks for its allowance, by the
+  file's stated length or else the room's whole remainder, before it reads, so downloads at the same time cannot together pass it), 48 families
+  asked for. A file must be a TrueType/OpenType font or collection whose family name is the one asked
+  for; damaged, oversize, mislabelled and non-font files are refused with a plain reason.
+- The host's own FigCraft (and its agents' participants) load every font too, so renders and thumbnails
+  match what people see.
+- Open fonts need the host to reach the internet. Without it a font nobody has is asked of the room, like any other. Offline test runs skip the
+  fetch.
 
 ## 13. Host control and permissions
 
@@ -1992,6 +2197,78 @@ says it out loud ("JamSesh wants to run … on the host. Approve or deny?"), and
 the same way, by voice or button. Asking for it isn't approval: the request still waits for an
 "approve" said after it was announced, so nothing someone said in passing, and nothing the model
 decides, can start a command.
+
+### 13.3a Live app tiles (6.3)
+
+An iPhone build in the iOS Simulator, or a Mac or Electron app, running on the host can stream into a
+tile, full resolution, and be driven from any person's own screen. The tile is `{ kind: "app", appId }`;
+the live apps are `state.liveApps` (`LiveApp` in `types.ts`, owned by `LiveApps` in `liveapps.ts`).
+
+- **Starting one.** An approved build that opened a Simulator app or a `.app` starts a tile and puts it
+  on the main screen (a locked screen is left alone). A person can also start one for what's already
+  running: `POST /api/apps` `{ kind: "ios", device? }` or `{ kind: "mac", name }`, from the host's own
+  window only, with host control on. Starting a tile builds nothing, so the build approval flow
+  ([8.11](#811-build-approvals)) is unchanged: an unapproved, denied or expired request never opens one.
+  At most four tiles are live at once.
+- **Picture, iOS, two modes.** When the host has already granted Screen Recording (checked with `jamsesh-live
+  --check`, which never prompts) and the device's own Simulator window is open and unambiguous (title
+  "<device name> – <runtime>"), the helper captures that window, cropped to the screen, at 30 fps (`capture:
+  "window"`). Otherwise `capture: "screenshots"` and the tile's `hint` says what would enable the faster mode.
+  The tile shows which mode it is in. The window mode drops to screenshots while the screen is turned.
+  The screenshot mode is `simctl io <device> screenshot --type=jpeg`, three calls in flight, newest first, a
+  frame identical to the last dropped, running only while someone watches. `recordVideo` can't stream (its
+  file is finished only when it stops) and idb's MJPEG stream fails to start on macOS 26. Frames travel as
+  binary WebSocket messages on `/ws/app/<id>` (people's windows only: a paired person or the host's own
+  window, never an agent or another process on the host; a slow viewer skips frames).
+- **Picture, Mac.** `jamsesh-live` (`hub/native/jamsesh-live.swift`, compiled by the hub on first use into
+  `~/.jamsesh/bin`): ScreenCaptureKit on one window at its native pixel size, 30 frames a second, JPEG,
+  length-prefixed on stdout. Needs Screen Recording for the app that runs the hub. The app is named by its
+  bundle id: the one the host opened, or the one running app whose name is exactly the one given (`--apps`
+  lists them; none, or two with that name, is refused). Only that app's processes' windows count (never an
+  app whose name merely contains it); the helper follows the one window it picked, checking its window id,
+  owner pid and bundle id four times a second, and ends when the window closes, leaves the screen or
+  changes hands. The Simulator is `com.apple.iphonesimulator` the same way.
+- **Taps, iOS.** idb's companion (`brew install facebook/fb/idb-companion`), one per tile on a unix socket in
+  the hub's folder, over gRPC (`idb.ts`). No Simulator window, no Accessibility. Without it people can
+  watch, switch Light/Dark, and nothing else (the tile says so). Touches don't land while the screen is
+  turned (checked on iOS 18.6), so taps wait for portrait. A call is done only when the companion answers
+  (HTTP 200) with gRPC status 0; one cut off before it says (the companion crashed mid-tap) is a failure.
+- **Taps, Mac.** The same helper posts CGEvents to the app's pid at points inside its window (the Mac's own
+  cursor never moves). Needs Accessibility; without it the tile is watch-only.
+- **Typing.** `{ t: "text", text }` and `{ t: "key", key: "return" | "delete" | "tab" | "escape" }` go through the
+  companion as HID key events on a US layout (shift pressed around capitals and symbols; characters outside
+  it are refused). A tile that has focus and is driven types with the keyboard. On a Mac app the helper posts
+  the characters and keys to the app.
+- **Brain.** `set_layout` accepts `{ kind: "app", ref }` (a live app's id, or part of its name or who started
+  it), and the brain's context lists the live apps.
+- **Controls (iOS).** Home, Rotate, Light/Dark. Appearance is `simctl ui appearance`; Home and Rotate go
+  through the companion. The device frame is a plain rounded rectangle drawn in CSS.
+- **Who is driving.** One controller per tile (`controller: { personId, name, since }`). `POST
+  /api/apps/<id>/control` `{ action: "take" | "release" | "pass", to? }`: taking a free tile works; taking
+  one someone holds is refused with their name unless it's the host's window or their hold lapsed (5
+  minutes with no input); only the holder (or the host) releases or passes, and `to` must be a person in the
+  room. `POST /api/apps/<id>/input` takes `tap`, `swipe`, `down|move|up`, `scroll`, `text`, `home`,
+  `rotate`, `appearance`, with `x` and `y` as 0..1 fractions of the screen; anyone but the controller gets
+  409 with the reason. Agents' credentials are refused on every `/api/apps` route and on the socket.
+- **On a locked big screen, the screen's drivers drive the tile** (10.6). A tile shown in a layout on a
+  locked screen has no controller of its own: `controller` shows the first driver, `drivers` lists them all and
+  `viaScreen` names the screen. Whoever drives the screen (the owner after **Drive**, whoever they **Pass control**
+  to, both with **Drive together**) may tap, type, press Home, rotate and switch appearance; anyone else, an
+  owner who hasn't started driving, and the tile's own take, release and pass are refused with the reason and the
+  way to do it on the screen. The big screen's window replays a driver's dart on the tile (`registerDriveTarget`)
+  and sends it with `as: <driver>`, which the hub honours only from the host's window and only for a driver of that
+  tile's screen. When the tile is shown anywhere else, or its screen is unlocked, the take, pass and release
+  above apply again. Agents and strangers are refused either way.
+- **A Mac button is never left down.** Every line to a Mac helper goes through one place in the hub, which knows whether a
+  button is down, where and for whom. It lets go (an `up` at the last position) when control changes hands (also when a locked screen's drivers or lock change), the tile ends, another
+  person's input arrives, or the button has seen no input for 4 seconds. The helper does the same on its own at 6 seconds, when the
+  hub closes its input, and on SIGTERM. For a Mac app the helper captures the frontmost window of the app (not the largest), keeps its stream alive in a global (a stream held
+  only by its starting task sent one frame), and treats a window that is minimized, hidden or on another Space as *away*: input is dropped
+  and the stream is kept, and the tile only ends when the window is gone. Mouse and scroll events reach AppKit only with window field 51
+  and the window-relative point set; this relies on an **undocumented CGEvent field** and a patch to the event's data, found on a real
+  Mac, and must be rechecked on each macOS release.
+  The page also sends its own `up` on pointer cancel, capture loss and leaving the tile, so
+  a drag ends promptly; the hub is what guarantees it.
 
 ### 13.4 Displays
 
@@ -2277,10 +2554,10 @@ in [`docs/spec-gaps.md`](docs/spec-gaps.md). Paths are under `jamsesh/` unless t
 | A7c | Annotations are app-wide | 10.3, 11.5 | `web/src/shared/annotate.tsx`, `web/src/host/Stage.tsx` | Partial |
 | A7d | All pins go to the brain as one prompt to divide up | 11.5 | `web/src/shared/annotate.tsx`, `hub/src/hub.ts` | Implemented |
 | A8a | Type a prompt to the brain | 11.2 | `web/src/client/ClientView.tsx`, `hub/src/http.ts` | Implemented |
-| A8b | Record a prompt between Record and Stop | 11.3 | `web/src/shared/annotate.tsx`, `hub/src/hub.ts` | Implemented |
+| A8b | Record: talk and point, tidy the notes, send them to the agents that own the work | 11.3 | `web/src/shared/annotate.tsx`, `web/src/shared/record.tsx`, `hub/src/record.ts`, `hub/src/hub.ts` | Implemented |
 | A8c | The mic is always recording unless muted | 9.1 | `web/src/client/ClientView.tsx`, `web/src/host/HostView.tsx` | Partial |
 | A8d | Saying "hey JamSesh" addresses the brain | 8.2 | `hub/src/brain/brain.ts` | Partial |
-| A9 | Recording watches the pointer and turns it into context | 11.3 | `web/src/shared/pointer.ts`, `hub/src/hub.ts` | Partial |
+| A9 | Recording watches the pointer (and a driver's dart) and pins what is said to where it was pointed | 11.3 | `web/src/shared/pointer.ts`, `web/src/shared/trail.tsx`, `hub/src/record.ts` | Partial |
 | A10 | The brain can be renamed and listens for its name | 8.2 | `hub/src/brain/brain.ts`, `web/src/shared/Settings.tsx` | Implemented |
 | A11 | The brain adapts to feedback about its demeanor | 8.9 | `hub/src/brain/brain.ts`, `hub/src/brain/speech.ts` | Implemented |
 | A12 | People can mute at any time | 9.1, 11.4 | `web/src/shared/mic.ts`, `web/src/client/ClientView.tsx` | Implemented |

@@ -17,6 +17,7 @@ import { ConnectionBanner } from "./shared/ConnectionBanner";
 import { ErrorBoundary } from "./shared/ErrorBoundary";
 import { CastHost } from "./client/CastPicker";
 import { BuildRequests } from "./shared/BuildRequests";
+import { FontShare } from "./shared/FontShare";
 import { startHeartbeat } from "./shared/heartbeat";
 
 function PinSlot({ target }: { target: PinTarget }) {
@@ -57,5 +58,6 @@ createRoot(document.getElementById("root")!).render(
     )}
     {!isConnect && !isSetup && !isProjects && <BuildRequests big={isHost} screen={extraScreen ?? "main"} />}
     {!isConnect && !isSetup && !isProjects && <CastHost picker={!isHost} />}
+    {!isConnect && !isSetup && !isProjects && !isHost && <FontShare />}
   </StrictMode>,
 );
