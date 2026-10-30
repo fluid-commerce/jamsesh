@@ -257,6 +257,17 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       if (!names.length) return "nothing";
       // The files go into the private index as their bytes on disk (no clean filters, no line-ending conversion), on stdin so a long backlog can't hit the argument limit.
       const here = names.filter((p) => existsSync(join(dir, p)));
+      // Each file must be a regular file in a real folder (never a link, or a path through one): hash-object would follow it and commit what it points at.
+      try {
+        for (const p of here) {
+          if (!lstatSync(join(dir, p)).isFile()) throw new Error(`${p} is not a regular file`);
+          const parts = p.split("/");
+          if (parts[0] === "wiki" || parts[0] === "raw") vaultDir(dir, parts.length === 3 ? "raw/archive" : (parts[0] as "wiki" | "raw"));
+        }
+      } catch (e) {
+        console.error("wiki: not committing, a vault file or folder is a link or not a regular file:", e instanceof Error ? e.message : e);
+        return "failed";
+      }
       const written = here.length ? gitOut(dir, ["hash-object", "-w", "--no-filters", "--stdin-paths"], {}, here.join("\n") + "\n")?.trim().split("\n") : [];
       if (!written || written.length !== here.length || !written.every((s) => SHA.test(s))) return "failed";
       const info = names.map((p) => (here.includes(p) ? `100644 ${written[here.indexOf(p)]}\t${p}\0` : `0 ${ZERO}\t${p}\0`)).join("");
@@ -500,7 +511,9 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
     for (const sub of folders) {
       let names: string[];
       try {
-        names = readdirSync(join(dir, sub));
+        const d = vaultDir(dir, sub as "wiki" | "raw" | "raw/archive"); // throws for a folder that is a link: never followed
+        if (!d) continue;
+        names = readdirSync(d);
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw e;
@@ -520,13 +533,39 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
         throw e;
       }
     });
-    const hashed = blobShas(dir, onDisk);
+    const hashed = blobShasCached(dir, onDisk);
     if (!hashed) return null;
     const changed = onDisk.filter((f) => inHead.get(f) !== hashed.get(f));
     return [...new Set([...changed, ...gone])];
   } catch {
     return null;
   }
+}
+
+/**
+ * Blob ids as blobShas gives them, but a file whose size and times are as when it was last hashed here keeps that id: a
+ * big archive of read sources is hashed once, not at every commit. (Only this process remembers; the first look hashes all.)
+ */
+const hashMemo = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha: string }>();
+function blobShasCached(dir: string, files: string[]): Map<string, string> | null {
+  const out = new Map<string, string>();
+  const todo: string[] = [];
+  const stats = new Map<string, { size: number; mtimeMs: number; ctimeMs: number }>();
+  for (const f of files) {
+    const st = lstatSync(join(dir, f));
+    const s = { size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs };
+    stats.set(f, s);
+    const m = hashMemo.get(`${dir}\0${f}`);
+    if (m && m.size === s.size && m.mtimeMs === s.mtimeMs && m.ctimeMs === s.ctimeMs) out.set(f, m.sha);
+    else todo.push(f);
+  }
+  const fresh = blobShas(dir, todo);
+  if (!fresh) return null;
+  for (const [f, sha] of fresh) {
+    out.set(f, sha);
+    hashMemo.set(`${dir}\0${f}`, { ...stats.get(f)!, sha });
+  }
+  return out;
 }
 
 /** The git blob id of each file's bytes exactly as they are on disk (no filters, nothing written), or null if git couldn't say. */

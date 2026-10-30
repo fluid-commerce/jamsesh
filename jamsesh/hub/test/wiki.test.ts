@@ -3088,3 +3088,50 @@ test("a clean filter in the global git config, or in the repo, is never run by t
   expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/filtered2.md");
   expect(existsSync(marker)).toBe(false);
 });
+
+test("a linked raw/archive folder or a linked top-level vault file is never followed into a commit", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const outside = join(root, `outside-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, "2026-10-29_secret.md"), "bytes from outside the vault");
+  writeFileSync(join(outside, "other-log.md"), "an outside log");
+  symlinkSync(outside, join(dir, "raw", "archive"));
+  const err = console.error;
+  console.error = () => {};
+  try {
+    w.editPage("two", "# Two\n\nAnother.", { by: "Chey" }); // changedOwn stops on the linked folder: nothing is committed
+    expect(gitOutOf(dir, "log", "--name-only", "--pretty=format:")).not.toContain("secret");
+    rmSync(join(dir, "raw", "archive"));
+    rmSync(join(dir, "log.md"));
+    symlinkSync(join(outside, "other-log.md"), join(dir, "log.md"));
+    expect(commitPaths(dir, "Try the log", ["log.md"])).toBe("failed");
+  } finally {
+    console.error = err;
+  }
+  expect(gitOutOf(dir, "log", "--pretty=format:%s")).not.toContain("Try the log");
+});
+
+test("a big archive is hashed once: a second look at unchanged sources makes no hash-object call over them", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const ids = Array.from({ length: 20 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  archiveSources(dir, ids);
+  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  rawPaths(dir); // the memo is warm
+  let hashed = 0;
+  const spawn = Bun.spawnSync.bind(Bun);
+  const original = Bun.spawnSync;
+  (Bun as any).spawnSync = (cmd: string[], opts: any) => {
+    if (cmd.includes("hash-object")) hashed += (opts?.stdin ? String(opts.stdin).split("\n").filter(Boolean).length : 0) || 1;
+    return spawn(cmd as any, opts);
+  };
+  try {
+    expect(rawPaths(dir)).toEqual([]);
+  } finally {
+    (Bun as any).spawnSync = original;
+  }
+  expect(hashed).toBe(0);
+});
