@@ -100,7 +100,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|drive\/(start|stop|pass|together)|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|drive\/(start|stop|pass|together)|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -463,19 +463,20 @@ export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
   const personId = dev ? (dev.kind === "browser" ? dev.personId : null) : ws.data.hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null;
   const asked = typeof m.screen === "string" ? m.screen : undefined;
   const found = s.findScreen(asked)?.id;
-  const screen = found ?? "main";
+  // Main when none is named (or "main" is) and its window is there; a named screen that is gone is not main.
+  const screen = found ?? ((asked === undefined || asked === "main") && s.mainAvailable() ? "main" : null);
   const person = personId ? s.person(personId) : undefined;
   const deny = (why: string) => {
     if (now - (ws.data.driveDenied ?? 0) < 1000) return;
     ws.data.driveDenied = now;
-    ws.send(JSON.stringify({ type: "drive-denied", screen, why }));
+    ws.send(JSON.stringify({ type: "drive-denied", screen: screen ?? asked ?? "main", why }));
   };
   if (!person) return deny("Pick who you are in this window first.");
   const rate = driveRate.get(person.id);
   if (!rate || now - rate.since >= 1000) driveRate.set(person.id, { since: now, n: 1 });
   else if (++rate.n > DRIVE_PER_SECOND) return;
-  // A screen that was named and is gone is not main: stale input for it is dropped, never replayed on another screen.
-  if (asked !== undefined && asked !== "main" && !found) return deny("That screen isn't connected any more.");
+  // A screen that is gone is not main: stale input for it is dropped, never replayed on another screen.
+  if (!screen) return deny("That screen isn't connected any more.");
   if (!s.driversOf(screen).includes(person.id)) return deny("You aren't driving this screen.");
   const ev = cleanDrive(m.ev);
   if (ev) bus.send({ type: "drive", screen, personId: person.id, name: person.name, color: person.color, ev, t: now });

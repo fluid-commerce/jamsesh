@@ -510,7 +510,7 @@ export class Hub {
     // Everything that can refuse is checked first: a rejected Start leaves the earlier recording running.
     let sc: { id: string } | undefined;
     if (screen) {
-      sc = screen === "main" ? { id: "main" } : s.findScreen(screen);
+      sc = screen === "main" ? (s.mainAvailable() ? { id: "main" } : undefined) : s.findScreen(screen);
       if (!sc) return { ok: false, reason: "That screen isn't connected.", status: 404 };
       if (!person) return { ok: false, reason: "Pick who you are before recording the big screen.", status: 403 };
       const lock = s.lockOf(sc.id);

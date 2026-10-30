@@ -45,11 +45,13 @@ export function withStdinWatch(cmd: string[]): string[] {
     '"$@" </dev/null 3<&- &',
     "child=$!",
     // `read` is the shell's own, so stopping this watcher leaves no process behind.
-    // When the hub is gone: TERM, and after a grace KILL, so a helper that ignores TERM can't hold its port.
-    "(while read -r _; do :; done <&3; kill $child 2>/dev/null; sleep 3; kill -9 $child 2>/dev/null) &",
+    // When the hub is gone the watcher stops this wrapper like any other stop (TERM below), and the wrapper, which still
+    // owns the helper (so its pid can't have been reused), escalates to KILL after a grace: a helper that ignores TERM can't hold its port.
+    "me=$$",
+    "(while read -r _; do :; done <&3; kill $me 2>/dev/null) &",
     "watch=$!",
     "exec 3<&-",
-    "trap 'kill $child $watch 2>/dev/null; wait $child 2>/dev/null; exit 0' TERM INT HUP",
+    "trap 'kill $child $watch 2>/dev/null; (sleep 3; kill -9 $child 2>/dev/null) & esc=$!; wait $child 2>/dev/null; kill $esc 2>/dev/null; exit 0' TERM INT HUP",
     "wait $child; code=$?",
     "kill $watch 2>/dev/null",
     "exit $code",

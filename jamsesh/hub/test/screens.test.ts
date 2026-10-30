@@ -124,3 +124,18 @@ test("a room's saved model choices keep only the roles that exist (an older room
     rmSync(d3, { recursive: true, force: true });
   }
 });
+
+test("main that has reported and closed can't be driven, recorded or cast to; before any window reports it still can", () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "gone-"))));
+  expect(s.screenOf("main")).toEqual({ id: "main" }); // cold start: where a window will appear
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  expect(s.screenOf()).toEqual({ id: "main" });
+  s.removeScreen("main");
+  expect(s.mainAvailable()).toBe(false);
+  expect(s.screenOf("main")).toHaveProperty("error");
+  expect(s.screenOf()).toHaveProperty("error");
+  s.reportScreen("main", info); // its window comes back
+  expect(s.screenOf("main")).toEqual({ id: "main" });
+});

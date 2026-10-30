@@ -2307,6 +2307,11 @@ export class Session {
     return true;
   }
 
+  /** Main can be put to use unless its window has reported and then closed (before any window has reported, it is where one will appear). */
+  mainAvailable(): boolean {
+    return !this.screenSeen || this.screens().some((x) => x.id === "main");
+  }
+
   /** The screen a caller means: none named is the main one; an id or a name that isn't there now is null, never some other screen. */
   screenRef(ref?: unknown): string | null {
     const r = this.screenOf(ref);
@@ -2315,7 +2320,7 @@ export class Session {
 
   /** `screenRef`, saying why not: no such screen, or which ones the name could mean (to ask which). */
   screenOf(ref?: unknown): { id: string } | { error: string; choices?: string[] } {
-    if (ref === undefined || ref === null || ref === "" || ref === "main") return { id: "main" };
+    if (ref === undefined || ref === null || ref === "" || ref === "main") return this.mainAvailable() ? { id: "main" } : { error: "That screen isn't connected any more." };
     const m = typeof ref === "string" ? this.screenMatch(ref) : null;
     if (m && "screen" in m) return { id: m.screen.id };
     if (m) return { error: `Which screen: ${m.choices.join(" or ")}?`, choices: m.choices };

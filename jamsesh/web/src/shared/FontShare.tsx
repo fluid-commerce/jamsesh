@@ -36,6 +36,7 @@ export function FontShare() {
       }
       // A lookup that failed is tried again a few times, not forgotten until the page reloads.
       else if (noteLookupFailed(tries.current, batch, checked.current)) setTimeout(() => setRetry((n) => n + 1), 5000);
+      else if (unchecked.length > batch.length) setRetry((n) => n + 1); // this batch is given up on: the next one
     });
   }, [unchecked.join("|"), retry]);
   const mine = available.filter((f) => f.kind === "borrowed" && me && f.lenderId === me);
