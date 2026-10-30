@@ -341,6 +341,21 @@ test("a comparison can't be reassigned, and the refused request leaves it open",
   expect(s.store.get("directives", d.id)!.progress?.[a.id]).not.toBe("cancelled");
 });
 
+test("a reassignment whose replacement can't be made leaves the task as it was", () => {
+  const { s, reg } = room();
+  const a = reg("Jonathan", "acme/desktop", "/d");
+  reg("Mo", "acme/api", "/api");
+  const d = directive(s, "Build the settings page", [a.id]);
+  const make = s.createDirective.bind(s);
+  (s as any).createDirective = () => {
+    throw new Error("disk full");
+  };
+  expect(() => s.reassignDirective(d.id, "Chey", undefined, a.id)).toThrow("disk full");
+  (s as any).createDirective = make;
+  expect(s.store.get("directives", d.id)).toMatchObject({ status: d.status });
+  expect(s.store.get("directives", d.id)!.progress?.[a.id]).not.toBe("cancelled");
+});
+
 test("a multi-target directive offers and reassigns per target; the others keep their work", () => {
   const { s, reg } = room();
   const a = reg("Jonathan", "acme/desktop", "/d");

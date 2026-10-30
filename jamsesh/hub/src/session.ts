@@ -963,13 +963,17 @@ export class Session {
       bus.send({ type: "toast", tone: "warn", text: "Nobody else is free to take it", detail: d.text.slice(0, 100) });
       return undefined;
     }
-    for (const t of from) {
-      this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
-      this.wake(t);
-    }
-    const left = this.store.get("directives", id);
-    if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
-    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
+    // The cancellation and the replacement are one write: if the replacement can't be made, the task stays as it was.
+    const made = this.store.atomic(() => {
+      for (const t of from) {
+        this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
+      }
+      const left = this.store.get("directives", id);
+      if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
+      return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
+    });
+    for (const t of from) this.wake(t);
+    return made;
   }
 
   // ---- directives ----
@@ -2309,7 +2313,7 @@ export class Session {
   /** Whether a stage may be put on this screen: its window is there (before any has reported, only main is, as the place one will appear). */
   private screenUsable(screen: string): boolean {
     if (screen === "main") return this.mainAvailable();
-    return !this.screenSeen || this.screens().some((x) => x.id === screen);
+    return this.screens().some((x) => x.id === screen);
   }
 
   /** Main can be put to use unless its window has reported and then closed (before any window has reported, it is where one will appear). */

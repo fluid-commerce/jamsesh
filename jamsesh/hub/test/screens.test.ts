@@ -164,3 +164,10 @@ test("a stage decided for a screen before its window closed is stale once it reo
   expect(s.setStage(layout, "x", "main", { claim })).toMatchObject({ applied: false });
   expect(s.setStage(layout, "x", "main", { claim: s.stageClaim() }).applied).toBe(true);
 });
+
+test("at a cold start only main can take a stage; a screen that never reported can't", () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "cold-"))));
+  const layout = { mode: "layout" as const, layout: { tiles: [{ kind: "feed" as const }] } };
+  expect(s.setStage(layout, "x", "screen-9", { claim: s.stageClaim() })).toMatchObject({ applied: false });
+  expect(s.setStage(layout, "x", "main", { claim: s.stageClaim() }).applied).toBe(true);
+});
