@@ -14,6 +14,9 @@ const tidyPage = (p: any): WikiPage => ({ ...p, category: asCategory(p?.category
 /** Whether the wiki keeps a version history, as the hub says (anything unexpected reads as no news, not as off). */
 export const historyOf = (h: { state?: string; why?: string } | undefined): { off: boolean; why: string } => ({ off: h?.state === "off", why: typeof h?.why === "string" ? h.why.slice(0, 200) : "" });
 
+/** The server's search answer, only while it answers what is typed now (an older query's hits are never shown or opened). */
+export const freshHits = <T,>(answer: { q: string; hits: T[] } | null, typed: string): T[] | null => (answer && answer.q === typed.trim() ? answer.hits : null);
+
 export const wikiApi = {
   pages: async () => {
     const r = await api<{ ready: boolean; project: string; history?: { state?: string; why?: string }; pages: any[] }>("/wiki/pages", undefined, undefined, NOW);

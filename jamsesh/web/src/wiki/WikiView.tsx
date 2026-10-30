@@ -10,7 +10,7 @@ import { drafts, onRefresh, restore, saveRev, track } from "./draft";
 import { GraphCanvas } from "./GraphCanvas";
 import { localGraph, localOf } from "./graph";
 import { dropTitle, plainText, renderMarkdown } from "./markdown";
-import { wikiApi, useWiki, type WikiData } from "./wikiApi";
+import { freshHits, wikiApi, useWiki, type WikiData } from "./wikiApi";
 import { CATEGORIES, CATEGORY_COLOR, CATEGORY_LABEL, type Category, type LogEntry, type PageMeta, type SearchHit, type SourceText, type WikiPage } from "./types";
 import "./wiki.css";
 
@@ -133,17 +133,19 @@ function useDebounced<T>(v: T, ms: number) {
 
 function Index({ wiki, q, setQ, search, current, onOpen, onGraph, onAdd, graphOn }: { wiki: WikiData; q: string; setQ: (s: string) => void; search: React.RefObject<HTMLInputElement | null>; current: string | null; onOpen: (s: string) => void; onGraph: () => void; onAdd: () => void; graphOn: boolean }) {
   const dq = useDebounced(q.trim(), 200);
-  const [hits, setHits] = useState<SearchHit[] | null>(null);
+  // The server's answer is kept with the words it answered; it is shown (and Enter opens its first hit) only while those are what is typed.
+  const [answer, setAnswer] = useState<{ q: string; hits: SearchHit[] } | null>(null);
   const [offline, setOffline] = useState(false);
   useEffect(() => {
-    if (dq.length < 2) return void setHits(null);
+    if (dq.length < 2) return void setAnswer(null);
     let live = true;
     wikiApi.search(dq).then(
-      (r) => live && (setHits(r), setOffline(false)),
-      () => live && setOffline(true),
+      (r) => live && (setAnswer({ q: dq, hits: r }), setOffline(false)),
+      () => live && (setAnswer(null), setOffline(true)), // a failed search shows no hits, not the last query's
     );
     return () => void (live = false);
   }, [dq]);
+  const hits = freshHits(answer, q);
   // Until the server answers (or if it can't), titles and summaries are searched here.
   const local = useMemo(() => {
     const w = q.trim().toLowerCase();

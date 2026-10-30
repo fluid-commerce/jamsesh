@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Hub } from "../../hub/src/hub";
 import { startHttp } from "../../hub/src/http";
 import { api } from "../src/shared/hub";
-import { historyOf, wikiApi } from "../src/wiki/wikiApi";
+import { freshHits, historyOf, wikiApi } from "../src/wiki/wikiApi";
 import { localOf, shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
 import { drafts, onRefresh, restore, saveRev, track } from "../src/wiki/draft";
@@ -409,4 +409,12 @@ test("the wiki status shows version history off only when the hub says so", () =
   expect(historyOf({ state: "on" })).toEqual({ off: false, why: "" });
   expect(historyOf({ state: "none" })).toEqual({ off: false, why: "" });
   expect(historyOf({ state: "off", why: "the repository uses SHA-256 object ids" })).toEqual({ off: true, why: "the repository uses SHA-256 object ids" });
+});
+
+test("search hits are shown only for the words they answered: a newer query, or a failed one, shows none", () => {
+  const answer = { q: "pricing", hits: [{ slug: "pricing" }] };
+  expect(freshHits(answer, "pricing")).toEqual([{ slug: "pricing" }]);
+  expect(freshHits(answer, " pricing ")).toEqual([{ slug: "pricing" }]);
+  expect(freshHits(answer, "pricing tiers")).toBeNull(); // typed on: the earlier answer is not this query's
+  expect(freshHits(null, "pricing")).toBeNull(); // a failed search keeps no hits
 });

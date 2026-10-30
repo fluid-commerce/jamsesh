@@ -3418,3 +3418,45 @@ test("readOnce refuses a file rewritten during the read, for real: the file chan
   expect(mutated).toBe(true);
   expect(readFileSync(file).equals(original)).toBe(false); // the change was real
 });
+
+test("a .git that is a link or a pointer elsewhere is never used: no history is written to another repository", () => {
+  if (!gitAvailable()) return;
+  const other = join(root, `other-repo-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(other, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: other });
+  Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "theirs"], { cwd: other });
+  const theirs = gitOutOf(other, "rev-parse", "HEAD");
+  for (const kind of ["gitfile", "symlink"] as const) {
+    const vault = join(root, `vault-${kind}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(vault, { recursive: true });
+    if (kind === "gitfile") writeFileSync(join(vault, ".git"), `gitdir: ${join(other, ".git")}\n`);
+    else symlinkSync(join(other, ".git"), join(vault, ".git"));
+    writeFileSync(join(vault, "index.md"), "one");
+    const err = console.error;
+    console.error = () => {};
+    try {
+      expect(commitPaths(vault, "Try", ["index.md"])).toBe("failed");
+    } finally {
+      console.error = err;
+    }
+    expect(historyStatus(vault)).toMatchObject({ state: "off" });
+    expect(pagePaths(vault)).toBeNull();
+  }
+  expect(gitOutOf(other, "rev-parse", "HEAD")).toBe(theirs); // the other repository was never touched
+  expect(gitOutOf(other, "log", "--pretty=format:%s")).toBe("theirs");
+});
+
+test("a dangling link at index.md or log.md is never renamed over, at start or by a later change", () => {
+  const { w, dir } = room();
+  rmSync(join(dir, "index.md"));
+  symlinkSync(join(root, "nowhere-index"), join(dir, "index.md"));
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(() => rebuildIndex(dir)).toThrow(/link/);
+    w.editPage("one", "# One\n\nA page.", { by: "Chey" }); // an ordinary change: the page lands, the index is reported, the link stays
+  } finally {
+    console.error = err;
+  }
+  expect(lstatSync(join(dir, "index.md")).isSymbolicLink()).toBe(true);
+});

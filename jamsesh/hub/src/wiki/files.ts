@@ -10,7 +10,7 @@
 // slugs (no slash, dot or space can reach a path), writes refuse symlinks, and sizes are capped. No model is involved.
 import { pastDeadline } from "../room-context";
 import { createHash } from "node:crypto";
-import { constants as fsc, closeSync, copyFileSync, fstatSync, readSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { constants as fsc, closeSync, copyFileSync, fstatSync, readSync, realpathSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const PAGE_MAX = 40_000;
@@ -129,7 +129,7 @@ export function initWiki(dir: string): void {
   if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!present(join(dir, "index.md"))) rebuildIndex(dir);
   if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.proposals/\n*.tmp\n");
-  if (gitAvailable() && !existsSync(join(dir, ".git"))) {
+  if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
   }
@@ -153,6 +153,12 @@ export const io = {
 
 /** Writes beside the file, then renames over it: a reader sees the old text or the new, never half of either. */
 function writeAtomic(file: string, text: string) {
+  // Only a regular file (or nothing) is replaced: a link, even one to nowhere, or a folder at the name is never renamed over.
+  try {
+    if (!lstatSync(file).isFile()) throw Object.assign(new Error(`${file.split("/").pop()} in the wiki folder is a link or a folder; JamSesh won't replace it.`), { code: "ELINK" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 7)}.tmp`;
   try {
     io.write(tmp, text, { flag: "wx" });
@@ -232,6 +238,22 @@ function refState(dir: string, ref: string): { sha: string } | "missing" | "unkn
 /** Most bytes of files held at once while they are written into the repository. */
 const BATCH_BYTES = 8 * 1024 * 1024;
 
+/**
+ * The vault's own git directory, or null: `.git` must be a real folder inside the vault (not a link, not a gitfile pointing elsewhere) and
+ * git must agree that it is the one in use, so no history operation can reach another repository's index or branch.
+ */
+function ownGitDir(dir: string): string | null {
+  try {
+    const st = lstatSync(join(dir, ".git"));
+    if (!st.isDirectory()) return null;
+    const gd = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
+    if (!gd || realpathSync(gd) !== realpathSync(join(dir, ".git"))) return null;
+    return gd;
+  } catch {
+    return null;
+  }
+}
+
 const ZERO = "0000000000000000000000000000000000000000";
 
 /**
@@ -247,12 +269,15 @@ export type Take = "take" | "skip" | "fail";
 export type Accept = (path: string, state: Buffer | "gone" | "unreadable" | "toobig") => Take;
 
 export function commitPaths(dir: string, message: string, paths: string[], accept?: Accept): "done" | "nothing" | "failed" {
-  if (!existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
+  if (!present(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
   const own = [...new Set(paths)].filter((p) => followPath(p) && !p.split("/").includes(".git")); // only the vault's own files (the same rule the index note holds to)
   if (!own.length) return "nothing";
-  const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
-  if (!gitDir) return "failed";
+  const gitDir = ownGitDir(dir);
+  if (!gitDir) {
+    console.error("wiki: the vault's .git isn't a git folder of its own (a link or a pointer elsewhere); the wiki keeps no history in it");
+    return "failed";
+  }
   if (!sha1Repo(dir)) {
     console.error("wiki: this repository doesn't use SHA-1 object ids; the wiki keeps no history in it");
     return "failed";
@@ -526,8 +551,8 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
 
 /** Finishes any index update an earlier commit left undone (the pass and startup call this). Quietly does nothing if the index is busy. */
 export function settleIndex(dir: string): void {
-  if (!existsSync(join(dir, ".git")) || !gitAvailable()) return;
-  const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
+  if (!gitAvailable()) return;
+  const gitDir = ownGitDir(dir);
   if (!gitDir) return;
   try {
     if (!readFollow(gitDir).length) return;
@@ -550,7 +575,8 @@ export function settleIndex(dir: string): void {
  * Only what changed, so the list is as long as the change; a person's own files there are never named.
  */
 function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boolean): string[] | null {
-  if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
+  if (!gitAvailable() || !present(join(dir, ".git"))) return [];
+  if (!ownGitDir(dir)) return null; // a .git that isn't the vault's own: nothing is compared against it
   const state = refState(dir, "HEAD");
   if (state === "unknown") return null; // git couldn't say: not "nothing changed"; the caller commits nothing this time
   try {
@@ -1322,7 +1348,8 @@ export { writeAtomic };
 /** Whether the wiki keeps a git history here: on, or off with why. Shown to the host, so no history is never silent. */
 export function historyStatus(dir: string): { state: "on" | "off"; why?: string } {
   if (!gitAvailable()) return { state: "off", why: "git can't be run here" };
-  if (!existsSync(join(dir, ".git"))) return { state: "off", why: "the folder isn't a git repository" };
+  if (!present(join(dir, ".git"))) return { state: "off", why: "the folder isn't a git repository" };
+  if (!ownGitDir(dir)) return { state: "off", why: "its .git is a link or points elsewhere, not a git folder of its own" };
   if (!sha1Repo(dir)) return { state: "off", why: "the repository uses SHA-256 object ids, which the wiki can't write" };
   const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
   if (!validRef(ref)) return { state: "off", why: "no branch is checked out" };
