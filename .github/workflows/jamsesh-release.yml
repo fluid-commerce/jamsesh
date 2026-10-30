@@ -1,9 +1,10 @@
 name: JamSesh release
 
 # Builds the JamSesh Mac app on every change to main that reaches it, and replaces the
-# "jamsesh-latest" release with it, so people download the newest build instead of building it.
+# new "jamsesh-<version>" release marked latest (older JamSesh releases are removed after it is up),
+# so people download the newest build instead of building it.
 # The download link stays the same:
-#   https://github.com/fluid-commerce/jamsesh/releases/download/jamsesh-latest/JamSesh.dmg
+#   https://github.com/fluid-commerce/jamsesh/releases/latest/download/JamSesh.dmg
 # Apple Silicon only, signed ad hoc (no Apple Developer ID yet): the first open needs
 # System Settings > Privacy & Security > Open Anyway.
 on:
@@ -56,10 +57,26 @@ jobs:
       - name: Install trunk
         run: brew install trunk
 
+      # The browser has no system fonts: without craft-fonts people's canvases have no face to
+      # draw text in (Inter, Noto Sans). Same pin as FigCraft's own release (release.yml).
+      - name: Check out craft-fonts
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: 37827adc41fd165f9a9234ac40f94dbad353aa69
+          path: craft-fonts
+          persist-credentials: false
+
       - name: Build FigCraft server and CLI
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
         run: cargo build --release --locked -p figcraft-server -p figcraft-cli
 
       - name: Build the browser canvas
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
         run: cd apps/figcraft-web && trunk build --release
 
       - name: Stage the parts the app carries
@@ -104,6 +121,12 @@ jobs:
 
           **First open:** macOS says it can't check the app for malicious software, because the app isn't signed with an Apple Developer ID yet. Click Done, then open **System Settings > Privacy & Security** and click **Open Anyway** next to JamSesh. After each update, macOS may ask again for the microphone and to use JamSesh's saved sign-in (choose **Always Allow**).
           EOF
-          gh release delete jamsesh-latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create jamsesh-latest "$RUNNER_TEMP/JamSesh.dmg" \
+          # The download link is never missing: the new release goes up first (and becomes "latest"),
+          # only then are the older JamSesh releases removed.
+          TAG="jamsesh-$VERSION"
+          gh release create "$TAG" "$RUNNER_TEMP/JamSesh.dmg" \
             --target "$GITHUB_SHA" --title "JamSesh $VERSION (latest)" --notes-file "$RUNNER_TEMP/notes.md" --latest
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qx 'JamSesh.dmg'
+          for old in $(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^jamsesh-' | grep -vx "$TAG"); do
+            gh release delete "$old" --yes --cleanup-tag || true
+          done

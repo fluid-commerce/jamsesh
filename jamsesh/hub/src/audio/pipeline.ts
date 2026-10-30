@@ -6,12 +6,13 @@
 // Network lag: a group waits an adaptive window (each device's recent lag) before it
 // is finalized. A copy that arrives later still joins its utterance; if it is clearly
 // better, the line is transcribed and attributed again in place.
+import { brainNames } from "../names";
 import { bus } from "../bus";
 import { newId } from "../store";
 import type { Session } from "../session";
 import type { Utterance } from "../types";
 import type { Transcriber } from "./transcribe";
-import { cosine, embed, Voiceprints } from "./voiceprint";
+import { cosine, embed, MIN_VOICE_SECONDS, voiceprintStatus, Voiceprints, type Learning } from "./voiceprint";
 import { clippedShare, decodeWav, encodeWav, resample, speechLevelDb, type Pcm } from "./wav";
 
 export interface Segment {
@@ -245,8 +246,8 @@ export class AudioPipeline {
    * repeats its hint on near-silence, so people's names stay out of it ("Chey, Pat." from nobody).
    */
   private hint() {
-    const brain = this.session.settings().brainName;
-    return brain && brain !== "JamSesh" ? `${brain}, JamSesh.` : "JamSesh.";
+    const named = brainNames(this.session.settings()).filter((n) => n !== "JamSesh");
+    return named.length ? `${named.join(", ")}, JamSesh.` : "JamSesh.";
   }
 
   /** Everyone's names, so a line made of nothing but names is recognized as whisper's invention. */
@@ -464,7 +465,7 @@ export class AudioPipeline {
   }
 
   /** Someone says who said a line. The line's voice joins that person's voiceprint. */
-  assign(utteranceId: string, personId: string) {
+  assign(utteranceId: string, personId: string): { utterance: Utterance; learning: Learning } {
     const u = this.session.store.get("utterances", utteranceId);
     const person = this.session.person(personId);
     if (!u || !person) throw new Error("Unknown line or person");
@@ -474,22 +475,32 @@ export class AudioPipeline {
     // Teach from the clearest copy that did not clip.
     const usable = g?.segments.filter((s) => s.clipped <= MAX_CLIPPED) ?? [];
     const best = g ? (usable.length ? pickBest(usable) : null) : null;
-    if (best) {
+    // Whether the correction taught the voiceprint, and if not, why (the person is told).
+    let learning: Learning = { learned: false, reason: "no voice sample was kept for that line" };
+    const status = voiceprintStatus();
+    if (!status.available) learning = { learned: false, reason: "voice matching is off on this host" };
+    else if (g && !best) learning = { learned: false, reason: "every copy of it was clipped" };
+    else if (best) {
       if (best.embedding === undefined) best.embedding = embed(best.pcm);
-      if (best.embedding) (this.voiceprints.add(personId, best.embedding), prior && this.voiceprints.remove(prior, best.embedding));
+      if (best.embedding) {
+        this.voiceprints.add(personId, best.embedding);
+        if (prior) this.voiceprints.remove(prior, best.embedding);
+        learning = { learned: true };
+      } else learning = { learned: false, reason: `the line is under ${MIN_VOICE_SECONDS} seconds` };
     } else if (!g && u.eventId) {
       const stored = this.session.store.event(u.eventId)?.data.embedding as number[] | undefined;
       if (stored) {
         const e = new Float32Array(stored);
         this.voiceprints.add(personId, e);
         if (prior) this.voiceprints.remove(prior, e);
+        learning = { learned: true };
       }
     }
     const next: Utterance = { ...u, personId, speakerName: person.name, confidence: 1, method: "manual" };
     this.session.store.put("utterances", next);
     this.onLine?.(next, false);
     bus.send({ type: "utterance", utterance: next });
-    return next;
+    return { utterance: next, learning };
   }
 
   /** The embedding of an utterance's best copy, kept with its event so labels work after restarts. */

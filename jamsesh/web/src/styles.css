@@ -546,6 +546,62 @@ textarea:focus {
   min-height: 0;
 }
 
+.feed-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.feed-wrap > .feed {
+  flex: 1;
+  /* The feed holds the reader's place itself when lines are added above them. */
+  overflow-anchor: none;
+}
+
+/* Floats over the bottom of the feed while the reader is reading back. */
+.feed-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px 0 10px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  animation: fadein 0.2s ease both;
+  cursor: pointer;
+}
+
+.feed-latest:hover {
+  background: var(--panel-2);
+}
+
+.feed-older {
+  align-self: center;
+  flex: none;
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.feed-older:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
 .feed::-webkit-scrollbar {
   display: none;
 }
@@ -992,6 +1048,15 @@ select {
   cursor: pointer;
 }
 
+/* A choice this window can't change reads as plain text: no chevron, no box. */
+select:disabled {
+  cursor: default;
+  color: var(--dim);
+  background: transparent;
+  border-color: transparent;
+  opacity: 1;
+}
+
 .btn,
 .chip,
 .badge,
@@ -1159,7 +1224,117 @@ select {
   position: absolute;
   top: 12px;
   left: 12px;
+  right: 12px;
   z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  pointer-events: none;
+}
+.page-bar > * {
+  pointer-events: auto;
+}
+/* How the canvas's join is going, when it isn't live. */
+.canvas-join,
+.canvas-fonts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  max-width: min(460px, 100%);
+  padding: 0 4px 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #3b3f45;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 6px 18px -8px rgba(0, 0, 0, 0.35);
+  font-size: 12.5px;
+  font-weight: 520;
+}
+.canvas-join-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e0a200;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.canvas-join.quiet {
+  padding-right: 12px;
+}
+.canvas-join-retry {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #16181b;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.canvas-join-retry:hover {
+  background: #2c3036;
+}
+/* Fonts this computer doesn't have: the canvas shows them in a substitute. */
+.canvas-fonts {
+  padding-right: 12px;
+  color: #6b5200;
+  background: rgba(255, 248, 225, 0.96);
+  border-color: rgba(176, 132, 0, 0.25);
+  cursor: help;
+}
+.canvas-fonts-aa {
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-weight: 700;
+  font-size: 13px;
+}
+.page-reconnect {
+  margin-top: 4px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 0 0 9px 9px;
+  color: #55595f;
+}
+/* A canvas that isn't connected says so over the (blank) document. */
+.canvas-down {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 6;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  max-width: min(380px, calc(100% - 32px));
+  padding: 20px 22px;
+  border-radius: 16px;
+  background: #fff;
+  color: #16181b;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 24px 60px -24px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  font-size: 13px;
+}
+.canvas-down strong {
+  font-size: 15px;
+}
+.canvas-down span {
+  color: #55595f;
+  overflow-wrap: anywhere;
+}
+.canvas-down .canvas-down-note {
+  font-size: 12px;
+  color: #8a8f98;
+}
+.canvas-down .btn {
+  margin-top: 8px;
+  background: #16181b;
+  color: #fff;
+  border-color: transparent;
+}
+.canvas-down .btn:hover {
+  background: #2c3036;
 }
 .page-current {
   display: inline-flex;

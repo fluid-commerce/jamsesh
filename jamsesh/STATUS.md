@@ -1,6 +1,6 @@
 # What's tested
 
-Status of each major capability as of October 27, 2026. **Tested live** means exercised end to end
+Status of each major capability as of October 29, 2026. **Tested live** means exercised end to end
 with the real pieces (real Claude Code or Codex, the live brain on the AI Gateway, real network
 connections). **Simulated** means covered by automated tests or emulation, not the real thing.
 **Not tested** means built but not exercised yet.
@@ -17,6 +17,7 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Permission setup window | Simulated | Rendered and laid out; the macOS prompts themselves weren't clicked through. |
 | Microphone inside the app's window (WebKit) | Not tested | The page is a secure origin, so the browser allows it; macOS will ask for Microphone on first use. |
 | Big screen on a second display, same-Space full screen | Not tested | Needs a second display. |
+| Helpers stop with the hub (canvas server, participants, key helper, local whisper), graceful or killed | Simulated | Hub tests with stand-in helpers, including ones that ignore `SIGTERM` and a hub killed outright; the bundled app's hung-page, hub-restart and port-release check is an owner-run release check on a Mac, still to run. |
 | Opening the app on another Mac | Not tested | Ad-hoc signed: needs **Open Anyway** once in Privacy & Security. Permissions reset if the app is rebuilt. |
 
 ## Room and brain
@@ -24,10 +25,11 @@ connections). **Simulated** means covered by automated tests or emulation, not t
 | Capability | Status | Notes |
 |---|---|---|
 | Directives reach agents (Stop hook, `jam_wait`, inbox) | Tested live | Real Claude Code and Codex in two-repository scenarios, earlier in the project. |
+| Parity and pairing: `coordinate` directives name their counterparts and finish only after a two-way exchange with one of them | Simulated | Hub tests through the session, the brain's tools, MCP and `POST /directives`; not yet run with two real agents. |
 | Brain routing, decisions, affinity, curation | Tested live | 37 live scenarios on the gateway pass; a few are occasionally flaky under parallel load. |
 | "How do I join?" puts the Join view up | Tested live | Two phrasings, about 3 seconds. |
 | Brain knows the big screen and display sizes | Tested live | It answered with the exact resolution and aspect ratio. |
-| Text-to-speech through the gateway | Tested live | `openai/tts-1`, about 3 seconds; falls back to macOS `say`. |
+| Text-to-speech through the gateway | Tested live | `openai/tts-1`, about 3 seconds, when it was the default; the default is now `microsoft/mai-voice-2.1`, not yet timed on this row. Falls back to macOS `say`. |
 | Arranging windows, listing windows, preview builds on the host | Not tested | Built; needs the Accessibility and Automation permissions granted on the host. |
 | Agents asking the host to build their branch | Not built | Waiting on a decision: it lets any paired agent run commands on the host. |
 

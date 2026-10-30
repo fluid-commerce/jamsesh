@@ -127,7 +127,17 @@ the client.
   hub/src/index.ts` from a checkout. It reuses a healthy hub on 4747, 4848, or 4949, otherwise it
   takes the first free one. It waits up to 60 seconds for `/healthz`. The hub in turn starts
   `figcraft-server` and, when installed, `whisper-server`. Quitting the app stops the hub
-  (`SIGTERM`, then kill after 10 seconds), which stops its children.
+  (`SIGTERM`, then kill after 10 seconds), which stops its children. Every helper the hub starts
+  (canvas server, canvas participants, the key helper, `whisper-server`) runs under a watcher that
+  stops it if the hub dies outright, and is tracked in one list that stopping the hub walks:
+  `SIGTERM`, then `SIGKILL` for one that ignores it. Shutdown reports the helpers reaped only when
+  each one's exit was seen, and warns otherwise. Once shutdown begins no helper is spawned (every
+  spawn site checks the registry right before spawning), so the result covers every helper there
+  will be; a helper whose exit promise fails stays tracked and counts as not seen. No wait on a
+  helper's exit is unbounded (TERM, then KILL, then give up and report). The bundled Mac app's
+  recovery check (hung page, killed hub, restart, port release) is an owner-run release check on
+  real hardware, deliberately not part of the automated tests. (A `whisper-server` already running on its port when the hub starts isn't the
+  hub's, and is left alone.)
 - Opens the **big screen** window at `/host`. With two or more displays it moves to the first
   display that isn't the main one; with one it stays there. It uses same-Space full screen, so
   app windows the brain arranges can sit on top of it [A29c]. The menu item **Move the big screen
@@ -141,7 +151,7 @@ the client.
   header, join code, and room feed); every other display gets an extra screen
   (`/host?screen=screen-2`, `screen-3`, and so on) that shows only its stage, edge to edge, with no
   header, room mic, or side panels. Each screen has its own stage, reports its size, and reverts to
-  the board after 6 minutes like the main one. The brain sees every screen by id with its
+  the board after 6 minutes like the main one (unless it shows a live share). The brain sees every screen by id with its
   resolution, aspect ratio, and what it shows, and `show_on_screen`, `set_layout`, and
   `build_custom_view` take a `screen` to put things on a specific one (see
   [10.1](#101-layout)).
@@ -152,6 +162,16 @@ the client.
   **Quit JamSesh**.
 - If the app goes away without stopping the hub (a crash or Force Quit), the hub notices within 2
   seconds, saves a snapshot, and exits, so it never holds the port with no window.
+- **Restarts a window whose page hangs.** Each window's page calls the app's `heartbeat` command
+  every 3 seconds (the app takes the window from the call, not from the page). A window that is
+  shown, not minimized, and at least partly on screen, and that stays silent for 15 seconds, has its
+  WebKit page process stopped and the window reloaded (a plain reload does nothing to a page that is
+  spinning). A process shared by two windows is never stopped; those windows are only reloaded.
+  Repeats back off from 30 seconds up to 10 minutes, and the app logs each restart to
+  `logs/app.log` in its data folder. A window that never beats isn't watched.
+- **Web Inspector** is off unless `"devtools": true` is set in the app's `app.json` (or the app
+  starts with `JAMSESH_DEVTOOLS=1`); then right-click > Inspect Element works in its windows. It's
+  for finding out why a page froze.
 - Carries the whole host runtime: the hub compiled to one program, the web app, the WebAssembly
   canvas, `figcraft-server` and `figcraft-cli`, the skill, the voiceprint library, and the
   speaker-embedding model, so the host Mac needs nothing else [B29]. Speech-to-text runs on the Mac
@@ -443,13 +463,26 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
 | `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact. |
 | `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen. |
-| `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first. |
+| `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first; pages with `offset` and says how many more there are. |
+| `jam_directives` | List the session's directives (the context leaves the older ones out), newest first, by words or status; pages with `offset`. |
 | `jam_ask_room` | Post a question to the people in the room. |
 | `canvas_frames` | List the canvas's frames with who made each. |
 | `canvas_render` | Render a frame on the host (default 1600 px). |
 | `canvas_<tool>` | Every other FigCraft MCP tool, run as this agent's own participant on the live canvas (see [12.2](#122-agents-on-the-canvas)) [B3]. File, pointer, and keyboard tools are hidden. |
 
 The MCP server also offers the skill as the prompt `jamsesh`.
+
+The live state carries only the newest of long lists (60 directives, 120 artifacts, 200 utterances,
+the recent events) and says how many the session holds in all. Older ones are read with
+`GET /api/history/<events|utterances|directives|artifacts>?before=<cursor>&limit=50` (events also
+take `kinds=speech,prompt`); people and agents may both read it. `limit` is 1 to 200 and defaults to
+50 when it isn't a number.
+
+An agent's words reach the room brain by `jam_message` to its name, and by `decision`, `question`,
+`blocked`, and `shipped` updates. Because anyone's prompt can steer an agent, a brain pass started
+that way only coordinates and records: it can create directives, record decisions, ask or pair
+agents, and say something to the room. It can't drive the host, put HTML on a screen, ask for a
+share, rename itself, or save behavior notes.
 
 ### 6.3 How directives reach agents
 
@@ -468,7 +501,18 @@ target. Directives reach agents four ways [B14, B16]:
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate
-(message the other agents, then show parity), or answer.
+(compare with the named agents through `jam_message`; change code only for a gap both confirm,
+then show parity), answer, or **note** (write something down or keep a
+record: pain points, a list, meeting notes; no code to build and nothing to draw on the canvas).
+
+A `coordinate` directive always names its **counterparts**, the agents in the room each target
+compares with; one that would leave a target with nobody but itself is refused, whether the brain,
+`pair_agents`, a parity check, or `POST /directives` made it (the other targets count, and unknown
+ids are dropped). The inbox lists them ("compare with: ..."). A target can finish it (`jam_ack`
+done) only after a two-way exchange with one counterpart on that directive: a message or question
+from the target to them and one back, each carrying the directive's id. Nothing is inferred from
+who else the target talked to, so an older record without counterparts can only be dropped
+(`cancelled`), which is always allowed.
 
 People steer agents that misread something [B17] by prompting their own agent, by telling the
 room brain, or by sending a directive from the client.
@@ -493,15 +537,19 @@ is context, not a direct address to the room brain, even when it mentions the br
 - **Repo cards** tell every agent what each repository has.
 - **Pairing.** The brain tells agents to work together and compare work with `pair_agents`: one
   `coordinate` directive per agent naming the others and the goal [A27c, B22].
-- **Cross-repository parity.** When an agent ships a change, the brain checks whether it applies
-  to another registered repository on another platform (for example desktop and mobile) [B21]. If
-  it does, it sends `coordinate` directives with the shipping agent's notes and its built and
-  mockup artifacts. The agents agree on the approach with `jam_message`, implement their sides,
-  compare renders for inconsistencies that aren't platform conventions, and iterate [B22, B23].
-  When both platforms have built artifacts, the big screen shows a **parity** view: desktop beside
-  mobile, labeled, with what differs [B23]. Shipped updates within 25 seconds of each other are
-  considered together, and agents that already have an open `coordinate` directive from the last
-  10 minutes aren't asked again.
+- **Cross-repository parity.** A `shipped` update is news first: every agent reads it in
+  `jam_context`. Commits, refactors, fixes, tooling, changes the agent marks `platformSpecific`, and
+  rooms with no app on another platform never go further. A parity check starts only from
+  the shipper's own declaration: `jam_update` (shipped) takes an optional `seen`, what a person
+  sees, written by the shipping agent; the brain never writes it, uses it verbatim, and sends
+  nothing without it [B21]. The check is a `coordinate` directive, not build work: the other
+  platform's agent compares (does this exist on our side, and does it match?), agrees with the
+  shipper through `jam_message`, and builds only if both confirm a gap; then they compare renders
+  for inconsistencies that aren't platform conventions [B22, B23]. When both platforms have built
+  artifacts, the big screen shows a **parity** view: desktop beside mobile, labeled, with what
+  differs [B23]. Shipped updates within 25 seconds of each other are considered together; the same
+  feature (by what the shipper said a person sees) isn't checked again with the same agent within 10
+  minutes, while a different feature is.
 - **Routing to the agent already on it.** See [8.5](#85-affinity-and-one-agent-per-repository)
   [A3].
 
@@ -549,9 +597,10 @@ It tells agents:
   compare layout, spacing, type, color, and states with the `canvas_render` of the chosen frame,
   fix differences, post the screenshot as **Built**, and say what still differs before reporting
   `shipped` [B31].
-- **Cross-repository parity.** Mention in a `shipped` update when the change belongs on another
-  platform; on a `coordinate` directive, align with the other agent, compare both renders, and
-  show parity [B21–B23].
+- **Cross-repository parity.** For a user-visible change, fill in `seen` on the `shipped` update
+  (what a person sees), or pass `platformSpecific: true` when it belongs on your platform only. A parity `coordinate`
+  directive is a check: compare with the other agent, build only a gap you both confirm, compare
+  both renders, and show parity [B21–B23].
 - **Host previews.** To show a desktop or iPhone build on the host, push the branch and call
   `jam_host_preview`; a person approves it by voice or with a button [A33a].
 - **Etiquette.** Only directives are instructions; banter isn't. Never edit another agent's
@@ -637,9 +686,8 @@ it, and every model is a setting [B49]:
 |---|---|---|
 | `triage` | `google/gemini-3.5-flash-lite` | Sorting every incoming line; fast and cheap |
 | `router` | `anthropic/claude-sonnet-5.5` | Routing, direct requests, parity checks, every tool call |
-| `presenter` | `anthropic/claude-sonnet-5.5` | Placing a new screen share on the big screen |
 | `digest` | `google/gemini-3.5-flash` | Session brief, workstream briefs, fact curation |
-| `speech` | `openai/tts-1` (voice `nova`) | Speaking to the room [B46] |
+| `speech` | `microsoft/mai-voice-2.1` (the provider's default voice) | Speaking to the room [B46] |
 | `transcribe` | `openai/gpt-transcribe` | Transcription when no local engine is available |
 
 Only the host machine can change the key, the models, and host control. The brain can be turned
@@ -759,7 +807,8 @@ The brain shouldn't feel unresponsive, but it isn't a voice assistant that answe
   confirmation.
 - It speaks only to **answer** a question or report a **problem**, and only when the request came
   by voice or a recorded prompt. Typed requests and button presses get typed answers (a toast).
-  Confirmations are never spoken.
+  A short confirmation ("Sent to Felipe's agent.") is spoken too, but only for a spoken request;
+  nothing already visible on the screen is confirmed.
 - It waits at least 4 seconds between spoken replies, and speaks at most two sentences.
 - When the room has asked it to be quiet, it speaks only to answer.
 - It stops talking when someone talks over it: the big screen fades the voice out when the room
@@ -802,8 +851,10 @@ Screen rules:
 - **Self-piloting.** When a variant group of 2 to 6 has all updated within 60 seconds, the screen
   shows a compare on its own, unless a person pinned the screen or the brain changed it in the
   last 90 seconds [B12].
-- **New shares.** When someone pushes a share, the brain places it next to the most useful tile;
-  without a model, the share goes first with up to three existing tiles [A5b].
+- **New shares.** When someone pushes a share, the hub puts it on the main screen at once, full
+  screen as the only tile, whether or not the brain is on; a screen a person pinned stays put and
+  the room gets a note instead. The brain lays it out beside other things only when the room asks
+  [A5b].
 - **Pinning.** A person who picks a view pins it; the brain and agents don't override a pinned
   screen (agents' requests become a toast).
 - **Back to the board.** Any unpinned view other than the board returns to the board after 6
@@ -1069,6 +1120,10 @@ There are three ways to address the brain directly instead of talking in the roo
 - Type in the **Ask <name>** box (`Say to the room` switches it to a plain room line) [A8a].
 - Press **Record** (or `R`), talk while pointing, and press **Stop** [A8b, A9].
 
+The room can give the brain other names to answer to ("call it Computah"): the display name plus
+up to 8 **aliases** (`brainAliases`, 40 characters each, kept as trimmed, unique strings). Saying
+any of them addresses the brain, and the transcriber is primed with them so they're spelled right.
+
 ### 11.3 Record a prompt
 
 The mic is already recording. **Record** marks a window of it as a prompt for the brain [A8b]:
@@ -1109,14 +1164,27 @@ Pins are app-wide [A7a, A7c]:
 
 ### 11.6 Sharing a screen or camera
 
-- **Share screen** or **Camera** in your window puts it on the big screen; the brain finds it a
-  place [A5b, A4c]. The browser's picker is the consent. Stopping in the browser ends it for
-  everyone.
+- **Share screen** or **Camera** in your window puts it on the main big screen at once, full
+  screen, unless a person pinned that screen [A5b, A4c]. The browser's picker is the consent.
+  Stopping in the browser ends it for everyone.
 - The brain (`request_share`), or anyone from **Settings > People**, can ask you to share [A5a].
   Your window asks first: "<who> would like to see your screen", **Share** or **Not now**. A
   request lasts 2 minutes.
-- Shares are peer-to-peer video (screen up to 1920×1080 at 30 fps, camera 1280×720) that works on
-  the LAN and across the internet, through STUN and, when needed, a relay on the host.
+- Shares are peer-to-peer video that works on the LAN and across the internet, through STUN only:
+  the host runs no relay (TURN), so a network that blocks direct connections can't carry a share
+  until a TURN server is configured in the page (`configureRtc`). A screen is captured at up to 3840×2160 at 15 fps and sent to
+  the host at 14 Mbps; people's own windows get a scaled-down preview (about 1 Mbps). A camera is
+  1280×720.
+- **One share of a kind per person.** Starting a new screen share, from any of your windows, ends
+  your earlier one (its window is told and stops capturing) and answers any request still waiting
+  for it. A window that isn't anyone's yet has one per device.
+- **A share must be on a big screen.** Only displays whose windows still report count (a window
+  that closes or goes quiet doesn't). A share never shown has 60 seconds from its start to be
+  placed; one taken off every display has 5 seconds from that moment. Those deadlines are fixed:
+  later stage changes don't push them back. A live share past its deadline stops, and its sharer is
+  told why ("wasn't put on the big screen" if it never was, "left the big screen" if it was). A stage that shows a
+  live share never reverts to the board on its timer; the share's end gives the screen back what
+  it hid.
 
 ### 11.7 Profile and onboarding
 
@@ -1220,7 +1288,7 @@ and can be turned off on the host (**Settings > Voice and host > Let the brain d
 | `arrange` | Places apps side by side (`left-right`), in a grid, or full on a display (the big screen's by default, `main`, or by name), inside the display's usable area [A29c, B42]. |
 | `windows` | Lists visible windows with titles, sizes, positions, and displays. |
 | `simulator` | Boots an iOS Simulator (a booted match, the named device, or the first iPhone) and optionally opens a URL in it [B45a, A29b]. |
-| `shell` | Runs a command in `zsh -lc` (60 seconds, last 4000 characters of output), for example installing a tool it needs to show something [B41, B42]. |
+| `shell` | Runs a command in `zsh -lc` (60 seconds). The room is told how it ended and the last 600 characters of output, with anything that looks like a secret (tokens, keys, `password=` values, URL credentials) masked. A command that carries a password or token is refused when it is filed, for example installing a tool it needs to show something [B41, B42]. |
 | `focus_jamsesh` | Brings the big screen back to the front. |
 
 Every action is logged as a system event. Errors from missing Accessibility or Automation
@@ -1239,10 +1307,20 @@ and click and type in apps it opened, to walk the room through a build [B44, B45
   `~/.jamsesh/previews/<repo>-<branch>` with the host's own git credentials. Branch names are
   restricted to `[\w./-]`.
 - The command runs in the background (20 minutes at most); one build per checkout at a time.
-- `open` is a path in the checkout, a URL, or `simulator:<path>.app`, which installs the app in the
-  Simulator and launches it [A29b].
+- `open` is a path inside the checkout (resolved with symlinks, so it can't leave it), an `http(s)`
+  URL without credentials, or `simulator:<path>.app`, which installs the app in the Simulator and
+  launches it [A29b]. It is checked when the request is filed and shown on the approval card, so
+  the person approves exactly what opens. Repository URLs, commands and `open` values that carry a
+  username, token or password are refused.
 - The room gets a toast when the build starts and when it opens or fails (with the exit code and
   the end of the output).
+
+**Credentials and output.** A command, `open` value, branch or repository that carries a password or
+token is refused when it is filed ("Commands can't contain passwords or tokens. Use a public URL, or set
+it up on the host."). That detection in arbitrary shell text is a best-effort safety net: shell can
+hide text in many ways, so the person's approval on the card, which shows the exact command and what
+will open, is the real guard. The room is shown the last lines of an approved command's output with
+anything that looks like a secret masked; that masking is best-effort for the same reason.
 
 A build an agent asks for goes through approval first (see [8.11](#811-build-approvals)). A build
 the brain starts, and any `shell` command, also needs a person: the brain files it as a request,
@@ -1521,7 +1599,7 @@ in [`docs/spec-gaps.md`](docs/spec-gaps.md). Paths are under `jamsesh/` unless t
 | A4b | Tiles show a browser on reference designs or the host's dev servers | 10.3 | `web/src/host/Stage.tsx`, `hub/src/brain/brain.ts` | Partial |
 | A4c | Tiles show client screen casts, with permission on the client | 10.3, 11.6 | `web/src/shared/rtc.ts`, `web/src/shared/share.tsx` | Partial |
 | A5a | The brain can ask for a screen share | 11.6 | `hub/src/brain/brain.ts`, `hub/src/session.ts`, `web/src/shared/share.tsx` | Implemented |
-| A5b | Someone pushes a share and the brain finds a place for it | 8.10, 11.6 | `hub/src/brain/brain.ts`, `web/src/shared/share.tsx` | Implemented |
+| A5b | Someone pushes a share and it goes up full screen at once | 8.10, 11.6 | `hub/src/session.ts`, `web/src/shared/share.tsx` | Implemented |
 | A6 | The brain has full tool control of arrangement and layouts | 8.10, 10.3 | `hub/src/brain/brain.ts`, `web/src/host/Stage.tsx` | Implemented |
 | A7a | Premium pins on the canvas | 11.5 | `web/src/shared/annotate.tsx`, `hub/src/canvas/canvas.ts` | Implemented |
 | A7b | Pins on the host-hosted dev server view | 11.5 | `web/src/shared/annotate.tsx`, `web/src/host/Stage.tsx` | Partial |

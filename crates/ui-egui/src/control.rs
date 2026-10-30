@@ -933,6 +933,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             let layers_generation = app.session.clipboard.layers_generation;
             let r = app.session.execute(cmd, &params).map_err(|e| e.to_string());
             app.clear_comment_draft_after_tool_set(cmd, r.is_ok());
+            app.quiet_session_note(cmd);
             app.invalidate_synthetic_copy(layers_generation);
             // Programmatic calls never open dialogs.
             app.session.ui_requests.retain(|u| !u.kind.starts_with("dialog."));

@@ -81,12 +81,12 @@ const JAM_TOOLS = [
   {
     name: "jam_search",
     description: "Search everything said, typed, decided, and posted in the session (full text).",
-    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] },
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many hits to see more" } }, required: ["query"] },
   },
   {
     name: "jam_update",
     description:
-      "Tell the room and the other agents what you're doing. kind: progress, done, shipped (implemented in the repo and verified), question (you need a person), blocked, handoff, decision. Keep text to one or two sentences with specifics.",
+      "Tell the room and the other agents what you're doing. kind: progress, done, shipped (implemented in the repo and verified), question (you need a person), blocked, handoff, decision (proposed to the room brain, which makes it a room decision if it binds others). Keep text to one or two sentences with specifics.",
     inputSchema: {
       type: "object",
       properties: {
@@ -94,6 +94,8 @@ const JAM_TOOLS = [
         text: { type: "string" },
         workstream: { type: "string" },
         directiveId: { type: "string", description: "The directive this update answers, if any" },
+        platformSpecific: { type: "boolean", description: "With shipped: the change is deliberately for your platform only, so other platforms aren't asked to match it" },
+        seen: { type: "string", description: "With shipped, for a user-visible change: what a person sees, in a sentence (the screen, control, flow or behavior). Agents on other platforms get a parity check about it. Leave it out when nobody sees the change." },
       },
       required: ["kind", "text"],
     },
@@ -124,8 +126,8 @@ const JAM_TOOLS = [
   },
   {
     name: "jam_message",
-    description: "Message another agent directly (by name or id), or 'all'. Use it to align on shared changes, hand work off, or ask who owns something.",
-    inputSchema: { type: "object", properties: { to: { type: "string" }, text: { type: "string" } }, required: ["to", "text"] },
+    description: "Message another agent directly (by name or id), or 'all'. Message the room brain by its name to ask it something or have it route or note something. Use it to align on shared changes, hand work off, or ask who owns something.",
+    inputSchema: { type: "object", properties: { to: { type: "string" }, text: { type: "string" }, directiveId: { type: "string", description: "The coordinate directive this is about (also on your reply to one that names it)" } }, required: ["to", "text"] },
   },
   {
     name: "jam_ask",
@@ -133,14 +135,14 @@ const JAM_TOOLS = [
       "Ask another agent a question and wait for its answer (it is told to answer right away). Use it whenever another agent's knowledge would save you guessing: how their repo does something, what their mockup's spacing is, whether they already built a component, what they decided. Returns the answer, or tells you it's still pending.",
     inputSchema: {
       type: "object",
-      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 230; default 120" } },
+      properties: { to: { type: "string", description: "Agent name or id" }, question: { type: "string" }, waitSeconds: { type: "number", description: "Up to 230; default 120" }, directiveId: { type: "string", description: "The coordinate directive this is about" } },
       required: ["to", "question"],
     },
   },
   {
     name: "jam_answer",
     description: "Answer a question another agent (or the room brain) asked you. Do this as soon as a QUESTION shows up in your inbox, before continuing your own work. Be concrete: file paths, values, names.",
-    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" } }, required: ["askId", "text"] },
+    inputSchema: { type: "object", properties: { askId: { type: "string" }, text: { type: "string" }, directiveId: { type: "string", description: "The coordinate directive the question was about, if it names one" } }, required: ["askId", "text"] },
   },
   {
     name: "jam_repo_card",
@@ -227,8 +229,16 @@ const JAM_TOOLS = [
   },
   {
     name: "jam_artifacts",
-    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words.",
-    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } } },
+    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words. Long sessions have more than one page: it says how many more there are; pass offset to page on.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many (from the newest) to see older ones" } } },
+  },
+  {
+    name: "jam_directives",
+    description: "List the session's directives (what the room asked agents to do), newest first, with their status, so you can see older ones the context leaves out. Filter by words or status. It says how many more there are; pass offset to page on.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" }, status: { type: "string", description: "open, done or cancelled" }, limit: { type: "number" }, offset: { type: "number" } },
+    },
   },
   {
     name: "jam_ask_room",
@@ -402,15 +412,24 @@ export class McpEndpoint {
         return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10));
       case "jam_search": {
         this.requireAgent(ctx);
-        const hits = s.store.searchEvents(String(args.query ?? ""), Math.min(60, args.limit ?? 20));
-        return text(hits.map(fmtEvent).join("\n") || "Nothing found.");
+        const limit = Math.min(60, Math.max(1, Number(args.limit) || 20));
+        const offset = Math.max(0, Math.floor(Number(args.offset) || 0));
+        // One extra hit tells whether there are more without counting them all.
+        const hits = s.store.searchEvents(String(args.query ?? ""), limit + 1, offset);
+        const shown = hits.slice(0, limit);
+        return text(shown.length ? `${shown.map(fmtEvent).join("\n")}${hits.length > limit ? `\n\nThere are more matches: call again with offset ${offset + limit}.` : ""}` : "Nothing found.");
       }
       case "jam_update": {
         const agent = this.requireAgent(ctx);
-        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId } });
-        if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
+        const aimed = args.directiveId ? s.store.get("directives", String(args.directiveId)) : undefined;
+        if (aimed && !aimed.targets.includes(agent.id)) throw new Error("That directive isn't addressed to you.");
+        const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}), ...(args.kind === "shipped" && typeof args.seen === "string" && args.seen.trim() ? { seen: args.seen.trim().slice(0, 300) } : {}) } });
+        // A report never closes a coordinate directive: that waits for jam_ack done after the exchange.
+        const coordinate = args.directiveId && s.store.get("directives", String(args.directiveId))?.mode === "coordinate";
+        if (args.directiveId && !coordinate && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
-        return text(`Posted (#${ev.id}).${inbox}${this.checkWarning(agent, args.kind)}`);
+        const open = coordinate && (args.kind === "done" || args.kind === "shipped") ? "\n\nThat directive is a comparison with another agent, so it stays open: compare through jam_message, then jam_ack it done." : "";
+        return text(`Posted (#${ev.id}).${open}${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
@@ -439,6 +458,7 @@ export class McpEndpoint {
         const agent = this.requireAgent(ctx);
         const d = s.store.get("directives", String(args.directiveId));
         if (!d) throw new Error("No directive with that id.");
+        if (d.progress?.[agent.id] === "done" || d.progress?.[agent.id] === "cancelled") return text("Already closed.");
         s.setDirectiveFor(d.id, agent.id, args.status, args.result);
         if (args.status === "acked") s.touchAgent(agent.id, { status: "working", activity: d.text.slice(0, 140) });
         if (args.status !== "acked")
@@ -447,13 +467,13 @@ export class McpEndpoint {
       }
       case "jam_message": {
         const agent = this.requireAgent(ctx);
-        s.sendMessage(agent.id, String(args.to), String(args.text));
+        s.sendMessage(agent.id, String(args.to), String(args.text), args.directiveId ? { directiveId: String(args.directiveId) } : {});
         return text("Sent.");
       }
       case "jam_ask": {
         const agent = this.requireAgent(ctx);
         const secs = Math.max(5, Math.min(230, Number(args.waitSeconds ?? 120)));
-        const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000);
+        const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000, args.directiveId ? { directiveId: String(args.directiveId) } : {});
         s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
         const a = await answer;
         s.touchAgent(agent.id, { status: "working" });
@@ -461,7 +481,7 @@ export class McpEndpoint {
       }
       case "jam_answer": {
         const agent = this.requireAgent(ctx);
-        s.answer(agent.id, String(args.askId), String(args.text));
+        s.answer(agent.id, String(args.askId), String(args.text), args.directiveId ? { directiveId: String(args.directiveId) } : {});
         return text("Answered.");
       }
       case "jam_repo_card": {
@@ -552,11 +572,17 @@ export class McpEndpoint {
       case "jam_artifacts": {
         this.requireAgent(ctx);
         const q = String(args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
-        const list = s
-          .artifacts()
-          .filter((a) => !q.length || q.every((w) => `${a.title} ${a.note} ${a.agentName} ${a.platform}`.toLowerCase().includes(w)))
-          .slice(0, Math.min(80, args.limit ?? 30));
-        return text(list.map((a) => `${a.id}: [${a.stage}/${a.kind}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.nodeId ? ` (frame ${a.nodeId})` : ""}${a.url ? ` ${a.url}` : ""}`).join("\n") || "No artifacts yet.");
+        const all = s.artifacts().filter((a) => !q.length || q.every((w) => `${a.title} ${a.note} ${a.agentName} ${a.platform}`.toLowerCase().includes(w)));
+        const { shown, more } = pageOf(all, args);
+        return text(shown.map((a) => `${a.id}: [${a.stage}/${a.kind}] ${a.title}${a.agentName ? ` by ${a.agentName}` : ""}${a.nodeId ? ` (frame ${a.nodeId})` : ""}${a.url ? ` ${a.url}` : ""}`).join("\n") + more || "No artifacts yet.");
+      }
+      case "jam_directives": {
+        this.requireAgent(ctx);
+        const q = String(args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+        const want = String(args.status ?? "").toLowerCase();
+        const all = s.directives().filter((d) => (!q.length || q.every((w) => `${d.text} ${d.result ?? ""}`.toLowerCase().includes(w))) && (!want || (want === "open" ? d.status !== "done" && d.status !== "cancelled" : d.status === want)));
+        const { shown, more } = pageOf(all, args);
+        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id))).join("\n") + more || "No directives yet.");
       }
       case "jam_ask_room": {
         const agent = this.requireAgent(ctx);
@@ -592,8 +618,10 @@ export class McpEndpoint {
   }
 
   /** A reminder appended to jam_update when "done" or "shipped" skips the checks the skill asks for. */
-  private checkWarning(agent: Agent, kind: string): string {
+  private checkWarning(agent: Agent, kind: string, directiveId?: string): string {
     const s = this.hub.session;
+    // A note has no build or canvas work to check.
+    if (directiveId && s.store.get("directives", directiveId)?.mode === "note") return "";
     const now = Date.now();
     if (kind === "done") {
       const c = this.canvasState.get(agent.id);
@@ -649,6 +677,8 @@ export class McpEndpoint {
     return [
       "People (name, title, whose call counts more when people disagree):",
       ...s.people().map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ", (no title yet)"}${p.weight > 1 ? ` (weight ${p.weight})` : ""}${s.agents().filter((a) => a.ownerId === p.id && a.status !== "offline").length ? `; agents: ${s.agents().filter((a) => a.ownerId === p.id && a.status !== "offline").map((a) => a.name).join(", ")}` : ""}`),
+      "Room brain (jam_message it by name; it routes work and answers):",
+      `- ${s.settings().brainName}`,
       "Agents:",
       ...agents.map(
         (a) =>
@@ -663,11 +693,22 @@ export class McpEndpoint {
     const ws = workstream
       ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === workstream.toLowerCase())
       : s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
-    const decisions = s.store.recentEvents({ kinds: ["decision"], limit: 12 });
+    const decisions = s.roomDecisions(agent.id, { limit: 12, workstreamId: ws?.id });
     const room = s.store
       .recentEvents({ kinds: ["speech", "prompt"], since: Date.now() - minutes * 60_000, limit: 80 })
       .filter((e) => e.relevance !== "banter" && e.relevance !== "chatter");
-    const updates = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 20 }).filter((e) => e.authorId !== agent.id);
+    const fromOthers = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 40 }).filter((e) => e.authorId !== agent.id);
+    const isShip = (e: JamEvent) => e.kind === "update" && e.data.updateKind === "shipped";
+    const updates = fromOthers.filter((e) => !isShip(e)).slice(-20);
+    // Ships are information, not tasks: listed here, one line per agent and branch (earlier ones folded in).
+    const shipped = new Map<string, { e: JamEvent; n: number }>();
+    for (const e of fromOthers.filter(isShip)) {
+      const a = s.agent(e.authorId ?? "");
+      const k = `${e.authorId}@${a?.branch ?? ""}`;
+      const prev = shipped.get(k);
+      shipped.set(k, { e, n: (prev?.n ?? 0) + 1 });
+    }
+    const shippedLines = [...shipped.values()].slice(-8).map(({ e, n }) => `${fmtEvent(e)}${n > 1 ? ` (+${n - 1} earlier on this branch)` : ""}`);
     const open = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled").slice(0, 16);
     const mine = open.filter((d) => d.targets.includes(agent.id));
     const others = open.filter((d) => !d.targets.includes(agent.id)).slice(0, 8);
@@ -679,6 +720,7 @@ export class McpEndpoint {
       `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
       `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
       `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
+      `## Recently shipped by other agents (information, nothing for you to do unless a directive says so)\n${shippedLines.join("\n") || "(nothing yet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
     ]
       .filter(Boolean)
@@ -691,18 +733,24 @@ export class McpEndpoint {
     if (!directives.length && !messages.length) {
       const open = s.openFor(agent.id);
       if (!open.length) return "Nothing new.";
-      return `Nothing new, but you haven't finished: ${open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ")}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
+      const list = open.map((d) => `${d.id} [${d.mode}] ${d.text.slice(0, 160)}`).join("; ");
+      // A coordinate directive is a comparison with the other agent first: finishing it means talking, so don't tell anyone to skip that.
+      if (open.some((d) => d.mode === "coordinate"))
+        return `Nothing new, but you haven't finished: ${list}. For a [coordinate] one, compare with the named agents through jam_message first and build only for a gap you both confirm; finish the others now. Then jam_ack each done.`;
+      return `Nothing new, but you haven't finished: ${list}. Finish it now (don't wait for others to reply first), then jam_ack it done.`;
     }
     const out: string[] = [];
     for (const d of directives) {
+      // A comparison names who with (only those count toward finishing it), whatever its text says.
+      const mates = (d.counterparts ?? []).filter((c) => c !== agent.id).map((c) => s.agent(c)?.name).filter(Boolean);
       out.push(
-        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
+        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}${d.mode === "coordinate" && mates.length ? `\n  compare with: ${mates.join(", ")}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
     for (const m of messages) {
-      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}), then continue.`);
+      if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}${m.data.directiveId ? `, directiveId ${m.data.directiveId}` : ""}), then continue.`);
       else if (m.data.answerTo) out.push(`ANSWER from ${m.authorName} (to your question ${m.data.answerTo}): ${m.text}`);
-      else out.push(`MESSAGE from ${m.authorName}: ${m.text}`);
+      else out.push(`MESSAGE from ${m.authorName}${m.data.directiveId ? ` (about directive ${m.data.directiveId}: reply with directiveId ${m.data.directiveId})` : ""}: ${m.text}`);
     }
     return out.join("\n\n");
   }
@@ -715,7 +763,9 @@ function modeHint(mode: Directive["mode"]) {
     case "implement":
       return "Implement in your repository. Run the dev server (jam_devserver), screenshot the build at the mockup's size, compare with canvas_render of the mockup, fix differences, then post the screenshot and jam_update shipped.";
     case "coordinate":
-      return "Align with the named agents through jam_message. Agree on the behavior, implement your side, post renders, and compare side by side with jam_show parity.";
+      return "Compare with the named agents through jam_message or jam_ask, always with this directive's id as directiveId: what each of you has, and what should match. Change code only for a gap you both confirm, then post renders and compare side by side with jam_show parity.";
+    case "note":
+      return "Write it down where the room said (or a notes file in your repo if it didn't). No code changes beyond that, no canvas, no dev server.";
     case "answer":
       return "This answers your question. Continue with it.";
     case "present":
@@ -739,6 +789,15 @@ function knowledge(s: Hub["session"], workstream?: string) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+/** One page of a newest-first list (limit, offset), and the line telling the agent how to get the rest. */
+function pageOf<T>(all: T[], args: { limit?: unknown; offset?: unknown }, max = 80, def = 30): { shown: T[]; more: string } {
+  const limit = Math.min(max, Math.max(1, Math.floor(Number(args.limit)) || def));
+  const offset = Math.max(0, Math.floor(Number(args.offset)) || 0);
+  const shown = all.slice(offset, offset + limit);
+  const left = all.length - offset - shown.length;
+  return { shown, more: left > 0 ? `\n\n${all.length} in all; ${left} more: call again with offset ${offset + shown.length}.` : shown.length && offset ? `\n\n(${all.length} in all; that is the last page.)` : "" };
 }
 
 export function fmtEvent(e: JamEvent) {

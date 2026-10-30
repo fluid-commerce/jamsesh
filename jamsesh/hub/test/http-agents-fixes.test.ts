@@ -112,3 +112,57 @@ test("a canvas join that fails closes its headless participant", async () => {
   expect(closed).toBe(1);
   expect(c.agents.size).toBe(0);
 });
+
+test("POST /directives: a coordinate directive needs another agent to compare with, and keeps only agents in the room", async () => {
+  const reg = (repo: string, platform: "desktop" | "mobile") => hub.session.registerAgent({ ownerName: "Jo", harness: "claude-code", repo, cwd: `/${repo}`, machine: "m1", platform, branch: "main" }).agent;
+  const desktop = reg("acme/desktop", "desktop");
+  const mobile = reg("acme/mobile", "mobile");
+  const h = { "content-type": "application/json", authorization: `Bearer ${browser.token}`, ...hostWindow };
+  const post = (b: object) => fetch(`${base}/api/directives`, { method: "POST", headers: h, body: JSON.stringify({ text: "Compare the sidebars", mode: "coordinate", ...b }) });
+  const before = hub.session.directives().length;
+  for (const b of [{ targets: [mobile.id] }, { targets: [mobile.id], counterparts: ["a_gone"] }, { targets: [mobile.id], counterparts: "nope" }]) {
+    const r = await post(b);
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).error).toContain("compare with");
+  }
+  expect(hub.session.directives()).toHaveLength(before);
+  const one = (await (await post({ targets: [mobile.id], counterparts: [desktop.id, "a_gone"] })).json()) as any;
+  expect(one.counterparts.slice().sort()).toEqual([desktop.id, mobile.id].sort());
+  const two = (await (await post({ targets: [mobile.id, desktop.id] })).json()) as any;
+  expect(two.counterparts.slice().sort()).toEqual([desktop.id, mobile.id].sort());
+  // Other modes are unaffected.
+  expect((await fetch(`${base}/api/directives`, { method: "POST", headers: h, body: JSON.stringify({ text: "Add the footer", mode: "implement", targets: [mobile.id] }) })).status).toBe(200);
+});
+
+test("a paired browser can't set a directive's status: coordinate directives finish only through the agents' exchange", async () => {
+  const reg = (repo: string) => hub.session.registerAgent({ ownerName: "Jo", harness: "claude-code", repo, cwd: `/${repo}`, machine: "m1", platform: "desktop", branch: "main" }).agent;
+  const a = reg("acme/one");
+  const b = reg("acme/two");
+  const d = hub.session.createDirective({ text: "Compare", mode: "coordinate", targets: [a.id, b.id], counterparts: [a.id, b.id], requestedBy: "Jo", rationale: "x" });
+  const h = { "content-type": "application/json", authorization: `Bearer ${browser.token}`, ...hostWindow };
+  for (const method of ["POST", "PATCH", "PUT"]) {
+    const r = await fetch(`${base}/api/directives/${d.id}`, { method, headers: h, body: JSON.stringify({ status: "done" }) });
+    expect(r.status).toBeGreaterThanOrEqual(400);
+  }
+  expect(hub.session.store.get("directives", d.id)!.status).not.toBe("done");
+});
+
+test("a stopped canvas gives no agent a new participant", async () => {
+  const c = Object.create(Canvas.prototype) as any;
+  c.stopped = true;
+  let spawned = 0;
+  c.spawnParticipant = () => void spawned++;
+  c.session = { canvas: { editLink: "ws://x/?token=t", status: "live" } };
+  await expect(c.forAgent({ id: "a1", name: "A" })).rejects.toThrow(/stopped/);
+  expect(spawned).toBe(0);
+});
+
+test("a dev server refresh that is mid-check when the proxy stops writes nothing afterwards", async () => {
+  const { DevProxy } = await import("../src/devproxy");
+  const patches: unknown[] = [];
+  const dp: any = new DevProxy({ devservers: () => [{ id: "d1", up: true, target: "127.0.0.1:1" }], store: { patch: (...a: unknown[]) => void patches.push(a) } } as any);
+  dp.check = async () => (dp.stop(), false); // stop arrives while the check is awaited
+  await dp.refresh();
+  expect(patches).toEqual([]);
+  expect(dp.downSince.size).toBe(0);
+});

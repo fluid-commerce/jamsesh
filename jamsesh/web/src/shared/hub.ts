@@ -50,6 +50,20 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 class HubClient {
   snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
   private listeners = new Set<() => void>();
+  private eventListeners = new Set<(e: JamEvent) => void>();
+  private gapListeners = new Set<() => void>();
+
+  /** Called when a replacement state shows lines were missed that it no longer holds (a gap longer than the snapshot), so a count would be wrong. */
+  onGap = (fn: () => void) => {
+    this.gapListeners.add(fn);
+    return () => void this.gapListeners.delete(fn);
+  };
+
+  /** Called for every new event as it arrives off the wire, before the 400-event window can displace it. */
+  onEvent = (fn: (e: JamEvent) => void) => {
+    this.eventListeners.add(fn);
+    return () => void this.eventListeners.delete(fn);
+  };
   private ws: WebSocket | null = null;
   private started = false;
   private retry = 0;
@@ -275,7 +289,22 @@ class HubClient {
 
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
-    const state = await api<HubState>("/state");
+    const before = this.snap.state;
+    const epoch = this.snap.epoch;
+    const fetched = await api<HubState>("/state");
+    // Any socket message that arrived while this was in flight made newer state, and a reconnect changes the epoch: either way an older answer must not overwrite it.
+    if (this.snap.state === before && this.snap.epoch === epoch) this.adopt(fetched);
+  }
+
+  /** The one way a whole state replaces the old (socket message or HTTP fallback): events newer than the old state's newest are announced, so lines that came in while this client was away from the wire still reach listeners (only those the snapshot still holds). */
+  private adopt(state: HubState) {
+    const old = this.snap.state;
+    if (old) {
+      const known = Math.max(0, ...old.events.map((e) => e.id));
+      const oldest = Math.min(Infinity, ...state.events.map((e) => e.id));
+      if (known > 0 && oldest > known + 1) for (const fn of this.gapListeners) fn();
+      for (const e of [...state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
+    }
     this.set({ state });
   }
 
@@ -298,13 +327,14 @@ class HubClient {
       case "state":
         // Authoritative. Queued-but-unsent work lives in the outbox (useOutbox().items), never in state.
         this.clear("state");
-        return this.set({ state: m.state });
+        return this.adopt(m.state);
       case "patch":
         if (s) this.set({ state: { ...s, [m.key]: m.value } });
         return;
       case "event": {
         if (!s) return;
         const i = s.events.findIndex((e) => e.id === m.event.id);
+        if (i < 0) for (const fn of this.eventListeners) fn(m.event);
         const events = i >= 0 ? s.events.map((e) => (e.id === m.event.id ? m.event : e)) : [...s.events, m.event].slice(-400);
         return this.set({ state: { ...s, events } });
       }
@@ -327,6 +357,15 @@ class HubClient {
         return this.set({ thinking: m.on ? m.label ?? "Thinking" : null });
       case "level":
         return this.set({ levels: { ...this.snap.levels, [m.deviceId]: m.level } });
+      case "share-ended": {
+        // The hub ended a share of this device (replaced, or its tile left the big screen): say so once.
+        if (m.text && m.deviceId === this.deviceId) {
+          const t: Toast = { id: ++this.toastId, text: m.text, tone: "info", at: Date.now() };
+          this.set({ toasts: [...this.snap.toasts, t].slice(-4) });
+          setTimeout(() => this.set({ toasts: this.snap.toasts.filter((x) => x.id !== t.id) }), 7000);
+        }
+        return;
+      }
       case "rtc":
       case "share-request":
         return;

@@ -1,3 +1,4 @@
 resources/
 target/
 src-tauri/gen/
+src-tauri/permissions/

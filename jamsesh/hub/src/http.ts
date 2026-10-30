@@ -4,22 +4,95 @@ import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { PairedDevice } from "./auth";
 import { bus } from "./bus";
+import { voiceprintStatus, learningNote } from "./audio/voiceprint";
+import { describeError } from "./brain/llm";
+import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
+import { FRAME_OVERHEAD, Upstream } from "./relay";
 import { skillMarkdown } from "./skill";
-import type { BusMessage, Stage } from "./types";
+import type { BusMessage, EventKind, Stage } from "./types";
 
-type WsData = { deviceId: string | null; collab?: string; upstream?: WebSocket; queue?: (string | Buffer)[] };
+type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: Upstream; queue?: (string | Buffer)[]; queueBytes?: number; openTimer?: ReturnType<typeof setTimeout> };
+
+/** What a relay holds for a canvas server that hasn't opened yet, and how long it waits: past either the client is told to try again. */
+export const RELAY_LIMITS = { bytes: 8 * 1024 * 1024, frames: 1000, openMs: 10_000 };
+
+/** Holds a frame for the canvas server; false when the relay is already holding as much as it may. */
+export function queueRelayFrame(data: WsData, raw: string | Buffer | ArrayBuffer | Uint8Array): boolean {
+  const size = (typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength) + FRAME_OVERHEAD;
+  const q = (data.queue ??= []);
+  if (q.length >= RELAY_LIMITS.frames || (data.queueBytes ?? 0) + size > RELAY_LIMITS.bytes) return false;
+  q.push(raw as any);
+  data.queueBytes = (data.queueBytes ?? 0) + size;
+  return true;
+}
+
+/** Ends both legs of a relay with a retryable close: used when either side can't drain what it's been sent. */
+function endRelay(ws: ServerWebSocket<WsData>, reason: string) {
+  ws.close(1013, reason); // first: the upstream's own close below must not turn it into a plain one
+  ws.data.upstream?.close();
+}
+
+/**
+ * Every frame between the canvas client and the canvas server goes through here, so one rule holds
+ * for both directions and before and after the upstream opens: a leg that is already holding more
+ * than RELAY_LIMITS.bytes (a peer that stopped reading) ends the relay instead of growing.
+ */
+export function relayUp(ws: ServerWebSocket<WsData>, raw: string | Buffer | ArrayBuffer | Uint8Array) {
+  const up = ws.data.upstream;
+  if (up?.open) {
+    // The upstream counts what the canvas server hasn't read; over the cap it stopped reading.
+    if (!up.send(typeof raw === "string" ? raw : new Uint8Array(raw as ArrayBuffer))) endRelay(ws, "canvas can't keep up, try again");
+  } else if (!queueRelayFrame(ws.data, raw)) endRelay(ws, "canvas not ready, try again");
+}
+
+export function relayDown(ws: ServerWebSocket<WsData>, data: string | Uint8Array) {
+  const sent = ws.send(data);
+  // 0 means dropped, except for an empty message (nothing to send is a success).
+  if ((sent === 0 && data.length > 0) || ws.getBufferedAmount() > RELAY_LIMITS.bytes) endRelay(ws, "can't keep up, try again");
+}
 
 /** Open sockets by device, for relaying WebRTC signaling between devices. */
 const sockets = new Map<string, Set<ServerWebSocket<WsData>>>();
+
+/**
+ * A device is now registered to `owner`: sockets another window opened for it earlier (before it was
+ * registered) stop speaking for it. They keep the live session, as a socket for no device.
+ */
+function dropForeignSockets(deviceId: string, owner: string | undefined) {
+  const set = sockets.get(deviceId);
+  if (!set || !owner) return;
+  for (const ws of [...set]) {
+    if (ws.data.caller === owner) continue;
+    set.delete(ws);
+    ws.data.deviceId = null;
+  }
+  if (!set.size) sockets.delete(deviceId);
+}
+
+/** The device a socket still speaks for: checked again on each use, so a later registration by another window wins. */
+function speaker(hub: Hub, ws: ServerWebSocket<WsData>): string | null {
+  const id = ws.data.deviceId;
+  if (!id) return null;
+  const owner = hub.session.store.get("devices", id)?.pairedId;
+  if (owner && owner !== ws.data.caller && (owner === "host" || hub.auth.live(owner))) {
+    dropForeignSockets(id, owner);
+    return null;
+  }
+  return id;
+}
 
 // Nothing to return means the thing was deleted (a queued edit to something gone): 410, not a crash.
 const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+const VOICE_NAME_MAX = 64;
+export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
+const lastVoicePreview = new Map<string, number>();
+
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -47,6 +120,22 @@ function knownHost(req: Request, hub: Hub) {
 }
 
 /** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
+/**
+ * The device a live-session socket speaks for (RTC signaling, mic level, and the share cleanup when
+ * its last socket closes): the one it names only when that device belongs to this window (its pairing,
+ * or "host" for the host's own windows). A device not registered yet, or whose window's pairing is
+ * gone, is claimed for this window. Any other id gets a socket that speaks for no device.
+ */
+function socketDevice(hub: Hub, wanted: string | null, caller: string | null): string | null {
+  if (!wanted || !caller || !/^[\w-]{1,64}$/.test(wanted)) return null;
+  const d = hub.session.store.get("devices", wanted);
+  if (!d) return wanted;
+  const owner = d.pairedId && (d.pairedId === "host" || hub.auth.live(d.pairedId)) ? d.pairedId : null;
+  if (owner && owner !== caller) return null;
+  if (!owner) hub.session.touchDevice(wanted, { pairedId: caller });
+  return wanted;
+}
+
 function sameOrigin(req: Request) {
   const origin = req.headers.get("origin");
   if (!origin) return true; // not a browser
@@ -196,7 +285,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          if (srv.upgrade(req, { data: { deviceId: url.searchParams.get("device"), local, pairedId: device?.id ?? null } as any })) return undefined as any;
+          const caller = hostWindow ? "host" : device?.kind === "browser" ? device.id : null;
+          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -256,18 +346,16 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       },
       message(ws: ServerWebSocket<WsData>, raw) {
         if (ws.data.collab != null) {
-          const up = ws.data.upstream;
-          if (up?.readyState === WebSocket.OPEN) up.send(raw as any);
-          else (ws.data.queue ??= []).push(raw);
-          return;
+          return relayUp(ws, raw as any);
         }
         try {
           const m = JSON.parse(String(raw));
-          if (m.type === "level" && ws.data.deviceId) {
-            bus.send({ type: "level", deviceId: ws.data.deviceId, level: m.level });
+          const me = m.type === "level" || m.type === "rtc" ? speaker(hub, ws) : null;
+          if (m.type === "level" && me) {
+            bus.send({ type: "level", deviceId: me, level: m.level });
           } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
-          else if (m.type === "rtc" && ws.data.deviceId && typeof m.to === "string") {
-            const msg = JSON.stringify({ type: "rtc", from: ws.data.deviceId, to: m.to, data: m.data });
+          else if (m.type === "rtc" && me && typeof m.to === "string") {
+            const msg = JSON.stringify({ type: "rtc", from: me, to: m.to, data: m.data });
             for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
           }
         } catch {}
@@ -275,16 +363,18 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       close(ws: ServerWebSocket<WsData>) {
         if (ws.data.collab != null) {
           (ws as any).off?.();
+          clearTimeout(ws.data.openTimer);
+          ws.data.queue = [];
           return void ws.data.upstream?.close();
         }
         hub.peopleOnline = Math.max(0, hub.peopleOnline - 1);
         (ws as any).off?.();
-        if (ws.data.deviceId) {
+        if (speaker(hub, ws) && ws.data.deviceId) {
           sockets.get(ws.data.deviceId)?.delete(ws);
           if (!sockets.get(ws.data.deviceId)?.size) {
             sockets.delete(ws.data.deviceId);
             s.touchDevice(ws.data.deviceId, { micOn: false, level: 0 });
-            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id);
+            for (const sh of s.shares()) if (sh.deviceId === ws.data.deviceId && sh.status === "live") s.endShare(sh.id, "ended", { lost: true });
           }
         }
       },
@@ -297,16 +387,28 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 /** Relays a canvas WebSocket to the canvas server, which only listens on this machine. */
 function openCollab(ws: ServerWebSocket<WsData>, hub: Hub) {
   const port = (ws.data as any).devPort ?? hub.canvas.port;
-  const up = new WebSocket(`ws://127.0.0.1:${port}${ws.data.collab}`);
-  up.binaryType = "arraybuffer";
+  const up = new Upstream(
+    port,
+    ws.data.collab ?? "/",
+    {
+      open() {
+        clearTimeout(ws.data.openTimer);
+        const held = ws.data.queue ?? [];
+        ws.data.queue = [];
+        ws.data.queueBytes = 0;
+        for (const m of held) relayUp(ws, m as any);
+      },
+      message: (data) => relayDown(ws, data),
+      close: () => ws.close(),
+    },
+    () => RELAY_LIMITS.bytes,
+  );
   ws.data.upstream = up;
-  up.onopen = () => {
-    for (const m of ws.data.queue ?? []) up.send(m as any);
-    ws.data.queue = [];
-  };
-  up.onmessage = (e) => ws.send(typeof e.data === "string" ? e.data : new Uint8Array(e.data as ArrayBuffer));
-  up.onclose = () => ws.close();
-  up.onerror = () => ws.close();
+  // A canvas server that doesn't open in time (stalled, restarting) ends the relay with a retryable close.
+  ws.data.openTimer = setTimeout(() => {
+    ws.close(1013, "canvas not ready, try again");
+    up.close();
+  }, RELAY_LIMITS.openMs);
 }
 
 /** The dev server port for a dev-<port>.<domain> request, when <domain> is this host's. */
@@ -381,8 +483,20 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   const path = url.pathname.slice("/api".length);
   const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
 
+  /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
+  const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+
   if (path === "/state") return json(s.state());
   if (path === "/clock") return json({ now: Date.now() });
+
+  // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt
+  let hm = path.match(/^\/history\/(events|utterances|directives|artifacts)$/);
+  if (hm && req.method === "GET") {
+    const q = url.searchParams;
+    const kinds = (q.get("kinds") ?? "").split(",").filter(Boolean) as EventKind[];
+    const r = s.history(hm[1], { before: q.get("before") ?? undefined, limit: q.has("limit") ? Number(q.get("limit")) : undefined, kinds });
+    return r ? json(r) : bad("unknown list", 404);
+  }
 
   // Things only people do: speak, record, pin, approve, steer the screen, share, invite. An agent's
   // credential is refused on all of them (agents talk to the room through MCP), and a person's
@@ -402,14 +516,22 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/devices" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
+    const cur = s.store.get("devices", String(body.deviceId));
+    // The first window to register a device owns it until that pairing is gone. Only it, or the host's
+    // own window, changes whose it is: another window can't take it over or speak and share as it.
+    const owner = cur?.pairedId && (cur.pairedId === "host" || hub.auth.live(cur.pairedId)) ? cur.pairedId : (caller ?? undefined);
+    if (owner && owner !== caller && !hostWindow) return bad("That device belongs to another window.", 403);
     if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
     // The person using the host's own window: agents on the host Mac work for them.
-    if (hostWindow && body.kind !== "host" && body.personId) {
+    if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
-    const location = body.location === "remote" || body.location === "room" ? body.location : s.store.get("devices", String(body.deviceId))?.location ?? (sameLan(ip) ? "room" : "remote");
-    return json(s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location }));
+    const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
+    const registered = s.touchDevice(String(body.deviceId), { label: body.label, personId: body.personId, kind: isLocal(ip) && body.kind === "host" ? "host" : "client", micOn: body.micOn, location, pairedId: owner });
+    // A socket another window opened for this id before it was registered stops speaking for it.
+    dropForeignSockets(registered.id, registered.pairedId);
+    return json(registered);
   }
 
   if (path === "/audio" && req.method === "POST") {
@@ -457,9 +579,26 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     let personId = body?.personId;
     if (!personId && body?.name) personId = s.upsertPerson({ name: body.name, role: body.role }).id;
     if (!personId) return bad("personId or name is required");
-    const u = hub.audio.assign(m[1], personId);
-    s.store.put("people", s.person(personId)!);
-    return json(u);
+    const { utterance, learning } = hub.audio.assign(m[1], personId);
+    const person = s.person(personId)!;
+    s.store.put("people", person);
+    return json({ ...utterance, learning: { ...learning, message: learningNote(person.name, learning) } });
+  }
+
+  if (path === "/voice-preview" && req.method === "POST") {
+    // A fixed sentence in the chosen voice, so the picker can be tried without a real reply. Each one costs a speech call:
+    // one per device every few seconds is plenty for clicking through voices.
+    const voice = typeof body?.voice === "string" ? body.voice.trim() : undefined;
+    if (voice && voice.length > VOICE_NAME_MAX) return bad("That voice name is too long.");
+    const who = paired?.id ?? ip;
+    if (Date.now() - (lastVoicePreview.get(who) ?? 0) < VOICE_PREVIEW_COOLDOWN_MS) return bad("One sample at a time; try again in a moment.", 429);
+    lastVoicePreview.set(who, Date.now());
+    if (lastVoicePreview.size > 200) for (const [k, at] of lastVoicePreview) if (Date.now() - at > VOICE_PREVIEW_COOLDOWN_MS) lastVoicePreview.delete(k);
+    try {
+      return json(await synthesize(s, "Hi, I'm the room brain. This is how I sound.", voice));
+    } catch (e) {
+      return bad(`Couldn't make a sample: ${describeError(e)}`, 502);
+    }
   }
 
   if (path === "/say" && req.method === "POST") {
@@ -487,11 +626,15 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
     const p = s.person(body.personId);
-    return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    try {
+      const counterparts = Array.isArray(body.counterparts) ? body.counterparts.filter((c: unknown) => typeof c === "string") : [...targets];
+      return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, ...(body.mode === "coordinate" ? { counterparts: [...new Set([...targets, ...counterparts])] } : {}), requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+    } catch (e) {
+      return bad(e instanceof Error ? e.message : String(e));
+    }
   }
 
-  m = path.match(/^\/directives\/([\w-]+)$/);
-  if (m && req.method === "POST") return json(s.setDirective(m[1], { status: body?.status }));
+  // A directive's status is never set from a browser: agents finish it through setDirectiveFor (which checks the exchange) and the brain cancels it.
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
@@ -524,7 +667,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: hub.audio.voiceprints.enrolled, problem: hub.transcriber.problem() });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
@@ -540,10 +683,17 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // ---- shares (screens and cameras) ----
+  // Every share call acts for the window that made it: a share starts from that window's own
+  // device and ends or is declined only by it (or, for a request, by the person asked). The host's
+  // own window is the one separate authority: it can end or decline any share in its room.
   if (path === "/shares" && req.method === "POST") {
     if (!body?.deviceId) return bad("deviceId is required");
-    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", body.shareId, body.label);
-    hub.brain.placeShare(share);
+    if (!caller || s.store.get("devices", String(body.deviceId))?.pairedId !== caller) return bad("Share from your own window.", 403);
+    // A share someone ended stays ended: its window re-registering it (after missing the end) is told so and stops.
+    const was = typeof body.shareId === "string" ? s.store.get("shares", body.shareId) : undefined;
+    if (was && was.deviceId === String(body.deviceId) && (was.status === "ended" || was.status === "declined") && !was.lost) return bad("That share was ended.", 409);
+    const share = s.startShare(String(body.deviceId), body.kind === "camera" ? "camera" : "screen", typeof body.shareId === "string" ? body.shareId : undefined, body.label);
+    s.placeShare(share);
     return json(share);
   }
   if (path === "/shares/request" && req.method === "POST") {
@@ -554,7 +704,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
   m = path.match(/^\/shares\/([\w-]+)(\/decline)?$/);
   if (m && (req.method === "DELETE" || (req.method === "POST" && m[2]))) {
-    s.endShare(m[1], m[2] ? "declined" : "ended");
+    const sh = s.store.get("shares", m[1]);
+    if (!sh) return json({ ok: true }); // already gone: a repeated call
+    const decline = !!m[2] && sh.status === "requested";
+    const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
+    const asked = decline && !!paired?.personId && sh.personId === paired.personId;
+    if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
+    if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended", { note: !own && sh.status === "live" ? `The host stopped your ${sh.kind} share.` : "" });
     return json({ ok: true });
   }
 
@@ -687,7 +843,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     s.reportScreen(screen, info);
     return json({ ok: true });
   }
-  // A user-less big-screen window closed: it stops being a place to put things (main always stays).
+  // A big-screen window closed: it stops being a place to put things until a window for it reports again.
   if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
     const screen = String(body?.screen ?? "");
     if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);

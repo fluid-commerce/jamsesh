@@ -24,6 +24,8 @@ export interface Device {
   micOn: boolean;
   level: number;
   lastSeen: number;
+  /** The window that registered it: its pairing id, or "host" for the host's own windows. Only that window starts or ends its shares. */
+  pairedId?: string;
 }
 
 export type Harness = "claude-code" | "codex" | "other";
@@ -98,7 +100,7 @@ export interface JamEvent {
   data: Record<string, any>;
 }
 
-export type DirectiveMode = "explore" | "implement" | "present" | "answer" | "coordinate";
+export type DirectiveMode = "explore" | "implement" | "present" | "answer" | "coordinate" | "note";
 export type DirectiveStatus = "pending" | "delivered" | "acked" | "done" | "cancelled";
 
 export interface Directive {
@@ -108,6 +110,8 @@ export interface Directive {
   mode: DirectiveMode;
   rationale: string;
   targets: string[];
+  /** The agents a coordinate directive's target compares with: finishing it needs a reply from one of them. */
+  counterparts?: string[];
   status: DirectiveStatus;
   /** Each target agent's own progress; status is done only when every target is. */
   progress: Record<string, DirectiveStatus>;
@@ -187,6 +191,8 @@ export interface Share {
   status: "requested" | "live" | "ended" | "declined";
   reason: string;
   startedAt: number;
+  /** Ended because its window lost the hub (or the hub restarted), not by anyone: only such a share is registered again. */
+  lost?: boolean;
 }
 
 /** One curated piece of session knowledge the brain keeps current. */
@@ -263,6 +269,8 @@ export interface Settings {
   sessionName: string;
   /** What the room calls the brain; saying it addresses the brain directly. */
   brainName: string;
+  /** Other names the brain answers to ("Computah", "computer"); each is heard like the display name. */
+  brainAliases: string[];
   /** What the room told the brain about how to behave, kept across the session. */
   brainNotes: string[];
   brainEnabled: boolean;
@@ -271,7 +279,6 @@ export interface Settings {
   models: {
     triage: string;
     router: string;
-    presenter: string;
     digest: string;
     speech: string;
     transcribe: string;
@@ -333,7 +340,11 @@ export interface HubState {
   /** Every big-screen window that has reported in (user-less hosts have one per display). */
   screens: ScreenInfo[];
   digest: string;
+  /** How much the session holds in all; the lists above carry only the newest, /api/history/<what> pages the rest. */
+  totals: { events: number; utterances: number; directives: number; artifacts: number };
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
+  /** Voice matching labels lines by voice; off when the speaker model or its native library fails to load. */
+  voiceprints: { available: boolean; reason: string; enrolled: number };
 }
 
 export interface CanvasInfo {
@@ -343,6 +354,9 @@ export interface CanvasInfo {
   wsEdit: string | null;
   wsView: string | null;
   reason: string | null;
+  /** Goes up each time the canvas is announced (a new file published, or the server restarted):
+   * people's canvases fetch their join link again when it changes. */
+  generation: number;
 }
 
 export type BusMessage =
@@ -357,4 +371,5 @@ export type BusMessage =
   | { type: "thinking"; on: boolean; label?: string }
   | { type: "rtc"; from: string; to: string; data: any }
   | { type: "chime"; deviceId: string | null }
+  | { type: "share-ended"; shareId: string; deviceId: string; text: string }
   | { type: "share-request"; shareId: string; deviceIds: string[]; kind: "screen" | "camera"; reason: string; by: string };

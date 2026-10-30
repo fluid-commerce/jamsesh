@@ -331,13 +331,60 @@ describe("8. agent questions", () => {
 describe("9. cross-platform parity", () => {
   t("shipped on desktop coordinates mobile", async () => {
     await runScenario("parity: desktop ships", [9], async (r) => {
-      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Shipped the collapsible sidebar navigation in the desktop app (acme/desktop, PR 214).");
+      await r.hub.mcp.call({ agentId: r.agents.desktop.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text: "Shipped the collapsible sidebar navigation in the desktop app (acme/desktop, PR 214).", seen: "A left sidebar that collapses to icons, with a button at its foot." });
       await r.settle();
       // the consider pass is not tracked by the debounce, so give it a moment to land
       const ds = r.newDirectives();
       expect(ds.length).toBeGreaterThanOrEqual(1);
       expect(ds.every((d) => d.mode === "coordinate" || d.mode === "implement")).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.mobile.id)).toBe(true);
+      // What the other platform's agent actually reads.
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toMatch(/\[coordinate\][^\n]*Parity check, not a build task[^\n]*sidebar[^\n]*Build only if you both confirm a gap/i);
+      expect(r.hub.mcp.inboxText(r.agents.design, false)).toBe("Nothing new.");
+    });
+  }, T);
+
+  t("a fix or a platform-specific ship stays news", async () => {
+    await runScenario("parity: fix and platform-only -> none", [9], async (r) => {
+      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Fixed the sidebar crash when the window is resized below 600px.", { data: { seen: "The sidebar no longer crashes" } });
+      await r.hub.mcp.call({ agentId: r.agents.mobile.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text: "Shipped haptic feedback on the tab bar.", platformSpecific: true });
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toBe("Nothing new.");
+      expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toBe("Nothing new.");
+    });
+  }, T);
+
+  t("two features shipped together get separate checks", async () => {
+    await runScenario("parity: two features -> separate", [9], async (r) => {
+      const up = (text: string, seen: string) => r.hub.mcp.call({ agentId: r.agents.desktop.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text, seen });
+      await up("Shipped the collapsible sidebar navigation in the desktop app.", "A left sidebar that collapses to icons.");
+      await up("Shipped a dark mode toggle in desktop settings.", "A dark mode switch in Settings that turns the whole app dark.");
+      await r.settle();
+      const ds = r.newDirectives();
+      expect(ds.length).toBeGreaterThanOrEqual(1);
+      expect(ds.every((d) => !(/sidebar/i.test(d.text) && /dark mode/i.test(d.text)))).toBe(true);
+    });
+  }, T);
+
+  t("a ship with nothing a person sees stays news", async () => {
+    await runScenario("parity: invisible ship -> none", [9], async (r) => {
+      // The shipper declared nothing a person sees, whatever the text sounds like.
+      await r.hub.mcp.call({ agentId: r.agents.desktop.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text: "Shipped background sync status telemetry to the metrics collector." });
+      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Moved the auth token refresh into a background worker and added retry with backoff in acme/desktop.");
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.hub.mcp.inboxText(r.agents.mobile, false)).toBe("Nothing new.");
+    });
+  }, T);
+
+  t("no app on another platform: nothing to coordinate", async () => {
+    await runScenario("parity: mobile offline -> none", [9], async (r) => {
+      r.hub.session.touchAgent(r.agents.mobile.id, { status: "offline" });
+      r.hub.session.postUpdate(r.agents.desktop.id, "shipped", "Shipped the collapsible sidebar navigation in the desktop app.", { data: { seen: "A left sidebar that collapses to icons." } });
+      await r.settle();
+      expect(r.newDirectives()).toHaveLength(0);
+      expect(r.hub.mcp.inboxText(r.agents.design, false)).toBe("Nothing new.");
     });
   }, T);
 
@@ -353,13 +400,14 @@ describe("9. cross-platform parity", () => {
 
   t("platform-neutral feature shipped on mobile", async () => {
     await runScenario("parity: mobile ships onboarding", [9], async (r) => {
-      r.hub.session.postUpdate(r.agents.mobile.id, "shipped", "Shipped the new three-step onboarding flow in the mobile app.");
+      await r.hub.mcp.call({ agentId: r.agents.mobile.id, ip: "127.0.0.1", device: "host" }, "jam_update", { kind: "shipped", text: "Shipped the new three-step onboarding flow in the mobile app.", seen: "New users see three onboarding screens with a progress dot row before the home screen." });
       await r.settle();
       const ds = r.newDirectives();
       expect(ds.length).toBeGreaterThanOrEqual(1);
       expect(ds.every((d) => d.mode === "coordinate" || d.mode === "implement")).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.desktop.id)).toBe(true);
       expect(r.targetsOf(ds).has(r.agents.mobile.id)).toBe(true);
+      expect(r.hub.mcp.inboxText(r.agents.desktop, false)).toMatch(/\[coordinate\][^\n]*Parity check, not a build task[^\n]*onboarding/i);
     });
   }, T);
 

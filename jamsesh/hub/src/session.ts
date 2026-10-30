@@ -1,9 +1,11 @@
 // The session: people, devices, agents, workstreams, directives, artifacts and the
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
+import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
 import { newId, PALETTE, Store } from "./store";
 import type {
+  EventKind,
   Agent,
   Annotation,
   Artifact,
@@ -29,11 +31,21 @@ export const AGENT_OFFLINE_MS = 20 * 60_000;
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
   router: "anthropic/claude-sonnet-5.5",
-  presenter: "anthropic/claude-sonnet-5.5",
   digest: "google/gemini-3.5-flash",
-  speech: "openai/tts-1",
+  speech: "microsoft/mai-voice-2.1",
   transcribe: "openai/gpt-transcribe",
 };
+
+/** The room's model choices for the roles that exist: a role that was dropped (an older room's "presenter") doesn't come back. */
+function knownModels(stored: Partial<Settings["models"]>): Settings["models"] {
+  const merged: Record<string, string> = { ...DEFAULT_MODELS, ...stored };
+  return Object.fromEntries(Object.keys(DEFAULT_MODELS).map((k) => [k, merged[k]])) as Settings["models"];
+}
+
+/** The old default speech model is the one rooms were never asked about; they move to the current default with it. */
+function withCurrentSpeech(models: Settings["models"]): Settings["models"] {
+  return models.speech === "openai/tts-1" ? { ...models, speech: DEFAULT_MODELS.speech } : models;
+}
 
 export type UpdateKind = "progress" | "done" | "question" | "blocked" | "handoff" | "decision" | "shipped";
 
@@ -45,13 +57,15 @@ export class Session {
   /** This session's id; the team store remembers every session. */
   sessionId: string;
   startedAt = Date.now();
-  canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null };
+  canvas: CanvasInfo = { status: "off", editLink: null, viewLink: null, wsEdit: null, wsView: null, reason: null, generation: 0 };
   brainStatus: HubState["brain"] = { status: "ready", lastError: null };
   private waiters = new Map<string, Set<Waiter>>();
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
   onDirective: ((d: Directive) => void) | null = null;
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
+  /** An agent wrote to the room brain (jam_message by its name). */
+  onBrainMessage: ((ev: JamEvent) => void) | null = null;
   onClaim: ((agentId: string, workstream: string) => void) | null = null;
   /** An agent took a new name because its owner was renamed (the canvas cursor follows). */
   onAgentRenamed: ((agent: Agent, oldName: string) => void) | null = null;
@@ -71,12 +85,20 @@ export class Session {
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
-    for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id);
-    // The stage's timer died with the old process: a brought-up screen still returns to the board.
+    for (const sh of store.all("shares")) if (sh.status === "live") this.endShare(sh.id, "ended", { lost: true });
+    // The stages' timers died with the old process: a brought-up screen, main or extra, still returns
+    // to the board when its own deadline (it was shown at `since`, which is kept) comes.
+    const left = (st: Stage) => Math.max(1000, st.since + Session.STAGE_REVERT_MS - Date.now());
     const st = this.stage();
-    if (!st.pinned && st.mode !== "board" && st.mode !== "welcome") {
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Math.max(1000, st.since + 6 * 60_000 - Date.now()));
+    if (this.revertsToBoard(st)) {
+      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), left(st));
       this.stageRevert.unref?.();
+    }
+    for (const [screen, extra] of Object.entries(store.setting<Record<string, Stage>>("screenStages", {}))) {
+      if (!this.revertsToBoard(extra)) continue;
+      const t = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), left(extra));
+      t.unref?.();
+      this.screenReverts.set(screen, t);
     }
     bus.resolver = (key) => this.resolve(key);
   }
@@ -103,11 +125,12 @@ export class Session {
     return {
       sessionName: s.setting("sessionName", "Jam session"),
       brainName: s.setting("brainName", "JamSesh"),
+      brainAliases: cleanNames(s.setting<unknown>("brainAliases", [])),
       brainNotes: s.setting<string[]>("brainNotes", []),
       brainEnabled: s.setting("brainEnabled", true),
       voiceReplies: s.setting("voiceReplies", true),
-      voice: s.setting("voice", "nova"),
-      models: { ...DEFAULT_MODELS, ...s.setting<Partial<Settings["models"]>>("models", {}) },
+      voice: s.setting("voice", ""),
+      models: withCurrentSpeech(knownModels(s.setting<Partial<Settings["models"]>>("models", {}))),
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),
@@ -120,9 +143,26 @@ export class Session {
     return this.store.setting<string>("gatewayKey", "") || config.envGatewayKey || undefined;
   }
 
+  /** Adds a name the brain answers to (or makes it the display name, keeping the old one as an alias). */
+  addBrainName(name: string, makeDisplay = false) {
+    const { brainName, brainAliases } = this.settings();
+    const names = [brainName, ...brainAliases];
+    if (names.some((n) => sameName(n, name)) && !(makeDisplay && !sameName(brainName, name))) return;
+    if (makeDisplay) this.updateSettings({ brainName: name, brainAliases: [brainName, ...brainAliases].filter((n) => !sameName(n, name)) });
+    else this.updateSettings({ brainAliases: [...brainAliases.slice(1 - MAX_ALIASES), name] });
+  }
+
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainName", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
-    for (const k of allowed) if (patch[k] !== undefined) this.store.setSetting(k, patch[k]);
+    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
+    for (const k of allowed) {
+      if (patch[k] === undefined) continue;
+      // The API is the contract: a paired browser can post anything.
+      if (k === "brainAliases") this.store.setSetting(k, cleanNames(patch[k]));
+      else if (k === "brainName") {
+        const n = typeof patch[k] === "string" ? patch[k].trim().slice(0, MAX_NAME) : "";
+        if (n) this.store.setSetting(k, n);
+      } else this.store.setSetting(k, patch[k]);
+    }
     if (patch.models) this.store.setSetting("models", { ...this.store.setting("models", {}), ...patch.models });
     if (patch.gatewayKey !== undefined) this.store.setSetting("gatewayKey", patch.gatewayKey.trim());
     bus.changed("settings");
@@ -133,6 +173,8 @@ export class Session {
 
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
+  /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
+  voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
 
   state(): HubState {
     return {
@@ -146,7 +188,7 @@ export class Session {
       artifacts: this.artifacts().slice(0, 120),
       devservers: this.store.all("devservers"),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
-      utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0).slice(-200),
+      utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200),
       stage: this.stage(),
       shares: this.shares(),
       annotations: this.annotations(),
@@ -154,8 +196,49 @@ export class Session {
       buildRequests: this.buildRequests(),
       screens: this.screens(),
       digest: this.store.digest("session")?.text ?? "",
+      totals: this.totals(),
       brain: this.brainStatus,
+      voiceprints: this.voiceprints(),
     };
+  }
+
+  totals(): HubState["totals"] {
+    return { events: this.store.countEvents(), utterances: this.store.all("utterances").length, directives: this.store.all("directives").length, artifacts: this.store.all("artifacts").length };
+  }
+
+  /**
+   * The part of a list that the live state leaves out: the page just older than `before` (the cursor
+   * the previous page ended on: an event's id, or "<time>|<id>" of an utterance, directive or artifact),
+   * plus how many are older still. Events and utterances come oldest first, the rest newest first.
+   */
+  history(what: string, o: { before?: number | string; limit?: number; kinds?: EventKind[] }): { items: any[]; more: number; total: number } | null {
+    const asked = Number(o.limit ?? 50);
+    const limit = Math.max(1, Math.min(200, Number.isFinite(asked) ? Math.floor(asked) : 50));
+    // A cursor is "<time>|<id>" (the last item's), so items stamped the same millisecond aren't skipped.
+    const [t, id = ""] = String(o.before ?? "").split("|");
+    const beforeT = t !== "" && Number.isFinite(Number(t)) ? Number(t) : Infinity;
+    const page = <T extends { id: string }>(all: T[], at: (x: T) => number, newestFirst: boolean) => {
+      const key = (x: T) => at(x) * (newestFirst ? -1 : 1);
+      const order = (a: T, b: T) => key(a) - key(b) || (a.id < b.id ? -1 : 1) * (newestFirst ? -1 : 1);
+      const older = all.filter((x) => at(x) < beforeT || (at(x) === beforeT && id !== "" && x.id < id)).sort(order);
+      const items = newestFirst ? older.slice(0, limit) : older.slice(-limit);
+      return { items, more: older.length - items.length, total: all.length };
+    };
+    switch (what) {
+      case "events": {
+        const events = this.store.recentEvents({ limit, kinds: o.kinds, beforeId: beforeT === Infinity ? undefined : beforeT }).map(publicEvent);
+        const oldest = events[0]?.id;
+        return { items: events, more: oldest == null ? 0 : this.store.countEvents({ beforeId: oldest, kinds: o.kinds }), total: this.store.countEvents({ kinds: o.kinds }) };
+      }
+      case "utterances":
+        return page(this.store.all("utterances"), (u) => u.t0, false);
+      case "directives":
+        return page(this.store.all("directives"), (d) => d.ts, true);
+      case "artifacts":
+        return page(this.store.all("artifacts"), (a) => a.updatedAt, true);
+      default:
+        return null;
+    }
   }
 
   private resolve(key: string): { key: any; value: any } | null {
@@ -175,7 +258,9 @@ export class Session {
       case "devservers":
         return { key, value: this.store.all("devservers") };
       case "utterances":
-        return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0).slice(-200) };
+        return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200) };
+      case "totals":
+        return { key, value: this.totals() };
       case "digest":
         return { key, value: this.store.digest("session")?.text ?? "" };
       case "shares":
@@ -315,6 +400,7 @@ export class Session {
       micOn: fields.micOn ?? cur?.micOn ?? false,
       level: fields.level ?? cur?.level ?? 0,
       lastSeen: Date.now(),
+      pairedId: fields.pairedId ?? cur?.pairedId,
     };
     const changed = !cur || cur.label !== d.label || cur.personId !== d.personId || cur.micOn !== d.micOn || cur.kind !== d.kind || cur.location !== d.location;
     this.store.put("devices", d, changed);
@@ -436,7 +522,8 @@ export class Session {
     const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
     const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
     const ev = this.store.addEvent({
-      kind: kind === "decision" ? "decision" : "update",
+      // An agent's decision is an update the brain can promote; only the brain makes room decisions.
+      kind: "update",
       authorType: "agent",
       authorId: agentId,
       authorName: agent.name,
@@ -480,7 +567,7 @@ export class Session {
   // ---- directives ----
 
   directives(): Directive[] {
-    return this.store.all("directives").sort((a, b) => b.ts - a.ts);
+    return this.store.all("directives").sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : -1));
   }
 
   createDirective(d: {
@@ -488,11 +575,16 @@ export class Session {
     mode: DirectiveMode;
     rationale?: string;
     targets: string[];
+    counterparts?: string[];
     priority?: number;
     requestedBy: string;
     sourceEventIds?: number[];
     workstreamId?: string | null;
   }): Directive {
+    // Only agents in the room are kept as counterparts. A coordinate directive is a comparison, so it must
+    // name who with, whatever made it: each target needs a known counterpart other than itself.
+    const counterparts = [...new Set(d.counterparts ?? [])].filter((c) => this.agent(c));
+    if (d.mode === "coordinate" && (!d.targets.length || d.targets.some((t) => !counterparts.some((c) => c !== t)))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
     const directive: Directive = {
       id: newId("d"),
       ts: Date.now(),
@@ -500,6 +592,7 @@ export class Session {
       mode: d.mode,
       rationale: d.rationale ?? "",
       targets: d.targets,
+      ...(counterparts.length ? { counterparts } : {}),
       status: "pending",
       progress: Object.fromEntries(d.targets.map((t) => [t, "pending" as const])),
       priority: d.priority ?? 1,
@@ -551,12 +644,40 @@ export class Session {
     return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
   }
 
-  /** One agent's progress on a directive; the directive's status follows the slowest target. */
+  /**
+   * Why an agent can't finish a coordinate directive yet, or null. A comparison with another agent is
+   * the whole job, so "done" needs a recorded exchange on that directive (messages and asks carry its
+   * id; an answer carries the id of the ask it answers), with no time window: a message this agent
+   * sent to one of the named counterparts, and a message or answer from one of them back to it.
+   * (Dropping it, "cancelled", is always allowed.)
+   */
+  exchangeGap(d: Directive, agentId: string): string | null {
+    if (d.mode !== "coordinate") return null;
+    const msgs = this.store.messagesAbout(d.id);
+    const named = (d.counterparts ?? []).filter((c) => c !== agentId);
+    if (!named.length) return "This coordinate directive names nobody to compare with, so it can't be completed: jam_ack it cancelled and ask the room to send it again.";
+    // Both directions with the same counterpart: one agent's replies don't stand in for another's.
+    const both = named.some((c) => c !== agentId && msgs.some((e) => e.authorId === agentId && e.data.to === c) && msgs.some((e) => e.authorId === c && e.data.to === agentId));
+    const sent = msgs.some((e) => e.authorId === agentId && named.includes(String(e.data.to)));
+    if (both) return null;
+    return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message or jam_ask, with directiveId " + d.id}. Their reply has to carry directiveId ${d.id} too. If nobody can answer, jam_ack it cancelled and say why.`;
+  }
+
+  /** One agent's progress on a directive; the directive's status follows the slowest target. A target's done or cancelled is final. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
     if (!d) return undefined;
+    if (!d.targets.includes(agentId)) throw new Error("That directive isn't addressed to you.");
+    const mine = d.progress?.[agentId];
+    if (mine === "done" || mine === "cancelled") return d; // terminal: a late ack or update doesn't reopen it or add to its result
+    const rank = ["pending", "delivered", "acked"];
+    if (mine && rank.includes(mine) && rank.includes(status) && rank.indexOf(status) < rank.indexOf(mine)) return d; // never backwards
+    if (status === "done") {
+      const gap = this.exchangeGap(d, agentId);
+      if (gap) throw new Error(gap);
+    }
     // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
-    if (d.status === "cancelled" || d.progress?.[agentId] === "cancelled") return d;
+    if (d.status === "cancelled") return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
@@ -578,9 +699,7 @@ export class Session {
       .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
-    const messages = this.store
-      .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
-      .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId)));
+    const messages = this.store.messagesTo(agentId, lastRead, 50);
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");
@@ -621,10 +740,56 @@ export class Session {
     return (this.waiters.get(agentId)?.size ?? 0) > 0;
   }
 
+  /** The brain's name, or any alias the room set for it (settings may not have an alias list yet). */
+  isBrainName(name: string) {
+    const s = this.settings();
+    return !!normName(name) && [...brainNames(s), "brain"].some((n) => sameName(n, name));
+  }
+
+  /** Decisions the room made (the brain's; agents' own decisions are updates), relevant to this agent's workstream when it has one. */
+  roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
+    const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
+    const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
+    const out: JamEvent[] = [];
+    if (opts.afterId != null) {
+      // Not handed over yet: the oldest first, so a burst of more than `limit` is delivered a page at a time and none is skipped.
+      let afterId = opts.afterId;
+      while (out.length < opts.limit) {
+        const page = this.store.recentEvents({ kinds: ["decision"], afterId, limit: 100, oldestFirst: true });
+        out.push(...page.filter(relevant));
+        if (page.length < 100) break;
+        afterId = page[page.length - 1].id;
+      }
+      return out.slice(0, opts.limit);
+    }
+    // The newest that matter: page back until enough are relevant, so other workstreams' can't crowd one out.
+    let beforeId: number | undefined;
+    while (out.length < opts.limit) {
+      const page = this.store.recentEvents({ kinds: ["decision"], beforeId, limit: 100 });
+      out.unshift(...page.filter(relevant));
+      if (page.length < 100) break;
+      beforeId = page[0].id;
+    }
+    return out.slice(-opts.limit);
+  }
+
   sendMessage(fromAgentId: string, to: string, text: string, data: Record<string, any> = {}) {
     const from = this.agent(fromAgentId);
     if (!from) throw new Error("Unknown agent; call jam_join first.");
     const target = to === "all" ? null : this.agent(to) ?? this.store.all("agents").find((a) => a.name.toLowerCase() === to.toLowerCase());
+    if (to !== "all" && !target && this.isBrainName(to)) {
+      const ev = this.store.addEvent({
+        kind: "message",
+        authorType: "agent",
+        authorId: from.id,
+        authorName: from.name,
+        text,
+        relevance: "work",
+        data: { to: "brain", toName: this.settings().brainName, typed: true, ...data },
+      });
+      this.onBrainMessage?.(ev);
+      return ev;
+    }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
     const ev = this.store.addEvent({
       kind: "message",
@@ -645,7 +810,7 @@ export class Session {
   private asks = new Map<string, { resolve: (answer: string) => void; timer: ReturnType<typeof setTimeout> }>();
 
   /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
-  ask(fromId: string | null, to: string, question: string, waitMs: number): { askId: string; answer: Promise<string | null> } {
+  ask(fromId: string | null, to: string, question: string, waitMs: number, data: Record<string, any> = {}): { askId: string; answer: Promise<string | null> } {
     const target = this.agent(to) ?? this.store.all("agents").find((a) => a.name.toLowerCase() === to.toLowerCase());
     if (!target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
     const from = this.agent(fromId);
@@ -657,7 +822,7 @@ export class Session {
       authorName: from?.name ?? this.settings().brainName,
       text: question,
       relevance: "work",
-      data: { to: target.id, toName: target.name, askId },
+      data: { to: target.id, toName: target.name, askId, ...data },
     });
     this.wake(target.id);
     const answer = new Promise<string | null>((resolve) => {
@@ -667,10 +832,16 @@ export class Session {
     return { askId, answer };
   }
 
-  answer(fromId: string, askId: string, text: string) {
+  private answered(askId: string) {
+    return this.store.messagesAnswering(askId).length > 0;
+  }
+
+  answer(fromId: string, askId: string, text: string, data: Record<string, any> = {}) {
     const from = this.agent(fromId);
-    const q = this.store.recentEvents({ kinds: ["message"], limit: 400 }).find((e) => e.data.askId === askId);
+    const q = this.store.messageByAsk(askId);
     if (!q) throw new Error("No question with that id.");
+    if (q.data.to !== fromId) throw new Error("That question wasn't asked of you.");
+    if (this.answered(askId)) throw new Error("That question was already answered.");
     const waiting = this.asks.get(askId);
     this.store.addEvent({
       kind: "message",
@@ -680,7 +851,7 @@ export class Session {
       text,
       relevance: "work",
       // A waiting jam_ask returns the answer itself: the inbox doesn't repeat it.
-      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...(waiting ? { inline: true } : {}) },
+      data: { to: q.authorId ?? "brain", toName: q.authorName, answerTo: askId, ...data, ...(waiting ? { inline: true } : {}) },
     });
     if (waiting) waiting.resolve(text);
     else if (q.authorId) this.wake(q.authorId); // the asker stopped waiting; it gets the answer in its inbox
@@ -689,7 +860,7 @@ export class Session {
   // ---- artifacts ----
 
   artifacts(): Artifact[] {
-    return this.store.all("artifacts").sort((a, b) => b.updatedAt - a.updatedAt);
+    return this.store.all("artifacts").sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1));
   }
 
   upsertArtifact(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, opts: { announce?: boolean } = {}): Artifact {
@@ -743,11 +914,17 @@ export class Session {
     return this.store.all("devices").filter((d) => d.personId === personId && d.kind === "client" && Date.now() - d.lastSeen < 10 * 60_000);
   }
 
-  /** The host asks someone to share; their JamSesh window asks them first. */
+  /**
+   * The host asks someone to share; their JamSesh window asks them first. A person has at most one
+   * share of each kind: asking again returns the pending request or the live share instead of
+   * starting a second capture.
+   */
   requestShare(personId: string, kind: Share["kind"], reason: string, by: string): Share | null {
     const person = this.person(personId);
     const devices = this.devicesOf(personId);
     if (!person || !devices.length) return null;
+    const existing = this.shares().find((x) => x.personId === personId && x.kind === kind);
+    if (existing) return existing;
     const share: Share = { id: newId("sh"), deviceId: devices[0].id, personId, personName: person.name, kind, label: `${person.name}'s ${kind}`, status: "requested", reason, startedAt: Date.now() };
     this.store.put("shares", share);
     bus.send({ type: "share-request", shareId: share.id, deviceIds: devices.map((d) => d.id), kind, reason, by });
@@ -758,9 +935,23 @@ export class Session {
   startShare(deviceId: string, kind: Share["kind"], shareId?: string, label?: string): Share {
     const device = this.store.get("devices", deviceId);
     const person = this.person(device?.personId);
-    const existing = shareId ? this.store.get("shares", shareId) : undefined;
+    // An id is this device's own share, or a request made to its person; any other id starts a new share.
+    const found = shareId ? this.store.get("shares", shareId) : undefined;
+    // It also has to be the same kind of capture: a camera never takes over a screen share's record.
+    const ownShare = found?.deviceId === deviceId && (found.status === "live" || (found.status === "ended" && !!found.lost));
+    const askedOf = found?.status === "requested" && !!person && found.personId === person.id;
+    const existing = found && found.kind === kind && (ownShare || askedOf) ? found : undefined;
+    const id = existing?.id ?? newId("sh");
+    // One share of a kind per person (per device for a device nobody claimed): an earlier one, from
+    // this window or another, is replaced, and requests for the same thing still waiting are answered.
+    for (const old of this.shares()) {
+      if (old.id === id || old.kind !== kind) continue;
+      if (old.status === "live" && (old.deviceId === deviceId || (person && old.personId === person.id))) {
+        this.endShare(old.id);
+      } else if (old.status === "requested" && person && old.personId === person.id) this.endShare(old.id);
+    }
     const share: Share = {
-      id: existing?.id ?? newId("sh"),
+      id,
       deviceId,
       personId: person?.id ?? null,
       personName: person?.name ?? device?.label ?? "Someone",
@@ -772,18 +963,144 @@ export class Session {
     };
     this.store.put("shares", share);
     this.store.addEvent({ kind: "system", authorType: "person", authorId: share.personId, authorName: share.personName, text: `${share.personName} is sharing their ${kind}.`, data: { shareId: share.id } });
+    // Nothing may ever place it: its placement deadline starts now.
+    this.checkShares(false);
     return share;
   }
 
-  endShare(id: string, status: Share["status"] = "ended") {
+  /**
+   * A new share fills the main screen's presentation area alone, at once, whether or not the brain
+   * is on (it can lay things out beside it when the room asks). A screen a person pinned stays put.
+   */
+  placeShare(share: Share) {
+    const stage = this.stage();
+    if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
+      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
+      return;
+    }
+    this.setStage({ mode: "layout", title: stage.title, layout: { tiles: [{ kind: "screen", shareId: share.id, label: share.label }] } }, "JamSesh");
+  }
+
+  /** What each display showed just before a share took it over (share id → display → stage), so the share's end gives it back. */
+  private beforeShare = new Map<string, Map<string, Stage>>();
+
+  /** Remember what a display shows now, ahead of a share taking it over (once per share and display). */
+  rememberStageFor(shareId: string, screen = "main", st = this.stage(screen)) {
+    const mine = this.beforeShare.get(shareId) ?? new Map<string, Stage>();
+    if (mine.has(screen)) return;
+    this.beforeShare.set(shareId, mine);
+    const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
+    if (tiles.length && tiles.every((t) => t.kind === "screen")) {
+      // Other shares are all the display shows: this one gives back what they were hiding.
+      for (const t of tiles) {
+        const prior = t.kind === "screen" ? this.beforeShare.get(t.shareId)?.get(screen) : undefined;
+        if (prior) return void mine.set(screen, prior);
+      }
+    }
+    mine.set(screen, st);
+  }
+
+  /**
+   * Ends a share. A live one's window is always told, so its capture stops for good; `lost` marks an
+   * end the sharer didn't choose (their connection dropped), which their window may register again.
+   */
+  endShare(id: string, status: Share["status"] = "ended", opts: { note?: string; lost?: boolean } = {}) {
     const sh = this.store.get("shares", id);
     if (!sh) return;
-    this.store.put("shares", { ...sh, status });
-    const st = this.stage();
-    if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
-      const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
-      this.setStage(tiles.length ? { ...st, layout: { tiles } } : { mode: "board" }, "JamSesh");
+    this.store.put("shares", { ...sh, status, lost: opts.lost || undefined });
+    if (sh.status === "live" && !opts.lost) bus.send({ type: "share-ended", shareId: sh.id, deviceId: sh.deviceId, text: opts.note ?? "" });
+    this.sharesShown.delete(id);
+    this.offScreen.delete(id);
+    const before = this.beforeShare.get(id);
+    this.beforeShare.delete(id);
+    const hosts = ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))];
+    for (const screen of hosts) {
+      const st = this.stage(screen);
+      if (st.mode === "layout" && st.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) {
+        const tiles = st.layout.tiles.filter((t) => !(t.kind === "screen" && t.shareId === id));
+        // When the share was all the display showed, it goes back to what it showed before.
+        const prior = before?.get(screen);
+        const back = !tiles.length && prior && !(prior.mode === "layout" && prior.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === id)) ? prior : null;
+        this.setStage(tiles.length ? { ...st, layout: { tiles } } : back ? back : { mode: "board" }, back?.by ?? "JamSesh", screen);
+      }
     }
+  }
+
+  // ---- shares that left the big screen ----
+
+  private shareSweep: ReturnType<typeof setTimeout> | null = null;
+  private shareSweepAt = 0;
+  /** Shares a host display has shown at some point: they had their placement, and the sharer hears why theirs stopped. */
+  private sharesShown = new Set<string>();
+  /** When each shown share was first seen on no display: its grace runs from there, whatever the stage does next. */
+  private offScreen = new Map<string, number>();
+  /** Long enough to place a brand-new share (a pinned screen waits for a person) before it counts as "not on screen". */
+  static SHARE_PLACE_MS = 60_000;
+  static SHARE_GRACE_MS = 5_000;
+  /** How often a share that is up gets looked at again, so a display that stops reporting is noticed. */
+  static SHARE_CHECK_MS = 15_000;
+
+  /** Shares on a display that is there now: one whose window still reports (not closed or gone quiet), the main one included. */
+  private shownShareIds(): Set<string> {
+    const ids = new Set<string>();
+    const screens = new Set(this.screens().map((sc) => sc.id));
+    for (const screen of screens) {
+      const st = this.stage(screen);
+      if (st.mode === "layout") for (const t of st.layout?.tiles ?? []) if (t.kind === "screen") ids.add(t.shareId);
+    }
+    return ids;
+  }
+
+  /** Wake the sweep by `at`. A later deadline never pushes back an earlier one, so stage changes can't postpone a cleanup. */
+  private wakeSweep(at: number) {
+    if (!Number.isFinite(at)) return;
+    if (this.shareSweep && this.shareSweepAt <= at) return;
+    if (this.shareSweep) clearTimeout(this.shareSweep);
+    this.shareSweepAt = at;
+    this.shareSweep = setTimeout(() => {
+      this.shareSweep = null;
+      this.shareSweepAt = 0;
+      try {
+        this.sweepShares();
+      } catch (e) {
+        console.error("shares: sweep failed:", e instanceof Error ? e.message : e); // a timer must never take the hub down
+      }
+    }, Math.max(0, at - Date.now()));
+    this.shareSweep.unref?.();
+  }
+
+  /**
+   * Which live shares are on a display now, and each one's deadline: a share never shown has its
+   * placement window from when it started; one taken down has the grace from when it left. With
+   * `end`, shares past their deadline stop and the sharer is told why.
+   */
+  private checkShares(end: boolean) {
+    const now = Date.now();
+    const shown = this.shownShareIds();
+    let next = Infinity;
+    for (const sh of this.shares()) {
+      if (sh.status !== "live") continue;
+      if (shown.has(sh.id)) {
+        this.sharesShown.add(sh.id);
+        this.offScreen.delete(sh.id);
+        next = Math.min(next, now + Session.SHARE_CHECK_MS);
+        continue;
+      }
+      const placed = this.sharesShown.has(sh.id);
+      if (placed && !this.offScreen.has(sh.id)) this.offScreen.set(sh.id, now);
+      const due = placed ? this.offScreen.get(sh.id)! + Session.SHARE_GRACE_MS : sh.startedAt + Session.SHARE_PLACE_MS;
+      if (!end || due > now) {
+        next = Math.min(next, due);
+        continue;
+      }
+      const text = placed ? `Your ${sh.kind} left the big screen, so sharing stopped.` : `Your ${sh.kind} wasn't put on the big screen, so sharing stopped.`;
+      this.endShare(sh.id, "ended", { note: text });
+    }
+    this.wakeSweep(next);
+  }
+
+  sweepShares() {
+    this.checkShares(true);
   }
 
   // ---- annotations ----
@@ -847,12 +1164,14 @@ export class Session {
   }
 
   /** A big-screen window closed (the host app says so): it stops being a place to show things now,
-   *  not 3 minutes later. The main screen always stays. */
+   *  not 3 minutes later. The main screen's stage stays, and it counts again once its window reports. */
   removeScreen(id: string) {
-    if (id === "main" || !this.bigScreens.delete(id)) return;
+    if (!this.bigScreens.delete(id)) return;
     clearTimeout(this.screenReverts.get(id));
     this.screenReverts.delete(id);
     bus.changed("screens");
+    // A share only that display showed is off screen from now.
+    this.checkShares(false);
   }
 
   screens(): ScreenInfo[] {
@@ -876,25 +1195,39 @@ export class Session {
     });
   }
 
+  /** How long a brought-up screen stays before the board comes back (tests shorten it). */
+  static STAGE_REVERT_MS = 6 * 60_000;
+
+  /** Whether a stage goes back to the board by itself. Not while it shows a live share: the share's end gives the screen back what it hid, and a timer would cut the share first. */
+  private revertsToBoard(stage: Stage) {
+    if (stage.pinned || stage.mode === "board" || stage.mode === "welcome") return false;
+    if (stage.mode === "layout" && stage.layout?.tiles.some((t) => t.kind === "screen" && this.store.get("shares", t.shareId)?.status === "live")) return false;
+    return true;
+  }
+
   setStage(next: Partial<Stage> & { mode: Stage["mode"] }, by: string, screen = "main") {
     const stage: Stage = { title: "", caption: "", items: [], pinned: false, ...next, since: Date.now(), by };
+    // A share taking over this display: what it showed comes back when the share ends.
+    const prior = this.stage(screen);
+    const had = new Set(prior.mode === "layout" ? (prior.layout?.tiles ?? []).flatMap((t) => (t.kind === "screen" ? [t.shareId] : [])) : []);
+    if (stage.mode === "layout") for (const t of stage.layout?.tiles ?? []) if (t.kind === "screen" && !had.has(t.shareId)) this.rememberStageFor(t.shareId, screen, prior);
     if (screen !== "main") {
       this.store.setSetting("screenStages", { ...this.store.setting<Record<string, Stage>>("screenStages", {}), [screen]: stage });
       bus.changed("screens");
+      this.checkShares(false);
       clearTimeout(this.screenReverts.get(screen));
-      if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome")
-        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), 6 * 60_000));
+      if (this.revertsToBoard(stage))
+        this.screenReverts.set(screen, setTimeout(() => this.setStage({ mode: "board" }, "JamSesh", screen), Session.STAGE_REVERT_MS));
       return stage;
     }
     this.store.setSetting("stage", stage);
     bus.send({ type: "stage", stage });
+    this.checkShares(false);
     if (this.bigScreens.size > 1) bus.changed("screens");
     if (this.stageRevert) clearTimeout(this.stageRevert);
     this.stageRevert = null;
-    if (!stage.pinned && stage.mode !== "board" && stage.mode !== "welcome") {
-      // Anything the brain brought up returns to the live board after a while.
-      this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), 6 * 60_000);
-    }
+    // Anything the brain brought up returns to the live board after a while.
+    if (this.revertsToBoard(stage)) this.stageRevert = setTimeout(() => this.setStage({ mode: "board" }, "JamSesh"), Session.STAGE_REVERT_MS);
     return stage;
   }
 }

@@ -43,6 +43,7 @@ const TEAM_SETTINGS = new Set<string>([
   "hostId",
   "gatewayKey",
   "brainName",
+  "brainAliases",
   "brainNotes",
   "brainEnabled",
   "voiceReplies",
@@ -235,18 +236,56 @@ export class Store {
     return row ? rowToEvent(row) : undefined;
   }
 
-  recentEvents(opts: { limit?: number; since?: number; kinds?: EventKind[]; afterId?: number } = {}): JamEvent[] {
+  /** Events in id order: the newest `limit` of them, or with `oldestFirst` the oldest (for reading forward from `afterId`). */
+  recentEvents(opts: { limit?: number; since?: number; kinds?: EventKind[]; afterId?: number; beforeId?: number; oldestFirst?: boolean } = {}): JamEvent[] {
     const where: string[] = [];
     const args: any[] = [];
     if (opts.since) (where.push("ts >= ?"), args.push(opts.since));
     if (opts.afterId != null) (where.push("id > ?"), args.push(opts.afterId));
+    if (opts.beforeId != null) (where.push("id < ?"), args.push(opts.beforeId));
     if (opts.kinds?.length) (where.push(`kind IN (${opts.kinds.map(() => "?").join(",")})`), args.push(...opts.kinds));
-    const sql = `SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id DESC LIMIT ?`;
+    const sql = `SELECT * FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY id ${opts.oldestFirst ? "ASC" : "DESC"} LIMIT ?`;
     args.push(opts.limit ?? 100);
-    return (this.db.query(sql).all(...args) as any[]).map(rowToEvent).reverse();
+    const rows = (this.db.query(sql).all(...args) as any[]).map(rowToEvent);
+    return opts.oldestFirst ? rows : rows.reverse();
   }
 
-  searchEvents(query: string, limit = 20): JamEvent[] {
+  /** Every message tied to a directive (sent or answered with its id), oldest first, with no window. */
+  messagesAbout(directiveId: string): JamEvent[] {
+    const rows = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.directiveId') = ? ORDER BY id ASC").all(directiveId) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** Messages for one agent after an id (direct, or to everyone from someone else), oldest first: the filter is in the query, so unrelated traffic can't push them out. */
+  messagesTo(agentId: string, afterId: number, limit: number): JamEvent[] {
+    const rows = this.db
+      .query("SELECT * FROM events WHERE kind = 'message' AND id > ? AND json_extract(data, '$.inline') IS NULL AND (json_extract(data, '$.to') = ? OR (json_extract(data, '$.to') = 'all' AND (author_id IS NULL OR author_id != ?))) ORDER BY id ASC LIMIT ?")
+      .all(afterId, agentId, agentId, limit) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** Answers already recorded for an ask. */
+  messagesAnswering(askId: string): JamEvent[] {
+    const rows = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.answerTo') = ?").all(askId) as any[];
+    return rows.map(rowToEvent);
+  }
+
+  /** The message with this ask id, wherever it is in the history. */
+  messageByAsk(askId: string): JamEvent | undefined {
+    const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.askId') = ? ORDER BY id ASC LIMIT 1").get(askId);
+    return row ? rowToEvent(row) : undefined;
+  }
+
+  /** How many events there are (before an id, of some kinds), for "N more" counts. */
+  countEvents(opts: { beforeId?: number; kinds?: EventKind[] } = {}): number {
+    const where: string[] = [];
+    const args: any[] = [];
+    if (opts.beforeId != null) (where.push("id < ?"), args.push(opts.beforeId));
+    if (opts.kinds?.length) (where.push(`kind IN (${opts.kinds.map(() => "?").join(",")})`), args.push(...opts.kinds));
+    return (this.db.query(`SELECT COUNT(*) AS n FROM events ${where.length ? "WHERE " + where.join(" AND ") : ""}`).get(...args) as any).n;
+  }
+
+  searchEvents(query: string, limit = 20, offset = 0): JamEvent[] {
     const terms = query
       .replace(/["'*^():]/g, " ")
       .split(/\s+/)
@@ -258,9 +297,9 @@ export class Store {
         this.db
           .query(
             `SELECT events.* FROM events_fts JOIN events ON events.id = events_fts.rowid
-             WHERE events_fts MATCH ? ORDER BY rank LIMIT ?`,
+             WHERE events_fts MATCH ? ORDER BY rank LIMIT ? OFFSET ?`,
           )
-          .all(terms.join(" OR "), limit) as any[]
+          .all(terms.join(" OR "), limit, offset) as any[]
       ).map(rowToEvent);
     } catch {
       return [];

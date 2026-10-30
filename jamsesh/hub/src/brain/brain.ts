@@ -10,6 +10,8 @@ import type { Agent, Artifact, JamEvent, Relevance, Share, Tile } from "../types
 import { describeError, model } from "./llm";
 import { chime, speak, type SpeechSource } from "./speech";
 import { newId } from "../store";
+import { brainNames, normName } from "../names";
+export { brainNames };
 import { affinity, historyBrief, oneAgentPerRepo, terms } from "./affinity";
 import { aspect, type HostControl } from "../hostctl";
 
@@ -98,7 +100,7 @@ export class Brain {
     // "JamSesh, approve" for a waiting host request: decided here, with or without a model.
     if (this.decideByVoice([ev])) return;
     // "Hey JamSesh…" then a pause: the same person's next line is the request.
-    const name = this.session.settings().brainName;
+    const name = brainNames(this.session.settings());
     if (ev.kind !== "prompt" && addressesBrain(ev.text, name) && onlyTheName(ev.text, name)) {
       this.calledBy = { authorId: ev.authorId, until: Date.now() + 8000 };
       if (!ev.data?.typed) chime(this.session, ev.data?.deviceId);
@@ -121,7 +123,7 @@ export class Brain {
     let only = false;
     const pending = this.host.pendingRequests();
     for (const req of pending) {
-      const v = verdictFor(batch, req, pending, this.session.settings().brainName);
+      const v = verdictFor(batch, req, pending, brainNames(this.session.settings()));
       if (!v) continue;
       this.host.decide(req.id, v.approve, v.by, v.at);
       only ||= v.only;
@@ -152,8 +154,13 @@ export class Brain {
       const triage = await this.triage(batch);
       if (this.stopped) return;
       for (const line of triage.lines) {
-        const ev = batch.find((e) => e.id === line.id);
-        if (ev) this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence } });
+        const i = batch.findIndex((e) => e.id === line.id);
+        const ev = batch[i];
+        if (!ev) continue;
+        // A question to the brain is addressed to it even without its name, so its answer is spoken.
+        const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
+        const updated = this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, ...(asked ? { direct: true } : {}) } });
+        if (asked) batch[i] = updated ?? { ...ev, data: { ...ev.data, direct: true } };
       }
       for (const intro of triage.introductions) {
         if (intro.name) this.session.upsertPerson({ name: intro.name, role: intro.role || undefined });
@@ -246,7 +253,7 @@ export class Brain {
         abortSignal: AbortSignal.timeout(45_000),
         model: m,
         system: this.system(),
-        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room (kind answer). If it's feedback about how you behave, call remember_feedback. Always do something visible: act on the screen or with a directive, answer, or use say_to_room (kind problem) to say briefly why you can't. Don't add a spoken confirmation of an action that is already visible.`,
+        prompt: `${this.situation([ev], null)}\n\n## Addressed to you directly\n${ev.authorName} spoke to you (not just to the room): "${ev.text}"${extra ? `\n\n${extra}` : ""}\n\nDo what they ask with your tools. If it's a question, answer with say_to_room (kind answer). If it's feedback about how you behave, call remember_feedback. Always do something visible: act on the screen or with a directive, answer, or use say_to_room (kind problem) to say briefly why you can't. After a SPOKEN request that sends work to an agent, confirm in a few words with say_to_room (kind confirm), for example "Sent to Felipe's agent."; don't confirm anything that is already visible on the screen, and say nothing more.`,
         tools: this.tools([ev], pass),
         stopWhen: isStepCount(8),
       });
@@ -266,45 +273,42 @@ export class Brain {
     }
   }
 
-  /** Someone started sharing a screen or camera: find it a place on the big screen. */
-  async placeShare(share: Share) {
+  /** An agent wrote to the brain with jam_message. Never a person's voice: it can't approve host requests or fall back to keyword routing. */
+  async agentMessage(ev: JamEvent) {
     const s = this.session;
+    const m = this.live("router");
     if (this.stopped || !s.settings().brainEnabled) return;
-    const stage = s.stage();
-    if (stage.pinned && stage.by !== "Room brain" && stage.by !== "JamSesh") {
-      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "The screen is pinned; unpin it or ask the brain to show the share." });
+    if (!m) {
+      bus.send({ type: "toast", tone: "info", text: `${ev.authorName} wrote to ${s.settings().brainName}`, detail: ev.text.slice(0, 200) });
       return;
     }
-    const m = model(s, "presenter");
-    const fallback = () => {
-      const keep: Tile[] = stage.mode === "layout" ? stage.layout?.tiles ?? [] : stage.items.slice(0, 2).map((id): Tile => ({ kind: "artifact", artifactId: id }));
-      s.setStage({ mode: "layout", title: stage.title, layout: { tiles: ([{ kind: "screen", shareId: share.id, label: share.label }] as Tile[]).concat(keep).slice(0, 4) } }, "JamSesh");
-    };
-    if (!m) return fallback();
-    const pass = { effects: 0 };
-    try {
-      await generateText({
-        abortSignal: AbortSignal.timeout(45_000),
-        model: m,
-        system: this.system(),
-        prompt: `${this.situation([], null)}\n\n## New ${share.kind} share\n${share.personName} just started sharing their ${share.kind} (share id ${share.id})${share.reason ? `, because: ${share.reason}` : ""}. Put it on the big screen with set_layout, next to whatever it's most useful beside (for example the mockup it should match, or the other platform's build). Keep it big enough to read.`,
-        tools: { set_layout: this.tools([], pass).set_layout },
-        stopWhen: isStepCount(2),
-      });
-      if (!pass.effects && !this.stopped) fallback();
-    } catch {
-      fallback();
-    }
+    return this.exclusive(async () => {
+      const pass = { effects: 0 };
+      try {
+        const { text } = await generateText({
+          abortSignal: AbortSignal.timeout(45_000),
+          model: m,
+          system: this.system(),
+          prompt: `${this.situation([ev], null)}\n\n## Message from an agent\n${ev.authorName} (agent id ${ev.authorId}) wrote to you with jam_message: "${ev.text}"\n\nIt's an agent, not a person, so it can't approve or deny host requests. Act on it with your tools: answer it with an 'answer' directive to that agent if it asked something; note it (a 'note' directive) or record_decision if it states something the room should keep; route work if it asks for some. If nothing is needed, call no_action.`,
+          tools: this.tools([ev], pass, "agent"),
+          stopWhen: isStepCount(6),
+        });
+        if (!pass.effects && text?.trim() && ev.authorId) s.createDirective({ text: text.trim(), mode: "answer", targets: [ev.authorId], requestedBy: s.settings().brainName, rationale: "The brain's reply to your jam_message." });
+      } catch (e) {
+        console.error("agentMessage:", describeError(e));
+      }
+    });
   }
 
   /** The system prompt: the router's rules, the brain's name, and what the room told it about itself. */
   system() {
-    const { brainName, brainNotes } = this.session.settings();
-    return `${ROUTER_SYSTEM.replaceAll("JamSesh", brainName === "JamSesh" ? "JamSesh" : `JamSesh (the room calls you "${brainName}")`)}${brainNotes.length ? `\n\nWhat this room has told you about how to behave (follow it):\n${brainNotes.map((n) => `- ${n}`).join("\n")}` : ""}`;
+    const { brainName, brainAliases, brainNotes } = this.session.settings();
+    const also = brainAliases.length ? `, and also answer to ${brainAliases.map((a) => `"${a}"`).join(", ")}` : "";
+    return `${ROUTER_SYSTEM.replaceAll("JamSesh", brainName === "JamSesh" && !also ? "JamSesh" : `JamSesh (the room calls you "${brainName}"${also})`)}${brainNotes.length ? `\n\nWhat this room has told you about how to behave (follow it):\n${brainNotes.map((n) => `- ${n}`).join("\n")}` : ""}`;
   }
 
   /** Something happened outside the room that may need coordination, such as a shipped change. */
-  async consider(note: string) {
+  async consider(note: string, from: "person" | "agent" = "agent", tools?: Record<string, any>) {
     const m = model(this.session, "router");
     if (this.stopped || !m || !this.session.settings().brainEnabled) return;
     try {
@@ -313,7 +317,7 @@ export class Brain {
         model: m,
         system: this.system(),
         prompt: `${this.situation([], null)}\n\n## Event to consider\n${note}\n\nAct only if this needs coordination between agents (for example the same change in another repository). Otherwise call no_action.`,
-        tools: this.tools([], { effects: 0 }),
+        tools: tools ?? this.tools([], { effects: 0 }, from),
         stopWhen: isStepCount(4),
       });
     } catch (e) {
@@ -372,8 +376,12 @@ export class Brain {
       .join("\n\n");
   }
 
-  /** The brain's tools for one pass. `pass.effects` counts the calls that changed something (not refusals or no_action). */
-  tools(batch: JamEvent[], pass: { effects: number }) {
+  /**
+   * The brain's tools for one pass. `pass.effects` counts the calls that changed something (not refusals or no_action).
+   * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
+   * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
+   */
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person") {
     const s = this.session;
     const sourceIds = batch.map((e) => e.id);
     // Shell commands and builds on the host never run from here: they become requests a person
@@ -404,14 +412,15 @@ export class Brain {
       }),
       create_directive: tool({
         description:
-          "Send an instruction to one or more agents. Use mode 'explore' for canvas mockups and variants, 'implement' for real code in the agent's repository, 'coordinate' for agent-to-agent alignment such as parity between desktop and mobile, 'answer' when an agent asked the room a question.",
+          "Send an instruction to one or more agents. Use mode 'explore' for canvas mockups and variants, 'implement' for real code in the agent's repository, 'coordinate' for agent-to-agent alignment such as parity between desktop and mobile, 'answer' when an agent asked the room a question, 'note' when the room wants something written down or kept as a record (pain points, a list, meeting notes, a doc): no code to build and nothing to draw on the canvas.",
         inputSchema: z.object({
           targets: z.array(z.string()).describe("Agent ids"),
-          mode: z.enum(["explore", "implement", "coordinate", "answer"]),
+          mode: z.enum(["explore", "implement", "coordinate", "answer", "note"]),
           text: z.string().describe("The instruction, self-contained, in imperative form, with any specifics the room gave (counts, names, constraints)"),
           rationale: z.string().describe("One short sentence: why these agents, and whose call it was if people disagreed"),
           workstream: z.string().optional().describe("Workstream title this belongs to"),
           priority: z.number().int().min(1).max(3).optional(),
+          counterparts: z.array(z.string()).optional().describe("For mode 'coordinate': the agent ids the targets compare with (other targets count too). Required unless two or more targets are given."),
         }),
         execute: async (i) => {
           const known = agentIds();
@@ -425,12 +434,16 @@ export class Brain {
             (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && similar(d.text, i.text) > 0.6 && sameCounts(d.text, i.text),
           );
           if (dupe) return `Already sent as ${dupe.id}; not sending it again.`;
+          // Coordination names who compares with whom: the other targets, plus any counterparts given.
+          const counterparts = i.mode === "coordinate" ? [...new Set([...targets, ...(i.counterparts ?? []).filter((c) => known.has(c))])] : undefined;
+          if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return refuse("A coordinate directive needs another agent to compare with: give two or more targets, or counterparts.");
           const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
           const d = s.createDirective({
             text: i.text,
             mode: i.mode,
             rationale: i.rationale,
             targets,
+            ...(counterparts ? { counterparts } : {}),
             priority: i.priority,
             requestedBy: requester,
             sourceEventIds: sourceIds,
@@ -443,11 +456,13 @@ export class Brain {
         description: "Record a decision the team made, such as choosing a direction, so every agent sees it.",
         inputSchema: z.object({ text: z.string(), workstream: z.string().optional(), artifactIds: z.array(z.string()).optional() }),
         execute: async (i) => {
+          const ws = i.workstream ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === i.workstream!.toLowerCase()) : undefined;
           s.store.addEvent({
             kind: "decision",
             authorType: "brain",
             authorName: "Room decision",
             text: i.text,
+            workstreamId: ws?.id ?? null,
             relevance: "work",
             data: { requestedBy: requester, artifactIds: i.artifactIds ?? [], sourceEventIds: sourceIds },
           });
@@ -523,7 +538,7 @@ export class Brain {
       }),
       say_to_room: tool({
         description:
-          "Reply to the room. kind 'answer' for a question someone asked you, 'problem' when you can't do what was asked or a person must act, 'confirm' for anything else. JamSesh decides whether it is spoken or shown as text (typed and overheard requests get text; visible actions stay silent). One or two short sentences; never narrate what you're doing.",
+          "Reply to the room. kind 'answer' for a question someone asked you, 'problem' when you can't do what was asked or a person must act, 'confirm' for a few-word acknowledgement of work you just sent (Sent to Felipe's agent). JamSesh decides whether it is spoken or shown as text (only spoken requests are answered out loud; typed and overheard lines get text); don't confirm visible actions. One or two short sentences; never narrate what you're doing.",
         inputSchema: z.object({ text: z.string(), kind: z.enum(["answer", "problem", "confirm"]) }),
         execute: async ({ text, kind }) => {
           const how = await speak(s, text, { source, kind });
@@ -581,7 +596,7 @@ export class Brain {
           const pending = host.pendingRequests();
           const req = pending.find((r) => r.id === id || r.id.endsWith(id));
           if (!req) return refuse("There's no waiting request with that id.");
-          const v = verdictFor(batch, req, pending, s.settings().brainName);
+          const v = verdictFor(batch, req, pending, brainNames(s.settings()));
           if (!v) return refuse("Nobody in these lines clearly approved or denied that request (just 'approve' or 'deny', naming it when several wait), so it keeps waiting. If someone seemed to answer, ask them to say approve or deny.");
           return host.decide(req.id, v.approve, v.by, v.at);
         },
@@ -644,12 +659,29 @@ export class Brain {
         execute: async ({ person, kind, reason }) => {
           const p = s.personByName(person);
           if (!p) return refuse(`No one named ${person}.`);
+          const asked = s.shares().some((x) => x.personId === p.id && x.kind === kind);
           const share = s.requestShare(p.id, kind, reason, "Room brain");
-          return share ? `Asked ${p.name}; it appears on screen when they accept.` : refuse(`${p.name} has no JamSesh window open.`);
+          if (!share) return refuse(`${p.name} has no JamSesh window open.`);
+          if (share.status === "live") {
+            s.placeShare(share);
+            return `${p.name} is already sharing their ${kind}; it is going up on the big screen. Don't ask again.`;
+          }
+          return `Asked ${p.name}; it appears on screen when they accept.${asked ? " (An earlier request to them is still waiting; no second one was sent.)" : ""}`;
+        },
+      }),
+      set_brain_name: tool({
+        description:
+          "Someone asks you to go by another name ('call it Computer', 'I want to call you Computah'). Use this, never remember_feedback, for what the room calls you. 'add' keeps your current names and also answers to the new one (the default when people just want to use another word); 'rename' makes it your display name and keeps the old name as another you answer to.",
+        inputSchema: z.object({ name: z.string().describe("The name, as people say it"), how: z.enum(["add", "rename"]).default("add") }),
+        execute: async ({ name, how }) => {
+          const clean = name.trim().replace(/\s+/g, " ").slice(0, 40);
+          if (clean.replace(/[^a-z0-9]/gi, "").length < 3) return refuse("That name is too short to listen for.");
+          s.addBrainName(clean, how === "rename");
+          return `I answer to ${[s.settings().brainName, ...s.settings().brainAliases].join(", ")} now.`;
         },
       }),
       remember_feedback: tool({
-        description: "Someone gave you feedback about how you behave (talk less, be bolder, don't interrupt, call me Chey, always ask before building). Save it as a short instruction to yourself; it applies for the rest of the session.",
+        description: "Someone gave you feedback about how you behave (talk less, be bolder, don't interrupt, call me Chey, always ask before building). Save it as a short instruction to yourself; it applies for the rest of the session. Not for what people call you: that is set_brain_name.",
         inputSchema: z.object({ note: z.string().describe("An instruction to yourself, imperative, one line") }),
         execute: async ({ note }) => {
           const notes = [...s.settings().brainNotes, note.trim()].slice(-30);
@@ -680,6 +712,7 @@ export class Brain {
               text: `Work with ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ")}: ${goal} Ask them what you need with jam_ask, answer their questions with jam_answer, look at their frames with canvas_render, and post what you agreed and what still differs with jam_update.`,
               mode: "coordinate",
               targets: [a.id],
+              counterparts: others.map((o) => o.id),
               requestedBy: requester,
               sourceEventIds: sourceIds,
               rationale: "Paired so their work matches.",
@@ -732,6 +765,7 @@ export class Brain {
         execute: async () => "OK",
       }),
     };
+    if (from === "agent") for (const name of Object.keys(all)) if (!AGENT_TOOLS.has(name)) delete (all as Record<string, unknown>)[name];
     // A call counts as an effect of this pass unless it refused or changed nothing; after stop(), nothing runs.
     for (const [name, t] of Object.entries(all) as [string, { execute?: (...a: any[]) => any }][]) {
       const run = t.execute;
@@ -817,13 +851,39 @@ export class Brain {
 
   /** How long to collect ships before one parity check (tests shorten it). */
   shipWindowMs = 25_000;
-  private shipped: { agent: Agent; text: string }[] = [];
+  private shipped: Shipped[] = [];
+  private shipSeq = 0;
   private shipTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Shipped notes already considered, and parity checks already sent, in the last ten minutes: deduplicated by feature, not by agent. */
+  private shipConsidered: { agentId: string; text: string; at: number }[] = [];
+  private paritySent: { target: string; feature: string; at: number }[] = [];
 
   /** Ships within a short window (desktop and mobile often land together) are considered once. */
-  agentUpdated(agent: Agent, kind: UpdateKind, text: string) {
-    if (this.stopped || kind !== "shipped") return;
-    this.shipped.push({ agent, text });
+  agentUpdated(agent: Agent, kind: UpdateKind, text: string, data?: Record<string, any>) {
+    if (this.stopped) return;
+    if (kind === "decision") {
+      // Agents don't make room decisions; the brain decides whether this one is the room's.
+      void this.consider(
+        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) reports a decision: ${text}\nDecide: is this a call other agents or the room must follow (a design direction, a shared behavior, an API or naming choice)? Then record_decision (with the workstream) and, only if another agent has to change something, a directive to it. If it only concerns ${agent.name}'s own work, call no_action.`,
+      );
+      return;
+    }
+    if (kind === "question" || kind === "blocked") {
+      // The room already sees a toast and the feed entry; the brain adds an answer when the record has one.
+      void this.consider(
+        `${agent.name} (${agent.platform}, ${shortRepo(agent.repo)}) is ${kind === "blocked" ? "blocked" : "asking the room"}: ${text}\nThe room already sees this in the feed. If the room's decisions, knowledge or an earlier line answer it, send an 'answer' directive to ${agent.name} (id ${agent.id}). If another agent is better placed to unblock it, send that agent a 'coordinate' directive with counterparts ["${agent.id}"]. Otherwise call no_action and leave it for a person.`,
+      );
+      return;
+    }
+    if (kind !== "shipped") return;
+    // Parity starts only from the shipper's own word on what a person sees. Without it, and for commits,
+    // refactors, fixes, tooling and deliberately one-platform changes, a shipped note is news only.
+    const seen = typeof data?.seen === "string" ? data.seen.trim() : "";
+    if (!seen || data?.platformSpecific === true || !parityCandidate(text)) return;
+    // Several notices from one agent about one feature in a window are one notice; a different feature stays its own.
+    const same = this.shipped.find((b) => b.agent.id === agent.id && sameFeature(b.seen, seen));
+    if (same) same.text = `${same.text} Then: ${text}`.slice(0, 600);
+    else this.shipped.push({ id: `ship-${++this.shipSeq}`, agent, text, seen });
     if (this.shipTimer) clearTimeout(this.shipTimer);
     this.shipTimer = setTimeout(() => {
       const batch = this.shipped.splice(0);
@@ -832,22 +892,77 @@ export class Brain {
     }, this.shipWindowMs);
   }
 
-  private shippedBatch(batch: { agent: Agent; text: string }[]) {
+  private shippedBatch(batch: Shipped[]) {
     const s = this.session;
-    const recentCoordinate = (id: string) =>
-      s.directives().some((d) => d.mode === "coordinate" && d.targets.includes(id) && d.status !== "done" && d.status !== "cancelled" && Date.now() - d.ts < 10 * 60_000);
+    // The same agent's note about the same thing was considered a few minutes ago: it's information now
+    // (jam_context lists it under "Recently shipped"). A different feature from it still gets its look.
+    const now = Date.now();
+    this.shipConsidered = this.shipConsidered.filter((c) => now - c.at < 10 * 60_000);
+    batch = batch.filter((b) => APP_PLATFORMS.has(b.agent.platform) && !this.shipConsidered.some((c) => c.agentId === b.agent.id && sameFeature(c.text, b.seen)));
+    if (!batch.length) return;
+    for (const b of batch) this.shipConsidered.push({ agentId: b.agent.id, text: b.seen, at: now });
+    // Parity needs an app on another platform in the room; without one there's nobody to coordinate with.
+    const apps = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform));
+    if (!batch.some((b) => apps.some((a) => a.platform !== b.agent.platform))) return;
     const ids = new Set(batch.map((b) => b.agent.id));
-    const others = s.agents().filter((a) => !ids.has(a.id) && a.status !== "offline" && a.platform !== "design" && !batch.some((b) => b.agent.platform === a.platform));
-    const shippedPlatforms = new Set(batch.map((b) => b.agent.platform));
-    if (!others.length && shippedPlatforms.size < 2) return;
-    if ([...ids, ...others.map((o) => o.id)].every(recentCoordinate)) return;
-    this.consider(
-      `Shipped just now:\n${batch.map((b) => `- ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}`).join("\n")}\n` +
-        (others.length
-          ? `Other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}. If the same change belongs in their apps, send ONE 'coordinate' directive per agent (the other platforms and the shippers), asking them to align through jam_message and post renders.`
-          : `Both platforms shipped the same feature. Send ONE 'coordinate' directive per shipper (unless one is already open for them) asking them to compare their builds through jam_message and fix inconsistencies that aren't deliberate platform differences.`) +
-        ` Don't send a coordinate directive to an agent that already has an open one. Put a parity view on screen when both platforms have built artifacts.`,
+    const others = apps.filter((a) => !ids.has(a.id) && !batch.some((b) => b.agent.platform === a.platform));
+    void this.consider(
+      `Shipped just now (one line per feature):\n${batch.map((b) => `- ${b.id}: ${b.agent.name} (${b.agent.platform}, ${shortRepo(b.agent.repo)}): ${b.text}\n  What a person sees, in the shipper's words: ${b.seen}`).join("\n")}\n` +
+        `${others.length ? `Apps on other platforms in the session: ${others.map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(", ")}.` : "Each platform here shipped."}\n` +
+        `Every agent can already read this in jam_context ("Recently shipped"); commits, refactors, fixes, tooling and changes marked as one platform's never reach you. Each shipper here said what a person sees. coordinate_parity sends a parity check about it, not build work: it asks the other platforms' agents whether their app has this and whether it matches, to agree with the shipper through jam_message, and to build only if they both confirm a gap. Call it once per feature, with that feature's shipment ids and the other platforms (or, when several platforms shipped the same feature, each of their shipment ids and no platforms). Never put two different features in one call. Call no_action when what they see plainly can't exist on the other platforms.`,
+      "agent",
+      this.parityTools(batch),
     );
+  }
+
+  /** The one thing a shipped-news pass can do: ask agents on different platforms to align one named feature. */
+  private parityTools(batch: Shipped[]) {
+    const s = this.session;
+    // One check per feature (what the shipper said a person sees) and agent in ten minutes; a different feature to the same agent still goes.
+    const sentAlready = (target: string, seen: string) => this.paritySent.some((p) => p.target === target && Date.now() - p.at < 10 * 60_000 && sameFeature(p.feature, seen));
+    return {
+      coordinate_parity: tool({
+        description: "Send a parity check about one user-visible feature a shipper described: the apps on the named platforms compare it with theirs and agree with the shipper; nobody builds unless they both confirm a gap. Each gets one 'coordinate' directive.",
+        inputSchema: z.object({
+          shipments: z.array(z.string()).describe("Ids from 'Shipped just now' (ship-…) of this one feature's shipments: one, or one per platform that shipped the same feature"),
+          platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
+        }),
+        execute: async ({ shipments, platforms }) => {
+          const from = batch.filter((b) => shipments.includes(b.id));
+          if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
+          // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
+          if (from.some((b) => !b.seen)) return refuse("A shipper didn't say what a person sees, so there is nothing to check: call no_action.");
+          // One check is one feature: shipments whose shippers describe different things are separate calls.
+          if (from.some((b) => !sameFeature(b.seen, from[0].seen))) return refuse("Those shipments are different features (their shippers describe different things): send one check per feature.");
+          const shippers = from.map((b) => b.agent);
+          const seen = from.map((b) => b.seen).join("; ");
+          const made = new Set(shippers.map((a) => a.platform));
+          const partners = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
+          const team = [...shippers, ...partners];
+          if (new Set(team.map((a) => a.platform)).size < 2) return refuse("That isn't a cross-platform feature: no app on another platform needs it.");
+          const sent: string[] = [];
+          for (const a of team) {
+            if (sentAlready(a.id, seen)) continue;
+            this.paritySent.push({ target: a.id, feature: seen, at: Date.now() });
+            const mates = team.filter((o) => o.id !== a.id).map((o) => `${o.name} (${o.platform}, ${shortRepo(o.repo)})`).join(" and ");
+            const by = shippers.map((o) => `${o.name} (${o.platform})`).join(" and ");
+            s.createDirective({
+              text: shippers.includes(a)
+                ? `Parity check, not a build task: you shipped this on ${a.platform}: ${seen}. ${mates} will compare it with their app. Answer them through jam_message and share a render of yours. No code changes unless you both confirm a gap; then jam_ack this done with what you agreed.`
+                : `Parity check, not a build task: ${by} shipped this on ${[...made].join(" and ")}: ${seen}. Does the ${a.platform} app have it, and does it match? Compare with ${mates} through jam_message. Build only if you both confirm a gap, adapted to ${a.platform}; otherwise jam_ack this done with what you found.`,
+              mode: "coordinate",
+              targets: [a.id],
+              counterparts: team.filter((o) => o.id !== a.id).map((o) => o.id),
+              requestedBy: "JamSesh",
+              rationale: `Parity: ${seen} shipped on ${[...made].join(" and ")}.`,
+            });
+            sent.push(a.name);
+          }
+          return sent.length ? `Sent ${sent.join(", ")} a parity check.` : "Each of them already has a parity check for this feature.";
+        },
+      }),
+      no_action: tool({ description: "Nothing for other platforms to do.", inputSchema: z.object({ reason: z.string() }), execute: async () => "ok" }),
+    };
   }
 
   /** New canvas or built work landed. Bring a finished variant set to the screen. */
@@ -1007,10 +1122,31 @@ function describeBigScreens(s: Session): string[] {
 }
 
 /** The line is only the name, perhaps with a greeting: "Hey JamSesh", "JamSesh?" */
-export function onlyTheName(text: string, name: string) {
-  const own = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const filler = new Set(["hey", "hi", "ok", "okay", "yo", "so", "um", "uh", "oh", own, "jam", "sesh", "session", "jamsesh", "jamsession"]);
+export function onlyTheName(text: string, name: string | string[]) {
+  const filler = new Set(["hey", "hi", "ok", "okay", "yo", "so", "um", "uh", "oh", ...nameForms(name), "jam", "sesh", "session", "jamsesh", "jamsession"]);
   return text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w && !filler.has(w)).length === 0;
+}
+
+/**
+ * Every spelling a name may arrive in: lowercase letters and digits only, with the ways speech-to-text
+ * tends to write it. The default name has its known mishearings; other names get the "-er" / "-ah" / "-a"
+ * endings swapped ("computah" is heard as "computer"), and a plural.
+ */
+export function nameForms(name: string | string[]): string[] {
+  const out = new Set<string>();
+  for (const raw of Array.isArray(name) ? name : [name]) {
+    const n = normName(raw);
+    if (n.length < 3) continue;
+    out.add(n);
+    if (n === "jamsesh") {
+      for (const v of ["jamsession", "jamsess", "jamseh", "jamsech", "jamses", "jamsey", "jamsy", "jamsessions"]) out.add(v);
+      continue;
+    }
+    const stem = n.replace(/(er|ah|a|ar|or)$/, "");
+    if (stem.length >= 3 && stem !== n) for (const end of ["er", "ah", "a", "ar"]) out.add(stem + end);
+    out.add(`${n}s`);
+  }
+  return [...out];
 }
 
 /**
@@ -1018,11 +1154,9 @@ export function onlyTheName(text: string, name: string) {
  * "hey jam sesh", "…can you do that, JamSesh?"), not mentioned as a thing ("update the jamsesh
  * skill", "open the JamSesh app").
  */
-export function addressesBrain(text: string, name: string) {
-  const n = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (n.length < 3) return false;
-  // How speech-to-text tends to write the default name.
-  const names = n === "jamsesh" ? new Set(["jamsesh", "jamsession", "jamsess", "jamseh", "jamsech", "jamses", "jamsey", "jamsy", "jamsessions"]) : new Set([n]);
+export function addressesBrain(text: string, name: string | string[]) {
+  const names = new Set(nameForms(name));
+  if (!names.size) return false;
   const raw = text.toLowerCase().split(/\s+/).filter((w) => /[a-z0-9]/.test(w));
   const words = raw.map((w) => w.replace(/[^a-z0-9]/g, ""));
   const ARTICLE = new Set(["the", "a", "an", "this", "that", "our", "your", "my", "in", "into", "to", "of", "with", "from", "on", "for", "about"]);
@@ -1030,7 +1164,8 @@ export function addressesBrain(text: string, name: string) {
   const GREETING = new Set(["hey", "hi", "ok", "okay", "yo", "so", "and", "alright", "um", "uh", "oh"]);
   for (let i = 0; i < words.length; i++) {
     // The name may be split by the transcriber ("jam sesh").
-    const span = names.has(words[i]) ? 1 : i + 1 < words.length && names.has(words[i] + words[i + 1]) ? 2 : 0;
+    let span = 0;
+    for (let n = 1; n <= 3 && !span && i + n <= words.length; n++) if (names.has(words.slice(i, i + n).join(""))) span = n;
     if (!span) continue;
     // Set off by a comma or a question mark ("can you do that, JamSesh?", "JamSesh, has it built?") is always an address.
     const setOff = /[,?!]$/.test(raw[i + span - 1] ?? "") || (i > 0 && /[,]$/.test(raw[i - 1] ?? ""));
@@ -1090,6 +1225,34 @@ class Refusal {
 const refuse = (text: string) => new Refusal(text);
 /** Tools that never change anything, so calling them isn't an effect of the pass. */
 const NO_EFFECT = new Set(["no_action", "search_artifacts"]);
+/** What a pass started by an agent's words may use: coordinate work, keep a record, speak. Nothing that acts on the host, the screen or the brain itself. */
+/** One shipped note waiting for its parity look: the shipper's text and what they said a person sees. */
+interface Shipped {
+  id: string;
+  agent: Agent;
+  text: string;
+  seen: string;
+}
+
+/** The same feature: most content words shared both ways, so a short name contained in a longer, different one doesn't match. */
+export function sameFeature(a: string, b: string) {
+  const x = new Set(terms(a));
+  const y = new Set(terms(b));
+  const inter = [...x].filter((t) => y.has(t)).length;
+  return inter > 0 && inter / Math.max(x.size, y.size) >= 0.6;
+}
+
+/** Platforms with a user-facing app, where a shipped feature can be a parity question. */
+const APP_PLATFORMS = new Set<Agent["platform"]>(["desktop", "mobile", "web"]);
+/** A shipped note that could be a feature: not a commit, refactor, fix, dependency or tooling change, and not marked one platform's. */
+export function parityCandidate(text: string) {
+  const t = text.toLowerCase().replace(/^\s*(shipped|landed|merged|pushed|done)\b[:,\s-]*/, "");
+  if (/^(commit|refactor|fix|fixed|fixes|bugfix|hotfix|bump|bumped|chore|ci\b|lint|test|tests|upgrade|upgraded|tidied|tidy|cleanup|cleaned|format|typo|deps?\b|dependenc|tooling|build script)/.test(t)) return false;
+  // A fix is news wherever the word sits ("crash fix for the sidebar", "corrected login flow"); missing a feature here only costs a parity check.
+  if (/\b(refactor(ed|ing)?|fix(ed|es|ing)?|bugfix(es)?|hotfix(es)?|patch(ed|es)?|corrected|correct(s|ing)? (a|an|the) (bug|crash|error)|crash(es)?|bugs?|regressions?|workarounds?|dependenc(y|ies)|tooling|linter|typos?|ci pipeline)\b/.test(t)) return false;
+  return !/\b(platform[- ]specific|(desktop|mobile|web|ios|android|mac|windows)[- ]only|only (on|for|in) (the )?(desktop|mobile|web|ios|android)( app)?|deliberately|on purpose)\b/.test(t);
+}
+export const AGENT_TOOLS = new Set(["create_directive", "record_decision", "ask_agent", "pair_agents", "no_action", "say_to_room"]);
 
 const EXPLICIT_YES = new Set(["approve", "approved", "approve it", "approve that", "approve the build", "approve the request", "yes approve", "yes approve it", "i approve", "i approve it"]);
 const EXPLICIT_NO = new Set(["deny", "denied", "deny it", "deny that", "deny the build", "reject", "reject it", "rejected", "i deny it"]);
@@ -1097,9 +1260,8 @@ const GENERIC_YES = new Set(["yes", "yeah", "yep", "yup", "sure", "go ahead", "g
 const GENERIC_NO = new Set(["no", "nope", "not now", "no not now", "dont build", "dont build it", "dont", "cancel", "cancel it", "cancel that", "hold off", "not yet", "no thanks", "nah"]);
 
 /** The answer part of a line: lowercase words, without the brain's name, greetings, fillers or punctuation. */
-function answerOf(text: string, brainName: string) {
-  const name = brainName.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const drop = new Set(["hey", "hi", "ok", "okay", "um", "uh", "oh", "please", "jamsesh", "jam", "sesh", "session", "jamsession", name]);
+function answerOf(text: string, brainName: string | string[]) {
+  const drop = new Set(["hey", "hi", "ok", "okay", "um", "uh", "oh", "please", "jamsesh", "jam", "sesh", "session", "jamsession", ...nameForms(brainName)]);
   return text
     .toLowerCase()
     .replace(/[’']/g, "")
@@ -1116,7 +1278,7 @@ function answerOf(text: string, brainName: string) {
  * else, so negations, questions and other sentences that contain the word don't count. Prompts
  * typed to agents never count. `only`: the line was nothing but the answer.
  */
-export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
+export function buildVerdict(batch: JamEvent[], pending: { createdAt: number }[], brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
   if (pending.length !== 1) return null;
   const asked = pending[0].createdAt;
   for (const e of [...batch].reverse()) {
@@ -1150,7 +1312,7 @@ const NAMING_FILLER = new Set(["the", "build", "for", "of", "request", "one", "s
  * this request and no other (its agent, owner, repository or branch) and otherwise be only "approve"
  * or "deny" ("approve Sam's build", "deny the ios one"); anything else is left for the brain to ask.
  */
-export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], brainName = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
+export function verdictFor(batch: JamEvent[], req: Waiting, pending: Waiting[], brainName: string | string[] = "JamSesh"): { approve: boolean; by: string; at: number; only: boolean } | null {
   if (!pending.some((p) => p.id === req.id)) return null;
   if (pending.length === 1) return buildVerdict(batch, pending, brainName);
   const mine = requestWords(req);
@@ -1228,7 +1390,9 @@ const ROUTER_SYSTEM = `You are the room brain for JamSesh, a live session where 
 
 How to route:
 - Decide between EXPLORE and IMPLEMENT. "Try", "what if", "show me options", "mock up", "let's see a few directions" = explore: the agent makes variants on the shared canvas, named "<Workstream> / <Letter>: <short description>". "Let's do it", "build it", "ship B", "implement that", "do it for real", "in the app" = implement: the agent changes code in its repository, runs its dev server, and checks the build against the chosen mockup.
+- NOTE is a third kind of work: "write that down", "log these pain points", "keep a record of", "add that to the doc/notes". Send mode 'note' (not implement) with the content to record and where it goes if the room said; the agent writes it and does not build, run a dev server or draw on the canvas.
 - Keep similar work with the agent that already has its context. Check "Agent work history" and "Best matches": a follow-up, tweak, or new variant of something an agent already worked on goes to that agent, even if another agent is idle. Never split one request between agents in the same repository; JamSesh keeps only the one with the most related history. Fan a request out only when it spans different repositories or platforms. Give genuinely new work to the agent whose repository it belongs in, preferring one with fewer unfinished directives.
+- A 'coordinate' directive about something an agent shipped is a check, not build work: the other platform's agent compares (does this exist on our side, and does it match?), agrees with the shipper through jam_message, and builds only if both confirm a gap. Shipped news that names nothing a person sees gets no directive.
 - Agents work as a team. When two agents touch related work (the same feature on desktop and mobile, a component and the screen that uses it, a design system and the apps), use pair_agents so they compare and align instead of diverging. When variants from several agents land on the same theme, pair them to review each other's work before the room decides. Use ask_agent when you need a fact only an agent knows (what's in its repo) to route well.
 - Pick targets by ownership: the agent already working on that workstream, or on the platform or repository the request is about. Name an owner's agent when a person says "my agent" or "Chey's". If the request applies to desktop and mobile, send it to both and ask them to coordinate.
 - When people disagree, weigh by role weight (higher wins) and say whose call it was in the rationale. Don't silently drop the other view: mention it.
@@ -1240,7 +1404,6 @@ How to route:
 - Write directives as complete instructions an agent can act on without hearing the room: include counts, names, constraints, and which mockup.
 - Use host_action only when the room asks to see something outside the board (a native app, a simulator, side-by-side windows).
 - Lines marked "(typed to their agent)" are prompts a person gave their own agent, which is already on it. Don't route them back to that agent. Act on them only when they affect other agents (for example "and tell the mobile agent to match"): then target ONLY the other agents (mode implement or explore, not coordinate) and tell them to jam_message the typer's agent to stay aligned. Never include the typer's own agent in that directive. Or record a decision they state.
-- When one platform ships something visible (an agent posts "shipped" or "done"), the other platforms' agents should get a 'coordinate' directive so desktop and mobile stay in parity, adapted to each platform. Include the shipping agent in it.
 - Don't repeat a directive that is already open. Don't route banter. If nothing needs doing, call no_action.
 - "That was Felipe" / "Britain said that" right after a line means fix_speaker on that line. It is not banter even if phrased casually.
 - Replies (say_to_room): only when someone addressed you. Use kind 'answer' for their question, 'problem' when you can't do it or a person must act. Don't confirm actions that show on the big screen or as a routed toast; silence plus the visible change is the confirmation. JamSesh decides whether a reply is spoken. Never more than two short sentences.`;

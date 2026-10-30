@@ -1,9 +1,10 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
+import { HelperRegistry } from "./children";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
-import { embed } from "./audio/voiceprint";
+import { embed, learningNote, voiceprintStatus } from "./audio/voiceprint";
 import { decodeWav, resample, speechLevelDb } from "./audio/wav";
 import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
@@ -84,6 +85,10 @@ export class Hub {
   peopleOnline = 0;
   uploadsDir: string;
 
+  /** Every helper process the hub starts; stop() walks it. */
+  readonly helpers = new HelperRegistry();
+  private proxyTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(private opts: HubOptions = {}) {
     const dir = opts.dataDir ?? config.dataDir;
     mkdirSync(dir, { recursive: true });
@@ -112,9 +117,9 @@ export class Hub {
       this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: ok ? `Preview build finished: ${label}. ${text}`.trim() : `Preview build failed: ${label}. ${text}`.trim() });
     };
     this.brain = new Brain(this.session, this.host);
-    this.transcriber = new Transcriber(this.session);
+    this.transcriber = new Transcriber(this.session, this.helpers);
     this.audio = new AudioPipeline(this.session, this.transcriber);
-    this.canvas = new Canvas(this.session);
+    this.canvas = new Canvas(this.session, this.helpers);
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
@@ -131,15 +136,17 @@ export class Hub {
     mkdirSync(this.uploadsDir, { recursive: true });
 
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
+    this.session.voiceprints = () => ({ ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled });
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
-    this.session.onUpdate = (agent, kind, text) => this.brain.agentUpdated(agent, kind, text);
+    this.session.onUpdate = (agent, kind, text, ev) => this.brain.agentUpdated(agent, kind, text, ev.data);
+    this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
     this.brain.relabel = (eventId, name) => {
       const ev = this.store.event(eventId);
       const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });
       if (!ev?.data.utteranceId) return "That line wasn't spoken, so there's no voice to learn.";
-      this.audio.assign(ev.data.utteranceId, person.id);
-      return `Line ${eventId} is now ${person.name}'s.`;
+      const { learning } = this.audio.assign(ev.data.utteranceId, person.id);
+      return `Line ${eventId} is now ${person.name}'s. ${learningNote(person.name, learning)}`;
     };
   }
 
@@ -149,7 +156,7 @@ export class Hub {
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
     this.autosave.start();
-    setInterval(() => this.devproxy.refresh(), 30_000);
+    this.proxyTimer = setInterval(() => this.devproxy.refresh(), 30_000);
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -162,17 +169,21 @@ export class Hub {
   async shutdown() {
     await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
     await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
-    this.stop();
+    // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
+    if (!(await this.stop())) console.warn("a helper process was still running at shutdown");
   }
 
-  stop() {
+  /** Stops everything; true when every helper process was seen to exit. */
+  stop(): Promise<boolean> {
     this.awake.stop();
     this.autosave.stop();
     this.brain.stop();
-    this.canvas.stop();
-    this.transcriber.stop();
+    this.canvas.halt();
     this.devproxy.stop();
+    if (this.proxyTimer) clearInterval(this.proxyTimer);
+    this.proxyTimer = null;
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
+    return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
   }
 
   /** Devices recording a prompt for the brain right now, with when they started. */
@@ -457,8 +468,11 @@ export class Hub {
     this.session.touchAgent(agent.id, { status: "working" });
     const { directives, messages } = this.session.inbox(agent.id, true);
     const lastSeen = this.store.setting<number>(`decisionsSeen:${agent.id}`, 0);
-    const decisions = this.store.recentEvents({ kinds: ["decision"], afterId: lastSeen, limit: 10 });
-    if (decisions.length) this.store.setSetting(`decisionsSeen:${agent.id}`, decisions[decisions.length - 1].id);
+    const decisions = this.session.roomDecisions(agent.id, { afterId: lastSeen, limit: 10 });
+    // Seen moves to the last decision this agent was handed. With none handed over, everything newer
+    // than its mark was for other workstreams, so the mark moves to the newest decision in the log.
+    const seen = decisions.length ? decisions[decisions.length - 1].id : this.store.recentEvents({ kinds: ["decision"], limit: 1 })[0]?.id;
+    if (seen && seen > lastSeen) this.store.setSetting(`decisionsSeen:${agent.id}`, seen);
     const lines = [
       ...directives.map((d) => `Room directive ${d.id} [${d.mode}] (${d.requestedBy}): ${d.text}`),
       ...messages.map((m) => (m.data.askId ? `QUESTION ${m.data.askId} from ${m.authorName}: ${m.text} (answer with jam_answer first)` : `Message from ${m.authorName}: ${m.text}`)),

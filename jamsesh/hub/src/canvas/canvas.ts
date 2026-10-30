@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { config } from "../config";
 import type { Session } from "../session";
 import type { Agent, Platform } from "../types";
+import { HelperRegistry, stopHelper, withParentWatch } from "../children";
 import { FigcraftMcp, type ToolResult } from "./figcraft-mcp";
 
 interface FrameInfo {
@@ -40,12 +41,17 @@ const POLL_MS = 2000;
 const SETTLE_MS = 2500;
 
 export class Canvas {
+  /** Health checks (150 ms apart) a new canvas server gets before it counts as failed to start. */
+  static START_TRIES = 40;
   private serverProc: ReturnType<typeof Bun.spawn> | null = null;
   host: FigcraftMcp | null = null;
   private agents = new Map<string, AgentCanvas>();
   private tracked = new Map<string, Tracked>();
   private touched = new Map<string, { agentId: string; at: number }>();
   private poller: ReturnType<typeof setInterval> | null = null;
+  private timers: ReturnType<typeof setInterval>[] = [];
+  private stopped = false;
+  private recovering = false;
   private polling = false;
   private serverDir: string;
   rendersDir: string;
@@ -61,7 +67,11 @@ export class Canvas {
   private agentPage = new Map<string, string>();
   private activity = new Map<string, { created: number; edited: number; timer: ReturnType<typeof setTimeout> | null }>();
 
-  constructor(private session: Session) {
+  constructor(
+    private session: Session,
+    /** Every helper this canvas starts goes in here, so stopping the hub finds them all. */
+    private helpers: HelperRegistry = new HelperRegistry(),
+  ) {
     this.serverDir = join(config.dataDir, "figcraft-server");
     this.rendersDir = join(config.dataDir, "renders");
     this.filesDir = join(config.dataDir, "canvas-files");
@@ -85,30 +95,83 @@ export class Canvas {
     throw new Error(`no free port for the canvas server near ${config.figcraftPort}`);
   }
 
+  /** Failed starts so far, and the next try (a failed first start is tried again, backing off, a few times). */
+  private startFailures = 0;
+  private startRetry: ReturnType<typeof setTimeout> | null = null;
+  static START_RETRIES = 6;
+  static START_RETRY_MS = 5_000;
+
   async start() {
+    this.startRetry = null;
     this.session.setCanvas({ status: "starting", reason: null });
     try {
+      // A helper left over from a failed start must be confirmed gone before another is started.
+      await this.reapLeftovers();
+      this.checkRunning();
       await this.startServer();
+      this.checkRunning();
       await this.startHost();
+      this.checkRunning();
+      this.startFailures = 0;
       this.poller = setInterval(() => this.poll(), POLL_MS);
-      setInterval(() => this.reapIdleAgents(), 60_000);
-      setInterval(() => this.watchdog().catch(() => {}), 30_000);
+      this.timers = [setInterval(() => this.reapIdleAgents(), 60_000), setInterval(() => this.watchdog().catch(() => {}), 30_000)];
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
-      console.error("canvas:", reason);
-      this.session.setCanvas({ status: "failed", reason });
+      if (!this.stopped) console.error("canvas:", reason);
+      // Nothing half-started stays behind: the host participant and the server this start spawned stop.
+      // (Each is awaited to its observed exit before its reference is dropped; the registry still holds any that didn't.)
+      const leftover = await this.reapLeftovers().then(() => false, () => true);
+      if (this.stopped) return; // stopped mid-start: cleaned up, nothing to report or retry
+      const stuck = leftover;
+      if (stuck) console.warn("canvas: a helper from the failed start is still running; the retry first tries to stop it again");
+      this.session.setCanvas({ status: "failed", reason: stuck ? `${reason} (a helper from that start is still running)` : reason });
+      if (this.stopped || ++this.startFailures > Canvas.START_RETRIES) return;
+      const wait = Math.min(5 * 60_000, Canvas.START_RETRY_MS * 2 ** (this.startFailures - 1));
+      this.startRetry = setTimeout(() => void this.start(), wait);
+      this.startRetry.unref?.();
     }
   }
 
-  stop() {
+  /**
+   * Stops the host participant and the server a failed start left behind. A helper whose exit wasn't
+   * observed stays referenced (and tracked), so the next start stops it again before spawning another.
+   */
+  private async reapLeftovers() {
+    let stuck = "";
+    if (this.host) {
+      const gone = await Promise.resolve(this.host.close()).catch(() => false);
+      if (gone !== false) this.host = null;
+      else stuck = "host";
+    }
+    if (this.serverProc) {
+      if (await stopHelper(this.serverProc).catch(() => false)) this.serverProc = null;
+      else stuck ||= "server";
+    }
+    if (stuck) throw new Error(`the previous canvas ${stuck} process is still running`);
+  }
+
+  /** Stop can come while a start is waiting on something: after each wait, a stopped canvas goes no further. */
+  private checkRunning() {
+    if (this.stopped) throw new Error("the canvas was stopped");
+  }
+
+  /** Cancels timers and retries and refuses further starts; no process is touched (see stop). */
+  halt() {
+    this.stopped = true;
+    if (this.startRetry) clearTimeout(this.startRetry);
     if (this.poller) clearInterval(this.poller);
-    this.host?.close();
-    for (const a of this.agents.values()) a.mcp.close();
-    this.serverProc?.kill();
+    for (const t of this.timers.splice(0)) clearInterval(t);
+  }
+
+  /** Halts, then stops every helper in the registry. True when each one's exit was seen (a TERM-resistant one gets KILL). */
+  stop(): Promise<boolean> {
+    this.halt();
+    return this.helpers.stopAll();
   }
 
   private async startServer() {
     this.port = await this.choosePort();
+    this.checkRunning();
     const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
     const before = this.session.store.setting<number>("figcraftPort", 0);
     if (saved && before && before !== this.port) {
@@ -119,44 +182,96 @@ export class Canvas {
     }
     this.session.store.setSetting("figcraftPort", this.port);
     if (await healthy(this.serverUrl)) return;
+    this.checkRunning();
     if (!existsSync(config.figcraftServerBin) && config.figcraftServerBin.includes("/")) {
       throw new Error(`figcraft-server not found at ${config.figcraftServerBin}. Run jamsesh/install.sh.`);
     }
-    this.serverProc = Bun.spawn([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir], {
-      stdout: "ignore",
-      stderr: "pipe",
-    });
-    for (let i = 0; i < 40; i++) {
+    this.helpers.assertOpen();
+    this.serverProc = this.helpers.track(
+      Bun.spawn(withParentWatch([config.figcraftServerBin, "--listen", `127.0.0.1:${this.port}`, "--data", this.serverDir]), {
+        stdout: "ignore",
+        stderr: "pipe",
+      }),
+    );
+    // Read all it says while it runs (a full pipe would block it), keeping only the latest part.
+    this.serverLog = "";
+    void this.drainServerLog(this.serverProc.stderr as ReadableStream<Uint8Array>);
+    for (let i = 0; i < Canvas.START_TRIES; i++) {
       if (await healthy(this.serverUrl)) return;
       await Bun.sleep(150);
+      this.checkRunning();
     }
-    const err = await new Response(this.serverProc.stderr as ReadableStream).text().catch(() => "");
-    throw new Error(`figcraft-server didn't start: ${err.slice(0, 300)}`);
+    // Stop it, and report the latest of what it said.
+    const proc = this.serverProc;
+    await Bun.sleep(100);
+    const err = this.serverLog.slice(-300);
+    if (await stopHelper(proc).catch(() => false)) this.serverProc = null; // else kept: the next start stops it again
+    throw new Error(`figcraft-server didn't start${err.trim() ? `: ${err.trim().slice(0, 300)}` : ""}`);
   }
 
+  /** The latest of what the canvas server wrote to stderr, at most SERVER_LOG_MAX characters. */
+  serverLog = "";
+  static SERVER_LOG_MAX = 16_384;
+
+  private async drainServerLog(stream: ReadableStream<Uint8Array>) {
+    const decoder = new TextDecoder();
+    try {
+      for await (const chunk of stream) {
+        this.serverLog = (this.serverLog + decoder.decode(chunk, { stream: true })).slice(-Canvas.SERVER_LOG_MAX);
+      }
+    } catch {}
+  }
+
+  /** How long `figcraft-server key` may take before the start counts as failed. */
+  static KEY_TIMEOUT_MS = 10_000;
+
+  private keyProc: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void } | null = null;
+
   private async serverKey(): Promise<string> {
-    const p = Bun.spawn([config.figcraftServerBin, "--data", this.serverDir, "key"], { stdout: "pipe", stderr: "pipe" });
-    const out = await new Response(p.stdout).text();
-    const m = out.match(/key=([\w-]+)/);
-    if (!m) throw new Error("couldn't read the figcraft-server key");
-    return m[1];
+    this.checkRunning();
+    this.helpers.assertOpen();
+    const p = this.helpers.track(Bun.spawn(withParentWatch([config.figcraftServerBin, "--data", this.serverDir, "key"]), { stdout: "pipe", stderr: "ignore" }));
+    this.keyProc = p;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const late = new Promise<null>((r) => (timer = setTimeout(() => r(null), Canvas.KEY_TIMEOUT_MS)));
+      const out = await Promise.race([new Response(p.stdout).text(), late]);
+      if (out == null) throw new Error("figcraft-server key didn't answer");
+      const m = out.match(/key=([\w-]+)/);
+      if (!m) throw new Error("couldn't read the figcraft-server key");
+      return m[1];
+    } finally {
+      clearTimeout(timer);
+      // Never left running: killed if it's still going, and reaped either way.
+      // Every wait is bounded (stopHelper's TERM then KILL grace); a helper whose exit still isn't seen stays in the registry, which reports it at shutdown.
+      if (p.exitCode == null && !(await stopHelper(p, 500).catch(() => false))) console.warn("canvas: the key helper's exit wasn't observed");
+      if (this.keyProc === p) this.keyProc = null;
+    }
   }
 
   private spawnParticipant(dir: string) {
     mkdirSync(dir, { recursive: true });
-    return new FigcraftMcp(config.figcraftBin, ["mcp", "--automation-read-root", dir, "--automation-write-root", dir]);
+    return new FigcraftMcp(config.figcraftBin, ["mcp", "--automation-read-root", dir, "--automation-write-root", dir], {}, this.helpers);
   }
 
   private async startHost() {
-    const host = await this.spawnParticipant(join(this.filesDir, "host")).init();
-    this.host = host;
+    const host = this.spawnParticipant(join(this.filesDir, "host"));
+    this.host = host; // tracked from the moment it exists: a Stop during init closes it
+    this.checkRunning();
+    await host.init().catch((e) => {
+      host.close(); // a process whose start failed doesn't linger
+      throw e;
+    });
+    this.checkRunning();
     await host.command("pref.userName", { name: "JamSesh" });
+    this.checkRunning();
     const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
     if (saved) {
       // The saved links name the LAN address, but the server listens on loopback only (and the
       // address may have changed since): rejoin through loopback and announce today's address.
       await host.command("collab.join", { link: this.loopLink(saved.edit) });
       const ok = await waitLive(host, 15_000);
+      this.checkRunning();
       if (ok) {
         const links = { edit: this.lanLink(this.loopLink(saved.edit)), view: this.lanLink(this.loopLink(saved.view)) };
         this.session.store.setSetting("canvasLinks", links);
@@ -166,9 +281,11 @@ export class Canvas {
       await host.command("collab.leave", {}).catch(() => {});
     }
     const key = await this.serverKey();
+    this.checkRunning();
     await host.command("collab.publish", { server: `ws://127.0.0.1:${this.port}/?key=${key}`, name: this.session.settings().sessionName });
     for (let i = 0; i < 80; i++) {
       const peers = await host.command("collab.peers");
+      this.checkRunning();
       if (peers?.published?.edit) {
         const links = { edit: this.lanLink(peers.published.edit), view: this.lanLink(peers.published.view) };
         this.session.store.setSetting("canvasLinks", links);
@@ -191,7 +308,7 @@ export class Canvas {
   }
 
   private announce(edit: string, view: string) {
-    this.session.setCanvas({ status: "live", editLink: edit, viewLink: view, wsEdit: toWs(edit), wsView: toWs(view), reason: null });
+    this.session.setCanvas({ status: "live", editLink: edit, viewLink: view, wsEdit: toWs(edit), wsView: toWs(view), reason: null, generation: this.session.canvas.generation + 1 });
   }
 
   /** The link the host's own pages use (localhost works without the LAN). */
@@ -323,6 +440,7 @@ export class Canvas {
   // ---------- agents on the canvas ----------
 
   async forAgent(agent: Agent): Promise<FigcraftMcp> {
+    if (this.stopped) throw new Error("The canvas was stopped.");
     const link = this.session.canvas.editLink;
     if (!link) throw new Error(`The canvas isn't live yet (${this.session.canvas.status}${this.session.canvas.reason ? `: ${this.session.canvas.reason}` : ""}).`);
     let a = this.agents.get(agent.id);
@@ -496,19 +614,86 @@ export class Canvas {
   async resync(why: string) {
     const link = this.session.canvas.editLink;
     if (!this.host || !link) return;
-    console.warn(`canvas: resyncing the host (${why})`);
-    await this.host.command("collab.leave", {}).catch(() => {});
-    await this.host.command("collab.join", { link: this.localLink(link) });
-    if (!(await waitLive(this.host, 20_000))) this.session.setCanvas({ reason: "The host lost the canvas session; restart JamSesh." });
+    await this.recover(async () => {
+      console.warn(`canvas: resyncing the host (${why})`);
+      await this.host!.command("collab.leave", {}).catch(() => {});
+      await this.host!.command("collab.join", { link: this.localLink(link) });
+      if (!(await waitLive(this.host!, 20_000))) throw new Error("The host lost the canvas session; restart JamSesh.");
+      this.backLive();
+    });
+  }
+
+  /** The host is in the session again: a canvas marked failed is live again, under a new generation so people's canvases rejoin. */
+  private backLive() {
+    const { status, editLink, viewLink } = this.session.canvas;
+    if (status !== "live" && editLink && viewLink) this.announce(editLink, viewLink);
+  }
+
+  /**
+   * One recovery at a time. One that fails marks the canvas failed (people's canvases stop rejoining
+   * a dead link and say why); the watchdog tries again on its next round.
+   */
+  private async recover(fn: () => Promise<void>) {
+    if (this.recovering || this.stopped) return;
+    this.recovering = true;
+    try {
+      await fn();
+    } catch (e) {
+      if (this.stopped) return;
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error("canvas:", reason);
+      this.session.setCanvas({ status: "failed", reason });
+    } finally {
+      this.recovering = false;
+    }
+  }
+
+  /** The canvas server stopped (it crashed, or something killed it): start it again on the same
+   * data, rejoin the session file, and announce it again so people's canvases rejoin too. */
+  private revive() {
+    return this.recover(async () => {
+      console.warn("canvas: the canvas server stopped; starting it again");
+      // Wait for the old server to let go of its port, so the new one comes up on the same links.
+      if (this.serverProc) {
+        if (!(await stopHelper(this.serverProc).catch(() => false))) throw new Error("The old canvas server is still running; not starting a second one.");
+        this.serverProc = null;
+      }
+      await this.startServer();
+      const saved = this.session.store.setting<{ edit: string; view: string } | null>("canvasLinks", null);
+      if (!this.host || !saved) throw new Error("The canvas server restarted but there is no session file to rejoin; restart JamSesh.");
+      await this.host.command("collab.leave", {}).catch(() => {});
+      await this.host.command("collab.join", { link: this.loopLink(saved.edit) });
+      if (!(await waitLive(this.host, 15_000))) throw new Error("The canvas server restarted but the session file didn't come back; restart JamSesh.");
+      this.announce(this.lanLink(this.loopLink(saved.edit)), this.lanLink(this.loopLink(saved.view)));
+    });
   }
 
   /** The host should see every agent participant the hub runs; if it doesn't, it lost the session. */
   private async watchdog() {
-    if (!this.host?.alive || this.polling) return;
+    if (this.stopped || this.recovering || !this.host || this.polling) return;
+    if (!this.host.alive) return this.restartHost();
+    // Live, or failed by an earlier recovery: a server that doesn't answer is started again.
+    const up = this.session.canvas.status === "live" || this.session.canvas.status === "failed";
+    if (up && !(await healthy(this.serverUrl)) && !(await healthy(this.serverUrl))) return this.revive();
     const ready = [...this.agents.values()].filter((a) => a.mcp.alive);
     const peers = await this.host.command("collab.peers").catch(() => null);
     if (!peers) return;
+    if (peers.status === "live" && this.session.canvas.status === "failed" && (await healthy(this.serverUrl))) this.backLive();
     if (peers.status !== "live" || (ready.length && (peers.peers?.length ?? 0) < ready.length)) await this.resync(`status ${peers.status}, ${peers.peers?.length ?? 0} peers for ${ready.length} agents`);
+  }
+
+  /** The host's own canvas process died: start a new one and rejoin the session file, or say the canvas failed. */
+  private restartHost() {
+    return this.recover(async () => {
+      console.warn("canvas: the host's canvas process stopped; starting it again");
+      // The dead one stays until a new one starts, so a failed restart is tried again next round.
+      this.host?.close();
+      try {
+        await this.startHost();
+      } catch (e) {
+        throw new Error(`The host's canvas stopped and didn't come back: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
   }
 
   private reapIdleAgents() {

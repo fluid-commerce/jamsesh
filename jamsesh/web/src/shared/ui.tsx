@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import qrcode from "qrcode-generator";
 import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
+import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, START_TIMEOUT_MS, friendlyReason, joinLabel, FontTries, loadLocalFonts, macInvoke, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
   const [now, setNow] = useState(Date.now());
@@ -368,24 +369,229 @@ function toneStyle(tone: string) {
 
 const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "update", "message", "artifact"]);
 
+/** Where the next page of history starts: the oldest event this window has at all, shown or not (the state's window may hold none the feed shows). */
+export function historyCursor(ids: Iterable<number>): number | undefined {
+  let oldest: number | undefined;
+  for (const id of ids) if (oldest === undefined || id < oldest) oldest = id;
+  return oldest;
+}
+
+/** How close to the bottom still counts as "at the bottom" (px). */
+const AT_BOTTOM = 40;
+/** Start loading older lines when the reader is this close to the top (px). */
+const NEAR_TOP = 160;
+
+/**
+ * The room's conversation. The reader's own scroll position rules: new lines are followed only
+ * while the reader is at the bottom; scrolling up stops following and shows a "Latest" pill with
+ * the count of what came in meanwhile. Older lines than the live state carries load from the hub
+ * as the reader reaches the top. The big screens (`big`) always follow and keep a short tail.
+ * The feed scrolls its own box (scrollTop), never its ancestors.
+ */
+/** How many lines the feed keeps in memory and renders, following the bottom or not. */
+const FEED_KEEP = 1500;
+
+/**
+ * Keeps at most `keep` lines, always, and the list stays contiguous. Following the bottom drops the
+ * oldest (they load again from the hub on scroll). A reader who scrolled away keeps the lines they
+ * are reading, so the newest are dropped instead: what remains is still an unbroken run, and
+ * returning to the bottom resets to the latest window. Says which end was cut, or null.
+ */
+export function capFeed(seen: Map<number, unknown>, following: boolean, keep = FEED_KEEP): "oldest" | "newest" | null {
+  if (seen.size <= keep) return null;
+  const ids = [...seen.keys()].sort((a, b) => a - b);
+  for (const id of following ? ids.slice(0, ids.length - keep) : ids.slice(keep)) seen.delete(id);
+  return following ? "oldest" : "newest";
+}
+
+/** Whether a live event joins the list: always while following; while the reader is away only ones at or before the line they left (so the list has no gap). */
+export function feedAdmits(following: boolean, frozenAt: number, id: number): boolean {
+  return following || id <= frozenAt;
+}
+
+/** A counter a response checks against: each reset bumps it, and an answer asked for under an older number is dropped. */
+export class Generation {
+  n = 0;
+  bump() {
+    return ++this.n;
+  }
+  stale(asked: number) {
+    return asked !== this.n;
+  }
+}
+
 export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
   const { state } = useHub();
-  const end = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
-  const events = (state?.events ?? []).filter((e) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind))));
-  const last = events[events.length - 1]?.id;
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  // Every line this window has seen, so lines the live state trims (or the reader loaded) stay put.
+  const seen = useRef(new Map<number, JamEvent>());
+  const following = useRef(true);
+  const [away, setAway] = useState(false);
+  const [, tick] = useState(0);
+  // The newest line in the list when the reader scrolled away. While they are away nothing newer is added (the list never has a gap); it is counted for the pill, and returning resets to the latest window.
+  const frozenAt = useRef(0);
+  // How many feed lines came in while the reader was away: a plain counter bumped by each new event as it arrives, with the highest id counted so far (the live state holds only a recent window).
+  const awayNew = useRef({ count: 0, upTo: 0, gap: false });
+  // Bumped by every reset to the latest window (and on unmount): a history response from an older generation is dropped, so it can't put stale rows back or restore an old scroll position.
+  const generation = useRef(new Generation());
+  useEffect(() => () => void generation.current.bump(), []);
+  // Where the box was before older lines went in above, to hold the reader's place.
+  const holdPlace = useRef<{ height: number; top: number } | null>(null);
+  const busy = useRef(false);
+  const trimmed = useRef(false);
+  const [older, setOlder] = useState<{ loading: boolean; failed: boolean; done: boolean; more: number | null }>({ loading: false, failed: false, done: false, more: null });
+
+  for (const e of state?.events ?? []) if (feedAdmits(following.current, frozenAt.current, e.id)) seen.current.set(e.id, e);
+  const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
+  // A long session keeps a bounded tail while the reader follows the bottom; older lines load again from the hub on scroll.
+  // Only cutting the oldest end reopens older paging; the newest end is always the live state's.
+  if (capFeed(seen.current, following.current) === "oldest") trimmed.current = true;
+  const all = [...seen.current.values()].sort((a, b) => a.id - b.id).filter(wanted);
+  const events = big ? all.slice(-140) : all;
+  const last = events[events.length - 1]?.id ?? 0;
+  const first = historyCursor(seen.current.keys());
+  const everything = !!state && state.totals.events <= state.events.length;
+  const exhausted = big || ((older.done || everything) && !trimmed.current);
+  const fresh = following.current ? 0 : awayNew.current.count;
+  const gap = !following.current && awayNew.current.gap;
+
+  /** Back at the bottom: drop everything and start again from the live state, a contiguous latest window that pages backward. */
+  const resetToLatest = () => {
+    seen.current.clear();
+    awayNew.current = { count: 0, upTo: 0, gap: false };
+    generation.current.bump();
+    busy.current = false;
+    trimmed.current = false;
+    holdPlace.current = null;
+    setOlder({ loading: false, failed: false, done: false, more: null });
+  };
+
+  const toBottom = (smooth = false) => {
+    const el = box.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  };
+
+  const onScroll = () => {
+    const el = box.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM;
+    if (atBottom !== following.current) {
+      if (atBottom) resetToLatest();
+      else {
+        frozenAt.current = Math.max(0, ...seen.current.keys());
+        awayNew.current = { gap: false, count: 0, upTo: Math.max(frozenAt.current, ...(state?.events ?? []).map((e) => e.id)) }; // everything in the state so far was already shown
+      }
+      following.current = atBottom;
+      setAway(!atBottom);
+    }
+    if (!big && el.scrollTop < NEAR_TOP) void loadOlder();
+  };
+
+  const loadOlder = async () => {
+    const el = box.current;
+    if (!el || exhausted || busy.current || holdPlace.current || first == null) return;
+    busy.current = true;
+    const gen = generation.current.n;
+    setOlder((o) => ({ ...o, loading: true, failed: false }));
+    try {
+      const kinds = [...FEED_KINDS].join(",");
+      const r = await api<{ items: JamEvent[]; more: number }>(`/history/events?before=${first}&limit=60&kinds=${kinds}`);
+      if (generation.current.stale(gen)) return; // the feed was reset to the latest window meanwhile: this answer is for the old one
+      holdPlace.current = { height: el.scrollHeight, top: el.scrollTop };
+      for (const e of r.items) seen.current.set(e.id, e);
+      if (r.more === 0 || r.items.length === 0) trimmed.current = false; // the start of history is back in memory
+      setOlder({ loading: false, failed: false, done: r.more === 0 || r.items.length === 0, more: r.more });
+    } catch {
+      if (!generation.current.stale(gen)) setOlder((o) => ({ ...o, loading: false, failed: true }));
+    } finally {
+      if (!generation.current.stale(gen)) busy.current = false;
+    }
+  };
+
+  // After lines are added above the reader, put the box back where they were looking.
+  useLayoutEffect(() => {
+    const el = box.current;
+    const h = holdPlace.current;
+    if (!el || !h) return;
+    holdPlace.current = null;
+    el.scrollTop = h.top + (el.scrollHeight - h.height);
+  });
+
+  // New lines: follow them while the reader is at the bottom, otherwise leave the box alone.
+  useLayoutEffect(() => {
+    if (following.current) {
+      toBottom();
+    }
   }, [last]);
+
+  // The away count is bumped at the wire, one event at a time, so a burst can't push lines out of the state window uncounted.
+  const wantedRef = useRef<(e: JamEvent) => boolean>(() => false);
+  wantedRef.current = wanted;
+  useEffect(() => hub.onGap(() => {
+    if (!following.current) {
+      awayNew.current.gap = true;
+      tick((n) => n + 1);
+    }
+  }), []);
+  useEffect(
+    () =>
+      hub.onEvent((e) => {
+        const a = awayNew.current;
+        if (following.current || e.id <= Math.max(frozenAt.current, a.upTo)) return;
+        a.upTo = e.id;
+        if (wantedRef.current(e)) {
+          a.count++;
+          tick((n) => n + 1);
+        }
+      }),
+    [],
+  );
+
+  // A taller or shorter box (keyboard, resize) keeps the reader at the bottom if they were there.
+  useEffect(() => {
+    const el = box.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => following.current && toBottom());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // A short feed that doesn't fill its box has no scrolling to trigger the load.
+  useEffect(() => {
+    const el = box.current;
+    if (el && !big && !exhausted && first != null && el.scrollHeight <= el.clientHeight + NEAR_TOP) void loadOlder();
+  }, [first, exhausted]);
+
   if (!state) return null;
+  const jump = () => {
+    if (!following.current) resetToLatest();
+    following.current = true;
+    setAway(false);
+    toBottom(true);
+  };
   return (
-    <div className="feed" style={{ flex: 1, fontSize: big ? 17 : 14 }}>
-      {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
-      {events.slice(-140).map((e) => (
-        <FeedLine key={e.id} e={e} state={state} editable={editable} condensed={big} onSpeaker={(ev, x, y) => setPop({ ev, x, y })} />
-      ))}
-      <div ref={end} />
-      {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
+    <div className="feed-wrap">
+      <div ref={box} className="feed" onScroll={onScroll} style={{ fontSize: big ? 17 : 14 }}>
+        {events.length === 0 && <div className="empty-note">The room's conversation shows up here as people talk.</div>}
+        {!exhausted && first != null && (
+          <button className="feed-older" disabled={older.loading} onClick={() => void loadOlder()}>
+            {older.loading ? "Loading earlier lines" : older.failed ? "Couldn't load earlier lines. Try again" : older.more ? `${older.more} earlier ${older.more === 1 ? "line" : "lines"}` : "Earlier lines"}
+          </button>
+        )}
+        {events.map((e) => (
+          <FeedLine key={e.id} e={e} state={state} editable={editable} condensed={big} onSpeaker={(ev, x, y) => setPop({ ev, x, y })} />
+        ))}
+        {pop && <SpeakerPopover state={state} ev={pop.ev} x={pop.x} y={pop.y} onClose={() => setPop(null)} />}
+      </div>
+      {away && !big && (
+        <button className="feed-latest" onClick={jump} aria-label={gap ? "Jump to the latest, you may have missed lines" : fresh ? `Jump to the latest, ${fresh} new` : "Jump to the latest"}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m6 9 6 6 6-6" />
+          </svg>
+          {gap ? "Catch up" : fresh ? `${fresh} new ${fresh === 1 ? "line" : "lines"}` : "Latest"}
+        </button>
+      )}
     </div>
   );
 }
@@ -456,14 +662,18 @@ function shortAgent(name?: string) {
 }
 
 export function modeLabel(mode: string) {
-  return mode === "explore" ? "Explore" : mode === "implement" ? "Build" : mode === "coordinate" ? "Coordinate" : mode === "answer" ? "Answer" : mode;
+  return mode === "explore" ? "Explore" : mode === "implement" ? "Build" : mode === "coordinate" ? "Coordinate" : mode === "answer" ? "Answer" : mode === "note" ? "Note" : mode;
 }
 
 function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: JamEvent; x: number; y: number; onClose: () => void }) {
   const [name, setName] = useState("");
+  const [result, setResult] = useState<{ message: string; learned: boolean } | null>(null);
   const assign = async (body: { personId?: string; name?: string }) => {
-    await api(`/utterances/${ev.data.utteranceId}/assign`, body);
-    onClose();
+    const r = await api<{ ok?: boolean; queued?: boolean; learning?: { learned: boolean; message: string } }>(`/utterances/${ev.data.utteranceId}/assign`, body);
+    // Say what the correction did for the voiceprint, then get out of the way.
+    if (!r?.learning) return onClose();
+    setResult({ message: r.learning.message, learned: r.learning.learned });
+    setTimeout(onClose, r.learning.learned ? 1600 : 3200);
   };
   useEffect(() => {
     const close = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -474,7 +684,18 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
     <>
       <div style={{ position: "fixed", inset: 0, zIndex: 59 }} onClick={onClose} />
       <div className="popover" style={{ left: Math.min(x, innerWidth - 260), top: Math.min(y + 8, innerHeight - 340) }}>
-        <div className="hint">Who said this? JamSesh learns their voice.</div>
+        {result ? (
+          <div className="hint" role="status" style={{ padding: "10px 10px 8px", maxWidth: 240, fontSize: 13, color: result.learned ? "var(--built)" : "var(--warn)" }}>{result.message}</div>
+        ) : (
+          <>
+        {state.voiceprints && !state.voiceprints.available ? (
+          <div className="hint" style={{ color: "var(--warn)", maxWidth: 240 }} title={state.voiceprints.reason}>
+            Voice matching is off on this host, so this renames the line but can't teach a voice.
+            {state.voiceprints.reason && <div style={{ color: "var(--dim)", marginTop: 4 }}>{state.voiceprints.reason}</div>}
+          </div>
+        ) : (
+          <div className="hint">Who said this? JamSesh learns their voice.</div>
+        )}
         {state.people.map((p) => (
           <button key={p.id} className="item" onClick={() => assign({ personId: p.id })}>
             <Avatar name={p.name} color={p.color} size={22} photo={p.photo} />
@@ -492,6 +713,8 @@ function SpeakerPopover({ state, ev, x, y, onClose }: { state: HubState; ev: Jam
         >
           <input className="grow" placeholder="Someone new…" value={name} onChange={(e) => setName(e.target.value)} autoFocus={!state.people.length} />
         </form>
+          </>
+        )}
       </div>
     </>
   );
@@ -587,8 +810,26 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
 
 type PageRow = { id: number; name: string; children: number; current: boolean; divider?: boolean };
 
-/** Pages of the shared canvas: switch between them, and (when editing) add one. */
-function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameElement | null>; canAdd: boolean; page?: string }) {
+/** Pages of the shared canvas: switch between them, and (when editing) add one. Also how the
+ * canvas's join is going, a way to reconnect it, and the fonts it shows in a substitute. */
+function PageBar({
+  frame,
+  canAdd,
+  page,
+  join,
+  substituted,
+  onReconnect,
+  onPage,
+}: {
+  frame: React.RefObject<HTMLIFrameElement | null>;
+  canAdd: boolean;
+  page?: string;
+  join: JoinState;
+  substituted: string[];
+  onReconnect: () => void;
+  /** The page shown, whenever it's read. */
+  onPage?: (name: string) => void;
+}) {
   const [pages, setPages] = useState<PageRow[]>([]);
   const [open, setOpen] = useState(false);
   const [adding, setAdding] = useState("");
@@ -597,14 +838,21 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
   const refresh = async () => {
     try {
       const list = await fc()?.execute("page.list", {});
-      if (Array.isArray(list)) setPages(list.filter((p: PageRow) => !p.divider));
+      if (!Array.isArray(list)) return;
+      const rows = list.filter((p: PageRow) => !p.divider);
+      setPages(rows);
+      const on = rows.find((p) => p.current);
+      if (on) onPage?.(on.name);
     } catch {}
   };
+  // Pages others add arrive with the session's changes: the list follows them (and is read again
+  // the moment the canvas (re)joins, and when the menu opens).
+  const live = join.state === "live";
   useEffect(() => {
-    const t = setInterval(refresh, 2500);
+    const t = setInterval(refresh, 2000);
     refresh();
     return () => clearInterval(t);
-  }, []);
+  }, [live]);
   // A layout can ask for a specific page.
   useEffect(() => {
     wanted.current = page;
@@ -617,7 +865,6 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
     if (target) wanted.current = undefined;
   }, [pages]);
   const current = pages.find((p) => p.current);
-  if (!pages.length) return null;
   const go = async (id: number) => {
     await fc()?.execute("page.select", { id }).catch(() => {});
     setOpen(false);
@@ -631,13 +878,43 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
     setOpen(false);
     refresh();
   };
+  const label = joinLabel(join);
+  const fonts = substituted.length ? `${substituted.join(", ")} ${substituted.length === 1 ? "isn't" : "aren't"} on this computer: text in ${substituted.length === 1 ? "it" : "them"} is shown in a substitute font.` : "";
   return (
     <div className="page-bar">
-      <button className="page-current" onClick={() => setOpen(!open)} aria-expanded={open} title="Canvas pages">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
-        <span className="ellipsis">{current?.name ?? "Pages"}</span>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}><path d="m6 9 6 6 6-6" /></svg>
-      </button>
+      {live && pages.length > 0 && (
+        <button
+          className="page-current"
+          onClick={() => {
+            if (!open) refresh();
+            setOpen(!open);
+          }}
+          aria-expanded={open}
+          title="Canvas pages"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
+          <span className="ellipsis">{current?.name ?? "Pages"}</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }}><path d="m6 9 6 6 6-6" /></svg>
+        </button>
+      )}
+      {label && (
+        <div className={`canvas-join ${join.state === "failed" ? "quiet" : ""}`} role="status" title={join.state === "reconnecting" && join.reason ? join.reason : label}>
+          <i className="canvas-join-dot" aria-hidden />
+          <span className="ellipsis">{label}</span>
+          {/* A failed join has the card over the canvas, with its own button. */}
+          {join.state !== "loading" && join.state !== "failed" && (
+            <button className="canvas-join-retry" onClick={onReconnect}>
+              Reconnect
+            </button>
+          )}
+        </div>
+      )}
+      {live && fonts && (
+        <div className="canvas-fonts" title={fonts} aria-label={fonts}>
+          <span aria-hidden className="canvas-fonts-aa">Aa</span>
+          <span className="ellipsis">{substituted.length === 1 ? `${substituted[0]} substituted` : `${substituted.length} fonts substituted`}</span>
+        </div>
+      )}
       {open && (
         <>
           <div style={{ position: "fixed", inset: 0 }} onClick={() => setOpen(false)} />
@@ -659,12 +936,36 @@ function PageBar({ frame, canAdd, page }: { frame: React.RefObject<HTMLIFrameEle
                 <input placeholder="New page…" value={adding} onChange={(e) => setAdding(e.target.value)} />
               </form>
             )}
+            <button
+              role="menuitem"
+              className="page-item page-reconnect"
+              onClick={() => {
+                setOpen(false);
+                onReconnect();
+              }}
+            >
+              Reconnect canvas
+            </button>
           </div>
         </>
       )}
     </div>
   );
 }
+
+/** "Reconnecting to the host in 6 s (attempt 2)", counting down to `at`. */
+function Countdown({ at, attempt }: { at: number | null; attempt: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const left = at ? Math.ceil((at - now) / 1000) : 0;
+  const tries = attempt > 1 ? ` (attempt ${attempt})` : "";
+  return <>{left > 0 ? `Reconnecting to the host in ${left} s${tries}` : `Reconnecting to the host…${tries}`}</>;
+}
+
+const figcraftIn = (iframe: HTMLIFrameElement | null) => (iframe?.contentWindow as any)?.figcraft as { execute: (c: string, p?: unknown) => Promise<any> } | undefined;
 
 export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" | "view"; name?: string; title: string; follow?: string; page?: string }) {
   const frame = useRef<HTMLIFrameElement>(null);
@@ -695,9 +996,12 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     return () => clearInterval(t);
   }, [follow]);
   const [link, setLink] = useState<string | null>(null);
+  // The canvas generation the link was fetched for: the host publishing the canvas again makes it old.
+  const [linkGen, setLinkGen] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const { state, epoch } = useHub();
   const status = state?.session.canvas.status;
+  const generation = state?.session.canvas.generation ?? 0;
   // A failed fetch tries again by itself (and right away when the hub comes back), instead of leaving the error up.
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
@@ -707,10 +1011,11 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
     const failed = () => {
       if (!gone) retry = setTimeout(() => setAttempt((n) => n + 1), 4000);
     };
+    const gen = generation;
     api<{ link: string | null; reason: string | null }>(`/canvas-link?kind=${kind}`)
       .then((r) => {
         if (gone) return;
-        if (r.link) (setLink(r.link), setErr(null));
+        if (r.link) (setLink(r.link), setLinkGen(gen), setErr(null));
         else (setErr(r.reason ?? "The canvas isn't live yet."), failed());
       })
       .catch((e) => (setErr(String(e.message ?? e)), failed()));
@@ -718,14 +1023,135 @@ export function CanvasFrame({ kind, name, title, follow, page }: { kind: "edit" 
       gone = true;
       clearTimeout(retry);
     };
-  }, [kind, status, epoch, attempt, link]);
-  if (!link) return <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>{err ?? (status === "failed" ? state?.session.canvas.reason : "Connecting to the canvas…")}</div>;
+  }, [kind, status, epoch, attempt, link, generation]);
+
+  // Rejoin: fetch the link again and start a fresh canvas on it. `why` shows meanwhile.
+  const [mount, setMount] = useState(0);
+  const [why, setWhy] = useState<string | null>(null);
+  // The page the person was on comes back with the rejoined canvas.
+  const lastPage = useRef<string | undefined>(undefined);
+  const [resume, setResume] = useState<string | undefined>(undefined);
+  const rejoin = (reason: string) => {
+    setWhy(reason);
+    setResume(lastPage.current);
+    setLink(null);
+    setLinkGen(null);
+    setMount((n) => n + 1);
+  };
+  const stale = link !== null && linkGen !== null && generation !== linkGen;
+  useEffect(() => {
+    if (stale) rejoin("The host's canvas restarted. Reconnecting…");
+  }, [stale]);
+
+  // How the canvas's own join is going (it joins inside the iframe, where a failure can't be seen):
+  // read every 2 s, shown on the page bar, and a failed join is retried by itself (3 s, 6 s, 12 s, then every 30 s).
+  const [join, setJoin] = useState<JoinState>({ state: "loading" });
+  const failures = useRef(0);
+  // When the next automatic rejoin happens, for the card's countdown.
+  const [retryAt, setRetryAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (!link) return;
+    setJoin({ state: "loading" });
+    const started = Date.now();
+    let since = started;
+    let last = "loading";
+    let gone = false;
+    const retry = new RejoinTimer(failures, () => rejoin("Reconnecting to the host…"));
+    const watch = new JoinWatch();
+    const tick = async () => {
+      const fc = figcraftIn(frame.current);
+      let j: JoinState;
+      if (!fc) j = Date.now() - started > START_TIMEOUT_MS ? { state: "failed", reason: "The canvas didn't start." } : { state: "loading" };
+      else {
+        const read = await watch.poll(fc);
+        if (!read) return;
+        j = read;
+      }
+      if (gone) return;
+      if (j.state !== last) ((last = j.state), (since = Date.now()));
+      if (j.state === "connecting" && Date.now() - since > CONNECT_TIMEOUT_MS) j = { state: "failed", reason: "The canvas server didn't answer." };
+      setJoin(j);
+      if (j.state === "live") setWhy(null);
+      setRetryAt(retry.update(j));
+    };
+    const safeTick = () => void tick().catch(() => {}); // a tick never leaves an unhandled rejection
+    safeTick();
+    const t = setInterval(safeTick, 2000);
+    return () => {
+      gone = true;
+      clearInterval(t);
+      retry.cancel();
+    };
+  }, [link, mount]);
+
+  // Fonts the canvas lacks: in the Mac app, from this Mac's own font folders; elsewhere they're
+  // only listed (the canvas draws them in a substitute).
+  const [substituted, setSubstituted] = useState<string[]>([]);
+  const live = join.state === "live";
+  useEffect(() => {
+    if (!live) return;
+    const tried = new FontTries();
+    let gone = false;
+    let busy = false;
+    const tick = async () => {
+      const fc = figcraftIn(frame.current);
+      if (!fc || busy) return;
+      busy = true;
+      try {
+        const left = await loadLocalFonts(fc, macInvoke(), tried);
+        if (!gone) setSubstituted(left);
+      } catch {
+      } finally {
+        busy = false;
+      }
+    };
+    tick();
+    const t = setInterval(tick, 5000);
+    return () => {
+      gone = true;
+      clearInterval(t);
+    };
+  }, [live, link, mount]);
+
+  const reconnect = () => {
+    failures.current = 0;
+    rejoin("Reconnecting to the host…");
+  };
+  if (!link)
+    return (
+      <div className="empty-note" style={{ display: "grid", placeItems: "center", height: "100%" }}>
+        {err ?? (status === "failed" ? state?.session.canvas.reason : why ?? "Connecting to the canvas…")}
+      </div>
+    );
   const gl = new URLSearchParams(location.search).has("webgl") ? "&webgl" : "";
   const src = `/canvas/?canvas&control${gl}${name ? `&name=${encodeURIComponent(name)}` : ""}#join=${encodeURIComponent(link)}`;
   return (
     <>
-      <iframe ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />
-      <PageBar frame={frame} canAdd={kind === "edit"} page={page} />
+      <iframe key={`${mount}:${link}`} ref={frame} src={src} title={title} style={{ width: "100%", height: "100%", border: 0, display: "block", background: "#f5f5f5" }} allow="clipboard-read; clipboard-write" />
+      <PageBar
+        key={mount}
+        frame={frame}
+        canAdd={kind === "edit"}
+        page={page ?? resume}
+        join={join}
+        substituted={substituted}
+        onReconnect={reconnect}
+        onPage={(name) => {
+          lastPage.current = name;
+        }}
+      />
+      {join.state === "failed" && (
+        <div className="canvas-down" role="alert" title={join.reason}>
+          <strong>Lost the canvas connection</strong>
+          <span>{friendlyReason(join.reason)}</span>
+          <span className="canvas-down-note">
+            <Countdown at={retryAt} attempt={failures.current + 1} />
+          </span>
+          <button className="btn small" onClick={reconnect}>
+            Reconnect now
+          </button>
+        </div>
+      )}
     </>
   );
 }

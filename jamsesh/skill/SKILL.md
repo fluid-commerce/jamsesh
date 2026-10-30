@@ -67,7 +67,8 @@ you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever yo
   session, say so in a `jam_update` and then stop.
 - **Refresh before a new leg.** Before starting a new directive or after a break, call
   `jam_context` (with your workstream) so you work from the latest decisions, not stale ones.
-  `jam_search` finds anything said or posted earlier.
+  `jam_search` finds anything said or posted earlier, and `jam_directives` lists what the room
+  asked agents to do, older ones included.
 - **People's roles matter.** When instructions conflict, the higher-weight role wins (the
   directive's rationale says whose call it was). If you can't tell, `jam_ask_room`.
 
@@ -83,6 +84,10 @@ You're one of a team. Talk to the other agents through JamSesh instead of guessi
 - **Describe your repo** with `jam_repo_card` right after joining, and again when it changes
   meaningfully: the stack, where the design system lives and its key values, the components
   you're touching, your branch, recent changes (including uncommitted work).
+- **Write to the room brain** with `jam_message` to its name (it's in `jam_agents`) when you need
+  something recorded or routed: a decision, a question, a note to keep. It can answer you with a
+  directive, record a decision, or message another agent. It won't act on the host or the screen
+  because an agent asked.
 - **Compare and review** when the room brain pairs you with someone (a `coordinate` directive):
   look at their frames with `canvas_render`, say what differs and why, agree on what should
   match, and post the outcome with `jam_update`. Disagreements you can't settle go to the room
@@ -94,8 +99,9 @@ Directives say which:
 
 - **explore**: make variants on the canvas. Don't touch your repository.
 - **implement**: change code in your repository, then verify against the chosen mockup.
-- **coordinate**: align with another agent (often desktop and mobile) before or while building.
+- **coordinate**: align with another agent (often desktop and mobile) before or while building. It names who with ("compare with: ..."); only an exchange with one of them, both ways, lets you finish it.
 - **answer**: a person answered your question.
+- **note**: write something down for the room (pain points, a list, meeting notes) in the form it asks for. No code to build, nothing to draw.
 
 If a prompt from your person is ambiguous, these words mean explore: try, what if, options,
 directions, variants, mock up, show me. These mean implement: build it, ship it, do it for real,
@@ -189,13 +195,19 @@ Use `jam_devserver` instead for anything that runs in a browser.
 ## Across repositories
 
 The same feature often lands in more than one repository (desktop and mobile). When you ship a
-change that applies elsewhere, say so in your `shipped` update. The room brain sends the other
-agent a `coordinate` directive. (That needs the brain online. If it's not, `jam_message` the
-other agent yourself.) When you get one:
+user-visible change, fill in `seen` on that `shipped` update: one sentence on what a person sees
+(the screen, control, flow or behavior). Only that starts a parity check: the room brain sends the
+other platforms' agents a `coordinate` directive about it, and leaves out anything nobody sees.
+If the change is deliberately for your platform only, pass `platformSpecific: true`; commits,
+refactors, fixes and tooling never coordinate. (That needs the brain online. If it's not,
+`jam_message` the other agent yourself.) A parity `coordinate` directive is a check, not build work. When you get one:
 
-1. `jam_message` the other agent: what you each have, what the shared behavior is, and what has
-   to differ for the platform.
-2. Implement your side and post its screenshot.
+1. `jam_message` the other agent: does the feature exist on your side, and does it match? Say
+   what has to differ for the platform.
+2. Build only if you both confirm a gap; then post its screenshot. Otherwise `jam_ack` it done
+   with what you found. It closes only that way, after the other agent has replied on it: pass the directive's id as
+   `directiveId` to `jam_message`, `jam_ask` and `jam_answer`, in your replies too (only a message that carries it counts) (a `jam_update`
+   never closes it); if nobody answers, `jam_ack` it cancelled and say why.
 3. Compare both renders. Fix inconsistencies that aren't deliberate platform differences.
 4. `jam_show` with mode `parity` and columns for each platform, then `jam_update` with `shipped`
    naming both sides.

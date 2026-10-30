@@ -274,6 +274,11 @@ pub fn on_dark<R>(ui: &mut egui::Ui, f: impl FnOnce(&mut egui::Ui) -> R) -> R {
 /// built-in faces are the whole RTL fallback, so tests and releases do not depend on installed fonts.
 pub fn install_fonts(ctx: &Context, system: bool, cjk: u8) {
     let mut fonts = FontDefinitions::default();
+    // Canvas text with no face to draw in (a web build without craft-fonts has none) uses egui's
+    // own proportional font instead of drawing nothing; the family still shows as missing.
+    if let Some(data) = fonts.font_data.get("Ubuntu-Light") {
+        figcraft_text::set_last_resort_font((*data.font).as_ref());
+    }
     let find = |family: &str, style: &str| figcraft_text::CRAFT_FONTS.iter().find(|f| f.family == family && f.style == style).map(|f| f.bytes);
     let regular = find("Inter", "Regular");
     let semibold = find("Inter", "SemiBold").or_else(|| find("Inter", "Bold"));

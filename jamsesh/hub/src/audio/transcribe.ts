@@ -1,5 +1,6 @@
 // Speech to text. Order: local whisper.cpp on the host, whisper servers that client
 // machines offer, then the gateway. A pool spreads work across whoever is free.
+import { HelperRegistry, withParentWatch } from "../children";
 import { transcribe as aiTranscribe } from "ai";
 import { bus } from "../bus";
 import { config } from "../config";
@@ -55,13 +56,16 @@ const CLEAN_VOICE_SNR = 15;
 
 export class Transcriber {
   private engines = new Map<string, Engine>();
-  private localProc: ReturnType<typeof Bun.spawn> | null = null;
 
   /** Why nothing is being heard, when that is the case (shown on the big screen and in Settings). */
   private trouble: string | null = null;
   private warnedAt = 0;
 
-  constructor(private session: Session) {}
+  constructor(
+    private session: Session,
+    /** whisper-server is tracked here so stopping the hub finds it. */
+    private helpers: HelperRegistry = new HelperRegistry(),
+  ) {}
 
   /** The "language" setting: an ISO code, or "auto" to let whisper detect it. Default English. */
   private language() {
@@ -94,9 +98,9 @@ export class Transcriber {
     if (!config.whisperServerBin || !config.whisperModel) return false;
     const url = `http://127.0.0.1:${port}`;
     if (!(await ping(url))) {
-      this.localProc = Bun.spawn(
-        [config.whisperServerBin, "-m", config.whisperModel, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "auto"],
-        { stdout: "ignore", stderr: "ignore" },
+      if (this.helpers.isClosed) return false; // the hub is stopping: no new helper (checked right before the spawn, after the awaited ping)
+      this.helpers.track(
+        Bun.spawn(withParentWatch([config.whisperServerBin, "-m", config.whisperModel, "--host", "127.0.0.1", "--port", String(port), "-t", "6", "--no-timestamps", "-l", "auto"]), { stdout: "ignore", stderr: "ignore" }),
       );
       for (let i = 0; i < 60 && !(await ping(url)); i++) await Bun.sleep(250);
     }
@@ -105,8 +109,9 @@ export class Transcriber {
     return true;
   }
 
-  stop() {
-    this.localProc?.kill();
+  /** Stops the whisper server this transcriber started (and anything else in its registry); true when its exit was seen. */
+  stop(): Promise<boolean> {
+    return this.helpers.stopAll();
   }
 
   /** A client machine offers its own whisper server for the room. */

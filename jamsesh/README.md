@@ -15,7 +15,7 @@ JamSesh is one Mac app that either hosts a session or joins one. The Mac that dr
 screen (usually a Mac mini) hosts; everyone else joins.
 
 1. Download
-   [JamSesh.dmg](https://github.com/fluid-commerce/jamsesh/releases/download/jamsesh-latest/JamSesh.dmg)
+   [JamSesh.dmg](https://github.com/fluid-commerce/jamsesh/releases/latest/download/JamSesh.dmg)
    (Macs with Apple Silicon), open it, and drag JamSesh to Applications. Every change to `main`
    rebuilds it, so the same link always has the newest version; to update, quit JamSesh and
    replace it. The app isn't notarized yet, so the first time macOS refuses to open it: open
@@ -196,8 +196,9 @@ the canvas also become FigCraft comments, so agents see them in the file.
 
 ## Share a screen or camera
 
-In your JamSesh window, **Share screen** or **Camera** puts your screen or camera on the big screen;
-the brain finds it a place. The brain (or anyone, from Settings > People) can also ask you to
+In your JamSesh window, **Share screen** or **Camera** puts your screen or camera on the big screen,
+full screen, straight away (unless someone pinned the screen). One share of each kind per person: a
+new one from another of your windows replaces the first. The brain (or anyone, from Settings > People) can also ask you to
 share, and your window asks you first.
 
 ## Your profile

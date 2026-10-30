@@ -131,7 +131,7 @@ test("A3: a speaker correction keeps the person it was corrected to", async () =
   const felipe = hub.session.upsertPerson({ name: "Felipe" });
   const laptop = hub.auth.issue({ kind: "browser", label: "Maya's laptop", ip: "10.0.0.6", personId: maya.id });
   let target = "";
-  (hub.audio as any).assign = (_u: string, pid: string) => ((target = pid), { ok: true });
+  (hub.audio as any).assign = (_u: string, pid: string) => ((target = pid), { utterance: { id: _u }, learning: { learned: true } });
   const r = await fetch(`${base}/api/utterances/u1/assign`, { method: "POST", headers: { ...remote, authorization: `Bearer ${laptop.token}` }, body: JSON.stringify({ personId: felipe.id }) });
   expect(r.status).toBe(200);
   expect(target).toBe(felipe.id);
@@ -173,7 +173,7 @@ test("A10: revoking a device closes its dev sockets and its token stops at once"
   proxy.sockets.delete(other);
 });
 
-test("a closed big-screen window stops being a screen at once; main stays, and only the host can say so", async () => {
+test("a closed big-screen window stops being a screen at once, main too until it reports again, and only the host can say so", async () => {
   const json = { "content-type": "application/json" };
   const report = (screen: string) => fetch(`${base}/api/display`, { method: "POST", headers: json, body: JSON.stringify({ screen, width: 1920, height: 1080 }) });
   await report("main");
@@ -186,5 +186,7 @@ test("a closed big-screen window stops being a screen at once; main stays, and o
   expect((await del("screen-2")).status).toBe(200);
   expect(ids()).not.toContain("screen-2");
   await del("main");
+  expect(ids()).not.toContain("main"); // 1.R5: main counts only while its window reports
+  await report("main");
   expect(ids()).toContain("main");
 });

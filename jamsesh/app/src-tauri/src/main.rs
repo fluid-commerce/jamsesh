@@ -4,9 +4,11 @@
 // Join mode shows the host's client view through a local relay (see proxy.rs), so the microphone
 // works without HTTPS, and keeps this Mac's token in the Keychain.
 mod discover;
+mod fonts;
 mod host;
 mod perms;
 mod proxy;
+mod watchdog;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +41,10 @@ struct Config {
     /// window opens.
     #[serde(default)]
     userless: bool,
+    /// Web Inspector in this app's windows (right-click, Inspect Element; or Safari's Develop
+    /// menu). Off unless this is set or `JAMSESH_DEVTOOLS=1`: it's for finding out why a page froze.
+    #[serde(default)]
+    devtools: bool,
 }
 
 #[derive(Default)]
@@ -64,6 +70,15 @@ struct App {
     tray_shown: std::sync::Mutex<String>,
     hosts: discover::Hosts,
     dir: PathBuf,
+    /// Heartbeats from the windows' pages (see watchdog.rs).
+    beats: Arc<std::sync::Mutex<watchdog::Beats>>,
+}
+
+/// Whether windows get Web Inspector; set once at launch from the saved config or the environment.
+static DEVTOOLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn devtools() -> bool {
+    DEVTOOLS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl App {
@@ -92,6 +107,7 @@ fn open_window(app: &AppHandle, label: &str, url: &str, title: &str) -> Result<(
     }
     let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
     WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .devtools(devtools())
         .title(title)
         // No separate title bar: the window controls sit in the page's own header (centered in
         // its 56 px), with the logo to their right; the header is the drag area.
@@ -115,6 +131,7 @@ fn open_start(app: &AppHandle) {
         return;
     }
     let _ = WebviewWindowBuilder::new(app, "start", WebviewUrl::App("index.html".into()))
+        .devtools(devtools())
         .title("JamSesh")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
@@ -135,6 +152,7 @@ fn close_start(app: &AppHandle) {
 fn big_window(app: &AppHandle, label: &str, url: &str, at: Option<tauri::PhysicalPosition<i32>>) -> Result<(), String> {
     let parsed: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
     let w = WebviewWindowBuilder::new(app, label, WebviewUrl::External(parsed))
+        .devtools(devtools())
         .title("JamSesh big screen")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
@@ -248,11 +266,15 @@ fn screen_moved(app: &AppHandle) {
     }
 }
 
-/// A user-less host's extra screen closed: tell the hub, so the brain stops sending it things.
-/// (Not when a window with the same label is open again by then.)
+/// A big-screen window closed (the main one or an extra one): tell the hub, so the brain stops sending
+/// it things and a share only it showed stops. (Not when a window with the same label is open again by then.)
 fn screen_closed(app: &AppHandle, label: &str) {
-    let Some(n) = label.strip_prefix("bigscreen-") else { return };
-    let (app, label, screen) = (app.clone(), label.to_string(), format!("screen-{n}"));
+    let screen = match label.strip_prefix("bigscreen-") {
+        Some(n) => format!("screen-{n}"),
+        None if label == "bigscreen" => "main".to_string(),
+        None => return,
+    };
+    let (app, label) = (app.clone(), label.to_string());
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         if app.get_webview_window(&label).is_some() {
@@ -277,6 +299,7 @@ fn open_big_screen(app: &AppHandle, origin: &str, next_display: bool) -> Result<
     }
     let parsed: url::Url = host::window_url(origin, "/host").parse().map_err(|e: url::ParseError| e.to_string())?;
     let w = WebviewWindowBuilder::new(app, "bigscreen", WebviewUrl::External(parsed))
+        .devtools(devtools())
         .title("JamSesh big screen")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
@@ -463,7 +486,7 @@ fn open_remote_setup(app: &AppHandle, origin: &str) {
         return;
     }
     if let Ok(url) = host::window_url(origin, "/setup?app").parse::<url::Url>() {
-        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)).title("Remote access").inner_size(900.0, 820.0).build();
+        let _ = WebviewWindowBuilder::new(app, "remote", WebviewUrl::External(url)).devtools(devtools()).title("Remote access").inner_size(900.0, 820.0).build();
     }
 }
 
@@ -481,6 +504,7 @@ fn open_setup(app: &AppHandle) {
         return;
     }
     let _ = WebviewWindowBuilder::new(app, "setup", WebviewUrl::App("setup.html".into()))
+        .devtools(devtools())
         .title("Set up this Mac")
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
@@ -866,6 +890,22 @@ async fn finish_setup(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), 
     Ok(())
 }
 
+/// The font files of `families` from this Mac's font folders, for this person's canvas, which
+/// can't see installed fonts (fonts.rs). Read off the main thread.
+#[tauri::command]
+async fn local_fonts(families: Vec<String>) -> fonts::LocalFonts {
+    tauri::async_runtime::spawn_blocking(move || fonts::local_fonts(&families)).await.unwrap_or_default()
+}
+
+/// A page's heartbeat (web/src/shared/heartbeat.ts). The window is the one that made the call, so a
+/// page can only vouch for itself.
+#[tauri::command]
+fn heartbeat(window: tauri::Window, state: tauri::State<'_, Arc<App>>) {
+    if let Ok(mut b) = state.beats.lock() {
+        b.beat(window.label(), std::time::Instant::now());
+    }
+}
+
 /// Screen Recording takes effect after a relaunch.
 #[tauri::command]
 fn relaunch(app: AppHandle) {
@@ -898,7 +938,9 @@ fn main() {
             relaunch,
             remote_setup,
             get_userless,
-            toggle_userless
+            toggle_userless,
+            local_fonts,
+            heartbeat
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
@@ -911,8 +953,10 @@ fn main() {
                 displays: std::sync::Mutex::new(String::new()),
                 arrange_gen: std::sync::atomic::AtomicU64::new(0),
                 arranged_until: std::sync::Mutex::new(None),
+                beats: Default::default(),
             });
             app.manage(state.clone());
+            DEVTOOLS.store(cfg.devtools || std::env::var_os("JAMSESH_DEVTOOLS").is_some_and(|v| v == "1"), std::sync::atomic::Ordering::Relaxed);
 
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
             TrayIconBuilder::with_id("main")
@@ -939,10 +983,12 @@ fn main() {
                 }
                 refresh_tray(&handle).await;
                 // The join code changes every 30 seconds; keep the menu's copy current.
+                let mut last_tick = std::time::Instant::now();
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     refresh_tray(&handle).await;
                     watch_displays(&handle);
+                    watchdog::tick(&handle, &state.beats, &state.dir, &mut last_tick);
                 }
             });
             Ok(())
