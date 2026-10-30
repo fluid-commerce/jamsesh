@@ -178,6 +178,8 @@ export class Board {
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const workstream = clean(p.workstream);
     // The same words for other agents, or another workstream, are another task.
+    // A card keeps only the agents the targets compare with; the targets themselves are implied.
+    const partners = (p.counterparts ?? []).filter((x) => !targets.includes(x));
     const wants = comparisonSet(targets, mode === "coordinate" ? p.counterparts : undefined);
     const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream) && sameSet(comparisonSet(c.targets, c.mode === "coordinate" ? c.counterparts : undefined), wants);
     const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
@@ -188,7 +190,7 @@ export class Board {
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
-      mode, targets, ...(mode === "coordinate" && p.counterparts?.length ? { counterparts: p.counterparts } : {}), targetNames: this.namesOf(comparisonSet(targets, mode === "coordinate" ? p.counterparts : undefined)), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
+      mode, targets, ...(mode === "coordinate" && partners.length ? { counterparts: partners } : {}), targetNames: this.namesOf(comparisonSet(targets, mode === "coordinate" ? p.counterparts : undefined)), kind: "fact", workstream, conflictsWith: null, ...(vetoed ? { renews: vetoed.id } : {}), ...(p.attachments?.length ? { attachments: p.attachments } : {}), ...(over ? { extraFiles: over } : {}), sources, count: 1, edits: [], resolvedBy: "", resolvedAt: null, directiveId: null, factId: null, mentionedAt: null,
     };
     return this.announce(this.s.store.put("triage", card));
   }
@@ -290,7 +292,8 @@ export class Board {
       if (!Array.isArray(e.counterparts)) return { error: "counterparts is a list of agent ids." };
       const others = e.counterparts.filter((x): x is string => typeof x === "string");
       if (others.length !== e.counterparts.length || others.some((x) => !this.s.agent(x) || this.s.agent(x)?.role === "observer")) return { error: "One of those agents isn't in the session, or only watches." };
-      if (!sameSet(others, next.counterparts ?? [])) (next.counterparts = others.length ? others : undefined), fields.push("counterparts");
+      const external = others.filter((x) => !next.targets.includes(x));
+      if (!sameSet(external, next.counterparts ?? [])) (next.counterparts = external.length ? external : undefined), fields.push("counterparts");
     }
     if (e.workstream !== undefined) {
       const w = clean(e.workstream);

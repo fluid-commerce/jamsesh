@@ -181,10 +181,10 @@ function cardKeys(e: KeyboardEvent<HTMLElement>, h: { open: () => void; edit?: (
 
 // ---------- Triage cards ----------
 
-/** The one agent a single-target comparison card is with (the first partner that isn't its target), or none. */
-const partnerOf = (card: TriageCard) => (card.targets.length === 1 ? (card.counterparts ?? []).find((c) => c !== card.targets[0]) ?? "" : "");
+/** The agents a comparison card compares its targets with (the targets themselves are implied). */
+const partnersOf = (card: TriageCard) => (card.counterparts ?? []).filter((c) => !card.targets.includes(c));
 
-type Draft = { text: string; mode: string; agent: string; partner: string; workstream: string; kind: string };
+type Draft = { text: string; mode: string; agent: string; partners: string[]; workstream: string; kind: string };
 
 function TriageCardView({ card, index, state, personId, now, show }: { card: TriageCard; index: number; state: HubState; personId?: string; now: number; show: (o: Open) => void }) {
   const { busy, err, run } = useAct();
@@ -192,7 +192,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
   const [merging, setMerging] = useState(false);
   const task = card.type === "task";
   const conflict = card.conflictsWith ? state.facts.find((f) => f.id === card.conflictsWith && f.status === "active") : undefined;
-  const [draft, setDraft] = useState<Draft>({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", partner: partnerOf(card), workstream: card.workstream, kind: card.kind });
+  const [draft, setDraft] = useState<Draft>({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", partners: partnersOf(card), workstream: card.workstream, kind: card.kind });
   const area = useRef<HTMLTextAreaElement>(null);
   const ref = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -200,7 +200,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
   }, [editing]);
   // A change that arrives while nobody is editing (a repeat joined, someone else edited) shows up in the card.
   useEffect(() => {
-    if (!editing) setDraft({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", partner: partnerOf(card), workstream: card.workstream, kind: card.kind });
+    if (!editing) setDraft({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", partners: partnersOf(card), workstream: card.workstream, kind: card.kind });
   }, [card, editing]);
 
   const edits = () => {
@@ -209,12 +209,8 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     if (task) {
       if (draft.mode !== card.mode) e.mode = draft.mode;
       if (draft.agent && draft.agent !== card.targets.join()) e.targets = [draft.agent];
-      // The partners the card shows are the ones it sends with: one chosen here replaces them, a change of target keeps them,
-      // and a comparison among three or more (several partners) is left as it is unless the partners are changed by Edit over the API.
-      if (draft.mode === "coordinate" && (draft.agent || card.targets.length === 1)) {
-        if (draft.partner !== partnerOf(card)) e.counterparts = draft.partner ? [draft.partner] : [];
-        else if (e.targets) e.counterparts = card.counterparts ?? [];
-      }
+      // The partners the card shows are the ones it sends with: changed here they replace the old, and a change of target keeps them.
+      if (draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (e.targets || draft.partners.join() !== partnersOf(card).join())) e.counterparts = draft.partners;
     } else if (draft.kind !== card.kind) e.kind = draft.kind;
     if (draft.workstream.trim() !== card.workstream) e.workstream = draft.workstream;
     return e;
@@ -269,14 +265,10 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
                     ))}
                   </select>
                 </label>
-                {draft.mode === "coordinate" && (card.counterparts ?? []).filter((c) => !card.targets.includes(c)).length > 1 ? (
-                  <span className="tk-times">Compares with {agentNames(state, (card.counterparts ?? []).filter((c) => !card.targets.includes(c)), card.targetNames).join(", ")}</span>
-                ) : null}
-                {draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (card.counterparts ?? []).filter((c) => !card.targets.includes(c)).length <= 1 && (
+                {draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (
                   <label>
                     <span>Compare with</span>
-                    <select value={draft.partner} onChange={(e) => setDraft({ ...draft, partner: e.target.value })}>
-                      <option value="">Choose an agent</option>
+                    <select multiple value={draft.partners} onChange={(e) => setDraft({ ...draft, partners: Array.from(e.target.selectedOptions, (o) => o.value) })}>
                       {workers(state)
                         .filter((a: Agent) => a.id !== (draft.agent || card.targets[0]))
                         .map((a: Agent) => (
@@ -378,7 +370,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
       {(task || (card.workstream && !editing) || card.count > 1 || card.edits.length > 0) && (
         <div className="tk-chips">
           {task && <AgentTag state={state} ids={card.targets} known={card.targetNames} />}
-          {task && card.mode === "coordinate" && card.counterparts?.length ? <span className="tk-times" title="The agents they compare with">Compares with {agentNames(state, card.counterparts.filter((c) => !card.targets.includes(c)), card.targetNames).join(", ") || "each other"}</span> : null}
+          {task && card.mode === "coordinate" && partnersOf(card).length ? <span className="tk-times" title="The agents they compare with">Compares with {agentNames(state, partnersOf(card), card.targetNames).join(", ")}</span> : null}
           {card.workstream && !editing && <span className="tk-tag ws">{card.workstream}</span>}
           {card.count > 1 && <span className="tk-times" title="Said more than once; the repeats are on this card">Heard {card.count} times</span>}
           {card.edits.length > 0 && <span className="tk-times">Edited</span>}

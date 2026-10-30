@@ -133,3 +133,23 @@ test("a partner chosen by Edit is still named when they leave before Send", () =
   expect(sent).toMatchObject({ ok: false, status: 409 });
   expect((sent as any).error).toContain("Cy");
 });
+
+test("a card keeps only the partners outside its targets, and a target change with the visible partners sends exactly them", () => {
+  const { s, a, b, c } = room();
+  const card = s.proposeTask({ text: "Compare the tabs", mode: "coordinate", targets: [a.id], counterparts: [a.id, b.id], by: "Chey" })!;
+  expect(card.counterparts).toEqual([b.id]);
+  // The form, changing the target to Cy, submits the partners it shows (Ben) with it.
+  expect(s.board.edit(card.id, { targets: [c.id], counterparts: [b.id] }, "Chey")).toMatchObject({ ok: true });
+  expect(s.board.send(card.id, "Chey").ok).toBe(true);
+  expect(s.directives()[0].targets).toEqual([c.id]);
+  expect([...s.directives()[0].counterparts!].sort()).toEqual([b.id, c.id].sort());
+});
+
+test("a comparison among several partners can be repaired when one leaves", () => {
+  const { s, a, b, c } = room();
+  const card = s.proposeTask({ text: "Compare the list", mode: "coordinate", targets: [a.id], counterparts: [b.id, c.id], by: "Chey" })!;
+  s.removeAgent(b.id);
+  expect(s.board.send(card.id, "Chey")).toMatchObject({ ok: false, status: 409 });
+  expect(s.board.edit(card.id, { counterparts: [c.id] }, "Chey")).toMatchObject({ ok: true });
+  expect(s.board.send(card.id, "Chey").ok).toBe(true);
+});
