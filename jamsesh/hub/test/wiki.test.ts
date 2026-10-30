@@ -3535,3 +3535,23 @@ test("an archive folder that can't be looked at stops an id being reused: no sec
   }
   expect(existsSync(join(dir, "raw", `${src.id}.md`))).toBe(false); // nothing written, so no two sources share the id once access returns
 });
+
+test("a mixed card: a page the update could not reach (unreadable) beside a good one: accepting writes the good one and the source stays pending", async () => {
+  const { w, s, dir } = room();
+  w.editPage("small", "# Small\n\nA page.", { by: "Chey" });
+  writeFileSync(join(dir, "wiki", "huge.md"), Buffer.alloc(MAX_FILE_BYTES + 1, 97));
+  const src = w.addSource("document", "Note", "Something about the huge page and a new one.", "Chey");
+  w.decide = (async () => ({ summary: "Both", pages: [page("huge", "Huge", "topic", "Replacement text."), page("fresh", "Fresh", "topic", "A new page.")] })) as Decider;
+  const err = console.error;
+  console.error = () => {};
+  try {
+    const card = (await w.tick())!.card!;
+    expect(card.wiki!.changes.map((c) => c.slug)).toEqual(["fresh"]); // the blocked page has no change on the card
+    expect(s.board.add(card.id, "Chey").ok).toBe(true);
+  } finally {
+    console.error = err;
+  }
+  expect(readPage(dir, "fresh")).not.toBeNull(); // the good page was written
+  expect(statSync(join(dir, "wiki", "huge.md")).size).toBe(MAX_FILE_BYTES + 1); // the blocked one untouched
+  expect(w.pendingSources()).toContain(src.id); // and the source is still waiting for its update to the page it could not reach
+});
