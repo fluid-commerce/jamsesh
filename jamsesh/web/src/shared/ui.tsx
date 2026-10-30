@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
-import { ago, api, hub, useHub, type Agent, type Artifact, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { readPref } from "./identity";
+import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, START_TIMEOUT_MS, friendlyReason, joinLabel, FontTries, loadLocalFonts, macInvoke, type JoinState } from "./canvasJoin";
 
@@ -307,14 +308,17 @@ export function ArtifactTile({
       {variant && <div className="variant">{variant}</div>}
       <div className="corner">
         {art.platform && art.platform !== "other" && <span className="badge neutral">{art.platform}</span>}
-        <span className={`badge ${art.stage} ${art.kind === "devserver" ? "live" : ""}`}>{art.kind === "devserver" ? "Live build" : art.stage === "built" ? "Built" : "Mockup"}</span>
+        <span className={`badge ${art.kind === "devserver" && dev?.up === false ? "neutral" : art.stage} ${art.kind === "devserver" && dev?.up !== false ? "live" : ""}`}>{art.kind === "devserver" ? (dev?.up === false ? "Stopped" : "Live build") : art.stage === "built" ? "Built" : "Mockup"}</span>
       </div>
       <div className="media" style={big ? { padding: 28 } : undefined}>
         {art.kind === "devserver" && art.url ? (
           live && dev?.up !== false ? (
             <ScaledFrame src={art.url} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} pin={target} />
           ) : (
-            <div className="empty-note mono">{art.url} isn't answering</div>
+            <div className="empty-note dev-down">
+              <strong>{dev?.problem ?? "This build isn't answering"}</strong>
+              <span>The tile clears itself in a few minutes. It comes back if the build does.</span>
+            </div>
           )
         ) : art.image ? (
           <img src={art.image} alt={art.title} loading="lazy" />
@@ -367,7 +371,7 @@ function toneStyle(tone: string) {
 
 // ---------- the room feed ----------
 
-const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "update", "message", "artifact"]);
+const FEED_KINDS = new Set(["speech", "prompt", "directive", "decision", "brain", "join", "update", "message", "artifact"]);
 
 /** Where the next page of history starts: the oldest event this window has at all, shown or not (the state's window may hold none the feed shows). */
 export function historyCursor(ids: Iterable<number>): number | undefined {
@@ -420,8 +424,13 @@ export class Generation {
   }
 }
 
-export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
-  const { state } = useHub();
+export function RoomFeed(props: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
+  // A different room starts a fresh feed: what was seen, loaded and scrolled belongs to the old one.
+  return <RoomFeedOf key={useHub().state?.session.roomId} {...props} />;
+}
+
+function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable?: boolean; filter?: "all" | "room" }) {
+  const { state, removed } = useHub();
   const box = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<{ ev: JamEvent; x: number; y: number } | null>(null);
   // Every line this window has seen, so lines the live state trims (or the reader loaded) stay put.
@@ -443,7 +452,9 @@ export function RoomFeed({ big, editable, filter = "all" }: { big?: boolean; edi
   const [older, setOlder] = useState<{ loading: boolean; failed: boolean; done: boolean; more: number | null }>({ loading: false, failed: false, done: false, more: null });
 
   for (const e of state?.events ?? []) if (feedAdmits(following.current, frozenAt.current, e.id)) seen.current.set(e.id, e);
-  const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
+  // Lines the room took out (an agent removed with what it posted) leave this window's memory too.
+  for (const id of removed) seen.current.delete(id);
+  const wanted = (e: JamEvent) => FEED_KINDS.has(e.kind) && (filter === "all" || ["speech", "prompt", "directive", "decision", "brain", "join"].includes(e.kind) || (e.kind === "update" && ["question", "blocked", "shipped"].includes(e.data.updateKind)));
   // A long session keeps a bounded tail while the reader follows the bottom; older lines load again from the hub on scroll.
   // Only cutting the oldest end reopens older paging; the newest end is always the live state's.
   if (capFeed(seen.current, following.current) === "oldest") trimmed.current = true;
@@ -611,6 +622,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
       </div>
     );
   }
+  if (e.kind === "join") return <JoinLine e={e} state={state} canRemove={!!editable && !condensed} color={color} />;
   if (e.kind === "decision") {
     return (
       <div className="line decision">
@@ -648,6 +660,64 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+/** "Jonathan's Codex joined from ~/fluid", with a way to take a wrong join out of the room. */
+function JoinLine({ e, state, canRemove, color }: { e: JamEvent; state: HubState; canRemove: boolean; color: string }) {
+  const agentId = e.data.agentId as string | undefined;
+  const here = !!agentId && state.agents.some((a) => a.id === agentId);
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  // Gone from the room (this removal, or someone's): nothing left to confirm, even if the answer to our call was lost.
+  useEffect(() => {
+    if (!here) {
+      setAsking(false);
+      setError("");
+    }
+  }, [here]);
+  const remove = async (purge: boolean) => {
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/agents/${agentId}/remove`, { purge });
+      setAsking(false);
+    } catch (e) {
+      // Still there: keep the choices open and say why.
+      setError(e instanceof Error && e.message ? e.message : "Couldn't remove it. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="line join">
+      <span className="who" title={e.authorName} style={{ color }}>
+        {e.authorName}
+      </span>
+      <span className="what">
+        {e.text.slice(e.authorName.length).trim()}
+        {canRemove && here && !asking && (
+          <button className="btn small ghost join-remove" onClick={() => setAsking(true)}>
+            Remove
+          </button>
+        )}
+        {asking && (
+          <span className="join-ask">
+            <button className="btn small" disabled={busy} onClick={() => void remove(false)}>
+              Remove
+            </button>
+            <button className="btn small" disabled={busy} onClick={() => void remove(true)} title="Also deletes what it posted: its updates, messages and long documents. Messages sent to it and its artifacts stay.">
+              Remove and delete its posts
+            </button>
+            <button className="btn small ghost" disabled={busy} onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+            {error && <span className="join-error" role="alert" style={{ color: "var(--warn)", marginLeft: 8 }}>{error}</span>}
           </span>
         )}
       </span>
@@ -732,12 +802,62 @@ export function stripMd(t: string): string {
     .replace(/^\s{0,3}(#{1,6}|>|[-*+])\s+/gm, "");
 }
 
+/** Open tasks an agent has taken or been handed, oldest first. */
+export function openTasksFor(state: HubState, agentId: string) {
+  return state.directives
+    .filter((d) => d.targets.includes(agentId) && ["pending", "delivered", "acked"].includes(d.progress?.[agentId] ?? d.status))
+    .sort((x, y) => x.ts - y.ts);
+}
+
+/**
+ * The open tasks a tile has room for (`max`): any offered for reassignment first, so its Reassign
+ * button is always on screen, then the oldest. All offered tasks show even past `max`.
+ */
+export function tasksToShow(tasks: Directive[], agentId: string, max: number) {
+  const offered = tasks.filter((d) => d.reassignOfferedAt?.[agentId]);
+  const rest = tasks.filter((d) => !d.reassignOfferedAt?.[agentId]);
+  return [...offered, ...rest].slice(0, Math.max(max, offered.length));
+}
+
+/** Moves this agent's stalled task to someone else; the other targets of the same task keep it. */
+export function reassignTask(directiveId: string, agentId: string) {
+  return api(`/directives/${directiveId}/reassign`, { personId: readPref("personId"), agentId });
+}
+
+function ReassignButton({ directiveId, agentId }: { directiveId: string; agentId: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <>
+      {error && <span style={{ color: "var(--warn)" }}>{error}</span>}
+      <button
+        className="btn small"
+        style={{ flex: "none" }}
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          setError("");
+          reassignTask(directiveId, agentId)
+            .catch((e) => setError(e?.message || "Couldn't reassign it"))
+            .finally(() => setBusy(false));
+        }}
+      >
+        Reassign
+      </button>
+    </>
+  );
+}
+
 export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubState; compact?: boolean }) {
   const now = useNow(5000);
   const color = colorFor(state, { agentId: agent.id });
   const ws = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "active");
+  const paused = state.workstreams.filter((w) => w.ownerAgentId === agent.id && w.status === "paused");
+  const tasks = agent.role === "observer" ? [] : openTasksFor(state, agent.id);
+  const shown = tasksToShow(tasks, agent.id, compact ? 1 : 3);
   const repo = agent.repo.split(/[/:]/).pop()?.replace(/\.git$/, "");
   const owner = state.people.find((p) => p.id === agent.ownerId);
+  const where = agent.role === "observer" ? "observer" : `${agent.platform} · ${repo}`;
   return (
     <div className="agent-row" style={{ opacity: agent.status === "offline" ? 0.45 : 1, padding: compact ? "8px 0" : "10px 0" }}>
       <span style={{ position: "relative", flex: "none" }}>
@@ -747,20 +867,37 @@ export function AgentRow({ agent, state, compact }: { agent: Agent; state: HubSt
       <div className="agent-row-text">
         <div className="agent-row-line">
           <strong className="ellipsis" style={{ fontWeight: 600, fontSize: compact ? 14 : 15 }}>{agent.name}</strong>
-          {!compact && <span className="chip" style={{ fontSize: 12, flex: "none" }}>{agent.platform} · {repo}</span>}
+          {!compact && <span className="chip" style={{ fontSize: 12, flex: "none" }}>{where}</span>}
           <span className="chip mono" style={{ fontSize: 12, color: "var(--dim)", marginLeft: "auto", flex: "none" }}>
             {ago(agent.lastSeen, now)}
           </span>
         </div>
         <div className="ellipsis" style={{ fontSize: 13, color: "var(--muted)", marginTop: 2 }}>
-          {compact ? `${agent.platform} · ${repo} · ` : ""}
-          {statusText(agent)}
-          {agent.activity && agent.status !== "offline" ? ` · ${stripMd(agent.activity)}` : ""}
+          {compact ? `${where} · ` : ""}
+          {statusLine(agent)}
         </div>
         {!compact && ws.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>Owns {ws.map((w) => w.title).join(", ")}</div>}
+        {paused.length > 0 && <div className="ellipsis" style={{ fontSize: 12, color: "var(--warn)", marginTop: 2 }}>Paused while offline: {paused.map((w) => w.title).join(", ")}</div>}
+        {shown.map((d) => (
+          <div key={d.id} className="row" style={{ fontSize: 12, color: d.reassignOfferedAt?.[agent.id] ? "var(--warn)" : "var(--dim)", marginTop: 2, gap: 8 }}>
+            <span className="chip mono" style={{ flex: "none" }}>{ago(d.ts, now)}</span>
+            <span className="ellipsis grow">{d.progress?.[agent.id] === "acked" ? "On it" : "Not picked up"}: {stripMd(d.text)}</span>
+            {d.reassignOfferedAt?.[agent.id] && <ReassignButton directiveId={d.id} agentId={agent.id} />}
+          </div>
+        ))}
+        {tasks.length > shown.length && <div style={{ fontSize: 12, color: "var(--dim)", marginTop: 2 }}>and {tasks.length - shown.length} more open</div>}
       </div>
     </div>
   );
+}
+
+/** "Working · what it's doing", or "Done: what it finished" until its next task. */
+export function statusLine(a: Agent) {
+  const act = a.activity && a.status !== "offline" ? stripMd(a.activity) : "";
+  if (act.startsWith("Done:") && (a.status === "idle" || a.status === "waiting")) return act;
+  // Generic activity words only repeat the status.
+  if (!act || /^(idle|waiting for work|working)$/i.test(act)) return statusText(a);
+  return act.startsWith("Working on:") ? act : `${statusText(a)} · ${act}`;
 }
 
 export function StatusDot({ status }: { status: Agent["status"] }) {

@@ -12,8 +12,8 @@ import { newId } from "./store";
 import type { Session } from "./session";
 import type { DevServer, Platform } from "./types";
 
-/** How long a dev server may stay unreachable before it's taken off the board. */
-export const DEV_GONE_MS = 30 * 60_000;
+/** How long a dev server may stay unreachable before its tile clears itself. */
+export const DEV_GONE_MS = 5 * 60_000;
 /** Most dev servers one agent can keep on the host. */
 export const MAX_PER_AGENT = 6;
 
@@ -29,8 +29,8 @@ interface WsData {
 const HOP = ["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "content-length"];
 
 export class DevProxy {
-  private listeners = new Map<string, Server<WsData>>();
-  private downSince = new Map<string, number>();
+  /** Each dev port's listener, with the target it forwards to (changed in place when a registration moves to another target). */
+  private listeners = new Map<string, { server: Server<WsData>; target: { v: string } }>();
   private tokenCache: { at: number; hashes: Map<string, string> } = { at: 0, hashes: new Map() };
   /** Open WebSockets on every dev port. */
   private sockets = new Set<ServerWebSocket<WsData>>();
@@ -67,9 +67,10 @@ export class DevProxy {
     if (!existing && this.session.devservers().filter((d) => d.agentId === opts.agentId).length >= MAX_PER_AGENT)
       throw new Error(`You already have ${MAX_PER_AGENT} dev servers on the host. Remove one with jam_devserver_remove first.`);
     const used = new Set(this.session.devservers().map((d) => d.hostPort));
-    if (existing) this.close(existing.id);
+    // A registration that is being replaced keeps its listener until the new one is bound.
     let hostPort = existing?.hostPort ?? config.devPortStart;
-    while ((!existing && used.has(hostPort)) || !portFree(hostPort)) hostPort++;
+    const own = () => !!existing && this.listeners.get(existing.id)?.server.port === hostPort;
+    while ((used.has(hostPort) && hostPort !== existing?.hostPort) || (!own() && !portFree(hostPort))) hostPort++;
     const d: DevServer = {
       id: existing?.id ?? newId("dev"),
       agentId: opts.agentId,
@@ -79,12 +80,29 @@ export class DevProxy {
       url: `http://${config.publicHost}:${hostPort}`,
       platform: opts.platform ?? this.session.agent(opts.agentId)?.platform ?? null,
       createdAt: existing?.createdAt ?? Date.now(),
+      generation: (existing?.generation ?? 0) + 1,
       up: false,
     };
-    await this.listen(d);
+    // The new generation is on record before anything is awaited: a refresh still holding the old one
+    // sees it changed and leaves this registration (and its listener) alone.
+    this.session.store.put("devservers", d, false);
+    try {
+      await this.listen(d);
+    } catch (e) {
+      // The bind failed: the earlier registration, still listening, stays exactly as it was.
+      if (existing) this.session.store.put("devservers", existing, false);
+      else this.session.store.remove("devservers", d.id);
+      throw e;
+    }
     const up = await this.check(d);
-    this.downSince.delete(d.id);
-    this.session.store.put("devservers", { ...d, up });
+    // Registered again (or removed) meanwhile: this registration is no longer the one to publish.
+    const now = this.session.store.get("devservers", d.id);
+    if (!now) {
+      this.close(d.id); // taken off the board meanwhile: its port closes again
+      return d;
+    }
+    if ((now.generation ?? 0) !== d.generation) return now;
+    this.session.store.put("devservers", { ...d, up, problem: undefined, downSince: undefined });
     const agent = this.session.agent(opts.agentId);
     this.session.upsertArtifact({
       id: this.artifactOf(d)?.id,
@@ -129,7 +147,13 @@ export class DevProxy {
 
   private async listen(d: DevServer) {
     const proxy = this;
-    const target = d.target;
+    const held = this.listeners.get(d.id);
+    // The same port again: the listener stays up and only its target changes, so nothing can fail or drop.
+    if (held && held.server.port === d.hostPort) {
+      held.target.v = d.target;
+      return;
+    }
+    const ref = { v: d.target };
     const server = Bun.serve<WsData, never>({
       hostname: "0.0.0.0",
       port: d.hostPort,
@@ -146,11 +170,12 @@ export class DevProxy {
           if (srv.upgrade(req, { data: { path, protocols, queue: [], deviceId: deviceId || undefined }, headers })) return undefined;
           return new Response("expected a WebSocket", { status: 400 });
         }
-        return forward(req, target, path);
+        return forward(req, ref.v, path);
       },
       websocket: {
         open(ws: ServerWebSocket<WsData>) {
           proxy.sockets.add(ws);
+          const target = ref.v;
           const up = new WebSocket(`ws://${target}${ws.data.path}`, { protocols: ws.data.protocols.slice(0, 1), headers: { origin: `http://${target}` } } as any);
           up.binaryType = "arraybuffer";
           ws.data.up = up;
@@ -176,7 +201,9 @@ export class DevProxy {
         },
       },
     });
-    this.listeners.set(d.id, server);
+    this.listeners.set(d.id, { server, target: ref });
+    // Moved to another port: the old one closes only now that the new one is up.
+    held?.server.stop(true);
   }
 
   /** Whether the dev server itself answers (asked directly, not through the forwarder). */
@@ -190,26 +217,45 @@ export class DevProxy {
     }
   }
 
-  /** Re-checks every dev server; ones that stay unreachable for a long while are taken down. */
-  async refresh() {
-    const now = Date.now();
-    for (const d of this.session.devservers()) {
+  /** How long a dev server may stay unreachable before it's taken off the board (a field so a test can shorten it). */
+  goneMs = DEV_GONE_MS;
+
+  /** What happened to a build that stopped answering, in plain words. */
+  explain(d: DevServer): string {
+    const owner = this.session.agents().find((a) => a.id === d.agentId);
+    if (!owner || owner.status === "offline") return `${owner?.ownerName ?? "Its owner"}'s ${owner?.name ?? "agent"} stopped this build`;
+    return `The build at port ${d.target.replace(/^.*:/, "")} stopped responding`;
+  }
+
+  /**
+   * Re-checks every dev server. One that stops answering says why on its tile and tells its agent;
+   * if it stays down a few minutes its tile clears itself.
+   */
+  async refresh(now = Date.now()) {
+    for (const checked of this.session.devservers()) {
       if (this.stopped) return;
-      const up = await this.check(d);
+      const up = await this.check(checked);
       if (this.stopped) return; // stopped during the check: nothing is written after stop
-      if (up !== d.up) this.session.store.patch("devservers", d.id, { up });
+      // Registered again (or removed) while it was being checked: that result is about a server that's gone.
+      const d = this.session.store.get("devservers", checked.id);
+      if (!d || (d.generation ?? 0) !== (checked.generation ?? 0) || d.target !== checked.target) continue;
       if (up) {
-        this.downSince.delete(d.id);
+        if (!d.up || d.problem || d.downSince) this.session.store.patch("devservers", d.id, { up: true, problem: undefined, downSince: undefined });
         continue;
       }
-      const since = this.downSince.get(d.id) ?? now;
-      this.downSince.set(d.id, since);
-      if (now - since > DEV_GONE_MS) this.remove(d.id);
+      const since = d.downSince ?? now;
+      const problem = this.explain(d);
+      if (!d.downSince) this.session.tellAgent(d.agentId, `${problem}. Its tile on the big screen says so and clears in ${Math.round(this.goneMs / 60_000)} minutes. Start it again and call jam_devserver to put it back.`);
+      if (d.up || d.problem !== problem || !d.downSince) this.session.store.patch("devservers", d.id, { up: false, problem, downSince: since });
+      if (now - since > this.goneMs) {
+        this.session.tellAgent(d.agentId, `Took "${d.name}" off the board: it didn't answer for ${Math.round(this.goneMs / 60_000)} minutes. Call jam_devserver again when it runs.`);
+        this.remove(d.id);
+      }
     }
   }
 
   close(id: string) {
-    this.listeners.get(id)?.stop(true);
+    this.listeners.get(id)?.server.stop(true);
     this.listeners.delete(id);
   }
 
@@ -217,7 +263,6 @@ export class DevProxy {
   remove(id: string) {
     const d = this.session.devservers().find((x) => x.id === id);
     this.close(id);
-    this.downSince.delete(id);
     this.session.store.remove("devservers", id);
     const art = d && this.artifactOf(d);
     if (art) this.session.store.remove("artifacts", art.id);
@@ -257,7 +302,7 @@ async function forward(req: Request, target: string, path: string): Promise<Resp
     if (loc?.startsWith(`http://${target}`)) out.set("location", loc.slice(`http://${target}`.length) || "/");
     return new Response(r.body, { status: r.status, statusText: r.statusText, headers: out });
   } catch {
-    return new Response("That dev server isn't answering right now. Its agent may have stopped it.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
+    return new Response("That build isn't answering right now. Its agent may have stopped it, or it crashed.", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
   }
 }
 

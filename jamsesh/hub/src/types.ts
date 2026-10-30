@@ -42,6 +42,8 @@ export interface Agent {
   branch: string;
   cwd: string;
   machine: string;
+  /** The chat this agent is: Claude Code's session id (what its hooks carry) or the MCP connection. A second Claude Code chat in the same folder is a different agent; Codex chats are keyed by machine and folder, so two in one folder are one agent. */
+  chatId?: string;
   platform: Platform;
   focus: string;
   status: AgentStatus;
@@ -51,6 +53,24 @@ export interface Agent {
   canvas: "none" | "joining" | "live" | "failed";
   /** What this agent's repository is, as the agent describes it. */
   card?: RepoCard | null;
+  /** An observer only watches: no repository, never routed product tasks. Absent means a worker. */
+  role?: "worker" | "observer";
+  /** An observer can opt out of room-wide messages (to "all"); absent means it gets them. */
+  broadcasts?: boolean;
+}
+
+/** A chat the room removed (Session.removedChats): kept out until a person lets it back in. */
+export interface RemovedChat {
+  id: string;
+  agentId: string;
+  chatId: string | null;
+  machine: string;
+  /** Its folder and harness: a join that can't name its chat (a fresh MCP session) from there is this chat as far as anyone can tell. */
+  cwd?: string;
+  harness?: Agent["harness"];
+  name: string;
+  ownerName: string;
+  at: number;
 }
 
 export interface RepoCard {
@@ -82,6 +102,7 @@ export type EventKind =
   | "canvas"
   | "message"
   | "brain"
+  | "join"
   | "system";
 
 /** How the brain judged a room line. */
@@ -122,6 +143,12 @@ export interface Directive {
   result: string;
   deliveredAt: number | null;
   updatedAt: number;
+  /** When JamSesh asked each target how it's going (an open task with no progress for a while). */
+  nudgedAt?: Record<string, number>;
+  /** Per target: when it last showed progress on this task (delivery, ack, a linked update, a status change). */
+  signs?: Record<string, number>;
+  /** Per target: when the room was offered a reassignment; that target's tile shows a Reassign button until it resumes or the task moves. */
+  reassignOfferedAt?: Record<string, number>;
 }
 
 export type ArtifactKind = "frame" | "screenshot" | "devserver" | "html" | "note";
@@ -150,6 +177,16 @@ export interface Artifact {
   page?: string;
 }
 
+/** A long message or update, stored once; the feed and other agents' inboxes carry a short pointer to it. */
+export interface Document {
+  id: string;
+  ts: number;
+  authorId: string | null;
+  authorName: string;
+  title: string;
+  text: string;
+}
+
 export interface DevServer {
   id: string;
   agentId: string;
@@ -159,7 +196,13 @@ export interface DevServer {
   url: string;
   platform: Platform | null;
   createdAt: number;
+  /** Goes up each time it is registered again (same id), so a check of an earlier registration is told apart. */
+  generation?: number;
   up: boolean;
+  /** Why it isn't answering, in words for the tile ("Chey's Context Gatherer stopped this build"). */
+  problem?: string;
+  /** Since when it hasn't answered; the tile clears itself a few minutes after. */
+  downSince?: number;
 }
 
 export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";
@@ -321,7 +364,7 @@ export interface ScreenInfo {
 }
 
 export interface HubState {
-  session: { name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
+  session: { roomId: string; name: string; code: string; startedAt: number; hubUrl: string; canvas: CanvasInfo; addresses: { label: string; url: string; reachable?: "yes" | "no" | "unknown" }[] };
   settings: Settings;
   people: Person[];
   devices: Device[];
@@ -362,6 +405,9 @@ export interface CanvasInfo {
 export type BusMessage =
   | { type: "state"; state: HubState }
   | { type: "event"; event: JamEvent }
+  | { type: "events-removed"; ids: number[] }
+  /** The list of removed chats changed (a chat removed, or allowed again): windows showing it reload. */
+  | { type: "removed-chats" }
   | { type: "patch"; key: keyof HubState; value: any }
   | { type: "utterance"; utterance: Utterance }
   | { type: "stage"; stage: Stage }

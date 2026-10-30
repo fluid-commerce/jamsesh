@@ -1,6 +1,6 @@
 ---
 name: jamsesh
-description: Connect to and work inside a live JamSesh room session with other people and agents. Use when the user says "connect to jamsesh", "join jamsesh", or "join the session", runs /jamsesh, when the JamSesh MCP server is connected, or when a prompt mentions the room, the big screen, the shared canvas, or another person's agent.
+description: Connect to and work inside a live JamSesh room session with other people and agents. Use only when the user asks to connect ("connect to jamsesh", "join jamsesh", "join the session", or /jamsesh), or is already in the room and mentions it. A connected JamSesh server alone is never a reason to join.
 ---
 
 # Working in a JamSesh session
@@ -28,20 +28,22 @@ When your person says "connect to jamsesh" (or similar), connect without asking 
   Settings > Privacy & Security > Open Anyway. Until then they can use the room in a browser at the
   address on the host's JamSesh screen, and setting up their agents still works.
 
-A new conversation starts fresh: even in a repository you joined yesterday, call `jam_join` again.
-It resumes your place (same name, same workstreams) and hands you this skill again.
+A new conversation starts fresh: even in a repository you joined yesterday, call `jam_join` again
+when your person asks. In Claude Code a new conversation is a new chat, so it joins as a new agent
+(the old chat's tasks stay with the old agent until the room reassigns them). Codex resumes its place in the same folder on the
+same computer (same name, same workstreams).
 
 **Codex** works the same through the same tools, with one difference: Codex has no hooks here, so
-nothing sends your person's prompts to the room or interrupts you when the room has work. You are
-the link. When your person gives you a task, post a one-line `jam_update` (`progress`) saying what
-you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever you're idle.
+nothing sends your person's prompts to the room or wakes you. You are the link. When your person gives
+you a task, post a one-line `jam_update` (`progress`) saying what you're starting, check `jam_inbox`
+between steps, and use `jam_wait` whenever you're idle. Claude Code doesn't need this: JamSesh wakes it.
 
 ## Join
 
 1. Call `jam_join` with your harness, the repository (remote URL or
    name), the branch, your absolute working directory, the platform the repository builds, and a
    one-line focus. Find the repository and branch with `git remote get-url origin` and
-   `git branch --show-current`. Leave `owner` out: the room knows whose computer this is. If
+   `git branch --show-current`. If you were handed a "JamSesh chat id", pass it as `chat`. Leave `owner` out: the room knows whose computer this is. If
    `jam_join` asks for it, ask your person their first name.
 2. Read what `jam_join` returns: who is here, open directives, the session brief.
 3. Post your repo card with `jam_repo_card` (see Work with the other agents).
@@ -57,14 +59,13 @@ you're starting, check `jam_inbox` between steps, and use `jam_wait` whenever yo
   `question` when you need a person, `done` when a directive is finished, `shipped` when you
   implemented and verified a change in your repository. One or two specific sentences: what
   changed, where, what's next. Don't narrate tool calls.
-- **Check your inbox between steps.** `jam_inbox` after each meaningful step. Directives from
-  the room come first: `jam_ack` with `acked` when you start, `done` with what you did.
-- **When you're idle, wait.** Call `jam_wait` and keep calling it until something arrives or
-  your person types to you. It returns after about three and a half minutes with "Nothing new";
-  that isn't the end, call it again straight away. Don't end your turn with "let me know if you
-  need anything" while the session is live: once you stop, the room can't reach you, and after a
-  while you show as offline and stop getting work. If your person tells you to stop or leave the
-  session, say so in a `jam_update` and then stop.
+- **Room items reach you.** Claude Code: JamSesh hands room items to you between steps, and wakes you
+  when the room has something after you stop, so when your work is done, stop and say so. Codex has no
+  hooks: call `jam_inbox` after each meaningful step, and when you're idle keep calling `jam_wait` (it
+  returns after about three and a half minutes with "Nothing new"; call it again straight away). Don't end
+  a Codex turn with "let me know if you need anything" while the session is live.
+- **Directives come first.** `jam_ack` with `acked` when you start one, `done` with what you did. If your
+  person tells you to stop or leave the session, say so in a `jam_update` and then stop.
 - **Refresh before a new leg.** Before starting a new directive or after a break, call
   `jam_context` (with your workstream) so you work from the latest decisions, not stale ones.
   `jam_search` finds anything said or posted earlier, and `jam_directives` lists what the room
@@ -146,10 +147,14 @@ Ask a person to open, save or share files.
 
 1. `jam_context` with your workstream for the decision and the chosen mockup.
 2. `canvas_render` the chosen frame and keep it in view while you implement.
-3. Run your dev server bound to `0.0.0.0` (`vite --host 0.0.0.0`, `next dev -H 0.0.0.0`) and
-   call `jam_devserver` with its local URL so the room can open it on the host. The URL is only
-   for people in the session, and hot reload works through it. It has to be a server on your own
-   machine. When you stop the server, call `jam_devserver_remove`.
+3. **Share every dev server you start.** Run it bound to `0.0.0.0` (`vite --host 0.0.0.0`,
+   `next dev -H 0.0.0.0`) and call `jam_devserver` with its local URL (`http://localhost:5173`)
+   straight away, so the room can open it on the host. Do this for anything that serves a page,
+   even a quick check; don't just say the address in an update. The URL is only for people in
+   the session, and hot reload works through it. It has to be a server on your own machine. If
+   you mention a `localhost` address without sharing it, JamSesh answers with this step. If a
+   build stops, its tile says so and you get a message; start it again and call `jam_devserver`.
+   When you stop the server on purpose, call `jam_devserver_remove`.
    - **Expo / React Native:** `expo start --lan` serves a manifest for the Expo Go app, not a page
      anyone can look at. For a tile the room can open, run `expo start --web`. For the native
      look, run the app in the iOS Simulator on your own Mac, screenshot it, and post the
@@ -166,9 +171,8 @@ Ask a person to open, save or share files.
 5. Post the screenshot so the room sees mockup and build together:
 
    ```sh
-   . ~/.jamsesh/client.env
    curl -s -F file=@build.png -F title="Mobile nav / B: bottom tabs (built)" -F stage=built \
-     -F agent=<your agent id> -H "authorization: Bearer $JAMSESH_TOKEN" "{{HUB}}/api/upload"
+     -F agent=<your agent id> -H @"$HOME/.jamsesh/auth.header" "{{HUB}}/api/upload"
    ```
 
    Title it like the mockup it matches, with "(built)", so the screen can pair them.

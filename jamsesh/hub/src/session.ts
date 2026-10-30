@@ -3,6 +3,8 @@
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
+import { affinity } from "./brain/affinity";
+import { canonicalCwd, chatKey, isChatKey } from "./chatkey";
 import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
@@ -15,18 +17,32 @@ import type {
   DevServer,
   Directive,
   DirectiveMode,
+  Document,
   HubState,
   JamEvent,
   Person,
   Platform,
+  RemovedChat,
   Settings,
   Share,
   Stage,
   Workstream,
  BuildRequest, ScreenInfo } from "./types";
 
+/** A message or update longer than this is stored once and others get a pointer. */
+export const LONG_TEXT = 1200;
+
 /** An agent quiet this long shows as offline (and its record can be taken over by a rejoin). */
 export const AGENT_OFFLINE_MS = 20 * 60_000;
+/** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
+export const TASK_STALE_MS = 20 * 60_000;
+export const TASK_OFFER_MS = 10 * 60_000;
+/** Why product work for observers alone is refused (createDirective, the API, the brain's tools). */
+export const ONLY_OBSERVERS = "Those agents only watch (observers), so nobody would do this. Pick a working agent.";
+/** Why an observer can't take a workstream (jam_claim and Session.claim say the same). */
+export const OBSERVER_CLAIM = "You joined as an observer, which only watches. Ask your person to rejoin you as a worker before you claim work.";
+/** A person prompt this recent means the agent's own work was asked for. */
+const ASKED_WINDOW_MS = 30 * 60_000;
 
 export const DEFAULT_MODELS: Settings["models"] = {
   triage: "google/gemini-3.5-flash-lite",
@@ -81,6 +97,7 @@ export class Session {
     if (me) me.lastActive = Date.now();
     else sessions.push({ id: this.sessionId, name: store.setting("sessionName", "Jam session"), startedAt: Date.now(), lastActive: Date.now() });
     store.setSetting("sessions", sessions.slice(-200));
+    this.migrateChatKeys();
     // Agents outlive a hub restart: they reconnect on their next call, and directives wait in their inbox.
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
@@ -101,6 +118,51 @@ export class Session {
       this.screenReverts.set(screen, t);
     }
     bus.resolver = (key) => this.resolve(key);
+  }
+
+  /**
+   * Chats without an id of their own used to be keyed by their readable `harness:machine:folder`, cut at 300
+   * characters, with the folder as typed. When the store opens, each such record and removal gets the key it
+   * would get now, from its stored harness, machine and folder (the real path where this computer can see it),
+   * so only current keys are ever compared. A record that doesn't store those is left as it is: it matches
+   * nothing, and in particular never anything by a shared prefix.
+   */
+  private migrateChatKeys() {
+    const keyed = (h: string | undefined): h is string => !!h && h !== "claude-code";
+    const redo = (harness: string | undefined, machine: string | undefined, cwd: string | undefined) => {
+      if (!keyed(harness) || !machine || !cwd) return null;
+      const folder = canonicalCwd(cwd, machine === "host");
+      return folder ? { folder, key: chatKey(harness, machine, folder) } : null;
+    };
+    // A folder is compared as one spelling for every harness, so a removal holds for the whole folder.
+    for (const a of this.store.all("agents")) {
+      if (a.harness === "claude-code" && a.machine && a.cwd) {
+        const folder = canonicalCwd(a.cwd, a.machine === "host");
+        if (folder && folder !== a.cwd) this.store.put("agents", { ...a, cwd: folder }, false);
+        continue;
+      }
+      if (!keyed(a.harness) || !a.chatId || isChatKey(a.chatId, a.harness)) continue;
+      const n = redo(a.harness, a.machine, a.cwd);
+      if (n) this.store.put("agents", { ...a, chatId: n.key, cwd: n.folder }, false);
+    }
+    const removed = this.removedChats();
+    let changed = false;
+    const next = removed.map((r) => {
+      if (r.harness === "claude-code" && r.machine && r.cwd) {
+        const folder = canonicalCwd(r.cwd, r.machine === "host");
+        if (folder && folder !== r.cwd) {
+          changed = true;
+          return { ...r, cwd: folder };
+        }
+        return r;
+      }
+      if (!keyed(r.harness) || (r.chatId && isChatKey(r.chatId, r.harness))) return r;
+      const n = redo(r.harness, r.machine, r.cwd);
+      if (!n) return r;
+      changed = true;
+      return { ...r, chatId: n.key, cwd: n.folder };
+    });
+    if (changed) this.store.setSetting("removedChats", next);
   }
 
   /** Every address people can join from: the room's LAN, Tailscale, and a public URL if one is set. */
@@ -178,13 +240,13 @@ export class Session {
 
   state(): HubState {
     return {
-      session: { name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
+      session: { roomId: this.roomId(), name: this.settings().sessionName, code: this.code, startedAt: this.startedAt, hubUrl: this.hubUrl, canvas: this.canvas, addresses: this.addresses() },
       settings: this.settings(),
       people: this.people(),
       devices: this.store.all("devices"),
-      agents: this.agents(),
+      agents: this.agents().map(publicAgent),
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
-      directives: this.directives().slice(0, 60),
+      directives: this.stateDirectives(),
       artifacts: this.artifacts().slice(0, 120),
       devservers: this.store.all("devservers"),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
@@ -248,11 +310,11 @@ export class Session {
       case "devices":
         return { key, value: this.store.all("devices") };
       case "agents":
-        return { key, value: this.agents() };
+        return { key, value: this.agents().map(publicAgent) };
       case "workstreams":
         return { key, value: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt) };
       case "directives":
-        return { key, value: this.directives().slice(0, 60) };
+        return { key, value: this.stateDirectives() };
       case "artifacts":
         return { key, value: this.artifacts().slice(0, 120) };
       case "devservers":
@@ -417,6 +479,16 @@ export class Session {
       .sort((a, b) => a.joinedAt - b.joinedAt);
   }
 
+  /** The agents that do the room's product work: observers only watch. */
+  workers(): Agent[] {
+    return this.agents().filter((a) => a.role !== "observer");
+  }
+
+  /** An observer that opted out of room-wide messages. */
+  private skipsBroadcasts(a: Agent | undefined) {
+    return a?.role === "observer" && a.broadcasts === false;
+  }
+
   agent(id: string | null | undefined) {
     return id ? this.store.get("agents", id) : undefined;
   }
@@ -431,6 +503,10 @@ export class Session {
     platform?: Platform;
     focus?: string;
     name?: string;
+    /** The chat joining (see Agent.chatId). */
+    chatId?: string;
+    role?: "worker" | "observer";
+    broadcasts?: boolean;
     /** Whether an older record's `machine` is the caller's machine under an earlier credential. */
     sameMachine?: (machine: string) => boolean;
   }): { agent: Agent; resumed: boolean; quietMs: number | null } {
@@ -442,11 +518,20 @@ export class Session {
     // The owner, harness and folder are the caller's word, so they alone never hand over a record
     // that may still be live (an agent busy for a minute is still live).
     const now = Date.now();
+    // A chat is its own agent: one that names its chat resumes only that chat's record from the same
+    // machine (or an older record from before chats were told apart), and a chat that doesn't never
+    // takes a named chat's.
+    const sameChat = (a: Agent) => (info.chatId ? !a.chatId || a.chatId === info.chatId : !a.chatId);
     const existing =
-      agents.find((a) => a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
+      // A chat id is only the caller's word: it resumes a record from the same machine, never another device's.
+      (info.chatId ? agents.find((a) => a.chatId === info.chatId && a.harness === info.harness && (a.machine === info.machine || !!info.sameMachine?.(a.machine))) : undefined) ??
+      agents.find((a) => sameChat(a) && a.machine === info.machine && (info.cwd ? a.cwd === info.cwd : a.repo === info.repo) && a.harness === info.harness) ??
       (info.cwd && owner
         ? agents
             .filter((a) => a.ownerId === owner.id && a.harness === info.harness && a.cwd === info.cwd && now - a.lastSeen > 60_000)
+            // Only a record from before chats had ids migrates this way: a named chat is never inherited
+            // by another chat, however long it has been quiet or wherever the newcomer joins from.
+            .filter((a) => !a.chatId)
             .filter((a) => now - a.lastSeen > AGENT_OFFLINE_MS || !!info.sameMachine?.(a.machine))
             .sort((a, b) => b.lastSeen - a.lastSeen)[0]
         : undefined);
@@ -464,10 +549,11 @@ export class Session {
       ownerId: owner?.id ?? null,
       ownerName: owner?.name ?? info.ownerName,
       harness: info.harness,
-      repo: info.repo,
+      repo: (info.role ?? existing?.role) === "observer" ? "" : info.repo,
       branch: info.branch ?? existing?.branch ?? "",
       cwd: info.cwd ?? existing?.cwd ?? "",
       machine: info.machine,
+      chatId: info.chatId ?? existing?.chatId,
       platform: info.platform ?? existing?.platform ?? "other",
       focus: info.focus ?? existing?.focus ?? "",
       status: "idle",
@@ -475,17 +561,103 @@ export class Session {
       lastSeen: Date.now(),
       joinedAt: existing?.joinedAt ?? Date.now(),
       canvas: existing?.canvas ?? "none",
+      ...(info.role || existing?.role ? { role: info.role ?? existing?.role } : {}),
+      ...((info.role ?? existing?.role) === "observer" ? { broadcasts: info.broadcasts ?? existing?.broadcasts ?? true } : {}),
     };
     this.store.put("agents", agent);
+    // The room is told who joined and from where, with a way to remove an agent that shouldn't be here.
+    this.resumeWorkstreams(agent);
     this.store.addEvent({
-      kind: "system",
+      kind: "join",
       authorType: "agent",
       authorId: agent.id,
       authorName: agent.name,
-      text: `${agent.name} ${existing ? "rejoined" : "joined"}: ${shortRepo(agent.repo)}${agent.branch ? ` @ ${agent.branch}` : ""}${agent.focus ? `, ${agent.focus}` : ""}.`,
-      data: { platform: agent.platform },
+      text:
+        agent.role === "observer"
+          ? `${agent.name} ${existing ? "rejoined" : "joined"} as an observer${agent.focus ? ` from ${tildePath(agent.cwd || agent.repo)}` : ""}`
+          : `${agent.name} ${existing ? "rejoined" : "joined"} from ${tildePath(agent.cwd || agent.repo)}`,
+      data: { agentId: agent.id, platform: agent.platform, harness: agent.harness, repo: shortRepo(agent.repo), branch: agent.branch, focus: agent.focus, resumed: !!existing, ...(agent.role === "observer" ? { observer: true } : {}) },
     });
     return { agent, resumed: !!existing, quietMs: existing ? Date.now() - existing.lastSeen : null };
+  }
+
+  /**
+   * Takes an agent out of the room: it no longer exists to the hub (its tools and hooks stop working
+   * until it joins again), its workstreams are free, and with `purge` what it authored goes too: its
+   * events (updates, messages, join notices) and its long documents. Messages others sent it, prompts
+   * its person wrote and its artifacts stay.
+   */
+  /** Agents the room took out, so a tool call from one says so instead of asking it to join again. */
+  readonly removedAgents = new Set<string>();
+
+  removeAgent(id: string, opts: { purge?: boolean } = {}): { removed: boolean; events: number } {
+    const agent = this.agent(id);
+    if (!agent) return { removed: false, events: 0 };
+    for (const w of this.store.all("workstreams")) if (w.ownerAgentId === id) this.store.put("workstreams", { ...w, ownerAgentId: null, status: "paused", updatedAt: Date.now() });
+    this.store.remove("agents", id);
+    this.removedAgents.add(id);
+    this.blockRejoin(agent);
+    // Nothing waits on it any more: its share of each open task is cancelled (and the room told which),
+    // what was being handed to it is dropped, and a listener or jam_wait of its ends now.
+    const open = this.directives().filter((d) => d.targets.includes(id) && !["done", "cancelled"].includes(d.progress?.[id] ?? d.status));
+    for (const d of open) this.setDirectiveFor(d.id, id, "cancelled", `${agent.name} was removed from the session`);
+    if (open.length)
+      this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed with ${open.length === 1 ? "an open task" : `${open.length} open tasks`}, now cancelled: ${open.map((d) => `"${d.text.slice(0, 80)}"`).join("; ")}. Ask the room to give ${open.length === 1 ? "it" : "them"} to another agent.`, data: { directiveIds: open.map((d) => d.id) } });
+    this.store.setSetting(`deliveries:${id}`, []);
+    this.wake(id);
+    this.cancelAsks(id);
+    const ids = opts.purge ? this.store.deleteAgentEvents(id) : [];
+    if (opts.purge) for (const d of this.store.all("documents")) if (d.authorId === id) this.store.remove("documents", d.id);
+    if (ids.length) bus.send({ type: "events-removed", ids });
+    if (!opts.purge) this.store.addEvent({ kind: "system", authorType: "system", authorName: "JamSesh", text: `${agent.name} was removed from the session.` });
+    return { removed: true, events: ids.length };
+  }
+
+  /**
+   * Chats the room removed. Their jam_join is refused until a person lets them back in: "Allow again"
+   * in Settings, a people-only route; nothing a chat or its hook says clears one. Kept in the session, so a hub restart doesn't let them straight back.
+   */
+  removedChats(): RemovedChat[] {
+    return this.store.setting<RemovedChat[]>("removedChats", []);
+  }
+
+  private blockRejoin(agent: Agent) {
+    const rec: RemovedChat = { id: newId("rc"), agentId: agent.id, chatId: agent.chatId ?? null, machine: agent.machine, cwd: agent.cwd || undefined, harness: agent.harness, name: agent.name, ownerName: agent.ownerName, at: Date.now() };
+    // Kept until a person lets the chat back in (or the session goes): never dropped for space.
+    this.store.setSetting("removedChats", [...this.removedChats().filter((r) => r.agentId !== agent.id), rec]);
+    bus.send({ type: "removed-chats" });
+  }
+
+  /** The removal that keeps this chat out, if any (by its chat id, or the agent id its connection had). */
+  /**
+   * `folder`: a join that can't name its chat (a Claude Code chat without its chat id, on a fresh MCP
+   * session) is refused if a chat removed from that machine, folder and harness hasn't been let back.
+   */
+  rejoinBlocked(chatId: string | undefined, agentId: string | null, folder?: { machine: string; cwd: string; harness: string }): RemovedChat | undefined {
+    return this.removedChats().find(
+      (r) =>
+        (!!chatId && r.chatId === chatId && (!folder || (r.machine === folder.machine && r.harness === folder.harness))) ||
+        (!!agentId && r.agentId === agentId) ||
+        (!!folder?.cwd && r.machine === folder.machine && r.cwd === folder.cwd && r.harness === folder.harness),
+    );
+  }
+
+  /**
+   * Lets a removed chat join again: only a person's Allow again (a people-only route) calls this. A removal
+   * keeps the whole folder out (every new chat from that machine and folder), so allowing one clears every
+   * removal for that machine, folder and harness together: the person is never told it worked while the
+   * folder is still blocked. Returns how many were cleared.
+   */
+  allowRejoin(match: { id: string }): number {
+    const all = this.removedChats();
+    const picked = all.find((r) => r.id === match.id);
+    if (!picked) return 0;
+    const sameFolder = (r: RemovedChat) => r.id === picked.id || (!!picked.cwd && r.cwd === picked.cwd && r.machine === picked.machine && r.harness === picked.harness);
+    const gone = all.filter(sameFolder);
+    for (const r of gone) this.removedAgents.delete(r.agentId);
+    this.store.setSetting("removedChats", all.filter((r) => !gone.includes(r)));
+    bus.send({ type: "removed-chats" });
+    return gone.length;
   }
 
   touchAgent(id: string, fields: Partial<Agent> = {}) {
@@ -495,6 +667,7 @@ export class Session {
     const next = { ...a, ...fields, status, lastSeen: Date.now() };
     const visible = a.status !== next.status || a.activity !== next.activity || a.canvas !== next.canvas || a.focus !== next.focus;
     this.store.put("agents", next, visible);
+    if (a.status === "offline" || Date.now() - a.lastSeen > AGENT_OFFLINE_MS) this.resumeWorkstreams(next);
   }
 
   findAgentByCwd(cwd: string, machine?: string, harness?: Agent["harness"]): Agent | undefined {
@@ -515,26 +688,73 @@ export class Session {
     return byName.length === 1 ? byName[0] : undefined;
   }
 
+  /** A note from JamSesh itself to one agent; it arrives in the inbox and wakes a waiting `jam_wait`. */
+  tellAgent(agentId: string, text: string) {
+    const a = this.agent(agentId);
+    if (!a) return;
+    this.store.addEvent({ kind: "message", authorType: "system", authorId: null, authorName: "JamSesh", text, relevance: "work", data: { to: a.id, toName: a.name } });
+    this.wake(a.id);
+  }
+
+  private nudged = new Set<string>();
+
+  /**
+   * A reply for an agent that mentioned a localhost address it hasn't shared: the exact step to share it.
+   * Once per URL per agent; empty when there is nothing to say.
+   */
+  shareNudge(agentId: string, text: string): string {
+    const shared = this.devservers().filter((d) => d.agentId === agentId).map((d) => d.target.replace(/^.*:/, ""));
+    const out: string[] = [];
+    for (const m of text.matchAll(/\bhttps?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})\b[^\s)>\]"']*/gi)) {
+      const port = m[1];
+      const url = `http://localhost:${port}`;
+      const key = `${agentId}|${port}`;
+      if (shared.includes(port) || this.nudged.has(key) || out.some((o) => o.includes(`"${url}"`))) continue;
+      this.nudged.add(key);
+      out.push(`You mentioned ${m[0]} but the room can't open it yet. To share it: make sure the server listens on 0.0.0.0 (for example vite --host 0.0.0.0), then call jam_devserver with url "${url}" and a name for the tile.`);
+    }
+    return out.length ? `\n\n${out.join("\n")}` : "";
+  }
+
+  /**
+   * A long text is stored once as a document. Returns what the feed and other agents' inboxes carry
+   * instead: its opening and where to fetch the rest.
+   */
+  shelve(from: { id: string; name: string }, text: string): { text: string; documentId?: string } {
+    if (text.length <= LONG_TEXT) return { text };
+    const doc: Document = { id: newId("doc"), ts: Date.now(), authorId: from.id, authorName: from.name, title: text.split("\n", 1)[0].slice(0, 80), text };
+    this.store.put("documents", doc, false);
+    const cut = text.slice(0, 240).replace(/\s+\S*$/, "");
+    return { text: `${cut}… [long: ${text.length} chars, stored once. Read it all with jam_artifacts id ${doc.id}]`, documentId: doc.id };
+  }
+
   postUpdate(agentId: string, kind: UpdateKind, text: string, extra: { workstream?: string; data?: Record<string, any> } = {}) {
     const agent = this.agent(agentId);
     if (!agent) throw new Error("Unknown agent; call jam_join first.");
-    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its brief.
-    const claimed = extra.workstream ? this.claim(agentId, extra.workstream, { quiet: true }) : undefined;
+    // A workstream another agent holds isn't this one's: the update stays untagged rather than land in its
+    // brief. An observer claims nothing, so its update stays untagged too. A workstream the update takes
+    // up for the first time is announced like any claim (work nobody asked for included).
+    const mine = (w: Workstream) => w.ownerAgentId === agentId && w.status === "active";
+    const already = !!extra.workstream && this.store.all("workstreams").some((w) => mine(w) && normalize(w.title) === normalize(extra.workstream!));
+    const claimed = extra.workstream && agent.role !== "observer" ? this.claim(agentId, extra.workstream, { quiet: already }) : undefined;
     const ws = claimed && !claimed.conflict ? claimed.workstream : undefined;
+    const short = this.shelve(agent, text);
     const ev = this.store.addEvent({
       // An agent's decision is an update the brain can promote; only the brain makes room decisions.
       kind: "update",
       authorType: "agent",
       authorId: agentId,
       authorName: agent.name,
-      text,
+      text: short.text,
       workstreamId: ws?.id ?? null,
       relevance: "work",
-      data: { updateKind: kind, ...(extra.data ?? {}) },
+      data: { updateKind: kind, ...(extra.data ?? {}), ...(short.documentId ? { documentId: short.documentId } : {}) },
     });
     const status = kind === "blocked" || kind === "question" ? "blocked" : kind === "done" || kind === "shipped" ? "idle" : "working";
-    this.touchAgent(agentId, { status, activity: text.slice(0, 140) });
+    this.touchAgent(agentId, { status, activity: (kind === "done" || kind === "shipped" ? `Done: ${text}` : text).slice(0, 140) });
     if (kind === "question" || kind === "blocked") bus.send({ type: "toast", tone: "warn", text: `${agent.name} needs the room`, detail: text });
+    const linked = typeof extra.data?.directiveId === "string" ? extra.data.directiveId : "";
+    if (linked) this.noteProgress(linked, agentId);
     this.onUpdate?.(this.agent(agentId)!, kind, text, ev);
     return ev;
   }
@@ -543,6 +763,7 @@ export class Session {
 
   claim(agentId: string, title: string, opts: { quiet?: boolean; force?: boolean } = {}) {
     const agent = this.agent(agentId);
+    if (agent?.role === "observer") throw new Error(OBSERVER_CLAIM);
     const t = title.trim();
     const key = normalize(t);
     const existing = this.store.all("workstreams").find((w) => normalize(w.title) === key);
@@ -553,18 +774,163 @@ export class Session {
         return { workstream: existing, conflict: owner };
       }
     }
+    // The first claim right after joining is what the join prompt asked for (the chat's prompt was ignored before it joined).
+    const firstAfterJoin = !!agent && Date.now() - agent.joinedAt < ASKED_WINDOW_MS && !this.store.all("workstreams").some((w) => w.ownerAgentId === agentId);
     const ws: Workstream = existing
       ? { ...existing, ownerAgentId: agentId, status: "active", updatedAt: Date.now() }
       : { id: newId("w"), title: t, ownerAgentId: agentId, status: "active", brief: "", updatedAt: Date.now() };
     this.store.put("workstreams", ws);
     this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
-      this.store.addEvent({ kind: "system", authorType: "agent", authorId: agentId, authorName: agent.name, text: `${agent.name} took "${ws.title}".`, workstreamId: ws.id });
+      // Work nobody asked for (no open task, no prompt from its person lately) is announced as such.
+      const onItsOwn = !!existing && existing.ownerAgentId === agentId && existing.status === "active" ? false : !firstAfterJoin && this.startedOnItsOwn(agent);
+      this.store.addEvent({
+        kind: "system",
+        authorType: "agent",
+        authorId: agentId,
+        authorName: agent.name,
+        text: onItsOwn ? `${agent.name} started "${ws.title}" on its own; nobody asked for it.` : `${agent.name} took "${ws.title}".`,
+        workstreamId: ws.id,
+        data: onItsOwn ? { onItsOwn: true } : {},
+      });
+      if (onItsOwn) bus.send({ type: "toast", tone: "info", text: `${agent.name} started something on its own`, detail: ws.title });
     }
     return { workstream: ws, conflict: null as Agent | null };
   }
 
+  /** True when nobody asked this agent for work: no open task for it and no prompt from its person lately. */
+  private startedOnItsOwn(agent: Agent) {
+    if (this.openFor(agent.id).length || this.directives().some((d) => d.targets.includes(agent.id) && (d.progress?.[agent.id] ?? d.status) === "pending")) return false;
+    // Only Claude Code reports its person's prompts; for other agents we can't tell, so they aren't accused.
+    if (agent.harness !== "claude-code") return false;
+    const since = Date.now() - ASKED_WINDOW_MS;
+    // By time, for this agent: however busy the room, other agents' prompts can't push its own out.
+    return !this.store.promptedSince(agent.id, since);
+  }
+
+  /** A workstream pauses when its owner goes offline, and picks up again when the owner is back. */
+  private resumeWorkstreams(agent: Agent) {
+    for (const w of this.store.all("workstreams")) {
+      if (w.ownerAgentId !== agent.id || w.status !== "paused") continue;
+      this.store.put("workstreams", { ...w, status: "active", updatedAt: Date.now() });
+      this.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `${agent.name} is back; "${w.title}" is active again.`, workstreamId: w.id });
+    }
+  }
+
+  /**
+   * Housekeeping, run every minute by the hub: pause workstreams whose owner went offline, ask
+   * agents about tasks that sat without an ack or a report, and offer the room a reassignment
+   * when asking didn't help.
+   */
+  tick(now = Date.now()) {
+    const agents = new Map(this.agents().map((a) => [a.id, a]));
+    for (const w of this.store.all("workstreams")) {
+      const owner = w.ownerAgentId ? agents.get(w.ownerAgentId) : undefined;
+      if (w.status !== "active" || !owner || owner.status !== "offline") continue;
+      this.store.put("workstreams", { ...w, status: "paused", updatedAt: now });
+      this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${owner.name} went offline; "${w.title}" is paused until it's back or someone takes it.`, workstreamId: w.id });
+    }
+    for (const open of this.openDirectives()) {
+      if (open.mode !== "explore" && open.mode !== "implement") continue;
+      for (const t of open.targets) {
+        // Fresh for each target: an earlier target's nudge or offer this tick is kept, not overwritten.
+        const d = this.store.get("directives", open.id) ?? open;
+        const state = d.progress?.[t] ?? d.status;
+        if (state === "done" || state === "cancelled") continue;
+        const agent = agents.get(t);
+        if (!agent || now - this.lastSign(d, t) < TASK_STALE_MS) continue;
+        const nudgeAt = d.nudgedAt?.[t];
+        const nudged = nudgeAt && nudgeAt > this.lastSign(d, t) ? nudgeAt : undefined; // an answer to the nudge starts the clock again
+        // An agent that's gone can't answer a nudge: the room is offered the reassignment right away.
+        if (agent.status === "offline" || (nudged && now - nudged >= TASK_OFFER_MS)) {
+          if (!d.reassignOfferedAt?.[t]) this.offerReassign(d, agent, now);
+        } else if (!nudged) {
+          this.store.patch("directives", d.id, { nudgedAt: { ...(d.nudgedAt ?? {}), [t]: now } });
+          this.store.addEvent({
+            kind: "message",
+            authorType: "system",
+            authorId: null,
+            authorName: "JamSesh",
+            text: `It has been ${Math.round((now - this.lastSign(d, t)) / 60_000)} minutes since you reported on directive ${d.id} ("${d.text.slice(0, 100)}"). jam_ack it if you've started, post a jam_update with where you are, or say if you're stuck.`,
+            relevance: "work",
+            data: { to: t, toName: agent.name, nudge: d.id },
+          });
+          this.wake(t);
+        }
+      }
+    }
+  }
+
+  openDirectives() {
+    return this.directives().filter((d) => d.status !== "done" && d.status !== "cancelled");
+  }
+
+  /** The last time anything moved on this task for this agent: when it reached the agent, was acked, or the agent reported on it. */
+  private lastSign(d: Directive, agentId: string) {
+    return Math.max(d.ts, d.signs?.[agentId] ?? 0);
+  }
+
+  /** This agent showed progress on this task: the clock starts again and a standing reassignment offer goes. */
+  noteProgress(directiveId: string, agentId: string, at = Date.now()) {
+    const d = this.store.get("directives", directiveId);
+    if (!d || !d.targets.includes(agentId)) return;
+    const { [agentId]: _offer, ...offers } = d.reassignOfferedAt ?? {};
+    this.store.patch("directives", directiveId, { signs: { ...(d.signs ?? {}), [agentId]: at }, reassignOfferedAt: offers });
+  }
+
+  private offerReassign(d: Directive, agent: Agent, now: number) {
+    const mins = Math.round((now - this.lastSign(d, agent.id)) / 60_000);
+    this.store.patch("directives", d.id, { reassignOfferedAt: { ...(d.reassignOfferedAt ?? {}), [agent.id]: now } });
+    this.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `${agent.name} hasn't reported on "${d.text.slice(0, 100)}" in ${mins} minutes. Reassign it from the agent's tile.`, data: { directiveId: d.id, agentId: agent.id, reassignOffer: true } });
+    bus.send({ type: "toast", tone: "warn", text: `${agent.name} is quiet on a task`, detail: `${mins} minutes on "${d.text.slice(0, 80)}". Reassign it from its tile.` });
+  }
+
+  /**
+   * Moves a stalled task to another worker (the best match for it, or `to`). Only `target` is released
+   * (default: the targets the room was offered a reassignment for, else every unfinished one); the other targets keep working.
+   */
+  reassignDirective(id: string, by: string, to?: string, target?: string): Directive | undefined {
+    const d = this.store.get("directives", id);
+    if (!d || d.status === "done" || d.status === "cancelled") return undefined;
+    const open = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
+    const offered = open.filter((t) => d.reassignOfferedAt?.[t]);
+    const from = target ? open.filter((t) => t === target) : offered.length ? offered : open;
+    if (!from.length) return undefined;
+    const taken = new Set(d.targets);
+    const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
+    // A named recipient is that agent or nobody: never someone the person didn't choose.
+    if (to && !live.some((a) => a.id === to)) {
+      const named = this.agent(to);
+      throw new Error(!named ? "There's no agent with that id." : named.role === "observer" ? `${named.name} only watches, so it can't take work.` : taken.has(named.id) ? `${named.name} already has this task.` : `${named.name} is offline, so it can't take it now.`);
+    }
+    const pick = to ? live.find((a) => a.id === to) : (affinity(this, d.text).find((x) => live.some((a) => a.id === x.agent.id))?.agent ?? live[0]);
+    if (!pick) {
+      bus.send({ type: "toast", tone: "warn", text: "Nobody else is free to take it", detail: d.text.slice(0, 100) });
+      return undefined;
+    }
+    for (const t of from) {
+      this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
+      this.wake(t);
+    }
+    const left = this.store.get("directives", id);
+    if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
+    return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
+  }
+
   // ---- directives ----
+
+  /** This room's id (one per session, kept with it): what a hook ties a queued prompt to. */
+  roomId(): string {
+    let id = this.store.setting<string>("roomId", "");
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) this.store.setSetting("roomId", (id = crypto.randomUUID()));
+    return id;
+  }
+
+  /** What the live state carries: the newest 60, plus every open one however old, so each agent's tile has all its tasks (and their Reassign offers). */
+  stateDirectives(): Directive[] {
+    const all = this.directives();
+    return all.filter((d, i) => i < 60 || (d.status !== "done" && d.status !== "cancelled"));
+  }
 
   directives(): Directive[] {
     return this.store.all("directives").sort((a, b) => b.ts - a.ts || (a.id < b.id ? 1 : -1));
@@ -581,6 +947,13 @@ export class Session {
     sourceEventIds?: number[];
     workstreamId?: string | null;
   }): Directive {
+    // Observers only watch: product work never goes to them (answers and notes still can).
+    if (d.mode !== "answer" && d.mode !== "note") {
+      const workers = d.targets.filter((t) => this.agent(t)?.role !== "observer");
+      // Nobody left to do it: no task is made (a task nobody can receive would sit open for ever).
+      if (d.targets.length && !workers.length) throw new Error(ONLY_OBSERVERS);
+      d = { ...d, targets: workers };
+    }
     // Only agents in the room are kept as counterparts. A coordinate directive is a comparison, so it must
     // name who with, whatever made it: each target needs a known counterpart other than itself.
     const counterparts = [...new Set(d.counterparts ?? [])].filter((c) => this.agent(c));
@@ -641,7 +1014,26 @@ export class Session {
   }
 
   setDirective(id: string, fields: Partial<Directive>) {
-    return this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
+    const d = this.store.patch("directives", id, { ...fields, updatedAt: Date.now() });
+    // A status set on the directive itself (not through one target's progress) is news for every target.
+    if (d && fields.status && !fields.progress) for (const t of d.targets) this.noteProgress(id, t);
+    return d;
+  }
+
+  /**
+   * A person ends a whole task (done or cancelled): every target still on it ends the same way, so no
+   * agent's inbox or tile keeps it open. A finished task never reopens.
+   */
+  endDirective(id: string, status: unknown): Directive | undefined {
+    const d = this.store.get("directives", id);
+    if (!d) return undefined;
+    if (status !== "done" && status !== "cancelled") return d;
+    if (d.status === "done" || d.status === "cancelled") return d;
+    const progress = { ...(d.progress ?? {}) };
+    for (const t of d.targets) if (progress[t] !== "done" && progress[t] !== "cancelled") progress[t] = status;
+    const out = this.setDirective(id, { progress, status });
+    for (const t of d.targets) this.wake(t);
+    return out;
   }
 
   /**
@@ -672,19 +1064,21 @@ export class Session {
     if (mine === "done" || mine === "cancelled") return d; // terminal: a late ack or update doesn't reopen it or add to its result
     const rank = ["pending", "delivered", "acked"];
     if (mine && rank.includes(mine) && rank.includes(status) && rank.indexOf(status) < rank.indexOf(mine)) return d; // never backwards
+    // Finished stays finished: a late ack or "done" doesn't reopen a task that is done or cancelled as a whole.
+    if (d.status === "done" || d.status === "cancelled") return d;
     if (status === "done") {
       const gap = this.exchangeGap(d, agentId);
       if (gap) throw new Error(gap);
     }
-    // Cancelled stays cancelled: a late ack or "done" from the agent doesn't reopen it.
-    if (d.status === "cancelled") return d;
     const progress = { ...(d.progress ?? Object.fromEntries(d.targets.map((t) => [t, d.status]))), [agentId]: status };
     const order: Directive["status"][] = ["pending", "delivered", "acked", "done", "cancelled"];
     const states = d.targets.map((t) => progress[t] ?? "pending");
     const finished = states.every((x) => x === "done" || x === "cancelled");
     const overall = finished ? (states.includes("done") ? "done" : "cancelled") : states.map((x) => order.indexOf(x)).reduce((a, b) => Math.min(a, b)) >= 2 ? "acked" : states.some((x) => x !== "pending") ? "delivered" : "pending";
     const res = result ? [d.result, `${this.agent(agentId)?.name ?? agentId}: ${result}`].filter(Boolean).join("\n") : d.result;
-    return this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+    const out = this.setDirective(id, { progress, status: overall as Directive["status"], result: res });
+    this.noteProgress(id, agentId);
+    return out;
   }
 
   /** Directives this agent took but hasn't finished. */
@@ -699,7 +1093,17 @@ export class Session {
       .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
-    const messages = this.store.messagesTo(agentId, lastRead, 50);
+    const quiet = this.skipsBroadcasts(this.agent(agentId));
+    const forMe = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
+    // Read forward from the cursor, oldest first, and filter before counting: the next 50 messages for
+    // this agent, however many for others came in between. Nothing unread is ever passed over.
+    const messages: JamEvent[] = [];
+    for (let after = lastRead; messages.length < 50; ) {
+      const page = this.store.eventsAfter(after, ["message"], 200);
+      for (const e of page) if (forMe(e) && messages.length < 50) messages.push(e);
+      if (page.length < 200) break;
+      after = page[page.length - 1].id;
+    }
     if (markDelivered) {
       for (const d of directives) {
         this.setDirectiveFor(d.id, agentId, "delivered");
@@ -750,18 +1154,20 @@ export class Session {
   roomDecisions(agentId: string, opts: { afterId?: number; limit: number; workstreamId?: string }) {
     const mine = opts.workstreamId ? [opts.workstreamId] : this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").map((w) => w.id);
     const relevant = (e: JamEvent) => e.authorType !== "agent" && (!mine.length || !e.workstreamId || mine.includes(e.workstreamId));
-    const out: JamEvent[] = [];
+    // After a cursor (what an agent was last handed), read forward oldest first: a burst bigger than
+    // the limit arrives over successive handovers, and the cursor never passes one it didn't hand over.
     if (opts.afterId != null) {
-      // Not handed over yet: the oldest first, so a burst of more than `limit` is delivered a page at a time and none is skipped.
-      let afterId = opts.afterId;
-      while (out.length < opts.limit) {
-        const page = this.store.recentEvents({ kinds: ["decision"], afterId, limit: 100, oldestFirst: true });
-        out.push(...page.filter(relevant));
-        if (page.length < 100) break;
-        afterId = page[page.length - 1].id;
+      const next: JamEvent[] = [];
+      for (let after = opts.afterId; next.length < opts.limit; ) {
+        const page = this.store.eventsAfter(after, ["decision"], 200);
+        for (const e of page) if (relevant(e) && next.length < opts.limit) next.push(e);
+        if (page.length < 200) break;
+        after = page[page.length - 1].id;
       }
-      return out.slice(0, opts.limit);
+      return next;
     }
+    // The latest: page back until enough are relevant, so other workstreams' decisions can't crowd one out.
+    const out: JamEvent[] = [];
     // The newest that matter: page back until enough are relevant, so other workstreams' can't crowd one out.
     let beforeId: number | undefined;
     while (out.length < opts.limit) {
@@ -791,23 +1197,30 @@ export class Session {
       return ev;
     }
     if (to !== "all" && !target) throw new Error(`No agent named ${to}. Call jam_agents to see who is here.`);
+    // A long note to everyone is stored once; each agent's inbox gets the pointer.
+    const short = target ? { text } : this.shelve(from, text);
     const ev = this.store.addEvent({
       kind: "message",
       authorType: "agent",
       authorId: from.id,
       authorName: from.name,
-      text,
+      text: short.text,
       relevance: "work",
-      data: { to: target?.id ?? "all", toName: target?.name ?? "everyone", ...data },
+      data: { to: target?.id ?? "all", toName: target?.name ?? "everyone", ...data, ...(short.documentId ? { documentId: short.documentId } : {}) },
     });
     if (target) this.wake(target.id);
-    else for (const a of this.store.all("agents")) if (a.id !== from.id) this.wake(a.id);
+    else for (const a of this.store.all("agents")) if (a.id !== from.id && !this.skipsBroadcasts(a)) this.wake(a.id);
     return ev;
   }
 
   // ---- agents asking each other ----
 
-  private asks = new Map<string, { resolve: (answer: string) => void; timer: ReturnType<typeof setTimeout> }>();
+  private asks = new Map<string, { resolve: (answer: string | null) => void; timer: ReturnType<typeof setTimeout>; from: string | null }>();
+
+  /** Ends the questions this agent is waiting on (it was removed, or its device disconnected): they return empty now. */
+  cancelAsks(fromId: string) {
+    for (const a of [...this.asks.values()]) if (a.from === fromId) a.resolve(null);
+  }
 
   /** An agent (or the brain, fromId null) asks another agent; resolves with the answer or null on timeout. */
   ask(fromId: string | null, to: string, question: string, waitMs: number, data: Record<string, any> = {}): { askId: string; answer: Promise<string | null> } {
@@ -827,7 +1240,7 @@ export class Session {
     this.wake(target.id);
     const answer = new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => (this.asks.delete(askId), resolve(null)), waitMs);
-      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer });
+      this.asks.set(askId, { resolve: (a) => (clearTimeout(timer), this.asks.delete(askId), resolve(a)), timer, from: fromId });
     });
     return { askId, answer };
   }
@@ -1236,6 +1649,18 @@ export function publicEvent(e: JamEvent): JamEvent {
   if (!e.data?.embedding) return e;
   const { embedding: _drop, ...data } = e.data;
   return { ...e, data };
+}
+
+/** An agent as the room sees it: its chat id is a transport handle (Claude Code's session id, an MCP session), never shown. */
+export function publicAgent(a: Agent): Agent {
+  if (!a.chatId) return a;
+  const { chatId: _drop, ...rest } = a;
+  return rest;
+}
+
+/** A folder as a person would say it: the home folder is ~. */
+export function tildePath(p: string) {
+  return p.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/, "~").replace(/^[A-Za-z]:\\Users\\[^\\]+/, "~");
 }
 
 /** Compares paths the way macOS resolves them: /private/tmp is /tmp, ~ is home, no trailing slash. */

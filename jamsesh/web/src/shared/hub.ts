@@ -30,6 +30,11 @@ interface Snapshot {
   /** Bumps on every (re)connect, so views can refetch what the socket doesn't carry. */
   epoch: number;
   toasts: Toast[];
+  /** Feed lines the hub deleted (an agent removed with its messages), newest last. All of them, never
+   * capped: a window that already showed a line must be able to forget it, however big the purge. */
+  removed: number[];
+  /** Bumps when the list of removed chats changes anywhere in the room. */
+  removedChatsRev: number;
   thinking: string | null;
   levels: Record<string, number>;
   speaking: string | null;
@@ -48,7 +53,7 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 }
 
 class HubClient {
-  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], thinking: null, levels: {}, speaking: null, clockOffset: 0 };
+  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], removedChatsRev: 0, thinking: null, levels: {}, speaking: null, clockOffset: 0 };
   private listeners = new Set<() => void>();
   private eventListeners = new Set<(e: JamEvent) => void>();
   private gapListeners = new Set<() => void>();
@@ -156,6 +161,8 @@ class HubClient {
       this.missed = 0;
       this.touch();
       this.lastRecv = Date.now();
+      // Whatever HTTP asked before this connection is older than the state it is about to send.
+      this.taken = ++this.seq;
       this.set({ epoch: this.snap.epoch + 1 });
       this.status("connected");
       this.startHeartbeat();
@@ -287,25 +294,33 @@ class HubClient {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
 
+  /** Every state source takes the next number: an HTTP request, a new connection, and every socket message that can change what is held (a state, or any patch or event once there is a state). An HTTP answer is applied only if nothing has been applied since its request started, so a late answer never overwrites newer room updates. */
+  private seq = 0;
+  private taken = 0;
+
   /** Authoritative state over HTTP (fallback when the socket's own state message is missing). */
   async refreshState() {
+    const n = ++this.seq;
     const before = this.snap.state;
     const epoch = this.snap.epoch;
     const fetched = await api<HubState>("/state");
     // Any socket message that arrived while this was in flight made newer state, and a reconnect changes the epoch: either way an older answer must not overwrite it.
-    if (this.snap.state === before && this.snap.epoch === epoch) this.adopt(fetched);
+    if (n < this.taken || this.snap.state !== before || this.snap.epoch !== epoch) return;
+    this.taken = n;
+    this.adopt(fetched);
   }
 
-  /** The one way a whole state replaces the old (socket message or HTTP fallback): events newer than the old state's newest are announced, so lines that came in while this client was away from the wire still reach listeners (only those the snapshot still holds). */
+  /** The one way a whole state replaces the old (socket message or HTTP fallback): events newer than the old state's newest are announced, so lines that came in while this client was away from the wire still reach listeners (only those the snapshot still holds). Another room (this window outlived a relay restart into a new one): its purge ids and live indicators mean nothing here, and nothing is announced. */
   private adopt(state: HubState) {
     const old = this.snap.state;
-    if (old) {
+    const sameRoom = !old || old.session?.roomId === state.session?.roomId;
+    if (old && sameRoom) {
       const known = Math.max(0, ...old.events.map((e) => e.id));
       const oldest = Math.min(Infinity, ...state.events.map((e) => e.id));
       if (known > 0 && oldest > known + 1) for (const fn of this.gapListeners) fn();
       for (const e of [...state.events].sort((a, b) => a.id - b.id)) if (e.id > known) for (const fn of this.eventListeners) fn(e);
     }
-    this.set({ state });
+    this.set(sameRoom ? { state } : { state, removed: [], thinking: null, speaking: null, levels: {}, toasts: [], clockSynced: false, clockOffset: 0 });
   }
 
   /** Host time now, for stamping audio. */
@@ -315,6 +330,7 @@ class HubClient {
 
   private handle(m: BusMessage | { type: "pong"; t: number; now: number }) {
     const s = this.snap.state;
+    if (m.type === "state" || (m.type !== "pong" && s)) this.taken = ++this.seq;
     switch (m.type) {
       case "pong": {
         const t1 = Date.now();
@@ -337,6 +353,14 @@ class HubClient {
         if (i < 0) for (const fn of this.eventListeners) fn(m.event);
         const events = i >= 0 ? s.events.map((e) => (e.id === m.event.id ? m.event : e)) : [...s.events, m.event].slice(-400);
         return this.set({ state: { ...s, events } });
+      }
+      case "removed-chats":
+        return this.set({ removedChatsRev: this.snap.removedChatsRev + 1 });
+      case "events-removed": {
+        const gone = new Set(m.ids);
+        this.set({ removed: [...this.snap.removed, ...m.ids] });
+        if (s) this.set({ state: { ...s, events: s.events.filter((e) => !gone.has(e.id)) } });
+        return;
       }
       case "utterance": {
         if (!s) return;
@@ -378,6 +402,9 @@ class HubClient {
   }
 }
 
+/** What the Removed chats list depends on: the room, the connection (a reconnect may have missed a broadcast), and the list's own revision. */
+export const removedChatsSource = (s: Pick<Snapshot, "state" | "epoch" | "removedChatsRev">) => `${s.state?.session?.roomId ?? ""}|${s.epoch}|${s.removedChatsRev}`;
+
 export const hub = new HubClient();
 
 export function useHub() {
@@ -387,7 +414,7 @@ export function useHub() {
 /** Calls that must never wait in the outbox: they only make sense live. */
 // Not worth replaying later, or unsafe to: approvals must be live, and a screen size is only worth
 // reporting now.
-const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
+const NEVER_QUEUE = /^\/(audio|pair|invite|hooks\/|agents\/|removed-chats|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {

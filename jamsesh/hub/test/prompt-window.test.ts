@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hub } from "../src/hub";
+import { hooksOf } from "./hooks";
 import { quietRoom } from "../src/brain/speech";
 import { cleanTranscript } from "../src/audio/transcribe";
 import type { Utterance } from "../src/types";
@@ -102,11 +103,11 @@ test("whisper noise is still cleaned", () => {
 test("onPrompt drops the harness's own injected text", () => {
   const { hub, s } = room();
   const { agent } = s.registerAgent({ ownerName: "Maya", harness: "claude-code", repo: "r", machine: "host" });
-  expect(hub.onPrompt({ agentId: agent.id, prompt: "fix the nav" }, "127.0.0.1")).toBeDefined();
+  expect(hooksOf(hub).prompt(agent, { prompt: "fix the nav" })).toBeDefined();
   const before = s.store.recentEvents({ kinds: ["prompt"], limit: 50 }).length;
   expect(before).toBe(1);
   for (const p of ["<task-notification>report /Users/x/y</task-notification>", "  \n<system-reminder>x</system-reminder>", "<bash-stdout>ok</bash-stdout>"]) {
-    expect(hub.onPrompt({ agentId: agent.id, prompt: p }, "127.0.0.1")).toEqual({});
+    expect(hooksOf(hub).prompt(agent, { prompt: p })).toEqual({});
   }
   expect(s.store.recentEvents({ kinds: ["prompt"], limit: 50 }).length).toBe(before);
   hub.stop();

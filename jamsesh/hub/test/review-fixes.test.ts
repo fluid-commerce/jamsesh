@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { bus } from "../src/bus";
 import { AGENT_TOOLS, Brain, nameForms } from "../src/brain/brain";
 import { Hub } from "../src/hub";
+import { hooksOf } from "./hooks";
 import { startHttp } from "../src/http";
 import { cleanNames } from "../src/names";
 import { Session } from "../src/session";
@@ -171,12 +172,13 @@ test("an agent's decisions mark moves to the last decision it was handed", () =>
   const add = (text: string, workstreamId: string | null) => s.store.addEvent({ kind: "decision", authorType: "brain", authorName: "Room decision", text, workstreamId, relevance: "work", data: {} });
   const first = add("Nav goes in a sidebar", mine.id);
   add("Checkout is one page", theirs.id);
-  const out = JSON.stringify(h.onPrompt({ agentId: nav.id, prompt: "hi" }, "127.0.0.1"));
+  const out = JSON.stringify(hooksOf(h).prompt(nav, { prompt: "hi" }));
   expect(out).toContain("sidebar");
   expect(out).not.toContain("Checkout");
-  // Other workstreams' decisions are skipped for good, and the mark follows what was handed over.
+  // Other workstreams' decisions are skipped for good, and the mark follows what was handed over
+  // once the hook says it passed it on (the next call carries that).
+  expect(JSON.stringify(hooksOf(h).prompt(nav, { prompt: "again" }))).not.toContain("sidebar");
   const mark = s.store.setting<number>(`decisionsSeen:${nav.id}`, 0);
   expect(mark).toBeGreaterThanOrEqual(first.id);
-  expect(JSON.stringify(h.onPrompt({ agentId: nav.id, prompt: "again" }, "127.0.0.1"))).not.toContain("sidebar");
   h.devproxy.stop();
 });

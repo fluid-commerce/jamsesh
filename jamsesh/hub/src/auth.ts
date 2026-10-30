@@ -167,6 +167,12 @@ export class Auth {
     return d;
   }
 
+  /** A live (not revoked) paired device by id. */
+  get(id: string | null | undefined): PairedDevice | null {
+    const d = id ? this.devices.get(id) : undefined;
+    return d && !d.revoked ? d : null;
+  }
+
   /** Whether a credential id is still paired (not revoked or forgotten). */
   live(id: string) {
     const d = this.devices.get(id);

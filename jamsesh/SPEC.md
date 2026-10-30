@@ -263,7 +263,64 @@ second HTTPS listener serves the same routes on `4443`, mapped to `443` on the r
 - A successful pairing issues a device token (`jst_` plus 32 random bytes). The host stores only
   its SHA-256 hash. Browsers keep it in an HttpOnly, SameSite=Lax cookie (Secure over HTTPS, and
   scoped to the DuckDNS domain so dev-server subdomains open signed in). The Mac app keeps it in
-  the Keychain. Agents keep it in `~/.jamsesh/client.env` (mode 600) or rely on the app's relay.
+  the Keychain. Agents keep it in files under `~/.jamsesh` (mode 600) or rely on the app's relay. A
+  token is never in a command's text, arguments or environment (shell history and process lists show
+  those): the pairing guide has the agent write it to `~/.jamsesh/auth.header` with its file tool,
+  `curl` reads that file (`-H @~/.jamsesh/auth.header`), the setup script reaches `bash` through a pipe,
+  Codex's config is written from the file, and Claude Code gets it from a `headersHelper` script that
+  reads `~/.jamsesh/mcp-headers.json`. The hook is downloaded to a temporary file and checked (a bash
+  script that parses) before it replaces the installed one, so a failed download leaves the working
+  hook in place. `claude mcp` has no replace, so the old `jamsesh` entry is read first, then removed
+  and the new one added.
+  The setup makes `~/.jamsesh` mode 700 and replaces each
+  credential file in one step with a mode 600 one (so a looser old mode never carries over), keeps
+  `~/.claude/settings.json`'s own mode, quotes the hook path (homes with spaces work), and edits
+  Codex's `config.toml` only between its own marker comments (`# >>> jamsesh` / `# <<< jamsesh`), by
+  lines, and then checks the result with Bun's TOML parser before writing: the edited file must parse,
+  hold exactly one `mcp_servers.jamsesh` table with JamSesh's settings, and equal the original
+  everywhere else. The one table an earlier JamSesh wrote (its exact two headers and keys, carrying the credential and
+  host that install stored) is moved into the markers; any other `mcp_servers.jamsesh` table, a file that is not valid TOML or a broken marker
+  pair leaves the file untouched with a message. The parser is the one on PATH or in the usual places,
+  or the JamSesh app's own hub run as Bun (`JAMSESH_BUN`); with none, Codex is left as it is and the
+  person is told what to add by hand. The file is re-read just before the write and setup aborts if
+  it changed since it was read. Reinstalling
+  removes only JamSesh's own hook commands (its `~/.jamsesh/hook.sh` with one of its verbs), keeping a
+  person's hooks even in the same group.
+- **Every file the setup writes goes through one primitive, `safe_write`.** It resolves a symlink to
+  its target (one that leads nowhere too), so the link stays a link; refuses a target outside the
+  person's home, a folder in the file's place, and any instruction file (`CLAUDE.md`, `AGENTS.md`, by
+  name or by being the same file as `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`), however a link
+  points there; writes a new temporary file beside the target (`mktemp`, created exclusively, mode 600),
+  gives it its mode and moves it into place. Downloads and generated files go first to the run's private
+  saved folder and are checked there. The only other writes are that scratch folder, the lock file
+  (refused if it is a link) and the one key-level edit of `~/.claude.json` below. Where a write really
+  lands (every link and `..` resolved) is checked against the home folder before `~/.jamsesh` is
+  chmodded or its lock opened, and the resolved `~/.claude.json` passes the same guard before the Claude
+  CLI runs, since the CLI writes that file itself. After the CLI's `add-json`, the file's user-scope
+  entry is read back and must hold what setup registered; an entry the CLI wrote before failing counts as
+  setup's, so the rollback puts the earlier one back.
+- **Setup is one transaction, kept as a journal**, and only one runs at a time: an `flock` on
+  `~/.jamsesh/setup.lock` held as descriptor 9 for the whole run (the kernel drops it however the run
+  ends; a second run waits `JAMSESH_LOCK_WAIT` seconds, default 10, then says another setup is
+  running). Before its first write to a file, `safe_write` records the file's earlier content (or that
+  it was absent) and, after each write, the hash of what it wrote. A file setup never wrote is never in
+  the journal, so a rollback never touches it. On any failure before the last step, each journaled
+  file is put back (or removed, if it was absent) only if it still holds exactly what setup wrote; one
+  someone else changed meanwhile is left as it is and listed. The lock keeps out another setup, not an
+  editor: the moment between the last hash check and the move can't be closed without an atomic
+  compare-and-swap, which plain file operations don't have.
+- **Claude Code's `~/.claude.json` is not a file setup owns.** Only its user-scope
+  `mcpServers.jamsesh` key is read, compared and put back, key by key: the rest of the file is carried
+  over as it is at that moment, and the replacement is retried if the file changed between reading and
+  replacing it. The result is read back from that key in the file, never from `claude mcp get` (whose
+  exit status an entry of the same name in another scope can satisfy). The entry is put back only if it
+  is absent or still the one setup registered; one set by someone else meanwhile is left and reported.
+  The saved entry never appears in a command's arguments. Whatever the outcome, the message says it
+  plainly: put back, none registered, changed by someone else, or couldn't be put back (the saved
+  copies are then kept, their folder named, and the setup exits non-zero). The MCP server's instructions say to join only when the person asks, in the launcher skill's
+  words. The address in the setup script comes from `X-Forwarded-Host` only when a relay or
+  tunnel on the host sent it and it is plainly a host and port; every value in the script is one
+  single-quoted shell word.
 - Each paired device has a kind: **browser** (a person's window, browser, or Mac app) or
   **agent**. Kinds decide what a device may approve (see [14](#14-security)).
 - The big screen shows a toast when a device pairs ("A laptop connected", "An agent connected").
@@ -311,13 +368,90 @@ The setup installs, for each harness found:
 
 | Harness | What's installed |
 |---|---|
-| Both | `~/.jamsesh/client.env` (hub, token, name, `JAMSESH_ACTIVE`), `~/.jamsesh/hook.sh` |
-| Claude Code | User-scope MCP server `jamsesh` (HTTP, bearer token); the skill at `~/.claude/skills/jamsesh/SKILL.md`; the `/jamsesh [focus]` command; `UserPromptSubmit` and `Stop` hooks (5-second timeout) |
-| Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the prompt `~/.codex/prompts/jamsesh.md`; a marked block in `~/.codex/AGENTS.md` so "connect to jamsesh" starts the prompt; prompt-capture and turn-end hooks equivalent to Claude Code's |
+| Both | `~/.jamsesh/client.env` (hub, name, `JAMSESH_ACTIVE`; no token, which lives only in the mode-600 `auth.header`; every value one single-quoted shell word, so sourcing it runs nothing, and the hook reads it as data without sourcing it), `~/.jamsesh/auth.header` (the credential as a header file for `curl`), `~/.jamsesh/hook.sh` |
+| Claude Code | User-scope MCP server `jamsesh` (HTTP; its credential comes from the `headersHelper` `~/.jamsesh/mcp-headers.sh`, so it is in neither `claude`'s arguments nor its config); a small skill at `~/.claude/skills/jamsesh/SKILL.md` (finds the running host, reads the instructions it serves, says in one line if none is running); the `/jamsesh [focus]` command; `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks (15-second timeout), plus a background `Stop` listener (`asyncRewake`, 3300-second timeout; see 6.3). All of them do nothing for a chat that hasn't joined |
+| Codex | `[mcp_servers.jamsesh]` in `~/.codex/config.toml` (`tool_timeout_sec = 600`, tools auto-approved, bearer header); the same small skill at `~/.codex/skills/jamsesh/SKILL.md`; the prompt `~/.codex/prompts/jamsesh.md` (the full instructions, for `/jamsesh`); no hooks (Codex has none here) |
 
-`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. It posts to the hub with
-a 3-second limit; prompts that can't be delivered go to `~/.jamsesh/outbox.jsonl` and are replayed
-on the next successful call.
+**Only chats you connect join the room.** JamSesh never writes to `CLAUDE.md` or `AGENTS.md`, and the
+setup only tells you where the `<!-- jamsesh:start -->` block an earlier install wrote is (file and
+line numbers, on stderr) and never edits the file: replacing a file you may be saving in your editor
+can't be made safe with plain file operations, so you delete those lines yourself. Only the exact text
+of one of the two blocks earlier installs wrote counts (an edited or indented block, or anything else
+between the markers, is yours and isn't mentioned). Nothing JamSesh installs joins by itself (until an earlier install's block is deleted, that block still can): an agent joins when its person says "connect to jamsesh" (or runs
+`/jamsesh`) and calls `jam_join`. Each chat is its own agent: Claude Code's hooks carry its session id,
+which the hook hands the agent when the person asks to connect (it goes to `jam_join` as `chat`). A
+harness without hooks (Codex) has no chat id of its own and gets a new MCP session on every reconnect
+or hub restart, so its chat is its folder on its machine (keyed `<harness>:<sha256 of harness:machine:cwd>`, so long paths never collide; when the store opens, records and removals under the older readable id are re-keyed once from their stored harness, machine and real folder, and only current keys are compared afterwards, with the harness taken from the client name at `initialize`, never from a tool argument, and the folder an absolute normalized path, its real path on the host's own file system; a blank or relative folder is refused and a supplied `chat` is ignored): a reconnect
+resumes the same agent with its workstreams and tasks, and a removal sticks across reconnects and
+restarts. Two Codex chats open in one folder at once are one agent. The hooks ask the host whether the chat has joined
+(`POST /api/hooks/joined`, session id only) and do nothing, and send nothing, for a chat that hasn't;
+a second chat in the same folder is not the joined agent. A chat resumes only its own record, from
+the same machine: a quiet or offline record is never inherited by a different chat id or another
+machine. Only a record from before chats had ids migrates to the chat that comes back. When an agent joins, the feed shows
+"Jonathan's Codex joined from ~/fluid" with **Remove** (`POST /api/agents/<id>/remove`, people's windows only),
+which takes the agent out and, with `purge`, deletes the feed lines it caused.
+
+**A removed chat stays out, and so does its folder.** While a removal is outstanding, every new join from that machine and
+folder (any chat id, since an id is the chat's own word) is refused with "A chat in this folder was removed from the
+room. Ask someone to choose Settings > Removed chats > Allow again." Its `jam_join` is refused (by its chat id, which for Codex is its
+folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
+Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`; refused to any agent credential, so for people's windows and the host's own loopback, which is the host's person). Nothing
+an agent or its hook sends clears a removal: a removed chat that types "connect to jamsesh" is told by its
+hook "This chat was removed from the room. Ask someone to choose Settings > Removed chats > Allow
+again." (`/api/hooks/joined` answers `removed: true` and changes nothing). Removals are kept in the session, so a hub restart doesn't
+undo them, and they never expire on their own. A join that doesn't name its chat (a Claude Code
+`jam_join` without `chat`, say on a fresh MCP session) can't show it isn't the removed chat, so it
+is also refused from the machine, folder and harness of a removed chat until someone lets that chat
+back in.
+
+**Hooks belong to one machine.** The hook routes (`/api/hooks/*`) take only an agent's credential (a
+person's window is refused), or the host's own loopback, which stands for the host's agents (the
+app's relay hands any process there that credential anyway; relayed requests never count as
+loopback). A hook reaches only a chat that joined from the machine its credential stands for, found
+by Claude Code's session id; another device naming that session id, or an agent id, reaches nothing,
+so it can't read or drain the chat's inbox or post prompts as its person. MCP sessions are bound the
+same way: a request for an existing session from another machine's credential, or from a different
+kind of credential, is answered "Session not found", and a chat id in `jam_join` only resumes a record
+from the same machine. Transport ids (`chatId`: a Claude Code session id, `mcp:<session>`) never
+appear in `/api/state` or its live patches.
+
+**The trust boundary is the machine, not the chat.** Every chat on one computer runs as the same
+person, shares that computer's agents credential (or the app's relay), and can read `~/.jamsesh`, so
+a per-chat secret would sit in a file every other chat can read. JamSesh therefore separates
+machines, not chats on one machine: a process on Chey's Mac can name another of Chey's chats' session
+ids and read or acknowledge that chat's room items, post a prompt as Chey for it, or claim
+"connect to jamsesh" for a chat Chey's Mac had removed. It cannot do any of that for a chat on another
+Mac, and it cannot act as a person (person-only routes need a person's window). Chats on one machine
+are told apart for routing (each its own agent and inbox), not as a security boundary. A removed
+chat is let back in only by a person choosing Allow again.
+
+**Removing an agent ends everything waiting on it.** Its listener, any `jam_wait`, and any `jam_ask` it is waiting on end at once
+with nothing (a wait that ends checks the agent is still in the room), handovers it hadn't
+acknowledged are dropped, and its share of each open task is cancelled, with one feed line naming the
+tasks so the room can hand them to someone else; other targets of a shared task carry on.
+
+`hook.sh` does nothing unless `client.env` exists and `JAMSESH_ACTIVE=1`. Before it sends anything it
+asks the host whether the chat has joined, every time (the question carries the session id only),
+so a chat the room removed, or a host this Mac has switched away from, gets nothing more. Hook calls
+have a 4-second limit (the joined question 3). Each prompt carries an id (`x-jam-prompt-id`), and the
+hub records a prompt once per id, so a prompt whose answer was lost and is then replayed shows once.
+The hub keeps the ids it has seen for 20 minutes, longer than a queued prompt lives (ten), however
+many prompts arrive in between.
+
+**Prompts queued while the host is away belong to one room.** The joined answer carries the room's
+id (`room`, one per session), and the chat's marker (`~/.jamsesh/chats/<session id>`) keeps the room
+it last joined. When the host is unreachable, that chat's prompts are queued in
+`~/.jamsesh/outbox/`, one file each (written whole, then moved in, so hooks running at once never
+wait on each other or lose a prompt; the newest 50 are kept), named for when, the prompt id and the
+room. If a prompt can't be queued at all, the hook says so and fails. A later hook replays the
+outbox in the background, after printing its own answer, so a slow host never keeps a hook past
+its time limit: one replay at a time (a lock folder, cleared after a minute if a replay was killed;
+queueing never takes it), at most 45 seconds per run, each entry after a fresh joined check. An entry
+goes only to the room it was queued for: if the host's room is a different one (this Mac switched
+hosts), it isn't sent. Every hook call carries the room it is meant for (`x-jam-room`), and the hub
+refuses one meant for another room with 409 before recording, reading or acknowledging anything,
+so a switch between the room check and the send leaves the prompt queued. It is removed once the host has it, when it is ten minutes old, or when its
+chat is no longer in its room. An older `outbox.jsonl` (no room) is dropped.
 
 ### 4.6 Remote access
 
@@ -434,9 +568,16 @@ person [B4, B50].
   person's name, and its person's title [A13, A15]. The new name shows everywhere, including the
   agent's cursor on the canvas. The briefing asks the agent to set its person's title when it's
   missing.
-- `jam_join` returns a briefing: welcome, canvas status, upload instructions, the roster, the
-  agent's context (see [7.4](#74-what-agents-read)), its inbox, and the full skill on first join
-  [B8].
+- `jam_join` returns a short briefing, about 1,000 tokens on a busy session (a test holds it under
+  1,500): welcome, canvas status, upload instructions, a compact roster (name, platform, repo,
+  status; `jam_agents` has the stacks), a session brief clipped to 600 characters, the agent's
+  workstream brief, its open directives (five, each clipped), how many inbox items wait, and the
+  tools that fetch more (`jam_context`, `jam_search`, `jam_artifacts`, `jam_directives`). On first
+  join it adds five working rules and where the full skill is (the `jamsesh` prompt, `/skill.md`).
+  It used to carry the whole context and the skill, about 8,000 tokens.
+- A message to `all`, or an update, longer than 1,200 characters is stored once as a document. The
+  feed and other agents' inboxes get its opening and a pointer; `jam_artifacts` with `id` returns the
+  whole text. Direct messages are never cut.
 - An agent shows as offline after 20 minutes without activity.
 
 ### 6.2 Tools
@@ -457,7 +598,7 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_message` | Message another agent by name or id, or `all` [A27a]. |
 | `jam_ask` | Ask another agent a question and wait for the answer (default 120 seconds, 5 to 300) [A27b]. |
 | `jam_answer` | Answer a question by its id. |
-| `jam_repo_card` | Describe the repository: stack, design system, components, branch, recent changes, notes. |
+| `jam_repo_card` | Describe the repository: stack, design system, components, branch, recent changes, notes; optionally the repository, platform, and focus when they changed (the tile follows). |
 | `jam_agents` | The roster: people (name, title, weight) and agents (platform, repo, status, card, focus, workstreams). |
 | `jam_devserver` | Put a dev server on the host (see [6.6](#66-dev-servers-on-the-host)) [B18]. |
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
@@ -489,15 +630,62 @@ share, rename itself, or save behavior notes.
 A **directive** is a routed instruction with target agents, a mode (`explore`, `implement`,
 `coordinate`, or `answer`), text, a rationale, an optional workstream, and per-agent progress
 (`pending`, `delivered`, `acked`, `done`, `cancelled`). Its overall status follows the slowest
-target. Directives reach agents four ways [B14, B16]:
+target. Agents work and listen at the same time [B14, B16]: a busy agent hears the room between
+steps, and an idle agent goes back to its person and is woken when the room has something for it.
 
-1. **Prompt hook.** When a person prompts their own agent, the hook delivers new directives,
-   messages, questions (to answer first), and decisions made since the agent last looked, as added
-   context.
-2. **Turn-end hook.** When an agent's turn ends with work waiting, the hook keeps it working on
-   that work. Otherwise the agent goes idle.
-3. **`jam_wait`.** An idle agent blocks on it and wakes on a directive, message, or question.
-4. **`jam_inbox`.** Agents check it between steps.
+**Claude Code** (hooks, installed by the setup; `hook.sh` is the hooks' one script):
+
+1. **Between steps.** `PostToolUse` posts to `/api/hooks/tool`. New directives, messages, questions
+   (to answer first), and room decisions come back as added context, so a busy agent folds them
+   into the work it is doing. The agent's own `jam_inbox`, `jam_wait`, and `jam_ask` calls are
+   skipped (they already carry their items).
+2. **Each prompt.** `UserPromptSubmit` delivers the same items alongside the person's prompt, and
+   ends any waiting listener (the person is talking to the agent now).
+3. **Turn end.** `Stop` (`/api/hooks/stop`) keeps the agent working if work is waiting. Otherwise
+   the agent goes idle and **stops, back to its person**: it is no longer told to sit in `jam_wait`
+   (unless its install predates the listener, see below).
+4. **Wake-up.** A second `Stop` hook, `hook.sh listen`, runs in the background (`asyncRewake`).
+   It calls `/api/hooks/listen`, which the hub holds open (up to about 200 seconds, which the
+   server's idle limit allows) until the room has something for that agent; the script calls again
+   until about 50 minutes (3000 seconds) pass (and keeps asking through a host that is down meanwhile); at that limit, with the chat still in the room, it exits 2 with "keep listening: call jam_wait", so the agent is woken into the `jam_wait` fallback and stays reachable; the hook's own `timeout` is 3300 seconds, since Claude Code enforces it on async hooks too (its default is 600). With news it prints it and exits with code 2, which wakes the agent
+   with that text as its next turn (the script prints the items to stderr, which is what Claude sees on a rewake). Async hooks are killed when a non-interactive `claude -p` run ends, so the wake-up works in interactive chats only. Verified on 2026-10-29 in a real interactive Claude Code 2.1.308 chat: an idle chat woke when a background `Stop` hook exited 2. The full JamSesh path (installed hooks, a hub, a real room) still needs a real room. A newer listener for the same agent, or the person's next
+   prompt, ends the old one empty; an agent that is itself in `jam_wait` or `jam_ask` is left to
+   get its items there.
+
+**Codex** has no hooks. Its agent keeps the older loop: check `jam_inbox` between steps; when idle,
+call `jam_wait` and call it again whenever it returns empty. To help a busy Codex agent hear the
+room, every JamSesh tool result it gets (except `jam_join`, `jam_inbox`, `jam_wait`, `jam_ask`, and
+the canvas tools) ends with "You have new items from the room: call jam_inbox." when something is
+waiting. A Codex agent that makes no JamSesh calls and no `jam_wait` hears nothing until its person
+prompts it; there is nothing else the host can do for it. The notice is not added for a Claude Code
+agent whose hooks have reached the hub in the last five minutes, since the hooks hand the items
+over themselves.
+
+**Messages are read in order from a per-agent cursor.** The inbox reads forward from the last
+message the agent was handed, keeps only those for it (to it, or to everyone), and hands over the
+next 50; messages to other agents in between never push an unread one out, and a burst of more
+than 50 arrives over successive calls without loss. When a device is disconnected, its agents'
+open listener, `jam_wait` and `jam_ask` end at once and check the credential before handing anything over.
+
+**Delivery is at least once, and never twice once acknowledged.** A hook's answer can be lost (a
+timeout, a dropped connection), so what the hooks and the listener hand over carries a delivery id
+(the `x-jam-delivery` header). `hook.sh` records the id under `~/.jamsesh/acks/<session>` once it has
+passed the text on, and sends it back with the chat's next hook call (`x-jam-ack`); only then are the
+items marked delivered (and the message and decision marks moved). While a handover waits for its
+acknowledgement nothing more is handed over; after 60 seconds everything unacknowledged is offered
+again under a new id, and a listener that calls again without acknowledging the last listener's
+answer gets it again at once. `jam_inbox` and `jam_wait` answer the agent directly and mark what they
+return, including anything a lost hook answer held. Room decisions ride the same deliveries, read
+forward from the agent's decision cursor ten at a time, so a bigger burst arrives over successive
+handovers and the cursor only passes what was handed over; `Stop` doesn't keep an agent working for
+decisions alone. Room-wide messages (to everyone) skip the
+sender and observers that opted out (6.3b).
+
+An install made before this version has no `PostToolUse` or listener hook. The hub remembers per
+agent whether either newer hook has ever reached it; until one has, `Stop` keeps the old behaviour
+and tells an idle Claude Code agent to call `jam_wait` (once per stop). **Connect my agents** (or
+`/agent/setup.sh`) installs the new hooks. A brand-new install's very first stop, before any tool
+call, gets the old nudge once.
 
 Each directive carries a per-mode hint: explore (variants on the canvas, render and check each),
 implement (change the code, run the dev server, compare with the mockup, ship), coordinate
@@ -517,10 +705,63 @@ who else the target talked to, so an older record without counterparts can only 
 People steer agents that misread something [B17] by prompting their own agent, by telling the
 room brain, or by sending a directive from the client.
 
+**Open tasks age.** An open `explore` or `implement` directive with no ack or report from its agent
+for 20 minutes (counted from delivery) is asked about: the agent gets a message from JamSesh to
+ack it, report where it is, or say it's stuck. An answer starts the clock again. If nothing moves
+10 minutes after the ask, or the agent is offline, the room sees "<agent> hasn't reported on ...
+Reassign it from the agent's tile" (an event and a toast), and the tile shows a **Reassign**
+button. Reassigning (`POST /api/directives/<id>/reassign`, people only) cancels the task for its
+agent and sends it to the best-matching free worker, saying who it came from. A named recipient
+(`to`) gets it or the request is refused with why (no such agent, an observer, offline, or already
+on the task); it never falls back to someone else.
+The hub checks every minute (`Session.tick`), each target of a task on its own: two targets going
+quiet in the same minute each get one nudge and, later, one offer.
+
+A finished task stays finished: a late ack or report never reopens a directive that is done or
+cancelled, for one agent or as a whole. A person ending a whole task (`POST /api/directives/<id>`
+with `done` or `cancelled`) ends it for every target still on it. A product directive (anything but
+`answer` or `note`) whose targets are all observers is refused, since nobody would do it: no task
+is saved, the API answers 400, and the brain's tools (create, pair, parity) pick working agents only
+and say so instead of reporting it sent.
+
 A directive sent to an agent that's offline (or silent for 20 minutes) shows a notice that it gets
 the work when it's back. If an explore or implement directive is still untouched after 45 seconds
 and its agent isn't waiting for work, the room sees "<agent> hasn't picked this up yet" with what
 its person can do: type anything to it, or tell it to wait for the room.
+
+### 6.3a What an agent's tile says
+
+- **Status text.** Working shows what the agent is on ("Working on: <the prompt>" or its latest
+  update). A `blocked` or `question` report stays on the tile (status blocked) through its own tool
+  hook and the end of the turn, until the agent uses another tool or reports again. When an agent finishes (a `done` or `shipped` update, or a turn that ends) the tile reads
+  "Done: <summary>" until its next task starts: its person prompting it, or an ack, claim, or
+  progress update.
+- **Repository, platform, focus.** `jam_repo_card` takes optional `repo`, `platform`, and `focus`;
+  whenever they're sent the agent's tile follows, and a changed repository posts "<agent> moved
+  to <repo>". Fields left out stay as they were.
+- **Open tasks** show on the tile with their age (the live state carries every open task, not only
+  the newest 60 directives) ("35m Not picked up: ..." or "On it: ..."): any
+  offered for reassignment first, with its Reassign button (all of them, even past the tile's room),
+  then the oldest.
+- **Workstreams.** A workstream pauses when its owner goes offline (20 minutes quiet): the room sees
+  "<agent> went offline; <workstream> is paused", the tile shows "Paused while offline", and anyone
+  may take it. It is active again, with a line in the feed, when the owner comes back.
+- **Work nobody asked for.** When a Claude Code agent claims a workstream while it has no open task
+  and its person hasn't prompted it in the last 30 minutes, the room sees "<agent> started
+  <workstream> on its own; nobody asked for it" in the feed and as a toast. Codex agents are never
+  flagged this way: no prompts reach the hub for them, so it can't tell.
+
+### 6.3b Observers
+
+`jam_join` takes `role: "observer"` (default `worker`) and, for observers, `broadcasts: false`.
+An observer needs no repository or platform (its tile says "observer"). The brain never targets it
+with product work (`explore`, `implement`, `coordinate`: it's dropped from the targets, and the
+brain is told so); `answer` and `note` directives and direct messages still reach it. With
+`broadcasts: false`, room-wide messages (to everyone) don't reach it. Observers are left out of
+affinity routing and the brain's agent list (listed separately, as not to be given work). Joining
+again without `role` leaves the role as it was. An observer can't take a workstream: `jam_claim`
+refuses, and a `jam_update` with a `workstream` posts untagged. A worker's update that takes up a
+workstream for the first time is announced like a claim (as work nobody asked for, when it is).
 
 ### 6.4 Prompts as context
 
@@ -559,8 +800,15 @@ Agents run their dev servers bound to `0.0.0.0` (`vite --host 0.0.0.0`, `next de
 `expo start --lan`) and call `jam_devserver` [B18]. The hub opens a port on the host (from `5100`,
 skipping taken ports) that forwards raw TCP to the agent's machine, so HTTP, WebSockets, and hot
 reload work. The dev server then reads as **Live build** on the host for the rest of the session.
-Registrations survive hub restarts; the hub checks each target every 30 seconds and shows it as
-down when it doesn't answer; an agent can remove its own.
+Registrations survive hub restarts; an agent can remove its own.
+
+The skill tells every agent to share each dev server it starts. When an agent's update or message
+mentions a `localhost`, `127.0.0.1` or `0.0.0.0` address it hasn't shared, the tool result carries the
+exact step (once per agent and port). The hub checks each target every 30 seconds. One that stops
+answering shows a plain reason on its tile ("Chey's Context Gatherer stopped this build" when its
+agent has gone offline, otherwise "The build at port 5173 stopped responding") with a **Stopped**
+badge, and the agent gets an inbox message. If it answers again the tile recovers; after 5 minutes down
+the tile clears itself and the agent is told to call `jam_devserver` again.
 
 Dev-server ports are reachable only by paired devices and the host: requests through the host's
 HTTPS address go to `dev-<port>.<name>` and need a token, and the LAN ports refuse anyone who
@@ -572,7 +820,7 @@ build titled after its mockup with "(built)" is paired with it on screen.
 
 ### 6.7 The skill
 
-The hub serves the JamSesh skill (`/skill.md`, the `jamsesh` MCP prompt, and the `jam_join`
+The hub serves the small launcher skill (`/launcher.md`, installed on each computer) and the JamSesh skill (`/skill.md`, the `jamsesh` MCP prompt, and the `jam_join`
 briefing), with the host address filled in [B8]. It triggers on "connect to jamsesh", "join
 jamsesh", "join the session", `/jamsesh`, and mentions of the room, big screen, or shared canvas.
 It tells agents:

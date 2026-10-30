@@ -467,7 +467,7 @@ fn offer_agents(app: AppHandle) {
         }
         let handle = app.clone();
         app.dialog()
-            .message("Connect Claude Code and Codex on this Mac to JamSesh? After this, telling either one \"connect to jamsesh\" is all it takes, in any repository.")
+            .message("Connect Claude Code and Codex on this Mac to JamSesh? Nothing joins the room on its own: tell a chat \"connect to jamsesh\" and only that chat joins.")
             .title("Connect your agents")
             .buttons(MessageDialogButtons::OkCancelCustom("Connect".into(), "Not now".into()))
             .show(move |yes| {
@@ -547,15 +547,22 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
     if !status.is_success() || !script.starts_with("#!") {
         return Err("The host didn't hand out the setup. Connect this Mac again with a fresh code.".into());
     }
-    let mut child = tokio::process::Command::new("/bin/bash")
-        .arg("-s")
+    let mut cmd = tokio::process::Command::new("/bin/bash");
+    cmd.arg("-s")
         .env("PATH", host::path_env())
         .env("JAMSESH_NAME", &name)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(std::process::Stdio::piped());
+    // The setup checks Codex's TOML config with Bun's parser. The app's own hub is a Bun executable (it
+    // runs as Bun itself when told to), so a Mac without Bun installed still has one.
+    let resources = app.path().resource_dir().ok().map(|r| r.join("jamsesh"));
+    match host::runtime(resources.as_deref()) {
+        Ok(host::Runtime::Bundled { hub, .. }) => cmd.env("JAMSESH_BUN", hub),
+        Ok(host::Runtime::Checkout { bun, .. }) => cmd.env("JAMSESH_BUN", bun),
+        Err(_) => &mut cmd,
+    };
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         stdin.write_all(script.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -572,10 +579,100 @@ async fn set_up_agents(app: &AppHandle, state: &App) -> Result<String, String> {
             (false, true) => ("Codex on this Mac is", "it"),
             (false, false) => ("Your agents on this Mac are", "them"),
         };
-        Ok(format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in."))
+        let mut msg = format!("{agents} connected. Restart {them}, then say \"connect to jamsesh\" in each repository you're working in.");
+        let old = old_block_notices(&String::from_utf8_lossy(&out.stderr));
+        if !old.is_empty() {
+            msg.push_str(&format!("\n\nOne more step: an earlier JamSesh left instructions that can still make a chat join the room by itself. Delete them:\n{}", old.join("\n")));
+        }
+        Ok(msg)
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
-        Err(format!("Setup didn't finish: {}", err.lines().last().unwrap_or("unknown error")))
+        Err(format!("Setup didn't finish:\n{}", failure_lines(&err, &String::from_utf8_lossy(&out.stdout))))
+    }
+}
+
+/// What setup printed, for the dialog: the line it marked `ERROR:` (the root error, always kept), the last
+/// lines of stderr (what was put back, what was not, where the saved copies are) and the last lines of
+/// stdout. Each line is cut to a fixed length, so the root error survives however much follows it.
+fn failure_lines(stderr: &str, stdout: &str) -> String {
+    const TAIL_ERR: usize = 8;
+    const TAIL_OUT: usize = 3;
+    const LINE: usize = 300;
+    let cut = |l: &str| if l.chars().count() > LINE { format!("{}…", l.chars().take(LINE).collect::<String>()) } else { l.to_string() };
+    let nonblank = |t: &str| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(cut).collect::<Vec<_>>();
+    let err = nonblank(stderr);
+    let out = nonblank(stdout);
+    let Some(root) = err.iter().position(|l| l.starts_with("ERROR:")).or(if err.is_empty() { None } else { Some(0) }) else {
+        return if out.is_empty() { "unknown error".to_string() } else { out[out.len().saturating_sub(TAIL_OUT)..].join("\n") };
+    };
+    let tail_from = err.len().saturating_sub(TAIL_ERR).max(root + 1);
+    let mut shown = vec![err[root].clone()];
+    if tail_from > root + 1 {
+        shown.push("…".to_string());
+    }
+    shown.extend(err[tail_from..].iter().cloned());
+    if !out.is_empty() {
+        shown.push("Setup also printed:".to_string());
+        shown.extend(out[out.len().saturating_sub(TAIL_OUT)..].iter().cloned());
+    }
+    shown.join("\n")
+}
+
+/// Held while the agent setup runs; taking it fails if another run holds it.
+struct SetupGuard;
+static SETUP_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+impl SetupGuard {
+    fn take() -> Option<SetupGuard> {
+        (!SETUP_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst)).then_some(SetupGuard)
+    }
+}
+impl Drop for SetupGuard {
+    fn drop(&mut self) {
+        SETUP_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The setup's notices about the block an earlier JamSesh wrote into an instruction file (file, lines,
+/// what to delete), taken from its stderr. Any other stderr line is not shown.
+fn old_block_notices(stderr: &str) -> Vec<String> {
+    stderr.lines().filter(|l| l.starts_with("JamSesh: ") && l.contains(" still has the block an earlier JamSesh wrote")).map(str::to_string).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{failure_lines, old_block_notices};
+
+    #[test]
+    fn the_root_error_and_the_end_are_shown_whatever_comes_between() {
+        assert_eq!(failure_lines("", ""), "unknown error");
+        assert_eq!(failure_lines("a\n\nb\n", ""), "a\nb");
+        let mut lines = vec!["noise 0".to_string(), "ERROR: the root".to_string()];
+        lines.extend((0..30).map(|i| format!("line {i}")));
+        let shown = failure_lines(&lines.join("\n"), "ok one\nok two\nok three\nDone\n");
+        assert!(shown.starts_with("ERROR: the root\n…\nline 22"), "{shown}");
+        assert!(shown.contains("line 29\nSetup also printed:\nok two\nok three\nDone") && !shown.contains("noise 0") && !shown.contains("line 10"));
+        // One huge line can't push the root error out, and is cut itself.
+        let long = format!("ERROR: root\n{}\nlast", "x".repeat(5000));
+        let shown = failure_lines(&long, "");
+        assert!(shown.starts_with("ERROR: root\n") && shown.ends_with("last") && shown.chars().count() < 700);
+        // With no ERROR: line the first line stands in.
+        assert!(failure_lines("first\nsecond", "").starts_with("first"));
+    }
+
+    #[test]
+    fn only_one_setup_at_a_time() {
+        let first = super::SetupGuard::take();
+        assert!(first.is_some());
+        assert!(super::SetupGuard::take().is_none());
+        drop(first);
+        assert!(super::SetupGuard::take().is_some());
+    }
+
+    #[test]
+    fn keeps_only_the_old_block_notices() {
+        let err = "some warning\nJamSesh: /Users/a/.claude/CLAUDE.md still has the block an earlier JamSesh wrote (lines 4-9). Delete them.\nJamSesh: other\n";
+        assert_eq!(old_block_notices(err), vec!["JamSesh: /Users/a/.claude/CLAUDE.md still has the block an earlier JamSesh wrote (lines 4-9). Delete them."]);
+        assert!(old_block_notices("").is_empty());
     }
 }
 
@@ -740,12 +837,17 @@ fn on_menu(app: &AppHandle, id: &str) {
                 }
             }
             "agents" => {
-                let result = set_up_agents(&app, &state).await;
-                let (kind, title, text) = match result {
-                    Ok(t) => (MessageDialogKind::Info, "Agents connected", t),
-                    Err(t) => (MessageDialogKind::Warning, "Couldn't set up your agents", t),
-                };
-                app.dialog().message(text).title(title).kind(kind).show(|_| {});
+                // One setup at a time: a second would race the first over the same files.
+                if let Some(_running) = SetupGuard::take() {
+                    let result = set_up_agents(&app, &state).await;
+                    let (kind, title, text) = match result {
+                        Ok(t) => (MessageDialogKind::Info, "Agents connected", t),
+                        Err(t) => (MessageDialogKind::Warning, "Couldn't set up your agents", t),
+                    };
+                    app.dialog().message(text).title(title).kind(kind).show(|_| {});
+                } else {
+                    app.dialog().message("Agent setup is already running. Wait for it to finish.").title("Setup is running").kind(MessageDialogKind::Info).show(|_| {});
+                }
             }
             // The windows' own M shortcut, so muting works from the menu bar without finding the window.
             "mute" | "muteroom" => {

@@ -11,6 +11,7 @@ import type {
   Device,
   DevServer,
   Directive,
+  Document,
   EventKind,
   JamEvent,
   Person,
@@ -32,6 +33,7 @@ type Collections = {
   shares: Share;
   annotations: Annotation;
   facts: Fact;
+  documents: Document;
 };
 export type CollectionName = keyof Collections;
 
@@ -231,6 +233,16 @@ export class Store {
     return next;
   }
 
+  /** Deletes everything one agent put in the room, or that was addressed to it. Returns the ids. */
+  deleteAgentEvents(agentId: string): number[] {
+    // Only what the agent itself authored: messages others sent it and prompts its person wrote stay.
+    const where = "author_id = ?1";
+    const rows = this.db.query(`SELECT id, text, author_name FROM events WHERE ${where}`).all(agentId) as { id: number; text: string; author_name: string }[];
+    for (const r of rows) this.db.query("INSERT INTO events_fts(events_fts, rowid, text, author_name) VALUES ('delete', ?, ?, ?)").run(r.id, r.text, r.author_name);
+    this.db.query(`DELETE FROM events WHERE ${where}`).run(agentId);
+    return rows.map((r) => r.id);
+  }
+
   event(id: number): JamEvent | undefined {
     const row = this.db.query("SELECT * FROM events WHERE id = ?").get(id);
     return row ? rowToEvent(row) : undefined;
@@ -274,6 +286,17 @@ export class Store {
   messageByAsk(askId: string): JamEvent | undefined {
     const row = this.db.query("SELECT * FROM events WHERE kind = 'message' AND json_extract(data, '$.askId') = ? ORDER BY id ASC LIMIT 1").get(askId);
     return row ? rowToEvent(row) : undefined;
+  }
+
+  /** Whether this agent's person prompted it since a time (prompt events carry the agent in data.agentId). */
+  promptedSince(agentId: string, since: number): boolean {
+    return !!this.db.query("SELECT 1 FROM events WHERE kind = 'prompt' AND ts >= ? AND json_extract(data, '$.agentId') = ? LIMIT 1").get(since, agentId);
+  }
+
+  /** The oldest events after an id (of some kinds), oldest first: for reading forward from a cursor. */
+  eventsAfter(afterId: number, kinds: EventKind[], limit = 200): JamEvent[] {
+    const sql = `SELECT * FROM events WHERE id > ?${kinds.length ? ` AND kind IN (${kinds.map(() => "?").join(",")})` : ""} ORDER BY id ASC LIMIT ?`;
+    return (this.db.query(sql).all(afterId, ...kinds, limit) as any[]).map(rowToEvent);
   }
 
   /** How many events there are (before an id, of some kinds), for "N more" counts. */

@@ -11,7 +11,8 @@ import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { FRAME_OVERHEAD, Upstream } from "./relay";
-import { skillMarkdown } from "./skill";
+import { ONLY_OBSERVERS } from "./session";
+import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
 
 type WsData = { deviceId: string | null; caller?: string | null; collab?: string; upstream?: Upstream; queue?: (string | Buffer)[]; queueBytes?: number; openTimer?: ReturnType<typeof setTimeout> };
@@ -92,7 +93,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+)?|workers|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -179,6 +180,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     async fetch(req, srv) {
       const url = new URL(req.url);
       const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
+      if (isLocal(peer)) viaLoopback.add(req);
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
       // Mac app's relay (which carries agents' traffic) all mark their requests.
       const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
@@ -289,8 +291,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, pairedId: device?.id ?? null } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
+        if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
         if (path === "/skill.md") return new Response(skillMarkdown(hub, originOf(req, url)), { headers: { "content-type": "text/markdown; charset=utf-8" } });
-        if (path === "/hook.sh") return new Response(hookScript(hub), { headers: { "content-type": "text/x-shellscript" } });
+        if (path === "/hook.sh") return new Response(hookScript(), { headers: { "content-type": "text/x-shellscript" } });
         if (path === "/agent/setup.sh") {
           // From the Mac app: agents talk to the app's relay on this computer, which adds the
           // Mac's credentials, so the script carries no token and survives switching hosts.
@@ -622,19 +625,53 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
   }
 
+  // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
+  const rm = path.match(/^\/agents\/([\w-]+)\/remove$/);
+  if (rm && req.method === "POST") {
+    const r = s.removeAgent(rm[1], { purge: !!body?.purge });
+    return r.removed ? json(r) : bad("no such agent", 404);
+  }
+  // Chats the room removed (kept out of jam_join), and letting one back in: people only.
+  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : (() => {
+      const all = s.removedChats();
+      const folderKey = (r: (typeof all)[number]) => (r.cwd ? `${r.harness}\0${r.machine}\0${r.cwd}` : "");
+      const counts = new Map<string, number>();
+      for (const r of all) if (folderKey(r)) counts.set(folderKey(r), (counts.get(folderKey(r)) ?? 0) + 1);
+      return json(all.map((r) => ({ id: r.id, name: r.name, ownerName: r.ownerName, at: r.at, inFolder: counts.get(folderKey(r)) ?? 1 })));
+    })();
+  const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
+  if (rc && req.method === "POST") {
+    const cleared = s.allowRejoin({ id: rc[1] });
+    return cleared ? json({ ok: true, cleared }) : bad("No removed chat with that id.", 404);
+  }
+
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
+    // Observers only watch: product work for observers alone would reach nobody.
+    const mode = body.mode ?? "explore";
+    if (mode !== "answer" && mode !== "note" && targets.every((t: string) => s.agent(t)?.role === "observer")) return bad(ONLY_OBSERVERS);
     const p = s.person(body.personId);
     try {
       const counterparts = Array.isArray(body.counterparts) ? body.counterparts.filter((c: unknown) => typeof c === "string") : [...targets];
-      return json(s.createDirective({ text: body.text.trim(), mode: body.mode ?? "explore", targets, ...(body.mode === "coordinate" ? { counterparts: [...new Set([...targets, ...counterparts])] } : {}), requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
+      return json(s.createDirective({ text: body.text.trim(), mode, targets, ...(mode === "coordinate" ? { counterparts: [...new Set([...targets, ...counterparts])] } : {}), requestedBy: p?.name ?? "Someone in the room", rationale: body.rationale ?? "Sent directly from the room." }));
     } catch (e) {
       return bad(e instanceof Error ? e.message : String(e));
     }
   }
 
   // A directive's status is never set from a browser: agents finish it through setDirectiveFor (which checks the exchange) and the brain cancels it.
+
+  m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
+  if (m && req.method === "POST") {
+    let moved;
+    try {
+      moved = s.reassignDirective(m[1], s.person(body?.personId)?.name ?? "Someone in the room", typeof body?.to === "string" && body.to ? body.to : undefined, typeof body?.agentId === "string" ? body.agentId : undefined);
+    } catch (e) {
+      return bad(e instanceof Error ? e.message : String(e));
+    }
+    return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
+  }
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
@@ -650,8 +687,43 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
 
-  if (path === "/hooks/prompt" && req.method === "POST") return json(hub.onPrompt(body, ip, hub.auth.machineOf(paired?.id)));
-  if (path === "/hooks/stop" && req.method === "POST") return json(hub.onStop(body, ip, hub.auth.machineOf(paired?.id)));
+  // Claude Code's hooks. They speak for an agent, so only an agent's credential sends them, or the
+  // host's own loopback, which is the host's agents (the app's relay hands any process there that
+  // credential anyway; relayed requests never count as loopback). A hook only reaches a chat that
+  // joined from the same machine as its credential, so no other device can read or drain its inbox
+  // or post prompts as its person.
+  const hook = path.match(/^\/hooks\/(prompt|joined|stop|tool|listen)$/)?.[1];
+  if (hook && req.method === "POST") {
+    if (paired && paired.kind !== "agent") return bad("Hooks are for agents' credentials.", 403);
+    const machine = paired ? hub.auth.machineOf(paired.id) : isLocal(ip) ? "host" : null;
+    if (!machine) return bad("This device isn't paired with this JamSesh host.", 401);
+    const b = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    // With this room's id: a hook keeps it with the chat, so a prompt queued while the host is away
+    // is only ever sent to this room.
+    if (hook === "joined") return json({ ...hub.chatJoined(b, machine), room: s.roomId() });
+    // Sent for one room (a queued prompt, or a call made just before this Mac's relay switched hosts):
+    // refused before anything is recorded, read or acknowledged, so the hook keeps it for that room. A call
+    // that doesn't name its room (an older hook, or a direct caller) can't show it is meant for this one.
+    const room = req.headers.get("x-jam-room");
+    if (room !== s.roomId()) return json({ error: "That was meant for another JamSesh room.", room: s.roomId() }, 409);
+    // What the hook script passed on to the agent since its last call (see Hub.offer).
+    const promptId = req.headers.get("x-jam-prompt-id") ?? "";
+    if (/^[\w-]{1,80}$/.test(promptId)) b.jamPromptId = promptId;
+    b.jamAcks = (req.headers.get("x-jam-ack") ?? "").split(",").map((x) => x.trim()).filter((x) => /^[\w-]{1,40}$/.test(x)).slice(0, 50);
+    // A chat that isn't (or is no longer) in the room: the script stops sending for it.
+    const joined = !!hub.hookAgent(b, ip, machine);
+    const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
+    if (hook === "listen") {
+      // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
+      const r = joined ? await hub.listen(b, ip, machine, undefined, () => !paired || !!hub.auth.get(paired.id)) : { text: "", delivery: null };
+      if (r.delivery) headers["x-jam-delivery"] = r.delivery;
+      return new Response(r.text, { headers: { ...headers, "content-type": "text/plain; charset=utf-8" } });
+    }
+    const out: any = !joined ? {} : hook === "prompt" ? hub.onPrompt(b, ip, machine) : hook === "tool" ? hub.onTool(b, ip, machine) : hub.onStop(b, ip, machine);
+    const { jamDelivery, ...rest } = out;
+    if (jamDelivery) headers["x-jam-delivery"] = jamDelivery;
+    return Response.json(rest, { headers });
+  }
 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");
@@ -904,9 +976,20 @@ async function idempotent(hub: Hub, req: Request, path: string, run: () => Promi
 }
 
 /** The origin the client used to reach this host (proxies forward the original host). */
-function originOf(req: Request, url: URL) {
-  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host") ?? url.host;
-  const proto = req.headers.get("x-forwarded-proto") ?? url.protocol.replace(":", "");
+/** Requests that reached the hub from this computer: only a relay or tunnel here can say where it was asked. */
+const viaLoopback = new WeakSet<Request>();
+/** A host name or address with an optional port, nothing else (it ends up in scripts and links). */
+const HOST_SHAPE = /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:\d{1,5})?$/;
+
+/**
+ * The address the caller reached the hub at. X-Forwarded-* count only from a relay or tunnel on this
+ * computer (anyone else could send them), and a value that isn't plainly a host and port is ignored.
+ */
+export function originOf(req: Request, url: URL) {
+  const relay = viaLoopback.has(req);
+  const host = [relay ? req.headers.get("x-forwarded-host") : null, req.headers.get("host"), url.host].find((h): h is string => !!h && HOST_SHAPE.test(h)) ?? "127.0.0.1";
+  const fwd = relay ? req.headers.get("x-forwarded-proto") : null;
+  const proto = fwd === "http" || fwd === "https" ? fwd : url.protocol === "https:" ? "https" : "http";
   return `${proto}://${host}`;
 }
 

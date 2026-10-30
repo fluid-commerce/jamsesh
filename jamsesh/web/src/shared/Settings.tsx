@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { ago, api, hub, useHub, type Person, type Settings as S } from "./hub";
+import { useEffect, useRef, useState } from "react";
+import { ago, api, hub, removedChatsSource, useHub, type Person, type Settings as S } from "./hub";
 import { Avatar, Meter, Section, Toggle } from "./ui";
 import { ScreenIcon } from "./icons";
 
@@ -189,6 +189,7 @@ export function SettingsDrawer({ onClose, host }: { onClose: () => void; host: b
 
 {host && <RemoteAccess />}
           <Paired host={host} />
+          <RemovedChats />
         </div>
       </aside>
     </>
@@ -278,6 +279,68 @@ function Paired({ host }: { host: boolean }) {
           )}
         </div>
       ))}
+    </Section>
+  );
+}
+
+/** Chats the room removed: they can't join again by themselves until someone lets them back in. */
+function RemovedChats() {
+  const snap = useHub();
+  const { state } = snap;
+  const [list, setList] = useState<{ id: string; name: string; ownerName: string; at: number; inFolder: number }[]>([]);
+  const [error, setError] = useState("");
+  const [loadFailed, setLoadFailed] = useState(false);
+  // The list belongs to a room: a window that outlived a room switch, or a chat removed by someone else
+  // meanwhile, reloads it, and an answer for an earlier request or room is dropped.
+  const latest = useRef(0);
+  const roomId = state?.session?.roomId;
+  const load = () => {
+    const mine = ++latest.current;
+    return api("/removed-chats")
+      .then((l) => mine === latest.current && (setList(l), setLoadFailed(false)))
+      .catch(() => mine === latest.current && setLoadFailed(true));
+  };
+  useEffect(() => {
+    // Answers still on their way belong to the room we just left.
+    latest.current++;
+    setList([]);
+    setError("");
+    setLoadFailed(false);
+  }, [roomId]);
+  const source = removedChatsSource(snap);
+  useEffect(() => {
+    void load();
+  }, [source]);
+  // Letting a chat back in is a permission change: it is never queued for later, and a failure leaves the list as it was.
+  const allow = (id: string) =>
+    api(`/removed-chats/${id}/allow`, {}, "POST", { queue: false })
+      .then(() => (setError(""), load()))
+      .catch((e) => setError(e instanceof Error && e.message ? e.message : "Couldn't allow that chat. Try again."));
+  if (loadFailed)
+    return (
+      <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in here.">
+        <div className="empty-note">Couldn't load the removed chats.</div>
+        <button className="btn small" onClick={load}>
+          Try again
+        </button>
+      </Section>
+    );
+  if (!list.length) return null;
+  return (
+    <Section title="Removed chats" help="Agents' chats the room took out. They stay out until you let them back in here.">
+      {list.map((c) => (
+        <div key={c.id} className="row" style={{ padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 14 }}>
+          <span className="grow ellipsis">
+            {c.name} <span style={{ color: "var(--dim)" }}>· {c.ownerName}</span>
+            {c.inFolder > 1 && <span style={{ color: "var(--dim)" }}> · {c.inFolder} chats in this folder, allowed together</span>}
+          </span>
+          <span className="chip mono" style={{ fontSize: 12 }}>{ago(c.at)}</span>
+          <button className="btn ghost small" onClick={() => allow(c.id)}>
+            Allow again
+          </button>
+        </div>
+      ))}
+      {error && <div className="empty-note">{error}</div>}
     </Section>
   );
 }

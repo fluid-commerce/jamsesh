@@ -5,12 +5,13 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { bus } from "./bus";
+import { canonicalCwd, chatKey } from "./chatkey";
 import { config } from "./config";
 import { ownTarget } from "./devproxy";
 import type { Hub } from "./hub";
 import { shortRepo, type UpdateKind } from "./session";
 import type { Agent, Directive, JamEvent } from "./types";
-import { skillMarkdown } from "./skill";
+import { JOIN_RULE, skillMarkdown } from "./skill";
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 type ToolOut = { content: Content[]; isError?: boolean };
@@ -22,8 +23,14 @@ interface Ctx {
   device: string | null;
   /** The address the agent reached the hub through (the app's relay on the host Mac, or the LAN address). */
   origin?: string;
+  /** This MCP connection: one per chat, so it tells chats apart when the harness has no hooks (Codex). */
+  sessionId?: string;
   /** The skill text has been handed over in this connection (a new conversation starts a new one). */
   skillSent?: boolean;
+  /** The harness, decided when the client says who it is at initialize, never from a tool argument. */
+  harness?: string;
+  /** Who opened this session (see McpEndpoint.owner): every later request must come from the same. */
+  owner?: string;
 }
 
 /** A remote URL without the credentials some people have embedded in it. */
@@ -37,7 +44,7 @@ const JAM_TOOLS = [
   {
     name: "jam_join",
     description:
-      "Join the JamSesh session. Call this first, once per agent session. Returns your agent id, the session brief, who is here, your open directives, and how to work here. Calling it again with the same cwd resumes the same agent.",
+      "Join the JamSesh session, only because your person told you to (\"connect to jamsesh\"). Call this first, once per chat. Returns your agent id, the session brief, who is here, your open directives, and how to work here. Calling it again from the same chat resumes the same agent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -46,11 +53,14 @@ const JAM_TOOLS = [
         repo: { type: "string", description: "Repository name or remote URL" },
         branch: { type: "string" },
         cwd: { type: "string", description: "Absolute path of your working directory" },
+        chat: { type: "string", description: "Claude Code only: the chat id from the JamSesh note at the start of your conversation. Leave it out if you didn't get one." },
         platform: { type: "string", enum: PLATFORMS, description: "What this repository builds" },
         focus: { type: "string", description: "One line: what you're working on today" },
         name: { type: "string", description: "Optional display name; default is \"<Owner>'s Claude\" or \"<Owner>'s Codex\"" },
+        role: { type: "string", enum: ["worker", "observer"], description: "worker (default) does the room's product work and needs repo and platform. observer only watches: no repository, never given product tasks." },
+        broadcasts: { type: "boolean", description: "Observers only: false opts out of room-wide messages (to everyone). Default true." },
       },
-      required: ["harness", "repo", "cwd", "platform"],
+      required: ["harness", "cwd"],
     },
   },
   {
@@ -157,6 +167,9 @@ const JAM_TOOLS = [
         branch: { type: "string" },
         recentChanges: { type: "string", description: "What changed recently, including uncommitted work" },
         notes: { type: "string" },
+        repo: { type: "string", description: "Repository name or remote URL, when you moved to a different one" },
+        platform: { type: "string", enum: PLATFORMS, description: "What this repository builds, when it changed" },
+        focus: { type: "string", description: "One line: what you're working on now" },
       },
       required: ["stack", "designSystem"],
     },
@@ -229,8 +242,8 @@ const JAM_TOOLS = [
   },
   {
     name: "jam_artifacts",
-    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words. Long sessions have more than one page: it says how many more there are; pass offset to page on.",
-    inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many (from the newest) to see older ones" } } },
+    description: "List artifacts in the session (canvas frames, screenshots, dev servers) with ids, newest first. Filter by words. Long sessions have more than one page: it says how many more there are; pass offset to page on. Pass id (for example doc_… from a pointer in your inbox) to read a long document someone shared, in full.",
+    inputSchema: { type: "object", properties: { id: { type: "string", description: "A document id from a pointer, to read it in full" }, query: { type: "string" }, limit: { type: "number" }, offset: { type: "number", description: "Skip this many (from the newest) to see older ones" } } },
   },
   {
     name: "jam_directives",
@@ -257,6 +270,10 @@ const JAM_TOOLS = [
   },
 ];
 
+/** The harness a connection belongs to, from the client name it gave at initialize. */
+export { canonicalCwd };
+export const harnessOfClient = (name: string | undefined) => (/claude/i.test(name ?? "") ? "claude-code" : /codex/i.test(name ?? "") ? "codex" : "other");
+
 const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 
 export class McpEndpoint {
@@ -282,20 +299,38 @@ export class McpEndpoint {
     return [...JAM_TOOLS, ...canvas];
   }
 
+  /**
+   * Who may use an MCP session: the kind of credential and the machine it stands for, so the Mac app
+   * re-issuing its agents credential on a relaunch keeps the session, and nobody else can use it.
+   * The host's loopback is the host's agents (the app's relay hands any process there that credential).
+   */
+  private owner(device: string | null) {
+    if (!device || device === "host") return "agent:host";
+    const d = this.hub.auth.get(device);
+    return d ? `${d.kind}:${this.hub.auth.machineOf(device)}` : `?:${device}`;
+  }
+
   async handle(req: Request, ip: string, device: string | null = null, origin?: string): Promise<Response> {
     const sid = req.headers.get("mcp-session-id");
     if (sid && this.sessions.has(sid)) {
       const s = this.sessions.get(sid)!;
+      // A session id is only good from the credential's own machine: another paired device that
+      // learned it gets "not found", the same as a session that never existed.
+      if (s.ctx.owner !== this.owner(device)) return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
+      s.ctx.device = device;
       s.ctx.ip = ip;
       if (origin) s.ctx.origin = origin;
       return s.transport.handleRequest(req);
     }
     // An unknown session (the hub restarted): 404 tells the client to start a new one.
     if (sid || req.method !== "POST") return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
-    const ctx: Ctx = { agentId: null, ip, device, origin };
+    const ctx: Ctx = { agentId: null, ip, device, origin, owner: this.owner(device) };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
-      onsessioninitialized: (id) => void this.sessions.set(id, { transport, ctx }),
+      onsessioninitialized: (id) => {
+        ctx.sessionId = id;
+        this.sessions.set(id, { transport, ctx });
+      },
       onsessionclosed: (id) => void this.sessions.delete(id),
     });
     const server = this.server(ctx);
@@ -309,9 +344,12 @@ export class McpEndpoint {
       {
         capabilities: { tools: {}, prompts: {} },
         instructions:
-          "You are connected to a JamSesh room session. Call jam_join first. Then follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, jam_wait when idle (it returns after a few minutes with nothing; call it again, and don't end your turn while the session is live), and verify mockups against the design system and builds against mockups.",
+          `These tools connect this chat to a live JamSesh room session with jam_join. ${JOIN_RULE} Until your person asks, don't call any JamSesh tool. Once you've joined, follow the JamSesh skill (prompt 'jamsesh' or GET /skill.md): claim before you start, report with jam_update, check jam_inbox between steps, when idle: Claude Code stops (JamSesh wakes it when the room has something), Codex calls jam_wait (it returns after a few minutes with nothing; call it again), and verify mockups against the design system and builds against mockups.`,
       },
     );
+    server.oninitialized = () => {
+      ctx.harness = harnessOfClient(server.getClientVersion()?.name);
+    };
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: this.toolList() }));
     server.setRequestHandler(ListPromptsRequestSchema, async () => ({
       prompts: [{ name: "jamsesh", description: "How to work in this JamSesh session" }],
@@ -332,14 +370,30 @@ export class McpEndpoint {
     return server;
   }
 
+  /** After a wait: a device disconnected meanwhile gets nothing more. */
+  private requireCredential(ctx: Ctx) {
+    if (ctx.device && ctx.device !== "host" && !this.hub.auth.get(ctx.device)) throw new Error("This device was disconnected from the JamSesh session.");
+  }
+
   private requireAgent(ctx: Ctx): Agent {
     const a = this.hub.session.agent(ctx.agentId);
+    if (!a && ctx.agentId && this.hub.session.removedAgents.has(ctx.agentId)) throw new Error("The room removed you from this session. Don't join again unless your person asks you to.");
     if (!a) throw new Error("Call jam_join first. (If you were already in the session, the hub restarted: call jam_join again with the same details to pick up where you left off.)");
     this.hub.session.touchAgent(a.id);
     return a;
   }
 
   async call(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
+    const out = await this.callTool(ctx, name, args, extra);
+    // An agent with no hooks (Codex) hears the room only when it asks, so every JamSesh call it makes
+    // says if something is waiting. Claude Code's hooks hand the items over themselves.
+    const id = ctx.agentId;
+    if (id && !out.isError && !/^jam_(join|inbox|wait|ask)$/.test(name) && !name.startsWith("canvas_") && !this.hub.hooked(id) && this.hub.session.hasInbox(id) && !out.content.some((c: any) => /call jam_inbox/.test(c.text ?? "")))
+      return { ...out, content: [...out.content, { type: "text", text: "You have new items from the room: call jam_inbox." }] };
+    return out;
+  }
+
+  private async callTool(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
     const s = this.hub.session;
     const text = (t: string): ToolOut => ({ content: [{ type: "text", text: t }] });
     const json = (v: unknown): ToolOut => text(JSON.stringify(v, null, 1));
@@ -363,13 +417,40 @@ export class McpEndpoint {
         // A credential that belongs to a person speaks for that person only: `owner` can't name someone else.
         const ownerName = String(pairedOwner || args.owner || "");
         if (!ownerName) throw new Error("Ask your person for their first name, then call jam_join again with owner.");
+        // The harness is what the connection said it was at initialize, so a tool argument can't pick another
+        // identity. Claude Code's hooks hand it its chat id. Every other harness is keyed here, by machine and
+        // real folder, and a chat or repo it supplies is ignored. No absolute folder, no join.
+        const harness = ctx.harness ?? String(args.harness ?? "other");
+        const cwd = canonicalCwd(String(args.cwd ?? ""), machine === "host");
+        if (!cwd) throw new Error("Pass cwd, this chat's working directory as an absolute path, to jam_join: without it the room can't tell which chat this is.");
+        const claudeChat = harness === "claude-code" && typeof args.chat === "string" ? args.chat.trim().slice(0, 80) : "";
+        // The key is a hash of the whole folder path, so two long paths that share a beginning stay two chats;
+        // the readable folder is the agent's own `cwd`.
+        const chatId = claudeChat || (harness !== "claude-code" ? chatKey(harness, machine, cwd) : ctx.sessionId ? `mcp:${ctx.sessionId}` : undefined);
+        // A chat the room removed stays out until a person lets it back in, and so does any new chat from its
+        // machine and folder: a chat id is the chat's own word, so a removed chat could otherwise return
+        // under a new one.
+        const blocked = s.rejoinBlocked(chatId, ctx.agentId, { machine, cwd, harness });
+        if (blocked) {
+          const sameChat = (!!chatId && blocked.chatId === chatId) || (!!ctx.agentId && blocked.agentId === ctx.agentId);
+          throw new Error(
+            sameChat
+              ? "The room removed this chat from the session, so it can't join again by itself. Someone in the room can choose Settings > Removed chats > Allow again."
+              : "A chat in this folder was removed from the room. Ask someone to choose Settings > Removed chats > Allow again.",
+          );
+        }
+        // Rejoining keeps the stored role unless the caller names one (the session settles it).
+        const role = args.role === "observer" || args.role === "worker" ? (args.role as "observer" | "worker") : undefined;
         const { agent, resumed, quietMs } = s.registerAgent({
           ownerName,
-          harness: args.harness ?? "other",
+          harness: harness as Agent["harness"],
           repo: cleanRepo(String(args.repo ?? "")),
+          role,
+          broadcasts: typeof args.broadcasts === "boolean" ? args.broadcasts : undefined,
           branch: args.branch,
-          cwd: args.cwd,
+          cwd,
           machine,
+          chatId, // see above
           platform: args.platform,
           focus: args.focus,
           name: args.name,
@@ -429,7 +510,7 @@ export class McpEndpoint {
         if (args.directiveId && !coordinate && (args.kind === "done" || args.kind === "shipped")) s.setDirectiveFor(args.directiveId, agent.id, "done", args.text);
         const inbox = s.hasInbox(agent.id) ? "\n\nYou have new items: call jam_inbox." : "";
         const open = coordinate && (args.kind === "done" || args.kind === "shipped") ? "\n\nThat directive is a comparison with another agent, so it stays open: compare through jam_message, then jam_ack it done." : "";
-        return text(`Posted (#${ev.id}).${open}${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}`);
+        return text(`Posted (#${ev.id}).${open}${inbox}${this.checkWarning(agent, args.kind, args.directiveId)}${s.shareNudge(agent.id, String(args.text ?? ""))}`);
       }
       case "jam_claim": {
         const agent = this.requireAgent(ctx);
@@ -449,6 +530,8 @@ export class McpEndpoint {
           : null;
         await s.wait(agent.id, secs * 1000);
         if (keepAlive) clearInterval(keepAlive);
+        this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
+        this.requireCredential(ctx);
         const out = this.inboxText(agent, true);
         const idle = out.startsWith("Nothing new.");
         s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
@@ -468,7 +551,7 @@ export class McpEndpoint {
       case "jam_message": {
         const agent = this.requireAgent(ctx);
         s.sendMessage(agent.id, String(args.to), String(args.text), args.directiveId ? { directiveId: String(args.directiveId) } : {});
-        return text("Sent.");
+        return text(`Sent.${s.shareNudge(agent.id, String(args.text ?? ""))}`);
       }
       case "jam_ask": {
         const agent = this.requireAgent(ctx);
@@ -476,6 +559,9 @@ export class McpEndpoint {
         const { askId, answer } = s.ask(agent.id, String(args.to), String(args.question), secs * 1000, args.directiveId ? { directiveId: String(args.directiveId) } : {});
         s.touchAgent(agent.id, { status: "waiting", activity: `Asked ${String(args.to)}: ${String(args.question).slice(0, 100)}` });
         const a = await answer;
+        // Removed, or its device disconnected, while it waited: nothing more for it.
+        this.requireAgent(ctx);
+        this.requireCredential(ctx);
         s.touchAgent(agent.id, { status: "working" });
         return text(a ? `Answer: ${a}` : `No answer yet (question ${askId}). It will arrive in your inbox; carry on and check jam_inbox.`);
       }
@@ -495,8 +581,13 @@ export class McpEndpoint {
           notes: String(args.notes ?? ""),
           updatedAt: Date.now(),
         };
-        s.touchAgent(agent.id, { card, branch: card.branch || agent.branch });
+        // The card is the agent's word on where it is now: the tile follows it.
+        const repo = typeof args.repo === "string" && args.repo.trim() ? cleanRepo(args.repo) : agent.repo;
+        const platform = PLATFORMS.includes(args.platform) ? args.platform : agent.platform;
+        const focus = typeof args.focus === "string" && args.focus.trim() ? args.focus.trim().slice(0, 200) : agent.focus;
+        s.touchAgent(agent.id, { card, branch: card.branch || agent.branch, repo, platform, focus });
         s.store.put("agents", s.agent(agent.id)!);
+        if (repo !== agent.repo) s.store.addEvent({ kind: "system", authorType: "agent", authorId: agent.id, authorName: agent.name, text: `${agent.name} moved to ${shortRepo(repo)}${focus ? `: ${focus}` : ""}.` });
         return text("Repo card saved. Other agents and the room brain can see it.");
       }
       case "jam_agents": {
@@ -571,6 +662,11 @@ export class McpEndpoint {
       }
       case "jam_artifacts": {
         this.requireAgent(ctx);
+        if (args.id) {
+          const doc = s.store.get("documents", String(args.id));
+          if (!doc) throw new Error("No document with that id.");
+          return text(`${doc.authorName}, ${new Date(doc.ts).toTimeString().slice(0, 5)}:\n\n${doc.text}`);
+        }
         const q = String(args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean);
         const all = s.artifacts().filter((a) => !q.length || q.every((w) => `${a.title} ${a.note} ${a.agentName} ${a.platform}`.toLowerCase().includes(w)));
         const { shown, more } = pageOf(all, args);
@@ -587,7 +683,7 @@ export class McpEndpoint {
       case "jam_ask_room": {
         const agent = this.requireAgent(ctx);
         s.postUpdate(agent.id, "question", String(args.question));
-        return text("Asked. The answer arrives as a directive; call jam_wait.");
+        return text(`Asked. The answer arrives as a directive; ${agent.harness === "claude-code" ? "carry on, or stop if you're done: JamSesh wakes you with it." : "call jam_wait."}`);
       }
       case "canvas_frames": {
         this.requireAgent(ctx);
@@ -636,41 +732,64 @@ export class McpEndpoint {
     return "";
   }
 
+  /**
+   * What `jam_join` returns: who is here, your workstream, what is asked of you, a short session brief and the
+   * tools that fetch more. A busy session's full context is thousands of tokens; `jam_context` has it on demand.
+   */
   briefing(agent: Agent, resumed: boolean, fullSkill = true, origin = this.hub.session.hubUrl) {
     const s = this.hub.session;
-    const inbox = this.inboxText(agent, false);
+    const role = s.person(agent.ownerId)?.role;
+    const ws = s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
+    const settled = s.facts().filter((f) => f.status === "active").length;
+    const mine = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled" && d.targets.includes(agent.id));
+    const brief = s.store.digest("session")?.text.trim();
     return [
-      `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${s.person(agent.ownerId)?.role ? ` (${s.person(agent.ownerId)!.role})` : ""}. The room brain is called "${s.settings().brainName}".`,
-      s.person(agent.ownerId)?.role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
+      `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
+      role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
       `Canvas: ${s.canvas.status}. Use the canvas_* tools; they act on the shared FigCraft file as you, live with everyone.`,
-      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload" (JAMSESH_TOKEN is in ~/.jamsesh/client.env)`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H @"$HOME/.jamsesh/auth.header" "${origin}/api/upload"`,
       "",
-      this.roster(),
+      this.roster(true),
       "",
-      this.context(agent, undefined, 10),
+      `## Session brief\n${brief ? clip(brief, 600) : "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
+      ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
+      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
+      this.unreadLine(agent),
       "",
-      inbox,
-      "",
+      "## Fetch more when you need it",
+      "- jam_context: the full picture (settled points, decisions, room conversation, other agents' updates). Call it at the start of each new leg of work.",
+      "- jam_search: full text of everything said, typed and decided.",
+      "- jam_artifacts: frames, screenshots and dev servers; also opens a long document someone shared (give its id).",
+      "- jam_directives: everything the room has asked, including older ones.",
       fullSkill
-        ? `Here is how to work in this session (the JamSesh skill). Follow it for the rest of this session.\n\n${skillMarkdown(this.hub, origin).replace(/^---[\s\S]*?---\s*/, "")}`
-        : "You already have the JamSesh skill from this conversation. Next: jam_inbox, then carry on. When you go idle, keep calling jam_wait.",
-    ].join("\n");
+        ? `\n## How to work here\n${workingRules(agent)}\nThe full JamSesh skill: the MCP prompt 'jamsesh', or GET ${origin}/skill.md.`
+        : `You already have the JamSesh skill from this conversation. Next: jam_inbox, then carry on. ${idleHint(agent)}`,
+    ]
+      .filter((x) => x !== "")
+      .join("\n");
+  }
+
+  /** One line on what is waiting in the inbox (the items themselves are read with jam_inbox, which marks them delivered). */
+  private unreadLine(agent: Agent) {
+    const { directives, messages } = this.hub.session.inbox(agent.id, false);
+    const n = directives.length + messages.length;
+    return n ? `Waiting in your inbox: ${n} item${n === 1 ? "" : "s"}. Call jam_inbox next.` : "Your inbox is empty.";
   }
 
   /** A reconnect: who you are, where uploads go now, and what's new; the rest is already known. */
   rejoinBriefing(agent: Agent, origin = this.hub.session.hubUrl) {
     return [
       `Reconnected to "${this.hub.session.settings().sessionName}" as ${agent.name} (agent id ${agent.id}); your workstreams and directives are as you left them.`,
-      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H "authorization: Bearer $JAMSESH_TOKEN" "${origin}/api/upload"`,
+      `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H @"$HOME/.jamsesh/auth.header" "${origin}/api/upload"`,
       "",
       this.inboxText(agent, false),
       "",
-      "Call jam_context if you need the room's latest; otherwise carry on, and keep calling jam_wait when idle.",
+      `Call jam_context if you need the room's latest; otherwise carry on. ${idleHint(agent)}`,
       "If this is a new conversation and you don't have the JamSesh skill yet, read it first: the MCP prompt 'jamsesh', or GET /skill.md.",
     ].join("\n");
   }
 
-  roster() {
+  roster(compact = false) {
     const s = this.hub.session;
     const ws = s.store.all("workstreams").filter((w) => w.status === "active");
     const agents = s.agents().filter((a) => a.status !== "offline");
@@ -680,10 +799,12 @@ export class McpEndpoint {
       "Room brain (jam_message it by name; it routes work and answers):",
       `- ${s.settings().brainName}`,
       "Agents:",
-      ...agents.map(
+      ...agents.slice(0, compact ? 12 : agents.length).map(
         (a) =>
-          `- ${a.name} (${a.id}): ${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}, ${a.status}${a.card ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${a.focus}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
+          `- ${a.name} (${a.id}): ${a.role === "observer" ? "observer (only watches)" : `${a.platform}, ${shortRepo(a.repo)}${a.branch ? `@${a.branch}` : ""}`}, ${a.status}${a.card && !compact ? `, stack: ${a.card.stack}; design system: ${a.card.designSystem.slice(0, 160)}` : ""}${a.focus ? `, focus: ${clip(a.focus, 100)}` : ""}${ws.filter((w) => w.ownerAgentId === a.id).length ? `, owns: ${ws.filter((w) => w.ownerAgentId === a.id).map((w) => w.title).join("; ")}` : ""}`,
       ),
+      ...(compact && agents.length > 12 ? [`(${agents.length - 12} more: jam_agents)`] : []),
+      ...(compact ? ["(jam_agents has each agent's stack and design system.)"] : []),
     ].join("\n");
   }
 
@@ -773,6 +894,21 @@ function modeHint(mode: Directive["mode"]) {
   }
 }
 
+/** What to do when idle: Claude Code's hooks wake it, Codex has none and keeps waiting. */
+const idleHint = (agent: Agent) =>
+  agent.harness === "claude-code"
+    ? "When you're idle, just stop and tell your person; JamSesh wakes you when the room has something."
+    : "When idle, call jam_wait (it returns after a few minutes with nothing: call it again) and don't end your turn while the session is live.";
+
+/** The few rules of working here that can't wait for the full skill. */
+const workingRules = (agent: Agent) => [
+  "- Claim your workstream (jam_claim) before you start; report with jam_update; check jam_inbox between steps.",
+  `- ${idleHint(agent)}`,
+  "- Share any dev server you start with jam_devserver, bound to 0.0.0.0, so the room can open it; jam_devserver_remove when you stop it.",
+  "- Check mockups against the design system and builds against mockups before you call work done.",
+  "- Long write-ups: send the gist, the rest is stored once and others fetch it by id.",
+].join("\n");
+
 /** The curated knowledge an agent should work from, its own workstream first. */
 function knowledge(s: Hub["session"], workstream?: string) {
   const active = s.facts().filter((f) => f.status === "active");
@@ -804,6 +940,10 @@ export function fmtEvent(e: JamEvent) {
   const t = new Date(e.ts).toTimeString().slice(0, 5);
   const label = e.kind === "speech" ? "said" : e.kind === "prompt" ? "typed" : e.kind;
   return `[${t}] ${e.authorName} ${label}: ${e.text}`;
+}
+
+export function clip(s: string, n: number) {
+  return s.length <= n ? s : `${s.slice(0, n - 1).trimEnd()}…`;
 }
 
 function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined) {

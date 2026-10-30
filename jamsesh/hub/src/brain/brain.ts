@@ -180,7 +180,7 @@ export class Brain {
     const recent = this.session.store
       .recentEvents({ kinds: ["speech", "prompt", "directive"], limit: 14 })
       .filter((e) => !batch.some((b) => b.id === e.id));
-    const agents = this.session.agents().filter((a) => a.status !== "offline");
+    const agents = this.session.workers().filter((a) => a.status !== "offline");
     const result = await generateText({
       abortSignal: AbortSignal.timeout(15_000),
       model: m,
@@ -328,7 +328,8 @@ export class Brain {
   situation(batch: JamEvent[], triage: Triage | null): string {
     const s = this.session;
     const people = s.people();
-    const agents = s.agents();
+    const agents = s.workers();
+    const observers = s.agents().filter((a) => a.role === "observer" && a.status !== "offline");
     const workstreams = s.store.all("workstreams").filter((w) => w.status === "active");
     const open = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled").slice(0, 12);
     const room = s.store.recentEvents({ kinds: ["speech", "prompt"], limit: 40 });
@@ -342,6 +343,7 @@ export class Brain {
     return [
       `## People\n${people.map((p) => `- ${p.name}${p.role ? `, ${p.role}` : ""} (weight ${p.weight})${s.store.all("devices").some((d) => d.personId === p.id && d.location === "remote") ? ", remote (sees the big screen in their Screen tab, hears your voice on their laptop)" : ""}`).join("\n") || "(nobody named yet)"}`,
       `## Agents\n${agents.filter((a) => a.status !== "offline").map(fmtAgent).join("\n") || "(no agents connected)"}`,
+      observers.length ? `## Observers (they only watch: never target them with product work)\n${observers.map((a) => `- ${a.name}`).join("\n")}` : "",
       historyBrief(s, batch.map((e) => e.text).join(" ")),
       agents.some((a) => a.card) ? `## Repo cards (what each agent's repository is)\n${agents.filter((a) => a.card && a.status !== "offline").map((a) => `- ${a.name}: ${a.card!.stack}. Design system: ${a.card!.designSystem.slice(0, 200)}${a.card!.components ? `. Components: ${a.card!.components.slice(0, 160)}` : ""}${a.card!.recentChanges ? `. Recent: ${a.card!.recentChanges.slice(0, 160)}` : ""}`).join("\n")}` : "",
       `## Workstreams\n${workstreams.map((w) => `- ${w.title} (owner ${s.agent(w.ownerAgentId)?.name ?? "nobody"})`).join("\n") || "(none)"}`,
@@ -424,8 +426,8 @@ export class Brain {
         }),
         execute: async (i) => {
           const known = agentIds();
-          const valid = i.targets.filter((t) => known.has(t));
-          if (!valid.length) return refuse("No valid agent ids. Use the ids from the Agents list.");
+          const valid = i.targets.filter((t) => known.has(t) && (i.mode === "answer" || i.mode === "note" || s.agent(t)?.role !== "observer"));
+          if (!valid.length) return refuse("No valid agent ids. Use the ids from the Agents list (observers only watch and can't be given work).");
           // One request, one agent per repository: the one that already has the context. Answers
           // and coordination go to everyone they're addressed to.
           const { kept: targets, dropped } = i.mode === "answer" || i.mode === "coordinate" ? { kept: valid, dropped: [] as Agent[] } : oneAgentPerRepo(s, valid, i.text);
@@ -704,8 +706,9 @@ export class Brain {
           "Get agents to work together: compare their variants or builds, review each other's work, agree on shared behavior or tokens across repositories. Each gets a 'coordinate' directive naming the others and the goal, and is told to use jam_ask / jam_message and canvas_render of each other's frames.",
         inputSchema: z.object({ agentIds: z.array(z.string()).min(2), goal: z.string().describe("What they should compare or agree on, and what to produce (for example a parity view with differences listed)") }),
         execute: async ({ agentIds, goal }) => {
-          const agents = agentIds.map((id) => s.agent(id)).filter(Boolean) as Agent[];
-          if (agents.length < 2) return refuse("Need at least two agent ids from the Agents list.");
+          // Observers only watch: they're never paired into work.
+          const agents = agentIds.map((id) => s.agent(id)).filter((a): a is Agent => !!a && a.role !== "observer");
+          if (agents.length < 2) return refuse("Need at least two working agents' ids from the Agents list (observers only watch).");
           for (const a of agents) {
             const others = agents.filter((o) => o.id !== a.id);
             s.createDirective({
@@ -803,7 +806,7 @@ export class Brain {
   ruleRoute(batch: JamEvent[], triage: Triage) {
     if (this.stopped) return;
     const s = this.session;
-    const agents = s.agents().filter((a) => a.status !== "offline");
+    const agents = s.workers().filter((a) => a.status !== "offline");
     for (const line of triage.lines) {
       const ev = batch.find((e) => e.id === line.id);
       if (!ev || !roomTalk(ev)) continue;
@@ -828,7 +831,7 @@ export class Brain {
         const pool = shown.length ? shown : s.artifacts().slice(0, 12);
         const pick = letter ? pool.find((a) => new RegExp(`/\\s*${letter}\\b`).test(a.title)) : undefined;
         const owner = pick?.agentId ? s.agent(pick.agentId) : undefined;
-        if (pick && owner) s.createDirective({ text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement", targets: [owner.id], requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "The room chose this variant (routed by keyword; the brain has no model right now)." });
+        if (pick && owner && owner.role !== "observer") s.createDirective({ text: `Build "${pick.title}" for real in your repository: ${text}`, mode: "implement", targets: [owner.id], requestedBy: ev.authorName, sourceEventIds: [ev.id], rationale: "The room chose this variant (routed by keyword; the brain has no model right now)." });
         continue;
       }
       if (line.intent !== "directive" || !agents.length) continue;
@@ -928,7 +931,7 @@ export class Brain {
           platforms: z.array(z.string()).describe("Other platforms that should match it (empty when several platforms shipped it)"),
         }),
         execute: async ({ shipments, platforms }) => {
-          const from = batch.filter((b) => shipments.includes(b.id));
+          const from = batch.filter((b) => shipments.includes(b.id) && b.agent.role !== "observer");
           if (!from.length) return refuse("Name the shipments by id from 'Shipped just now'.");
           // What a person sees is the shipper's own declaration, used as written; the brain never supplies it.
           if (from.some((b) => !b.seen)) return refuse("A shipper didn't say what a person sees, so there is nothing to check: call no_action.");
@@ -937,7 +940,7 @@ export class Brain {
           const shippers = from.map((b) => b.agent);
           const seen = from.map((b) => b.seen).join("; ");
           const made = new Set(shippers.map((a) => a.platform));
-          const partners = s.agents().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
+          const partners = s.workers().filter((a) => a.status !== "offline" && APP_PLATFORMS.has(a.platform) && !made.has(a.platform) && platforms.includes(a.platform));
           const team = [...shippers, ...partners];
           if (new Set(team.map((a) => a.platform)).size < 2) return refuse("That isn't a cross-platform feature: no app on another platform needs it.");
           const sent: string[] = [];
