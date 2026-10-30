@@ -571,6 +571,16 @@ test("nobody records, stops or sends on another window's device, even knowing it
   expect(r.s.recordings().filter((x) => x.deviceId === "mayaLaptop").map((x) => x.personName)).toEqual(["Maya"]);
 }, 30_000);
 
+test("a recording gives back its lock by the lock's own id: a newer lock of the same person at the same instant stays", async () => {
+  const r = room();
+  expect(r.hub.recordStart("mayaLaptop", r.maya.id, Date.now(), "main").ok).toBe(true);
+  const mine = r.s.lockOf("main")!;
+  // Released and retaken by the same person within the same millisecond: same person and `since`, a new id.
+  (r.s as any).atomically(() => (r.s as any).commitStage({ ...r.s.stage("main"), lock: { ...mine, id: "lk_newer" } }, "main"));
+  await r.hub.recordStop({ recordingId: rid(r, "mayaLaptop"), caller: "host", deviceId: "mayaLaptop", personId: r.maya.id, pointer: [] });
+  expect(r.s.lockOf("main")?.id).toBe("lk_newer");
+});
+
 test("a recording replacing its own keeps the screen locked; one that ends gives back only the lock it took", async () => {
   const r = room();
   const t0 = Date.now();

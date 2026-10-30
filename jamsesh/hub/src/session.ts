@@ -1490,6 +1490,10 @@ export class Session {
    */
   placeShare(share: Share) {
     const target = this.shareTarget(share);
+    if (!target && this.screenSeen && !this.screens().length) {
+      bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: "No big screen window is open to show it on." });
+      return;
+    }
     if (!target) {
       const lock = this.lockOf("main");
       bus.send({ type: "toast", tone: "info", text: `${share.personName} is sharing their ${share.kind}`, detail: lock && lock.personId !== share.personId ? `${lock.by} has the screen locked; unlock it or ask the brain to show the share.` : "The screen is pinned; unpin it or ask the brain to show the share." });
@@ -1517,7 +1521,8 @@ export class Session {
     };
     // Only screens whose window is reporting now (a closed main is not a place to put anything), main first.
     const live = this.screens().map((x) => x.id);
-    return (live.length ? live : ["main"]).find(eligible) ?? null;
+    // Before any window has reported (a cold start) main is where it will appear; once they have and all are closed, nowhere.
+    return (live.length ? live : this.screenSeen ? [] : ["main"]).find(eligible) ?? null;
   }
 
   /** What each screen showed just before a share took it over, so the share's end can give it back. */
@@ -1527,9 +1532,9 @@ export class Session {
   }
 
   /** Remember what every screen shows now (keyed by screen), ahead of a new share taking one of them over. */
+  /** Called when a share newly takes a screen: what the screen showed then is what its end gives back (a share that returns saves it afresh). */
   rememberStageFor(shareId: string, screen = "main") {
     const all = this.priorStages();
-    if (all[shareId]?.[screen]) return;
     const st = this.stage(screen);
     const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
     let kept = st;
@@ -1812,7 +1817,10 @@ export class Session {
   }
 
   /** A big-screen window reported its size; windows that stop reporting drop off after 3 minutes. */
+  /** Whether any big-screen window has reported in this process: before that, main is where a share will appear. */
+  private screenSeen = false;
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
+    this.screenSeen = true;
     this.bigScreens.set(id, { id, ...info });
     this.sweepScreens();
     // A screen not heard from for 3 minutes stops being listed: say so then (its stored stage stays for when it returns).

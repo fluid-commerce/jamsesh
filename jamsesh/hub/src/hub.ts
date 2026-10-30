@@ -74,7 +74,7 @@ interface Rec {
   t0: number;
   personId: string | null;
   screenId: string | null;
-  lock: { personId?: string | null; since: number } | null;
+  lock: { id?: string; personId?: string | null; since: number } | null;
   keep?: ReturnType<typeof setInterval>;
   cap?: ReturnType<typeof setTimeout>;
   missed: number;
@@ -522,13 +522,13 @@ export class Hub {
     for (const r of [earlier, ...(this.stoppingRecs.get(deviceId) ?? [])]) if (r && r.nextT0 === undefined) r.nextT0 = t0;
     if (earlier) void this.endRecording(earlier, "replaced");
     let screenId: string | null = null;
-    let lockTaken: { personId?: string | null; since: number } | null = null;
+    let lockTaken: { id?: string; personId?: string | null; since: number } | null = null;
     if (sc && person) {
       screenId = sc.id;
       if (!s.lockOf(screenId)) {
         s.holdScreen(screenId, person);
         const held = s.lockOf(screenId);
-        lockTaken = held ? { personId: held.personId, since: held.since } : null;
+        lockTaken = held ? { id: held.id, personId: held.personId, since: held.since } : null;
       } else if (!s.driversOf(screenId).includes(person.id)) {
         // Recording a screen is driving it: its owner starts driving again.
         s.drive("start", screenId, person.id);
@@ -656,7 +656,7 @@ export class Hub {
     if (others[0]) return void (others[0].lock ??= rec.lock);
     // Only the lock this recording took: not a later one (the owner cast again, or someone took the free screen after a release).
     const cur = this.session.lockOf(rec.screenId);
-    if (cur && cur.since === rec.lock.since && cur.personId === rec.lock.personId) this.session.releaseLock(rec.screenId, { owner: rec.lock.personId ?? null });
+    if (cur && (rec.lock.id ? cur.id === rec.lock.id : cur.since === rec.lock.since && cur.personId === rec.lock.personId)) this.session.releaseLock(rec.screenId, { owner: rec.lock.personId ?? null });
   }
 
   /** The pointer moments that fall inside a window the hub opened (a little slack either side for the pointer's own clock). */
@@ -962,6 +962,8 @@ export class Hub {
 
   /** An approved build opened an app: stream it live and put it on the big screen (unless a person's screen is locked). */
   private async showLive(app: { kind: "ios" } | { kind: "mac"; name: string; bundle?: string }, by: string) {
+    // Taken before the app starts: a screen that changes while it comes up is not overwritten.
+    const claim = this.session.stageClaim();
     let r: Awaited<ReturnType<LiveApps["startIos"]>> = "";
     // A Mac app's window takes a moment to appear.
     for (let i = 0; i < (app.kind === "mac" ? 8 : 1); i++) {
@@ -970,7 +972,7 @@ export class Hub {
       await Bun.sleep(2000);
     }
     if (typeof r === "string") return void this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text: `Couldn't stream the app live: ${r}` });
-    this.session.setStage({ mode: "layout", title: r.name, layout: { tiles: [{ kind: "app", appId: r.id, label: r.name }] } }, "JamSesh", "main", { claim: this.session.stageClaim() });
+    this.session.setStage({ mode: "layout", title: r.name, layout: { tiles: [{ kind: "app", appId: r.id, label: r.name }] } }, "JamSesh", "main", { claim });
   }
 
   private onBuildRequest(r: BuildRequest) {

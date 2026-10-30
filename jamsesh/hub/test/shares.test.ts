@@ -495,3 +495,23 @@ test("a comparison between a worker and an observer is refused: an observer is n
   const watcher = reg("Rae", "observer");
   expect(() => s.createDirective({ text: "Compare", mode: "coordinate", targets: [worker.id, watcher.id], counterparts: [worker.id, watcher.id], requestedBy: "Jo" })).toThrow(/counterpart/);
 });
+
+test("with every window closed after they had reported, a new share has no screen and is not written to main", () => {
+  const { s } = room();
+  s.removeScreen("main");
+  const sh = s.startShare("felipe-laptop", "screen");
+  expect(s.shareTarget(sh)).toBeNull();
+  s.placeShare(sh);
+  expect(s.stage().layout).toBeUndefined();
+});
+
+test("a share that leaves its screen and returns gives back what the screen showed on the return, not on the first takeover", () => {
+  const { s } = room();
+  const art = (n: string) => s.upsertArtifact({ kind: "screenshot", stage: "built", title: n, image: `/renders/${n}.png` }).id;
+  const sh = s.startShare("felipe-laptop", "screen");
+  s.placeShare(sh);
+  s.setStage({ mode: "spotlight", items: [art("later")], title: "Later" }, "x", "main", { claim: s.stageClaim() });
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "main", { claim: s.stageClaim() });
+  s.endShare(sh.id);
+  expect(s.stage()).toMatchObject({ mode: "spotlight", title: "Later" });
+});
