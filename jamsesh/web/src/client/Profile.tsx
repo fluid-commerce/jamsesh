@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { api, type Person } from "../shared/hub";
-import { encodeWav, holdMic } from "../shared/mic";
+import { encodeWav } from "../shared/mic";
 import { PhotoAvatar, ProfilePhoto } from "../shared/share";
 import { mediaAvailable } from "../shared/rtc";
 import { WhereChooser } from "./ClientView";
+import { deviceCopiesProblem } from "../shared/voiceprint";
+import { browserReadDeps, VoiceRead, type ReadView } from "../shared/voiceRead";
 
 /** Your profile: photo, name, title, and the voice sample JamSesh recognizes you by. */
 export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person; brainName: string; onClose: () => void; micError?: string | null }) {
@@ -61,81 +63,82 @@ export function ProfileDrawer({ me, brainName, onClose, micError }: { me: Person
   );
 }
 
-// No wake word in it: the room's microphones hear this too, and the brain must not answer it.
-const SENTENCE =
-  "This is my voice. When I ask for something to go up on the big screen, or to send a change to my agent, this is how I sound. I talk like this while I work, so here is me describing what I see: the layout, the colors, the spacing, and what I would change next on this screen.";
+// The hub owns the wording (it recognises the read in what the room's laptops heard); this is only
+// what shows if the hub can't be asked. No wake word in it: the brain must not answer it.
+const FALLBACK_SCRIPT = [
+  "This is my voice, and this is how I sound while I work.",
+  "When I ask for something to go up on the big screen, or to send a change to my agent, it is me talking.",
+  "Here is me describing what I see: the layout, the colors, the spacing, and what I would change next.",
+];
 
-/** Read one sentence; the hub turns it into a voiceprint so lines are attributed right from the start. */
+/** Read a few sentences; the hub turns them into a voiceprint so lines are attributed right from the start. */
 export function VoiceEnroll({ me, brainName, micError }: { me: Person; brainName: string; micError?: string | null }) {
-  const [state, setState] = useState<"idle" | "recording" | "saving" | "done" | "error">("idle");
-  const [msg, setMsg] = useState("");
-  const [secs, setSecs] = useState(0);
-  const rec = useRef<{ stop: () => void } | null>(null);
+  const [view, setView] = useState<ReadView>({ state: "idle", msg: "", secs: 0 });
+  const [script, setScript] = useState(FALLBACK_SCRIPT);
+  const [oldCopy, setOldCopy] = useState<string | null>(() => deviceCopiesProblem());
+  const reader = useRef<VoiceRead | null>(null);
 
-  // Over plain http (the default LAN join address) the browser has no mic API at all.
+  useEffect(() => {
+    api<{ sentences?: string[] }>("/voice/script")
+      .then((r) => r.sentences?.length && setScript(r.sentences))
+      .catch(() => {});
+  }, []);
+
+  // One reader per person; closing the profile (unmount) or switching person cancels a read wherever it is.
+  useEffect(() => {
+    const r = new VoiceRead(me.id, brainName, browserReadDeps(toWav16k), setView);
+    reader.current = r;
+    return () => {
+      r.cancel();
+      if (reader.current === r) reader.current = null;
+    };
+  }, [me.id, brainName]);
+
+  useEffect(() => {
+    if (!oldCopy) return;
+    const t = setInterval(() => setOldCopy(deviceCopiesProblem()), 15_000);
+    return () => clearInterval(t);
+  }, [oldCopy]);
+
   const blocked = micError || (mediaAvailable()?.replace("Sharing", "Reading aloud") ?? ("getUserMedia" in (navigator.mediaDevices ?? {}) ? null : "This page can't use the microphone. Open the host's secure address."));
+  const { state, msg, secs } = view;
 
-  const start = async () => {
-    if (blocked) return setState("error"), setMsg(blocked);
-    // Your own laptop's always-on mic hears you read this; keep it from sending it to the room.
-    const release = holdMic();
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false } });
-      const chunks: Blob[] = [];
-      const mr = new MediaRecorder(stream);
-      mr.ondataavailable = (e) => chunks.push(e.data);
-      const t0 = Date.now();
-      const tick = setInterval(() => setSecs(Math.floor((Date.now() - t0) / 1000)), 250);
-      const auto = setTimeout(() => mr.state === "recording" && mr.stop(), 30_000);
-      mr.onstop = async () => {
-        release();
-        clearInterval(tick);
-        clearTimeout(auto);
-        stream.getTracks().forEach((t) => t.stop());
-        setState("saving");
-        try {
-          const wav = await toWav16k(new Blob(chunks, { type: mr.mimeType }));
-          const r = await fetch(`/api/people/${me.id}/voice`, { method: "POST", headers: { "content-type": "audio/wav" }, body: wav }).then((x) => x.json());
-          if (r.ok) (setState("done"), setMsg(`${brainName} knows your voice (${r.samples} samples).`));
-          else (setState("error"), setMsg(r.reason ?? r.error ?? "That didn't work. Try again."));
-        } catch (e) {
-          setState("error");
-          setMsg(String(e));
-        }
-      };
-      rec.current = { stop: () => mr.state === "recording" && mr.stop() };
-      mr.start();
-      setSecs(0);
-      setState("recording");
-    } catch (e) {
-      release();
-      setState("error");
-      setMsg(e instanceof Error ? e.message : String(e));
-    }
+  const start = () => {
+    if (blocked) return setView({ ...view, state: "error", msg: blocked });
+    void reader.current?.start();
   };
+
+  const l = me.voiceLearned;
+  const learned = l && [l.read && `${l.read} from reading aloud`, l.corrections && `${l.corrections} correction${l.corrections === 1 ? "" : "s"}`, l.heard && `${l.heard} line${l.heard === 1 ? "" : "s"} heard`].filter(Boolean);
 
   return (
     <div className="section">
       <h3>Teach {brainName} your voice</h3>
       <p className="help">
-        Read this out loud. It takes about twenty seconds and makes speaker recognition much better, especially when you walk around the room.
-        {me.voiceSamples ? ` You have ${me.voiceSamples} voice sample${me.voiceSamples === 1 ? "" : "s"} so far.` : ""}
+        Read these out loud. It takes about twenty seconds and makes speaker recognition much better, especially when you walk around the room.
+        {learned?.length ? ` So far it knows you from ${learned.join(", ")}.` : ""}
       </p>
-      <blockquote style={{ margin: "0 0 14px", padding: "14px 16px", borderRadius: 14, background: "var(--panel)", border: "1px solid var(--line)", fontSize: 17, lineHeight: 1.45, color: state === "recording" ? "var(--text)" : "var(--muted)" }}>
-        {SENTENCE}
-      </blockquote>
+      <div className="voice-read" data-reading={state === "recording"}>
+        {script.map((s) => (
+          <p key={s}>{s}</p>
+        ))}
+      </div>
+      <p className="help" style={{ margin: "0 0 12px" }}>
+        This host keeps your voice so it knows you next time: numbers that describe it, never a recording. It isn't taken to other hosts; on a new one, read again. Reset in Settings forgets it.
+      </p>
       <div className="row">
         {state === "recording" ? (
-          <button className="btn" onClick={() => rec.current?.stop()} style={{ borderColor: "rgba(255,107,94,.5)", color: "var(--warn)" }}>
+          <button className="btn" onClick={() => reader.current?.stop()} style={{ borderColor: "rgba(255,107,94,.5)", color: "var(--warn)" }}>
             <span className="dot" style={{ background: "var(--warn)", animation: "pulse 1s infinite" }} /> Done reading · {secs}s
           </button>
         ) : (
-          <button className="btn primary" onClick={start} disabled={state === "saving" || !!blocked}>
-            {state === "saving" ? "Learning your voice…" : state === "done" ? "Record again" : "Start reading"}
+          <button className="btn primary" onClick={start} disabled={state === "saving" || !!blocked || !!reader.current?.busy}>
+            {state === "saving" ? "Learning your voice…" : state === "done" ? "Read again" : "Start reading"}
           </button>
         )}
         {blocked && !msg && <span className="chip" style={{ whiteSpace: "normal", color: "var(--warn)" }}>{blocked}</span>}
         {msg && <span className="chip" style={{ whiteSpace: "normal", color: state === "error" ? "var(--warn)" : "var(--built)" }}>{msg}</span>}
+        {oldCopy && <span className="chip" style={{ whiteSpace: "normal", color: "var(--warn)" }}>{oldCopy}</span>}
       </div>
     </div>
   );

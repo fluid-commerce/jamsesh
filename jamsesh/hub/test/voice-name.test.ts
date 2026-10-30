@@ -90,7 +90,7 @@ test("a correction with no voice sample says so", () => {
   const hub = room();
   const ben = hub.session.upsertPerson({ name: "Ben" });
   const u = line(hub, ben.id);
-  const { learning } = hub.audio.assign(u.id, ben.id);
+  const { learning } = hub.audio.assign(u.id, ben.id, { host: true, personId: null });
   expect(learning.learned).toBe(false);
   if (!learning.learned) expect(learning.reason).toMatch(voiceprintStatus().available ? /no voice sample/ : /voice matching is off/);
   hub.stop();

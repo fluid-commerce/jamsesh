@@ -9,6 +9,8 @@ export interface Person {
   color: string;
   hasVoiceprint: boolean;
   voiceSamples: number;
+  /** What the voiceprint was learned from: reads aloud, corrections, lines heard. */
+  voiceLearned?: { read: number; corrections: number; heard: number };
   createdAt: number;
   /** Profile photo URL (from the person's camera), or null. */
   photo?: string | null;
@@ -418,6 +420,10 @@ export interface Settings {
   hostControl: boolean;
   /** Spoken language for transcription: an ISO code ("en" by default) or "auto". */
   language: string;
+  /** The opt-in faster engine (Parakeet, English only, a 482 MB download and about 2 GB of memory). */
+  fastEngine: boolean;
+  /** The room's words for transcription (5.2): "Term" or "Term: heard as, heard as" ("Chey: Shay"). */
+  vocabulary: string[];
   gatewayKeySet: boolean;
   gatewayKeySource: "settings" | "env" | "none";
 }
@@ -486,7 +492,7 @@ export interface HubState {
   totals: { events: number; utterances: number; directives: number; artifacts: number };
   brain: { status: "ready" | "thinking" | "offline" | "no-key"; lastError: string | null };
   /** Voice matching labels lines by voice; off when the speaker model or its native library fails to load. */
-  voiceprints: { available: boolean; reason: string; enrolled: number };
+  voiceprints: { available: boolean; reason: string; code: string; fix: string; enrolled: number; lines: number; byVoice: number; neverUsed: boolean };
 }
 
 export interface CanvasInfo {

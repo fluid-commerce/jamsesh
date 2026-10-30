@@ -101,14 +101,6 @@ export const config = {
   skillFile: firstExisting(res("skill", "SKILL.md"), join(REPO, "jamsesh", "skill", "SKILL.md")) ?? join(REPO, "jamsesh", "skill", "SKILL.md"),
   /** Where the voiceprint library is installed (the app ships it next to the hub). */
   nodeModules: firstExisting(res("node_modules")),
-  whisperServerBin: firstExisting(process.env.JAMSESH_WHISPER_SERVER, "/opt/homebrew/bin/whisper-server", "/usr/local/bin/whisper-server"),
-  whisperModel: firstExisting(
-    process.env.JAMSESH_WHISPER_MODEL,
-    join(homedir(), ".cache/whisper-cpp/ggml-large-v3-turbo-q5_0.bin"),
-    join(homedir(), ".cache/whisper-cpp/ggml-large-v3-turbo.bin"),
-    join(homedir(), ".cache/whisper-cpp/ggml-medium.en.bin"),
-    join(homedir(), ".cache/whisper-cpp/ggml-base.en.bin"),
-  ),
   speakerModel: firstExisting(join(HOME, "models", "wespeaker_en.onnx"), res("models", "wespeaker_en.onnx")),
 };
 

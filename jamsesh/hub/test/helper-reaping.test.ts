@@ -4,7 +4,6 @@ import { afterAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { config } from "../src/config";
 import { Hub } from "../src/hub";
 
 const dir = mkdtempSync(join(tmpdir(), "jam-reap-"));
@@ -16,7 +15,7 @@ function fakeWhisper(name: string, ignoreTerm = false) {
   const pidFile = join(dir, `${name}.pid`);
   writeFileSync(script, `${ignoreTerm ? 'process.on("SIGTERM", () => {});' : ""}
 const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
-Bun.serve({ port, hostname: "127.0.0.1", fetch: () => new Response("ok") });
+Bun.serve({ port, hostname: "127.0.0.1", fetch: () => Response.json({ text: "" }) });
 require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 `);
   const bin = join(dir, name);
@@ -45,12 +44,13 @@ async function until(fn: () => boolean, ms: number) {
   return fn();
 }
 function withWhisper<T>(bin: string, run: () => Promise<T>) {
-  const was = { bin: config.whisperServerBin, model: config.whisperModel };
-  (config as any).whisperServerBin = bin;
-  (config as any).whisperModel = join(dir, "model.bin");
+  const was = { bin: process.env.JAMSESH_WHISPER_SERVER, model: process.env.JAMSESH_WHISPER_MODEL };
+  process.env.JAMSESH_WHISPER_SERVER = bin;
+  process.env.JAMSESH_WHISPER_MODEL = join(dir, "model.bin");
+  const put = (k: string, v: string | undefined) => (v === undefined ? delete process.env[k] : (process.env[k] = v));
   return run().finally(() => {
-    (config as any).whisperServerBin = was.bin;
-    (config as any).whisperModel = was.model;
+    put("JAMSESH_WHISPER_SERVER", was.bin);
+    put("JAMSESH_WHISPER_MODEL", was.model);
   });
 }
 
@@ -79,17 +79,14 @@ test("Hub.stop says false when one helper's exit is never seen, and still stops 
 test("a local whisper dies within seconds of its hub being killed outright", async () => {
   const { bin, pidFile } = fakeWhisper("whisper-c");
   const code = `
-    import { config } from ${JSON.stringify(import.meta.dir + "/../src/config")};
     import { Transcriber } from ${JSON.stringify(import.meta.dir + "/../src/audio/transcribe")};
-    config.whisperServerBin = ${JSON.stringify(bin)};
-    config.whisperModel = ${JSON.stringify(join(dir, "model.bin"))};
     console.log(await new Transcriber({} as any).startLocal(${freePort()}));
     await Bun.sleep(300000);
   `;
-  const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit", env: { ...process.env, JAMSESH_SILENT: "1", JAMSESH_OFFLINE: "1" } });
+  const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit", env: { ...process.env, JAMSESH_SILENT: "1", JAMSESH_OFFLINE: "1", JAMSESH_WHISPER_SERVER: bin, JAMSESH_WHISPER_MODEL: join(dir, "model.bin") } });
   try {
     const { value } = await hub.stdout.getReader().read();
-    expect(new TextDecoder().decode(value).trim()).toBe("true");
+    expect(new TextDecoder().decode(value).trim().split("\n").pop()).toBe("true");
     expect(existsSync(pidFile)).toBe(true);
     const pid = Number(readFileSync(pidFile, "utf8"));
     expect(alive(pid)).toBe(true);

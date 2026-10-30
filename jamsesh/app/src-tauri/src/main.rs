@@ -339,7 +339,13 @@ async fn start_hosting(app: &AppHandle, state: &App, launch: Launch) -> Result<(
     Ok(())
 }
 
-async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>) -> Result<(), String> {
+/// The join code from a scanned QR code, as the connect page takes it: capitals and digits only.
+fn clean_code(code: Option<&str>) -> Option<String> {
+    let c: String = code?.to_uppercase().chars().filter(char::is_ascii_alphanumeric).collect();
+    matches!(c.len(), 4 | 8).then_some(c)
+}
+
+async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<String>, code: Option<&str>) -> Result<(), String> {
     // A typed name like team.duckdns.org is a remote host's HTTPS address; an IP or a .local name
     // is a host on this network.
     let raw = input.trim();
@@ -383,7 +389,11 @@ async fn start_joining(app: &AppHandle, state: &App, input: &str, name: Option<S
         });
     })
     .await?;
-    let url = relay.window_url(if paired { "/client" } else { "/connect?next=%2Fclient" });
+    let connect = match clean_code(code) {
+        Some(c) => format!("/connect?next=%2Fclient&c={c}"),
+        None => "/connect?next=%2Fclient".to_string(),
+    };
+    let url = relay.window_url(if paired { "/client" } else { &connect });
     let needs_agents = paired && agents.is_none();
     inner.relay = Some(relay);
     inner.cfg.role = Some("join".into());
@@ -1048,6 +1058,11 @@ fn nearby_hosts(state: State<'_, Arc<App>>) -> Vec<discover::Found> {
 }
 
 #[tauri::command]
+fn discovery_status(state: State<'_, Arc<App>>) -> discover::Status {
+    state.hosts.status()
+}
+
+#[tauri::command]
 async fn host_here(app: AppHandle, state: State<'_, Arc<App>>) -> Result<(), String> {
     let ticket = state.switching.ticket();
     let Some(_turn) = state.switching.lock(ticket).await else { return Ok(()) };
@@ -1130,11 +1145,11 @@ async fn switch_now(app: &AppHandle, state: &App, launch: Launch) -> Result<(), 
 }
 
 #[tauri::command]
-async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>) -> Result<(), String> {
+async fn join(app: AppHandle, state: State<'_, Arc<App>>, url: String, name: Option<String>, code: Option<String>) -> Result<(), String> {
     let ticket = state.switching.ticket();
     let Some(_turn) = state.switching.lock(ticket).await else { return Ok(()) };
     session_is(&state, Before::Idle).await?;
-    let joined = start_joining(&app, &state, &url, name).await;
+    let joined = start_joining(&app, &state, &url, name, code.as_deref()).await;
     rolled_back(&app, &state, joined).await
 }
 
@@ -1301,6 +1316,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_info,
             nearby_hosts,
+            discovery_status,
             host_here,
             open_project,
             join,
@@ -1322,6 +1338,12 @@ fn main() {
         ])
         .setup(|app| {
             let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("/tmp/jamsesh-app"));
+            let stuck = forget_voice_copies(&dir);
+            if !stuck.is_empty() {
+                let list = stuck.iter().map(|(p, e)| format!("{} ({e})", p.display())).collect::<Vec<_>>().join("\n");
+                let text = format!("Earlier versions kept a copy of your voice on this Mac. JamSesh couldn't delete it:\n{list}\nDelete it in Finder; JamSesh will try again next time it opens.");
+                app.dialog().message(text).title("An old copy of your voice is still here").kind(MessageDialogKind::Warning).show(|_| {});
+            }
             let cfg: Config = std::fs::read(dir.join("app.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
             let state = Arc::new(App {
                 inner: Mutex::new(Inner { cfg: cfg.clone(), ..Default::default() }),
@@ -1351,7 +1373,7 @@ fn main() {
                     let Some(_turn) = state.switching.lock(ticket).await else { return };
                     let r = match (cfg.role.as_deref(), cfg.host_url.clone()) {
                         (Some("host"), _) => start_hosting(&handle, &state, resume_launch(&cfg)).await,
-                        (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None).await,
+                        (Some("join"), Some(url)) => start_joining(&handle, &state, &url, None, None).await,
                         _ => Err(String::new()),
                     };
                     // Say why on the start window instead of just showing it.
@@ -1418,9 +1440,80 @@ fn main() {
     });
 }
 
+/// Earlier builds kept a copy of the person's voice in the app's folder, as voiceprint.json, written through
+/// voiceprint.json.<pid>.<n>.part (left behind if the app was killed mid-write). Voices now stay on the host
+/// that learned them, so every such copy is deleted. Returns the ones that are still there after two tries.
+fn forget_voice_copies(dir: &std::path::Path) -> Vec<(PathBuf, std::io::Error)> {
+    let names = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect::<Vec<_>>(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => return vec![(dir.to_path_buf(), e)],
+    };
+    let mut stuck = Vec::new();
+    for name in names {
+        let Some(n) = name.to_str() else { continue };
+        if !(n == "voiceprint.json" || (n.starts_with("voiceprint.json.") && n.ends_with(".part"))) {
+            continue;
+        }
+        let path = dir.join(n);
+        let gone = |r: std::io::Result<()>| match r {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        if let Err(e) = gone(std::fs::remove_file(&path)).or_else(|_| gone(std::fs::remove_file(&path))) {
+            stuck.push((path, e));
+        }
+    }
+    stuck
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folder(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("jamsesh-voice-copies-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_old_voice_copy_and_an_interrupted_write_of_one_are_deleted_and_nothing_else() {
+        let d = folder("ok");
+        for f in ["voiceprint.json", "voiceprint.json.4242.7.part", "voiceprint.json.1.0.part", "app.json", "voiceprint.json.bak", "notes.part"] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        assert!(forget_voice_copies(&d).is_empty());
+        let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        left.sort();
+        assert_eq!(left, ["app.json", "notes.part", "voiceprint.json.bak"]);
+        // Nothing to delete, or no folder yet: nothing to report.
+        assert!(forget_voice_copies(&d).is_empty());
+        assert!(forget_voice_copies(&d.join("missing")).is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_cant_be_deleted_is_reported() {
+        let d = folder("stuck");
+        // A folder where the copy was: remove_file fails on it, as it would on a locked file.
+        std::fs::create_dir(d.join("voiceprint.json")).unwrap();
+        std::fs::write(d.join("voiceprint.json.9.1.part"), "x").unwrap();
+        let stuck = forget_voice_copies(&d);
+        assert_eq!(stuck.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), [d.join("voiceprint.json")]);
+        assert!(!d.join("voiceprint.json.9.1.part").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn only_a_join_or_invite_code_is_passed_to_the_connect_page() {
+        assert_eq!(clean_code(Some("ab3k")).as_deref(), Some("AB3K"));
+        assert_eq!(clean_code(Some("ABCD2345")).as_deref(), Some("ABCD2345"));
+        assert_eq!(clean_code(Some("AB&next=//evil")), None);
+        assert_eq!(clean_code(Some("AB3")), None);
+        assert_eq!(clean_code(None), None);
+    }
 
     #[test]
     fn only_the_hosts_own_projects_picker_opens_a_project() {

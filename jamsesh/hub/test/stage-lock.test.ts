@@ -1,6 +1,7 @@
 // Phase 3 on the big screen: a person's cast is locked (3.1), a rebuilt screen is one item with versions
 // (3.5), and each screen remembers what it showed (3.6). Simulated rooms: fake people and agents, no sound.
 import { afterAll, afterEach, expect, test } from "bun:test";
+import { deflateSync } from "node:zlib";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,8 +29,24 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-// A 1x1 PNG and a 1x1 JPEG header are enough: uploads only sniff the format and read the size.
-const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+/** A whole 1x1 PNG (uploads are checked to the end before they're written). */
+const PNG = (() => {
+  const chunk = (type: string, data: Uint8Array) => {
+    const out = new Uint8Array(12 + data.length);
+    const v = new DataView(out.buffer);
+    v.setUint32(0, data.length);
+    out.set(new TextEncoder().encode(type), 4);
+    out.set(data, 8);
+    v.setUint32(8 + data.length, Bun.hash.crc32(out.subarray(4, 8 + data.length)) >>> 0);
+    return out;
+  };
+  const ihdr = new Uint8Array([0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+  const parts = [new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", new Uint8Array(deflateSync(new Uint8Array(5)))), chunk("IEND", new Uint8Array())];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) (out.set(p, at), (at += p.length));
+  return out;
+})();
 
 function room() {
   const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, String(Math.random())) });
@@ -598,8 +615,13 @@ test("a paired window is the person it's bound to: another device naming the own
     await as(cheys)("/devices", { deviceId: "felipe-laptop", personId: felipe.id });
     expect(await me(cheys)).toBe(chey.id);
     s.removePerson(maya.id);
+    // Freed, it picks again: not Felipe, whose own browser holds him (phase 5: only the host lets a laptop in as
+    // someone another laptop is), but someone nobody has been.
     await as(nobody)("/devices", { deviceId: "phone", personId: felipe.id });
-    expect(await me(nobody)).toBe(felipe.id);
+    expect(await me(nobody)).toBeNull();
+    const nia = s.upsertPerson({ name: "Nia" });
+    await as(nobody)("/devices", { deviceId: "phone", personId: nia.id });
+    expect(await me(nobody)).toBe(nia.id);
     // Someone who doesn't exist is never bound.
     const fresh = browser("Tablet", null);
     await as(fresh)("/devices", { deviceId: "tablet", personId: "per_nope" });

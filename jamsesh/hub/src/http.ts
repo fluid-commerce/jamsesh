@@ -5,11 +5,14 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
 import { bus } from "./bus";
-import { voiceprintStatus, learningNote } from "./audio/voiceprint";
+import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
+import { learningNote } from "./audio/voiceprint";
+import { BadWav } from "./audio/wav";
 import { describeError } from "./brain/llm";
 import { synthesize } from "./brain/speech";
 import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
+import { BadImage } from "./image";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { FRAME_OVERHEAD, Upstream } from "./relay";
 import { projectsRoute } from "./projects-api";
@@ -95,7 +98,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -108,7 +111,7 @@ function hostIdOf(hub: Hub) {
 /** Human-only paths whose personId is the person acted on, not the caller. */
 const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request|devices)$/;
 /** Settings only the host machine may change (SPEC 14, host-only). */
-const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled"] as const;
+const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled", "fastEngine"] as const;
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
@@ -201,7 +204,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
         const dev = devTarget(req, hub);
         if (dev) {
-          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
+          if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code from the big screen, under the QR code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             const who = local ? null : anyToken(hub, req, url, ip);
             if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
@@ -287,7 +290,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if (!ok) {
           if (wantsHtml(req) && !path.startsWith("/api") && path !== "/mcp" && path !== "/ws") return Response.redirect(`/connect?next=${encodeURIComponent(path + url.search)}`, 302);
-          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen.", 401);
+          return bad("This device isn't paired with this JamSesh host. Open /connect and enter the code on the big screen, under the QR code.", 401);
         }
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
@@ -367,7 +370,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           const me = m.type === "level" || m.type === "rtc" ? speaker(hub, ws) : null;
           if (m.type === "level" && me) {
             bus.send({ type: "level", deviceId: me, level: m.level });
-          } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now() }));
+          } else if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, now: Date.now(), voiceEpoch: hub.session.store.voiceEpoch() }));
           else if (m.type === "rtc" && me && typeof m.to === "string") {
             const msg = JSON.stringify({ type: "rtc", from: me, to: m.to, data: m.data });
             for (const peer of sockets.get(m.to) ?? []) peer.send(msg);
@@ -488,14 +491,29 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   const md = (t: string, status = 200) => new Response(t, { status, headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" } });
   if (!code) return md(agentIntro(origin));
   const r = hub.auth.pair({ code, kind: "agent", label: url.searchParams.get("name") ?? "Agent", ip });
-  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh screen right now, then fetch ${origin}/agent?c=<code> again.`, 403);
+  if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh big screen (under the QR code) right now, then fetch ${origin}/agent?c=<code> again.`, 403);
   return md(agentGuide(origin, r.token));
 }
 
-async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedDevice | null, hostWindow = false): Promise<Response> {
+async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: PairedDevice | null, hostWindow = false): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
-  const body = req.method === "POST" || req.method === "PATCH" || req.method === "DELETE" ? await readBody(req) : null;
+  let body: any = null;
+  // A body that didn't arrive whole (the connection dropped, a broken form) stops the request: nothing runs.
+  if (req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE") {
+    try {
+      body = await readBody(req);
+    } catch (e) {
+      // A form that arrived whole but isn't one: the sender's error.
+      if (e instanceof BadForm) return bad(e.message);
+      // Didn't arrive whole, 408: the sender's outbox retries it, and idempotent() doesn't remember it (nothing ran).
+      return new Response(JSON.stringify({ error: "The request didn't arrive whole. Try again." }), { status: 408, headers: { "content-type": "application/json" } });
+    }
+  }
+  // The credential is read again after the body arrived: one disconnected (or changed) while its request was
+  // on its way acts as it is now, never as it was when the request began.
+  const paired = pairedAtStart ? hub.auth.get(pairedAtStart.id) : null;
+  if (pairedAtStart && !paired) return new Response(JSON.stringify({ error: "This device was disconnected." }), { status: 401, headers: { "content-type": "application/json" } });
 
   /** Who is calling, for what only one window may do: its pairing, or "host" for the host's own windows. */
   const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
@@ -540,12 +558,16 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       // So this is the browser's own device. The browser becomes the person it first says it is; after that a
       // request can't make it someone else (only a person who was removed frees it to pick again), and its
       // devices are that person's. Owner-only answers rest on this.
-      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) hub.auth.update(paired.id, { personId: String(body.personId) });
+      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) {
+        const refused = becomePerson(hub, paired, String(body.personId));
+        if (refused) return bad(refused, 403);
+      }
       if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
     }
     // The person using the host's own window: agents on the host Mac work for them.
     if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
+      setKeeper(hub, String(body.personId), "host");
       hub.auth.setOwnerPerson("host", String(body.personId));
     }
     const location = body.location === "remote" || body.location === "room" ? body.location : cur?.location ?? (sameLan(ip) ? "room" : "remote");
@@ -559,50 +581,108 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     const q = url.searchParams;
     const deviceId = q.get("deviceId");
     if (!deviceId) return bad("deviceId is required");
+    // Only the window that owns a device sends its audio: a device's owner names the speaker and teaches
+    // their voiceprint, so another window's microphone can't be spoken through.
+    const dev = s.store.get("devices", deviceId);
+    if (!dev) return bad("Register this device first (POST /api/devices).", 404);
+    if (!caller || dev.pairedId !== caller) return bad("That device belongs to another window.", 403);
     // A timed-out upload is retried; the same segment from the same device only counts once.
     const segKey = `${deviceId}:${q.get("t0")}`;
     if (recentSegments.has(segKey) || segmentsInFlight.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
     segmentsInFlight.add(segKey);
     try {
-      const bytes: Uint8Array = body?.__raw ?? new Uint8Array(await req.arrayBuffer());
+      // Read in full by readBody before the credential was checked again.
+      const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
       const seg = await hub.audio.ingest({
         deviceId,
         t0: Number(q.get("t0")),
         t1: Number(q.get("t1")),
         wav: bytes,
-        levelDb: q.has("level") ? Number(q.get("level")) : undefined,
-        noiseDb: q.has("noise") ? Number(q.get("noise")) : undefined,
+        // A device that sent no epoch is an old one: its audio counts as captured before every reset.
+        epoch: q.has("epoch") ? Number(q.get("epoch")) : -1,
       });
       remember(recentSegments, segKey, 4000);
       return json({ ok: true, segment: seg.id, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    } catch (e) {
+      if (e instanceof BadWav) return bad(e.message);
+      throw e;
     } finally {
       segmentsInFlight.delete(segKey);
     }
   }
 
+  // A voice belongs to its person: only their own window reads aloud for it or resets it.
+  const own = (id: string) => {
+    if (paired?.kind === "agent") return "That's for people; agents use their jam_ tools.";
+    if (isLocal(ip) && !hostWindow) return NOT_THE_HOST_WINDOW;
+    const me = paired ? paired.personId : isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : null;
+    return me && me === id ? null : "A voice is only for its own person to give.";
+  };
   if (path === "/people" && req.method === "POST") {
     if (!body?.name?.trim()) return bad("name is required");
-    return json(s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined }));
+    const known = new Set(s.people().map((p) => p.id));
+    const p = s.upsertPerson({ id: body.id, name: body.name, role: body.role, weight: body.weight != null ? Number(body.weight) : undefined });
+    // Someone new, made by this browser: it may become them without asking the host.
+    if (!known.has(p.id) && paired?.kind === "browser" && !paired.personId) setKeeper(hub, p.id, paired.id);
+    return json(p);
   }
   let m = path.match(/^\/people\/([\w-]+)$/);
-  if (m && req.method === "DELETE") return (s.removePerson(m[1]), json({ ok: true }));
+  // Removing a person erases their voiceprint: only the host or the person themselves.
+  if (m && req.method === "DELETE") {
+    const refused = hostWindow ? null : own(m[1]);
+    if (refused) return bad(refused === "A voice is only for its own person to give." ? "Only the host or that person can remove them." : refused, 403);
+    return (s.removePerson(m[1]), setKeeper(hub, m[1], null), json({ ok: true }));
+  }
   if (m && req.method === "PATCH") {
     const p = s.person(m[1]);
     if (!p) return bad("no such person", 404);
     return json(s.upsertPerson({ id: p.id, name: body?.name ?? p.name, role: body?.role, weight: body?.weight != null ? Number(body.weight) : undefined }));
   }
+  // Reset: the voice lives only here, so this is the only place it is forgotten.
   m = path.match(/^\/people\/([\w-]+)\/voiceprint$/);
-  if (m && req.method === "DELETE") return (hub.audio.voiceprints.clear(m[1]), s.store.put("people", s.person(m[1])!), json({ ok: true }));
+  if (m && req.method === "DELETE") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    if (!s.person(m[1])) return bad("no such person", 404);
+    return json(hub.resetVoice(m[1]));
+  }
+  if (path === "/voice/script" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people; agents use their jam_ tools.", 403) : json({ sentences: ENROL_SCRIPT, seconds: ENROL_SECONDS });
+  m = path.match(/^\/people\/([\w-]+)\/voice\/start$/);
+  if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    // The read sends this epoch back with its recording: a Reset while it's read makes it stale.
+    // Its id goes with its end and its recording: only this read is closed or taken by them.
+    // The window's place in its own order of starts (`seq`); a credential's starts are fenced per credential.
+    // Only a JSON number counts as a place in the order (Number(null), Number(false), Number([]) are 0).
+    const seq = typeof body?.seq === "number" ? body.seq : NaN;
+    const read = hub.audio.beginEnrolment(m[1], { window: hostWindow ? "host" : paired?.id ?? "local", seq });
+    if (!read) return bad("A newer read has already started.", 409);
+    return json({ ok: true, epoch: s.store.voiceEpoch(), read });
+  }
+  // The read stopped without reaching the host (the microphone failed, the upload failed): `read` says
+  // whether anything was said aloud, which earns the grace for copies still on their way.
+  m = path.match(/^\/people\/([\w-]+)\/voice\/end$/);
+  if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
+    const read = typeof body?.id === "string" ? body.id : "";
+    if (body?.read) hub.audio.endEnrolment(m[1], read);
+    else hub.audio.cancelEnrolment(m[1], read);
+    return json({ ok: true });
+  }
 
   m = path.match(/^\/utterances\/([\w-]+)\/assign$/);
   if (m && req.method === "POST") {
     let personId = body?.personId;
     if (!personId && body?.name) personId = s.upsertPerson({ name: body.name, role: body.role }).id;
     if (!personId) return bad("personId or name is required");
-    const { utterance, learning } = hub.audio.assign(m[1], personId);
+    const by = { host: hostWindow, personId: paired?.kind === "browser" ? paired.personId : null };
+    const { utterance, learning } = hub.audio.assign(m[1], personId, by);
     const person = s.person(personId)!;
     s.store.put("people", person);
+    hub.confirmLearning(person.name, learning);
     return json({ ...utterance, learning: { ...learning, message: learningNote(person.name, learning) } });
   }
 
@@ -631,9 +711,10 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   if (path === "/settings" && req.method === "POST") {
-    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control and the brain's on/off switch on the host itself.", 403);
+    if (!isLocal(ip) && HOST_ONLY_SETTINGS.some((k) => body?.[k] !== undefined)) return bad("Change the gateway key, models, host control, the faster engine and the brain's on/off switch on the host itself.", 403);
     s.updateSettings(body ?? {});
     hub.brain.refreshStatus();
+    if (body?.fastEngine !== undefined || body?.transcription !== undefined) void hub.transcriber.syncFastEngine();
     return json(s.settings());
   }
 
@@ -763,17 +844,34 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
 
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
-    const f = form?.get("file");
-    if (!(f instanceof Blob)) return bad("send the image as form field 'file'");
-    const agent = s.agent(String(form!.get("agent") ?? "")) ?? null;
-    const art = await hub.saveUpload(agent, new Uint8Array(await f.arrayBuffer()), {
-      title: String(form!.get("title") ?? "Screenshot"),
-      stage: form!.get("stage") === "mockup" ? "mockup" : "built",
-      note: String(form!.get("note") ?? ""),
-      platform: (form!.get("platform") as any) ?? undefined,
-      replaces: String(form!.get("replaces") ?? "") || undefined,
-    });
-    return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
+    const bytes: unknown = body?.__files?.file;
+    if (!(form instanceof FormData) || !(bytes instanceof Uint8Array)) return bad("send the image as form field 'file'");
+    // Who it's from. The host's window posts for anyone, or for the room (no agent), and may make versions. Anyone
+    // else posts as one of its own machine's agents. A machine's agents share its credential, so a post over HTTP
+    // can't prove which of them sent it: it is always a new item, never a version of an earlier one (an agent makes
+    // versions with jam_post_image, which knows which agent it is).
+    const named = String(form.get("agent") ?? "");
+    const agent = named ? s.agent(named) ?? null : null;
+    if (named && !agent) return bad("No such agent.", 404);
+    if (!hostWindow) {
+      if (!agent) return bad("Name your agent (-F agent=<id>); only the host posts for the room.", 403);
+      if (agent.machine !== (paired ? hub.auth.machineOf(paired.id) : null)) return bad("That agent is on another machine; post as yourself.", 403);
+      if (form.get("replaces")) return bad("To post a new version of a screen, use jam_post_image with replaces.", 403);
+    }
+    try {
+      const art = await hub.saveUpload(agent, bytes, {
+        title: String(form.get("title") ?? "Screenshot"),
+        stage: form.get("stage") === "mockup" ? "mockup" : "built",
+        note: String(form.get("note") ?? ""),
+        platform: (form.get("platform") as any) ?? undefined,
+        replaces: hostWindow ? String(form.get("replaces") ?? "") || undefined : undefined,
+        fold: hostWindow,
+      });
+      return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
+    } catch (e) {
+      if (e instanceof BadImage) return bad(e.message);
+      throw e;
+    }
   }
 
   // Claude Code's hooks. They speak for an agent, so only an agent's credential sends them, or the
@@ -828,7 +926,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     hub.transcriber.addWorker(String(body.id), String(body.label ?? "worker"), workerUrl);
     return json({ ok: true, engines: hub.transcriber.engineList() });
   }
-  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), voiceprints: { ...voiceprintStatus(), enrolled: hub.audio.voiceprints.enrolled }, problem: hub.transcriber.problem() });
+  if (path === "/engines") return json({ transcription: hub.transcriber.engineList(), whisperModel: hub.transcriber.whisper.status(), speechModel: hub.transcriber.parakeet.status(), vocabulary: hub.transcriber.vocabulary().map((v) => v.term), voiceprints: s.voiceprints(), problem: hub.transcriber.problem() });
 
   if (path === "/canvas-link") {
     const kind = url.searchParams.get("kind") === "view" ? "view" : "edit";
@@ -898,15 +996,33 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // ---- voice enrollment: a person reads a sentence so JamSesh knows their voice ----
   m = path.match(/^\/people\/([\w-]+)\/voice$/);
   if (m && req.method === "POST") {
+    const refused = own(m[1]);
+    if (refused) return bad(refused, 403);
     const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
-    return json(hub.enrollVoice(m[1], bytes));
+    try {
+      // Over HTTP a recording always names its read; one without (or for a closed read) isn't taken.
+      return json(hub.enrollVoice(m[1], bytes, url.searchParams.has("epoch") ? Number(url.searchParams.get("epoch")) : -1, url.searchParams.get("read") ?? ""));
+    } catch (e) {
+      if (e instanceof BadWav) return bad(e.message);
+      throw e;
+    }
   }
 
   // ---- profile photos ----
   m = path.match(/^\/people\/([\w-]+)\/photo$/);
   if (m && req.method === "POST") {
-    const bytes: Uint8Array = body?.__raw ?? (body?.__form?.get("file") instanceof Blob ? new Uint8Array(await (body.__form.get("file") as Blob).arrayBuffer()) : new Uint8Array());
-    return json(await hub.savePhoto(m[1], bytes));
+    // A photo is its own person's to set (their window, or the host's window for the host's person).
+    const refused = own(m[1]);
+    if (refused) return bad(refused.replace("A voice is only for its own person to give.", "A photo is only for its own person to set."), 403);
+    const sent: unknown = body?.__raw ?? body?.__files?.file;
+    const bytes = sent instanceof Uint8Array ? sent : new Uint8Array();
+    // What the sender got wrong (no file, not a whole JPEG or PNG) is a 400, not the host's error.
+    try {
+      return json(await hub.savePhoto(m[1], bytes));
+    } catch (e) {
+      if (e instanceof BadImage) return bad(e.message);
+      throw e;
+    }
   }
 
   // ---- prompts addressed to the brain ----
@@ -983,6 +1099,20 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   if (m && req.method === "DELETE") {
     if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can disconnect devices.", 403);
     return hub.auth.revoke(m[1]) ? json({ ok: true }) : bad("No such device.", 404);
+  }
+  // The host lets a laptop be the person it asked to be: the person's other laptops are disconnected, and
+  // their voice and owner-only answers follow this one from now on.
+  m = path.match(/^\/paired\/([\w-]+)\/allow$/);
+  if (m && req.method === "POST") {
+    if (!hostWindow) return bad(isLocal(ip) ? NOT_THE_HOST_WINDOW : "Only the host can let a laptop in as someone.", 403);
+    const d = hub.auth.list().find((x) => x.id === m![1]);
+    const personId = d?.kind === "browser" ? d.wants : null;
+    if (!d || !personId || !s.person(personId)) return bad("That laptop isn't asking to be anyone.", 404);
+    // The host confirms one exact person: the one it was shown. A request changed since then is not what it confirmed.
+    if (typeof body?.personId !== "string" || body.personId !== personId) return bad(`That laptop is now asking to be ${s.person(personId)?.name ?? "someone else"}. Look again before letting it in.`, 409);
+    if (s.store.setting<string>("hostPersonId", "") === personId) return bad("That's the person using the host's own window.", 409);
+    bindBrowser(hub, d.id, personId, true);
+    return json({ ok: true });
   }
 
   // A person approves or denies an agent's host build. Agents can't: their tokens are refused here.
@@ -1061,7 +1191,8 @@ async function idempotent(hub: Hub, req: Request, path: string, run: () => Promi
     const body = await res.clone().text();
     // Server errors aren't remembered, so the retry can succeed.
     const reply = { status: res.status, body, type: res.headers.get("content-type") ?? "application/json" };
-    if (res.status >= 500) idemSeen.delete(key);
+    // Nor is a body that didn't arrive whole (408): nothing ran, so the same key sent again whole must run.
+    if (res.status >= 500 || res.status === 408) idemSeen.delete(key);
     else hub.session.store.saveReply(key, reply);
     settle(reply);
     return res;
@@ -1090,13 +1221,41 @@ export function originOf(req: Request, url: URL) {
   return `${proto}://${host}`;
 }
 
+/**
+ * Reads the whole body, whatever its type, before any route runs: api() checks the credential again after this,
+ * so no route reads bytes later (when the credential may have been revoked meanwhile). Unknown types and bytes
+ * come back as `__raw`; an empty body as null.
+ */
 async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
-  if (type.includes("application/json")) return req.json().catch(() => ({}));
-  if (type.includes("multipart/form-data")) return { __form: await req.formData() };
-  if (type.includes("audio/") || type.includes("image/") || type.includes("octet-stream")) return { __raw: new Uint8Array(await req.arrayBuffer()) };
-  return null;
+  // Reading fails (throws) when the body didn't arrive whole; api() then stops the request.
+  // The bytes first: failing here means the body didn't arrive whole. Then what they say.
+  const raw = new Uint8Array(await req.arrayBuffer());
+  if (type.includes("application/json")) {
+    const text = new TextDecoder().decode(raw);
+    try {
+      const parsed = JSON.parse(text);
+      // The internal fields of a form or raw body can't come from JSON.
+      if (parsed && typeof parsed === "object") for (const k of ["__raw", "__form", "__files"]) delete parsed[k];
+      return parsed;
+    } catch {
+      return {};
+    }
+  }
+  if (type.includes("multipart/form-data")) {
+    const form = await new Response(raw, { headers: { "content-type": type } }).formData().catch(() => {
+      throw new BadForm("That form couldn't be read.");
+    });
+    // A form's files are read into memory here too, so no route awaits bytes after the credential check.
+    const files: Record<string, Uint8Array> = {};
+    for (const [k, v] of form.entries() as Iterable<[string, unknown]>) if (v instanceof Blob && !(k in files)) files[k] = new Uint8Array(await v.arrayBuffer());
+    return { __form: form, __files: files };
+  }
+  return raw.length ? { __raw: raw } : null;
 }
+
+/** A body that arrived whole but is a broken form (400, unlike one that didn't arrive whole). */
+class BadForm extends Error {}
 
 function file(p: string, root: string, cache = false): Response {
   const full = normalize(p);
@@ -1159,3 +1318,43 @@ export function cookie(req: Request, name: string) {
   return req.headers.get("cookie")?.match(new RegExp(`(?:^|; )${name}=([^;]+)`))?.[1] ?? null;
 }
 
+
+/** Which credential a person belongs to ("host" for the host's own window), set the first time someone becomes them. */
+function setKeeper(hub: Hub, personId: string, keeper: string | null) {
+  const all = { ...hub.session.store.setting<Record<string, string>>("personKeepers", {}) };
+  if (keeper) all[personId] = keeper;
+  else delete all[personId];
+  hub.session.store.setSetting("personKeepers", all);
+}
+
+/**
+ * The only place a browser credential is given a person (auth.update with a personId happens nowhere else).
+ * `confirmed`: the host's own window confirmed this exact person for this exact credential (POST /paired/:id/allow
+ * with the person it was shown); the person's other browsers are then disconnected. Otherwise becomePerson has
+ * found the person is this browser's own (it made them) or nobody's yet.
+ */
+function bindBrowser(hub: Hub, deviceId: string, personId: string, confirmed: boolean) {
+  if (confirmed) for (const other of hub.auth.list()) if (other.kind === "browser" && other.id !== deviceId && other.personId === personId) hub.auth.revoke(other.id);
+  hub.auth.update(deviceId, { personId, wants: null });
+  setKeeper(hub, personId, deviceId);
+}
+
+/**
+ * The one rule for a browser becoming a person, since their voiceprint and every owner-only answer follow
+ * it. A browser is someone it made itself, or someone nobody has been yet who has no voice here; anyone
+ * else (on another laptop now, before, or the host's own window) only once the host lets it in. Returns
+ * why not, and then the host is asked.
+ */
+function becomePerson(hub: Hub, paired: PairedDevice, personId: string): string | null {
+  const s = hub.session;
+  const keeper = s.store.setting<Record<string, string>>("personKeepers", {})[personId];
+  const fresh = !keeper && !hub.auth.everHeld(personId) && s.store.setting<string>("hostPersonId", "") !== personId && hub.audio.voiceprints.count(personId) === 0;
+  if (keeper === paired.id || fresh) {
+    bindBrowser(hub, paired.id, personId, false);
+    return null;
+  }
+  const name = s.person(personId)?.name ?? "them";
+  hub.auth.update(paired.id, { wants: personId });
+  bus.send({ type: "toast", tone: "info", text: `${paired.label} wants to be ${name}`, detail: "Let them in from Settings, Connected devices." });
+  return `${name} is already known to this host. Ask the host to let this laptop in as ${name} (Settings, Connected devices).`;
+}

@@ -112,7 +112,7 @@ export class Brain {
     if (called) this.calledBy = null;
     // Prompts people type to their own agents mention JamSesh all the time; they aren't for the brain.
     if (called || (ev.kind !== "prompt" && addressesBrain(ev.text, name))) {
-      const marked = this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true } }) ?? { ...ev, data: { ...ev.data, direct: true } };
+      const marked = this.session.store.updateEvent(ev.id, { relevance: "work", data: { direct: true, ...(ev.data?.typed ? {} : { source: "addressed" }) } }) ?? { ...ev, data: { ...ev.data, direct: true } };
       return void this.direct(marked);
     }
     this.pending.push(ev);
@@ -191,7 +191,7 @@ export class Brain {
         if (!ev) continue;
         // A question to the brain is addressed to it even without its name, so its answer is spoken.
         const asked = line.intent === "question" && line.confidence >= 0.55 && ev.kind !== "prompt" && ev.authorType === "person";
-        const updated = this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, ...(asked ? { direct: true } : {}) } });
+        const updated = this.session.store.updateEvent(ev.id, { relevance: line.relevance, data: { intent: line.intent, confidence: line.confidence, ...(asked ? { direct: true, ...(ev.data?.typed ? {} : { source: "addressed" }) } : {}) } });
         batch[i] = updated ?? { ...ev, data: { ...ev.data, intent: line.intent, ...(asked ? { direct: true } : {}) } };
       }
       for (const intro of triage.introductions) {

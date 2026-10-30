@@ -1,11 +1,12 @@
 // Wires the session to the brain, audio, canvas, dev servers, MCP and host control.
+import { BadImage, checkImage } from "./image";
 import { HelperRegistry } from "./children";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { AudioPipeline } from "./audio/pipeline";
 import { Transcriber } from "./audio/transcribe";
-import { embed, learningNote, voiceprintStatus } from "./audio/voiceprint";
-import { decodeWav, resample, speechLevelDb } from "./audio/wav";
+import { learningNote, voiceprintStatus, type Learning } from "./audio/voiceprint";
+import { decodeWav, resample } from "./audio/wav";
 import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
 import { config } from "./config";
@@ -158,7 +159,12 @@ export class Hub {
     mkdirSync(this.uploadsDir, { recursive: true });
 
     this.audio.onLine = (u, isNew) => this.roomLine(u, isNew);
-    this.session.voiceprints = () => ({ ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled });
+    this.session.voiceprints = () => {
+      const st = this.audio.stats;
+      const heard = this.session.people().filter((p) => p.hasVoiceprint).length;
+      // Voiceprints exist but, over a dozen lines, none was matched by voice: say so instead of failing quietly.
+      return { ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled, lines: st.lines, byVoice: st.voice, neverUsed: heard > 0 && st.lines >= 12 && st.voice === 0 };
+    };
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
     this.session.onUpdate = (agent, kind, text, ev) => this.brain.agentUpdated(agent, kind, text, ev.data);
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
@@ -167,14 +173,18 @@ export class Hub {
       const ev = this.store.event(eventId);
       const person = this.session.personByName(name) ?? this.session.upsertPerson({ name });
       if (!ev?.data.utteranceId) return "That line wasn't spoken, so there's no voice to learn.";
-      const { learning } = this.audio.assign(ev.data.utteranceId, person.id);
+      // Said out loud to the brain: whoever said it isn't known for sure, so it relabels and teaches nothing.
+      const { learning } = this.audio.assign(ev.data.utteranceId, person.id, { host: false, personId: null });
+      this.confirmLearning(person.name, learning);
       return `Line ${eventId} is now ${person.name}'s. ${learningNote(person.name, learning)}`;
     };
   }
 
   async start() {
     const tasks: Promise<unknown>[] = [this.net.start().catch((e) => console.error("net:", e))];
-    if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal().then((ok) => console.log(ok ? "whisper: local whisper.cpp ready" : "whisper: no local model, using the gateway")));
+    if (this.opts.whisper !== false) tasks.push(this.transcriber.startLocal());
+    // The opt-in faster engine. Not awaited: its first start downloads the model, and whisper or the gateway carry the room meanwhile.
+    if (this.opts.whisper !== false) void this.transcriber.syncFastEngine().then((ok) => console.log(ok ? "parakeet: ready" : `parakeet: ${this.transcriber.parakeet.status().detail}`));
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
     this.autosave.start();
@@ -221,6 +231,7 @@ export class Hub {
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
     for (const t of this.intervals.splice(0)) clearInterval(t);
     this.session.stop();
+    this.transcriber.stop(); // whisper and Parakeet: no new start or download (their servers are in the helper list below)
     return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
   }
 
@@ -289,7 +300,7 @@ export class Hub {
         authorName: u.speakerName,
         text: u.text,
         ts: u.t0,
-        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, embedding: this.audio.embeddingFor(u.id) },
+        data: { utteranceId: u.id, confidence: u.confidence, method: u.method, deviceId: u.deviceId, ...this.audio.voiceFor(u.id), source: "overheard" },
       });
       s.store.put("utterances", { ...u, eventId: ev.id });
       this.brain.hear(ev);
@@ -315,7 +326,7 @@ export class Hub {
       authorName: p?.name ?? "Someone",
       text: text.trim(),
       relevance: direct ? "work" : null,
-      data: { typed: true, direct },
+      data: { typed: true, direct, source: "typed" },
     });
     if (direct) this.brain.direct(ev);
     else this.brain.hear(ev);
@@ -368,7 +379,7 @@ export class Hub {
       text: said || "(pointed without speaking)",
       relevance: "work",
       // The recording laptop gets the chime for its own prompt.
-      data: { direct: true, recorded: true, saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, embedding: this.audio.embeddingFor(lines[0].id) } : {}) },
+      data: { direct: true, recorded: true, source: "addressed", saidAt: w.t1, pointer: marks, deviceId: w.deviceId, ...(lines.length === 1 ? { utteranceId: lines[0].id, ...this.audio.voiceFor(lines[0].id) } : {}) },
     });
     // One spoken line: it can be relabelled from the prompt, like any line in the feed.
     if (lines.length === 1) s.store.put("utterances", { ...lines[0], eventId: ev.id });
@@ -400,56 +411,79 @@ export class Hub {
     return ev;
   }
 
-  /** A deliberate voice sample: split into a few chunks so the voiceprint starts with variety. */
-  enrollVoice(personId: string, bytes: Uint8Array) {
-    const p = this.session.person(personId);
-    if (!p) throw new Error("No such person.");
-    const pcm = resample(decodeWav(bytes), 16000);
-    const { levelDb, noiseDb } = speechLevelDb(pcm);
-    if (levelDb - noiseDb < 8 || levelDb < -50) return { ok: false, reason: "That was too quiet. Hold the laptop closer and try again." };
-    const chunk = 16000 * 3;
-    let added = 0;
-    for (let i = 0; i + chunk / 2 <= pcm.samples.length; i += chunk) {
-      const e = embed({ sampleRate: 16000, samples: pcm.samples.subarray(i, Math.min(pcm.samples.length, i + chunk)) });
-      if (e) (this.audio.voiceprints.add(personId, e), added++);
+  /** A deliberate voice sample: the join sentences, read aloud. */
+  /** `read`: the id beginEnrolment gave the read (null for an in-process caller with no read window). */
+  enrollVoice(personId: string, bytes: Uint8Array, epoch: number, read: string | null = null) {
+    if (!this.session.person(personId)) throw new Error("No such person.");
+    let pcm;
+    try {
+      pcm = resample(decodeWav(bytes), 16000);
+    } catch (e) {
+      if (read !== null) this.audio.endEnrolment(personId, read);
+      throw e;
     }
-    this.session.store.put("people", this.session.person(personId)!);
-    return added ? { ok: true, samples: this.audio.voiceprints.count(personId) } : { ok: false, reason: "Couldn't hear enough speech. Try reading the whole sentence." };
+    return this.audio.enrol(personId, pcm, epoch, read);
+  }
+
+  /**
+   * Forgets a person's voice on this host: their samples, the embeddings kept with their lines in this
+   * session, and what's held or in flight. A voice lives only on the host that learned it, so nothing else
+   * can bring it back, and nothing heard before now teaches it again (Store.addVoiceSample).
+   */
+  resetVoice(personId: string) {
+    this.session.store.markVoiceReset(personId);
+    this.audio.voiceprints.clear(personId);
+    const scrubbed = this.session.store.scrubEmbeddings(personId);
+    this.audio.forgetVoice(personId);
+    const p = this.session.person(personId);
+    if (p) this.session.store.put("people", p);
+    return { ok: true as const, scrubbed };
+  }
+
+  /** Says what a correction did, out loud when the room allows it and as a toast otherwise. */
+  confirmLearning(name: string, learning: Learning) {
+    void speak(this.session, learningNote(name, learning), { source: "voice", kind: "confirm" });
   }
 
   async savePhoto(personId: string, bytes: Uint8Array) {
     const p = this.session.person(personId);
     if (!p) throw new Error("No such person.");
-    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
-    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
-    if (!isJpeg && !isPng) throw new Error("Send a JPEG or PNG.");
-    const file = `${personId}-${Date.now()}.${isJpeg ? "jpg" : "png"}`;
+    // A whole PNG or JPEG, checked before anything is written.
+    const img = checkImage(bytes);
+    if (typeof img === "string") throw new BadImage(img);
+    const file = `${personId}-${Date.now()}.${img.kind === "jpeg" ? "jpg" : "png"}`;
     await Bun.write(join(this.uploadsDir, file), bytes);
     return this.session.setPhoto(personId, `/renders/uploads/${file}`);
   }
 
-  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string }): Promise<Artifact> {
-    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
-    const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
-    if (!isJpeg && !isPng) throw new Error("Upload a PNG or JPEG.");
-    if (bytes.length > 12 * 1024 * 1024) throw new Error("Images must be under 12 MB.");
-    const file = `${newId("up")}.${isJpeg ? "jpg" : "png"}`;
-    await Bun.write(join(this.uploadsDir, file), bytes);
-    const size = imageSize(bytes);
-    const art = this.session.upsertVersion(
-      {
-        kind: "screenshot",
-        stage: meta.stage,
-        title: meta.title,
-        note: meta.note ?? "",
-        image: `/renders/uploads/${file}`,
-        agentId: agent?.id ?? null,
-        platform: meta.platform,
-        width: size?.width ?? null,
-        height: size?.height ?? null,
-      },
-      meta.replaces,
-    );
+  /**
+   * A screenshot: checked whole (BadImage, the sender's error) and its replacement checked before anything is
+   * written; a file whose item then can't be stored is removed. `fold: false` makes it a new item, never the next
+   * version of an earlier one by title (for callers that can't prove which agent they are).
+   */
+  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string; fold?: boolean }): Promise<Artifact> {
+    if (bytes.length > 12 * 1024 * 1024) throw new BadImage("Images must be under 12 MB.");
+    const img = checkImage(bytes);
+    if (typeof img === "string") throw new BadImage(img);
+    if (meta.replaces) {
+      const prior = this.session.store.get("artifacts", meta.replaces);
+      if (!prior) throw new BadImage(`No artifact ${meta.replaces} to replace. Use jam_artifacts for ids.`);
+      if (prior.agentId !== (agent?.id ?? null)) throw new BadImage("That item belongs to someone else's agent; post yours as a new item.");
+    }
+    const file = `${newId("up")}.${img.kind === "jpeg" ? "jpg" : "png"}`;
+    const path = join(this.uploadsDir, file);
+    await Bun.write(path, bytes);
+    let art: Artifact;
+    try {
+      art = this.session.upsertVersion(
+        { kind: "screenshot", stage: meta.stage, title: meta.title, note: meta.note ?? "", image: `/renders/uploads/${file}`, agentId: agent?.id ?? null, platform: meta.platform, width: img.width, height: img.height },
+        meta.replaces,
+        meta.fold ?? true,
+      );
+    } catch (e) {
+      rmSync(path, { force: true });
+      throw e;
+    }
     this.brain.artifactsLanded([art]);
     return art;
   }
@@ -533,7 +567,7 @@ export class Hub {
         authorName: owner?.name ?? agent.ownerName,
         text: prompt.slice(0, 4000),
         relevance: "work",
-        data: { agentId: agent.id, agentName: agent.name },
+        data: { agentId: agent.id, agentName: agent.name, source: "typed" },
       });
       this.brain.hear(ev);
     }
@@ -756,21 +790,6 @@ export class Hub {
   }
 }
 
+
 /** One handover by a hook or the listener, waiting for the hook script to acknowledge it (Hub.offer). */
 type Delivery = { id: string; at: number; via: "hook" | "listen"; directives: string[]; msgUpTo: number; decisionUpTo: number };
-
-function imageSize(b: Uint8Array): { width: number; height: number } | null {
-  if (b[0] === 0x89 && b[1] === 0x50) {
-    const v = new DataView(b.buffer, b.byteOffset);
-    return { width: v.getUint32(16), height: v.getUint32(20) };
-  }
-  let i = 2;
-  while (i + 9 < b.length) {
-    if (b[i] !== 0xff) return null;
-    const marker = b[i + 1];
-    const len = (b[i + 2] << 8) | b[i + 3];
-    if (marker >= 0xc0 && marker <= 0xc3) return { height: (b[i + 5] << 8) | b[i + 6], width: (b[i + 7] << 8) | b[i + 8] };
-    i += 2 + len;
-  }
-  return null;
-}

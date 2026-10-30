@@ -68,6 +68,8 @@ export interface AudioSeg {
   wav: ArrayBuffer;
   /** Stamped before the first clock sample arrived; shifted by the clock offset at upload. */
   unsynced?: boolean;
+  /** The host's reset epoch when it was captured: audio from before a Reset never teaches that voice. */
+  epoch?: number;
 }
 
 export interface AudioBufferState {
@@ -192,7 +194,7 @@ export class AudioBuffer {
 async function postSegment(s: AudioSeg): Promise<PostResult> {
   // Segments stamped before the clock synced get the offset now (drain waits for the sync).
   const shift = s.unsynced ? hub.get().clockOffset : 0;
-  const q = new URLSearchParams({ deviceId: s.deviceId, t0: String(Math.round(s.t0 + shift)), t1: String(Math.round(s.t1 + shift)), level: s.level.toFixed(1), noise: s.noise.toFixed(1) });
+  const q = new URLSearchParams({ deviceId: s.deviceId, t0: String(Math.round(s.t0 + shift)), t1: String(Math.round(s.t1 + shift)), level: s.level.toFixed(1), noise: s.noise.toFixed(1), epoch: String(s.epoch ?? -1) });
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 20_000);
   try {
@@ -203,7 +205,8 @@ async function postSegment(s: AudioSeg): Promise<PostResult> {
       hub.markUnauthorized();
       return "unauthorized";
     }
-    return res.status >= 500 || res.status === 408 || res.status === 429 ? "retry" : "drop";
+    // 404: this window's device isn't registered with the host yet (it is a moment after joining).
+    return res.status >= 500 || res.status === 404 || res.status === 408 || res.status === 429 ? "retry" : "drop";
   } catch {
     return "retry";
   } finally {
@@ -233,28 +236,20 @@ export function isEchoSegment(level: number, noise: number, suppressing: boolean
   return suppressing && level < noise + BARGE_MARGIN_DB;
 }
 
-let holds = 0;
-/**
- * Keeps this laptop's microphone from sending speech while the caller does something that
- * must not be heard as room talk (reading the voice-enrollment sentence). Release is
- * delayed a moment so the last words, finishing after the caller stops, are still dropped.
- */
-export function holdMic() {
-  holds++;
-  let done = false;
-  return () => {
-    if (done) return;
-    done = true;
-    setTimeout(() => (holds = Math.max(0, holds - 1)), 1500);
-  };
-}
-
 export class Mic {
   status: MicStatus = { on: false, level: -90, noise: -70, speaking: false, sent: 0, error: null, deviceLabel: "", buffered: audioBuffer.get().seconds };
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private listeners = new Set<Listener>();
   private ring: Float32Array[] = [];
+  /** The reset epoch each ring frame was captured under (hub.voiceEpoch then). */
+  private ringEpochs: number[] = [];
+  /**
+   * The reset epoch of the segment: the one its earliest frame was captured under. Epochs only go up, so this is
+   * the oldest in the segment, and audio from before a reset never carries a newer epoch (the hub would date it
+   * after the reset and teach it). Set with segStart, never at finish.
+   */
+  private segEpoch = -1;
   private seg: Float32Array[] | null = null;
   private segStart = 0;
   private segSpeechFrames = 0;
@@ -449,7 +444,8 @@ export class Mic {
     const isSpeech = db > this.noise + 10 && db > -58;
 
     this.ring.push(f);
-    if (this.ring.length > PREROLL_FRAMES) this.ring.shift();
+    this.ringEpochs.push(hub.get().voiceEpoch);
+    if (this.ring.length > PREROLL_FRAMES) (this.ring.shift(), this.ringEpochs.shift());
 
     // Someone talking over the brain: sustained and well above the room, which its echo is not.
     if (Date.now() < this.suppressUntil) {
@@ -466,6 +462,7 @@ export class Mic {
       if (this.run >= START_FRAMES) {
         this.seg = [...this.ring];
         this.segStart = ts - (this.ring.length - 1) * 20;
+        this.segEpoch = this.ringEpochs[0] ?? -1;
         this.segSpeechFrames = this.run;
         this.segLevels = [db];
         this.silence = 0;
@@ -496,14 +493,13 @@ export class Mic {
     const t0 = this.segStart;
     const t1 = ts - trim * 20;
     if (this.segSpeechFrames < MIN_SPEECH_FRAMES) return;
-    if (holds > 0) return;
     const samples = new Float32Array(kept.length * FRAME);
     kept.forEach((k, i) => samples.set(k, i * FRAME));
     const levels = [...this.segLevels].sort((a, b) => a - b);
     const level = levels.slice(Math.floor(levels.length / 2)).reduce((a, b) => a + b, 0) / Math.max(1, levels.length - Math.floor(levels.length / 2));
     // The brain's own voice coming back through the speakers is not a person.
     if (isEchoSegment(level, this.noise, Date.now() < this.suppressUntil)) return;
-    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced });
+    return audioBuffer.submit({ deviceId: this.deviceId, t0: Math.round(t0), t1: Math.round(t1), level: Number(level.toFixed(1)), noise: Number(this.noise.toFixed(1)), wav: encodeWav(samples), unsynced: !hub.get().clockSynced, epoch: this.segEpoch });
   }
 }
 

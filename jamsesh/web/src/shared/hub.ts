@@ -39,6 +39,8 @@ interface Snapshot {
   levels: Record<string, number>;
   speaking: string | null;
   clockOffset: number;
+  /** The host's reset epoch, from its clock pongs (-1 before the first): stamped on audio as it is captured. */
+  voiceEpoch: number;
 }
 
 type SpeakListener = (m: { audio: string | null; mime: string; text: string }) => void;
@@ -53,7 +55,7 @@ export function reconnectDelay(retry: number, rand: () => number = Math.random) 
 }
 
 class HubClient {
-  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], removedChatsRev: 0, thinking: null, levels: {}, speaking: null, clockOffset: 0 };
+  snap: Snapshot = { state: null, connected: false, status: "connecting", lastContact: 0, clockSynced: false, epoch: 0, toasts: [], removed: [], removedChatsRev: 0, thinking: null, levels: {}, speaking: null, clockOffset: 0, voiceEpoch: -1 };
   private listeners = new Set<() => void>();
   private eventListeners = new Set<(e: JamEvent) => void>();
   private gapListeners = new Set<() => void>();
@@ -328,7 +330,7 @@ class HubClient {
     return Date.now() + this.snap.clockOffset;
   }
 
-  private handle(m: BusMessage | { type: "pong"; t: number; now: number }) {
+  private handle(m: BusMessage | { type: "pong"; t: number; now: number; voiceEpoch?: number }) {
     const s = this.snap.state;
     if (m.type === "state" || (m.type !== "pong" && s)) this.taken = ++this.seq;
     switch (m.type) {
@@ -337,7 +339,7 @@ class HubClient {
         const rtt = t1 - m.t;
         this.pings = [...this.pings, { rtt, offset: m.now - (m.t + rtt / 2) }].slice(-12);
         const best = [...this.pings].sort((a, b) => a.rtt - b.rtt)[0];
-        this.set({ clockOffset: best.offset, clockSynced: true });
+        this.set({ clockOffset: best.offset, clockSynced: true, voiceEpoch: m.voiceEpoch ?? -1 });
         return;
       }
       case "state":
@@ -415,7 +417,7 @@ export function useHub() {
 // Not worth replaying later, or unsafe to: approvals and answers must be live, a screen size is only
 // worth reporting now, and a screen control (a cast, unlock, show, restore) replayed after reconnecting
 // could undo a later decision, such as clearing a newer lock.
-const NEVER_QUEUE = /^\/(audio|stage($|\/)|show-requests\/|pair|invite|hooks\/|agents\/|removed-chats|shares\/request|debug\/|build-requests\/|display|prompt-window|shares$)/;
+const NEVER_QUEUE = /^\/(audio|stage($|\/)|show-requests\/|paired($|\/)|pair|invite|hooks\/|agents\/|removed-chats|shares\/request|debug\/|build-requests\/|display|prompt-window|people\/[\w-]+\/voice|shares$)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {
@@ -497,13 +499,15 @@ export async function api<T = any>(path: string, body?: unknown, method?: string
   if (!res.ok) {
     // A proxy answering 502/503/504 while the hub restarts is a connection problem.
     if (queueable && [502, 503, 504].includes(res.status)) return save();
+    // 408: the body didn't reach the host whole and nothing ran; the outbox sends it again with the same key.
+    if (queueable && res.status === 408) return save();
     // The relay moved to another host while this was on its way: the change is still wanted. It
     // waits in the outbox, with the same idempotency key and host stamp, until its own host is back.
     if (res.status === 409 && /different JamSesh host/i.test(text)) {
       if (queueable) return save();
       throw Object.assign(new Error("That was meant for the host this window was showing; it changed. Try again."), { status: 409 });
     }
-    throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), { status: res.status });
+    throw Object.assign(new Error(json.error ?? `HTTP ${res.status}`), { status: res.status, body: json });
   }
   return json as T;
 }

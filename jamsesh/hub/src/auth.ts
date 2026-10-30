@@ -22,6 +22,8 @@ export interface PairedDevice {
   revoked: boolean;
   /** For a Mac's agents' credential: the person's window it was issued from. */
   ownerDeviceId?: string;
+  /** A browser that asked to be a person already held elsewhere: the host lets it in, or not (Settings). */
+  wants?: string | null;
 }
 
 const hash = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -179,7 +181,7 @@ export class Auth {
     return !!d && !d.revoked;
   }
 
-  update(id: string, fields: Partial<Pick<PairedDevice, "label" | "personId">>) {
+  update(id: string, fields: Partial<Pick<PairedDevice, "label" | "personId" | "wants">>) {
     const d = this.devices.get(id);
     if (!d) return null;
     Object.assign(d, fields);
@@ -219,6 +221,11 @@ export class Auth {
   /** Revokes the agents credentials an owner window issued earlier (the app issues a new one on each launch). */
   revokeAgentsOf(ownerDeviceId: string) {
     for (const a of this.devices.values()) if (a.ownerDeviceId === ownerDeviceId && a.kind === "agent" && !a.revoked) this.revoke(a.id);
+  }
+
+  /** Whether any browser was ever this person, disconnected ones included. */
+  everHeld(personId: string) {
+    return [...this.devices.values()].some((d) => d.kind === "browser" && d.personId === personId);
   }
 
   list() {

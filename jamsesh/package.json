@@ -7,6 +7,6 @@
     "host": "bun run hub/src/index.ts",
     "dev:web": "cd web && bunx vite",
     "build:web": "cd web && bunx vite build",
-    "test": "bun test hub"
+    "test": "scripts/test-all.sh"
   }
 }

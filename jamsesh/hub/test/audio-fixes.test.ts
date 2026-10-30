@@ -62,7 +62,7 @@ test("U3: relabeling a recorded prompt changes its speaker but not its text", as
   const u = line(hub, "make it blue", maya.id, t0 + 500);
   const r: any = await hub.promptWindow({ deviceId: "mayaLaptop", personId: maya.id, t0, t1: t0 + 3000, pointer: [] });
   expect(s.store.event(r.eventId)?.authorName).toBe("Maya");
-  hub.audio.assign(u.id, ben.id);
+  hub.audio.assign(u.id, ben.id, { host: true, personId: null });
   const ev = s.store.event(r.eventId)!;
   expect(ev.authorName).toBe("Ben");
   expect(ev.authorId).toBe(ben.id);
@@ -125,12 +125,14 @@ test("U4: relabeling twice removes the voice sample from the first, wrong, perso
   s.touchDevice("x", { location: "room", micOn: true });
   (hub.transcriber as any).transcribe = async () => ({ text: "hello there team", engine: "fake" });
   const t = Date.now() - 5000;
-  await hub.audio.ingest({ deviceId: "x", t0: t, t1: t + 2000, wav: tone(2), levelDb: -25, noiseDb: -55 });
+  await hub.audio.ingest({ deviceId: "x", t0: t, t1: t + 2000, wav: tone(2) });
   await hub.audio.flush();
   const u = s.store.all("utterances")[0];
-  hub.audio.assign(u.id, ben.id);
-  hub.audio.assign(u.id, cam.id);
+  hub.audio.assign(u.id, ben.id, { host: true, personId: null });
+  hub.audio.assign(u.id, cam.id, { host: true, personId: null });
   expect(hub.audio.voiceprints.count(ben.id)).toBe(0);
-  expect(hub.audio.voiceprints.count(cam.id)).toBe(1);
+  // A correction counts as many automatic samples, but it is still the one sample.
+  expect(hub.audio.voiceprints.learnedFrom(cam.id).correction).toBe(1);
+  expect(hub.audio.voiceprints.count(cam.id)).toBe(10);
   hub.stop();
 }, 30000);

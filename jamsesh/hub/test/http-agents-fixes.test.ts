@@ -51,6 +51,7 @@ test("a worker has to be the caller's own machine, and can't replace the local e
 });
 
 test("a failed audio upload isn't remembered as received", async () => {
+  await fetch(`${base}/api/devices`, { method: "POST", headers: { "content-type": "application/json", ...hostWindow }, body: JSON.stringify({ deviceId: "dX", label: "Host mic" }) });
   const url = `${base}/api/audio?deviceId=dX&t0=1000&t1=3000`;
   const send = () => fetch(url, { method: "POST", headers: { "content-type": "audio/wav", ...hostWindow }, body: new Uint8Array([1, 2, 3]) }).then((r) => r.json() as Promise<any>);
   const first = await send();
@@ -58,6 +59,27 @@ test("a failed audio upload isn't remembered as received", async () => {
   expect(first.error).toBe("not a WAV file"); // reached the pipeline (the host window may upload)
   expect(first.duplicate).toBeUndefined();
   expect(retry.duplicate).toBeUndefined();
+});
+
+test("audio comes only from the caller's own device: not another window's, an unknown one, or an agent's", async () => {
+  const anaTok = hub.auth.issue({ kind: "browser", label: "Ana's laptop", ip: "10.0.0.7" });
+  const benTok = hub.auth.issue({ kind: "browser", label: "Ben's laptop", ip: "10.0.0.8" });
+  const as = (token: string) => ({ ...remote, authorization: `Bearer ${token}` });
+  const reg = (token: string, deviceId: string) => fetch(`${base}/api/devices`, { method: "POST", headers: { ...as(token), "content-type": "application/json" }, body: JSON.stringify({ deviceId, label: deviceId }) });
+  expect((await reg(anaTok.token, "dev-ana")).status).toBe(200);
+  expect((await reg(benTok.token, "dev-ben")).status).toBe(200);
+  const up = (token: string, deviceId: string, t0: number) =>
+    fetch(`${base}/api/audio?deviceId=${deviceId}&t0=${t0}&t1=${t0 + 1000}&level=-10&noise=-80`, { method: "POST", headers: { ...as(token), "content-type": "audio/wav" }, body: new Uint8Array([1, 2, 3]) });
+  // Ben speaking through Ana's microphone: refused, before anything is ingested or remembered.
+  expect((await up(benTok.token, "dev-ana", 5000)).status).toBe(403);
+  expect((await up(benTok.token, "dev-nobody", 5000)).status).toBe(404);
+  expect((await up(agent.token, "dev-ana", 5000)).status).toBe(403);
+  // The host's own window isn't any device's owner but its own either.
+  expect((await fetch(`${base}/api/audio?deviceId=dev-ana&t0=5000&t1=6000`, { method: "POST", headers: { ...hostWindow, "content-type": "audio/wav" }, body: new Uint8Array([1]) })).status).toBe(403);
+  // Ana's own device reaches the pipeline (and a retry of the refused segment isn't taken as a duplicate).
+  const own = (await (await up(anaTok.token, "dev-ana", 5000)).json()) as any;
+  expect(own.error).toBe("not a WAV file");
+  expect(own.duplicate).toBeUndefined();
 });
 
 test("a page on another site can't post as the host's own window", async () => {

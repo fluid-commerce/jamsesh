@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { parseStage } from "./stageSchema";
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
 import { bus } from "./bus";
+import { cleanVocabulary } from "./audio/vocabulary";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
 import { canonicalCwd, chatKey, isChatKey } from "./chatkey";
@@ -197,6 +198,8 @@ export class Session {
       transcription: s.setting("transcription", "auto"),
       hostControl: s.setting("hostControl", true),
       language: s.setting("language", "en"),
+      vocabulary: cleanVocabulary(s.setting<unknown>("vocabulary", [])),
+      fastEngine: s.setting<unknown>("fastEngine", false) === true,
       gatewayKeySet: keyInSettings || !!config.envGatewayKey,
       gatewayKeySource: keyInSettings ? "settings" : config.envGatewayKey ? "env" : "none",
     };
@@ -216,11 +219,13 @@ export class Session {
   }
 
   updateSettings(patch: Partial<Settings> & { gatewayKey?: string }) {
-    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language"] as const;
+    const allowed = ["sessionName", "brainName", "brainAliases", "brainNotes", "brainEnabled", "voiceReplies", "voice", "transcription", "hostControl", "language", "vocabulary", "fastEngine"] as const;
     for (const k of allowed) {
       if (patch[k] === undefined) continue;
       // The API is the contract: a paired browser can post anything.
       if (k === "brainAliases") this.store.setSetting(k, cleanNames(patch[k]));
+      else if (k === "vocabulary") this.store.setSetting(k, cleanVocabulary(patch[k]));
+      else if (k === "fastEngine") this.store.setSetting(k, patch[k] === true);
       else if (k === "brainName") {
         const n = typeof patch[k] === "string" ? patch[k].trim().slice(0, MAX_NAME) : "";
         if (n) this.store.setSetting(k, n);
@@ -237,7 +242,7 @@ export class Session {
   /** Host build requests waiting on (or just decided by) the room; HostControl owns them. */
   buildRequests: () => BuildRequest[] = () => [];
   /** Whether voice matching works on this host (the hub supplies it: the pipeline owns the voiceprints). */
-  voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", enrolled: 0 });
+  voiceprints: () => HubState["voiceprints"] = () => ({ available: false, reason: "", code: "ok", fix: "", enrolled: 0, lines: 0, byVoice: 0, neverUsed: false });
 
   /** The newest artifacts, plus any a screen is showing however old: a screen's tiles must always resolve. */
   private stateArtifacts() {
@@ -389,11 +394,16 @@ export class Session {
   // ---- people and devices ----
 
   people(): Person[] {
-    const samples = new Map<string, number>();
-    for (const s of this.store.voiceSamples()) samples.set(s.personId, (samples.get(s.personId) ?? 0) + 1);
+    const samples = new Map<string, Person["voiceLearned"] & object>();
+    for (const s of this.store.voiceSamples()) {
+      const n = samples.get(s.personId) ?? { read: 0, corrections: 0, heard: 0 };
+      n[({ enrol: "read", correction: "corrections", auto: "heard" } as const)[s.kind]]++;
+      samples.set(s.personId, n);
+    }
+    const total = (n?: Person["voiceLearned"]) => (n ? n.read + n.corrections + n.heard : 0);
     return this.store
       .all("people")
-      .map((p) => ({ ...p, voiceSamples: samples.get(p.id) ?? 0, hasVoiceprint: (samples.get(p.id) ?? 0) > 0 }))
+      .map((p) => ({ ...p, voiceSamples: total(samples.get(p.id)), voiceLearned: samples.get(p.id), hasVoiceprint: total(samples.get(p.id)) > 0 }))
       .sort((a, b) => a.createdAt - b.createdAt);
   }
 
@@ -1355,13 +1365,13 @@ export class Session {
    * item of the same stage with the same title once "(built)" and version marks are dropped.
    * `replaces` that names nothing usable throws, so the agent hears it.
    */
-  upsertVersion(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, replaces?: string): Artifact {
+  upsertVersion(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, replaces?: string, fold = true): Artifact {
     let prior: Artifact | undefined;
     if (replaces) {
       prior = this.store.get("artifacts", replaces);
       if (!prior) throw new Error(`No artifact ${replaces} to replace. Use jam_artifacts for ids.`);
       if (prior.agentId !== (a.agentId ?? null)) throw new Error("That item belongs to someone else's agent; post yours as a new item.");
-    } else if (a.kind === "screenshot" || a.kind === "html") {
+    } else if (fold && (a.kind === "screenshot" || a.kind === "html")) {
       const key = buildKey(a.title);
       prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(x.title) === key);
     }

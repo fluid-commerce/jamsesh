@@ -43,9 +43,14 @@ export const PALETTE = ["#FF6B4A", "#3E8BFF", "#22C08B", "#B36BFF", "#FFB020", "
 const TEAM_COLLECTIONS = new Set<string>(["people", "devices"]);
 const TEAM_SETTINGS = new Set<string>([
   "hostId",
+  "voiceResetAt",
+  "voiceResets",
+  "personKeepers",
   "gatewayKey",
   "brainName",
   "brainAliases",
+  "vocabulary",
+  "fastEngine",
   "brainNotes",
   "brainEnabled",
   "voiceReplies",
@@ -64,6 +69,9 @@ export function newId(prefix: string) {
 
 /** As long as a laptop keeps a queued change (web/src/shared/offline.ts): a replay is always recognized. */
 const REPLAY_MS = 7 * 86_400_000;
+
+/** Where a voice sample came from: heard in passing, read aloud, or a correction. */
+export type VoiceKind = "auto" | "enrol" | "correction";
 
 export class Store {
   db: Database;
@@ -102,6 +110,10 @@ export class Store {
       CREATE TABLE IF NOT EXISTS digests (scope TEXT PRIMARY KEY, text TEXT NOT NULL, updated INTEGER NOT NULL, through_event INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS replies (key TEXT PRIMARY KEY, status INTEGER NOT NULL, type TEXT NOT NULL, body TEXT NOT NULL, at INTEGER NOT NULL);
     `);
+    // Older stores kept voice samples with no kind: they were all learned automatically.
+    if (!(this.db.query("PRAGMA table_info(voiceprints)").all() as any[]).some((c) => c.name === "kind")) this.db.exec("ALTER TABLE voiceprints ADD COLUMN kind TEXT NOT NULL DEFAULT 'auto'");
+    // Earlier builds took copies of a voice from other hosts. A voice now lives only on the host that learned it.
+    this.db.exec("DELETE FROM voiceprints WHERE kind = 'carried'");
   }
 
   // ---- generic collections ----
@@ -262,6 +274,15 @@ export class Store {
     return next;
   }
 
+  /** Drops the voice embedding kept with a person's speech lines (their voice was reset). Returns how many. */
+  scrubEmbeddings(personId: string): number {
+    const where = "author_id = ? AND json_extract(data, '$.embedding') IS NOT NULL";
+    // Counted first: the search index's triggers count toward the update's changes.
+    const n = (this.db.query(`SELECT COUNT(*) AS n FROM events WHERE ${where}`).get(personId) as { n: number }).n;
+    this.db.query(`UPDATE events SET data = json_remove(data, '$.embedding') WHERE ${where}`).run(personId);
+    return n;
+  }
+
   /** Deletes everything one agent put in the room, or that was addressed to it. Returns the ids. */
   deleteAgentEvents(agentId: string): number[] {
     // Only what the agent itself authored: messages others sent it and prompts its person wrote stay.
@@ -387,24 +408,81 @@ export class Store {
 
   // ---- voiceprints ----
 
-  addVoiceSample(personId: string, embedding: Float32Array): void {
-    if (this.team) return this.team.addVoiceSample(personId, embedding);
-    this.db.query("INSERT INTO voiceprints (person_id, ts, embedding) VALUES (?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)));
-    // Keep the 40 most recent samples per person.
-    this.db
-      .query(
-        `DELETE FROM voiceprints WHERE person_id = ? AND rowid NOT IN
-         (SELECT rowid FROM voiceprints WHERE person_id = ? ORDER BY ts DESC LIMIT 40)`,
-      )
-      .run(personId, personId);
+  /** When a person's voice was last reset here (this host's clock), or 0. */
+  voiceResetAt(personId: string): number {
+    return this.setting<Record<string, number>>("voiceResetAt", {})[personId] ?? 0;
   }
 
-  voiceSamples(): { personId: string; embedding: Float32Array }[] {
+  /** A reset, at a moment later than any before it even if the clock stepped back. */
+  markVoiceReset(personId: string): number {
+    const all = this.setting<Record<string, number>>("voiceResetAt", {});
+    const resets = this.setting<number[]>("voiceResets", []);
+    const at = Math.max(Date.now(), (all[personId] ?? 0) + 1, (resets.at(-1) ?? 0) + 1);
+    this.setSetting("voiceResetAt", { ...all, [personId]: at });
+    this.setSetting("voiceResets", [...resets, at]);
+    return at;
+  }
+
+  /**
+   * The reset epoch: how many resets this host has made, anyone's. The hub hands it out (with each clock pong,
+   * and when a read starts); a device stamps it on audio as it captures it, and a read sends back the one it began with.
+   */
+  voiceEpoch(): number {
+    return this.setting<number[]>("voiceResets", []).length;
+  }
+
+  /**
+   * The latest moment audio captured in `epoch` can count as heard: the first reset after that epoch began, so
+   * nothing captured before a reset teaches that voice, however late it arrives or whatever its timestamp says.
+   * The current epoch has no limit; anything that isn't an epoch this host issued counts as the oldest.
+   */
+  heardBy(epoch: number): number {
+    const resets = this.setting<number[]>("voiceResets", []);
+    if (epoch === resets.length) return Infinity;
+    return Number.isInteger(epoch) && epoch >= 0 && epoch < resets.length ? resets[epoch] : (resets[0] ?? Infinity);
+  }
+
+  /**
+   * Every voice sample comes in here, with when its source was heard (this host's clock). Nothing heard
+   * at or before the person's last reset teaches their voice again, whichever path it took (a line still
+   * being transcribed, a later correction of an old line, a held first sample). Returns
+   * whether it was kept.
+   */
+  addVoiceSample(personId: string, embedding: Float32Array, kind: VoiceKind, heardAt: number): boolean {
+    if (!(Number.isFinite(heardAt) && heardAt > this.voiceResetAt(personId))) return false;
+    if (this.team) return this.team.addVoiceSample(personId, embedding, kind, heardAt);
+    this.db.query("INSERT INTO voiceprints (person_id, ts, embedding, kind) VALUES (?, ?, ?, ?)").run(personId, Date.now(), new Uint8Array(embedding.buffer.slice(0)), kind);
+    // Automatic samples are the only ones that age out: the 40 most recent. What a person read or corrected stays (up to 24 each).
+    for (const [k, keep] of [["auto", 40], ["enrol", 24], ["correction", 24]] as const)
+      this.db
+        .query(
+          `DELETE FROM voiceprints WHERE person_id = ? AND kind = ? AND rowid NOT IN
+           (SELECT rowid FROM voiceprints WHERE person_id = ? AND kind = ? ORDER BY ts DESC, rowid DESC LIMIT ?)`,
+        )
+        .run(personId, k, personId, k, keep);
+    return true;
+  }
+
+  voiceSamples(): { id: number; personId: string; embedding: Float32Array; kind: VoiceKind; ts: number }[] {
     if (this.team) return this.team.voiceSamples();
-    return (this.db.query("SELECT person_id, embedding FROM voiceprints").all() as any[]).map((r) => ({
+    return (this.db.query("SELECT rowid AS id, person_id, embedding, kind, ts FROM voiceprints").all() as any[]).map((r) => ({
+      id: r.id,
       personId: r.person_id,
       embedding: new Float32Array(new Uint8Array(r.embedding).buffer),
+      kind: r.kind as VoiceKind,
+      ts: r.ts,
     }));
+  }
+
+  deleteVoiceSamples(ids: number[]): void {
+    if (this.team) return this.team.deleteVoiceSamples(ids);
+    for (const id of ids) this.db.query("DELETE FROM voiceprints WHERE rowid = ?").run(id);
+  }
+
+  /** Drops one kind of a person's samples (a new join read replaces the old one). */
+  clearVoiceKind(personId: string, kind: VoiceKind): void {
+    if (this.team) return this.team.clearVoiceKind(personId, kind);
+    this.db.query("DELETE FROM voiceprints WHERE person_id = ? AND kind = ?").run(personId, kind);
   }
 
   clearVoiceprint(personId: string): void {
