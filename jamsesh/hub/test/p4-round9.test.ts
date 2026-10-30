@@ -565,7 +565,7 @@ test("a body that never finishes is dropped at the deadline, and bodies share a 
     });
     return new Request(url, { method: "POST", headers: { "content-type": url.includes("/audio") ? "audio/wav" : "application/json" }, body, duplex: "half" } as any);
   };
-  const small = (url = "http://x/api/audio") => new Request(url, { method: "POST", headers: { "content-type": "audio/wav" }, body: new Uint8Array(10) });
+  const small = (url = "http://x/api/audio") => new Request(url, { method: "POST", headers: { "content-type": "audio/wav", "content-length": "10" }, body: new Uint8Array(10) });
   try {
     READ_MS.small = 200;
     expect(await buffered(stalled("http://x/api/say"))).toMatchObject({ status: 408 });
@@ -575,15 +575,11 @@ test("a body that never finishes is dropped at the deadline, and bodies share a 
     await Bun.sleep(50);
     expect(await buffered(small())).toMatchObject({ status: 503 });
     expect((await Promise.all(open)).every((o) => "status" in o && o.status === 408)).toBe(true);
-    // A body that arrived stays charged until its request is answered.
-    const held = [1, 2].map(() => buffered(small()));
+    // Once a body has arrived it holds what it really is (four times over), not its worst case, until its request is answered.
+    const held = [1, 2, 3, 4, 5].map(() => buffered(small()));
     const got = await Promise.all(held);
     expect(got.every((g) => "req" in g)).toBe(true);
-    expect(await buffered(small())).toMatchObject({ status: 503 });
     for (const g of got) if ("release" in g) g.release();
-    const again = await buffered(small());
-    expect("req" in again).toBe(true);
-    if ("release" in again) again.release();
     // Non-media routes take 1 MB of anything but JSON.
     expect(await buffered(new Request("http://x/api/say", { method: "POST", headers: { "content-type": "text/plain" }, body: new Uint8Array(2 * 1024 * 1024) }))).toMatchObject({ status: 413 });
   } finally {
@@ -1034,4 +1030,49 @@ test("a cancellation for another reason is another card; the same reason joins",
   const a = r.s.board.proposeCancel({ directive: d, reason: "Scrap it", by: "Chey" })!;
   expect(r.s.board.proposeCancel({ directive: d, reason: "scrap it.", by: "Felipe" })!.id).toBe(a.id);
   expect(r.s.board.proposeCancel({ directive: d, reason: "The client changed their mind", by: "Felipe" })!.id).not.toBe(a.id);
+});
+
+// ---------- round 25 ----------
+
+test("a real MCP jam_post_image call above the SDK's old 4 MB cap goes through the HTTP endpoint", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const dev = r.hub.auth.issue({ kind: "agent", label: "A", ip: "127.0.0.1", personId: r.chey.id });
+    const base = `http://127.0.0.1:${server.port}`;
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${dev.token}` };
+    const rpc = async (body: object, sid?: string) => fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body) });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+    const sid = init.headers.get("mcp-session-id")!;
+    expect(init.status).toBe(200);
+    await rpc({ jsonrpc: "2.0", method: "notifications/initialized" }, sid);
+    await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "jam_join", arguments: { harness: "other", repo: "a/b", owner: "Chey" } } }, sid)).text();
+    // A PNG header plus padding, 5 MB of image: past the SDK's default and well inside the stated limit.
+    const png = Buffer.concat([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"), Buffer.alloc(5 * 1024 * 1024)]);
+    const res = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "jam_post_image", arguments: { title: "Big", imageBase64: png.toString("base64") } } }, sid);
+    expect(res.status).toBe(200);
+    expect(await res.text()).not.toContain("too large");
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("the body reserve stays charged through an MCP call, and a small body gives back the rest of its reserve", async () => {
+  const { buffered } = await import("../src/body");
+  const small = await buffered(new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json", "content-length": "2" }, body: "{}" }));
+  expect("req" in small).toBe(true);
+  // Many agents' small calls fit (each holds what it actually sent, not its worst case).
+  const many = await Promise.all(Array.from({ length: 40 }, () => buffered(new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json", "content-length": "2" }, body: "{}" }))));
+  expect(many.every((m) => "req" in m)).toBe(true);
+  for (const m of many) if ("release" in m) m.release();
+  if ("release" in small) small.release();
+});
+
+test("an oversized repeat keeps the overflow notice, on context, task and cancellation cards", () => {
+  const r = room();
+  const att = (n: number) => ({ id: `att_o${n}`, name: `o${n}.txt`, type: "text/plain", kind: "text" as const, size: 5 });
+  const first = r.s.proposeContext({ text: "Same again", kind: "fact", by: "Chey", attachments: [1, 2, 3].map(att) })!;
+  const again = r.s.proposeContext({ text: "Same again", kind: "fact", by: "Felipe", attachments: [1, 2, 3, 4, 5, 6, 7, 8, 9].map(att) })!;
+  expect(again.id === first.id ? again.extraFiles : (again.extraFiles ?? 0) > 0).toBeTruthy();
 });

@@ -49,6 +49,8 @@ const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled
 
 /** Per request, what releases its count at once: a request that is only waiting for the room (a hook's listen) isn't work in flight. */
 const waiting = new WeakMap<Request, () => void>();
+/** Per response: the body-memory charge it still holds, released when its stream has ended. */
+const budgetHeld = new WeakMap<Response, () => void>();
 const markWaiting = (req: Request) => waiting.get(req)?.();
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
@@ -153,6 +155,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       if (!("req" in got)) return bad(got.message, got.status);
       const req = got.req;
       const release = got.release;
+      let holdsBudget = false;
       const early = waiting.get(incoming);
       if (early) waiting.set(req, early);
       const url = new URL(req.url);
@@ -272,7 +275,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/mcp") {
           // An agent's stream can stay open for minutes (waiting for the room): its tool calls are counted where they run (mcp.ts), not here.
           markWaiting(req);
-          return await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+          const res = await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+          holdsBudget = true;
+          budgetHeld.set(res, release);
+          return res;
         }
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
@@ -311,7 +317,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         return bad(e instanceof Error ? e.message : String(e), 500);
       }
       } finally {
-        release();
+        // An MCP call keeps its payload until its stream ends (the tool runs after the response starts): the charge moves to the response.
+        if (!holdsBudget) release();
       }
     };
 
@@ -333,8 +340,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         throw e;
       }
       // An upgrade has no response; a body is released when its last byte has gone (or the client left).
+      const budget = res ? budgetHeld.get(res) : undefined;
       if (!res || !res.body) {
         release();
+        budget?.();
         return res;
       }
       const reader = res.body.getReader();
@@ -343,15 +352,17 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           async pull(c) {
             try {
               const { done, value } = await reader.read();
-              if (done) (c.close(), release());
+              if (done) (c.close(), release(), budget?.());
               else c.enqueue(value);
             } catch (e) {
               release();
+              budget?.();
               c.error(e);
             }
           },
           cancel(reason) {
             release();
+            budget?.();
             return reader.cancel(reason);
           },
         }),

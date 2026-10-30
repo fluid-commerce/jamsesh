@@ -1,7 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
-import { MAX_IMAGE_BYTES } from "./limits";
+import { MAX_IMAGE_BYTES, MCP_BODY_BYTES } from "./limits";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -323,6 +323,8 @@ export class McpEndpoint {
     const ctx: Ctx = { agentId: null, ip, device, origin, owner: this.owner(device) };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
+      // The SDK's own cap (4 MB) is lower than the one limit this hub states for an image: use that one.
+      maxRequestBodySize: MCP_BODY_BYTES,
       onsessioninitialized: (id) => {
         ctx.sessionId = id;
         this.sessions.set(id, { transport, ctx });

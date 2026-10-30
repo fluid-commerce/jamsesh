@@ -59,7 +59,9 @@ export async function buffered(req: Request): Promise<{ req: Request; release: (
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return { req, release: () => {} };
   const max = limitFor(req);
   // The bytes, the copy a route parses, and (for a file) the copies it makes of the part: four times the cap at the peak.
-  const charge = max * 4;
+  // A declared length is the framing the server enforces, so it is what can arrive; without one, the cap is the worst case.
+  const declared = Number(req.headers.get("content-length"));
+  let charge = Math.min(max, Number.isFinite(declared) && req.headers.has("content-length") ? declared : max) * 4;
   if (reserved + charge > BUDGET) return { status: 503, message: "The hub is busy receiving other requests. Try again in a moment." };
   reserved += charge;
   let released = false;
@@ -70,6 +72,12 @@ export async function buffered(req: Request): Promise<{ req: Request; release: (
   if (bytes === "timeout" || !bytes) {
     release();
     return bytes === "timeout" ? { status: 408, message: "That request took too long to arrive." } : { status: 413, message: "That request is too large." };
+  }
+  // What was reserved for the worst case is trimmed to what actually arrived (still four times over), so a small body doesn't hold a large share.
+  if (!released) {
+    const actual = Math.max(64 * 1024, bytes.length * 4);
+    reserved -= charge - Math.min(charge, actual);
+    charge = Math.min(charge, actual);
   }
   // The length is now known exactly, whatever the sender declared (or didn't).
   const headers = new Headers(req.headers);

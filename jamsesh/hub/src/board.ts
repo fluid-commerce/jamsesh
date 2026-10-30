@@ -125,14 +125,14 @@ export class Board {
   }
 
   /** The same thing said again joins its card (and a dismissed one stays dismissed for a while). */
-  private repeat(match: TriageCard, sources: TriageSource[], attachments: TriageCard["attachments"] = []): TriageCard {
+  private repeat(match: TriageCard, sources: TriageSource[], attachments: TriageCard["attachments"] = [], over = 0): TriageCard {
     const fresh = sources.filter((x) => x.eventId == null || !match.sources.some((m) => m.eventId === x.eventId));
     // Files sent with the repeat belong on the card too, once each.
     const files = [...(match.attachments ?? []), ...(attachments ?? []).filter((a) => !(match.attachments ?? []).some((m) => m.id === a.id))];
     const newFiles = files.length > (match.attachments?.length ?? 0);
     // A line seen twice (the same event) isn't a repeat.
-    if (!fresh.length && !newFiles && sources.some((x) => x.eventId != null)) return match;
-    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), ...(files.length ? { attachments: files } : {}), updatedAt: this.stamp() };
+    if (!fresh.length && !newFiles && !over && sources.some((x) => x.eventId != null)) return match;
+    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), ...(files.length ? { attachments: files } : {}), ...(over ? { extraFiles: (match.extraFiles ?? 0) + over } : {}), updatedAt: this.stamp() };
     return this.s.store.put("triage", next);
   }
 
@@ -176,7 +176,7 @@ export class Board {
     const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream);
     const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
     // Files past what one card can carry make another card.
-    if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments);
+    if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments, over);
     // Asked again after the room overruled it: a new card, so the veto stays on the old one for people to see and decide.
     const vetoed = this.match("task", text, (c) => purpose(c) && !!c.overruled && c.status === "open");
     const now = this.stamp();
@@ -203,7 +203,7 @@ export class Board {
     if (!named && active.some((f) => f.kind === kind && sameName(f.workstream, workstream) && restates(f.text, text))) return null;
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const same = this.match("context", text, (c) => !c.retire && c.kind === kind && sameName(c.workstream, workstream) && (!named || c.conflictsWith === named.id));
-    if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments);
+    if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments, over);
     // A close fact that differs in its specifics (option A versus B, 16 versus 24 px) or says the opposite is the one this would replace.
     // Only a fact of the same kind and workstream: "48px in Mobile" doesn't replace "64px in Desktop".
     const conflict = named ?? active.find((f) => f.kind === kind && sameName(f.workstream, workstream) && sameScope(f.text, text) && similar(f.text, text) > 0.45 && !restates(f.text, text));
@@ -476,7 +476,7 @@ export class Board {
     const text = clean(p.reason) || "The room changed its mind";
     // The same directive cancelled for the same reason joins the card; another reason is another card, so neither is lost.
     const open = this.open().find((c) => c.cancels === d.id && !c.overruled && restates(c.text, text));
-    if (open && this.fits(open, p.attachments)) return this.repeat(open, sources, p.attachments);
+    if (open && this.fits(open, p.attachments)) return this.repeat(open, sources, p.attachments, over);
     const now = this.stamp();
     const card: TriageCard = {
       id: newId("tri"), ts: now, updatedAt: now, type: "task", status: "open", origin: p.origin ?? "overheard", text, original: text, by: p.by,
