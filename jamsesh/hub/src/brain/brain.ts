@@ -452,7 +452,7 @@ export class Brain {
    * `from: "agent"`: the input is an agent's words, which anyone's prompt can steer, so the pass gets only the
    * tools that coordinate work and record it. No host control, no screen HTML, no renaming, no saved behavior notes.
    */
-  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim(), bind?: { shareId: string; screen: string }) {
+  tools(batch: JamEvent[], pass: { effects: number }, from: "person" | "agent" = "person", claim = this.session.stageClaim()) {
     const s = this.session;
     this.unlockRefused.clear();
     this.replaceOk.clear();
@@ -476,7 +476,7 @@ export class Brain {
     const asker = batch.find(isDirectRequest);
     // Every stage write of this pass carries the claim taken when the pass began (see StageClaim): nothing it decided
     // lands on a screen someone changed while the model thought.
-    const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(bind ? { requireShare: bind.shareId, onlyScreen: bind.screen } : {}), ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
+    const castBy = (screen: string) => ({ ...(asker ? { person: { id: asker.authorId!, name: asker.authorName } } : {}), claim, ...(this.replaceOk.has(screen) ? { mayReplaceLock: this.replaceOk.get(screen) } : {}) });
     // The pass's stage writes: whether it went up (a screen changed meanwhile, or a share that ended, refuses it).
     const put = (next: Partial<Stage> & { mode: Stage["mode"] }, screen: string): StageResult => s.setStage(next, "Room brain", screen, castBy(screen));
     /** What the model is told when a write didn't land. */
@@ -767,10 +767,8 @@ export class Brain {
           }
           if (!tiles.length) return refuse("None of those tiles resolved. Use artifact ids, share ids, agent ids and live app ids from the lists, dev server URLs from 'Dev servers on the host', or full public URLs.");
           const grid = i.grid && i.grid.areas.length === tiles.length ? i.grid : undefined;
-          const screen = bind && !i.screen ? bind.screen : screenId(i.screen);
+          const screen = screenId(i.screen);
           if (!screen) return noScreen();
-          if (bind && screen !== bind.screen) return refuse(`Put the share on the screen with id ${bind.screen}, not another one.`);
-          if (bind && !tiles.some((t) => t.kind === "screen" && t.shareId === bind.shareId)) return refuse("The layout must include the share you are placing.");
           const held = this.lockBlock(screen, batch, claim);
           if (held) return refuse(held);
           this.lastRoomStageAt = Date.now();

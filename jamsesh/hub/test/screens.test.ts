@@ -139,3 +139,16 @@ test("main that has reported and closed can't be driven, recorded or cast to; be
   s.reportScreen("main", info); // its window comes back
   expect(s.screenOf("main")).toEqual({ id: "main" });
 });
+
+test("nothing is put on a screen whose window has closed, except the hub's own cleanup", () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "closed-"))));
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  s.reportScreen("screen-2", { ...info, screenX: 1920 });
+  s.removeScreen("main");
+  s.removeScreen("screen-2");
+  const layout = { mode: "layout" as const, layout: { tiles: [{ kind: "feed" as const }] } };
+  expect(s.setStage(layout, "x", "main", { claim: s.stageClaim() })).toMatchObject({ applied: false });
+  expect(s.setStage(layout, "x", "screen-2", { claim: s.stageClaim() })).toMatchObject({ applied: false });
+  expect(s.setStage({ mode: "board" }, "JamSesh", "main", { override: true }).applied).toBe(true);
+});

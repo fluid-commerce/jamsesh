@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { bus } from "./bus";
+import type { HelperRegistry } from "./children";
 import { config } from "./config";
 import { simScreenRect } from "./hostctl";
 import { Companion, companionPath, type ScreenInfo } from "./idb";
@@ -117,7 +118,8 @@ export class LiveApps {
   /** The `jamsesh-live` command (tests supply a fake). */
   helper: () => Promise<string[] | string> = () => this.macHelper();
 
-  constructor(private session: Session) {}
+  /** The hub's helper list (stopping the hub finds the capture helpers) is optional so the class stands alone in tests. */
+  constructor(private session: Session, private helpers?: HelperRegistry) {}
 
   /** The locked big screen showing this tile, with who drives it; the hub fills this in. Null when it is shown nowhere locked. */
   /** How long a held button may sit still before it is let go (a field so tests can shorten it). */
@@ -214,7 +216,9 @@ export class LiveApps {
     const bundle = target.bundle ?? (await this.bundleOf(cmd, appName));
     if (bundle.startsWith("!")) return bundle.slice(1);
     if (!BUNDLE_ID.test(bundle)) return "That isn't an app's bundle id.";
+    if (this.helpers?.isClosed) return "The hub is stopping."; // checked right before the spawn, after every await above
     const proc = Bun.spawn([...cmd, bundle, "30"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    this.helpers?.track(proc);
     const live = this.add({ kind: "mac", name: appName, width: 0, height: 0, orientation: "portrait", appearance: null, canTap: true, startedBy: by }, { proc });
     if (typeof live === "string") return (proc.kill(), live);
     void this.readHelper(live, proc);
@@ -274,7 +278,9 @@ export class LiveApps {
     // The screen sits inside the window's frame: crop to it so taps map onto the picture.
     const rect = simScreenRect({ x: 0, y: 0, width: plan.window.w, height: plan.window.h }, live.screen.widthPx, live.screen.heightPx, live.screen.density);
     if (!rect) return void this.update(live, { capture: "screenshots", hint: undefined });
+    if (this.helpers?.isClosed) return void this.update(live, { capture: "screenshots", hint: undefined });
     const proc = Bun.spawn([...cmd, SIMULATOR, "30", "--window", String(plan.window.id), "--crop", `${rect.x},${rect.y},${rect.width},${rect.height}`], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    this.helpers?.track(proc);
     live.proc = proc;
     this.update(live, { capture: "window", hint: undefined });
     void this.readHelper(live, proc);

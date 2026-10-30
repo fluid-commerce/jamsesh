@@ -114,3 +114,12 @@ test("shutdown is not reported complete when a helper's exit was never seen", as
   hub.helpers.track({ pid: 999999, exited: new Promise<number>(() => {}), kill: () => {} });
   expect(await hub.shutdown()).toBe(false);
 }, 30_000);
+
+test("a live app can't start its capture helper once the hub is stopping, and one that started is in the helper list", async () => {
+  const { LiveApps } = await import("../src/liveapps");
+  const { HelperRegistry } = await import("../src/children");
+  const reg = new HelperRegistry();
+  const live = new LiveApps({ store: { all: () => [] }, screens: () => [] } as any, reg);
+  void reg.stopAll(50);
+  expect(await live.startMac({ name: "Notes", bundle: "com.apple.Notes" }, "tester", ["/usr/bin/true"])).toBe("The hub is stopping.");
+});

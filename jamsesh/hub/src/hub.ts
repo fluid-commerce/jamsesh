@@ -137,7 +137,7 @@ export class Hub {
     this.awake = new KeepAwake(() => this.peopleOnline + this.session.agents().filter((a) => a.status !== "offline" && Date.now() - a.lastSeen < 10 * 60_000).length);
     this.session = new Session(this.store);
     this.host = new HostControl(this.session);
-    this.live = new LiveApps(this.session);
+    this.live = new LiveApps(this.session, this.helpers);
     this.live.pickSim = (d) => this.host.pickSimShort(d);
     this.live.log = (text) => this.session.store.addEvent({ kind: "system", authorType: "system", authorId: null, authorName: "JamSesh", text });
     this.session.liveApps = () => this.live.list();
@@ -145,7 +145,8 @@ export class Hub {
     // A tile on a locked big screen is driven by that screen's drivers (6.1).
     this.live.screenFor = (appId) => {
       const s = this.session;
-      for (const id of ["main", ...s.screens().map((x) => x.id)]) {
+      // Only screens whose window is there: a closed main no longer lets its drivers control the app.
+      for (const id of [...(s.mainAvailable() ? ["main"] : []), ...s.screens().filter((x) => x.id !== "main").map((x) => x.id)]) {
         const lock = s.lockOf(id);
         const st = s.stage(id);
         if (!lock || st.mode !== "layout" || !st.layout?.tiles.some((t) => t.kind === "app" && t.appId === appId)) continue;

@@ -1862,8 +1862,9 @@ export class Session {
     clearTimeout(this.screenExpiry.get(id));
     this.screenExpiry.delete(id);
     this.sweepScreens();
-    // A share only that display showed is off screen from now.
+    // A share only that display showed is off screen from now; a live app on it no longer has drivers (held input is let go).
     this.checkShares(false);
+    this.onStageCommit?.();
   }
 
   screens(): ScreenInfo[] {
@@ -2017,15 +2018,10 @@ export class Session {
     // The lock is looked at first (a lapse is a change too), then the claim: a decision made before the lapse doesn't land after it.
     const held = this.lockOf(screen);
     if (!this.claimHolds(opts.claim, screen)) return refused("The screen changed since this was decided.");
+    // Nothing is put on a screen whose window has gone (a build finishing after it closed); the hub's own cleanup (override) still may.
+    if (!opts.override && !this.screenUsable(screen)) return refused("That screen isn't connected any more.");
     // The lock's owner asked for this very write: it replaces their lock in the same step (nothing is released ahead of it).
     if (!opts.person && !opts.override && held && !(opts.mayReplaceLock && opts.mayReplaceLock === held.personId)) return refused(`${held.by} has this screen locked.`);
-    // Work bound to one share (the presenter's placement) lands only while that share is live and in the layout.
-    if (opts.onlyScreen && opts.onlyScreen !== screen) return refused("This was decided for another screen.");
-    if (opts.requireShare) {
-      const need = opts.requireShare;
-      const inLayout = next.mode === "layout" && !!next.layout?.tiles.some((t) => t.kind === "screen" && t.shareId === need);
-      if (!inLayout || this.store.get("shares", need)?.status !== "live") return refused("The share it was for has ended or isn't in the layout.");
-    }
     // A share is shown only while it's live: an ended one's tile is dropped, and a layout that was only ended shares isn't put up.
     if (next.mode === "layout" && next.layout?.tiles.length) {
       const tiles = next.layout.tiles.filter((t) => t.kind !== "screen" || this.store.get("shares", t.shareId)?.status === "live");
@@ -2305,6 +2301,12 @@ export class Session {
     this.lockQuestions.delete(screen);
     claim?.revs.set(screen, this.stageRev(screen));
     return true;
+  }
+
+  /** Whether a stage may be put on this screen: its window is there (before any has reported, only main is, as the place one will appear). */
+  private screenUsable(screen: string): boolean {
+    if (screen === "main") return this.mainAvailable();
+    return !this.screenSeen || this.screens().some((x) => x.id === screen);
   }
 
   /** Main can be put to use unless its window has reported and then closed (before any window has reported, it is where one will appear). */
@@ -2656,10 +2658,6 @@ interface StageOptsBase {
   /** The new stage keeps this lock: the owner's own share over their cast, and that cast coming back when it ends. */
   keepLock?: StageLock;
   claim?: StageClaim;
-  /** The write needs this share live and in the layout, or none of it lands (a presenter's placement of one share). */
-  requireShare?: string;
-  /** With `requireShare`: the one screen the write may land on. */
-  onlyScreen?: string;
   /** The write may replace the lock this person owns, and does so only if it lands. */
   mayReplaceLock?: string;
 }
