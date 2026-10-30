@@ -1638,21 +1638,22 @@ test("the dev-link request for the host's own window is the plain address; a pai
 test("a read whose client has stalled (a streamed download) is not work in flight: shutdown stays clean", async () => {
   const r = room();
   const { startHttp } = await import("../src/http");
+  const { config } = await import("../src/config");
   const server = startHttp(r.hub, 0);
+  const home = config.home;
+  const dir2 = mkdtempSync(join(tmpdir(), "jam-dl-"));
   try {
-    const dir2 = mkdtempSync(join(tmpdir(), "jam-dl-"));
-    writeFileSync(join(dir2, "JamSesh.dmg"), Buffer.alloc(8 * 1024 * 1024, 1));
-    (await import("../src/config")).config.home = dir2;
-    const res = await fetch(`http://127.0.0.1:${server.port}/download/mac`);
-    expect(res.status).toBe(200);
-    // Read a little and stop reading: the answer stays open on the server's side.
-    const reader = res.body!.getReader();
-    await reader.read();
-    await Bun.sleep(100);
+    writeFileSync(join(dir2, "JamSesh.dmg"), Buffer.alloc(64 * 1024 * 1024, 1));
+    config.home = dir2;
+    // A raw socket that reads the headers and a little of the body and then stops reading: the answer cannot drain.
+    const sock = await Bun.connect({ hostname: "127.0.0.1", port: server.port!, socket: { data() {}, open(s) { s.write(`GET /download/mac HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: close\r\n\r\n`); s.pause?.(); } } });
+    await Bun.sleep(300);
     expect(r.hub.working()).toEqual([]);
     expect(await r.hub.shutdown()).toBe(true);
-    await reader.cancel();
+    sock.end();
   } finally {
+    config.home = home;
+    rmSync(dir2, { recursive: true, force: true });
     server.stop(true);
   }
 });

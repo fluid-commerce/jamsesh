@@ -867,13 +867,12 @@ The brain keeps context current so new legs of work start informed [B27, A16d]:
   the same words again (identical once case, spacing and punctuation are set aside) add their events to the
   existing fact's sources instead of another fact; any other wording, a refinement included, is a card for a person
   to merge or replace (4.1 Repeats). A replaced decision is
-  superseded in the same pass, answered questions are resolved. The pass does not add a fact that contradicts an active one: a proposal that does becomes a card flagged
-  with the fact it disagrees with, and a person decides (Replace, or Add anyway, which keeps both). Never recorded: what an agent shipped (commit ids, branch names, "implemented X"),
+  superseded in the same pass, answered questions are resolved. The pass does not add a fact that contradicts an active one: a proposal that reads as the opposite of a fact of the same kind, workstream and platform (close wording, the check is lexical) becomes a card flagged with the fact it disagrees with, and a person decides (Replace, or Add anyway, which keeps both); a contradiction in different words is an ordinary card, for a person to notice. Never recorded: what an agent shipped (commit ids, branch names, "implemented X"),
   instructions typed to an agent, progress reports, banter, and JamSesh's own problems (the
   microphone, transcription, speaker names, the TV, connection failures). A fact with no source
-  event in the batch is not saved. A new fact that matches an active one of the same kind with the
-  same specifics is merged into it; a changed decision (A to B, 16 px to 24 px, a new color) is
-  never merged.
+  event in the batch is not saved. A new fact whose text is identical (case, spacing and punctuation aside) to an active one of the
+  same kind and workstream is merged into it; any other wording, a changed decision (A to B, 16 px to 24 px, a new
+  color) included, is a card.
 - **One function decides, one applies.** `Brain.decideCuration(events)` asks the model what should
   change and writes nothing; `Brain.applyCuration(decision, events)` writes the facts and returns
   what it added, merged and dropped. `Brain.curate` is both in a row. The Tasks board wraps the

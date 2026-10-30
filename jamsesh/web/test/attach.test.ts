@@ -109,6 +109,11 @@ test("openDevServer opens the link the hub made the way a dev tile is opened (lo
     tab.location.href = "";
     await openDevServer("http://192.168.1.20:5100/app");
     expect(tab.location.href).toBe("https://dev-5100.room.example.net/app?jam_code=abc123");
+    // A named host, and a hash route, on the public address.
+    tab.location.href = "";
+    globalThis.fetch = (async () => new Response(JSON.stringify({ url: "http://jamsesh-host.local:5100/app?jam_code=abc123#/board" }), { status: 200 })) as any;
+    await openDevServer("http://jamsesh-host.local:5100/app");
+    expect(tab.location.href).toBe("https://dev-5100.room.example.net/app?jam_code=abc123#/board");
     // No link: the tab closes and the person is told.
     globalThis.fetch = (async () => new Response(JSON.stringify({ error: "That isn't one of this session's dev servers." }), { status: 404 })) as any;
     await openDevServer("http://192.168.1.20:5100/app");
