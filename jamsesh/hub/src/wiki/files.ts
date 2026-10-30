@@ -445,9 +445,9 @@ type Follow = { ref: string; old: string | null; new: string; paths: string[] };
 const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
 
 const SHA = /^[0-9a-f]{40}$/;
-const FOLLOW_TOP = new Set(["index.md", "log.md", "log-older.md", "WIKI.md", ".gitignore"]);
+const FOLLOW_TOP = new Set(["index.md", "log.md", "WIKI.md", ".gitignore"]);
 /** A path a note may name: relative, no "..", under wiki/ or raw/ (or one of the vault's top-level files). */
-const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && (FOLLOW_TOP.has(p) || /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(p) || /^raw\/(archive\/)?[\w-]+\.md$/.test(p));
+const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && (FOLLOW_TOP.has(p) || /^log-older-[0-9a-f]{10}\.md$/.test(p) || /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(p) || /^raw\/(archive\/)?[\w-]+\.md$/.test(p));
 /** A branch ref as git itself allows: no "..", "//", "@{", leading or trailing dot or slash, ".lock" component, control characters or spaces. */
 const validRef = (r: unknown): r is string => typeof r === "string" && /^refs\/heads\/[A-Za-z0-9._\/-]+$/.test(r) && !/(\.\.|\/\/|@\{|\/\.|\.lock(\/|$)|\/$|\.$)/.test(r) && r.length < 200;
 
@@ -1076,13 +1076,32 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
 const LOG_MAX = 4 * 1024 * 1024;
 const LOG_KEEP = 2 * 1024 * 1024;
 
-/** Moves the oldest lines of the log into log-older.md (appended), keeps the header and the newest LOG_KEEP characters from a line start; returns the new log text. */
+/**
+ * Moves the oldest lines of the log into a new file of their own, log-older-<hash>.md (named by its content and created only if
+ * new: never appended to, never through a link, and a retry after a failure finds it and writes nothing twice). The active log
+ * keeps its header, the newest LOG_KEEP characters, and every older line that keys a source still in raw/ (so the catch-up that
+ * gives each source one log line still finds it). Returns the new log text.
+ */
 function rotateLog(dir: string, cur: string): string {
   const header = "# Log\n\nWhat changed in this wiki, newest last.\n";
   const cut = cur.indexOf("\n", cur.length - LOG_KEEP) + 1;
-  const older = cur.slice(0, cut);
-  io.write(join(dir, "log-older.md"), older.startsWith("# Log") ? older.slice(older.indexOf("\n- ") + 1) : older, { flag: "a" });
-  return header + cur.slice(cut);
+  const live = new Set(sourceIds(dir));
+  const kept: string[] = [];
+  const moved: string[] = [];
+  for (const line of cur.slice(0, cut).split("\n")) {
+    if (!line.startsWith("- ")) continue; // the header
+    const key = line.match(/ %%src:([\w-]+)%%/)?.[1];
+    (key && live.has(key) ? kept : moved).push(line);
+  }
+  if (moved.length) {
+    const body = moved.join("\n") + "\n";
+    try {
+      io.write(join(dir, `log-older-${createHash("sha1").update(body).digest("hex").slice(0, 10)}.md`), `# Log (older)\n\n${body}`, { flag: "wx" });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // the same lines already moved there: nothing to write again
+    }
+  }
+  return header + (kept.length ? kept.join("\n") + "\n" : "") + cur.slice(cut);
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {
@@ -1371,4 +1390,13 @@ export function historyStatus(dir: string): { state: "on" | "off"; why?: string 
   const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
   if (!validRef(ref)) return { state: "off", why: "no branch is checked out" };
   return { state: "on" };
+}
+
+/** The rotated-out log files in the vault (log-older-<hash>.md), for a commit to name. */
+export function rotatedLogs(dir: string): string[] {
+  try {
+    return readdirSync(dir).filter((f) => /^log-older-[0-9a-f]{10}\.md$/.test(f));
+  } catch {
+    return [];
+  }
 }

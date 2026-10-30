@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { rotatedLogs, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3558,18 +3558,28 @@ test("a mixed card: a page the update could not reach (unreadable) beside a good
   expect(w.pendingSources()).toContain(src.id); // and the source is still waiting for its update to the page it could not reach
 });
 
-test("log.md is rotated before it can reach the read cap: History, the catch-up and the next change keep working", () => {
+test("log.md is rotated before it can reach the read cap: older lines go to a file of their own, live sources keep their line, a retry writes nothing twice", () => {
   const { w, dir } = room();
   w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const live = sourceIds(dir)[0]!;
   const filler = Array.from({ length: 20000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
-  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`); // over the rotation size
+  const keyed = `- 2026-01-01 00:00 An old line of a source still in raw/ %%src:${live}%%\n`;
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${keyed}${filler}`); // over the rotation size
   expect(statSync(join(dir, "log.md")).size).toBeGreaterThan(4 * 1024 * 1024);
   w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
-  expect(statSync(join(dir, "log.md")).size).toBeLessThan(2.5 * 1024 * 1024);
-  expect(existsSync(join(dir, "log-older.md"))).toBe(true);
-  expect(readFileSync(join(dir, "log-older.md"), "utf8")).toContain("filler line number 0 ");
-  expect(readLog(dir, 5)[0]!.pages).toContain("two"); // the newest entry is the change just made
-  expect(() => w.syncVault()).not.toThrow();
+  const active = readFileSync(join(dir, "log.md"), "utf8");
+  expect(active.length).toBeLessThan(2.5 * 1024 * 1024);
+  expect(active).toContain(`%%src:${live}%%`); // a live source keeps its line, so the catch-up does not log it again
+  const older = rotatedLogs(dir);
+  expect(older.length).toBe(1);
+  expect(readFileSync(join(dir, older[0]!), "utf8")).toContain("filler line number 0 ");
+  expect(readLog(dir, 5)[0]!.pages).toContain("two");
+  // A retry of the same rotation (the active log replacement had failed) finds the file and makes no second one.
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${keyed}${filler}`);
+  w.editPage("three", "# Three\n\nMore.", { by: "Chey" });
+  expect(rotatedLogs(dir).length).toBe(1);
+  // The rotated file is in git history.
+  if (gitAvailable()) expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain(older[0]!);
 }, 60_000);
 
 test("the log route clamps its limit: zero and negative values give one entry at least, never the whole log", async () => {
