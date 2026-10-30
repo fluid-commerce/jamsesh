@@ -445,7 +445,7 @@ type Follow = { ref: string; old: string | null; new: string; paths: string[] };
 const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
 
 const SHA = /^[0-9a-f]{40}$/;
-const FOLLOW_TOP = new Set(["index.md", "log.md", "WIKI.md", ".gitignore"]);
+const FOLLOW_TOP = new Set(["index.md", "log.md", "log-older.md", "WIKI.md", ".gitignore"]);
 /** A path a note may name: relative, no "..", under wiki/ or raw/ (or one of the vault's top-level files). */
 const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && (FOLLOW_TOP.has(p) || /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(p) || /^raw\/(archive\/)?[\w-]+\.md$/.test(p));
 /** A branch ref as git itself allows: no "..", "//", "@{", leading or trailing dot or slash, ".lock" component, control characters or spaces. */
@@ -1066,8 +1066,23 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   const cur = readPlain(file) ?? "# Log\n\n";
   const mark = key ? ` %%${key.replace(/[^\w:,-]/g, "")}%%` : "";
   if (mark && cur.includes(mark)) return;
+  // log.md only ever grows and every read is capped, so past LOG_MAX its oldest part moves to log-older.md and the newest stays: History and the catch-up keep working in a long-lived project.
+  const cur2 = cur.length > LOG_MAX ? rotateLog(dir, cur) : cur;
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
-  writeAtomic(file, cur + line);
+  writeAtomic(file, cur2 + line);
+}
+
+/** Past this many characters log.md is rotated (its read cap is far above). */
+const LOG_MAX = 4 * 1024 * 1024;
+const LOG_KEEP = 2 * 1024 * 1024;
+
+/** Moves the oldest lines of the log into log-older.md (appended), keeps the header and the newest LOG_KEEP characters from a line start; returns the new log text. */
+function rotateLog(dir: string, cur: string): string {
+  const header = "# Log\n\nWhat changed in this wiki, newest last.\n";
+  const cut = cur.indexOf("\n", cur.length - LOG_KEEP) + 1;
+  const older = cur.slice(0, cut);
+  io.write(join(dir, "log-older.md"), older.startsWith("# Log") ? older.slice(older.indexOf("\n- ") + 1) : older, { flag: "a" });
+  return header + cur.slice(cut);
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {

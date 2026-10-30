@@ -267,7 +267,7 @@ export class WikiService {
     }
     // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. The rule is applied
     // to each page's bytes as the commit reads them (once, one at a time, none kept here), and those same bytes are what is committed.
-    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]);
+    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", "log-older.md", ...raw]);
     const accept = (f: string, state: Buffer | "gone" | "unreadable" | "toobig"): Take => {
       const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
       if (!m) return state === "unreadable" ? "fail" : state === "toobig" ? "skip" : "take"; // not a page (index, log, sources): the wiki's own files by name

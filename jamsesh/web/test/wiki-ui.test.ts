@@ -418,3 +418,15 @@ test("search hits are shown only for the words they answered: a newer query, or 
   expect(freshHits(answer, "pricing tiers")).toBeNull(); // typed on: the earlier answer is not this query's
   expect(freshHits(null, "pricing")).toBeNull(); // a failed search keeps no hits
 });
+
+test("the index's arrow keys can reach both kinds of row it shows (this reads the source: there is no DOM here)", async () => {
+  const src = await Bun.file(new URL("../src/wiki/WikiView.tsx", import.meta.url)).text();
+  const selector = [...src.matchAll(/querySelector(?:All)?<HTMLElement>\("([^"]+)"\)/g)].map((m) => m[1]).filter((q) => q.includes("wk-item"));
+  expect(selector.length).toBeGreaterThan(0);
+  for (const q of selector) {
+    expect(q).toContain(".wk-item");
+    expect(q).toContain(".wk-hit"); // search answers render rows of this class
+  }
+  expect(src).toContain('className={`wk-hit ');
+  expect(src).toContain('className={`wk-item ');
+});

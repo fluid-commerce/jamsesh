@@ -3458,7 +3458,8 @@ test("a real .git folder whose common directory is elsewhere is never used", () 
   Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "theirs"], { cwd: other });
   const vault = join(root, `vault-common-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(vault, ".git"), { recursive: true });
-  writeFileSync(join(vault, ".git", "HEAD"), "ref: refs/heads/master\n");
+  const branch = gitOutOf(other, "symbolic-ref", "--short", "HEAD").trim(); // whatever this git calls its default branch
+  writeFileSync(join(vault, ".git", "HEAD"), `ref: refs/heads/${branch}\n`);
   writeFileSync(join(vault, ".git", "commondir"), `${join(other, ".git")}\n`); // refs and objects are in the other repository
   writeFileSync(join(vault, "index.md"), "one");
   const theirs = gitOutOf(other, "rev-parse", "HEAD");
@@ -3474,7 +3475,7 @@ test("a real .git folder whose common directory is elsewhere is never used", () 
   }
   expect(historyStatus(vault)).toMatchObject({ state: "off" });
   expect(gitOutOf(other, "rev-parse", "HEAD")).toBe(theirs);
-  expect(gitOutOf(other, "rev-parse", "refs/heads/master")).toBe(theirs); // the exact ref the vault names, in the other repository, did not move
+  expect(gitOutOf(other, "rev-parse", `refs/heads/${branch}`)).toBe(theirs); // the exact ref the vault names, in the other repository, did not move
   expect(gitOutOf(other, "log", "--pretty=format:%s")).toBe("theirs");
 });
 
@@ -3520,18 +3521,19 @@ test("a failing commit of archived sources is found again by the next scan and c
 });
 
 test("an archive folder that can't be looked at stops an id being reused: no second source is written beside an inaccessible archived one", () => {
-  if (process.getuid?.() === 0) return; // a closed folder means nothing to root
   const { w, dir } = room();
   const src = w.addSource("document", "Old", "Archived.", "Chey", { id: "2026-10-29_report-bbbbbb-1" });
   archiveSources(dir, [src.id]);
-  chmodSync(join(dir, "raw", "archive"), 0o000);
+  // The archive folder is replaced by a link (which is refused whoever runs the test, root included).
+  const real = join(dir, "raw", "archive");
+  renameSync(real, join(dir, "raw", "archive-away"));
+  symlinkSync(join(dir, "raw", "archive-away"), real);
   const err = console.error;
   console.error = () => {};
   try {
     expect(() => w.addSource("document", "Old", "Again.", "Chey", { id: src.id })).toThrow();
   } finally {
     console.error = err;
-    chmodSync(join(dir, "raw", "archive"), 0o755);
   }
   expect(existsSync(join(dir, "raw", `${src.id}.md`))).toBe(false); // nothing written, so no two sources share the id once access returns
 });
@@ -3554,4 +3556,31 @@ test("a mixed card: a page the update could not reach (unreadable) beside a good
   expect(readPage(dir, "fresh")).not.toBeNull(); // the good page was written
   expect(statSync(join(dir, "wiki", "huge.md")).size).toBe(MAX_FILE_BYTES + 1); // the blocked one untouched
   expect(w.pendingSources()).toContain(src.id); // and the source is still waiting for its update to the page it could not reach
+});
+
+test("log.md is rotated before it can reach the read cap: History, the catch-up and the next change keep working", () => {
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const filler = Array.from({ length: 20000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`); // over the rotation size
+  expect(statSync(join(dir, "log.md")).size).toBeGreaterThan(4 * 1024 * 1024);
+  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  expect(statSync(join(dir, "log.md")).size).toBeLessThan(2.5 * 1024 * 1024);
+  expect(existsSync(join(dir, "log-older.md"))).toBe(true);
+  expect(readFileSync(join(dir, "log-older.md"), "utf8")).toContain("filler line number 0 ");
+  expect(readLog(dir, 5)[0]!.pages).toContain("two"); // the newest entry is the change just made
+  expect(() => w.syncVault()).not.toThrow();
+}, 60_000);
+
+test("the log route clamps its limit: zero and negative values give one entry at least, never the whole log", async () => {
+  const { w } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  const { wikiRoute } = await import("../src/wiki/routes");
+  for (const limit of ["-1", "0", "-500", "abc"]) {
+    const r: any = await wikiRoute(w, "GET", "/wiki/log", new URL(`http://x/wiki/log?limit=${limit}`), null, { name: "Chey" });
+    const n = (JSON.parse(JSON.stringify(r.body ?? r.json ?? r)).entries ?? []).length;
+    expect(n).toBeGreaterThanOrEqual(1);
+    expect(n).toBeLessThanOrEqual(limit === "abc" || limit === "0" ? 100 : 1);
+  }
 });
