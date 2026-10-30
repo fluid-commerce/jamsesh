@@ -243,6 +243,11 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
 }
 
 /** `fill`: draw the page at the box's own size instead of scaling a fixed-size page to it (an expanded desktop build gets the real viewport). */
+/** How a frame starts for the address it resolves to: blocked at once for a plain-HTTP build on an HTTPS page, or a host known not to be framed; otherwise loading. */
+export function frameStart(mixed: boolean, detectBlocked: boolean, raw: string): "loading" | "blocked" {
+  return mixed || (detectBlocked && NO_FRAME.test(hostName(raw))) ? "blocked" : "loading";
+}
+
 export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked, fill, bare }: { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean }) {
   const src = localize(raw);
   const box = useRef<HTMLDivElement>(null);
@@ -250,7 +255,7 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
   const pinbox = useRef<HTMLDivElement>(null);
   // An HTTPS page can't frame a plain-HTTP build (mixed content blocks it): say so at once rather than leaving a blank tile.
   const mixed = typeof location !== "undefined" && location.protocol === "https:" && src.startsWith("http:");
-  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => (mixed || (detectBlocked && NO_FRAME.test(hostName(raw))) ? "blocked" : "loading"));
+  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => frameStart(mixed, !!detectBlocked, raw));
   const [forced, setForced] = useState(false);
   const blocked = state === "blocked" && !forced;
   // A frame that never reports loading is as good as blocked; a load event on a page we can't
@@ -261,11 +266,11 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
     return () => clearTimeout(id);
   }, [detectBlocked, blocked, src]);
   useEffect(() => {
-    if (detectBlocked || mixed) setState(mixed || NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
+    // Whenever the address this page resolves to changes (remote access came online, or went away), the tile starts over.
+    setState(frameStart(mixed, !!detectBlocked, raw));
     setForced(false);
-    if (!detectBlocked) return;
     // The hub never fetches a shared page: a site that refuses framing is found by the frame not loading (the timeout above).
-  }, [raw, detectBlocked]);
+  }, [raw, detectBlocked, src, mixed]);
   // Sized in the resize callback itself, not through React state: state would land a frame late
   // and the frame would shake while the window is being resized.
   useLayoutEffect(() => {

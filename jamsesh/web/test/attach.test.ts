@@ -136,3 +136,28 @@ test("openDevServer opens the link the hub made the way a dev tile is opened (lo
     Object.assign(g, saved);
   }
 });
+
+
+test("a dev tile starts over when the address it resolves to changes: blocked while only plain HTTP is reachable from an HTTPS page, loading once the hub serves it over HTTPS", async () => {
+  const { frameStart, localize } = await import("../src/shared/ui");
+  const { hub } = await import("../src/shared/hub");
+  const g = globalThis as any;
+  const saved = g.location;
+  const snap = hub.snap;
+  try {
+    g.location = { hostname: "room.example.net", protocol: "https:", host: "room.example.net" };
+    const raw = "http://192.168.1.20:5100/app";
+    hub.snap = { ...hub.snap, state: { devservers: [{ hostPort: 5100, url: "http://192.168.1.20:5100" }] } as any };
+    let src = localize(raw);
+    expect(src).toBe(raw);
+    expect(frameStart(src.startsWith("http:"), false, raw)).toBe("blocked");
+    // Remote access comes online: the hub's patch carries the public address, and the same call now resolves to HTTPS.
+    hub.snap = { ...hub.snap, state: { devservers: [{ hostPort: 5100, url: "http://192.168.1.20:5100", publicUrl: "https://dev-5100.room.example.net" }] } as any };
+    src = localize(raw);
+    expect(src).toBe("https://dev-5100.room.example.net/app");
+    expect(frameStart(src.startsWith("http:"), false, raw)).toBe("loading");
+  } finally {
+    g.location = saved;
+    hub.snap = snap;
+  }
+});

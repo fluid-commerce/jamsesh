@@ -1703,10 +1703,14 @@ test("the dev subdomain address keeps a non-standard external port, and connecte
   const { bus } = await import("../src/bus");
   const heard: string[] = [];
   const off = bus.on((m: any) => m.type === "patch" && m.key === "devservers" && heard.push(m.value[0]?.publicUrl ?? ""));
-  net.status = () => ({ enabled: false, cert: { state: "none" } });
-  await r.hub.start();
-  net.status = () => ({ enabled: true, domain: "room.duckdns.org", publicUrl: "https://room.duckdns.org", cert: { state: "ok" } });
-  await Bun.sleep(3400);
-  off();
-  expect(heard.some((u) => u.includes("dev-"))).toBe(true);
+  try {
+    net.status = () => ({ enabled: false, cert: { state: "none" } });
+    await r.hub.start();
+    net.status = () => ({ enabled: true, domain: "room.duckdns.org", publicUrl: "https://room.duckdns.org", cert: { state: "ok" } });
+    await Bun.sleep(3400);
+    expect(heard.some((u) => u.includes("dev-"))).toBe(true);
+  } finally {
+    off();
+    r.hub.stop();
+  }
 }, 20_000);
