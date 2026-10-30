@@ -1,7 +1,7 @@
 // The room brain. It reads the room (speech and typed lines), separates banter from
 // work, turns real requests into directives for the right agents, keeps the big
 // screen on what matters, and keeps the shared digests current.
-import { sameSet } from "../board";
+import { comparisonSet, sameSet } from "../board";
 import { generateText, isStepCount, Output, tool } from "ai";
 import { z } from "zod";
 import type { AttachmentRef, Attachments } from "../attachments";
@@ -710,7 +710,7 @@ export class Brain {
           if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return refuse("A coordinate directive needs another agent to compare with: give two or more targets, or counterparts.");
           // The same instruction twice (two tool calls in one pass, or a repeated ask) is sent once.
           const dupe = s.directives().find(
-            (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && sameSet(d.counterparts ?? [], counterparts ?? []) && restates(d.text, i.text),
+            (d) => Date.now() - d.ts < 5 * 60_000 && d.status !== "done" && d.status !== "cancelled" && d.mode === i.mode && d.targets.slice().sort().join() === targets.slice().sort().join() && sameSet(comparisonSet(d.targets, d.mode === "coordinate" ? d.counterparts : undefined), comparisonSet(targets, i.mode === "coordinate" ? counterparts : undefined)) && restates(d.text, i.text),
           );
           // Already sent, and nothing new with it. Files that weren't on the sent directive go to a card for a person to see and send.
           const newFiles = fileRefs.filter((f) => !(dupe?.attachments ?? []).some((a) => a.id === f.id));

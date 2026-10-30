@@ -36,6 +36,8 @@ const splitFiles = (list: TriageCard["attachments"]) => {
   const all = list ? [...new Map(list.map((a) => [a.id, a])).values()] : [];
   return { kept: all.slice(0, MAX_PER_MESSAGE), over: Math.max(0, all.length - MAX_PER_MESSAGE) };
 };
+/** Who a comparison is among: its targets and the agents they compare with, however it was written (the others only, or everyone). */
+export const comparisonSet = (targets: string[], counterparts?: string[]) => [...new Set([...targets, ...(counterparts ?? [])])];
 export const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
@@ -179,8 +181,8 @@ export class Board {
     const sources = this.sourcesOf(p.sourceEventIds, p.by, text, p.note);
     const workstream = clean(p.workstream);
     // The same words for other agents, or another workstream, are another task.
-    const wants = mode === "coordinate" ? p.counterparts ?? [] : [];
-    const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream) && sameSet(c.counterparts ?? [], wants);
+    const wants = comparisonSet(targets, mode === "coordinate" ? p.counterparts : undefined);
+    const purpose = (c: TriageCard) => !c.cancels && c.mode === mode && sameSet(c.targets, targets) && sameName(c.workstream, workstream) && sameSet(comparisonSet(c.targets, c.mode === "coordinate" ? c.counterparts : undefined), wants);
     const same = this.match("task", text, (c) => purpose(c) && !c.overruled);
     // Files past what one card can carry make another card.
     if (same && this.fits(same, p.attachments)) return this.repeat(same, sources, p.attachments, over);
@@ -285,13 +287,13 @@ export class Board {
       if (!Array.isArray(e.targets)) return { error: "targets is a list of agent ids." };
       const targets = this.validTargets(e.targets, next.mode);
       if (targets.length !== e.targets.length) return { error: "One of those agents isn't in the session, or only watches." };
-      if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), (next.targetNames = this.namesOf(targets)), (next.counterparts = undefined), fields.push("targets"); // who it compares with was chosen for the old targets
+      if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), (next.targetNames = this.namesOf(targets)), (e.counterparts === undefined ? (next.counterparts = undefined) : 0), fields.push("targets"); // who it compares with was chosen for the old targets, unless the edit names them too
     }
     if (e.counterparts !== undefined && c.type === "task" && !c.cancels) {
       if (!Array.isArray(e.counterparts)) return { error: "counterparts is a list of agent ids." };
       const others = e.counterparts.filter((x): x is string => typeof x === "string");
       if (others.length !== e.counterparts.length || others.some((x) => !this.s.agent(x) || this.s.agent(x)?.role === "observer")) return { error: "One of those agents isn't in the session, or only watches." };
-      if (!sameSet(others, c.counterparts ?? [])) (next.counterparts = others.length ? others : undefined), fields.push("counterparts");
+      if (!sameSet(others, next.counterparts ?? [])) (next.counterparts = others.length ? others : undefined), fields.push("counterparts");
     }
     if (e.workstream !== undefined) {
       const w = clean(e.workstream);

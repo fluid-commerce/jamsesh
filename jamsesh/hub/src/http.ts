@@ -1231,7 +1231,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   if (m && req.method !== "GET") {
     const who = actor();
     if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
-    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind };
+    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, counterparts: body?.counterparts, workstream: body?.workstream, kind: body?.kind };
     const verb = m[2];
     const r = !verb
       ? req.method === "PATCH"

@@ -181,7 +181,10 @@ function cardKeys(e: KeyboardEvent<HTMLElement>, h: { open: () => void; edit?: (
 
 // ---------- Triage cards ----------
 
-type Draft = { text: string; mode: string; agent: string; workstream: string; kind: string };
+/** The one agent a single-target comparison card is with (the first partner that isn't its target), or none. */
+const partnerOf = (card: TriageCard) => (card.targets.length === 1 ? (card.counterparts ?? []).find((c) => c !== card.targets[0]) ?? "" : "");
+
+type Draft = { text: string; mode: string; agent: string; partner: string; workstream: string; kind: string };
 
 function TriageCardView({ card, index, state, personId, now, show }: { card: TriageCard; index: number; state: HubState; personId?: string; now: number; show: (o: Open) => void }) {
   const { busy, err, run } = useAct();
@@ -189,7 +192,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
   const [merging, setMerging] = useState(false);
   const task = card.type === "task";
   const conflict = card.conflictsWith ? state.facts.find((f) => f.id === card.conflictsWith && f.status === "active") : undefined;
-  const [draft, setDraft] = useState<Draft>({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", workstream: card.workstream, kind: card.kind });
+  const [draft, setDraft] = useState<Draft>({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", partner: partnerOf(card), workstream: card.workstream, kind: card.kind });
   const area = useRef<HTMLTextAreaElement>(null);
   const ref = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -197,7 +200,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
   }, [editing]);
   // A change that arrives while nobody is editing (a repeat joined, someone else edited) shows up in the card.
   useEffect(() => {
-    if (!editing) setDraft({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", workstream: card.workstream, kind: card.kind });
+    if (!editing) setDraft({ text: card.needsWording ? "" : card.text, mode: card.mode, agent: card.targets.length === 1 ? card.targets[0] : "", partner: partnerOf(card), workstream: card.workstream, kind: card.kind });
   }, [card, editing]);
 
   const edits = () => {
@@ -206,6 +209,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
     if (task) {
       if (draft.mode !== card.mode) e.mode = draft.mode;
       if (draft.agent && draft.agent !== card.targets.join()) e.targets = [draft.agent];
+      if (draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && draft.partner !== partnerOf(card)) e.counterparts = draft.partner ? [draft.partner] : [];
     } else if (draft.kind !== card.kind) e.kind = draft.kind;
     if (draft.workstream.trim() !== card.workstream) e.workstream = draft.workstream;
     return e;
@@ -260,6 +264,21 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
                     ))}
                   </select>
                 </label>
+                {draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (
+                  <label>
+                    <span>Compare with</span>
+                    <select value={draft.partner} onChange={(e) => setDraft({ ...draft, partner: e.target.value })}>
+                      <option value="">Choose an agent</option>
+                      {workers(state)
+                        .filter((a: Agent) => a.id !== (draft.agent || card.targets[0]))
+                        .map((a: Agent) => (
+                          <option key={a.id} value={a.id}>
+                            {a.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                )}
                 <label>
                   <span>Mode</span>
                   <select value={draft.mode} onChange={(e) => setDraft({ ...draft, mode: e.target.value })}>

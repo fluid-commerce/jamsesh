@@ -58,3 +58,45 @@ test("the same comparison asked of the brain with a different partner is not a d
   expect(out).not.toContain("Already sent");
   expect(s.directives().filter((d) => d.id !== first.id)).toHaveLength(1);
 });
+
+test("the same pairing written as [partner] or [target, partner] is one comparison to the brain's duplicate check", async () => {
+  const { s, a, b } = room();
+  s.createDirective({ text: "Compare the settings screen", mode: "coordinate", targets: [a.id], counterparts: [b.id], requestedBy: "Chey" });
+  const { Brain } = await import("../src/brain/brain");
+  const brain = new Brain(s, {} as any);
+  clearInterval((brain as any).digestTimer);
+  const tools = (brain as any).tools([], { effects: 0 });
+  const out = String(await tools.create_directive.execute({ targets: [a.id], mode: "coordinate", text: "Compare the settings screen", rationale: "x", counterparts: [a.id, b.id] }, { toolCallId: "t", messages: [] }));
+  expect(out).toContain("Already sent");
+});
+
+test("over HTTP a comparison card whose partner left is recovered by naming a new one, in the edit or in the send", async () => {
+  const { Hub } = await import("../src/hub");
+  const { startHttp } = await import("../src/http");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "http") });
+  const server = startHttp(hub, 0);
+  try {
+    const s = hub.session;
+    const reg = (owner: string) => s.registerAgent({ ownerName: owner, harness: "claude-code", repo: `acme/${owner}`, cwd: `/${owner}`, machine: "m1", platform: "desktop" }).agent;
+    const a = reg("Ana");
+    const b = reg("Ben");
+    const c = reg("Cy");
+    const chey = s.upsertPerson({ name: "Chey" });
+    const win = { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` };
+    const call = (method: string, path: string, body: object) => fetch(`http://127.0.0.1:${server.port}/api${path}`, { method, headers: { "content-type": "application/json", ...win }, body: JSON.stringify({ personId: chey.id, ...body }) });
+    const card = s.proposeTask({ text: "Compare checkout", mode: "coordinate", targets: [a.id], counterparts: [b.id], by: "Chey" })!;
+    s.removeAgent(b.id);
+    expect((await call("POST", `/triage/${card.id}/send`, {})).status).toBe(409);
+    expect((await call("PATCH", `/triage/${card.id}`, { counterparts: [c.id] })).status).toBe(200);
+    expect(s.board.get(card.id)!.counterparts).toEqual([c.id]);
+    expect((await call("POST", `/triage/${card.id}/send`, {})).status).toBe(200);
+    // Named in the send itself.
+    const two = s.proposeTask({ text: "Compare the footer", mode: "coordinate", targets: [a.id], counterparts: [], by: "Chey" })!;
+    expect((await call("POST", `/triage/${two.id}/send`, {})).status).toBe(409);
+    expect((await call("POST", `/triage/${two.id}/send`, { counterparts: [c.id] })).status).toBe(200);
+  } finally {
+    server.stop(true);
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});
