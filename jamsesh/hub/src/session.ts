@@ -1017,7 +1017,7 @@ export class Session {
     }
     // Only agents in the room are kept as counterparts. A coordinate directive is a comparison, so it must
     // name who with, whatever made it: each target needs a known counterpart other than itself.
-    const counterparts = [...new Set(d.counterparts ?? [])].filter((c) => this.agent(c));
+    const counterparts = [...new Set(d.counterparts ?? [])].filter((c) => this.agent(c) && this.agent(c)?.role !== "observer"); // an observer takes no part in a comparison
     if (d.mode === "coordinate" && (!d.targets.length || d.targets.some((t) => !counterparts.some((c) => c !== t)))) throw new Error("A coordinate directive has to name the agent(s) to compare with (counterparts).");
     const directive: Directive = {
       id: newId("d"),
@@ -1515,7 +1515,9 @@ export class Session {
       if (!st.pinned || st.pinnedById === undefined) return true;
       return !!share.personId && st.pinnedById === share.personId;
     };
-    return ["main", ...this.screens().filter((x) => x.role === "extra").map((x) => x.id)].find(eligible) ?? null;
+    // Only screens whose window is reporting now (a closed main is not a place to put anything), main first.
+    const live = this.screens().map((x) => x.id);
+    return (live.length ? live : ["main"]).find(eligible) ?? null;
   }
 
   /** What each screen showed just before a share took it over, so the share's end can give it back. */
@@ -1525,27 +1527,23 @@ export class Session {
   }
 
   /** Remember what every screen shows now (keyed by screen), ahead of a new share taking one of them over. */
-  rememberStageFor(shareId: string) {
+  rememberStageFor(shareId: string, screen = "main") {
     const all = this.priorStages();
-    if (all[shareId]) return;
-    const snap: Record<string, Stage> = {};
-    for (const screen of ["main", ...Object.keys(this.store.setting<Record<string, Stage>>("screenStages", {}))]) {
-      const st = this.stage(screen);
-      const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
-      let kept = st;
-      if (tiles.length && tiles.every((t) => t.kind === "screen")) {
-        // Another share is all this screen shows: this one gives back what that one was hiding.
-        for (const t of tiles) {
-          const prior = t.kind === "screen" ? all[t.shareId]?.[screen] : undefined;
-          if (prior) {
-            kept = prior;
-            break;
-          }
+    if (all[shareId]?.[screen]) return;
+    const st = this.stage(screen);
+    const tiles = st.mode === "layout" ? st.layout?.tiles ?? [] : [];
+    let kept = st;
+    if (tiles.length && tiles.every((t) => t.kind === "screen")) {
+      // Another share is all this screen shows: this one gives back what that one was hiding.
+      for (const t of tiles) {
+        const prior = t.kind === "screen" ? all[t.shareId]?.[screen] : undefined;
+        if (prior) {
+          kept = prior;
+          break;
         }
       }
-      snap[screen] = kept;
     }
-    this.store.setSetting("beforeShare", { ...all, [shareId]: snap });
+    this.store.setSetting("beforeShare", { ...all, [shareId]: { ...all[shareId], [screen]: kept } });
   }
 
   /**
@@ -2049,7 +2047,7 @@ export class Session {
     // A share newly on this screen gets the screens' earlier stages saved, so its end gives them back (once per share).
     const had = new Set(this.stage(screen).layout?.tiles.flatMap((t) => (t.kind === "screen" ? [t.shareId] : [])) ?? []);
     this.atomically(() => {
-      if (stage.mode === "layout") for (const t of stage.layout?.tiles ?? []) if (t.kind === "screen" && !had.has(t.shareId)) this.rememberStageFor(t.shareId);
+      if (stage.mode === "layout") for (const t of stage.layout?.tiles ?? []) if (t.kind === "screen" && !had.has(t.shareId)) this.rememberStageFor(t.shareId, screen);
       this.commitStage(stage, screen);
       this.recordHistory(stage, screen);
     });

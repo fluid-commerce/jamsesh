@@ -464,3 +464,34 @@ describe("share calls act only for the window that made them", () => {
     expect(sent.some((m) => m.type === "share-ended" && m.shareId === one.id && m.deviceId === "dev-felipe")).toBe(true);
   });
 });
+
+test("with the main window closed, a new share goes to a live extra screen, not to the absent main", () => {
+  const { s } = room();
+  s.reportScreen("screen-2", { ...display, at: Date.now() });
+  s.removeScreen("main");
+  const sh = s.startShare("felipe-laptop", "screen");
+  s.placeShare(sh);
+  expect(s.shareTarget(sh)).toBe("screen-2");
+  expect(s.stage("screen-2").layout?.tiles).toEqual([{ kind: "screen", shareId: sh.id, label: sh.label }]);
+});
+
+test("a share that moves to another screen gives back what that screen showed when it took it, not an older picture", () => {
+  const { s } = room();
+  s.reportScreen("screen-2", { ...display, at: Date.now() });
+  const art = (n: string) => s.upsertArtifact({ kind: "screenshot", stage: "built", title: n, image: `/renders/${n}.png` }).id;
+  const sh = s.startShare("felipe-laptop", "screen");
+  s.placeShare(sh); // on main
+  // The extra screen changes while the share is on main, then the share is shown there too.
+  s.setStage({ mode: "spotlight", items: [art("newer")], title: "Newer" }, "x", "screen-2", { claim: s.stageClaim() });
+  s.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id }] } }, "x", "screen-2", { claim: s.stageClaim() });
+  s.endShare(sh.id);
+  expect(s.stage("screen-2")).toMatchObject({ mode: "spotlight", title: "Newer" });
+});
+
+test("a comparison between a worker and an observer is refused: an observer is no counterpart", () => {
+  const { s } = room();
+  const reg = (owner: string, role?: "observer") => s.registerAgent({ ownerName: owner, harness: "claude-code", repo: `acme/${owner}`, cwd: `/${owner}`, machine: "m1", platform: "desktop", ...(role ? { role } : {}) }).agent;
+  const worker = reg("Jo");
+  const watcher = reg("Rae", "observer");
+  expect(() => s.createDirective({ text: "Compare", mode: "coordinate", targets: [worker.id, watcher.id], counterparts: [worker.id, watcher.id], requestedBy: "Jo" })).toThrow(/counterpart/);
+});
