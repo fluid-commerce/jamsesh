@@ -3144,3 +3144,36 @@ test("readOnce reads a regular file once and refuses a link, a folder and a link
   expect(gitOutOf(dir, "show", "HEAD:wiki/swap.md")).toContain("Validated bytes.");
   expect(gitOutOf(dir, "show", "HEAD:wiki/swap.md")).not.toContain("arrived after");
 });
+
+test("a page whose bytes are not valid UTF-8 is never taken for the wiki's recorded revision", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page \uFFFD with a replacement character.", { by: "Chey" });
+  const file = join(dir, "wiki", "one.md");
+  const good = readFileSync(file);
+  // The same text with the replacement character's three bytes swapped for one malformed byte: decodes to the very same string.
+  const bad = Buffer.from(good.toString("latin1").replace("\xEF\xBF\xBD", "\xFF"), "latin1");
+  expect(bad.equals(good)).toBe(false);
+  expect(bad.toString("utf8")).toBe(good.toString("utf8"));
+  writeFileSync(file, bad);
+  (w as any).write("two", "# Two\n\nUnrelated.");
+  (w as any).commitOwn("Add two", ["wiki/two.md"]);
+  const committed = Bun.spawnSync(["git", "show", "HEAD:wiki/one.md"], { cwd: dir }).stdout;
+  expect(Buffer.from(committed).equals(good)).toBe(true); // the committed page is still the one the wiki wrote
+});
+
+test("a repository with SHA-256 object ids gets no wiki history, said plainly, rather than a broken one", () => {
+  if (!gitAvailable()) return;
+  const dir = join(root, `sha256-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  const init = Bun.spawnSync(["git", "init", "-q", "--object-format=sha256"], { cwd: dir });
+  if (init.exitCode !== 0) return; // this git can't make one
+  writeFileSync(join(dir, "index.md"), "one");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(commitPaths(dir, "First", ["index.md"])).toBe("failed");
+  } finally {
+    console.error = err;
+  }
+});

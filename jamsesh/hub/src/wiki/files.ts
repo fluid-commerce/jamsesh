@@ -235,6 +235,10 @@ export function commitPaths(dir: string, message: string, paths: string[], prere
   if (!own.length) return "nothing";
   const gitDir = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
   if (!gitDir) return "failed";
+  if (!sha1Repo(dir)) {
+    console.error("wiki: this repository doesn't use SHA-1 object ids; the wiki keeps no history in it");
+    return "failed";
+  }
   const msg = message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200);
   // The branch is read once, by its exact name, and every later step uses that name: a checkout meanwhile can't redirect the move.
   const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
@@ -586,10 +590,16 @@ export function readOnce(dir: string, rel: string): Buffer {
       if (n === 0) break;
       got += n;
     }
-    return got === st.size ? buf : buf.subarray(0, got);
+    if (got !== st.size) throw Object.assign(new Error(`${rel} changed while it was being read`), { code: "ESHORT" }); // not a snapshot: never partial bytes
+    return buf;
   } finally {
     closeSync(fd);
   }
+}
+
+/** Whether the repository's object format is SHA-1 (the only one the wiki computes ids for). */
+function sha1Repo(dir: string): boolean {
+  return (gitOut(dir, ["rev-parse", "--show-object-format"])?.trim() ?? "sha1") === "sha1"; // (older git has no such option: SHA-1 only)
 }
 
 /** The git blob id of some bytes (SHA-1 repositories: the ones the wiki makes). */
