@@ -659,8 +659,11 @@ passed the text on, and sends it back with the chat's next hook call (`x-jam-ack
 items marked delivered (and the message and decision marks moved). While a handover waits for its
 acknowledgement nothing more is handed over; after 60 seconds everything unacknowledged is offered
 again under a new id, and a listener that calls again without acknowledging the last listener's
-answer gets it again at once. `jam_inbox` and `jam_wait` answer the agent directly and mark what they
-return, including anything a lost hook answer held. Room decisions ride the same deliveries; `Stop`
+answer gets it again at once. `jam_inbox` answers the agent directly and marks what it returns, including
+anything a lost hook answer held. `jam_wait` does the same with one difference, by design: items are marked read once the hub has
+finished sending the reply. A disconnect the hub sees before then (the client leaving mid-wait, or before the reply has gone
+out) leaves them unread for the next call. A reply lost after it was fully sent is not redelivered: an acknowledgement an agent
+must remember to echo costs more than it saves on a local network. Room decisions ride the same deliveries; `Stop`
 doesn't keep an agent working for decisions alone. Room-wide messages (to everyone) skip the
 sender and observers that opted out (6.3b).
 
