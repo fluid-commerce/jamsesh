@@ -368,6 +368,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         throw e;
       }
       // An upgrade has no response; a body is released when its last byte has gone (or the client left).
+      // A read has done its work when its handler returns: a slow client on a streamed answer (the Mac app download) isn't work in flight for a
+      // save. Mutating calls and MCP stay counted until their response is sent.
+      if (incoming.method === "GET" || incoming.method === "HEAD") release();
       const budget = res ? budgetHeld.get(res) : undefined;
       const live = liveCalls.get(incoming);
       if (!res || !res.body) {

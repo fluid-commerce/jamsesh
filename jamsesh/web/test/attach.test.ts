@@ -88,3 +88,33 @@ test("the composer doesn't offer Send for a set the hub would turn away: more th
   // A failed file doesn't count toward the limits (it's blocked for its own reason).
   expect(composerState("hi", [...[1, 2, 3, 4, 5, 6].map((n) => ready(n)), { key: "x", name: "bad.pdf", size: 9, status: "error", error: "no" }]).blocked).toMatch(/didn't attach/);
 });
+
+test("openDevServer opens the link the hub made the way a dev tile is opened (localized), keeps its one-time code, and closes its tab with a message when no link comes", async () => {
+  const { openDevServer } = await import("../src/shared/ui");
+  const g = globalThis as any;
+  const saved = { window: g.window, location: g.location, alert: g.alert, fetch: globalThis.fetch };
+  try {
+    const opened: string[] = [];
+    const tab = { location: { href: "" }, closed: false, close() { this.closed = true; } };
+    const messages: string[] = [];
+    g.window = { open: (u: string) => (opened.push(u), tab), alert: (m: string) => void messages.push(m) };
+    g.navigator = { onLine: true };
+    // The host's own window on 127.0.0.1: the LAN address becomes localhost, the code stays.
+    g.location = { hostname: "127.0.0.1", protocol: "http:", host: "127.0.0.1:4790" };
+    globalThis.fetch = (async () => new Response(JSON.stringify({ url: "http://192.168.1.20:5100/app?jam_code=abc123" }), { status: 200 })) as any;
+    await openDevServer("http://192.168.1.20:5100/app");
+    expect(tab.location.href).toBe("http://localhost:5100/app?jam_code=abc123");
+    // A remote client on the public address reaches it on the dev subdomain.
+    g.location = { hostname: "room.example.net", protocol: "https:", host: "room.example.net" };
+    tab.location.href = "";
+    await openDevServer("http://192.168.1.20:5100/app");
+    expect(tab.location.href).toBe("https://dev-5100.room.example.net/app?jam_code=abc123");
+    // No link: the tab closes and the person is told.
+    globalThis.fetch = (async () => new Response(JSON.stringify({ error: "That isn't one of this session's dev servers." }), { status: 404 })) as any;
+    await openDevServer("http://192.168.1.20:5100/app");
+    expect(tab.closed).toBe(true);
+    expect(messages.at(-1)).toContain("dev server");
+  } finally {
+    Object.assign(g, saved);
+  }
+});

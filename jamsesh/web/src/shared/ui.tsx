@@ -1276,7 +1276,8 @@ export async function openDevServer(url: string) {
   const tab = window.open("about:blank", "_blank");
   try {
     const r = await api<{ url?: string }>("/devserver/link", { url }, "POST", { queue: false });
-    const target = new URL(String(r?.url)).toString();
+    // The hub names the dev server by the host's LAN address; this page reaches it the way its tiles do (localize), the one-time code kept.
+    const target = localize(new URL(String(r?.url)).toString());
     if (tab) tab.location.href = target;
     else window.open(target, "_blank");
   } catch (e) {

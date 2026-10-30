@@ -1634,3 +1634,25 @@ test("the dev-link request for the host's own window is the plain address; a pai
     server.stop(true);
   }
 });
+
+test("a read whose client has stalled (a streamed download) is not work in flight: shutdown stays clean", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const dir2 = mkdtempSync(join(tmpdir(), "jam-dl-"));
+    writeFileSync(join(dir2, "JamSesh.dmg"), Buffer.alloc(8 * 1024 * 1024, 1));
+    (await import("../src/config")).config.home = dir2;
+    const res = await fetch(`http://127.0.0.1:${server.port}/download/mac`);
+    expect(res.status).toBe(200);
+    // Read a little and stop reading: the answer stays open on the server's side.
+    const reader = res.body!.getReader();
+    await reader.read();
+    await Bun.sleep(100);
+    expect(r.hub.working()).toEqual([]);
+    expect(await r.hub.shutdown()).toBe(true);
+    await reader.cancel();
+  } finally {
+    server.stop(true);
+  }
+});
