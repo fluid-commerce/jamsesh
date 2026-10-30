@@ -420,7 +420,8 @@ export function saveProjectContext(home: string, slug: string, sessionId: string
       const next: Fact = { ...local, status, kind: data.kind, text: data.text, workstream: data.workstream, note: status === "active" ? "Changed in another session" : "Retired in another session", updatedAt: now };
       s.store.put("facts", next);
       bases[id] = { v: row.version, sig: factSig(next) };
-      s.board.proposeContext({ text: lost.text, kind: lost.kind, workstream: lost.workstream, by: "Carry-over", note: `Not saved for the project: another session ${status === "active" ? "changed" : "retired"} this fact first. Add it again to keep this wording.` });
+      // Both sessions retired it: nothing to add back.
+      if (!(status !== "active" && next.status !== "active" && local.status !== "active")) s.board.proposeContext({ text: lost.text, kind: lost.kind, workstream: lost.workstream, by: "Carry-over", note: `Not saved for the project: another session ${status === "active" ? "changed" : "retired"} this fact first. Add it again to keep this wording.` });
       continue;
     }
     const ws = s.store.all("workstreams").find((w) => projectId(w) === id);

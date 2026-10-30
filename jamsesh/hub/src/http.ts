@@ -112,8 +112,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
   const s = hub.session;
   s.deviceOnline = (id) => (sockets.get(id)?.size ?? 0) > 0;
 
-  const tokenOf = (req: Request, url: URL) =>
-    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token") ?? url.searchParams.get("token");
+  // A device token comes in a header or the cookie, never the URL (a one-time dev-server sign-in link is the only URL token: anyToken).
+  const tokenOf = (req: Request, _url: URL) =>
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token");
 
   // The dev app may send its own Authorization header, so the paired token can be in the cookie instead.
   const anyToken = (hub: Hub, req: Request, url: URL, ip: string) => {
@@ -150,7 +151,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       const refused = await methodAllowed(incoming);
       if (refused) return refused;
       // A route that takes a recording or a file is for someone paired (or the host's window): nobody else gets a big buffer.
-      if (limitFor(incoming) > BODY_LIMITS.json && !hostWindow && !(local ? fileReader(incoming) : hub.auth.check(tokenOf(incoming, incomingUrl), ip))) return local ? bad(NOT_THE_HOST_WINDOW, 403) : bad("This device isn't paired with this JamSesh host.", 401);
+      if (limitFor(incoming) > BODY_LIMITS.json && incomingUrl.pathname !== "/mcp" && !hostWindow && !(local ? fileReader(incoming) : hub.auth.check(tokenOf(incoming, incomingUrl), ip))) return local ? bad(NOT_THE_HOST_WINDOW, 403) : bad("This device isn't paired with this JamSesh host.", 401);
+      // MCP from another machine needs its credential before anything is buffered (on this Mac it is the documented tokenless setup).
+      if (incomingUrl.pathname === "/mcp" && !local && !hub.auth.check(tokenOf(incoming, incomingUrl), ip)) return bad("This device isn't paired with this JamSesh host.", 401);
       // Every body is read here, bounded, before any route (or the closing check below) looks at the request; its memory stays
       // charged until the request has been answered.
       const got = await buffered(incoming);
@@ -158,15 +161,17 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       const req = got.req;
       const release = got.release;
       let holdsBudget = false;
-      const early = waiting.get(incoming);
-      if (early) waiting.set(req, early);
       const url = new URL(req.url);
       const path = url.pathname;
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
       if (!knownHost(req, hub)) return (release(), bad("Unknown host name.", 421));
       try {
       // Once the final save has begun nothing is written: every route that changes something is turned away here, after its body was read.
-      if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
+      if (hub.closing && req.method !== "GET") return (release(), bad("The session is saving and closing.", 503));
+      // Accepted for dispatch: from here the request is work in flight, until its response has been sent.
+      const admission = hub.admit(`${req.method} ${path}`);
+      waiting.set(incoming, admission);
+      waiting.set(req, admission);
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
         if (path.endsWith("/healthz")) return new Response("ok");
@@ -339,8 +344,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
     maxRequestBodySize: 64 * 1024 * 1024,
     // Every request is counted from the moment it is admitted until its response has been fully sent, here once, for every route.
     async fetch(incoming, srv) {
-      const release = hub.admit(`${incoming.method} ${new URL(incoming.url).pathname}`);
-      waiting.set(incoming, release);
+      // Counted as work only once accepted for dispatch (see route): a stranger trickling a body is never in the count.
+      const release = () => waiting.get(incoming)?.();
       let res: Response | undefined;
       try {
         res = await route(incoming, srv);

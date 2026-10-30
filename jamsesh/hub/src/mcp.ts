@@ -579,9 +579,9 @@ export class McpEndpoint {
       case "jam_inbox":
         return text(this.inboxText(this.requireAgent(ctx), true, ctx.origin));
       case "jam_wait": {
-        const agent = this.requireAgent(ctx);
-        // Shutting down: no new wait starts (it would write after the final save).
+        // Shutting down: no new wait starts (it would write after the final save), and nothing is touched to say so.
         if (this.hub.closing) return text("");
+        const agent = this.requireAgent(ctx);
         const secs = Math.max(5, Math.min(230, Number(args.seconds ?? 200)));
         // This call's link to the HTTP request that carries it: its disconnect (abort) and the moment its reply has been sent.
         const live = this.lives.get(`${ctx.sessionId}:${typeof extra?.requestId}:${extra?.requestId}`);

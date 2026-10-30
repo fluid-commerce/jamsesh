@@ -1006,12 +1006,18 @@ export class Session {
     // mark never moves past one that wasn't carried).
     const mineOf = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
     const messages: JamEvent[] = [];
-    for (let after = lastRead; messages.length < 50; ) {
+    // Lines already looked at and found not to be for this agent aren't looked at again on every poll: the scan resumes after them.
+    const scanned = this.store.setting<number>(`msgScan:${agentId}`, 0);
+    let after = Math.max(lastRead, scanned);
+    while (messages.length < 50) {
       const page = this.store.eventsAfter(after, ["message"], 200);
       for (const e of page) if (mineOf(e) && messages.length < 50) messages.push(e);
-      if (page.length < 200 || messages.length >= 50) break;
-      after = page[page.length - 1].id;
+      if (page.length) after = page[page.length - 1].id;
+      if (page.length < 200) break;
     }
+    // Everything before the first line for this agent (or all that was seen, when there is none) is settled: not looked at again.
+    const reached = messages.length ? messages[0].id - 1 : after;
+    if (reached > scanned) this.store.setSetting(`msgScan:${agentId}`, reached);
     if (markDelivered) this.markInbox(agentId, { directives, messages });
     return { directives, messages };
   }

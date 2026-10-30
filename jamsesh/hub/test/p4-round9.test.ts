@@ -947,7 +947,8 @@ test("the transport counts a request until its response has been sent; a hook's 
     });
     const sending = fetch(`${base}/api/say`, { method: "POST", headers: { "content-type": "application/json", cookie: `jam_window=${"dd".repeat(32)}` }, body, duplex: "half" } as any);
     await Bun.sleep(100);
-    expect(r.hub.working()).toEqual(["POST /api/say"]);
+    // Still arriving: not accepted for dispatch yet, so not work (a stranger trickling a body can't hold the final save).
+    expect(r.hub.working()).toEqual([]);
     release();
     await sending;
     await Bun.sleep(50);
@@ -1347,3 +1348,86 @@ test("a wait dispatched after shutdown began returns at once and touches nothing
     server.stop(true);
   }
 }, 30_000);
+
+// ---------- round 31 ----------
+
+test("tokenless MCP on this Mac still works (the documented local setup): initialize and jam_join without a credential", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const rpc = (body: object, sid?: string) => fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body) });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+    expect(init.status).toBe(200);
+    const sid = init.headers.get("mcp-session-id")!;
+    await rpc({ jsonrpc: "2.0", method: "notifications/initialized" }, sid);
+    const joined = await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "jam_join", arguments: { harness: "other", repo: "a/b", owner: "Chey" } } }, sid)).text();
+    expect(joined).not.toContain("isError");
+    // From another machine, with no credential, nothing is buffered.
+    const far = await fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, "x-forwarded-for": "9.9.9.9" }, body: "{}" });
+    expect(far.status).toBe(401);
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("a request still trickling its body when the session ends was never work: shutdown stays clean", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const stalled = new ReadableStream<Uint8Array>({ pull: (c) => new Promise((res) => (c.enqueue(new TextEncoder().encode("{")), setTimeout(res, 3000))) });
+    const slow = fetch(`http://127.0.0.1:${server.port}/api/say`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": "9.9.9.9" }, body: stalled, duplex: "half" } as any).catch(() => null);
+    await Bun.sleep(150);
+    expect(r.hub.working()).toEqual([]);
+    expect(await r.hub.shutdown()).toBe(true);
+    void slow;
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("a device token in the URL is not accepted on ordinary routes", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const dev = r.hub.auth.issue({ kind: "browser", label: "L", ip: "10.0.0.5", personId: r.chey.id });
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/state?token=${dev.token}`, { headers: { "x-forwarded-for": "10.0.0.5" } });
+    expect(res.status).toBe(401);
+    expect((await fetch(`http://127.0.0.1:${server.port}/api/state`, { headers: { "x-forwarded-for": "10.0.0.5", authorization: `Bearer ${dev.token}` } })).status).toBe(200);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("two sessions retiring the same fact don't propose adding it back", () => {
+  const p = createProject(dir, "Double retire");
+  const a = room();
+  const b = room();
+  a.s.board.rememberNow({ text: "Use the old nav", kind: "decision", by: "Chey" });
+  expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
+  b.s.store.setSetting("carried", null as any);
+  seedFromProject(dir, p.slug, "B", b.s);
+  const fa = a.s.facts().find((f) => f.text === "Use the old nav")!;
+  a.s.store.put("facts", { ...fa, status: "superseded", updatedAt: Date.now() });
+  const fb = b.s.facts().find((f) => f.text === "Use the old nav")!;
+  b.s.store.put("facts", { ...fb, status: "superseded", updatedAt: Date.now() + 5 });
+  expect(saveProjectContext(dir, p.slug, "A", a.s)).toBe("written");
+  expect(saveProjectContext(dir, p.slug, "B", b.s)).toBe("written");
+  expect(b.s.board.open().filter((c) => c.text.includes("Use the old nav"))).toEqual([]);
+});
+
+test("the inbox scan resumes after lines already seen not to be for the agent, and still finds every message", () => {
+  const r = room();
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "other", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const other = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "a/o", cwd: "/o", machine: "fm", platform: "mobile" }).agent;
+  const third = r.s.registerAgent({ ownerName: "Sam", harness: "claude-code", repo: "a/t", cwd: "/t", machine: "sm", platform: "mobile" }).agent;
+  for (let i = 0; i < 300; i++) r.s.sendMessage(other.id, third.id, `elsewhere ${i}`);
+  expect(r.s.inbox(agent.id, false, true).messages).toHaveLength(0);
+  expect(r.s.store.setting<number>(`msgScan:${agent.id}`, 0)).toBeGreaterThan(0);
+  r.s.sendMessage(other.id, agent.id, "for you");
+  expect(r.s.inbox(agent.id, true).messages.map((m) => m.text)).toEqual(["for you"]);
+});
