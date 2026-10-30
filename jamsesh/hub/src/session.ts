@@ -196,7 +196,7 @@ export class Session {
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
       directives: this.directives().slice(0, 60),
       artifacts: this.artifacts().slice(0, 120),
-      devservers: this.store.all("devservers"),
+      devservers: this.devserversForClients(),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
       utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200),
       stage: this.stage(),
@@ -270,7 +270,7 @@ export class Session {
       case "artifacts":
         return { key, value: this.artifacts().slice(0, 120) };
       case "devservers":
-        return { key, value: this.store.all("devservers") };
+        return { key, value: this.devserversForClients() };
       case "utterances":
         return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200) };
       case "totals":
@@ -1508,6 +1508,17 @@ export class Session {
   }
 
   // ---- dev servers ----
+
+  /** The hub's HTTPS dev subdomain for a dev server's port, when it serves one (set by the hub from the remote-access state). */
+  devPublicBase: (port: number) => string | null = () => null;
+
+  /** Dev servers as clients see them: with where an HTTPS page reaches each. */
+  devserversForClients(): DevServer[] {
+    return this.store.all("devservers").map((d) => {
+      const base = this.devPublicBase(d.hostPort);
+      return base ? { ...d, publicUrl: base } : d;
+    });
+  }
 
   devservers(): DevServer[] {
     return this.store.all("devservers");

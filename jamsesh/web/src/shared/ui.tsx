@@ -102,8 +102,12 @@ export function localize(url: string) {
       u.hostname = "localhost";
       return u.toString();
     }
-    // On the public HTTPS address, dev servers live on their own subdomain: dev-<port>.<host>.
-    if (location.protocol === "https:" && /^(\d+\.){3}\d+$/.test(u.hostname) && u.port) return `https://dev-${u.port}.${location.hostname}${u.pathname}${u.search}${u.hash}`;
+    // On an HTTPS page a dev server is reached on the subdomain the hub says it serves for it (its `publicUrl`); a build the hub doesn't serve
+    // that way (a tunnel, no remote access) is left as it is, and the tile says it can't be shown.
+    if (location.protocol === "https:") {
+      const d = hub.snap.state?.devservers.find((x) => String(x.hostPort) === u.port && url.startsWith(x.url.replace(/\/$/, "")));
+      if (d) return d.publicUrl ? `${d.publicUrl}${u.pathname}${u.search}${u.hash}` : url;
+    }
     if (/^(\d+\.){3}\d+$/.test(u.hostname) && u.hostname !== location.hostname && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
       u.hostname = location.hostname;
       return u.toString();
@@ -1269,11 +1273,10 @@ export type { Person };
 void hub;
 
 /**
- * Where this page reaches a dev server the hub named (by its LAN address, or a host name): on the public HTTPS address, its dev subdomain
- * by port; otherwise the way tiles are reached. Query (the one-time code) and fragment are kept.
+ * Where this page reaches a dev server the hub named: the one rule tiles use (localize), so a tile and Open link agree. Query (the one-time
+ * code) and fragment are kept.
  */
 export function devAddress(u: URL): string {
-  if (location.protocol === "https:" && u.port) return `https://dev-${u.port}.${location.hostname}${u.pathname}${u.search}${u.hash}`;
   return localize(u.toString());
 }
 

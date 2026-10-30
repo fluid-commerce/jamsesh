@@ -1646,8 +1646,26 @@ test("a read whose client has stalled (a streamed download) is not work in fligh
     writeFileSync(join(dir2, "JamSesh.dmg"), Buffer.alloc(64 * 1024 * 1024, 1));
     config.home = dir2;
     // A raw socket that reads the headers and a little of the body and then stops reading: the answer cannot drain.
-    const sock = await Bun.connect({ hostname: "127.0.0.1", port: server.port!, socket: { data() {}, open(s) { s.write(`GET /download/mac HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: close\r\n\r\n`); s.pause?.(); } } });
-    await Bun.sleep(300);
+    let head = "";
+    let pause!: () => void;
+    const sock = await Bun.connect({
+      hostname: "127.0.0.1",
+      port: server.port!,
+      socket: {
+        data(s, chunk) {
+          head += head.length < 200 ? Buffer.from(chunk).toString("latin1") : "";
+          pause = () => s.pause();
+        },
+        open(s) {
+          s.write(`GET /download/mac HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: close\r\n\r\n`);
+        },
+      },
+    });
+    await Bun.sleep(200);
+    // The answer has begun (a 200 with its body streaming); now the client stops reading.
+    expect(head).toContain("200 OK");
+    pause();
+    await Bun.sleep(200);
     expect(r.hub.working()).toEqual([]);
     expect(await r.hub.shutdown()).toBe(true);
     sock.end();
@@ -1656,4 +1674,17 @@ test("a read whose client has stalled (a streamed download) is not work in fligh
     rmSync(dir2, { recursive: true, force: true });
     server.stop(true);
   }
+});
+
+test("clients are told where an HTTPS page reaches each dev server, only while the hub serves that subdomain", async () => {
+  const r = room();
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: "127.0.0.1:1" });
+  const status = (over: object) => ((r.hub.net as any).status = () => ({ enabled: true, domain: "room.example.net", cert: { state: "ok" }, ...over }));
+  status({});
+  expect(r.s.state().devservers[0].publicUrl).toBe(`https://dev-${dev.hostPort}.room.example.net`);
+  status({ cert: { state: "pending" } });
+  expect(r.s.state().devservers[0].publicUrl).toBeUndefined();
+  status({ domain: undefined });
+  expect(r.s.state().devservers[0].publicUrl).toBeUndefined();
 });

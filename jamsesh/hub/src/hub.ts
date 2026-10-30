@@ -136,6 +136,12 @@ export class Hub {
     this.devproxy = new DevProxy(this.session);
     this.devproxy.links = this.auth.devLinks;
     this.mcp = new McpEndpoint(this);
+    // Where an HTTPS page reaches a dev server: its own subdomain of the hub's domain, only while that domain is served (devTarget in http.ts).
+    this.session.devPublicBase = (port) => {
+      const st = this.net.status();
+      const domain = st.domain?.toLowerCase().replace(/^https?:\/\//, "");
+      return st.enabled && domain && st.cert.state === "ok" ? `https://dev-${port}.${domain}` : null;
+    };
     this.session.extraAddresses = () => {
       const st = this.net.status();
       return st.enabled && st.publicUrl && st.cert.state === "ok" ? [{ label: "Anywhere", url: st.publicUrl, reachable: st.reachable }] : [];

@@ -90,13 +90,18 @@ test("the composer doesn't offer Send for a set the hub would turn away: more th
 });
 
 test("openDevServer opens the link the hub made the way a dev tile is opened (localized), keeps its one-time code, and closes its tab with a message when no link comes", async () => {
-  const { openDevServer } = await import("../src/shared/ui");
+  const { openDevServer, localize } = await import("../src/shared/ui");
+  const { hub } = await import("../src/shared/hub");
   const g = globalThis as any;
   const saved = { window: g.window, location: g.location, alert: g.alert, fetch: globalThis.fetch };
   try {
     const opened: string[] = [];
     const tab = { location: { href: "" }, closed: false, close() { this.closed = true; } };
     const messages: string[] = [];
+    const dev = { hostPort: 5100, url: "http://192.168.1.20:5100", publicUrl: "https://dev-5100.room.example.net" };
+    const named = { hostPort: 5200, url: "http://jamsesh-host.local:5200", publicUrl: "https://dev-5200.room.example.net" };
+    const tunnelled = { hostPort: 5300, url: "http://192.168.1.20:5300" };
+    hub.snap = { ...hub.snap, state: { devservers: [dev, named, tunnelled] } as any };
     g.window = { open: (u: string) => (opened.push(u), tab), alert: (m: string) => void messages.push(m) };
     g.navigator = { onLine: true };
     // The host's own window on 127.0.0.1: the LAN address becomes localhost, the code stays.
@@ -112,8 +117,15 @@ test("openDevServer opens the link the hub made the way a dev tile is opened (lo
     // A named host, and a hash route, on the public address.
     tab.location.href = "";
     globalThis.fetch = (async () => new Response(JSON.stringify({ url: "http://jamsesh-host.local:5100/app?jam_code=abc123#/board" }), { status: 200 })) as any;
-    await openDevServer("http://jamsesh-host.local:5100/app");
-    expect(tab.location.href).toBe("https://dev-5100.room.example.net/app?jam_code=abc123#/board");
+    globalThis.fetch = (async () => new Response(JSON.stringify({ url: "http://jamsesh-host.local:5200/app?jam_code=abc123#/board" }), { status: 200 })) as any;
+    await openDevServer("http://jamsesh-host.local:5200/app");
+    expect(tab.location.href).toBe("https://dev-5200.room.example.net/app?jam_code=abc123#/board");
+    // The tile and Open link agree (one rule), and a build the hub doesn't serve over HTTPS (a tunnel) is left as it is.
+    expect(localize("http://jamsesh-host.local:5200/app")).toBe("https://dev-5200.room.example.net/app");
+    expect(localize("http://192.168.1.20:5100/")).toBe("https://dev-5100.room.example.net/");
+    expect(localize("http://192.168.1.20:5300/")).toBe("http://192.168.1.20:5300/");
+    // An ordinary external address with a port isn't a dev server and isn't touched.
+    expect(localize("http://example.com:8080/x")).toBe("http://example.com:8080/x");
     // No link: the tab closes and the person is told.
     globalThis.fetch = (async () => new Response(JSON.stringify({ error: "That isn't one of this session's dev servers." }), { status: 404 })) as any;
     await openDevServer("http://192.168.1.20:5100/app");

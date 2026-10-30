@@ -238,6 +238,8 @@ export interface DevServer {
   problem?: string;
   /** Since when it hasn't answered; the tile clears itself a few minutes after. */
   downSince?: number;
+  /** Where an HTTPS page reaches it (the hub's dev subdomain), when the hub serves one; absent through a tunnel or without remote access. */
+  publicUrl?: string;
 }
 
 export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";
