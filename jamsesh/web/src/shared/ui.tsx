@@ -532,7 +532,9 @@ function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable
   const awayNew = useRef({ count: 0, upTo: 0, gap: false });
   // Bumped by every reset to the latest window (and on unmount): a history response from an older generation is dropped, so it can't put stale rows back or restore an old scroll position.
   const generation = useRef(new Generation());
-  useEffect(() => () => void generation.current.bump(), []);
+  useEffect(() => {
+    return () => void generation.current.bump();
+  }, []);
   // Where the box was before older lines went in above, to hold the reader's place.
   const holdPlace = useRef<{ height: number; top: number } | null>(null);
   const busy = useRef(false);
@@ -627,12 +629,14 @@ function RoomFeedOf({ big, editable, filter = "all" }: { big?: boolean; editable
   // The away count is bumped at the wire, one event at a time, so a burst can't push lines out of the state window uncounted.
   const wantedRef = useRef<(e: JamEvent) => boolean>(() => false);
   wantedRef.current = wanted;
-  useEffect(() => hub.onGap(() => {
-    if (!following.current) {
-      awayNew.current.gap = true;
-      tick((n) => n + 1);
-    }
-  }), []);
+  useEffect(() => {
+    return hub.onGap(() => {
+      if (!following.current) {
+        awayNew.current.gap = true;
+        tick((n) => n + 1);
+      }
+    });
+  }, []);
   useEffect(
     () =>
       hub.onEvent((e) => {

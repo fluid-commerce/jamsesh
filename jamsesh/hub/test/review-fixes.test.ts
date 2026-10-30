@@ -157,10 +157,18 @@ test("voice previews are limited per device and the voice name has a length cap"
   const laptop = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.10" });
   const other = hub.auth.issue({ kind: "browser", label: "Other", ip: "10.0.0.11" });
   const post = (token: string, voice: string) => fetch(`${base}/api/voice-preview`, { method: "POST", headers: { "x-forwarded-for": "9.9.9.9", "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ voice }) });
-  expect((await post(laptop.token, "x".repeat(200))).status).toBe(400);
-  expect((await post(laptop.token, "alloy")).status).not.toBe(429);
-  expect((await post(laptop.token, "alloy")).status).toBe(429);
-  expect((await post(other.token, "alloy")).status).not.toBe(429);
+  // These are about the route's checks, not silence: a silent hub refuses the sample before any of them.
+  const was = process.env.JAMSESH_SILENT;
+  process.env.JAMSESH_SILENT = "0";
+  try {
+    expect((await post(laptop.token, "x".repeat(200))).status).toBe(400);
+    expect((await post(laptop.token, "alloy")).status).not.toBe(429);
+    expect((await post(laptop.token, "alloy")).status).toBe(429);
+    expect((await post(other.token, "alloy")).status).not.toBe(429);
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_SILENT;
+    else process.env.JAMSESH_SILENT = was;
+  }
 });
 
 // ---- the decisions mark ----

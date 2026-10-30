@@ -106,7 +106,9 @@ test("voice matching status is in hub state and says why when it is off", () => 
 });
 
 test("when speech falls back to the Mac's voice, the room is told why", async () => {
-  process.env.JAMSESH_SILENT = "1";
+  // A silent hub says nothing at all, so this checks the fallback with sound allowed. bun test sets NODE_ENV=test, so `say` never runs.
+  const was = process.env.JAMSESH_SILENT;
+  process.env.JAMSESH_SILENT = "0";
   // No key, so no call leaves this machine.
   const key = config.envGatewayKey;
   (config as any).envGatewayKey = "";
@@ -117,6 +119,8 @@ test("when speech falls back to the Mac's voice, the room is told why", async ()
   const off = bus.on((m) => m.type === "toast" && toasts.push(m));
   await speak(hub.session, "Sent to Felipe's agent.", { source: "voice", kind: "confirm" });
   off();
+  if (was === undefined) delete process.env.JAMSESH_SILENT;
+  else process.env.JAMSESH_SILENT = was;
   (config as any).envGatewayKey = key;
   expect(toasts.some((m) => /built-in voice|No good voice/.test(m.text) && m.detail)).toBe(true);
   hub.stop();
