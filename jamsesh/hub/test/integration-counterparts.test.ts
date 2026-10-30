@@ -153,3 +153,15 @@ test("a comparison among several partners can be repaired when one leaves", () =
   expect(s.board.edit(card.id, { counterparts: [c.id] }, "Chey")).toMatchObject({ ok: true });
   expect(s.board.send(card.id, "Chey").ok).toBe(true);
 });
+
+test("an older comparison that names nobody is no duplicate of a new one", async () => {
+  const { s, a, b } = room();
+  const old = s.createDirective({ text: "Compare the sidebar", mode: "coordinate", targets: [a.id], counterparts: [b.id], requestedBy: "Chey" });
+  s.store.put("directives", { ...old, counterparts: undefined }); // a record from before comparisons named their partners
+  const { Brain } = await import("../src/brain/brain");
+  const brain = new Brain(s, {} as any);
+  clearInterval((brain as any).digestTimer);
+  const tools = (brain as any).tools([], { effects: 0 });
+  const out = String(await tools.create_directive.execute({ targets: [a.id], mode: "coordinate", text: "Compare the sidebar", rationale: "x", counterparts: [b.id] }, { toolCallId: "t", messages: [] }));
+  expect(out).not.toContain("Already sent");
+});

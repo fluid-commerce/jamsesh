@@ -332,7 +332,7 @@ export class Board {
   /** What accepting a card makes and the card's own resolution land together, or not at all (Store.atomic). */
   private commit<T>(fn: () => T): T | { ok: false; error: string; status: number } {
     try {
-      return this.s.store.atomic(fn);
+      return this.s.atomically(fn); // the store's transaction, with the session's effects (wakes, toasts) held until it commits
     } catch (e) {
       console.error("board:", e instanceof Error ? e.message : e);
       return fail("That didn't save. Nothing changed; try again.", 500);

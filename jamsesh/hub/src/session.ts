@@ -2248,7 +2248,7 @@ export class Session {
    * One store transaction whose in-memory side (stage revisions, shown-share marks) is put back if it fails, and whose
    * effects (sends, timers) run only after it commits. A rollback runs none of them.
    */
-  private atomically<T>(fn: () => T): T {
+  atomically<T>(fn: () => T): T {
     if (this.effects) return fn();
     const revs = new Map(this.stageRevs);
     const shown = new Set(this.sharesShown);
