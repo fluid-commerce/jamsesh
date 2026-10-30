@@ -111,3 +111,25 @@ test("a comparison is sent among exactly the approved agents: if one partner lef
   expect(s.directives()).toHaveLength(0);
   expect(s.board.get(card.id)).toMatchObject({ status: "open" });
 });
+
+test("the brain refuses a comparison whose only partner is an observer", async () => {
+  const { s, a } = room();
+  const watcher = s.registerAgent({ ownerName: "Rae", harness: "claude-code", repo: "acme/Rae", cwd: "/Rae", machine: "m1", platform: "mobile", role: "observer" }).agent;
+  const { Brain } = await import("../src/brain/brain");
+  const brain = new Brain(s, {} as any);
+  clearInterval((brain as any).digestTimer);
+  const tools = (brain as any).tools([], { effects: 0 });
+  const out = String(await tools.create_directive.execute({ targets: [a.id], mode: "coordinate", text: "Compare the nav", rationale: "x", counterparts: [watcher.id] }, { toolCallId: "t", messages: [] }));
+  expect(out).toContain("another agent to compare with");
+  expect(s.directives()).toHaveLength(0);
+});
+
+test("a partner chosen by Edit is still named when they leave before Send", () => {
+  const { s, a, b, c } = room();
+  const card = s.proposeTask({ text: "Compare the footer", mode: "coordinate", targets: [a.id], counterparts: [b.id], by: "Chey" })!;
+  expect(s.board.edit(card.id, { counterparts: [c.id] }, "Chey")).toMatchObject({ ok: true });
+  s.removeAgent(c.id);
+  const sent = s.board.send(card.id, "Chey");
+  expect(sent).toMatchObject({ ok: false, status: 409 });
+  expect((sent as any).error).toContain("Cy");
+});

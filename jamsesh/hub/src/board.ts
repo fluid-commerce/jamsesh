@@ -2,7 +2,7 @@
 // as cards for a person to send, add, edit, merge or dismiss. Things said to JamSesh on purpose skip this.
 // Cards never expire; the ones that have waited a while get a label and a spoken mention (brain.ts).
 import { MAX_PER_MESSAGE } from "./attachments";
-import { restates, sameScope, similar } from "./similarity";
+import { comparisonSet, restates, sameScope, sameSet, similar } from "./similarity";
 import type { Session } from "./session";
 import { newId } from "./store";
 import type { Directive, DirectiveMode, Fact, JamEvent, TriageCard, TriageSource } from "./types";
@@ -36,9 +36,6 @@ const splitFiles = (list: TriageCard["attachments"]) => {
   const all = list ? [...new Map(list.map((a) => [a.id, a])).values()] : [];
   return { kept: all.slice(0, MAX_PER_MESSAGE), over: Math.max(0, all.length - MAX_PER_MESSAGE) };
 };
-/** Who a comparison is among: its targets and the agents they compare with, however it was written (the others only, or everyone). */
-export const comparisonSet = (targets: string[], counterparts?: string[]) => [...new Set([...targets, ...(counterparts ?? [])])];
-export const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 export interface TaskProposal {
@@ -303,6 +300,8 @@ export class Board {
       if (!KINDS.includes(e.kind as Fact["kind"])) return { error: `Kind is one of ${KINDS.join(", ")}.` };
       if (e.kind !== c.kind) (next.kind = e.kind as Fact["kind"]), fields.push("kind");
     }
+    // The names kept for the card follow who it is now among, so a partner who leaves later can still be named.
+    if (fields.includes("targets") || fields.includes("counterparts")) next.targetNames = { ...(c.targetNames ?? {}), ...this.namesOf(comparisonSet(next.targets, next.mode === "coordinate" ? next.counterparts : undefined)) };
     return { card: next, fields };
   }
 

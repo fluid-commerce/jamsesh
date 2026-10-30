@@ -1,7 +1,7 @@
 // The room brain. It reads the room (speech and typed lines), separates banter from
 // work, turns real requests into directives for the right agents, keeps the big
 // screen on what matters, and keeps the shared digests current.
-import { comparisonSet, sameSet } from "../board";
+import { comparisonSet, sameSet } from "../similarity";
 import { generateText, isStepCount, Output, tool } from "ai";
 import { z } from "zod";
 import type { AttachmentRef, Attachments } from "../attachments";
@@ -706,7 +706,7 @@ export class Brain {
           // and coordination go to everyone they're addressed to.
           const { kept: targets, dropped } = i.mode === "answer" || i.mode === "coordinate" ? { kept: valid, dropped: [] as Agent[] } : oneAgentPerRepo(s, valid, i.text);
           // Coordination names who compares with whom: the other targets, plus any counterparts given.
-          const counterparts = i.mode === "coordinate" ? [...new Set([...targets, ...(i.counterparts ?? []).filter((c) => known.has(c))])] : undefined;
+          const counterparts = i.mode === "coordinate" ? [...new Set([...targets, ...(i.counterparts ?? []).filter((c) => known.has(c) && s.agent(c)?.role !== "observer")])] : undefined; // an observer takes no part in a comparison
           if (counterparts && targets.some((t) => !counterparts.some((c) => c !== t))) return refuse("A coordinate directive needs another agent to compare with: give two or more targets, or counterparts.");
           // The same instruction twice (two tool calls in one pass, or a repeated ask) is sent once.
           const dupe = s.directives().find(

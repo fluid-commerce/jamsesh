@@ -29,3 +29,8 @@ export function sameScope(a: string, b: string) {
 export function restates(a: string, b: string) {
   return normalized(a) === normalized(b);
 }
+
+/** Who a comparison is among: its targets and the agents they compare with, however it was written (the others only, or everyone). */
+export const comparisonSet = (targets: string[], counterparts?: string[]) => [...new Set([...targets, ...(counterparts ?? [])])];
+/** Whether two lists name the same agents, in any order. */
+export const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
