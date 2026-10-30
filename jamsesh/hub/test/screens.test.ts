@@ -171,3 +171,12 @@ test("at a cold start only main can take a stage; a screen that never reported c
   expect(s.setStage(layout, "x", "screen-9", { claim: s.stageClaim() })).toMatchObject({ applied: false });
   expect(s.setStage(layout, "x", "main", { claim: s.stageClaim() }).applied).toBe(true);
 });
+
+test("a screen that went quiet past the cutoff and reports again makes earlier stage decisions stale", () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "quiet-"))));
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() - Session.SCREEN_LIVE_MS - 1000 };
+  s.reportScreen("main", info);
+  const claim = s.stageClaim();
+  s.reportScreen("main", { ...info, at: Date.now() });
+  expect(s.setStage({ mode: "board" }, "x", "main", { claim })).toMatchObject({ applied: false });
+});

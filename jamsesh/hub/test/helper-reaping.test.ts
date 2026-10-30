@@ -130,3 +130,11 @@ test("a live app can't start its capture helper once the hub is stopping, and on
   void reg.stopAll(50);
   expect(await live.startMac({ name: "Notes", bundle: "com.apple.Notes" }, "tester", ["/usr/bin/true"])).toBe("The hub is stopping.");
 });
+
+test("a live app's utility command is bounded: a child holding its output open and ignoring TERM can't stall it", async () => {
+  const { runShort } = await import("../src/hostctl");
+  const t0 = Date.now();
+  const r = await runShort(["/bin/sh", "-c", "trap '' TERM; (trap '' TERM; sleep 30) & sleep 30"], 600);
+  expect(Date.now() - t0).toBeLessThan(15_000);
+  expect(r.code).not.toBe(0);
+}, 30_000);

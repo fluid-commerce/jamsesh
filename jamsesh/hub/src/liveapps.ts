@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { bus } from "./bus";
 import type { HelperRegistry } from "./children";
 import { config } from "./config";
-import { simScreenRect } from "./hostctl";
+import { runShort, simScreenRect } from "./hostctl";
 import { Companion, companionPath, type ScreenInfo } from "./idb";
 import type { Session } from "./session";
 import type { LiveApp } from "./types";
@@ -66,15 +66,10 @@ interface Live {
 }
 
 async function run(cmd: string[], timeoutMs = 15_000, helpers?: HelperRegistry): Promise<{ code: number; out: string }> {
-  // Once the hub is stopping nothing new starts; one that is running is in the helper list, so stopping the hub sees its exit.
+  // Once the hub is stopping nothing new starts. The command runs in its own process group with a bounded wait and
+  // bounded output (hostctl's runner), so a hung child or one holding the pipe open can't stall the caller.
   if (helpers?.isClosed) return { code: 1, out: "The hub is stopping." };
-  const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", env: process.env });
-  helpers?.track(p);
-  const timer = setTimeout(() => p.kill(), timeoutMs);
-  const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
-  const code = await p.exited;
-  clearTimeout(timer);
-  return { code, out: (out + (err ? `\n${err}` : "")).trim() };
+  return runShort(cmd, timeoutMs);
 }
 
 export interface SimWindow {

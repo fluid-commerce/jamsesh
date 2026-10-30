@@ -163,7 +163,7 @@ async function waitGone(pgid: number): Promise<void> {
 
 /** Runs argv (no shell) as its own process group with a deadline. Every wait is bounded; a group that can't be emptied is reported as stuck, never as a finished failure. */
 export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<RunResult> {
-  const p = Bun.spawn(["/usr/bin/perl", "-e", "use POSIX qw(setsid); setsid(); exec @ARGV or exit 127", ...cmd], { stdout: "pipe", stderr: "pipe", ...(cwd ? { cwd } : {}) });
+  const p = Bun.spawn(["/usr/bin/perl", "-e", "use POSIX qw(setsid); setsid(); exec @ARGV or exit 127", ...cmd], { stdout: "pipe", stderr: "pipe", env: process.env, ...(cwd ? { cwd } : {}) });
   const out = collect(p.stdout);
   const err = collect(p.stderr);
   // The readers are cancelled on every way out of here (a background child can hold the pipes open).

@@ -964,7 +964,7 @@ export class Session {
       return undefined;
     }
     // The cancellation and the replacement are one write: if the replacement can't be made, the task stays as it was.
-    const made = this.store.atomic(() => {
+    const made = this.atomically(() => {
       for (const t of from) {
         this.setDirectiveFor(id, t, "cancelled", `Reassigned to ${pick.name} by ${by}`);
       }
@@ -1056,29 +1056,32 @@ export class Session {
       data: { directiveId: directive.id, mode: d.mode, targets: d.targets, targetNames: names, requestedBy: d.requestedBy, rationale: directive.rationale },
     });
     });
-    bus.changed("directives");
-    bus.send({
-      type: "toast",
-      tone: "directive",
-      text: names.length ? `→ ${names.join(", ")}` : "Noted for the room",
-      detail: d.text,
+    // Told only once the write has landed (inside a larger write, after it commits).
+    this.after(() => {
+      bus.changed("directives");
+      bus.send({
+        type: "toast",
+        tone: "directive",
+        text: names.length ? `→ ${names.join(", ")}` : "Noted for the room",
+        detail: d.text,
+      });
+      for (const t of d.targets) this.wake(t);
+      // An agent that's gone, or idle without waiting for work, won't see this until its person types
+      // to it. Say so, so someone can nudge it, instead of the room assuming it's underway.
+      const asleep = (id: string) => {
+        const a = this.agent(id);
+        return !a || a.status === "offline" || Date.now() - a.lastSeen > 20 * 60_000;
+      };
+      const gone = d.targets.filter(asleep).map((t) => this.agent(t)?.name ?? "That agent");
+      if (gone.length) bus.send({ type: "toast", tone: "warn", text: `${gone.join(", ")} isn't connected right now`, detail: "It gets this as soon as it's back." });
+      if (d.mode === "explore" || d.mode === "implement")
+        setTimeout(() => {
+          const now = this.store.get("directives", directive.id);
+          if (!now || now.status === "done" || now.status === "cancelled") return;
+          const idle = d.targets.filter((t) => now.progress[t] === "pending" && !asleep(t) && this.agent(t)?.status !== "waiting").map((t) => this.agent(t)!);
+          for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
+        }, 45_000).unref?.();
     });
-    for (const t of d.targets) this.wake(t);
-    // An agent that's gone, or idle without waiting for work, won't see this until its person types
-    // to it. Say so, so someone can nudge it, instead of the room assuming it's underway.
-    const asleep = (id: string) => {
-      const a = this.agent(id);
-      return !a || a.status === "offline" || Date.now() - a.lastSeen > 20 * 60_000;
-    };
-    const gone = d.targets.filter(asleep).map((t) => this.agent(t)?.name ?? "That agent");
-    if (gone.length) bus.send({ type: "toast", tone: "warn", text: `${gone.join(", ")} isn't connected right now`, detail: "It gets this as soon as it's back." });
-    if (d.mode === "explore" || d.mode === "implement")
-      setTimeout(() => {
-        const now = this.store.get("directives", directive.id);
-        if (!now || now.status === "done" || now.status === "cancelled") return;
-        const idle = d.targets.filter((t) => now.progress[t] === "pending" && !asleep(t) && this.agent(t)?.status !== "waiting").map((t) => this.agent(t)!);
-        for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
-      }, 45_000).unref?.();
     this.onDirective?.(directive);
     return directive;
   }
@@ -1825,8 +1828,9 @@ export class Session {
   private screenSeen = false;
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
     this.screenSeen = true;
-    // A screen coming back is a different screen to anything decided while it was gone.
-    if (!this.bigScreens.has(id)) this.stageRevs.set(id, this.stageRev(id) + 1);
+    // A screen coming back (or one that had gone quiet past the cutoff) is a different screen to anything decided while it was gone.
+    const was = this.bigScreens.get(id);
+    if (!was || Date.now() - was.at >= Session.SCREEN_LIVE_MS) this.stageRevs.set(id, this.stageRev(id) + 1);
     this.bigScreens.set(id, { id, ...info });
     this.sweepScreens();
     // A screen not heard from for 3 minutes stops being listed: say so then (its stored stage stays for when it returns).

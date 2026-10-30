@@ -11,7 +11,13 @@ const MAX_OFFERS = 3;
 /** The most families the Mac app inspects in one request (fonts.rs MAX_FAMILIES). */
 const LOOKUP_MAX = 24;
 
+/** What was answered and looked up belongs to one person in one room: another starts afresh. */
 export function FontShare() {
+  const { state } = useHub();
+  return <FontShareOf key={`${state?.session.roomId}|${pref("personId")}`} />;
+}
+
+function FontShareOf() {
   const { state } = useHub();
   const invoke = macInvoke();
   const me = pref("personId") || null;

@@ -1220,12 +1220,14 @@ type CanvasFrameProps = { kind: "edit" | "view"; name?: string; title: string; f
 
 /** The live canvas. A silent room doesn't load it: it is a page in a frame, and nothing in a frame can be muted from here. */
 export function CanvasFrame(p: CanvasFrameProps) {
+  // A different room starts a fresh canvas: its link, generation and frame belong to the old one.
+  const room = useHub().state?.session.roomId;
   return useSilent() ? (
     <div style={{ position: "relative", height: "100%" }}>
       <QuietFrame url="" title={p.title} bare />
     </div>
   ) : (
-    <LiveCanvas {...p} />
+    <LiveCanvas key={room} {...p} />
   );
 }
 
