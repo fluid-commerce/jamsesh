@@ -248,7 +248,9 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const pinbox = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => (detectBlocked && NO_FRAME.test(hostName(raw)) ? "blocked" : "loading"));
+  // An HTTPS page can't frame a plain-HTTP build (mixed content blocks it): say so at once rather than leaving a blank tile.
+  const mixed = typeof location !== "undefined" && location.protocol === "https:" && src.startsWith("http:");
+  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => (mixed || (detectBlocked && NO_FRAME.test(hostName(raw))) ? "blocked" : "loading"));
   const [forced, setForced] = useState(false);
   const blocked = state === "blocked" && !forced;
   // A frame that never reports loading is as good as blocked; a load event on a page we can't
@@ -259,7 +261,7 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
     return () => clearTimeout(id);
   }, [detectBlocked, blocked, src]);
   useEffect(() => {
-    if (detectBlocked) setState(NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
+    if (detectBlocked || mixed) setState(mixed || NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
     setForced(false);
     if (!detectBlocked) return;
     // The hub never fetches a shared page: a site that refuses framing is found by the frame not loading (the timeout above).
@@ -1273,14 +1275,6 @@ export type { Person };
 void hub;
 
 /**
- * Where this page reaches a dev server the hub named: the one rule tiles use (localize), so a tile and Open link agree. Query (the one-time
- * code) and fragment are kept.
- */
-export function devAddress(u: URL): string {
-  return localize(u.toString());
-}
-
-/**
  * Opens a dev server in a new tab, through a one-time link from the hub (it never puts a device token in an address). The link request is
  * never queued: if it can't be made, the tab is closed and the person is told.
  */
@@ -1289,7 +1283,7 @@ export async function openDevServer(url: string) {
   try {
     const r = await api<{ url?: string }>("/devserver/link", { url }, "POST", { queue: false });
     // The hub names the dev server by the host's LAN address; this page reaches it the way its tiles do (localize), the one-time code kept.
-    const target = devAddress(new URL(String(r?.url)));
+    const target = localize(new URL(String(r?.url)).toString());
     if (tab) tab.location.href = target;
     else window.open(target, "_blank");
   } catch (e) {

@@ -140,7 +140,14 @@ export class Hub {
     this.session.devPublicBase = (port) => {
       const st = this.net.status();
       const domain = st.domain?.toLowerCase().replace(/^https?:\/\//, "");
-      return st.enabled && domain && st.cert.state === "ok" ? `https://dev-${port}.${domain}` : null;
+      if (!(st.enabled && domain && st.cert.state === "ok")) return null;
+      // The external port the router forwards, when it isn't 443 (the room's own address names it).
+      let ext = "";
+      try {
+        const p = st.publicUrl ? new URL(st.publicUrl).port : "";
+        if (p && p !== "443") ext = `:${p}`;
+      } catch {}
+      return `https://dev-${port}.${domain}${ext}`;
     };
     this.session.extraAddresses = () => {
       const st = this.net.status();
@@ -182,6 +189,14 @@ export class Hub {
     this.keeper.start();
     this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000));
     this.intervals[1]?.unref?.();
+    // Connected clients learn where an HTTPS page reaches the dev servers when remote access turns on, off, or changes.
+    let devPublic = String(this.session.devPublicBase(0));
+    this.intervals.push(
+      setInterval(() => {
+        const now = String(this.session.devPublicBase(0));
+        if (now !== devPublic) (devPublic = now), bus.changed("devservers");
+      }, 3000),
+    );
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {

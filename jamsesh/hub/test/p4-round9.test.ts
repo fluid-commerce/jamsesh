@@ -1688,3 +1688,24 @@ test("clients are told where an HTTPS page reaches each dev server, only while t
   status({ domain: undefined });
   expect(r.s.state().devservers[0].publicUrl).toBeUndefined();
 });
+
+test("the dev subdomain address keeps a non-standard external port, and connected clients are told when remote access changes it", async () => {
+  const r = room();
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: "127.0.0.1:1" });
+  const net = r.hub.net as any;
+  net.status = () => ({ enabled: true, domain: "room.duckdns.org", publicUrl: "https://room.duckdns.org:8443", cert: { state: "ok" } });
+  expect(r.s.state().devservers[0].publicUrl).toBe(`https://dev-${dev.hostPort}.room.duckdns.org:8443`);
+  net.status = () => ({ enabled: true, domain: "room.duckdns.org", publicUrl: "https://room.duckdns.org", cert: { state: "ok" } });
+  expect(r.s.state().devservers[0].publicUrl).toBe(`https://dev-${dev.hostPort}.room.duckdns.org`);
+  // A connected client hears about it: the hub's watcher publishes a devservers patch when the address changes.
+  const { bus } = await import("../src/bus");
+  const heard: string[] = [];
+  const off = bus.on((m: any) => m.type === "patch" && m.key === "devservers" && heard.push(m.value[0]?.publicUrl ?? ""));
+  net.status = () => ({ enabled: false, cert: { state: "none" } });
+  await r.hub.start();
+  net.status = () => ({ enabled: true, domain: "room.duckdns.org", publicUrl: "https://room.duckdns.org", cert: { state: "ok" } });
+  await Bun.sleep(3400);
+  off();
+  expect(heard.some((u) => u.includes("dev-"))).toBe(true);
+}, 20_000);

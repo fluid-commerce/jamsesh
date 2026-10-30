@@ -93,7 +93,8 @@ test("openDevServer opens the link the hub made the way a dev tile is opened (lo
   const { openDevServer, localize } = await import("../src/shared/ui");
   const { hub } = await import("../src/shared/hub");
   const g = globalThis as any;
-  const saved = { window: g.window, location: g.location, alert: g.alert, fetch: globalThis.fetch };
+  const saved = { window: g.window, location: g.location, alert: g.alert, fetch: globalThis.fetch, navigator: g.navigator };
+  const snap = hub.snap;
   try {
     const opened: string[] = [];
     const tab = { location: { href: "" }, closed: false, close() { this.closed = true; } };
@@ -116,7 +117,6 @@ test("openDevServer opens the link the hub made the way a dev tile is opened (lo
     expect(tab.location.href).toBe("https://dev-5100.room.example.net/app?jam_code=abc123");
     // A named host, and a hash route, on the public address.
     tab.location.href = "";
-    globalThis.fetch = (async () => new Response(JSON.stringify({ url: "http://jamsesh-host.local:5100/app?jam_code=abc123#/board" }), { status: 200 })) as any;
     globalThis.fetch = (async () => new Response(JSON.stringify({ url: "http://jamsesh-host.local:5200/app?jam_code=abc123#/board" }), { status: 200 })) as any;
     await openDevServer("http://jamsesh-host.local:5200/app");
     expect(tab.location.href).toBe("https://dev-5200.room.example.net/app?jam_code=abc123#/board");
@@ -132,6 +132,7 @@ test("openDevServer opens the link the hub made the way a dev tile is opened (lo
     expect(tab.closed).toBe(true);
     expect(messages.at(-1)).toContain("dev server");
   } finally {
+    hub.snap = snap;
     Object.assign(g, saved);
   }
 });
