@@ -367,7 +367,7 @@ export function GraphCanvas({ graph, mode = "full", focus = null, onOpen, coarse
   }, [wake]);
   useEffect(() => {
     if (!prefersReducedMotion()) return;
-    const t = setInterval(() => (pulses.active ? wake() : undefined), PULSE_MS / 2);
+    const t = setInterval(() => (pulses.active() ? wake() : undefined), PULSE_MS / 2);
     return () => clearInterval(t);
   }, [wake]);
 

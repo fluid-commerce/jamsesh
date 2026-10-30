@@ -17,7 +17,9 @@ export class PulseStore {
     if (k <= 0) return (this.at.delete(slug), 0);
     return k;
   }
-  get active() {
+  /** Whether any pulse is still running. Expired ones are dropped here, so a pulse for a page that is no longer drawn (deleted) can't keep the canvas waking. */
+  active(now = Date.now()) {
+    for (const [s, t] of this.at) if (now - t >= PULSE_MS) this.at.delete(s);
     return this.at.size > 0;
   }
   on(f: () => void) {

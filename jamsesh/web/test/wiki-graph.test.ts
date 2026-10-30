@@ -108,7 +108,7 @@ test("a pulse fades by itself and is forgotten", () => {
   p.add([]);
   expect(woke).toBe(1);
   p.level("y", 1000 + PULSE_MS + 1);
-  expect(p.active).toBe(false);
+  expect(p.active(Date.now() + 10_000)).toBe(false);
 });
 
 test("names go to the important pages first: backlinks, then people and workstreams before the rest; pages with 2+ backlinks are all named", async () => {

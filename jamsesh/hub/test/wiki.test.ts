@@ -2609,20 +2609,19 @@ test("a report queued at session end keeps its id: a replay after the queue fail
   expect(sourceIds(dir).filter((id) => readSource(dir, id)!.text.includes("replay screen"))).toHaveLength(1);
 });
 
-test("when git can't say what changed in raw/, no half commit is made", () => {
+test("when git can't read the branch, nothing is reported as changed and no commit is made", () => {
   if (!gitAvailable()) return;
   const { dir } = room();
-  rmSync(join(dir, ".git", "index"), { force: true });
-  writeFileSync(join(dir, ".git", "index"), "not an index"); // git status fails on it
+  writeFileSync(join(dir, ".git", "HEAD"), "garbage\n"); // git can't read the branch
   expect(rawPaths(dir)).toBeNull();
 });
 
-test("a page whose commit was skipped because git couldn't list raw/ is named by the next commit", () => {
+test("a page whose commit was skipped because git couldn't read the branch is committed by the next one", () => {
   if (!gitAvailable()) return;
   const { w, dir } = room();
   w.editPage("first", "# First\n\nA page.", { by: "Chey" });
-  const index = readFileSync(join(dir, ".git", "index"));
-  writeFileSync(join(dir, ".git", "index"), "not an index"); // git status fails
+  const headFile = readFileSync(join(dir, ".git", "HEAD"));
+  writeFileSync(join(dir, ".git", "HEAD"), "garbage\n"); // git can't read the branch
   const err = console.error;
   console.error = () => {};
   try {
@@ -2630,7 +2629,7 @@ test("a page whose commit was skipped because git couldn't list raw/ is named by
   } finally {
     console.error = err;
   }
-  writeFileSync(join(dir, ".git", "index"), index);
+  writeFileSync(join(dir, ".git", "HEAD"), headFile);
   w.editPage("later", "# Later\n\nAfter.", { by: "Chey" });
   const tracked = Bun.spawnSync(["git", "ls-files"], { cwd: dir }).stdout.toString();
   expect(tracked).toContain("wiki/skipped.md");
@@ -2997,16 +2996,6 @@ test("a source with a valid name that is a link is not committed; a missing inde
   expect(gitOutOf(dir, "status", "--porcelain", "--", "wiki").trim()).toBe("");
 });
 
-test("before the first look at the vault (no record of known pages yet) the pages present are committed, not held back", () => {
-  if (!gitAvailable()) return;
-  const { w, dir } = room();
-  const st = readState(dir);
-  delete st.seen;
-  writeState(dir, st);
-  writePage(dir, "migrated", "# Migrated\n\nA page from before.");
-  (w as any).commitOwn("Migrated", ["wiki/migrated.md"]);
-  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/migrated.md");
-});
 
 test("the vault's own commit runs none of the repository's programs: a clean filter configured in the repo is not run", () => {
   if (!gitAvailable()) return;
@@ -3062,4 +3051,40 @@ test("the first look through the public path: a hub started on a vault with page
   const files = gitOutOf(vault, "ls-tree", "-r", "--name-only", "HEAD");
   expect(files).toContain("wiki/after.md");
   expect(files).toContain("wiki/before.md");
+});
+
+test("a note for another branch is left alone while a different branch is checked out", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  Bun.spawnSync(["git", "checkout", "-q", "-b", "side"], { cwd: dir });
+  const note = join(dir, ".git", "jamsesh-follow.json");
+  const text = JSON.stringify([{ ref: "refs/heads/master", old: null, new: gitOutOf(dir, "rev-parse", "HEAD").trim(), paths: ["wiki/one.md"] }]);
+  writeFileSync(note, text);
+  const before = readFileSync(join(dir, ".git", "index"));
+  settleIndex(dir);
+  expect(readFileSync(note, "utf8")).toBe(text); // kept for when master is out again
+  expect(readFileSync(join(dir, ".git", "index")).equals(before)).toBe(true); // and this branch's index untouched
+});
+
+test("a clean filter in the global git config, or in the repo, is never run by the wiki's commit or its change detection", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const marker = join(root, `global-filter-${Math.random().toString(36).slice(2)}`);
+  const globalCfg = join(root, `gitconfig-${Math.random().toString(36).slice(2)}`);
+  writeFileSync(globalCfg, `[filter "leak"]\n\tclean = sh -c 'touch ${marker}; cat'\n`);
+  Bun.spawnSync(["git", "config", "filter.repo.clean", `sh -c 'touch ${marker}; cat'`], { cwd: dir });
+  writeFileSync(join(dir, ".gitattributes"), "*.md filter=leak\n*.txt filter=repo\n");
+  const was = process.env.HOME;
+  process.env.HOME = root;
+  writeFileSync(join(root, ".gitconfig"), readFileSync(globalCfg));
+  try {
+    w.editPage("filtered2", "# Filtered\n\nA page.", { by: "Chey" });
+    expect(pagePaths(dir)).toEqual([]);
+  } finally {
+    process.env.HOME = was;
+    rmSync(join(root, ".gitconfig"), { force: true });
+  }
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/filtered2.md");
+  expect(existsSync(marker)).toBe(false);
 });

@@ -160,7 +160,7 @@ export function gitAvailable(): boolean {
   if (!gitOk || gitOk.path !== process.env.PATH) {
     let ok = false;
     try {
-      ok = !!Bun.which("git", { PATH: process.env.PATH ?? "" }) && Bun.spawnSync(["git", "--version"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+      ok = !!Bun.which("git", { PATH: process.env.PATH ?? "" }) && Bun.spawnSync(["git", "--version"], { env: cleanEnv(), stdout: "ignore", stderr: "ignore" }).exitCode === 0;
     } catch {}
     gitOk = { path: process.env.PATH, ok };
   }
@@ -178,37 +178,20 @@ function git(dir: string, args: string[]) {
 function cleanEnv(extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of ["PATH", "HOME", "LANG", "TMPDIR"]) if (process.env[k] !== undefined) env[k] = process.env[k]!;
-  return { ...env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", ...extra };
+  return { ...env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_ATTR_NOSYSTEM: "1", ...extra };
 }
 
 /**
  * Every git command runs with these: our identity, no signing, and nothing that can launch a program on the wiki's behalf (hooks,
  * the file-system monitor, ssh, external diff and textconv helpers, the pager, the editor, credential helpers, file:// transports).
+ * The repository's clean/smudge filters are never involved: files are hashed with `hash-object --no-filters`, not added.
  */
 const GIT_SAFE = ["user.name=JamSesh", "user.email=jamsesh@localhost", "commit.gpgsign=false", "core.hooksPath=/dev/null", "core.fsmonitor=false", "core.sshCommand=", "core.pager=cat", "core.editor=true", "core.askPass=", "credential.helper=", "diff.external=", "protocol.file.allow=never", "gc.auto=0", "maintenance.auto=false"].flatMap((c) => ["-c", c]);
-
-/** The repository's own clean/smudge/process filters, named so each can be switched off (they run programs when files are added). Cached by config time. */
-const filterCache = new Map<string, { at: number; args: string[] }>();
-function filterOff(dir: string): string[] {
-  let at = 0;
-  try {
-    at = statSync(join(dir, ".git", "config")).mtimeMs;
-  } catch {}
-  const hit = filterCache.get(dir);
-  if (hit && hit.at === at) return hit.args;
-  const args: string[] = [];
-  try {
-    const r = Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", "config", "--local", "--name-only", "--get-regexp", "^(filter|diff|merge)\\..*\\.(clean|smudge|process|textconv|driver|command)$"], { cwd: dir, env: cleanEnv(), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
-    for (const name of r.stdout.toString().split("\n").filter(Boolean)) args.push("-c", `${name}=`);
-  } catch {}
-  filterCache.set(dir, { at, args });
-  return args;
-}
 
 /** Runs git in the vault and returns its output (null on failure). `env` is added to the environment; `input` goes to stdin. */
 function gitOut(dir: string, args: string[], env: Record<string, string> = {}, input?: string): string | null {
   try {
-    const r = Bun.spawnSync(["git", ...GIT_SAFE, ...filterOff(dir), ...args], { cwd: dir, env: cleanEnv(env), stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    const r = Bun.spawnSync(["git", ...GIT_SAFE, ...args], { cwd: dir, env: cleanEnv(env), stdin: input === undefined ? "ignore" : Buffer.from(input), stdout: "pipe", stderr: "ignore", timeout: 15_000 });
     return r.exitCode === 0 ? r.stdout.toString() : null;
   } catch {
     return null;
@@ -218,7 +201,7 @@ function gitOut(dir: string, args: string[], env: Record<string, string> = {}, i
 /** The exit code of a git command (null if it could not be run). */
 function gitCode(dir: string, args: string[]): number | null {
   try {
-    return Bun.spawnSync(["git", ...GIT_SAFE, ...filterOff(dir), ...args], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 15_000 }).exitCode;
+    return Bun.spawnSync(["git", ...GIT_SAFE, ...args], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout: 15_000 }).exitCode;
   } catch {
     return null;
   }
@@ -227,7 +210,7 @@ function gitCode(dir: string, args: string[]): number | null {
 /** Where a ref is, asked once: its commit, "missing" (git says it isn't there), or "unknown" (git could not say). */
 function refState(dir: string, ref: string): { sha: string } | "missing" | "unknown" {
   try {
-    const r = Bun.spawnSync(["git", ...GIT_SAFE, ...filterOff(dir), "rev-parse", "-q", "--verify", ref], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 15_000 });
+    const r = Bun.spawnSync(["git", ...GIT_SAFE, "rev-parse", "-q", "--verify", ref], { cwd: dir, env: cleanEnv(), stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 15_000 });
     if (r.exitCode === 0) return { sha: r.stdout.toString().trim() };
     return r.exitCode === 1 ? "missing" : "unknown";
   } catch {
@@ -255,7 +238,7 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
   const msg = message.replace(/[\u0000-\u001f]/g, " ").slice(0, 200);
   // The branch is read once, by its exact name, and every later step uses that name: a checkout meanwhile can't redirect the move.
   const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
-  if (!ref || !/^refs\/heads\/[\w./-]+$/.test(ref)) return "failed"; // detached, or not a branch: no commit is made
+  if (!validRef(ref)) return "failed"; // detached, or not a branch: no commit is made
   const idx = join(gitDir, `jamsesh-index-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
   const env = { GIT_INDEX_FILE: idx };
   try {
@@ -272,8 +255,12 @@ export function commitPaths(dir: string, message: string, paths: string[]): "don
       const inHead = new Set(head && missing.length ? (gitOut(dir, ["ls-tree", "-r", "--name-only", "-z", head]) ?? "").split("\0").filter(Boolean) : []);
       const names = own.filter((p) => existsSync(join(dir, p)) || inHead.has(p));
       if (!names.length) return "nothing";
-      // The pathspec goes in on stdin: a long backlog of sources can't hit the argument-size limit.
-      if (gitOut(dir, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"], env, names.join("\0") + "\0") === null) return "failed";
+      // The files go into the private index as their bytes on disk (no clean filters, no line-ending conversion), on stdin so a long backlog can't hit the argument limit.
+      const here = names.filter((p) => existsSync(join(dir, p)));
+      const written = here.length ? gitOut(dir, ["hash-object", "-w", "--no-filters", "--stdin-paths"], {}, here.join("\n") + "\n")?.trim().split("\n") : [];
+      if (!written || written.length !== here.length || !written.every((s) => SHA.test(s))) return "failed";
+      const info = names.map((p) => (here.includes(p) ? `100644 ${written[here.indexOf(p)]}\t${p}\0` : `0 ${ZERO}\t${p}\0`)).join("");
+      if (gitOut(dir, ["update-index", "-z", "--index-info"], env, info) === null) return "failed";
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history
@@ -363,7 +350,9 @@ const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
 const SHA = /^[0-9a-f]{40}$/;
 const FOLLOW_TOP = new Set(["index.md", "log.md", "WIKI.md", ".gitignore"]);
 /** A path a note may name: relative, no "..", under wiki/ or raw/ (or one of the vault's top-level files). */
-const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && !p.startsWith("/") && !p.split("/").includes("..") && (FOLLOW_TOP.has(p) || /^(wiki|raw)(\/[\w.-]+){1,2}$/.test(p));
+const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && (FOLLOW_TOP.has(p) || /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(p) || /^raw\/(archive\/)?[\w-]+\.md$/.test(p));
+/** A branch ref as git itself allows: no "..", "//", "@{", leading or trailing dot or slash, ".lock" component, control characters or spaces. */
+const validRef = (r: unknown): r is string => typeof r === "string" && /^refs\/heads\/[A-Za-z0-9._\/-]+$/.test(r) && !/(\.\.|\/\/|@\{|\/\.|\.lock(\/|$)|\/$|\.$)/.test(r) && r.length < 200;
 
 /** The note, or an error: every field is checked, and one bad entry makes the whole note unusable (it is kept, never trimmed or dropped). */
 function readFollow(gitDir: string): Follow[] {
@@ -378,7 +367,7 @@ function readFollow(gitDir: string): Follow[] {
   const bad = () => new Error("the index note is damaged");
   if (!Array.isArray(j)) throw bad();
   for (const e of j) {
-    if (!e || typeof e !== "object" || typeof e.ref !== "string" || !/^refs\/heads\/[\w./-]+$/.test(e.ref) || !SHA.test(e.new) || !(e.old === null || SHA.test(e.old)) || !Array.isArray(e.paths) || !e.paths.length || !e.paths.every(followPath)) throw bad();
+    if (!e || typeof e !== "object" || !validRef(e.ref) || !SHA.test(e.new) || !(e.old === null || SHA.test(e.old)) || !Array.isArray(e.paths) || !e.paths.length || !e.paths.every(followPath)) throw bad();
   }
   return j as Follow[];
 }
@@ -410,7 +399,10 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
       return out;
     };
     // A note for a commit that isn't (any more) part of HEAD's history never got its branch move: dropped.
-    const live = list.filter((e) => {
+    // Notes for other branches are not this index's business (it is the checked-out branch's): they stay, untouched, for when that branch is out again.
+    const current = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim() ?? null;
+    const others = list.filter((e) => e.ref !== current);
+    const live = list.filter((e) => e.ref === current).filter((e) => {
       const code = gitCode(dir, ["merge-base", "--is-ancestor", e.new, e.ref]);
       if (code === 0) return true;
       if (code === 1) return false; // really not in HEAD's history
@@ -454,7 +446,7 @@ function resumeFollow(dir: string, gitDir: string, lock: IndexLock) {
       renameSync(lock.path, lock.real);
       lock.taken();
     }
-    writeFollow(gitDir, []);
+    writeFollow(gitDir, others);
   } catch (e) {
     console.error("wiki: couldn't bring the git index up to date with the wiki's commit; it was left as it was and is tried again at the next pass:", e instanceof Error ? e.message : e);
   } finally {
@@ -489,24 +481,61 @@ export function settleIndex(dir: string): void {
  */
 function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boolean): string[] | null {
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
-  const hasHead = gitOut(dir, ["rev-parse", "-q", "--verify", "HEAD"]) !== null;
-  const changed = hasHead ? gitOut(dir, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "--no-renames", "HEAD", "--", folder]) : "";
-  const fresh = gitOut(dir, ["ls-files", "-o", "--exclude-standard", "-z", "--", folder]);
-  if (changed === null || fresh === null) return null; // git couldn't say (timed out, locked): not "nothing changed"; the caller commits nothing this time
-  // Named like the wiki's own and, if there at all, a regular file: a link with a valid name is never the wiki's to commit.
-  const real = (f: string) => {
-    try {
-      return lstatSync(join(dir, f)).isFile();
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // gone: a deletion
-      throw e; // any other failure is not "deleted": the pass stops
+  const state = refState(dir, "HEAD");
+  if (state === "unknown") return null; // git couldn't say: not "nothing changed"; the caller commits nothing this time
+  const inHead = new Map<string, string>(); // path -> blob, as committed
+  if (state !== "missing") {
+    const listing = gitOut(dir, ["ls-tree", "-r", "-z", state.sha, "--", folder]);
+    if (listing === null) return null;
+    for (const rec of listing.split("\0").filter(Boolean)) {
+      const tab = rec.indexOf("\t");
+      const f = rec.slice(0, tab).split(" ");
+      if (own(rec.slice(tab + 1))) inHead.set(rec.slice(tab + 1), f[2]);
     }
-  };
+  }
+  // The files on disk that could be the wiki's: named like them and regular (a link with a valid name never is). Only ENOENT is "gone".
+  const onDisk: string[] = [];
   try {
-    return [...new Set([...changed.split("\0"), ...fresh.split("\0")].filter((f) => f && own(f) && real(f)))];
+    const folders = folder === "raw" ? ["raw", "raw/archive"] : ["wiki"];
+    for (const sub of folders) {
+      let names: string[];
+      try {
+        names = readdirSync(join(dir, sub));
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw e;
+      }
+      for (const n of names) {
+        const f = `${sub}/${n}`;
+        if (!own(f)) continue;
+        if (lstatSync(join(dir, f)).isFile()) onDisk.push(f);
+      }
+    }
+    const gone = [...inHead.keys()].filter((f) => {
+      try {
+        lstatSync(join(dir, f));
+        return false;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+        throw e;
+      }
+    });
+    const hashed = blobShas(dir, onDisk);
+    if (!hashed) return null;
+    const changed = onDisk.filter((f) => inHead.get(f) !== hashed.get(f));
+    return [...new Set([...changed, ...gone])];
   } catch {
     return null;
   }
+}
+
+/** The git blob id of each file's bytes exactly as they are on disk (no filters, nothing written), or null if git couldn't say. */
+function blobShas(dir: string, files: string[]): Map<string, string> | null {
+  if (!files.length) return new Map();
+  const out = gitOut(dir, ["hash-object", "--no-filters", "--stdin-paths"], {}, files.join("\n") + "\n");
+  const lines = out?.trim().split("\n");
+  if (!lines || lines.length !== files.length) return null;
+  return new Map(files.map((f, i) => [f, lines[i]]));
 }
 
 /** The source files in raw/ and raw/archive/ that changed: new ones, and the two sides of a move to the archive. */
