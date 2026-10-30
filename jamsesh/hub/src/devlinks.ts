@@ -73,3 +73,12 @@ export function scrubHeaders(headers: Headers) {
     else headers.delete("cookie");
   }
 }
+
+/**
+ * A request that still carries a device token in its address (an old link): the browser is sent on to the clean address before anything
+ * of the preview is served, so the token isn't left in `location` for the preview's scripts. Null when the address is clean.
+ */
+export function cleanRedirect(url: URL): Response | null {
+  if (!url.searchParams.has("token")) return null;
+  return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+}

@@ -5,7 +5,7 @@ import { fadeOut, playChime } from "../shared/sound";
 import { HistoryStrip, StageBar } from "../shared/StageControls";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel, openDevServer } from "../shared/ui";
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
@@ -703,7 +703,16 @@ function AgentsPanel({ state }: { state: HubState }) {
           {state.devservers.map((d) => (
             <div key={d.id} className="row dev-row" style={{ padding: "6px 0" }}>
               <span className="dot" style={{ background: d.up ? "var(--built)" : "var(--faint)" }} />
-              <a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--text)" }}>
+              <a
+                href={d.url}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "var(--text)" }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openDevServer(d.url);
+                }}
+              >
                 {d.name}
               </a>
               <span className="chip mono ellipsis">{d.problem ?? d.url}</span>

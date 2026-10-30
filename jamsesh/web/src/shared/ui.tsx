@@ -1267,3 +1267,17 @@ export function Section({ title, help, children, right }: { title: string; help?
 
 export type { Person };
 void hub;
+
+/**
+ * Opens a dev server in a new tab. A paired device asks the hub for a one-time link first (the hub never puts a device token in an
+ * address); the host's own window, and anything that fails, opens the plain address.
+ */
+export async function openDevServer(url: string) {
+  const tab = window.open("about:blank", "_blank");
+  let target = url;
+  try {
+    target = (await api<{ url: string }>("/devserver/link", { url })).url;
+  } catch {}
+  if (tab) tab.location.href = target;
+  else window.open(target, "_blank");
+}

@@ -1559,3 +1559,41 @@ test("a stored title version that isn't a positive integer fails the start, and 
   db.close();
   expect(() => readProjectContext(dir, p.slug)).toThrow(ContextUnavailable);
 });
+
+// ---------- round 33 ----------
+
+test("an old dev link with a device token in it is sent on to the clean address before the preview is served, on both proxies", async () => {
+  const r = room();
+  const seen: string[] = [];
+  const preview = Bun.serve({ port: 0, fetch: (req) => (seen.push(new URL(req.url).pathname + new URL(req.url).search), new Response("preview")) });
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+    const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: `127.0.0.1:${preview.port}` });
+    seen.length = 0;
+    const lan = await fetch(`http://127.0.0.1:${dev.hostPort}/p?token=jst_oldtoken&a=1`, { redirect: "manual" });
+    expect(lan.status).toBe(302);
+    expect(lan.headers.get("location")).toBe("/p?a=1");
+    expect(lan.headers.get("referrer-policy")).toBe("no-referrer");
+    (r.hub.net as any).status = () => ({ domain: "room.example.net" });
+    const sub = await fetch(`http://127.0.0.1:${server.port}/p?token=jst_oldtoken&a=1`, { redirect: "manual", headers: { host: `dev-${dev.hostPort}.room.example.net` } });
+    expect(sub.status).toBe(302);
+    expect(sub.headers.get("location")).toBe("/p?a=1");
+    expect(seen).toEqual([]);
+  } finally {
+    server.stop(true);
+    preview.stop(true);
+  }
+});
+
+test("Merge refuses final wording that another active fact already has, inside the save", () => {
+  const r = room();
+  const a = r.s.board.rememberNow({ text: "Header is 64px", kind: "requirement", by: "Chey" })!;
+  r.s.board.rememberNow({ text: "Footer is slim", kind: "requirement", by: "Chey" });
+  const card = r.s.proposeContext({ text: "Footer has a border", kind: "requirement", by: "Felipe" })!;
+  const dup = r.s.board.merge(card.id, a.id, "Chey", "footer is slim.");
+  expect(dup).toMatchObject({ ok: false, status: 409 });
+  expect(r.s.board.get(card.id)!.status).toBe("open");
+  expect(r.s.store.get("facts", a.id)!.text).toBe("Header is 64px");
+});

@@ -427,6 +427,9 @@ export class Board {
     if (c.needsWording && (text === undefined || joined.includes(c.original) || joined.replace(/[.\s]+$/, "") === clean(f.text).replace(/[.\s]+$/, ""))) return fail("Write what to keep from the file into the merged wording first.");
     const ids = [...new Set([...f.sourceEventIds, ...c.sources.map((x) => x.eventId).filter((x): x is number => x != null)])];
     return this.commit(() => {
+      // The final wording, checked inside the save: another active fact may already say exactly this.
+      const same = this.twin({ ...c, text: joined }, f.id);
+      if (same) return fail("A saved fact already says exactly that. Merge into that one, or dismiss this card.", 409);
       this.s.store.put("facts", { ...f, text: joined, sourceEventIds: ids, note: `Merged with a proposal from ${c.by}`, updatedAt: Date.now() });
       return { ok: true as const, card: this.done(c, "merged", by, { factId: f.id }), factId: f.id };
     });

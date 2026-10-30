@@ -5,7 +5,7 @@
 // browser already holds, which browsers send to every port of the same address, or a
 // bearer header such as the Mac app's relay adds).
 import { createHash } from "node:crypto";
-import { DEV_CODE_PARAM, DevLinks, scrubHeaders, withoutCredentials } from "./devlinks";
+import { DEV_CODE_PARAM, DevLinks, cleanRedirect, scrubHeaders, withoutCredentials } from "./devlinks";
 import type { Server, ServerWebSocket } from "bun";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
@@ -142,11 +142,13 @@ export class DevProxy {
         const ip = srv.requestIP(req)?.address ?? "";
         const url = new URL(req.url);
         // A one-time sign-in link: the code becomes this origin's own cookie and the address loses it.
+        const stale = cleanRedirect(url);
+        if (stale) return stale;
         const code = url.searchParams.get(DEV_CODE_PARAM);
         if (code && proxy.links) {
           const device = proxy.links.redeem(code);
           if (!device) return new Response("That link has been used or has expired. Open the dev server again from JamSesh.", { status: 401, headers: { "cache-control": "no-store" } });
-          return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": proxy.links.setCookie(proxy.links.open(device), false), "cache-control": "no-store" } });
+          return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": proxy.links.setCookie(proxy.links.open(device), false), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
         }
         const deviceId = proxy.who(req, ip);
         if (deviceId === null) return denied(req);
@@ -254,7 +256,7 @@ export class DevProxy {
 }
 
 /** Passes a request to the dev server and its answer back, without the room's credentials (or the host window key). */
-async function forward(req: Request, target: string, path: string): Promise<Response> {
+export async function forward(req: Request, target: string, path: string): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const h of HOP) headers.delete(h);
   headers.set("host", target);

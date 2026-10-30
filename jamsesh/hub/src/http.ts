@@ -4,7 +4,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
-import { DEV_CODE_PARAM, DevLinks, scrubHeaders, withoutCredentials } from "./devlinks";
+import { forward } from "./devproxy";
+import { DEV_CODE_PARAM, DevLinks, cleanRedirect, scrubHeaders, withoutCredentials } from "./devlinks";
 import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
 import { methodAllowed } from "./methods";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
@@ -181,18 +182,21 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         const dev = devTarget(req, hub);
         if (dev) {
           // A one-time sign-in link: the code becomes this origin's own cookie and the address loses it.
+          const stale = cleanRedirect(url);
+          if (stale) return stale;
           const code = url.searchParams.get(DEV_CODE_PARAM);
           if (code) {
             const device = hub.auth.devLinks.redeem(code);
             if (!device) return new Response("That link has been used or has expired. Open the dev server again from JamSesh.", { status: 401, headers: { "cache-control": "no-store" } });
-            return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": hub.auth.devLinks.setCookie(hub.auth.devLinks.open(device), url.protocol === "https:" || req.headers.get("x-forwarded-proto") === "https"), "cache-control": "no-store" } });
+            return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": hub.auth.devLinks.setCookie(hub.auth.devLinks.open(device), url.protocol === "https:" || req.headers.get("x-forwarded-proto") === "https"), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
           }
           if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             const who = local ? null : anyToken(hub, req, url, ip);
             if (srv.upgrade(req, { data: { deviceId: null, collab: withoutCredentials(url), devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
           }
-          return proxyHttp(req, url, dev);
+          // The same forwarder as the LAN ports (it also strips what is ours): this hop is to the hub's own listener for that dev server.
+          return forward(req, `127.0.0.1:${dev}`, withoutCredentials(url));
         }
         // The host's own windows are trusted without a token, so a page on another site can't post as them.
         if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
@@ -495,19 +499,6 @@ function devTarget(req: Request, hub: Hub): number | null {
   if (!m || !domain || m[2] !== domain.replace(/^https?:\/\//, "")) return null;
   const port = Number(m[1]);
   return hub.session.devservers().some((d) => d.hostPort === port) ? port : null;
-}
-
-async function proxyHttp(req: Request, url: URL, port: number): Promise<Response> {
-  const headers = new Headers(req.headers);
-  // The dev server sees none of ours: no cookies of the hub's, no token in the address, no bearer.
-  scrubHeaders(headers);
-  headers.set("host", `127.0.0.1:${port}`);
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}${withoutCredentials(url)}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual" } as RequestInit);
-    return new Response(r.body, { status: r.status, headers: r.headers });
-  } catch {
-    return new Response("That dev server isn't answering.", { status: 502 });
-  }
 }
 
 /** The web app: hashed assets cached forever, every other path gets index.html. */

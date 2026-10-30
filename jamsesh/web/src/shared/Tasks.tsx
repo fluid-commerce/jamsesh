@@ -6,7 +6,7 @@ import { WorkViewer } from "../client/WorkViewer";
 import { api, pref, setPref, type Agent, type Artifact, type Directive, type Fact, type HubState, type JamEvent, type TriageCard } from "./hub";
 import { agoWords } from "./StageControls";
 import { FeedAttachments } from "./attach";
-import { colorFor, Reactions, useNow } from "./ui";
+import { colorFor, openDevServer, Reactions, useNow } from "./ui";
 import "./tasks.css";
 
 type ColId = "triage" | "waiting" | "working" | "done";
@@ -654,7 +654,20 @@ function MadeItem({ a, onOpen }: { a: Artifact; onOpen: () => void }) {
             </button>
           )}
           {a.url && (
-            <a className="btn small" href={a.url} target="_blank" rel="noreferrer">
+            <a
+              className="btn small"
+              href={a.url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={
+                a.kind === "devserver"
+                  ? (e) => {
+                      e.preventDefault();
+                      void openDevServer(a.url!);
+                    }
+                  : undefined
+              }
+            >
               Open link
             </a>
           )}
