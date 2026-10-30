@@ -138,26 +138,50 @@ the client.
   recovery check (hung page, killed hub, restart, port release) is an owner-run release check on
   real hardware, deliberately not part of the automated tests. (A `whisper-server` already running on its port when the hub starts isn't the
   hub's, and is left alone.)
-- Opens the **big screen** window at `/host`. With two or more displays it moves to the first
-  display that isn't the main one; with one it stays there. It uses same-Space full screen, so
-  app windows the brain arranges can sit on top of it [A29c]. The menu item **Move the big screen
-  to the next display** moves it.
+- Opens the **big screen** at `/host`, full screen in its own display (same-Space full screen, so
+  app windows the brain arranges can sit on top of it [A29c]). With one display it is there. With
+  two or more it follows the **Screens** setup (below).
 - Opens your own **client window** (`/client`), because the person at the host is usually a
   participant.
-- **User-less host** (**Use every display (nobody uses this Mac)** in the menu bar menu, saved with
-  the app): when nobody uses the host's desktop, every connected display becomes a presentation
-  surface. The app opens one big-screen window per display, each in same-Space full screen on its
-  own display, and no client window. The main display gets the main screen (`/host`, with the
-  header, join code, and room feed); every other display gets an extra screen
-  (`/host?screen=screen-2`, `screen-3`, and so on) that shows only its stage, edge to edge, with no
-  header, room mic, or side panels. Each screen has its own stage, reports its size, and reverts to
-  the board after 6 minutes like the main one (unless it shows a live share). The brain sees every screen by id with its
-  resolution, aspect ratio, and what it shows, and `show_on_screen`, `set_layout`, and
-  `build_custom_view` take a `screen` to put things on a specific one (see
+- **Screens** (3.4; `src-tauri/src/screens.rs`, `ui/screens.html`): the first time this Mac hosts with
+  more than one display it hasn't seen before, a **Screens** window opens (also **Screens…** in the
+  menu bar menu). It draws the displays where macOS arranges them, numbered left to right, and each is
+  marked **Main**, **Extra** or **Unused**; exactly one is main. **Identify** flashes each display's
+  number, large, on that display for 3 seconds. Screens are named by where they sit ("Left TV" and
+  "Right TV", "Top TV" and "Bottom TV", "Left TV", "Middle TV" and "Right TV"; more than three are
+  "Screen 1"...; a laptop's own display is "Laptop screen"), and the name can be typed over. The
+  choice is remembered per display set (keyed by each display's name, size and scale, not its
+  position), so the same TVs plugged in again keep it; an extra keeps its number ("screen-3") when
+  another is unplugged. Defaults before anyone chooses: with a laptop plus other displays, the
+  laptop's own display sits out (that is where its person works) and the leftmost other display is
+  main; with no laptop in the way, every display presents and the primary one is main.
+  The app opens one window per used display: main is `/host` (header, join code, room feed); each
+  extra is `/host?screen=screen-N`, showing only its stage, edge to edge, with no header, room mic or
+  side panels. Windows are built on their own display and placed in logical points (physical pixels
+  differ in scale between displays, which is why windows used to land wrong), then set to
+  same-Space full screen. Every 5 seconds the app checks the displays: one unplugged closes its
+  window (and the hub drops that screen); one plugged in (or the lid closed or opened) opens or
+  rearranges windows by the remembered or default setup; a window that leaves its display is put
+  back. A window already on its display is not reloaded. After arranging, the app tells the hub
+  each screen's id, name and role (`POST /api/screens/config`, local only).
+- **User-less host** (**Use every display (nobody uses this Mac)**, saved with the app): no client
+  window opens and the laptop's own display presents too (the defaults above, without the laptop sitting
+  out). Each screen has its own stage, reports its size, and reverts to the board after 6 minutes like
+  the main one (unless it shows a live share). The brain sees every screen by name and id with its
+  resolution, aspect ratio and what it shows; `show_on_screen`, `set_layout` and `build_custom_view`
+  take a `screen` (a name or an id: "the left TV" works; no screen is the main one) (see
   [10.1](#101-layout)).
+- **Put on screen**: the hub's state lists the room's screens (id, name, role, size, stage). With
+  two or more, a cast from someone's app (Work tab, tapping a tile) opens a picker with a live
+  thumbnail of each screen (its stage drawn at the screen's own size and scaled down) and its name; the
+  chosen screen gets the cast (`POST /api/stage` takes `screen`: an id, matched as an id only; or a
+  name, or the first word(s) of a name, that exactly one screen has. None named is the main screen,
+  one that isn't there is 404, and a name or start two screens share is 409 naming both, so the
+  person can say which). With one screen nothing is asked. Each stage carries its
+  `screenId`.
 - Keeps hosting from the menu bar when its windows are closed. The menu shows that it's hosting,
   the current join code (refreshed every 5 seconds), who's connected, and **Open my window**,
-  **Show the big screen**, **Move the big screen to the next display**, **Mute the room mic**,
+  **Show the big screen**, **Screens…**, **Mute the room mic**,
   **Connect my agents**, **Set up this Mac…**, **Set up remote access…**, **Stop hosting**, and
   **Quit JamSesh**.
 - If the app goes away without stopping the hub (a crash or Force Quit), the hub notices within 2
@@ -225,15 +249,73 @@ Developers can run the host from a checkout without the app:
 | Command | What it does |
 |---|---|
 | `./jamsesh/install.sh` | Builds the FigCraft binaries, the WebAssembly canvas, and the web app; installs whisper.cpp and its model and the speaker model; links `jamsesh` into `~/.local/bin`. |
-| `jamsesh host [--no-open]` | Runs the hub (`JAMSESH_PORT`, default 4747) and opens the big screen in a full-screen Chrome app window, or reopens it if a hub is already running. |
+| `jamsesh host [--no-open] [--project NAME] [--new-session]` | Runs the hub (`JAMSESH_PORT`, default 4747) and opens the big screen in a full-screen Chrome app window, or reopens it if a hub is already running. `--project` opens (or creates) that project; with none it opens the project used last. `--new-session` skips today's session in it ([3.6](#36-projects)). |
 | `jamsesh join <host>` | Connects this computer's agents to a host (pairs with a code, then installs the agent setup). |
 | `jamsesh on` / `jamsesh off` | Turns this computer's agent hooks on or off. The MCP server stays registered. |
 | `jamsesh status` | Shows the local host's health and this computer's hub, name, and hook state. |
 | `jamsesh key` | Stores the gateway key in `~/.jamsesh/.env` (mode 600) after checking it against the gateway. |
-| `jamsesh new` | Archives the current session (`~/.jamsesh/host` → `~/.jamsesh/host-YYYY-MM-DD-HHMM`) and starts the next one fresh. Refuses while a host is running. People, devices, voiceprints, and team settings carry over. |
+| `jamsesh new` | The next host start (terminal or app) begins a new session in the current project, like `--new-session`; it leaves `~/.jamsesh/projects/.new-session`, which the hub removes when it uses it. Refuses while a host is running. Nothing is moved. |
 
 Build the app with `jamsesh/app/bundle-hub.sh`, then `cargo tauri build` in
 `jamsesh/app/src-tauri`.
+
+### 3.6 Projects
+
+A **project** holds many sessions. It is what the host opens, so starting new work is a choice in
+the app, not a terminal command.
+
+**Storage.** `~/.jamsesh/projects/<slug>/` (`JAMSESH_HOME` moves `~/.jamsesh`):
+
+```text
+project.json        name, created, lastUsed, people [{name, color}]
+thumbnail.png       the canvas, small (480 px), saved every 5 minutes while a session runs and when it ends
+sessions/<id>/      one session: a hub data directory (jamsesh.db, renders, snapshots) plus session.json
+                    {id, startedAt, lastActive}
+```
+
+The folder is also where the project's wiki lives (`WIKI.md`, `wiki/`, `raw/`), which is why sessions
+sit in `sessions/` and nothing else shares that name. The team store (`~/.jamsesh/team`: people,
+devices, voiceprints, settings) stays shared by every project.
+
+**Opening.** Opening a project begins a new session in it, or continues today's: the newest session
+whose last activity was on today's date. A project created by name needs nothing else. The hub reads
+`JAMSESH_PROJECT` (slug or name; a name that isn't there is created), `JAMSESH_NEW_PROJECT` (always
+makes one), `JAMSESH_NEW_SESSION=1` (never continues), else the project used last, else a project
+called "My project". `JAMSESH_DATA` still names a data directory outright (tests), and then no
+project is involved. `people` is everyone who spoke or typed in any of its sessions, newest first.
+
+**The picker.** `/projects` in the web app: a full-window chooser, recent first, each card with its
+canvas thumbnail (a lettered tile before there is one), last-used date, session count, the people
+who came, and "Continues today" when opening it would resume today's session. **New project**
+takes a name. Arrow keys move between cards, Enter opens, N starts a new project, Escape cancels.
+Only the host's own windows can use it (`/api/projects`, `/api/projects/<slug>/thumbnail.png`,
+`POST /api/projects` to create; `POST /api/projects/open` from a terminal-run hub creates the
+project and answers with the `jamsesh host --project` command, because only the Mac app can swap
+the hub).
+
+**In the Mac app.** Choosing **Host** starts the hub as a lobby (`JAMSESH_LOBBY=1`): the picker
+only, on 127.0.0.1, with no session and no big screen. Choosing a project (the page calls the app's
+`open_project` command) stops the lobby, starts the hub on the project and opens the usual windows
+in place of the picker. The menu bar's **Projects** submenu lists the recent projects (the open one
+ticked), **All projects…** (the picker) and **New project…** (the picker with the name field open).
+Choosing another project ends the session first: the hub saves a snapshot and the project's
+thumbnail and exits, and only then does the next one start. The app remembers the project it
+hosted last and relaunches into it. Every change of session (host, join, leave, a project, Quit, the
+setup's Reopen) waits its turn in one queue and acts only on the session it was asked in; arranging
+the screens waits too and acts only for the session there is. Reopen restarts only after the hub's
+save finished: a save that didn't, then or before, keeps the app from reopening until the person
+chooses **Reopen anyway**.
+
+**Migration.** The first time a hub or lobby starts with no `JAMSESH_DATA`, the sessions from before
+projects (`~/.jamsesh/host` and the `host-YYYY-MM-DD-HHMM` archives) are copied into projects named
+from each session's name, same names together. Nothing is moved or deleted: each database is copied
+privately and written out with `VACUUM INTO`, its event and document counts are compared with the
+copy (a mismatch removes the copy and is recorded), and the originals stay where they were. What
+happened is written to `projects/.migration.json`, and the migration doesn't run again. One start
+migrates at a time: it holds an exclusive SQLite transaction on `projects/.migration-lock.db` (an
+advisory lock the system lets go when its holder exits or dies), and another start waits up to a
+minute, then fails rather than go on with unfinished projects. The old
+live session becomes `last-session` in its project, so opening that project the same day continues it.
 
 ## 4. Setup, pairing, and remote access
 
@@ -520,7 +602,8 @@ A26c].
 
 ### 5.2 Saved state and merge
 
-- **Outbox.** Every change the client makes (POST, PATCH, DELETE) goes into a durable outbox in
+- **Outbox.** Every change the client makes (POST, PATCH, DELETE), except the live-only screen controls
+  (every call under /stage: a cast, Unlock, Restore, a ready item's Show or Dismiss, and Expand and Collapse of a tile; and the answers to show requests, which are never queued for later because replaying one after reconnecting could undo a later decision), goes into a durable outbox in
   IndexedDB when the host can't take it. Calls replay in order, one at a time, with an idempotency
   key, so the host applies each exactly once even if it saw the first attempt. Caps: 500 changes
   and 7 days. Pairing, audio, hooks, share requests, and debug calls are never queued.
@@ -602,8 +685,8 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_agents` | The roster: people (name, title, weight) and agents (platform, repo, status, card, focus, workstreams). |
 | `jam_devserver` | Put a dev server on the host (see [6.6](#66-dev-servers-on-the-host)) [B18]. |
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
-| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact. |
-| `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen. |
+| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact; the same screen again (same title, or `replaces`) is its next version ([10.5](#105-locks-queue-history-and-versions)). |
+| `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen; a screen a person locked queues it as "ready to show" instead. |
 | `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first; pages with `offset` and says how many more there are. |
 | `jam_directives` | List the session's directives (the context leaves the older ones out), newest first, by words or status; pages with `offset`. |
 | `jam_ask_room` | Post a question to the people in the room. |
@@ -614,7 +697,7 @@ Every tool except `jam_join` requires a joined agent.
 The MCP server also offers the skill as the prompt `jamsesh`.
 
 The live state carries only the newest of long lists (60 directives, 120 artifacts, 200 utterances,
-the recent events) and says how many the session holds in all. Older ones are read with
+the recent events); the one exception is an artifact a screen is showing, which is always included however old and says how many the session holds in all. Older ones are read with
 `GET /api/history/<events|utterances|directives|artifacts>?before=<cursor>&limit=50` (events also
 take `kinds=speech,prompt`); people and agents may both read it. `limit` is 1 to 200 and defaults to
 50 when it isn't a number.
@@ -858,7 +941,7 @@ It tells agents:
 
 ### 7.1 Storage
 
-The session lives in SQLite (WAL) in the hub's data directory (`~/.jamsesh/host`). Team-level data
+The session lives in SQLite (WAL) in the hub's data directory (`~/.jamsesh/projects/<project>/sessions/<id>`, see [3.6](#36-projects); before projects it was `~/.jamsesh/host`). Team-level data
 that outlives a session (people, devices, voiceprints, pairings, the gateway key, the brain's name
 and behavior notes, models, and host-control settings) lives in a separate team store
 (`~/.jamsesh/team`) [B39].
@@ -1092,6 +1175,7 @@ The brain has complete control of the big screen through tools [A6, B40]:
 | `remember_feedback` / `forget_feedback` | See [8.9](#89-feedback-about-its-behavior). |
 | `create_directive`, `record_decision`, `pair_agents`, `ask_agent` | See [8.4](#84-routing-and-intent)–[8.6](#86-decisions). |
 | `host_action`, `build_preview`, `decide_host_build` | See [13](#13-host-control-and-permissions). |
+| `unlock_screen`, `show_ready`, `restore_screen` | Let go of a person's lock after the room agrees, show an agent's waiting item, and bring back an earlier screen ("bring back what Jonathan had up"). See [10.5](#105-locks-queue-history-and-versions). |
 | `no_action` | Explicitly do nothing. |
 
 Screen rules:
@@ -1099,12 +1183,14 @@ Screen rules:
 - **Self-piloting.** When a variant group of 2 to 6 has all updated within 60 seconds, the screen
   shows a compare on its own, unless a person pinned the screen or the brain changed it in the
   last 90 seconds [B12].
-- **New shares.** When someone pushes a share, the hub puts it on the main screen at once, full
-  screen as the only tile, whether or not the brain is on; a screen a person pinned stays put and
-  the room gets a note instead. The brain lays it out beside other things only when the room asks
-  [A5b].
+- **New shares.** When someone pushes a share, the hub puts it up at once as the only tile, filling the presentation area, whether or not the brain is on
+  (other tiles only if the room asks to see something beside it); the screen gets back what it showed when the share ends [A5b]. With the main screen held by someone else's lock
+  or pin, it goes to a free extra screen; with none free, the room gets a note instead.
 - **Pinning.** A person who picks a view pins it; the brain and agents don't override a pinned
   screen (agents' requests become a toast).
+- **Locks.** What a person puts up is locked, which is stronger than a pin: the brain's show tools,
+  the automatic compare and agents' `jam_show` all leave it alone (see
+  [10.5](#105-locks-queue-history-and-versions)).
 - **Back to the board.** Any unpinned view other than the board returns to the board after 6
   minutes.
 - **Displays.** The brain knows the big screen window's size, aspect ratio, and pixel density,
@@ -1341,6 +1427,66 @@ tile, in every view, takes pins (see [11.5](#115-annotations)) [A7c].
 | `A` | Annotate |
 | `,` | Settings |
 
+### 10.5 Locks, queue, history, and versions
+
+**Locks (3.1).** A screen a person puts something on is locked to them: the stage shows
+"Locked by Chey" with **Unlock**. While it is locked:
+
+- the brain's `show_on_screen`, `set_layout`, `build_custom_view`, `show_saved_layout` and
+  `restore_screen` refuse and tell the model to ask the room; `unlock_screen` works only when a
+  person in the lines agrees (or the lock's owner is the one asking, which lets go of it first);
+- the automatic compare doesn't replace it, a new share doesn't take it unless the sharer holds it
+  (the share is shown only on its own), and an agent's `jam_show` waits in the queue;
+- the 6-minute return to the board doesn't run; it starts when the lock lets go.
+
+People replace people's locks: another person's deliberate cast takes the lock over, and the
+history strip brings the earlier one back. A restore from the strip is the exception: it is held
+off (409) while someone else holds the screen. Housekeeping (a share ending, a timer) is never held
+back. A stage the brain puts up on its own is not locked; one it puts up because a person asked it directly is that
+person's cast and is locked to them like any other.
+
+A person's lock stays until they unlock it, however long they talk through it. **Unlock** is shown
+to the lock's owner and goes through one check in the hub, whoever asks: the owner's own window (by
+its credential, never a name in the request), the host's own windows for a lock held by no one in
+particular or by the person at the host, or, through the brain, the owner telling JamSesh to unlock
+or replace it, or anyone's plain yes said after the brain's question about that very lock and within
+3 minutes (the owner's bare "yes" counts only that way). A screen named in a request that isn't
+connected any more is refused (404), never taken to mean the main screen. It also lets go when
+its owner is removed or has no live window for 10 minutes (a 30-second sweep applies it). A lock held
+by no one in particular (the host before anyone picked who they are) lets go after 20 minutes
+untouched. An agent's only way in is the 5-minute question below.
+
+**Ready to show.** An agent's held-back item waits as "ready to show" (at most 12, an hour), in a
+small queue on the stage that the host and people open to **Show** or **Dismiss** an item. A person
+who shows one takes the lock. The automatic compare queues itself the same way.
+
+**Asking the owner.** Once a lock is 5 minutes old, an agent's `jam_show` also makes JamSesh ask its
+owner, on the big screen and in the owner's window (a card with **Show it** and **Keep mine up**) and
+out loud through the speech policy's `request` kind: "Chey, Felipe's agent has the checkout build
+ready. Can I put it up?" (once more after a minute). One question is open per screen, and none comes
+within 10 minutes of a no. The owner can answer by button (the owner, or the host's own window) or
+by voice: "yes, show it" or "keep mine up", plus a bare "yes" or "no" for 90 seconds after the
+question; only the owner's words count and the brain's voice handling applies them with or without
+a model. A spoken answer settles a question only when it is the only one open for that person, of any
+kind (host build approvals, their show requests, any lock question to the room); with two open a
+plain yes or no settles none, JamSesh asks which, and the cards still answer each by its id ("deny
+the build" names its kind and still counts). One line answers one question, once. Every stage write
+says who acts: a person now, the hub's upkeep now, or a claim for work decided earlier (the brain,
+an agent), which lands only on a screen nothing changed since; a share that has ended is never put up. Yes puts the item up unlocked; no keeps the screen and the item stays queued. An
+unanswered question goes stale after 5 minutes.
+
+**One item per built screen (3.5).** A new `jam_post_image` or `/api/upload` of the same agent and
+stage, with the same title once "(built)", "v2" and similar marks are dropped, or an explicit
+`replaces` id, becomes the next version of the existing item rather than a new one. Variants
+("Nav / A", "Nav / B") stay separate, and one agent can't replace another's item. The item keeps its
+id, so a screen showing it, a pin and the feed all follow the newest build; earlier builds are kept in
+the item's `versions` (up to 20). The tile's badge reads "v3 · 2 min ago" and opens the versions.
+
+**History (3.6).** Every screen keeps the last 20 things it showed with who put them up (the board
+and the join view are not kept; neither are shares). Showing the same thing again moves it to the
+top. People's apps show the earlier ones as a strip of chips that bring one back (`POST
+/api/stage/restore`), and the brain's `restore_screen` does the same by name.
+
 ## 11. Client
 
 ### 11.1 Desktop layout
@@ -1353,7 +1499,25 @@ tile, in every view, takes pins (see [11.5](#115-annotations)) [A7c].
   - **Canvas:** the live canvas, editable, with the page bar [A19a].
   - **Screen:** the big screen, live; clicking changes it [B11].
   - **Work:** every artifact grouped by variant set, filtered by All, Mockups, or Built, with
-    **Show on big screen** per group.
+    **Show on big screen** per group. Clicking an item opens a full-size viewer on your own screen
+    (a dark overlay; images at full size, live builds in a frame, Space for actual size): the left
+    and right arrows, on-screen arrows, a thumbnail strip, or a swipe step through its group, and
+    Esc closes. **Show on big screen** in the viewer is the deliberate second step and puts the item
+    up as the person ("Chey put this up"); **All N side by side** puts the group up. Clicking never
+    changes the big screen.
+  - **Expand:** every tile of a multi-tile stage (board, spotlight, compare, parity, layout) has
+    **Expand** in its header, on the big screen and in the Screen tab. The stage's `expanded` field
+    holds the tile key (an artifact id; `t<n>.<fingerprint>` (the first 96 bits of a SHA-256 of the tile) for a layout nth tile, so a click on an old tile can't expand different new content; `p<column>.<place>.<artifact id>` for a parity tile, from where it came and which artifact it was, so the same artifact in two columns is two tiles and a key never names different content after another artifact goes). Only the hub makes keys, and the state lists them with the source of each parity tile, so windows read the key and never work it out:
+    the state's `stageTiles` lists each connected screen's tiles in drawing order, a screen with nothing on it yet included (sent again whenever a stage, the artifacts or the set of screens change), and windows draw from it; `POST /api/stage/expand
+    {tile, screen?}` sets it (tile null collapses). The tile fills the presentation area, the others
+    become a strip of thumbnails along the right edge (bottom on tall areas), and **Collapse**
+    returns. On a phone, a chip per tile under the mirror does the same (Collapse first). The room
+    brain has `expand_tile` (a position, an artifact id, or neither to collapse). Expanding changes the
+    stage in place (same age and lock) and restarts the revert wait of a brought-up stage; a new stage
+    clears it. Agents can't call the route (they use jam_show); malformed tiles are refused, never
+    read as a collapse. Expanded tiles are drawn at the screen's real size: frames come from
+    `/renders/full/<artifact id>.png?size=N` (N is exactly 1600, 2400, 3200 or 4096; frames only; the hub
+    asks the canvas for that scale, since `maxSize` alone never upscales past 1x, and keeps the newest 60), desktop builds get the real viewport instead of a scaled 1440 page.
   - **Pins:** every pin in the session (see [11.5](#115-annotations)).
   - **Agents:** every agent with its workstreams, what the session has settled (curated facts by
     workstream), the session brief, and the dev servers on the host.

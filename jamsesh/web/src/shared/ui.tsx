@@ -1,8 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import qrcode from "qrcode-generator";
 import { readPref } from "./identity";
 import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type HubState, type JamEvent, type Person, type Share } from "./hub";
+import { useArtSrc } from "./frames";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
+import { VersionBadge } from "./StageControls";
 import { CONNECT_TIMEOUT_MS, JoinWatch, RejoinTimer, START_TIMEOUT_MS, friendlyReason, joinLabel, FontTries, loadLocalFonts, macInvoke, type JoinState } from "./canvasJoin";
 
 export function useNow(ms = 1000) {
@@ -45,6 +47,43 @@ export function colorFor(state: HubState | null, ref: { personId?: string | null
     if (p) return p.color;
   }
   return "#8a8f98";
+}
+
+// ---------- expanding a tile ----------
+
+/** Which tile of the stage a piece of tile chrome belongs to (set around each tile of a multi-tile layout). */
+export const TileKeyCtx = createContext<string | null>(null);
+/** The stage's expand state and the way to change it; absent where tiles can't be expanded (the Work tab). */
+export const ExpandCtx = createContext<{ expanded: string | null; expand: (key: string) => void; collapse: () => void } | null>(null);
+
+/** Whether the tile around this component is the one filling the presentation area. */
+export function useIsExpanded() {
+  const key = useContext(TileKeyCtx);
+  const ex = useContext(ExpandCtx);
+  return !!key && ex?.expanded === key;
+}
+
+/** The tile header's Expand / Collapse. Sits in `.tile-tools`, which other tile badges share. */
+export function ExpandButton() {
+  const key = useContext(TileKeyCtx);
+  const ex = useContext(ExpandCtx);
+  if (!key || !ex) return null;
+  const open = ex.expanded === key;
+  return (
+    <button type="button" className="tile-expand" title={open ? "Back to all tiles" : "Fill the screen with this tile"} onClick={(e) => (e.stopPropagation(), open ? ex.collapse() : ex.expand(key))}>
+      <svg width="1em" height="1em" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {open ? <path d="M6.5 2.5v4h-4M9.5 13.5v-4h4" /> : <path d="M2.5 6.5v-4h4M13.5 9.5v4h-4" />}
+      </svg>
+      {open ? "Collapse" : "Expand"}
+    </button>
+  );
+}
+
+/** A frame or screenshot, drawn at the size its box needs when the tile is expanded. */
+export function ArtImage({ art, full, onClick }: { art: Artifact; full: boolean; onClick?: () => void }) {
+  const ref = useRef<HTMLImageElement>(null);
+  const { src, onError } = useArtSrc(art, ref, full);
+  return <img ref={ref} src={src ?? undefined} alt={art.title} onClick={onClick} loading={full ? undefined : "lazy"} onError={full ? onError : undefined} />;
 }
 
 // ---------- artifact tiles ----------
@@ -198,7 +237,8 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
   );
 }
 
-export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked }: { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean }) {
+/** `fill`: draw the page at the box's own size instead of scaling a fixed-size page to it (an expanded desktop build gets the real viewport). */
+export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlocked, fill, bare }: { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean }) {
   const src = localize(raw);
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
@@ -232,7 +272,11 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
     const el = box.current;
     const f = frame.current;
     if (!el || !f) return;
+    const [w0, h0] = [width, height];
     const fit = () => {
+      const width = fill ? el.clientWidth : w0;
+      const height = fill ? el.clientHeight : h0;
+      if (fill) (f.style.width = `${width}px`), (f.style.height = `${height}px`);
       const scale = Math.min(el.clientWidth / width, el.clientHeight / height) || 0;
       const left = (el.clientWidth - width * scale) / 2;
       const top = (el.clientHeight - height * scale) / 2;
@@ -255,9 +299,9 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
     const ro = new ResizeObserver(fit);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [width, height, blocked]);
+  }, [width, height, blocked, fill]);
   return (
-    <div ref={box} style={{ position: "absolute", inset: "50px 18px 18px", overflow: "hidden" }}>
+    <div ref={box} style={{ position: "absolute", inset: bare ? 0 : "50px 18px 18px", overflow: "hidden" }}>
       {blocked ? (
         <BlockedFrame url={raw} onTry={() => setForced(true)} />
       ) : (
@@ -267,7 +311,7 @@ export function ScaledFrame({ src: raw, width = 1280, height = 800, title, pin, 
             src={src}
             title={title}
             onLoad={() => setState("ok")}
-            style={{ position: "absolute", width, height, transformOrigin: "0 0", border: 0, background: "#fff", boxShadow: "0 16px 50px -18px rgba(0,0,0,.8)", visibility: "hidden" }}
+            style={{ position: "absolute", width: fill ? "100%" : width, height: fill ? "100%" : height, transformOrigin: "0 0", border: 0, background: "#fff", boxShadow: "0 16px 50px -18px rgba(0,0,0,.8)", visibility: "hidden" }}
           />
           <div ref={pinbox} className="pinbox">
             <RecordCatch frame={frame} />
@@ -303,6 +347,7 @@ export function ArtifactTile({
   const target = pins ? artifactTarget(art) : undefined;
   const dev = state.devservers.find((d) => d.url === art.url);
   const framed = art.kind === "devserver" && !!art.url && live && dev?.up !== false;
+  const full = useIsExpanded();
   return (
     <div className={`tile ${art.stage} ${fresh ? "fresh" : ""} ${onClick ? "clickable" : ""}`} onClick={onClick} data-jam-target={target ? JSON.stringify(target) : undefined}>
       {variant && <div className="variant">{variant}</div>}
@@ -313,7 +358,7 @@ export function ArtifactTile({
       <div className="media" style={big ? { padding: 28 } : undefined}>
         {art.kind === "devserver" && art.url ? (
           live && dev?.up !== false ? (
-            <ScaledFrame src={art.url} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} pin={target} />
+            <ScaledFrame src={art.url} title={art.title} width={art.platform === "mobile" ? 390 : 1440} height={art.platform === "mobile" ? 844 : 900} pin={target} fill={full && art.platform !== "mobile"} />
           ) : (
             <div className="empty-note dev-down">
               <strong>{dev?.problem ?? "This build isn't answering"}</strong>
@@ -321,7 +366,7 @@ export function ArtifactTile({
             </div>
           )
         ) : art.image ? (
-          <img src={art.image} alt={art.title} loading="lazy" />
+          <ArtImage art={art} full={full} />
         ) : art.kind === "html" ? null : (
           <div className="empty-note">{art.note || art.title}</div>
         )}
@@ -333,8 +378,14 @@ export function ArtifactTile({
           {art.title}
         </span>
         <span className="chip">{art.agentName || "Canvas"}</span>
-        <span className="chip mono" style={{ color: "var(--dim)" }}>
-          {ago(art.updatedAt)}
+        {!(art.version && art.version > 1) && (
+          <span className="chip mono" style={{ color: "var(--dim)" }}>
+            {ago(art.updatedAt)}
+          </span>
+        )}
+        <span className="tile-tools">
+          {art.version && art.version > 1 && <VersionBadge art={art} />}
+          <ExpandButton />
         </span>
       </div>
     </div>

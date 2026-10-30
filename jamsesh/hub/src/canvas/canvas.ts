@@ -402,9 +402,9 @@ export class Canvas {
   }
 
   /** The current render of one frame (for agents comparing against their build). */
-  async renderNode(nodeId: string, maxSize = 1600): Promise<ToolResult> {
+  async renderNode(nodeId: string, maxSize = 1600, scale?: number): Promise<ToolResult> {
     if (!this.host) throw new Error("canvas isn't running");
-    const shot = () => this.host!.call("screenshot", { ids: [Number(nodeId)], maxSize });
+    const shot = () => this.host!.call("screenshot", { ids: [Number(nodeId)], maxSize, ...(scale ? { scale } : {}) });
     let r = await shot();
     if (!r.isError) return r;
     // The host may be a moment behind the agent that just made the frame.
@@ -414,6 +414,19 @@ export class Canvas {
     if (!r.isError || !this.touched.has(nodeId)) return r;
     await this.resync("a frame an agent made was missing");
     return shot();
+  }
+
+  /** The newest frame drawn small, for the project's thumbnail; null when there is no canvas or nothing on it. */
+  async thumbnail(maxSize = 480): Promise<Uint8Array | null> {
+    if (!this.host) return null;
+    const art = this.session
+      .artifacts()
+      .filter((a) => a.kind === "frame" && a.nodeId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!art?.nodeId) return null;
+    const r = await this.host.call("screenshot", { ids: [Number(art.nodeId)], maxSize });
+    const img = r.content.find((c) => c.type === "image") as { data: string } | undefined;
+    return img && !r.isError ? new Uint8Array(Buffer.from(img.data, "base64")) : null;
   }
 
   async frames() {

@@ -153,6 +153,35 @@ export class Store {
 
   // ---- settings ----
 
+  private txDepth = 0;
+  /** Everything `fn` writes lands together or not at all (a crash or a throw in between leaves the earlier state). Nests. */
+  atomic<T>(fn: () => T): T {
+    if (this.txDepth > 0) {
+      this.txDepth++;
+      try {
+        return fn();
+      } finally {
+        this.txDepth--;
+      }
+    }
+    // The depth counts only a transaction that really began: a BEGIN that throws leaves it at 0.
+    this.db.exec("BEGIN IMMEDIATE");
+    this.txDepth = 1;
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      return out;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      this.cache.clear();
+      throw e;
+    } finally {
+      this.txDepth = 0;
+    }
+  }
+
   // ---- replayed calls: the first answer to each idempotency key, kept across restarts for as long
   // as a laptop keeps a change queued (seven days) ----
 
@@ -297,6 +326,14 @@ export class Store {
   eventsAfter(afterId: number, kinds: EventKind[], limit = 200): JamEvent[] {
     const sql = `SELECT * FROM events WHERE id > ?${kinds.length ? ` AND kind IN (${kinds.map(() => "?").join(",")})` : ""} ORDER BY id ASC LIMIT ?`;
     return (this.db.query(sql).all(afterId, ...kinds, limit) as any[]).map(rowToEvent);
+  }
+
+  /** The people who spoke or typed in this session, most recent first. */
+  speakers(limit = 24): string[] {
+    const rows = this.db
+      .query("SELECT author_name AS n FROM events WHERE author_type = 'person' AND author_name NOT IN ('', 'Someone') GROUP BY author_name ORDER BY MAX(id) DESC LIMIT ?")
+      .all(limit) as { n: string }[];
+    return rows.map((r) => r.n);
   }
 
   /** How many events there are (before an id, of some kinds), for "N more" counts. */

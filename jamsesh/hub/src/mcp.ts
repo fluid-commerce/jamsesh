@@ -1,6 +1,7 @@
 // The MCP endpoint every agent connects to (Streamable HTTP at /mcp). It carries the
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
+import { parseStage } from "./stageSchema";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -220,6 +221,7 @@ const JAM_TOOLS = [
         stage: { type: "string", enum: ["built", "mockup"] },
         note: { type: "string" },
         platform: { type: "string", enum: PLATFORMS },
+        replaces: { type: "string", description: "The id of your earlier post of this same screen, to make this its next version. Leave it out when the title is the same as before: a new post with the same title (ignoring '(built)' and 'v2' marks) is already treated as the next version." },
       },
       required: ["title", "imageBase64"],
     },
@@ -227,7 +229,7 @@ const JAM_TOOLS = [
   {
     name: "jam_show",
     description:
-      "Ask the big screen to show your work: spotlight one artifact, compare variants, or a parity view with columns (for example desktop beside mobile). People can override it.",
+      "Ask the big screen to show your work: spotlight one artifact, compare variants, or a parity view with columns (for example desktop beside mobile). People can override it. If a person has locked the screen, your item waits as \"ready to show\" and the room is asked; you don't need to retry.",
     inputSchema: {
       type: "object",
       properties: {
@@ -641,15 +643,33 @@ export class McpEndpoint {
           stage: args.stage ?? "built",
           note: args.note ?? "",
           platform: args.platform,
+          replaces: args.replaces ? String(args.replaces) : undefined,
         });
-        return text(`Posted as ${art.id}. Open: ${s.hubUrl}${art.image}`);
+        return text(`${(art.version ?? 1) > 1 ? `Posted as version ${art.version} of ${art.id} (the room sees only the newest).` : `Posted as ${art.id}.`} Open: ${s.hubUrl}${art.image}`);
       }
       case "jam_show": {
         const agent = this.requireAgent(ctx);
+        const claim = s.stageClaim();
         const known = new Set(s.artifacts().map((a) => a.id));
         const items = (args.artifactIds ?? []).filter((i: string) => known.has(i));
         const columns = (args.columns ?? []).map((c: any) => ({ label: String(c.label ?? ""), items: (c.artifactIds ?? []).filter((i: string) => known.has(i)) }));
         if (!items.length && !columns.some((c: any) => c.items.length)) throw new Error("No known artifact ids. Use jam_artifacts.");
+        const screen = "main";
+        if (!["spotlight", "compare", "parity"].includes(args.mode)) return text("jam_show can put up a spotlight, a compare or a parity view. Other screens are the room's to choose.");
+        // The exact stage, checked before it is queued or shown: an item that can never go up isn't promised to the agent.
+        const wanted = { mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items: items.slice(0, 60), columns: columns.length ? columns : undefined };
+        const checked = parseStage(wanted);
+        if (!checked.ok) return text(`That can't go on the big screen: ${checked.error}`);
+        const empty = s.unrenderable(wanted);
+        if (empty) return text(`That can't go on the big screen: ${empty}`);
+        const lock = s.lockOf(screen);
+        if (lock) {
+          // A person's cast stays up. The item waits as "ready to show"; an old enough lock makes JamSesh ask its owner.
+          const item = s.queueReady({ screen, agentId: agent.id, agentName: agent.name, label: args.title || s.store.get("artifacts", items[0] ?? "")?.title || "their work", stage: wanted });
+          const asked = s.askOwner(item);
+          bus.send({ type: "toast", tone: "info", text: `${agent.name} has ${item.label} ready to show`, detail: `${lock.by} has the screen locked.` });
+          return text(`${lock.by} has the big screen locked, so I didn't replace it. Yours is waiting as "ready to show"${asked ? `, and I've asked ${lock.by} out loud and on screen whether it can go up` : ""}. You don't need to ask again.`);
+        }
         const cur = s.stage();
         const peopleChose = !s.agents().some((a) => a.name === cur.by) && cur.mode !== "board" && cur.mode !== "welcome";
         if (cur.pinned || (peopleChose && Date.now() - cur.since < 90_000)) {
@@ -657,7 +677,8 @@ export class McpEndpoint {
           bus.send({ type: "toast", tone: "info", text: `${agent.name} would like to show ${args.title || "their work"}`, detail: `${why}, so it wasn't swapped in.` });
           return text(`${why}, so I didn't replace it. The room got a note that you'd like to show this; try again in a minute or ask them.`);
         }
-        s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items, columns: columns.length ? columns : undefined }, agent.name);
+        const shown = s.setStage({ mode: args.mode, title: args.title ?? "", caption: args.caption ?? "", items: items.slice(0, 60), columns: columns.length ? columns : undefined }, agent.name, "main", { claim });
+        if (!shown.applied) return text(`It didn't go on the big screen: ${shown.reason}`);
         return text("On the big screen.");
       }
       case "jam_artifacts": {

@@ -1,0 +1,339 @@
+.pj {
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  background: radial-gradient(1100px 520px at 50% -140px, rgba(180, 156, 255, 0.1), transparent 70%), var(--bg);
+  color: var(--text);
+}
+.pj-drag {
+  position: sticky;
+  top: 0;
+  height: 44px;
+  margin-bottom: -44px;
+  z-index: 2;
+}
+.pj-inner {
+  width: min(1120px, 100% - 64px);
+  margin: 0 auto;
+  padding: 72px 0 96px;
+}
+.pj-head {
+  margin-bottom: 36px;
+}
+.pj-eyebrow {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.pj-head h1 {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  text-wrap: balance;
+}
+.pj-lede {
+  margin: 14px 0 0;
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.pj-loading {
+  color: var(--dim);
+}
+.pj-error {
+  margin: 0 0 20px;
+  padding: 12px 16px;
+  border-radius: var(--r-sm);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.pj-hint {
+  margin: 0 0 20px;
+  padding: 12px 16px;
+  border-radius: var(--r-sm);
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  flex-wrap: wrap;
+  color: var(--muted);
+}
+.pj-hint code {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.pj-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 18px;
+}
+.pj.is-empty .pj-inner {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding-block: 56px;
+}
+.pj.is-empty .pj-lede {
+  margin-inline: auto;
+}
+.pj-grid.is-empty {
+  width: min(440px, 100%);
+  grid-template-columns: 1fr;
+  text-align: left;
+}
+.pj-card {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  transition: border-color 0.2s var(--ease), background 0.2s var(--ease), transform 0.2s var(--ease);
+}
+.pj-card:not(:disabled):hover {
+  border-color: var(--line-2);
+  background: var(--panel-2);
+  transform: translateY(-2px);
+}
+.pj-card:focus-visible {
+  outline: 2px solid var(--mockup);
+  outline-offset: 3px;
+  border-color: transparent;
+}
+.pj-card:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.pj-frame {
+  position: relative;
+  display: block;
+}
+.pj-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+.pj-blank {
+  display: grid;
+  place-items: center;
+}
+.pj-blank span {
+  font-size: 56px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  opacity: 0.7;
+}
+.pj-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 18px 18px;
+  min-width: 0;
+}
+.pj-body strong {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.pj-meta {
+  color: var(--dim);
+  font-size: 13px;
+}
+.pj-foot {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.pj-people {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.pj-people > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pj-nobody {
+  color: var(--faint);
+  font-size: 13px;
+}
+.pj-faces {
+  display: flex;
+  flex: none;
+}
+.pj-faces i {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font: 600 11px/1 var(--font);
+  font-style: normal;
+  color: #0c0d0f;
+  border: 2px solid var(--panel);
+  margin-left: -6px;
+}
+.pj-faces i:first-child {
+  margin-left: 0;
+}
+.pj-card:hover .pj-faces i {
+  border-color: var(--panel-2);
+}
+.pj-tag {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--built);
+  background: rgba(12, 13, 15, 0.78);
+  backdrop-filter: blur(6px);
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.pj-tag.now {
+  color: var(--mockup);
+}
+
+.pj-new {
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 250px;
+  padding: 24px;
+  background: transparent;
+  border: 1px dashed var(--line-2);
+  color: var(--muted);
+}
+.pj-new strong {
+  font-size: 17px;
+  color: var(--text);
+  font-weight: 600;
+}
+.pj-plus {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  line-height: 1;
+  color: var(--mockup);
+  background: var(--mockup-bg);
+  margin-bottom: 8px;
+}
+.pj-sub {
+  font-size: 13px;
+  color: var(--dim);
+}
+.pj-new.is-naming {
+  align-items: stretch;
+  justify-content: center;
+  gap: 10px;
+  border-style: solid;
+  background: var(--panel);
+}
+.pj-new label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.pj-new input {
+  font-size: 16px;
+  padding: 12px 14px;
+}
+.pj-new input:focus {
+  border-color: var(--mockup);
+}
+.pj-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 6px;
+}
+.pj-go {
+  white-space: nowrap;
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 600;
+  padding: 10px 16px;
+  border-radius: var(--r-sm);
+}
+.pj-go:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.pj-go:focus-visible,
+.pj-quiet:focus-visible {
+  outline: 2px solid var(--mockup);
+  outline-offset: 2px;
+}
+.pj-quiet {
+  color: var(--muted);
+  padding: 10px 8px;
+}
+
+.pj-busy {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(12, 13, 15, 0.82);
+  backdrop-filter: blur(6px);
+  font-size: 16px;
+  color: var(--muted);
+}
+.pj-spin {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--text);
+  animation: pj-spin 0.8s linear infinite;
+}
+@keyframes pj-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pj-card,
+  .pj-spin {
+    transition: none;
+    animation: none;
+  }
+}

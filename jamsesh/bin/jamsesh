@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # jamsesh: run the host, or connect this laptop to someone else's host.
-#   jamsesh host [--no-open]     start the session on this machine and open the big screen
+#   jamsesh host [--no-open] [--project NAME] [--new-session]
+#                                start the session on this machine and open the big screen; a project
+#                                holds many sessions (the last project, if you name none)
 #   jamsesh join <host[:port]>   connect this laptop (Claude Code, Codex, your JamSesh window)
 #   jamsesh off | on             pause or resume this laptop's hooks
 #   jamsesh status               what's running
 #   jamsesh key                  set the Vercel AI Gateway key for this machine
-#   jamsesh new                  start the next session fresh (the last one is archived, not deleted)
+#   jamsesh new                  the next host starts a new session in the current project
 set -euo pipefail
 SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
@@ -27,13 +29,28 @@ case "${1:-help}" in
   host)
     shift
     cd "$DIR"
+    # --project NAME opens (or creates) that project; --new-session skips today's session in it.
+    rest=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --project) export JAMSESH_PROJECT="${2:?Usage: jamsesh host --project NAME}"; shift 2 ;;
+        --new-session) export JAMSESH_NEW_SESSION=1; shift ;;
+        *) rest+=("$1"); shift ;;
+      esac
+    done
+    set -- ${rest[@]+"${rest[@]}"}
     if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
       echo "JamSesh is already running on port $PORT."
       [ "${1:-}" = "--no-open" ] && exit 0
       # A fresh one-time host link, so the browser is the host's window (approvals, the pairing code).
       # The secret file is the running hub's own (mode 600); curl reads the header from it, so the
       # secret never shows in a process list.
-      secret="${JAMSESH_DATA:-${JAMSESH_HOME:-$HOME/.jamsesh}/host}/host-link.secret"
+      jhome="${JAMSESH_HOME:-$HOME/.jamsesh}"
+      secret="${JAMSESH_DATA:-$jhome}/host-link.secret"
+      # Installs from before projects kept it in host/: copy it forward (never move: an older hub may read it there).
+      if [ -z "${JAMSESH_DATA:-}" ] && [ ! -e "$secret" ] && [ -r "$jhome/host/host-link.secret" ]; then
+        cp -p "$jhome/host/host-link.secret" "$secret" 2>/dev/null || secret="$jhome/host/host-link.secret"
+      fi
       link=""
       if [ -r "$secret" ]; then
         link="$( (curl -fsS --max-time 3 -X POST -H "@$secret" "http://127.0.0.1:$PORT/api/host-link" 2>/dev/null || true) | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')"
@@ -87,14 +104,10 @@ case "${1:-help}" in
       echo "Stop the running host first (Ctrl+C in its terminal)." >&2
       exit 1
     fi
-    data="${JAMSESH_DATA:-$HOME/.jamsesh/host}"
-    if [ -d "$data" ]; then
-      archive="$data-$(date +%Y-%m-%d-%H%M)"
-      mv "$data" "$archive"
-      echo "Archived the last session to $archive. The next 'jamsesh host' starts fresh."
-    else
-      echo "No session to archive."
-    fi
+    # The next host starts a new session in the current project (what --new-session does), nothing is moved.
+    mkdir -p "${JAMSESH_HOME:-$HOME/.jamsesh}/projects"
+    : > "${JAMSESH_HOME:-$HOME/.jamsesh}/projects/.new-session"
+    echo "The next 'jamsesh host' (or the Mac app) starts a new session in the current project."
     ;;
   *)
     sed -n '2,8p' "$SELF" | sed 's/^# \{0,1\}//'

@@ -5,6 +5,7 @@ const COMMANDS: &[&str] = &[
     "start_info",
     "nearby_hosts",
     "host_here",
+    "open_project",
     "join",
     "perm_status",
     "perm_request",
@@ -16,6 +17,11 @@ const COMMANDS: &[&str] = &[
     "toggle_userless",
     "local_fonts",
     "heartbeat",
+    "screens_state",
+    "screens_preview",
+    "screens_save",
+    "screens_identify",
+    "screens_close",
 ];
 
 fn main() {

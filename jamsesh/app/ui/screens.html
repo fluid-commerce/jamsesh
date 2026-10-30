@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>Screens</title>
+    <style>
+      :root { --bg: #0c0d0f; --panel: #16181b; --panel-2: #1c1f23; --panel-3: #24282d; --line: rgba(255,255,255,.07); --line-2: rgba(255,255,255,.12); --text: #f3f2ef; --muted: #a3a6ac; --faint: #6d7076; --built: #45e0a0; --amber: #f5b14c; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; -webkit-font-smoothing: antialiased; user-select: none; -webkit-user-select: none; }
+      main { height: 100%; display: flex; flex-direction: column; padding: 48px 32px 24px; gap: 18px; }
+      h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: -0.01em; }
+      .lede { margin: 4px 0 0; color: var(--muted); }
+      #map { position: relative; height: 170px; flex: none; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; }
+      .tile { position: absolute; border-radius: 8px; border: 1.5px solid var(--line-2); background: var(--panel-2); display: grid; place-content: center; text-align: center; gap: 2px; padding: 4px; overflow: hidden; transition: border-color .15s, background .15s, opacity .15s; }
+      .tile .num { font-size: 26px; font-weight: 700; line-height: 1; }
+      .tile .lbl { font-size: 12px; font-weight: 600; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tile .sub { font-size: 11px; color: var(--muted); }
+      .tile.main { border-color: var(--built); background: rgba(69,224,160,.12); }
+      .tile.extra { border-color: var(--amber); background: rgba(245,177,76,.1); }
+      .tile.unused { opacity: .5; border-style: dashed; }
+      .list { display: grid; gap: 8px; overflow: auto; flex: 1; min-height: 0; align-content: start; }
+      .row { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); }
+      .badge { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--panel-3); font-weight: 700; font-size: 16px; }
+      .what { min-width: 0; display: grid; gap: 4px; }
+      .what input { width: 100%; max-width: 280px; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--bg); color: var(--text); font: inherit; font-weight: 600; user-select: text; -webkit-user-select: text; }
+      .what input:disabled { opacity: .35; }
+      .what input:focus { outline: none; border-color: var(--built); }
+      .meta { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .seg { display: flex; border: 1px solid var(--line-2); border-radius: 9px; overflow: hidden; }
+      .seg button { border: 0; border-radius: 0; height: 32px; padding: 0 12px; background: var(--panel-2); color: var(--muted); border-right: 1px solid var(--line-2); }
+      .seg button:last-child { border-right: 0; }
+      .seg button.on { background: var(--text); color: #111; }
+      button { height: 32px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--panel-2); color: var(--text); font: inherit; font-weight: 600; font-size: 13px; cursor: pointer; white-space: nowrap; }
+      button:hover { background: var(--panel-3); }
+      button.primary { background: var(--text); color: #111; border-color: transparent; }
+      footer { display: flex; align-items: center; gap: 10px; margin-top: auto; }
+      footer .hint { flex: 1; color: var(--faint); font-size: 12.5px; }
+      footer button { height: 38px; padding: 0 18px; font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <div data-tauri-drag-region style="position:fixed;top:0;left:0;right:0;height:36px;z-index:5"></div>
+    <main>
+      <div>
+        <h1>Screens</h1>
+        <p class="lede">Mark what each display does. The main screen has the join code and the room feed; extra screens just present. A display marked unused is left alone.</p>
+      </div>
+      <div id="map"></div>
+      <div class="list" id="list"></div>
+      <footer>
+        <span class="hint" id="hint">JamSesh remembers this for these displays.</span>
+        <button id="identify">Identify</button>
+        <button id="done" class="primary">Done</button>
+      </footer>
+    </main>
+    <script>
+      const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+      const ROLES = [["main", "Main"], ["extra", "Extra"], ["unused", "Unused"]];
+      let view = null;
+      const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+      function drawMap() {
+        const map = document.getElementById("map");
+        map.replaceChildren();
+        const ds = view.displays;
+        const x0 = Math.min(...ds.map((d) => d.rect.x)), y0 = Math.min(...ds.map((d) => d.rect.y));
+        const x1 = Math.max(...ds.map((d) => d.rect.x + d.rect.w)), y1 = Math.max(...ds.map((d) => d.rect.y + d.rect.h));
+        const pad = 14, W = map.clientWidth - pad * 2, H = map.clientHeight - pad * 2;
+        const k = Math.min(W / (x1 - x0), H / (y1 - y0));
+        const ox = pad + (W - (x1 - x0) * k) / 2, oy = pad + (H - (y1 - y0) * k) / 2;
+        for (const d of ds) {
+          const t = el("div", "tile " + d.role);
+          t.style.left = ox + (d.rect.x - x0) * k + "px";
+          t.style.top = oy + (d.rect.y - y0) * k + "px";
+          t.style.width = d.rect.w * k - 3 + "px";
+          t.style.height = d.rect.h * k - 3 + "px";
+          t.append(el("div", "num", d.number), el("div", "lbl", d.role === "unused" ? "Unused" : d.label || ""), el("div", "sub", `${Math.round(d.rect.w)}×${Math.round(d.rect.h)}`));
+          map.append(t);
+        }
+      }
+
+      function drawList() {
+        const list = document.getElementById("list");
+        list.replaceChildren();
+        for (const d of view.displays) {
+          const row = el("div", "row");
+          const what = el("div", "what");
+          const input = el("input");
+          input.value = d.role === "unused" ? "" : d.label;
+          input.placeholder = d.role === "unused" ? "Not presenting" : "Name";
+          input.disabled = d.role === "unused";
+          input.maxLength = 40;
+          input.oninput = () => { d.label = input.value; d.named = true; drawMap(); };
+          what.append(input, el("div", "meta", `${d.name}${d.primary ? ", has the menu bar" : ""}, ${Math.round(d.rect.w)}×${Math.round(d.rect.h)}${d.scale > 1 ? ` at ${d.scale}x` : ""}`));
+          const seg = el("div", "seg");
+          for (const [role, text] of ROLES) {
+            const b = el("button", d.role === role ? "on" : "", text);
+            b.onclick = () => choose(d, role);
+            seg.append(b);
+          }
+          row.append(el("div", "badge", d.number), what, seg);
+          list.append(row);
+        }
+      }
+
+      const picks = () => view.displays.map((d) => ({ key: d.key, role: d.role, name: d.named && d.role !== "unused" ? d.label : null }));
+
+      // One main screen: marking another display main hands it over, and the old one becomes extra.
+      // The Mac works out the names by position that follow.
+      async function choose(d, role) {
+        if (role === "main") for (const o of view.displays) if (o !== d && o.role === "main") o.role = "extra";
+        if (d.role === "main" && role !== "main") {
+          const next = view.displays.find((o) => o !== d && o.role === "extra");
+          if (!next) return;
+          next.role = "main";
+        }
+        d.role = role;
+        view = await invoke("screens_preview", { picks: picks() });
+        draw();
+      }
+
+      const draw = () => { drawMap(); drawList(); };
+      window.refresh = async () => { view = await invoke("screens_state"); draw(); };
+
+      document.getElementById("identify").onclick = () => invoke("screens_identify");
+      document.getElementById("done").onclick = async () => {
+        await invoke("screens_save", { picks: picks() });
+        await invoke("screens_close");
+      };
+      addEventListener("resize", () => view && drawMap());
+      window.refresh();
+    </script>
+  </body>
+</html>

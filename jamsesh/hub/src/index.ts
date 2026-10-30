@@ -2,13 +2,35 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { config } from "./config";
-import { Hub } from "./hub";
+import { config, enterProject } from "./config";
+import { Hub, sharedOnce } from "./hub";
 import { startHttp } from "./http";
 import { advertise, stopAdvertising } from "./bonjour";
 import { readWindowLinks } from "./auth";
+import { linkSecretFile } from "./projects";
 
 const args = new Set(process.argv.slice(2));
+enterProject();
+// The Mac app starts a hub with no session first when hosting: only the Projects picker, until a project is chosen.
+if (config.lobby) {
+  const { startLobby } = await import("./lobby");
+  const lobby = startLobby();
+  const stop = () => (lobby.stop(true), process.exit(0));
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
+  // Like the hub: if the app goes away without stopping this, exit.
+  const parentPid = Number(process.env.JAMSESH_PARENT_PID);
+  if (parentPid > 1) {
+    setInterval(() => {
+      try {
+        process.kill(parentPid, 0);
+      } catch {
+        stop();
+      }
+    }, 2000).unref();
+  }
+  await new Promise(() => {});
+}
 const hub = new Hub({ canvas: !args.has("--no-canvas"), whisper: !args.has("--no-whisper") });
 const server = startHttp(hub);
 // The Mac app hands over its window key and one-time window links on stdin (SPEC 14).
@@ -40,7 +62,7 @@ announce();
 if (!fromApp) writeLinkSecret();
 const hostLink = fromApp ? `http://127.0.0.1:${config.port}/host` : `http://127.0.0.1:${config.port}/host-window?once=${hub.auth.windows.mint()}&next=%2Fhost`;
 console.log(`
-  JamSesh is live: ${hub.session.settings().sessionName}
+  JamSesh is live: ${hub.session.settings().sessionName}${config.project ? `\n  Project:     ${config.project.name} (${config.project.resumed ? "today's session continues" : "a new session"})` : ""}
   Host view:   ${hostLink}${fromApp ? "" : "\n               (a one-time link: open it in the browser for the big screen; restart the host for a new one)"}
   Invite:      open the host view; it shows the QR code, address and 4-character code
   Canvas:      ${hub.session.canvas.status}${hub.session.canvas.reason ? ` (${hub.session.canvas.reason})` : ""}
@@ -55,7 +77,8 @@ if (args.has("--open")) openBigScreen(hostLink);
  * header line curl sends (`curl -H @file`), so the secret never appears in a process's arguments.
  */
 function writeLinkSecret() {
-  const file = join(config.dataDir, "host-link.secret");
+  // Beside the projects, not in a session: `jamsesh host` finds it whichever session is running.
+  const file = process.env.JAMSESH_DATA ? join(config.dataDir, "host-link.secret") : linkSecretFile(config.home);
   try {
     rmSync(file, { force: true });
     const secret = randomBytes(32).toString("hex");
@@ -76,17 +99,18 @@ function openBigScreen(url: string) {
   else Bun.spawn(["open", url]);
 }
 
-let stopping = false;
-const shutdown = async () => {
-  if (stopping) return process.exit(0);
-  stopping = true;
+// A second signal (or the parent app vanishing mid-save) waits for the first shutdown's result:
+// it never exits early, or reports a save as finished before it is.
+const shutdown = sharedOnce(async () => {
   console.log("Saving the session…");
   stopAdvertising();
-  await hub.shutdown();
+  const complete = await hub.shutdown();
   secure?.stop(true);
   server.stop(true);
-  process.exit(0);
-};
+  // 0: everything was saved. 3: a save failed or ran out of time (the Mac app says the save is incomplete).
+  if (!complete) console.error("The session's final save didn't finish.");
+  process.exit(complete ? 0 : 3);
+});
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 

@@ -13,13 +13,14 @@ import { DevProxy } from "./devproxy";
 import { HostControl } from "./hostctl";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
+import { ProjectKeeper } from "./projectkeeper";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, BuildRequest, Platform, Utterance } from "./types";
-import { speak } from "./brain/speech";
+import type { Agent, Annotation, Artifact, BuildRequest, Platform, ShowRequest, Utterance } from "./types";
+import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
 
 /** One distilled pointer moment from a recorded prompt (after CursorCap's dwell/click model). */
@@ -66,6 +67,12 @@ export interface HubOptions {
 
 const HARNESS_TEXT = /^\s*<(task-notification|local-command-stdout|local-command-stderr|bash-input|bash-stdout|bash-stderr|system-reminder)>/;
 
+/** `fn` runs once; every call, including those made while it runs, gets that one run's result. */
+export function sharedOnce<T>(fn: () => Promise<T>): () => Promise<T> {
+  let run: Promise<T> | null = null;
+  return () => (run ??= fn());
+}
+
 export class Hub {
   store: Store;
   session: Session;
@@ -77,6 +84,8 @@ export class Hub {
   devproxy: DevProxy;
   mcp: McpEndpoint;
   autosave: Autosave;
+  /** Records the project this session belongs to (people, last used, thumbnail); idle without a project. */
+  keeper: ProjectKeeper;
   auth: Auth;
   awake: KeepAwake;
   /** Reachability from anywhere (DuckDNS, certificates, router); team-level, so it survives sessions. */
@@ -87,8 +96,6 @@ export class Hub {
 
   /** Every helper process the hub starts; stop() walks it. */
   readonly helpers = new HelperRegistry();
-  private proxyTimer: ReturnType<typeof setInterval> | null = null;
-  private tickTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private opts: HubOptions = {}) {
     const dir = opts.dataDir ?? config.dataDir;
@@ -105,6 +112,7 @@ export class Hub {
     this.host = new HostControl(this.session);
     this.session.buildRequests = () => this.host.buildRequests();
     this.host.onRequest = (r) => this.onBuildRequest(r);
+    this.session.onShowRequest = (r) => this.onShowRequest(r);
     // Simulator and host screenshots become artifacts the room and the brain can see.
     this.host.onImage = (path, title) => {
       void Bun.file(path)
@@ -144,6 +152,7 @@ export class Hub {
 
     this.autosave = new Autosave(this, dir);
     this.brain.autosave = this.autosave;
+    this.keeper = new ProjectKeeper(this, opts.dataDir ? undefined : config.home, opts.dataDir ? null : config.project);
     this.brain.pages = () => this.canvas.pageCache;
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
@@ -169,9 +178,9 @@ export class Hub {
     if (this.opts.canvas !== false) tasks.push(this.canvas.start().then(() => this.mcp.loadCanvasTools()));
     this.devproxy.restore();
     this.autosave.start();
-    this.proxyTimer = setInterval(() => this.devproxy.refresh(), 30_000);
-    this.tickTimer = setInterval(() => this.session.tick(), 60_000);
-    this.tickTimer.unref?.();
+    this.keeper.start();
+    this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000));
+    this.intervals[1]?.unref?.();
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -180,12 +189,22 @@ export class Hub {
     }
   }
 
-  /** Stops, saving a final snapshot first when there is a canvas to save. */
-  async shutdown() {
-    await Promise.race([this.autosave.save("end of session", { onlyIfChanged: true }).catch(() => null), Bun.sleep(8000)]);
-    await Promise.race([this.net.stop().catch(() => null), Bun.sleep(3000)]);
+  /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000 };
+
+  /**
+   * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
+   * finished: false when a save failed or ran out of time, which the hub's exit code reports (index.ts).
+   */
+  async shutdown(): Promise<boolean> {
+    const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
+    const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
+    const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
+    const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
-    if (!(await this.stop())) console.warn("a helper process was still running at shutdown");
+    const reaped = await this.stop();
+    if (!reaped) console.warn("a helper process was still running at shutdown");
+    return saved && kept && closed;
   }
 
   private offRevoked: () => void;
@@ -195,16 +214,17 @@ export class Hub {
     this.offRevoked();
     this.awake.stop();
     this.autosave.stop();
+    this.keeper.stop();
     this.brain.stop();
     this.canvas.halt();
     this.devproxy.stop();
-    if (this.proxyTimer) clearInterval(this.proxyTimer);
-    this.proxyTimer = null;
-    if (this.tickTimer) clearInterval(this.tickTimer);
-    this.tickTimer = null;
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
+    for (const t of this.intervals.splice(0)) clearInterval(t);
+    this.session.stop();
     return this.helpers.stopAll(); // the one list of helper processes: canvas server, MCP participants, key helper, whisper
   }
+
+  private intervals: ReturnType<typeof setInterval>[] = [];
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
@@ -408,7 +428,7 @@ export class Hub {
     return this.session.setPhoto(personId, `/renders/uploads/${file}`);
   }
 
-  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform }): Promise<Artifact> {
+  async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string }): Promise<Artifact> {
     const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8;
     const isPng = bytes[0] === 0x89 && bytes[1] === 0x50;
     if (!isJpeg && !isPng) throw new Error("Upload a PNG or JPEG.");
@@ -416,19 +436,32 @@ export class Hub {
     const file = `${newId("up")}.${isJpeg ? "jpg" : "png"}`;
     await Bun.write(join(this.uploadsDir, file), bytes);
     const size = imageSize(bytes);
-    const art = this.session.upsertArtifact({
-      kind: "screenshot",
-      stage: meta.stage,
-      title: meta.title,
-      note: meta.note ?? "",
-      image: `/renders/uploads/${file}`,
-      agentId: agent?.id ?? null,
-      platform: meta.platform,
-      width: size?.width ?? null,
-      height: size?.height ?? null,
-    });
+    const art = this.session.upsertVersion(
+      {
+        kind: "screenshot",
+        stage: meta.stage,
+        title: meta.title,
+        note: meta.note ?? "",
+        image: `/renders/uploads/${file}`,
+        agentId: agent?.id ?? null,
+        platform: meta.platform,
+        width: size?.width ?? null,
+        height: size?.height ?? null,
+      },
+      meta.replaces,
+    );
     this.brain.artifactsLanded([art]);
     return art;
+  }
+
+  // ---------- an agent wants a screen someone locked (answered by the owner, by voice or a button) ----------
+
+  private onShowRequest(r: ShowRequest) {
+    const first = (n: string) => n.split(/\s+/)[0];
+    const ask = showRequestSpeech(r);
+    void speak(this.session, ask, { source: "voice", kind: "request" });
+    // Once more after a minute if the owner hasn't answered.
+    setTimeout(() => this.session.showRequests().find((x) => x.id === r.id)?.status === "pending" && void speak(this.session, `Still waiting, ${first(r.ownerName)}: ${ask}`, { source: "voice", kind: "request" }), 60_000).unref?.();
   }
 
   // ---------- host build requests (approved by people, by voice or a button) ----------

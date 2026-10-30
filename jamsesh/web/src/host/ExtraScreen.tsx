@@ -30,7 +30,7 @@ export function ExtraScreen({ id }: { id: string }) {
   const stage = state.screens?.find((sc) => sc.id === id)?.stage ?? { ...state.stage, mode: "board" as const, title: "", items: [] };
   return (
     <div className="extra-screen">
-      <Stage state={{ ...state, stage }} />
+      <Stage state={{ ...state, stage }} bar={id} interactive asPerson={false} />
     </div>
   );
 }

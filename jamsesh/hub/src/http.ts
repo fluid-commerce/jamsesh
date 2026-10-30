@@ -1,8 +1,9 @@
 // HTTP, WebSocket and MCP on one port.
+import { parseStage } from "./stageSchema";
 import type { Server, ServerWebSocket } from "bun";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
-import type { PairedDevice } from "./auth";
+import type { HostWindows, PairedDevice } from "./auth";
 import { bus } from "./bus";
 import { voiceprintStatus, learningNote } from "./audio/voiceprint";
 import { describeError } from "./brain/llm";
@@ -11,6 +12,7 @@ import { config, sameLan } from "./config";
 import type { Hub } from "./hub";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { FRAME_OVERHEAD, Upstream } from "./relay";
+import { projectsRoute } from "./projects-api";
 import { ONLY_OBSERVERS } from "./session";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, EventKind, Stage } from "./types";
@@ -86,14 +88,14 @@ function speaker(hub: Hub, ws: ServerWebSocket<WsData>): string | null {
 }
 
 // Nothing to return means the thing was deleted (a queued edit to something gone): 410, not a crash.
-const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
+export const json = (v: unknown, status = 200) => (v === undefined ? Response.json({ error: "That was deleted." }, { status: 410 }) : Response.json(v, { status, headers: { "cache-control": "no-store" } }));
 
 /** API paths (after /api) that stand for a person: never callable with an agent's credential. */
 const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|prompt-window(\/start)?|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -137,7 +139,7 @@ function socketDevice(hub: Hub, wanted: string | null, caller: string | null): s
   return wanted;
 }
 
-function sameOrigin(req: Request) {
+export function sameOrigin(req: Request) {
   const origin = req.headers.get("origin");
   if (!origin) return true; // not a browser
   try {
@@ -155,6 +157,7 @@ function isLocal(ip: string) {
 
 export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; key: string; serverName: string }[]): Server<WsData> {
   const s = hub.session;
+  s.deviceOnline = (id) => (sockets.get(id)?.size ?? 0) > 0;
 
   const tokenOf = (req: Request, url: URL) =>
     req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token") ?? url.searchParams.get("token");
@@ -210,7 +213,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
         // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
         // which tiles open as localhost:<port>.
-        if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub, req, url);
+        if (path === "/host-window" && local && req.method === "GET") return await hostWindowRoute(hub.auth.windows, req, url);
         // A new host link for `jamsesh host` on a hub that's already running (a terminal-started hub
         // only): the caller proves it's this Mac's user by the secret in a mode-600 file of the hub's.
         if (path === "/api/host-link" && local && req.method === "POST") {
@@ -225,6 +228,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (req.method !== "GET" && !(req.headers.get("content-type") ?? "").includes("application/json")) return bad("Send JSON.", 415);
           if (req.method !== "GET" && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
           const r = await hub.net.routes(req, url);
+          if (r) return r;
+        }
+        // The Projects picker's data: the host's own windows only (project names and who came).
+        if (path.startsWith("/api/projects")) {
+          const r = await projectsRoute(req, url, { local, hostWindow });
           if (r) return r;
         }
         if (path === "/api/pair" && req.method === "POST") return pairRoute(hub, req, url, ip);
@@ -307,6 +315,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
           return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
         }
+        // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
+        const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
+        if (full) return fullRender(hub, full[1], Number(url.searchParams.get("size")));
         if (path.startsWith("/renders/")) return file(join(hub.canvas.rendersDir, path.slice("/renders/".length)), hub.canvas.rendersDir);
         if (path === "/canvas" || path.startsWith("/canvas/")) {
           if (!config.canvasDist) return new Response("The canvas web build isn't installed. Run jamsesh/install.sh.", { status: 404 });
@@ -437,7 +448,7 @@ async function proxyHttp(req: Request, url: URL, port: number): Promise<Response
 }
 
 /** The web app: hashed assets cached forever, every other path gets index.html. */
-function webApp(path: string): Response {
+export function webApp(path: string): Response {
   if (!config.webDist) return new Response("The JamSesh web app isn't built. Run: cd jamsesh && bun run build:web", { status: 503 });
   const rel = path.replace(/^\//, "");
   const candidate = join(config.webDist, rel);
@@ -509,7 +520,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // On the host, only its own windows act as a person: not another process that reaches loopback.
     if (isLocal(ip) && !hostWindow) return bad(NOT_THE_HOST_WINDOW, 403);
     // Except where personId names someone else: the speaker a line is corrected to, the person asked to share.
-    if (paired?.personId && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
+    // A window that hasn't said who it is yet is nobody in particular, not whoever the request names.
+    if (paired && body && typeof body === "object" && "personId" in body && !TARGETS_A_PERSON.test(path)) body.personId = paired.personId;
   }
 
   if (path === "/me") {
@@ -524,7 +536,13 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     // own window, changes whose it is: another window can't take it over or speak and share as it.
     const owner = cur?.pairedId && (cur.pairedId === "host" || hub.auth.live(cur.pairedId)) ? cur.pairedId : (caller ?? undefined);
     if (owner && owner !== caller && !hostWindow) return bad("That device belongs to another window.", 403);
-    if (paired && body.personId && paired.personId !== body.personId) hub.auth.update(paired.id, { personId: String(body.personId) });
+    if (paired?.kind === "browser") {
+      // So this is the browser's own device. The browser becomes the person it first says it is; after that a
+      // request can't make it someone else (only a person who was removed frees it to pick again), and its
+      // devices are that person's. Owner-only answers rest on this.
+      if (body.personId && s.person(String(body.personId)) && !(paired.personId && s.person(paired.personId))) hub.auth.update(paired.id, { personId: String(body.personId) });
+      if (body.personId !== undefined) body.personId = hub.auth.get(paired.id)?.personId ?? null;
+    }
     // The person using the host's own window: agents on the host Mac work for them.
     if (hostWindow && owner === "host" && body.kind !== "host" && body.personId) {
       s.store.setSetting("hostPersonId", String(body.personId));
@@ -619,10 +637,80 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     return json(s.settings());
   }
 
+  // What a person puts on a screen is theirs until they unlock it (3.1). A paired window is the person its credential is
+  // bound to, whatever the body says. The host's own windows are the room's (the big screen is shared), so they may name
+  // who is acting, else the person at the host. `by` is only a fallback name for a window that hasn't picked who it is.
+  const actor = () => {
+    const id = String((paired ? paired.personId : body?.personId || s.store.setting<string>("hostPersonId", "")) ?? "");
+    const p = id ? s.person(id) : undefined;
+    return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
+  };
+  // With several screens, the caller says which (an id or a name). None named is the main one; one that isn't there now
+  // (a display unplugged since the control was drawn) is an error, never some other screen.
+  const where = s.screenOf(body?.screen);
+  const screenOf = () => ("id" in where ? where.id : null);
+  // Not connected (404), or a name more than one screen starts with (409, naming them, so the person can say which).
+  const noScreen = () => bad("error" in where ? where.error : "", "choices" in where && where.choices ? 409 : 404);
+
   if (path === "/stage" && req.method === "POST") {
-    const stage = body as Partial<Stage> & { mode: Stage["mode"] };
-    if (!stage?.mode) return bad("mode is required");
-    return json(s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, body.by ?? "Someone in the room"));
+    if (!body?.mode) return bad("mode is required");
+    const checked = parseStage(body);
+    if (!checked.ok) return bad(checked.error);
+    const stage = checked.stage;
+    const who = actor();
+    const screen = screenOf();
+    if (!screen) return noScreen();
+    const gone = s.unrenderable(stage);
+    if (gone) return bad(gone, 400);
+    const put = s.setStage({ ...stage, pinned: stage.pinned ?? stage.mode !== "board" }, who.name, screen, { person: who });
+    return put.applied ? json(put.stage) : bad(put.reason, 409);
+  }
+  // Only the lock's owner unlocks it: their window's credential, never a name in the body. The host's own windows carry no
+  // person's credential; they may unlock a lock held by no one in particular or by the person at the host (Session.releaseLock).
+  if (path === "/stage/unlock" && req.method === "POST") {
+    const screen = screenOf();
+    if (!screen) return noScreen();
+    const lock = s.lockOf(screen);
+    const consent = paired ? { owner: paired.personId ?? null } : hostWindow ? { hostWindow: true as const } : { owner: null };
+    if (lock && !s.releaseLock(screen, consent)) return bad(`Only ${lock.by} can unlock this screen.`, 403);
+    return json(s.stage(screen));
+  }
+  if (path === "/stage/restore" && req.method === "POST") {
+    const who = actor();
+    const screen = screenOf();
+    if (!screen) return noScreen();
+    const lock = s.lockOf(screen);
+    if (lock && lock.personId !== who.id) return bad(`${lock.by} has this screen locked. Unlock it first to bring something else back.`, 409);
+    const stage = s.restoreHistory(String(body?.id ?? ""), screen, { person: who });
+    return stage.applied ? json(stage.stage) : bad(stage.reason, stage.reason.includes("history") ? 404 : 409);
+  }
+  m = path.match(/^\/stage\/ready\/([\w-]+)$/);
+  if (m && req.method === "POST") {
+    if (body?.action === "dismiss") return (s.dismissReady(m[1]), json({ ok: true }));
+    const stage = s.showReady(m[1], { person: actor() });
+    return stage.applied ? json(stage.stage) : bad(stage.reason, stage.reason.includes("waiting") ? 404 : 409);
+  }
+  m = path.match(/^\/show-requests\/([\w-]+)$/);
+  if (m && req.method === "POST") {
+    const asked = s.showRequests().find((r) => r.id === m![1]);
+    const who = actor();
+    // The lock's owner answers; so does the host's own window, where the room is looking at the question.
+    if (asked && !hostWindow && (!who.id || asked.ownerId !== who.id)) return bad(`Only ${asked.ownerName} can answer that.`, 403);
+    const done = s.answerShowRequest(m[1], !!body?.approve, who.name);
+    if (done?.status === "expired") return bad("The screen changed since that question, so it no longer applies. The item is still waiting.", 409);
+    return done ? json(done) : bad("That question has already been answered.", 404);
+  }
+
+  // Expand one tile to fill the presentation area, or collapse (`tile` null). `screen` picks an extra big screen.
+  if (path === "/stage/expand" && req.method === "POST") {
+    // Agents steer the screen with jam_show; expanding is for people looking at it.
+    if (paired?.kind === "agent") return bad("Agents use jam_show; expanding a tile is for people.", 403);
+    if (body?.tile !== null && (typeof body?.tile !== "string" || !body.tile.trim())) return bad("tile must be a tile key, or null to collapse");
+    const tile: string | null = body.tile === null ? null : body.tile.trim();
+    const screen = screenOf();
+    if (!screen) return noScreen();
+    if (tile !== null && !s.stageTileKeys(screen).some((t) => t.key === tile)) return bad("That isn't on the screen right now.", 404);
+    return json(s.expandTile(tile, screen));
   }
 
   // Take an agent out of the room (one that joined by mistake, say); `purge` also deletes what it put in the feed.
@@ -683,6 +771,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
       stage: form!.get("stage") === "mockup" ? "mockup" : "built",
       note: String(form!.get("note") ?? ""),
       platform: (form!.get("platform") as any) ?? undefined,
+      replaces: String(form!.get("replaces") ?? "") || undefined,
     });
     return json({ id: art.id, url: `${s.hubUrl}${art.image}` });
   }
@@ -907,7 +996,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   }
 
   // The big screen reports its size so the brain can plan layouts for its shape.
-  if (path === "/display" && req.method === "POST" && isLocal(ip)) {
+  // A big-screen window reports or retires its display: only the host's own windows (not another process on the host).
+  if (path === "/display" && (req.method === "POST" || req.method === "DELETE") && !hostWindow) return bad("Only the host's own screens report themselves.", 403);
+  if (path === "/display" && req.method === "POST") {
     const n = (v: unknown) => (Number.isFinite(Number(v)) ? Math.round(Number(v) * 100) / 100 : 0);
     const info = { width: n(body?.width), height: n(body?.height), dpr: n(body?.dpr) || 1, screenX: n(body?.screenX), screenY: n(body?.screenY), at: Date.now() };
     const screen = /^[\w-]{1,32}$/.test(String(body?.screen ?? "")) ? String(body.screen) : "main";
@@ -915,8 +1006,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
     s.reportScreen(screen, info);
     return json({ ok: true });
   }
-  // A big-screen window closed: it stops being a place to put things until a window for it reports again.
-  if (path === "/display" && req.method === "DELETE" && isLocal(ip)) {
+  // The host app names the room's screens ("Left TV") after setting them up.
+  if (path === "/screens/config" && req.method === "POST") {
+    if (!hostWindow) return bad("Only the host app names the screens.", 403);
+    s.configureScreens(Array.isArray(body?.screens) ? body.screens : []);
+    return json({ screens: s.screens().map(({ id, name, role }) => ({ id, name, role })) });
+  }
+  // A big-screen window closed: it stops being a place to put things until a window for it reports again (main too, 1.R5).
+  if (path === "/display" && req.method === "DELETE") {
     const screen = String(body?.screen ?? "");
     if (/^[\w-]{1,32}$/.test(screen)) s.removeScreen(screen);
     return json({ ok: true });
@@ -1011,22 +1108,54 @@ function file(p: string, root: string, cache = false): Response {
   return new Response(Bun.file(full), { headers });
 }
 
+export const FULL_SIZES = [1600, 2400, 3200, 4096];
+const FULL_KEEP = 60;
+const fullInflight = new Map<string, Promise<string | null>>();
+
+/** One frame, drawn at exactly one of FULL_SIZES and kept beside the stored render (the newest FULL_KEEP files stay). */
+export async function fullRender(hub: Hub, artifactId: string, size: number): Promise<Response> {
+  if (!FULL_SIZES.includes(size)) return new Response(`size must be one of ${FULL_SIZES.join(", ")}`, { status: 400 });
+  const art = hub.session.store.get("artifacts", artifactId);
+  const base = art?.image?.match(/^\/renders\/([\w-]+)\.png$/)?.[1];
+  if (!art || art.kind !== "frame" || !art.nodeId || !base) return new Response("not found", { status: 404 });
+  const dir = join(hub.canvas.rendersDir, "full");
+  const name = `${base}@${size}.png`;
+  let job = fullInflight.get(name);
+  if (!job) {
+    job = (async () => {
+      if (existsSync(join(dir, name))) return name;
+      // The canvas draws at 1x unless asked: `maxSize` only caps, so the scale that fills `size` is asked for.
+      const long = Math.max(art.width ?? 0, art.height ?? 0);
+      const r = await hub.canvas.renderNode(art.nodeId!, size, long > 0 ? Math.min(8, size / long) : 4).catch(() => null);
+      const img = r?.isError ? undefined : (r?.content.find((c) => c.type === "image") as { data: string } | undefined);
+      if (!img) return null;
+      mkdirSync(dir, { recursive: true });
+      await Bun.write(join(dir, name), Buffer.from(img.data, "base64"));
+      for (const f of readdirSync(dir).map((n) => ({ n, t: statSync(join(dir, n)).mtimeMs })).sort((x, y) => y.t - x.t).slice(FULL_KEEP)) rmSync(join(dir, f.n), { force: true });
+      return name;
+    })().finally(() => fullInflight.delete(name));
+    fullInflight.set(name, job);
+  }
+  const done = await job;
+  return done ? file(join(dir, done), dir) : new Response("not found", { status: 404 });
+}
+
 const NOT_THE_HOST_WINDOW = "On the host, do this from the JamSesh window. A host started from a terminal printed a one-time host link: open that (restart the host for a new one).";
 
 /** GET /host-window?once=…&next=/path: a one-time host link (see HostWindows in auth.ts). */
-async function hostWindowRoute(hub: Hub, req: Request, url: URL): Promise<Response> {
+export async function hostWindowRoute(windows: HostWindows, req: Request, url: URL): Promise<Response> {
   const next = url.searchParams.get("next") ?? "/host";
   const target = next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/\\") ? next : "/host";
   const name = (req.headers.get("host") ?? "").replace(/:\d+$/, "");
   // The key lives on 127.0.0.1 only: send localhost (shared with dev tiles) and others there first.
   if (name !== "127.0.0.1") return new Response(null, { status: 302, headers: { location: `http://127.0.0.1:${url.port || config.port}${url.pathname}${url.search}`, "cache-control": "no-store" } });
-  const key = await hub.auth.windows.takeSoon(url.searchParams.get("once"));
+  const key = await windows.takeSoon(url.searchParams.get("once"));
   const headers = new Headers({ location: target, "cache-control": "no-store", "referrer-policy": "no-referrer" });
   if (key) headers.append("set-cookie", `jam_window=${key}; Path=/; HttpOnly; SameSite=Strict`);
   return new Response(null, { status: 302, headers });
 }
 
-function cookie(req: Request, name: string) {
+export function cookie(req: Request, name: string) {
   return req.headers.get("cookie")?.match(new RegExp(`(?:^|; )${name}=([^;]+)`))?.[1] ?? null;
 }
 

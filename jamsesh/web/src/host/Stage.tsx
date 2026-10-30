@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, type ReactElement, type ReactNode } from "react";
-import { api, ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, RecordCatch, RoomFeed, ScaledFrame, Slot, artifactTarget, colorFor, stripMd, tileSlots, useNow, type SlotTarget } from "../shared/ui";
+import { ago, type Artifact, type HubState, type Share, type Tile } from "../shared/hub";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, FitPins, QR, ExpandButton, ExpandCtx, RecordCatch, RoomFeed, ScaledFrame, Slot, TileKeyCtx, artifactTarget, colorFor, stripMd, tileSlots, useIsExpanded, useNow, type SlotTarget } from "../shared/ui";
 
 export { tileSlots };
 
@@ -11,15 +11,30 @@ const TilePins = createContext(true);
 function PinnedTile(props: Omit<Parameters<typeof ArtifactTile>[0], "pins">) {
   return <ArtifactTile {...props} pins={useContext(TilePins)} />;
 }
+import { StageBar, stageAction } from "../shared/StageControls";
+import { cast, tellNote } from "../client/CastPicker";
 import { CodeRing, JoinCard, joinOptions, useJoinCode } from "./JoinCard";
 
 const BOARD_MAX = 5;
 
-export function Stage({ state, interactive, tilePins = true }: { state: HubState; interactive?: boolean; tilePins?: boolean }) {
+/** `asPerson`: this is a person's own window (not the host's), which matters for who may unlock a lock held by no one in particular. */
+export function Stage({ state, interactive, tilePins = true, bar, asPerson }: { state: HubState; interactive?: boolean; tilePins?: boolean; bar?: string; asPerson: boolean }) {
   const stage = state.stage;
+  // Which screen this stage is: an extra display passes its id (`bar`), a mirror shows the main one.
+  const screen = bar ?? stage.screenId ?? "main";
+  const expand = useMemo(
+    () => ({
+      expanded: stage.expanded ?? null,
+      expand: (tile: string) => void expandTile(tile, screen),
+      collapse: () => void expandTile(null, screen),
+    }),
+    [stage.expanded, screen],
+  );
+  const tiles = useMemo(() => stageTiles(state), [state]);
+  const zoomed = stage.expanded ? tiles.find((t) => t.key === stage.expanded) : undefined;
   const byId = useMemo(() => new Map(state.artifacts.map((a) => [a.id, a])), [state.artifacts]);
   const pick = (ids: string[]) => ids.map((id) => byId.get(id)).filter(Boolean) as Artifact[];
-  const spotlight = (a: Artifact) => interactive && api("/stage", { mode: "spotlight", items: [a.id], title: a.title, pinned: false, by: "Someone in the room" });
+  const spotlight = (a: Artifact) => interactive && cast({ mode: "spotlight", items: [a.id], title: a.title, pinned: false, by: "Someone in the room", ...(bar ? { screen: bar } : {}) });
 
   let body: ReactElement;
   switch (stage.mode) {
@@ -55,7 +70,92 @@ export function Stage({ state, interactive, tilePins = true }: { state: HubState
   }
   return (
     <div key={`${stage.mode}-${stage.since}`} style={{ height: "100%", minHeight: 0, animation: "fadein .45s ease both", display: "flex", flexDirection: "column" }}>
-      <TilePins.Provider value={tilePins}>{body}</TilePins.Provider>
+      {(interactive || bar) && tilePins && <StageBar state={state} screen={screen} asPerson={asPerson} />}
+      <TilePins.Provider value={tilePins}>
+        <ExpandCtx.Provider value={interactive ? expand : null}>{zoomed ? <Expanded tiles={tiles} open={zoomed} onPick={expand.expand} /> : body}</ExpandCtx.Provider>
+      </TilePins.Provider>
+    </div>
+  );
+}
+
+/** A tile of the current stage that can be expanded: the hub's key for it, and how to draw it. */
+interface StageTile {
+  key: string;
+  label: string;
+  kind: string;
+  art?: Artifact;
+  node: ReactElement;
+}
+
+/** The hub's tile list for the screen this stage is on. Keys and their order come from the hub only (Session.stageTileKeys). */
+const hubTiles = (state: HubState) => state.stageTiles?.[state.stage.screenId ?? "main"] ?? [];
+
+/** The hub's key for a tile this stage draws (an artifact, or a layout's nth tile); null when the hub lists none, so no Expand. */
+/** The hub's key for the parity tile that came from this column and place (never made here). */
+function parityKey(state: HubState, column: number, place: number, artifactId: string): string | null {
+  return hubTiles(state).find((k) => k.parity?.column === column && k.parity.place === place && k.artifactId === artifactId)?.key ?? null;
+}
+
+function tileKey(state: HubState, t: { artifactId: string } | { layoutIndex: number }): string | null {
+  return hubTiles(state).find((k) => ("layoutIndex" in t ? k.layoutIndex === t.layoutIndex : k.layoutIndex === undefined && !k.parity && k.artifactId === t.artifactId))?.key ?? null;
+}
+
+/** The tiles of the stage, in the hub's order, with what draws each. Single-view modes (agents, custom, join) have none. */
+export function stageTiles(state: HubState): StageTile[] {
+  const byId = new Map(state.artifacts.map((a) => [a.id, a]));
+  const layout = state.stage.mode === "layout" ? (state.stage.layout?.tiles ?? []) : [];
+  return hubTiles(state).flatMap(({ key, artifactId, layoutIndex }): StageTile[] => {
+    if (layoutIndex !== undefined) {
+      const t = layout[layoutIndex];
+      return t ? [{ key, label: tileLabel(t, state), kind: t.kind, art: t.kind === "artifact" ? byId.get(t.artifactId) : undefined, node: <TileView tile={t} state={state} /> }] : [];
+    }
+    const a = artifactId ? byId.get(artifactId) : undefined;
+    return a ? [{ key, label: a.title, kind: "artifact", art: a, node: <PinnedTile art={a} state={state} big /> }] : [];
+  });
+}
+
+function tileLabel(t: Tile, state: HubState): string {
+  switch (t.kind) {
+    case "artifact":
+      return state.artifacts.find((a) => a.id === t.artifactId)?.title ?? t.label ?? "Artifact";
+    case "web":
+      return t.label ?? hostOf(t.url);
+    case "agent":
+      return state.agents.find((a) => a.id === t.agentId)?.name ?? "Agent";
+    case "screen":
+      return t.label ?? state.shares.find((x) => x.id === t.shareId)?.label ?? "Shared screen";
+    default:
+      return t.label ?? KIND_LABEL[t.kind] ?? t.kind;
+  }
+}
+
+/** One tile filling the presentation area, the others as a strip of thumbnails along the edge. */
+/** Ask the hub to expand a tile of this screen's stage, or (tile null) collapse. Live only; a failure is said on screen. Resolves with that note ("" when it went through). */
+export const expandTile = async (tile: string | null, screen = "main") => {
+  const note = await stageAction("/stage/expand", { tile, screen });
+  tellNote(note);
+  return note;
+};
+
+function Expanded({ tiles, open, onPick }: { tiles: StageTile[]; open: StageTile; onPick: (key: string) => void }) {
+  const rest = tiles.filter((t) => t !== open);
+  return (
+    <div className="expanded-frame">
+      <div className="expanded-stage">
+        <div className="expanded-main" key={open.key}>
+          <TileKeyCtx.Provider value={open.key}>{open.node}</TileKeyCtx.Provider>
+        </div>
+        {rest.length > 0 && (
+          <div className="expanded-strip">
+            {rest.map((t) => (
+              <button key={t.key} type="button" className="expanded-thumb" onClick={() => onPick(t.key)} title={`Expand ${t.label}`}>
+                <span className="expanded-thumb-pic">{t.art?.image ? <img src={t.art.image} alt="" /> : <span className="expanded-thumb-kind">{KIND_LABEL[t.kind] ?? t.kind}</span>}</span>
+                <span className="expanded-thumb-label">{t.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -85,7 +185,9 @@ function Board({ state, onPick }: { state: HubState; onPick: (a: Artifact) => vo
       {items.map((a, i) => (
         <div key={a.id} style={{ gridArea: l.areas[i], minHeight: 0, display: "flex" }}>
           <div style={{ flex: 1, display: "flex", minWidth: 0 }}>
-            <PinnedTile art={a} state={state} fresh={now - a.updatedAt < 45_000} big={i === 0 && n >= 3} onClick={() => onPick(a)} />
+            <TileKeyCtx.Provider value={tileKey(state, { artifactId: a.id })}>
+              <PinnedTile art={a} state={state} fresh={now - a.updatedAt < 45_000} big={i === 0 && n >= 3} onClick={() => onPick(a)} />
+            </TileKeyCtx.Provider>
           </div>
         </div>
       ))}
@@ -113,7 +215,9 @@ function Columns({ title, caption, items, state, lettered, big }: { title: strin
       <Header title={title} caption={caption} />
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 18, gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}>
         {(lettered ? [...items].sort((a, b) => (a.variant || a.title).localeCompare(b.variant || b.title)) : items).map((a, i) => (
-          <PinnedTile key={a.id} art={a} state={state} big={big || items.length <= 3} variant={lettered ? a.variant || String.fromCharCode(65 + i) : undefined} />
+          <TileKeyCtx.Provider key={a.id} value={tileKey(state, { artifactId: a.id })}>
+            <PinnedTile art={a} state={state} big={big || items.length <= 3} variant={lettered ? a.variant || String.fromCharCode(65 + i) : undefined} />
+          </TileKeyCtx.Provider>
         ))}
       </div>
     </>
@@ -127,14 +231,16 @@ function Parity({ state, pick }: { state: HubState; pick: (ids: string[]) => Art
     <>
       <Header title={stage.title || "Side by side"} caption={stage.caption} />
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 22, gridTemplateColumns: cols.map((c) => `${Math.max(1, c.items.length)}fr`).join(" ") }}>
-        {cols.map((c) => (
-          <div key={c.label} style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
+        {cols.map((c, ci) => (
+          <div key={`${ci}:${c.label}`} style={{ display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0 }}>
             <div className="label" style={{ fontSize: 13, marginBottom: 10 }}>
               {c.label}
             </div>
             <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 14, gridTemplateColumns: `repeat(${Math.max(1, c.items.length)}, minmax(0, 1fr))` }}>
-              {pick(c.items).map((a) => (
-                <PinnedTile key={a.id} art={a} state={state} />
+              {c.items.flatMap((id, place) => pick([id]).map((a) => ({ a, place }))).map(({ a, place }) => (
+                <TileKeyCtx.Provider key={`${a.id}:${place}`} value={parityKey(state, ci, place, a.id)}>
+                  <PinnedTile art={a} state={state} />
+                </TileKeyCtx.Provider>
               ))}
             </div>
           </div>
@@ -201,7 +307,9 @@ function LayoutView({ state }: { state: HubState }) {
       <div style={{ flex: 1, minHeight: 0, display: "grid", gap: 16, gridTemplateColumns: grid.columns, gridTemplateRows: grid.rows }}>
         {tiles.map((t, i) => (
           <div key={i} style={{ gridArea: grid.areas[i] ?? "auto", minHeight: 0, minWidth: 0, display: "flex" }}>
-            <TileView tile={t} state={state} />
+            <TileKeyCtx.Provider value={tileKey(state, { layoutIndex: i })}>
+              <TileView tile={t} state={state} />
+            </TileKeyCtx.Provider>
           </div>
         ))}
       </div>
@@ -229,6 +337,7 @@ function autoGrid(n: number): { columns: string; rows: string; areas: string[] }
 
 /** One tile of any kind, framed the same way, with its annotation target. */
 export function TileView({ tile, state, interactive }: { tile: Tile; state: HubState; interactive?: boolean }) {
+  const full = useIsExpanded();
   switch (tile.kind) {
     case "artifact": {
       const a = state.artifacts.find((x) => x.id === tile.artifactId);
@@ -250,7 +359,7 @@ export function TileView({ tile, state, interactive }: { tile: Tile; state: HubS
       const target = { kind: "web", ref: tile.url, label };
       return (
         <TileFrame label={label} kind="web" sub={tile.url} target={target} ownPins>
-          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} detectBlocked={!dev} pin={target} />
+          <ScaledFrame src={tile.url} title={tile.label ?? tile.url} width={mobile ? 390 : 1440} height={mobile ? 844 : 900} detectBlocked={!dev} pin={target} fill={full && !mobile} />
         </TileFrame>
       );
     }
@@ -317,6 +426,9 @@ function TileFrame({ label, sub, kind, children, target, ownPins }: { label: str
         <span className="chip">
           {KIND_LABEL[kind] ?? kind}
           {sub ? ` · ${shortHost(sub)}` : ""}
+        </span>
+        <span className="tile-tools">
+          <ExpandButton />
         </span>
       </div>
     </div>

@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Identify</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0c0d0f; color: #f3f2ef; font: 700 40vh/1 -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; display: grid; place-items: center; overflow: hidden; }
+      body::after { content: ""; position: fixed; inset: 0; border: 1.2vmin solid #45e0a0; pointer-events: none; }
+    </style>
+  </head>
+  <body><span id="n"></span><script>document.getElementById("n").textContent = new URLSearchParams(location.search).get("n") || "";</script></body>
+</html>
