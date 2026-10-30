@@ -36,7 +36,7 @@ const splitFiles = (list: TriageCard["attachments"]) => {
   const all = list ? [...new Map(list.map((a) => [a.id, a])).values()] : [];
   return { kept: all.slice(0, MAX_PER_MESSAGE), over: Math.max(0, all.length - MAX_PER_MESSAGE) };
 };
-const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
+export const sameSet = (a: string[], b: string[]) => a.slice().sort().join() === b.slice().sort().join();
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 export interface TaskProposal {
@@ -74,6 +74,8 @@ export interface CardEdit {
   text?: unknown;
   mode?: unknown;
   targets?: unknown;
+  /** For a comparison: the agents the targets compare with (when not the targets themselves). */
+  counterparts?: unknown;
   workstream?: unknown;
   kind?: unknown;
 }
@@ -285,6 +287,12 @@ export class Board {
       if (targets.length !== e.targets.length) return { error: "One of those agents isn't in the session, or only watches." };
       if (targets.slice().sort().join() !== c.targets.slice().sort().join()) (next.targets = targets), (next.targetNames = this.namesOf(targets)), (next.counterparts = undefined), fields.push("targets"); // who it compares with was chosen for the old targets
     }
+    if (e.counterparts !== undefined && c.type === "task" && !c.cancels) {
+      if (!Array.isArray(e.counterparts)) return { error: "counterparts is a list of agent ids." };
+      const others = e.counterparts.filter((x): x is string => typeof x === "string");
+      if (others.length !== e.counterparts.length || others.some((x) => !this.s.agent(x) || this.s.agent(x)?.role === "observer")) return { error: "One of those agents isn't in the session, or only watches." };
+      if (!sameSet(others, c.counterparts ?? [])) (next.counterparts = others.length ? others : undefined), fields.push("counterparts");
+    }
     if (e.workstream !== undefined) {
       const w = clean(e.workstream);
       if (w !== c.workstream) (next.workstream = w), fields.push("workstream");
@@ -353,13 +361,18 @@ export class Board {
       this.s.store.put("triage", { ...c, unavailable: gone, updatedAt: this.stamp() });
       return fail(`Not sent: ${gone.join(", ")} ${gone.length === 1 ? "isn't" : "aren't"} in the session any more, or only ${gone.length === 1 ? "watches" : "watch"}. Change the agents with Edit.`, 409);
     }
+    // A comparison needs another agent to compare with, still in the session and not an observer: say so, don't fail inside the write.
+    if (card.mode === "coordinate") {
+      const partners = [...new Set([...targets, ...(card.counterparts ?? []).filter((x) => this.s.agent(x) && this.s.agent(x)?.role !== "observer")])];
+      if (targets.some((x) => !partners.some((y) => y !== x))) return fail("A comparison needs another agent to compare with: choose two or more agents (or a partner) with Edit.", 409);
+    }
     const ws = card.workstream ? this.s.store.all("workstreams").find((w) => w.title.toLowerCase() === card.workstream.toLowerCase()) : undefined;
     return this.commit(() => {
       const d = this.s.createDirective({
         text: card.text,
         mode: card.mode,
         targets,
-        ...(card.mode === "coordinate" ? { counterparts: [...new Set([...targets, ...(card.counterparts ?? [])])] } : {}),
+        ...(card.mode === "coordinate" ? { counterparts: [...new Set([...targets, ...(card.counterparts ?? []).filter((x) => this.s.agent(x) && this.s.agent(x)?.role !== "observer")])] } : {}),
         requestedBy: card.by,
         sourceEventIds: card.sources.map((x) => x.eventId).filter((x): x is number => x != null),
         // Exactly the files the card showed: what was reviewed is what the agent receives.

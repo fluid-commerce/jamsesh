@@ -32,3 +32,29 @@ test("a reassigned task carries exactly its approved files, none when it had non
   const moved = s.reassignDirective(d.id, "Chey", b.id)!;
   expect(moved.attachments ?? []).toEqual([]);
 });
+
+test("a comparison card sent with no partner left says what to do (409), and partners can be edited", () => {
+  const { s, a, b, c } = room();
+  const card = s.proposeTask({ text: "Compare checkout", mode: "coordinate", targets: [a.id], counterparts: [b.id], by: "Chey" })!;
+  s.removeAgent(b.id);
+  const sent = s.board.send(card.id, "Chey");
+  expect(sent).toMatchObject({ ok: false, status: 409 });
+  expect(s.directives()).toHaveLength(0);
+  expect(s.board.edit(card.id, { counterparts: [c.id] }, "Chey")).toMatchObject({ ok: true });
+  const ok = s.board.send(card.id, "Chey");
+  expect(ok.ok).toBe(true);
+  expect(s.directives()[0]).toMatchObject({ targets: [a.id] });
+  expect(s.directives()[0].counterparts).toEqual(expect.arrayContaining([c.id]));
+});
+
+test("the same comparison asked of the brain with a different partner is not a duplicate", async () => {
+  const { s, a, b, c } = room();
+  const first = s.createDirective({ text: "Compare the navigation", mode: "coordinate", targets: [a.id], counterparts: [b.id], requestedBy: "Chey" });
+  const { Brain } = await import("../src/brain/brain");
+  const brain = new Brain(s, {} as any);
+  clearInterval((brain as any).digestTimer);
+  const tools = (brain as any).tools([], { effects: 0 });
+  const out = String(await tools.create_directive.execute({ targets: [a.id], mode: "coordinate", text: "Compare the navigation", rationale: "x", counterparts: [c.id] }, { toolCallId: "t", messages: [] }));
+  expect(out).not.toContain("Already sent");
+  expect(s.directives().filter((d) => d.id !== first.id)).toHaveLength(1);
+});

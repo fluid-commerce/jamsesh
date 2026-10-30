@@ -1392,7 +1392,7 @@ The same line twice (two microphones) is not a repeat. A dismissed card absorbs 
 proposal that repeats a saved fact word for word is dropped; one that is close to a fact (`similar`, a hint only) but not
 identical, or that names a fact with `replaces`, is flagged `conflictsWith`, but only a fact of the same kind, workstream
 and platforms (`sameScope`). A named replacement is never dropped as already known. A task repeat must also agree on mode,
-target agents and workstream; a context repeat, and "already known", on kind and workstream. Curation and the brain's
+target agents, workstream and (for a comparison) the agents it compares with, here and in the brain's duplicate-directive check; a card's partners can be edited (`counterparts`), and Send says so (409) when a comparison has none; a context repeat, and "already known", on kind and workstream. Curation and the brain's
 duplicate-directive checks use the same rule (`hub/src/similarity.ts`): no judging of meaning, polarity or paraphrase, since
 a missed merge costs one card and a wrong one loses what was said.
 
