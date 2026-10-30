@@ -1,5 +1,17 @@
 // Shapes shared by the hub, the host view, and the client view.
 
+export type AttachmentKind = "image" | "pdf" | "text";
+
+/** A file or image added to a message; fetched from /api/attachments/<id>. */
+export interface AttachmentRef {
+  id: string;
+  name: string;
+  /** What the bytes are, from sniffing: image/png, application/pdf, text/plain... */
+  type: string;
+  kind: AttachmentKind;
+  size: number;
+}
+
 export interface Person {
   id: string;
   name: string;
@@ -92,6 +104,7 @@ export interface Workstream {
   status: "active" | "paused" | "done";
   brief: string;
   updatedAt: number;
+  carriedFrom?: CarriedFrom;
 }
 
 export type EventKind =
@@ -153,6 +166,8 @@ export interface Directive {
   signs?: Record<string, number>;
   /** Per target: when the room was offered a reassignment; that target's tile shows a Reassign button until it resumes or the task moves. */
   reassignOfferedAt?: Record<string, number>;
+  /** Files and images that came with the request; agents fetch them from /api/attachments/<id>. */
+  attachments?: AttachmentRef[];
 }
 
 export type ArtifactKind = "frame" | "screenshot" | "devserver" | "html" | "note";
@@ -183,6 +198,17 @@ export interface Artifact {
   version?: number;
   /** The earlier builds, oldest first. They stay retrievable; only the newest shows. */
   versions?: ArtifactVersion[];
+  /** What people said about it right after it went up ("this is cool"), saved by the room brain (4.2). */
+  reactions?: ArtifactReaction[];
+  /** The task it was made for: the one its agent was working on when it first went up, when that was only one. */
+  directiveId?: string | null;
+}
+
+export interface ArtifactReaction {
+  by: string;
+  text: string;
+  at: number;
+  eventId: number;
 }
 
 /** One earlier build of an artifact. */
@@ -223,6 +249,8 @@ export interface DevServer {
   problem?: string;
   /** Since when it hasn't answered; the tile clears itself a few minutes after. */
   downSince?: number;
+  /** Where an HTTPS page reaches it (the hub's dev subdomain), when the hub serves one; absent through a tunnel or without remote access. */
+  publicUrl?: string;
 }
 
 export type StageMode = "board" | "spotlight" | "compare" | "parity" | "agents" | "canvas" | "custom" | "layout" | "welcome" | "join";
@@ -299,6 +327,86 @@ export interface Fact {
   status: "active" | "resolved" | "superseded";
   note: string;
   sourceEventIds: number[];
+  /** Set when the project's context carried this over from an earlier session (SPEC 12.7). */
+  carriedFrom?: CarriedFrom;
+}
+
+export interface CarriedFrom {
+  sessionId: string;
+  at: number;
+  /** The item's id in the project's context (carryover.ts), so a change to it here updates that row. */
+  id?: string;
+}
+
+/** One line the card came from: what was heard, who said it, and the transcript moment it links to. */
+export interface TriageSource {
+  eventId: number | null;
+  authorName: string;
+  text: string;
+  ts: number;
+}
+
+/**
+ * A proposal waiting for a person on the Tasks board (4.1): a task the room seemed to ask for, or a piece
+ * of context (a decision, a constraint…) JamSesh heard or an agent reported. Nothing reaches the agents
+ * until someone sends or adds it. Cards never expire; they only leave the board when someone acts.
+ */
+export interface TriageCard {
+  id: string;
+  ts: number;
+  updatedAt: number;
+  type: "task" | "context";
+  status: "open" | "sent" | "added" | "merged" | "replaced" | "dismissed";
+  /** Overheard in the room, reported by an agent, or taken from a document someone attached. */
+  origin: "overheard" | "agent" | "document";
+  /** The wording now (a person may have changed it); `original` is what was proposed. */
+  text: string;
+  original: string;
+  /** The person (or agent) it came from. */
+  by: string;
+  /** Task: how to work, and who. */
+  mode: DirectiveMode;
+  targets: string[];
+  /** For a comparison: the agents the targets compare with (other targets count too). */
+  counterparts?: string[];
+  /** Context: what kind of knowledge it is. */
+  kind: Fact["kind"];
+  workstream: string;
+  /** Context that disagrees with a saved fact: Replace puts this one in its place. */
+  conflictsWith: string | null;
+  /** A card that only retires the saved fact it names (answered, or replaced by something not worded yet). */
+  retire?: "superseded" | "resolved";
+  /** Files that came with it (a document sent with no request). */
+  attachments?: AttachmentRef[];
+  /** Its wording is only a placeholder (a file with no text JamSesh could read): a person writes the fact before Add. */
+  needsWording?: boolean;
+  /** Files offered with the request past the six a card holds: they were not added, and the card says so. */
+  extraFiles?: number;
+  /** Ids of the room lines this card has taken in (the last 2000), kept apart from the dozen it shows, so a replay isn't counted again. */
+  seen?: number[];
+  /** A task card that cancels this directive when a person sends it; its text is the reason the agents read. */
+  cancels?: string;
+  /** A later line in the room overruled this proposal; it waits for a person to dismiss it like any other. */
+  overruled?: string;
+  /** Every overrule of it: why, who, when, and the lines it came from. Never cleared; the same ask said again makes a new card. */
+  vetoes?: { reason: string; by: string; at: number; eventIds: number[] }[];
+  /** The targets' names when they were chosen. */
+  targetNames?: Record<string, string>;
+  /** Agents a Send found gone or only watching (their names): nothing was sent; a person changes the agents with Edit. */
+  unavailable?: string[];
+  /** This card asks again for a proposal that was overruled (that card's id), which keeps its veto. */
+  renews?: string;
+  sources: TriageSource[];
+  /** How many times it was proposed: repeats join this card. */
+  count: number;
+  edits: { by: string; at: number; fields: string[] }[];
+  resolvedBy: string;
+  resolvedAt: number | null;
+  /** What accepting it made. */
+  directiveId: string | null;
+  factId: string | null;
+  /** When JamSesh last mentioned it out loud as waiting. */
+  mentionedAt: number | null;
 }
 
 export interface Annotation {
@@ -599,6 +707,8 @@ export interface HubState {
   /** Recordings running now. */
   recordings: ActiveRecording[];
   facts: Fact[];
+  /** Cards on the Tasks board: every open one, and the last few that were acted on. */
+  triage: TriageCard[];
   buildRequests: BuildRequest[];
   /** Simulator and Mac apps streaming live from the host (6.3). */
   liveApps: LiveApp[];

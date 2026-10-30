@@ -16,7 +16,21 @@ class Bus {
     return () => this.listeners.delete(fn);
   }
 
+  /** Messages kept back while a store transaction is open (Store.atomic): they go out once it commits, or never. */
+  private held: BusMessage[][] = [];
+
+  hold() {
+    this.held.push([]);
+  }
+
+  release(publish: boolean) {
+    const msgs = this.held.pop() ?? [];
+    if (publish) for (const m of msgs) this.send(m);
+  }
+
   send(msg: BusMessage) {
+    const held = this.held[this.held.length - 1];
+    if (held) return void held.push(msg);
     for (const fn of this.listeners) {
       try {
         fn(msg);

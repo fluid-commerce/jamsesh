@@ -12,6 +12,12 @@ import { linkSecretFile } from "./projects";
 // The compiled hub is also the host's speech model process (audio/parakeet.ts); that never returns.
 if (process.argv[2] === "--stt-server") await (await import("./audio/stt-server")).runSttServer(process.argv[3] ?? "");
 const args = new Set(process.argv.slice(2));
+// A check of the PDF reader in a release build: `jamsesh-hub --pdf-text <file>` prints what the helper reads from it.
+if (process.argv[2] === "--pdf-text" && process.argv[3]) {
+  const { pdfText } = await import("./attachments");
+  console.log(await pdfText(process.argv[3]));
+  process.exit(0);
+}
 enterProject();
 // The Mac app starts a hub with no session first when hosting: only the Projects picker, until a project is chosen.
 if (config.lobby) {

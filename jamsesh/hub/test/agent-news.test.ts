@@ -113,9 +113,12 @@ test("question and blocked updates reach the brain", async () => {
   s.postUpdate(desktop.id, "blocked", "Need the API key");
   s.postUpdate(desktop.id, "question", "Which icon set?");
   s.postUpdate(desktop.id, "decision", "Icons from set A");
-  expect(calls).toHaveLength(3);
+  // Questions and blockers go to the brain; a decision waits on the Tasks board for a person.
+  expect(calls).toHaveLength(2);
   expect(calls[0]).toContain("blocked");
-  expect(calls[2]).toContain("record_decision");
+  const card = s.board.open()[0];
+  expect(card).toMatchObject({ type: "context", kind: "decision", text: "Icons from set A", origin: "agent", by: desktop.name });
+  expect(card.sources[0].eventId).not.toBeNull();
 });
 
 test("note mode: its own hint, no build or canvas warnings", () => {

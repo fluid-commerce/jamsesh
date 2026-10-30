@@ -1641,7 +1641,8 @@ select:disabled {
   padding: 20px;
   -webkit-overflow-scrolling: touch;
 }
-.pins-pane {
+.pins-pane,
+.tasks-pane {
   overflow: hidden;
 }
 .wrap-row {
@@ -3339,4 +3340,255 @@ html.in-app .app-header {
 }
 .font-sharing b {
   color: var(--text);
+}
+/* =====================================================================================
+   Attachments: the message box tray and the feed
+   ===================================================================================== */
+.say {
+  position: relative;
+}
+.say.dragging {
+  outline: 2px dashed var(--decision);
+  outline-offset: -4px;
+  border-radius: 14px;
+}
+.say-drop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.say-attach {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  transition: background 0.15s, color 0.15s;
+}
+.say-attach:hover:not(:disabled) {
+  background: var(--panel-3);
+  color: var(--text);
+}
+.say-phone .say-attach {
+  width: 44px;
+  height: 44px;
+}
+.say-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+.say-file {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 6px 30px 6px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.say-file.pic {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  overflow: visible;
+}
+.say-file.pic img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 11px;
+  display: block;
+}
+.say-file.uploading {
+  opacity: 0.65;
+}
+.say-file.error {
+  border-color: rgba(255, 107, 94, 0.5);
+}
+.say-file-text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.25;
+}
+.say-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+.say-file-meta {
+  font-size: 12px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.say-file.error .say-file-meta {
+  color: var(--warn);
+  white-space: normal;
+}
+.say-file-badge {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  background: rgba(12, 13, 15, 0.55);
+  color: var(--text);
+  font-weight: 700;
+}
+.say-file-x {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.say-file.pic .say-file-x {
+  top: -6px;
+  right: -6px;
+  transform: none;
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+  color: var(--text);
+}
+.say-file-x:hover,
+.say-file-retry:hover {
+  color: var(--text);
+}
+.say-file.error:has(.say-file-retry):not(.pic) {
+  padding-right: 52px;
+}
+.say-file-retry {
+  position: absolute;
+  top: 50%;
+  right: 28px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 0;
+  background: transparent;
+  color: var(--warn);
+  font-size: 15px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.say-file.pic .say-file-retry {
+  top: auto;
+  bottom: -6px;
+  right: -6px;
+  transform: none;
+  background: var(--panel-3);
+  border: 1px solid var(--line-2);
+}
+.say-blocked {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+.feed-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.feed-files:first-child {
+  margin-top: 0;
+}
+.feed-pic img {
+  display: block;
+  max-width: 220px;
+  max-height: 140px;
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  object-fit: cover;
+}
+.feed-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.feed-chip:hover {
+  background: var(--panel-3);
+}
+
+/* What people said about a piece of work, quietly under it (4.2). */
+.reactions {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 12px 9px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--dim);
+}
+.reaction {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reaction b {
+  font-weight: 550;
+  color: var(--muted);
+}
+.reaction time {
+  margin-left: 7px;
+  font-size: 11px;
+  opacity: 0.8;
+}
+.reaction-more {
+  flex: none;
+  font-size: 11px;
+}
+.reactions.all {
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 0;
+  font-size: 13px;
+}
+.wv-react {
+  flex: none;
+  padding: 2px 16px 8px;
+  text-align: center;
 }

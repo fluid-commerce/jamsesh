@@ -2,14 +2,17 @@
 // session tools (jam_*) and the FigCraft canvas tools (canvas_*), which the hub runs
 // for the agent on the host.
 import { parseStage } from "./stageSchema";
+import { MAX_IMAGE_BYTES, MCP_BODY_BYTES } from "./limits";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { sizeLabel } from "./attachments";
 import { bus } from "./bus";
 import { canonicalCwd, chatKey } from "./chatkey";
 import { config } from "./config";
 import { ownTarget } from "./devproxy";
 import type { Hub } from "./hub";
+import { confidentBanter } from "./brain/card";
 import { shortRepo, type UpdateKind } from "./session";
 import type { Agent, Directive, JamEvent } from "./types";
 import { JOIN_RULE, skillMarkdown } from "./skill";
@@ -212,7 +215,7 @@ const JAM_TOOLS = [
   {
     name: "jam_post_image",
     description:
-      "Post a screenshot to the big screen and the session (for example your running build, to compare with its mockup). Prefer the HTTP upload in the skill for large files; base64 PNG or JPEG here is fine under 3 MB.",
+      `Post a screenshot to the big screen and the session (for example your running build, to compare with its mockup). Prefer the HTTP upload in the skill for large files; base64 PNG or JPEG here is fine up to ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -278,6 +281,19 @@ export const harnessOfClient = (name: string | undefined) => (/claude/i.test(nam
 
 const machineIsHost = (ip: string) => ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 
+/** A jam_wait call as the HTTP request carrying it sees it: `drop` when the client leaves or the reply fails, `sent` once the reply has gone. */
+export interface LiveCall {
+  signal: AbortSignal;
+  /** Set by the HTTP layer: the request stops counting as work (the call is only waiting now). */
+  idle: () => void;
+  /** The request has ended: forget this call (a dropped one stays findable until then, so a call dispatched late still sees it was dropped). */
+  gone(): void;
+  afterSent(fn: () => void): void;
+  onDrop(fn: () => void): void;
+  sent(): void;
+  drop(): void;
+}
+
 export class McpEndpoint {
   private sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; ctx: Ctx }>();
   private canvasTools: { name: string; description?: string; inputSchema?: any }[] = [];
@@ -329,6 +345,8 @@ export class McpEndpoint {
     const ctx: Ctx = { agentId: null, ip, device, origin, owner: this.owner(device) };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
+      // The SDK's own cap (4 MB) is lower than the one limit this hub states for an image: use that one.
+      maxRequestBodySize: MCP_BODY_BYTES,
       onsessioninitialized: (id) => {
         ctx.sessionId = id;
         this.sessions.set(id, { transport, ctx });
@@ -385,8 +403,83 @@ export class McpEndpoint {
     return a;
   }
 
-  async call(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
-    const out = await this.callTool(ctx, name, args, extra);
+  /** jam_wait calls in flight, by session and JSON-RPC id: each tied to its HTTP request (see classify). */
+  private lives = new Map<string, LiveCall>();
+
+  /**
+   * What an /mcp request is, from its parsed top-level message: an open stream (GET) or a jam_wait call is idle; anything else is work. A wait
+   * gets a LiveCall so the call can see its client leave and learn when its reply has been sent.
+   */
+  async classify(req: Request): Promise<{ idle: boolean; live?: LiveCall; reject?: string }> {
+    if (req.method !== "POST") return { idle: true };
+    if (this.hub.closing) return { idle: false, reject: "The session is saving and closing." };
+    let msg: any;
+    try {
+      msg = JSON.parse(await req.clone().text());
+    } catch {
+      return { idle: false };
+    }
+    // A batch with a wait in it isn't supported: it could not be tied to one reply.
+    if (Array.isArray(msg)) return msg.some((m) => m?.method === "tools/call" && m?.params?.name === "jam_wait") ? { idle: false, reject: "Send jam_wait as a message of its own, not in a batch." } : { idle: false };
+    if (msg?.method !== "tools/call" || msg?.params?.name !== "jam_wait") return { idle: false };
+    const sid = req.headers.get("mcp-session-id");
+    if (!sid || msg.id == null) return { idle: false };
+    // Keyed by the id with its type (1 and "1" are two requests), and removed only by the record that made it.
+    const key = `${sid}:${typeof msg.id}:${msg.id}`;
+    const ctrl = new AbortController();
+    const sent: (() => void)[] = [];
+    const dropped: (() => void)[] = [];
+    let done = false;
+    const gone = () => {
+      if (this.lives.get(key) === live) this.lives.delete(key);
+    };
+    const finish = () => {
+      done = true;
+    };
+    const live: LiveCall = {
+      signal: ctrl.signal,
+      idle: () => {},
+      afterSent: (fn) => void sent.push(fn),
+      onDrop: (fn) => void dropped.push(fn),
+      gone,
+      sent: () => {
+        if (done) return;
+        finish();
+        gone();
+        for (const fn of sent) fn();
+      },
+      drop: () => {
+        if (done) return;
+        finish();
+        ctrl.abort();
+        for (const fn of dropped) fn();
+      },
+    };
+    this.lives.set(key, live);
+    // Admitted as work until the call itself says it is idle (after dispatch): parsing and handing over are inside.
+    return { idle: false, live };
+  }
+
+  /** Shutdown: every wait still open ends now (nothing is read for it, what is waiting stays), so none wakes and writes after the final save. */
+  endWaits() {
+    for (const live of [...this.lives.values()]) live.drop();
+  }
+
+  /** Tool calls (other than waits) running now; `whenQuiet` resolves when there are none. */
+  private running = 0;
+  private quiet: (() => void)[] = [];
+  whenQuiet(): Promise<void> {
+    return this.running === 0 ? Promise.resolve() : new Promise((res) => this.quiet.push(res));
+  }
+
+  async call(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any; requestId?: string | number }): Promise<ToolOut> {
+    // Counted from the call until its last write, for shutdown: here once for every tool, whoever calls. A call that only waits for the room isn't work.
+    const release = name === "jam_wait" ? () => {} : this.hub.admit(`the ${name} call`);
+    if (name !== "jam_wait") this.running++;
+    const out = await this.callTool(ctx, name, args, extra).finally(() => {
+      release();
+      if (name !== "jam_wait" && --this.running === 0) for (const w of this.quiet.splice(0)) w();
+    });
     // An agent with no hooks (Codex) hears the room only when it asks, so every JamSesh call it makes
     // says if something is waiting. Claude Code's hooks hand the items over themselves.
     const id = ctx.agentId;
@@ -395,7 +488,7 @@ export class McpEndpoint {
     return out;
   }
 
-  private async callTool(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
+  private async callTool(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any; requestId?: string | number }): Promise<ToolOut> {
     const s = this.hub.session;
     const text = (t: string): ToolOut => ({ content: [{ type: "text", text: t }] });
     const json = (v: unknown): ToolOut => text(JSON.stringify(v, null, 1));
@@ -492,7 +585,7 @@ export class McpEndpoint {
         return text(`You are ${now.name}, working for ${now.ownerName}${s.person(now.ownerId)?.role ? ` (${s.person(now.ownerId)!.role})` : ""}.`);
       }
       case "jam_context":
-        return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10));
+        return text(this.context(this.requireAgent(ctx), args.workstream, args.minutes ?? 10, ctx.origin));
       case "jam_search": {
         this.requireAgent(ctx);
         const limit = Math.min(60, Math.max(1, Number(args.limit) || 20));
@@ -521,23 +614,49 @@ export class McpEndpoint {
         return text(`You own "${workstream.title}".${workstream.brief ? `\n\nBrief so far:\n${workstream.brief}` : ""}`);
       }
       case "jam_inbox":
-        return text(this.inboxText(this.requireAgent(ctx)));
+        return text(this.inboxText(this.requireAgent(ctx), true, ctx.origin));
       case "jam_wait": {
+        // Shutting down: no new wait starts (it would write after the final save), and nothing is touched to say so.
+        if (this.hub.closing) return text("");
         const agent = this.requireAgent(ctx);
         const secs = Math.max(5, Math.min(230, Number(args.seconds ?? 200)));
+        // This call's link to the HTTP request that carries it: its disconnect (abort) and the moment its reply has been sent.
+        const live = this.lives.get(`${ctx.sessionId}:${typeof extra?.requestId}:${extra?.requestId}`);
+        // The writes before and after the idle wait are work; the wait itself is not.
+        const before = this.hub.admit("a jam_wait starting");
         s.touchAgent(agent.id, { status: "waiting", activity: "Waiting for work" });
+        before();
+        if (this.hub.closing) return text(""); // shutdown began during the writes above: end here, nothing left running
+        live?.idle(); // from here the call only waits for the room
         const token = extra?._meta?.progressToken;
         const keepAlive = token != null && extra?.sendNotification
           ? setInterval(() => extra.sendNotification!({ method: "notifications/progress", params: { progressToken: token, progress: 0, message: "waiting" } }).catch(() => {}), 20_000)
           : null;
-        await s.wait(agent.id, secs * 1000);
+        await s.wait(agent.id, secs * 1000, live?.signal);
         if (keepAlive) clearInterval(keepAlive);
-        this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
-        this.requireCredential(ctx);
-        const out = this.inboxText(agent, true);
-        const idle = out.startsWith("Nothing new.");
-        s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
-        return text(out);
+        // The client left while it waited: nothing is read for it, and what is waiting stays for its next call.
+        if (live?.signal.aborted) return text("");
+        const after = this.hub.admit("a jam_wait delivery");
+        try {
+          this.requireAgent(ctx); // removed while it waited: says so instead of handing it anything
+          this.requireCredential(ctx);
+          const taken = { directives: [] as Directive[], messages: [] as JamEvent[] };
+          const out = this.inboxText(agent, true, ctx.origin, taken);
+          const idle = out.startsWith("Nothing new.");
+          s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
+          if (live) {
+            // Marked read only when the reply carrying it has been fully sent; a disconnect or failure leaves it for the next call (at least once).
+            live.afterSent(() => (s.markInbox(agent.id, taken), after()));
+            live.onDrop(after);
+          } else {
+            s.markInbox(agent.id, taken);
+            after();
+          }
+          return text(out);
+        } catch (e) {
+          after();
+          throw e;
+        }
       }
       case "jam_ack": {
         const agent = this.requireAgent(ctx);
@@ -701,7 +820,7 @@ export class McpEndpoint {
         const want = String(args.status ?? "").toLowerCase();
         const all = s.directives().filter((d) => (!q.length || q.every((w) => `${d.text} ${d.result ?? ""}`.toLowerCase().includes(w))) && (!want || (want === "open" ? d.status !== "done" && d.status !== "cancelled" : d.status === want)));
         const { shown, more } = pageOf(all, args);
-        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id))).join("\n") + more || "No directives yet.");
+        return text(shown.map((d) => fmtDirective(d, (id) => s.agent(id), ctx.origin ?? s.hubUrl)).join("\n") + more || "No directives yet.");
       }
       case "jam_ask_room": {
         const agent = this.requireAgent(ctx);
@@ -765,7 +884,7 @@ export class McpEndpoint {
     const ws = s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
     const settled = s.facts().filter((f) => f.status === "active").length;
     const mine = s.directives().filter((d) => d.status !== "done" && d.status !== "cancelled" && d.targets.includes(agent.id));
-    const brief = s.store.digest("session")?.text.trim();
+    const brief = s.brief().short;
     return [
       `${resumed ? "Welcome back" : "Welcome"} to "${s.settings().sessionName}". You are ${agent.name} (agent id ${agent.id}), working for ${agent.ownerName}${role ? ` (${role})` : ""}. The room brain is called "${s.settings().brainName}".`,
       role ? "" : `Your person has no title in the room yet. Ask them their position (for example designer, engineer, CPO) and call jam_rename with ownerTitle; titles decide whose call wins when people disagree. If they give you a name to go by, jam_rename with name too.`,
@@ -774,9 +893,9 @@ export class McpEndpoint {
       "",
       this.roster(true),
       "",
-      `## Session brief\n${brief ? clip(brief, 600) : "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
+      `## Session brief\n${brief || "(no brief yet; the session just started)"}${settled ? `\n${settled} settled point${settled === 1 ? "" : "s"} (decisions, requirements, constraints) are in jam_context.` : ""}`,
       ws ? `## Your workstream: ${ws.title}\n${clip(ws.brief || "(no brief yet)", 500)}` : "",
-      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective(d, s.agent.bind(s)), 300)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
+      `## Open directives for you\n${mine.length ? `${mine.slice(0, 5).map((d) => clip(fmtDirective({ ...d, attachments: undefined }, s.agent.bind(s)), 300) + attachmentLine(d, origin)).join("\n")}${mine.length > 5 ? `\n${mine.length - 5} more: jam_directives.` : ""}` : "(none yet)"}`,
       this.unreadLine(agent),
       "",
       "## Fetch more when you need it",
@@ -805,7 +924,7 @@ export class McpEndpoint {
       `Reconnected to "${this.hub.session.settings().sessionName}" as ${agent.name} (agent id ${agent.id}); your workstreams and directives are as you left them.`,
       `Upload screenshots: curl -s -F file=@shot.png -F title="<title>" -F stage=built -F agent=${agent.id} -H @"$HOME/.jamsesh/auth.header" "${origin}/api/upload"`,
       "",
-      this.inboxText(agent, false),
+      this.inboxText(agent, false, origin),
       "",
       `Call jam_context if you need the room's latest; otherwise carry on. ${idleHint(agent)}`,
       "If this is a new conversation and you don't have the JamSesh skill yet, read it first: the MCP prompt 'jamsesh', or GET /skill.md.",
@@ -831,16 +950,16 @@ export class McpEndpoint {
     ].join("\n");
   }
 
-  context(agent: Agent, workstream?: string, minutes = 10) {
+  context(agent: Agent, workstream?: string, minutes = 10, origin = this.hub.session.hubUrl) {
     const s = this.hub.session;
-    const brief = s.store.digest("session")?.text;
+    const brief = s.brief().full;
     const ws = workstream
       ? s.store.all("workstreams").find((w) => w.title.toLowerCase() === workstream.toLowerCase())
       : s.store.all("workstreams").find((w) => w.ownerAgentId === agent.id && w.status === "active");
     const decisions = s.roomDecisions(agent.id, { limit: 12, workstreamId: ws?.id });
     const room = s.store
       .recentEvents({ kinds: ["speech", "prompt"], since: Date.now() - minutes * 60_000, limit: 80 })
-      .filter((e) => e.relevance !== "banter" && e.relevance !== "chatter");
+      .filter((e) => !confidentBanter(e) && e.relevance !== "chatter");
     const fromOthers = s.store.recentEvents({ kinds: ["update", "artifact", "message"], limit: 40 }).filter((e) => e.authorId !== agent.id);
     const isShip = (e: JamEvent) => e.kind === "update" && e.data.updateKind === "shipped";
     const updates = fromOthers.filter((e) => !isShip(e)).slice(-20);
@@ -861,9 +980,9 @@ export class McpEndpoint {
       ws ? `## Workstream: ${ws.title}\n${ws.brief || "(no brief yet)"}` : "",
       knowledge(s, ws?.title),
       `## Decisions as said in the room\n${decisions.map(fmtEvent).join("\n") || "(none yet)"}`,
-      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none: check jam_inbox for new ones)"}`,
-      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s))).join("\n") || "(none)"}`,
-      `## Room, last ${minutes} min (banter filtered)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
+      `## Open directives for you\n${mine.map((d) => fmtDirective(d, s.agent.bind(s), origin)).join("\n") || "(none: check jam_inbox for new ones)"}`,
+      `## Other agents' open directives (context only, not yours to do)\n${others.map((d) => fmtDirective(d, s.agent.bind(s), origin)).join("\n") || "(none)"}`,
+      `## Room, last ${minutes} min (clear banter filtered; lines marked maybe off-topic are doubtful)\n${room.map(fmtEvent).join("\n") || "(quiet)"}`,
       `## Recently shipped by other agents (information, nothing for you to do unless a directive says so)\n${shippedLines.join("\n") || "(nothing yet)"}`,
       `## Other agents, recent\n${updates.map(fmtEvent).join("\n") || "(nothing yet)"}`,
     ]
@@ -871,9 +990,11 @@ export class McpEndpoint {
       .join("\n\n");
   }
 
-  inboxText(agent: Agent, mark = true) {
+  inboxText(agent: Agent, mark = true, origin = this.hub.session.hubUrl, taken?: { directives: Directive[]; messages: JamEvent[] }) {
     const s = this.hub.session;
-    const { directives, messages } = s.inbox(agent.id, mark);
+    // With `taken`, nothing is marked here: the caller marks what it carried once the reply has been sent.
+    const { directives, messages } = s.inbox(agent.id, mark && !taken, !!taken);
+    if (taken) (taken.directives.push(...directives), taken.messages.push(...messages));
     if (!directives.length && !messages.length) {
       const open = s.openFor(agent.id);
       if (!open.length) return "Nothing new.";
@@ -888,13 +1009,13 @@ export class McpEndpoint {
       // A comparison names who with (only those count toward finishing it), whatever its text says.
       const mates = (d.counterparts ?? []).filter((c) => c !== agent.id).map((c) => s.agent(c)?.name).filter(Boolean);
       out.push(
-        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${d.rationale ? `\n  why you: ${d.rationale}` : ""}${d.mode === "coordinate" && mates.length ? `\n  compare with: ${mates.join(", ")}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
+        `DIRECTIVE ${d.id} [${d.mode}] from the room (${d.requestedBy}): ${d.text}${attachmentLine(d, origin)}${d.rationale ? `\n  why you: ${d.rationale}` : ""}${d.mode === "coordinate" && mates.length ? `\n  compare with: ${mates.join(", ")}` : ""}\n  → ${modeHint(d.mode)} Then jam_ack ${d.id} done with what you did.`,
       );
     }
     for (const m of messages) {
       if (m.data.askId) out.push(`QUESTION ${m.data.askId} from ${m.authorName}: ${m.text}\n  → Answer it now with jam_answer (askId ${m.data.askId}${m.data.directiveId ? `, directiveId ${m.data.directiveId}` : ""}), then continue.`);
       else if (m.data.answerTo) out.push(`ANSWER from ${m.authorName} (to your question ${m.data.answerTo}): ${m.text}`);
-      else out.push(`MESSAGE from ${m.authorName}${m.data.directiveId ? ` (about directive ${m.data.directiveId}: reply with directiveId ${m.data.directiveId})` : ""}: ${m.text}`);
+      else out.push(`MESSAGE from ${m.authorName}${m.data.directiveId ? ` (about directive ${m.data.directiveId}: reply with directiveId ${m.data.directiveId})` : ""}: ${m.text}${messageFiles(m, origin)}`);
     }
     return out.join("\n\n");
   }
@@ -962,15 +1083,27 @@ function pageOf<T>(all: T[], args: { limit?: unknown; offset?: unknown }, max = 
 export function fmtEvent(e: JamEvent) {
   const t = new Date(e.ts).toTimeString().slice(0, 5);
   const label = e.kind === "speech" ? "said" : e.kind === "prompt" ? "typed" : e.kind;
-  return `[${t}] ${e.authorName} ${label}: ${e.text}`;
+  return `[${t}] ${e.authorName} ${label}: ${e.text}${e.relevance === "banter" ? " (maybe off-topic)" : ""}`;
 }
 
 export function clip(s: string, n: number) {
   return s.length <= n ? s : `${s.slice(0, n - 1).trimEnd()}…`;
 }
 
-function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined) {
-  return `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => agent(t)?.name ?? t).join(", ")}: ${d.text}`;
+function fmtDirective(d: Directive, agent: (id: string) => Agent | undefined, base = "") {
+  return `- ${d.id} [${d.mode}, ${d.status}] → ${d.targets.map((t) => agent(t)?.name ?? t).join(", ")}: ${d.text}${attachmentLine(d, base)}`;
+}
+
+/** The files that came with a message (a cancellation's): where to fetch each, from the address this agent reaches the hub by. */
+function messageFiles(m: JamEvent, base: string) {
+  const list = (m.data.attachments ?? []) as { id: string; name: string; type: string }[];
+  return list.length ? `\n  files (fetch with your credential, for example curl -H @"$HOME/.jamsesh/auth.header"): ${list.map((a) => `${a.name} (${a.type}) ${base}/api/attachments/${a.id}`).join("; ")}` : "";
+}
+
+/** The files that came with a task: where to fetch each one with your credential. */
+function attachmentLine(d: Directive, base: string) {
+  if (!d.attachments?.length) return "";
+  return `\n  attachments (fetch with your credential, for example curl -H @"$HOME/.jamsesh/auth.header"): ${d.attachments.map((a) => `${a.name} (${a.type}, ${sizeLabel(a.size)}) ${base}/api/attachments/${a.id}`).join("; ")}`;
 }
 
 void config;

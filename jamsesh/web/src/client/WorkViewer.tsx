@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ago, type Artifact, type HubState } from "../shared/hub";
 import { RecordHere } from "../shared/annotate";
-import { ArtImage, ScaledFrame } from "../shared/ui";
+import { ArtImage, Reactions, ScaledFrame } from "../shared/ui";
 import { CloseIcon } from "./mobile";
 import { keyAction, step } from "./viewerNav";
 
@@ -150,6 +150,11 @@ export function WorkViewer({ items, index, state, name, onIndex, onClose, onShow
           <Arrow dir="next" />
         </button>
       </div>
+      {art.reactions?.length ? (
+        <div className="wv-react">
+          <Reactions art={art} all />
+        </div>
+      ) : null}
       {items.length > 1 && (
         <div className="wv-strip" role="tablist" aria-label="In this group">
           {items.map((a, i) => (

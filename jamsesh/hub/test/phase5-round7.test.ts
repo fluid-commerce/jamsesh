@@ -200,14 +200,8 @@ function holdBody(token: string, path: string, headers: Record<string, string>, 
   let send!: (body: string | Uint8Array) => void;
   let ctl!: ReadableStreamDefaultController<Uint8Array>;
   const body = new ReadableStream<Uint8Array>({ start: (c) => void ((ctl = c), (send = (b) => (c.enqueue(typeof b === "string" ? new TextEncoder().encode(b) : b), c.close()))) });
-  const check = hub.auth.check.bind(hub.auth);
-  let seen!: () => void;
-  const reached = new Promise<void>((r) => (seen = r));
-  hub.auth.check = ((t: string | null | undefined, ip?: string) => {
-    const d = check(t, ip);
-    if (t === token) ((hub.auth.check = check), seen());
-    return d;
-  }) as typeof hub.auth.check;
+  // The front door reads a small body whole before anything looks at the credential, so the request "is on its way" once it is sent.
+  const reached = Bun.sleep(100);
   // Only the content type given (none when none is): `remote`'s JSON type isn't inherited.
   const sent = { "x-forwarded-for": remote["x-forwarded-for"], ...headers, authorization: `Bearer ${token}` };
   const response = fetch(`${base}/api${path}`, { method, headers: sent, body, duplex: "half" } as RequestInit);
@@ -427,7 +421,7 @@ test("over HTTP an agent posts only as one of its own machine's agents, always a
   // Another machine's agent, nobody's (the room's), an unknown agent, or any replacement: refused, nothing written.
   expect((await post(mine.token, "/upload", formOf(png(), { agent: b.id }))).status).toBe(403);
   expect((await post(mine.token, "/upload", formOf(png(), {}))).status).toBe(403);
-  expect((await post(mine.token, "/upload", formOf(png(), { agent: "agent_nobody" }))).status).toBe(404);
+  expect((await post(mine.token, "/upload", formOf(png(), { agent: "agent_nobody" }))).status).toBe(403); // the same answer as another machine's agent (4.R): whether an id exists is not told
   for (const replaces of [theirShot, mineShot]) expect((await post(mine.token, "/upload", formOf(png(), { agent: a2.id, replaces }))).status).toBe(403);
   expect(uploads()).toBe(before);
   expect(items()).toBe(count);

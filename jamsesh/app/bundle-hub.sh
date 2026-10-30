@@ -10,6 +10,8 @@ JAM="${JAMSESH_HOME:-$HOME/.jamsesh}"
 rm -rf "$OUT" && mkdir -p "$OUT"/{hub,bin,skill,models,node_modules}
 
 (cd hub && bun build --compile src/index.ts --outfile "$OUT/hub/jamsesh-hub" >/dev/null)
+# The PDF reader (Apple's PDFKit), built beside the hub: the hub looks for `jamsesh-pdftext` next to its own binary.
+swiftc -O -swift-version 5 hub/native/jamsesh-pdftext.swift -o "$OUT/hub/jamsesh-pdftext"
 (cd web && bunx vite build >/dev/null) && cp -R web/dist "$OUT/web"
 cp -R "$JAM/web-canvas" "$OUT/canvas"
 cp skill/SKILL.md "$OUT/skill/"

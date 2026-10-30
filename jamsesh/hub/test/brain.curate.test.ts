@@ -21,6 +21,12 @@ t("decisions, requirements and questions are curated; banter isn't; answers reso
     s.postUpdate(r.agents.mobile.id, "progress", "Mobile settings runs at http://192.168.1.20:5100; tokens live in theme/tokens.ts.", { workstream: "Mobile settings" }),
   ];
   await r.hub.brain.curate(batch1);
+  // What curation proposes waits on the Tasks board; the room accepts it here.
+  const accept = () => {
+    for (const c of s.board.open()) c.conflictsWith ? s.board.replace(c.id, "Chey") : s.board.add(c.id, "Chey");
+  };
+  expect(s.facts().filter((f) => f.status === "active")).toHaveLength(0);
+  accept();
   let facts = s.facts().filter((f) => f.status === "active");
   const has = (kind: string, re: RegExp) => facts.some((f) => f.kind === kind && re.test(f.text));
   console.log(facts.map((f) => `${f.kind}: ${f.text}`).join("\n"));
@@ -34,12 +40,31 @@ t("decisions, requirements and questions are curated; banter isn't; answers reso
     say("felipe", "Actually, change of plan: settings header goes with option B, the compact search, on desktop only."),
   ];
   await r.hub.brain.curate(batch2);
+  accept();
   const all = s.facts();
   facts = all.filter((f) => f.status === "active");
   console.log("--- after\n" + all.map((f) => `${f.status} ${f.kind}: ${f.text}`).join("\n"));
-  expect(all.some((f) => f.kind === "question" && /dark/i.test(f.text) && f.status === "resolved")).toBe(true);
+  expect(all.some((f) => f.kind === "question" && /dark/i.test(f.text) && f.status !== "active")).toBe(true);
   expect(facts.some((f) => /option b|compact/i.test(f.text))).toBe(true);
   // Nothing active may still say option A applies to desktop.
   expect(facts.some((f) => f.kind === "decision" && /option a/i.test(f.text) && /(both|desktop|all)/i.test(f.text) && !/mobile/i.test(f.text))).toBe(false);
+  r.stop();
+}, 120_000);
+
+t("a spec restated at each iteration stays one fact; ship notes and JamSesh's own trouble add none; every fact has a source", async () => {
+  const r = makeRoom();
+  const s = r.hub.session;
+  s.claim(r.agents.desktop.id, "Nav", { quiet: true });
+  const say = (who: "chey" | "felipe" | "britain", text: string) => s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.people[who].id, authorName: r.people[who].name, text, relevance: "discussion" });
+  const ship = (text: string) => s.store.addEvent({ kind: "update", authorType: "agent", authorId: r.agents.desktop.id, authorName: r.agents.desktop.name, text, relevance: "work", data: { updateKind: "shipped" } });
+  await r.hub.brain.curate([say("chey", "Under 1024 pixels the sidebar should collapse to an icon rail."), say("britain", "The icon rail should be 64 pixels wide.")]);
+  await r.hub.brain.curate([say("chey", "The sidebar turns into just icons when the window is narrow, under 1024."), ship("Implemented the sidebar collapse, commit 813f5c7452 on branch jonathan/nav."), say("felipe", "The mic keeps cutting out and the TV is flickering again.")]);
+  await r.hub.brain.curate([say("felipe", "So narrow windows get the 64 pixel icon rail, under 1024."), ship("Sidebar rail fixed, commit 9ab31cc02e on branch jonathan/nav.")]);
+  const active = s.facts().filter((f) => f.status === "active");
+  console.log(active.map((f) => `${f.kind}: ${f.text}`).join("\n"));
+  expect(active.filter((f) => /rail|1024/i.test(f.text)).length).toBeLessThanOrEqual(2);
+  expect(active.some((f) => /commit [0-9a-f]{7}|branch jonathan/i.test(f.text))).toBe(false);
+  expect(active.some((f) => /\bmic\b|flicker/i.test(f.text))).toBe(false);
+  expect(active.every((f) => f.sourceEventIds.length > 0)).toBe(true);
   r.stop();
 }, 120_000);

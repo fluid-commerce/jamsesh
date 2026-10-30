@@ -302,6 +302,7 @@ the app, not a terminal command.
 
 ```text
 project.json        name, created, lastUsed, people [{name, color}]
+context.db          what the project's sessions settled, carried into the next (12.7); context.json is its export
 thumbnail.png       the canvas, small (480 px), saved every 5 minutes while a session runs and when it ends
 sessions/<id>/      one session: a hub data directory (jamsesh.db, renders, snapshots) plus session.json
                     {id, startedAt, lastActive}
@@ -511,7 +512,7 @@ which takes the agent out and, with `purge`, deletes the feed lines it caused.
 folder (any chat id, since an id is the chat's own word) is refused with "A chat in this folder was removed from the
 room. Ask someone to choose Settings > Removed chats > Allow again." Its `jam_join` is refused (by its chat id, which for Codex is its
 folder on its machine, or by the MCP connection that joined) until a person lets it back in: **Allow again** under Settings ▸
-Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`; refused to any agent credential, so for people's windows and the host's own loopback, which is the host's person). Nothing
+Removed chats (`GET /api/removed-chats`, `POST /api/removed-chats/<id>/allow`; for people's windows only: a paired window, or the host's own window with its window key. An agent credential, and any other process on the host (loopback alone grants nothing), is refused.) Nothing
 an agent or its hook sends clears a removal: a removed chat that types "connect to jamsesh" is told by its
 hook "This chat was removed from the room. Ask someone to choose Settings > Removed chats > Allow
 again." (`/api/hooks/joined` answers `removed: true` and changes nothing). Removals are kept in the session, so a hub restart doesn't
@@ -710,7 +711,7 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_update` | Post `progress`, `done`, `shipped`, `question`, `blocked`, `handoff`, or `decision`, optionally for a workstream and a directive. Naming a workstream claims it. `done` or `shipped` with a directive marks it done for this agent. `question` and `blocked` raise a "needs the room" toast. |
 | `jam_claim` | Claim a workstream. If another active agent owns it, the agent is told who, and must coordinate instead of duplicating (`force` overrides) [B20]. |
 | `jam_inbox` | Pending directives, messages, questions, and answers. Marks them delivered. |
-| `jam_wait` | Block until a directive, message, or question arrives (default 4 minutes, at most 9). Sends progress every 20 seconds. |
+| `jam_wait` | Block until a directive, message, or question arrives (200 seconds unless `seconds` is given; between 5 and 230). When the caller supplied a progress token it sends a progress notification every 20 seconds, so a long wait isn't cut off. |
 | `jam_ack` | Acknowledge, finish, or drop a directive, with a result. |
 | `jam_message` | Message another agent by name or id, or `all` [A27a]. |
 | `jam_ask` | Ask another agent a question and wait for the answer (default 120 seconds, 5 to 300) [A27b]. |
@@ -719,7 +720,7 @@ Every tool except `jam_join` requires a joined agent.
 | `jam_agents` | The roster: people (name, title, weight) and agents (platform, repo, status, card, focus, workstreams). |
 | `jam_devserver` | Put a dev server on the host (see [6.6](#66-dev-servers-on-the-host)) [B18]. |
 | `jam_host_preview` | Ask the host to build this agent's pushed branch and open it (see [13.3](#133-preview-builds)) [A33a]. |
-| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB) as a **Built** or **Mockup** artifact; the same screen again (same title, or `replaces`) is its next version ([10.5](#105-locks-queue-history-and-versions)). |
+| `jam_post_image` | Post a screenshot (PNG or JPEG, at most 12 MB, the one limit the tool, the hub and the /mcp request cap all derive from `limits.ts`) as a **Built** or **Mockup** artifact; the same screen again (same title, or `replaces`) is its next version ([10.5](#105-locks-queue-history-and-versions)). |
 | `jam_show` | Put a spotlight, compare, or parity view on the big screen, unless a person pinned the screen; a screen a person locked queues it as "ready to show" instead. |
 | `jam_artifacts` | List artifacts (frames, screenshots, dev servers), newest first; pages with `offset` and says how many more there are. |
 | `jam_directives` | List the session's directives (the context leaves the older ones out), newest first, by words or status; pages with `offset`. |
@@ -791,8 +792,11 @@ passed the text on, and sends it back with the chat's next hook call (`x-jam-ack
 items marked delivered (and the message and decision marks moved). While a handover waits for its
 acknowledgement nothing more is handed over; after 60 seconds everything unacknowledged is offered
 again under a new id, and a listener that calls again without acknowledging the last listener's
-answer gets it again at once. `jam_inbox` and `jam_wait` answer the agent directly and mark what they
-return, including anything a lost hook answer held. Room decisions ride the same deliveries, read
+answer gets it again at once. `jam_inbox` answers the agent directly and marks what it returns, including
+anything a lost hook answer held. `jam_wait` does the same with one difference, by design: items are marked read once the hub has
+finished sending the reply. A disconnect the hub sees before then (the client leaving mid-wait, or before the reply has gone
+out) leaves them unread for the next call. A reply lost after it was fully sent is not redelivered: an acknowledgement an agent
+must remember to echo costs more than it saves on a local network. Room decisions ride the same deliveries, read
 forward from the agent's decision cursor ten at a time, so a bigger burst arrives over successive
 handovers and the cursor only passes what was handed over; `Stop` doesn't keep an agent working for
 decisions alone. Room-wide messages (to everyone) skip the
@@ -1008,19 +1012,40 @@ relevance.
 
 The brain keeps context current so new legs of work start informed [B27, A16d]:
 
-- **Session brief.** At most every 75 seconds, and only after at least 6 new events (or when
-  forced, for example 3 seconds after a decision), the digest model rewrites a brief of 300 words
-  or fewer: goal, decisions (with who decided), in progress, open questions, people. Banter and
-  canvas noise are left out.
+- **Session brief (4.4).** At most every 75 seconds, and only after at least 6 new events (or when
+  forced), the digest model returns the parts only it can write: the goal (what the room is making
+  now, replaced when it no longer fits), the settled decisions, the open questions, and a glossary of
+  project words. The hub builds the rest from its own records each time the brief is read, so a new
+  dev server or owner shows up without a model pass: `GOAL`, `OWNERS` (workstream, agent, person),
+  `REPOS` (repository and branch per working agent), `LIVE` (dev servers that are up, with links),
+  `IN PROGRESS` (per workstream: items mocked and built, open tasks), `DECISIONS`, `OPEN QUESTIONS`,
+  `GLOSSARY`. The full brief is what `jam_context` and the session state carry. The join briefing
+  carries a separate excerpt of at most 600 characters (goal, owners, live builds, repositories,
+  what's in progress, glossary terms, in that order of priority; whole lines only). With no model
+  pass yet the brief still fills from state. Clear banter is left out; a doubtful line is passed
+  with a "maybe off-topic" label and the model decides.
 - **Workstream briefs.** Each active workstream gets a brief of 150 words or fewer.
-- **Curated facts.** The same pass maintains a list of facts, each a `decision`, `requirement`,
-  `constraint`, `preference`, `question`, or `fact`, with status `active`, `resolved`, or
-  `superseded`. Curation is sparse (most batches add zero to three items), never leaves two
-  contradicting active facts, updates a fact when its scope changes ("A on both" becomes "A on
-  mobile"), supersedes it when it's replaced, and resolves answered questions. A new fact is
-  dropped as a duplicate only when it matches an active fact of the same kind with the same
-  specifics; a changed decision (A to B, 16 px to 24 px, a new color) is never dropped.
-- A batch that fails to curate is retried on the next pass.
+- **Curated facts (4.3).** The same pass maintains a list of knowledge, not a log. A fact is a
+  `decision`, `requirement`, `constraint`, `preference`, `question`, or `fact`, with status
+  `active`, `resolved`, or `superseded`, the workstream it is about (an existing title, chosen by
+  topic, not by who said it), and the ids of the events it came from. One topic is one fact:
+  the same words again (identical once case, spacing and punctuation are set aside) add their events to the
+  existing fact's sources instead of another fact; any other wording, a refinement included, is a card for a person
+  to merge or replace (4.1 Repeats). A replaced decision is
+  superseded in the same pass, answered questions are resolved. The pass does not add a fact that contradicts an active one: a proposal whose wording is close to a fact of the same kind, workstream and platform but not identical gets a card flagged with that fact as a possible match (the check is lexical word overlap, not an understanding of meaning, so it can flag two statements that don't conflict and miss one in different words), and a person decides (Replace, or Add anyway, which keeps both); a contradiction in different words is an ordinary card, for a person to notice. Never recorded: what an agent shipped (commit ids, branch names, "implemented X"),
+  instructions typed to an agent, progress reports, banter, and JamSesh's own problems (the
+  microphone, transcription, speaker names, the TV, connection failures). A fact with no source
+  event in the batch is not saved. A new fact whose text is identical (case, spacing and punctuation aside) to an active one of the
+  same kind and workstream is merged into it; any other wording, a changed decision (A to B, 16 px to 24 px, a new
+  color) included, is a card.
+- **One function decides, one applies.** `Brain.decideCuration(events)` asks the model what should
+  change and writes nothing; `Brain.applyCuration(decision, events)` writes the facts and returns
+  what it added, merged and dropped. `Brain.curate` is both in a row. The Tasks board wraps the
+  first to turn new facts into proposed context cards.
+- The digest reads forward from its cursor, oldest first, 400 events a pass (`store.eventsAfter`), and moves the
+  cursor only past the page it read; a backlog is read page after page.
+- A batch that fails to curate, or comes back with no result, is retried: the digest cursor doesn't move past it, and
+  the next try waits 30 s, doubling up to 10 minutes.
 
 ### 7.4 What agents read
 
@@ -1080,19 +1105,33 @@ off from the host. Brain status is **ready**, **thinking**, **off**, or **Add a 
 ### 8.3 Triage
 
 Every incoming line is triaged [A16a, B25]: transcribed room speech, typed room lines, and prompts
-typed to agents. Lines are batched for 1.4 seconds. The triage model gets the waiting builds, the
-online agents, the last 14 lines for context, and the new lines with each author's role, and
-returns for each line:
+typed to agents. Lines are batched for 1.4 seconds. The triage model gets the **project card**, the
+waiting builds, the online agents, the last 14 lines for context (with ids), and the new lines with
+each author's role. The card is a few hundred words kept current by the hub: the session goal, each
+active workstream with its owner and one line, the settled decisions, the glossary terms, and what
+is on each big screen (item ids, titles, who put it up, how long ago). For each line it returns:
 
-- **Relevance:** `banter`, `chatter`, `discussion`, or `work`.
+- **Topic (4.2):** `project` (about the thing being made or what's on a screen; a joke about the
+  product counts), `unrelated` (family, food, sports, errands), or `tool` (JamSesh itself: its mic,
+  transcript, speaker names, the TV), and whether the line is **joking**. Tone never changes the
+  topic.
+- **Relevance:** `banter`, `chatter`, `discussion`, or `work`. The hub applies the topic: only a line
+  that isn't about the project is `banter`; filler stays `chatter`; a casual project line is
+  `discussion`.
 - **Intent:** `none`, `directive`, `decision`, `present`, `question`, `introduce`, or `relabel`.
 - **Confidence**, and introductions (`name`, `role`) it heard.
+- **Reaction:** a quick reaction right after something went up ("this is cool", "love it") names the
+  screen item it belongs to. It's saved on that item (`reactions`) and on the line
+  (`data.reactionTo`) when the item is on a screen now or was posted in the last 10 minutes. Only
+  people's lines count, once per line, never banter.
+- **Rescue:** a later line ("actually that's a good idea") can promote an earlier line labeled
+  banter back to discussion.
 
-Triage is deliberately conservative. The team jokes around, and speech-to-text is messy. Sarcasm
+Triage is deliberately conservative about intent. The team jokes around, and speech-to-text is messy. Sarcasm
 and jokes are never directives. Musing ("I wonder if…") is discussion unless it ends in an ask. A
 request aimed at a person ("Felipe, can you grab lunch") isn't work. The batch is routed only when
 a line has a directive, decision, present, question, or relabel intent with confidence above 0.55.
-Banter is stored but never routed [A16b]. Introductions ("I'm Britt, I run product") add or update
+Banter is stored but never routed [A16b]. Banter the model is sure about (confidence 0.8 or more) is left out of the brief and of `jam_context`; a doubtful one stays, marked "(maybe off-topic)". Introductions ("I'm Britt, I run product") add or update
 people [B39].
 
 ### 8.4 Routing and intent
@@ -1145,8 +1184,11 @@ cancels the old directive (`cancel_directive`, which tells the agent why) and se
 
 ### 8.6 Decisions
 
-A decision ("I like B", "go with direction A") is recorded as a `decision` event, shown as a
-toast, and folded into the brief within seconds [B14]. Unless the room says otherwise, the brain
+A decision ("I like B", "go with direction A") that someone asks JamSesh to record is a
+`decision` event (and a saved fact), shown as a toast and folded into the brief within seconds
+[B14]. One JamSesh only overhears, or an agent reports, waits as a card until a person adds it
+(see [8.14](#814-the-tasks-board-and-triage-41)); the same goes for the implement directive below,
+which is proposed rather than sent. Unless the room says otherwise, the brain
 also sends an **implement** directive to the agent that owns the chosen work, naming the chosen
 artifact, and spotlights it. "That one" means what's on screen, or the latest artifact.
 
@@ -1286,12 +1328,141 @@ whole-word name or platform, else best affinity, skipping a request already sent
 minutes), "bring up" by matching artifact titles, the Join view for join phrases, voice approvals,
 and decisions ("let's go with B") that send an implement directive to the agent that made the
 chosen variant. Spoken to directly on rules, it acts, or says it's on simple rules and what it
-can't do; "talk less" and similar still become a behavior note.
+can't do; "talk less" and similar still become a behavior note. A casual word ("lol", "dude") marks
+a line as doubtful banter (confidence 0.5, so it stays in the brief and `jam_context`) only when the
+line uses none of the project's own words (glossary terms, workstream and screen names).
 
 Every gateway call has a time limit (15 seconds for triage, 45 for everything else). When a call
 fails, the brain falls back to the rules for that batch, shows a notice at most every five
 minutes, and goes straight to rules for the next minute, so nothing said is lost and nobody waits
 on a failing gateway.
+
+### 8.14 The Tasks board and triage (4.1)
+
+Nothing JamSesh overhears reaches an agent or the shared knowledge until a person accepts it. What it
+holds is a **card** in the `triage` collection (`TriageCard`, `hub/src/board.ts`).
+
+**On purpose versus overheard.** A line is on purpose when a person typed it to JamSesh, recorded a prompt,
+or said its name (the event carries `data.direct`, set by `Brain.hear`, `Hub.typed` and the recorded-prompt
+path). A question the triage hears asked in the room carries `data.asked` instead: its answer is spoken, but it is
+overheard like any other line and never counts as accepted. Those passes (`Brain.direct`, `tools(…, route = "direct")`) work as before: `create_directive` sends,
+`record_decision` records an event and saves a fact at once. Everything else is **overheard** (`Brain.route`,
+the batched pass; `tools(…, "overheard")`, and the keyword rules when the gateway is down):
+
+| What | On purpose | Overheard, or reported by an agent |
+|---|---|---|
+| A task for agents | `createDirective` | a **task card** (`proposeTask`) |
+| A decision or fact | `record_decision` saves a decision event and a fact | a **context card** (`proposeContext`) |
+| A fact curation would add, rewrite, resolve or supersede | n/a | a context card (only a restatement that cites a new event joins a saved fact directly) |
+| Cancelling a task (`cancel_directive`) | cancels it and tells its agents | a **cancel card** (`cancels` names the directive; Send cancels it); a proposal still waiting is only marked `overruled` |
+| Pairing agents (`pair_agents`) | a `coordinate` directive each | a task card each |
+| Asking an agent (`ask_agent`), acting on a card (`triage_card`) | available | not offered |
+| An agent's `decision` update | n/a | a context card naming the agent, linked to the update event |
+| Agents' `shipped`, `done`, `progress`, `handoff` updates | n/a | the **changelog** (`Session.changelog()`, `GET /api/changelog`); curation skips them (`forCuration`) |
+| `jam_message` and `jam_ask` between agents, and `question` or `blocked` updates | unchanged: direct | unchanged |
+
+Agents never see a card: `jam_context`, the inbox and the hooks read only directives, facts and decisions. The session
+brief's DECISIONS and OPEN QUESTIONS are the accepted facts; the digest model writes only the goal and glossary, and it
+and the workstream briefs read accepted material only (saved facts, sent tasks, room decisions, direct requests and
+agents' own reports; `acceptedEvent`), never overheard talk. Curation still reads the talk: that is where cards come from.
+
+**Other workers' entry points** (so a feature that finds a task or a piece of context can use the board):
+
+```ts
+session.proposeTask({ text, mode, targets, workstream?, by, origin?: "overheard" | "agent" | "document", sourceEventIds?, attachments?, note? }): TriageCard | null
+session.proposeContext({ text, kind, workstream?, by, origin?, sourceEventIds?, attachments?, replaces?, note? }): TriageCard | null
+session.board.rememberNow({ text, kind, workstream?, by, sourceEventIds? }): Fact | null   // on purpose: saved at once
+```
+
+`attachments` are the files the proposal was made from; the card shows them, and a card carries at most six (a repeat
+that would pass that makes another card), so what a person reviews is what Send delivers. `note` is what the card shows as its source when there is no transcript line (a document with no request becomes a
+context card with `origin: "document"`). Both return `null` for empty text, and `proposeContext` returns `null` when
+a saved fact already says it. Repeats are folded in (below), so calling twice is safe.
+
+**Cards.** A card has `type` (`task` or `context`), `status` (`open`, then `sent`, `added`, `merged`, `replaced` or
+`dismissed`), the current wording and the `original`, who it came from, its `sources` (each with the transcript event id,
+author, text and time; at most 12), a `count`, and `edits` (who changed which fields, when). A task card has a mode,
+target agents and a workstream; a context card has a kind, a workstream and `conflictsWith`, a saved fact it
+disagrees with. Cards never expire. One that has waited 30 minutes reads "Waiting 40 min" on the board.
+
+**Repeats.** The same thing proposed again joins the open card: `count` goes up and the new source line is added. "The same"
+means identical text once case, spacing and punctuation are set aside, compared with the card's current wording only
+(never its `original`, so an edited card doesn't absorb a later, different request); any other wording is another card.
+The same line twice (two microphones) is not a repeat. A dismissed card absorbs its repeats for 30 minutes. A context
+proposal that repeats a saved fact word for word is dropped; one that is close to a fact (`similar`, a hint only) but not
+identical, or that names a fact with `replaces`, is flagged `conflictsWith`, but only a fact of the same kind, workstream
+and platforms (`sameScope`). A named replacement is never dropped as already known. A task repeat must also agree on mode,
+target agents and workstream; a context repeat, and "already known", on kind and workstream. Curation and the brain's
+duplicate-directive checks use the same rule (`hub/src/similarity.ts`): no judging of meaning, polarity or paraphrase, since
+a missed merge costs one card and a wrong one loses what was said.
+
+**Actions** (`POST /api/triage/<id>/<action>`, `PATCH /api/triage/<id>`; people only, like the other human routes: an
+agent's credential and a process on the host without the window key get 403, and a window must know its person):
+
+| Route | Does |
+|---|---|
+| `PATCH /triage/<id>` | Edit the wording, `mode`, `targets`, `workstream`, `kind`. Records who changed what. |
+| `POST /triage/<id>/send` | Task: apply any edits in the body, then `createDirective` (requested by the original speaker, with the card's source events). 400 with no agent. |
+| `POST /triage/<id>/add` | Context: save the (edited) fact. A decision also becomes a room decision event, so the agents of its workstream see it. |
+| `POST /triage/<id>/merge` | Context: `factId` and the combined `text` (default: the fact, then the card). The fact keeps both sources. |
+| `POST /triage/<id>/replace` | Context: supersede the fact it conflicts with (or `factId`) and add this one. 409 if no saved fact is left. |
+| `POST /triage/<id>/dismiss` | Task or context. |
+| `GET /triage` | `{ cards, stats }`: counts of proposed, open, accepted, edited and dismissed per type. |
+
+A card that has been acted on answers 409 ("That card was already sent by Felipe"); the same person repeating the same
+action gets the first result again, so a retried click acts once. What an action makes (the directive, the fact, the
+retired fact and its replacement, the room decision event) and the card's own resolution are one transaction
+(`Store.atomic`): a failed write leaves none of them, and the hub's messages go out only after it commits. A cancel card
+that finds its task already done or cancelled answers 409. Replace acts on the fact the card was matched with (a
+`factId` naming another is refused; with no match, a person may name one of the card's kind and workstream), and a
+Retire card only ever retires the fact it was proposed for. A context card with `needsWording` (a file with no text to
+read) can't be added, merged or used to replace until a person writes the wording (a merge whose text is only the
+placeholder or only the fact is refused). Send sends only to the card's agents still in the session and not
+observers; with none left it answers 409 and the card stays open. The client never queues these calls
+while offline.
+
+**Curation and the board.** `Brain.applyCuration` passes a `CurationHold` to `applyCuration`: only a restatement (the
+same words, citing an event of this batch) joins a saved fact directly; an update with no cited event is dropped, and any
+other update becomes a Replace card for that fact; a resolve or supersede with no cited event of the batch is dropped
+(a Retire card always shows a room line behind it); new facts become context cards, an addition that resembles a fact the same answer supersedes becomes a **Replace** card for it, and a fact the
+curator would resolve or supersede with nothing to take its place becomes a **Retire** card (`retire` on the card;
+accepting it only changes the fact's status). Overheard, the brain's `cancel_directive` marks a waiting task card
+`overruled` for a person to dismiss, and keeps every veto (`vetoes`: why, who, when, the lines; the whole history) on that card for good;
+the same ask said again doesn't clear it but makes a new card with `renews` naming the overruled one ("Asked again").
+Asked directly, it dismisses it. A document sent with no request is a context card
+with `origin: "document"`, its `attachments` (shown on the card) and the text read from it (text files; PDFs through
+`jamsesh-pdftext`, a small helper on Apple's PDFKit (`hub/native/jamsesh-pdftext.swift`): first 20 pages, capped, 5 s at most; the Mac app ships it built beside the hub and a checkout builds it on first use; `jamsesh-hub --pdf-text <file>` checks it); a PDF the helper can't read (a scan, a locked or damaged file, no helper) gets `needsWording` and the text "Couldn't read this PDF; write what to keep.". Agents'
+credentials get `triage: []` in `/api/state` and never receive `triage` patches. Carry-over (`context.db`) holds only
+accepted facts, and carries the brief's `goal` and `glossary` as well as its text.
+
+A frame or build records the task it was made for (`Artifact.directiveId`): the one its agent had picked up (or the
+only one open for it) when it first went up, none when there were several. A done task lists only those.
+
+**Spoken triage.** The brain's `triage_card` tool (only in on-purpose passes, only for a person who spoke to it) takes a
+card by number, id or "last" and an action (send, add, replace, merge, dismiss, edit), with changes in the same breath
+("add it, but for mobile only"). "That one" is the newest card. The situation prompt lists the open cards with
+numbers; the order is the board's (oldest first). Without a model, `triageByVoice` handles "send that one", "dismiss the
+second one", "add that", "send it" by rule (sending a context card adds it; adding a task sends it).
+
+**Mentioning waiting cards.** `Brain.nagTriage` (every minute, not under test) says out loud that cards have waited 30
+minutes or more ("3 items have been waiting in triage, the oldest for 47 minutes"), at most once every 20 minutes, never
+within 20 seconds of someone talking, and as text only in a room that asked for quiet.
+
+**The Tasks view** (`web/src/shared/Tasks.tsx`): a top-level **Tasks** tab in people's apps (count of waiting cards on the
+tab) and a **Tasks** button on the host (key `4`; Esc leaves it) that takes the big screen's place on the host's own
+window only. Four columns: **Triage** (open cards, oldest first, numbered for "the second one"), **Waiting** (directives
+`pending` or `delivered`), **Working** (`acked`), **Done** (`done`, the newest 30). Cancelled tasks aren't shown. At
+narrow widths (below 820 px of view width) the columns become tabs. Task cards offer Send, Edit and Dismiss; context
+cards Add, Edit, Merge into…, Dismiss, and Replace (with the saved fact and the new one side by side) when
+they conflict. Merge into… offers, and accepts, only saved facts of the card's kind, workstream and platform (the
+same check as Replace). Send with any chosen agent gone or only watching sends nothing: the card says which
+(`unavailable`, named from `targetNames`) until a person changes the agents. Edit is in place (wording, agent, mode or kind, workstream); Send and Add apply it. A focused card takes
+the keys ↑ ↓, Enter (open), E, S (send or add) and D. Clicking a card opens a sheet: the wording, who asked and when,
+each agent's progress, the lines it came from (with the conversation around each, from `/api/history/events`), what
+people changed, and for a sent task what it produced: the frames and builds its agents put up since it was sent (each
+**Show on the big screen** or **Open**) and the links in its result. A produced frame or build opens in the Phase 3 viewer
+(`WorkViewer`), whose **Show on big screen** is the second step. Reactions saved on an artifact ("Felipe: this is cool",
+with the time) show quietly under its tile and under it in the viewer.
 
 ## 9. Room audio
 
@@ -1749,6 +1920,16 @@ a scan and its end marker), checked before anything is written. JPEG scan data i
 id, so a screen showing it, a pin and the feed all follow the newest build; earlier builds are kept in
 the item's `versions` (up to 20). The tile's badge reads "v3 · 2 min ago" and opens the versions.
 
+**Filed on arrival (4.5).** The hub files every item itself, whatever the agent passes. Its workstream
+is the posting agent's active one (the one named like the item's group when the agent has several); a
+canvas frame with no agent is filed under the workstream named like its page; an agent that claims a
+workstream later has its earlier unfiled items filed under it. Titles are tidied as they arrive:
+spacing, the variant letter capitalised ("Nav/b: rail" is "Nav / B: rail"), and a trailing "(built)"
+dropped, since the stage already says it. A group takes the spelling an existing group already has
+("Mist Mobile rep mode" joins "Mist Mobile rep"; mode, page, screen, flow and view are ignored), or
+the workstream's title. Once an item has versions its title never changes, so later builds keep
+matching it.
+
 **History (3.6).** Every screen keeps the last 20 things it showed with who put them up (the board
 and the join view are not kept; neither are shares). Showing the same thing again moves it to the
 top. People's apps show the earlier ones as a strip of chips that bring one back (`POST
@@ -1857,6 +2038,8 @@ registerDriveTarget(el, handler): Unsub       // see "Replaying input"
     Esc closes. **Show on big screen** in the viewer is the deliberate second step and puts the item
     up as the person ("Chey put this up"); **All N side by side** puts the group up. Clicking never
     changes the big screen.
+  - **Tasks:** what's waiting for a person and what the agents are doing, in four columns (see
+    [8.14](#814-the-tasks-board-and-triage-41)).
   - **Expand:** every tile of a multi-tile stage (board, spotlight, compare, parity, layout) has
     **Expand** in its header, on the big screen and in the Screen tab. The stage's `expanded` field
     holds the tile key (an artifact id; `t<n>.<fingerprint>` (the first 96 bits of a SHA-256 of the tile) for a layout nth tile, so a click on an old tile can't expand different new content; `p<column>.<place>.<artifact id>` for a parity tile, from where it came and which artifact it was, so the same artifact in two columns is two tiles and a key never names different content after another artifact goes). Only the hub makes keys, and the state lists them with the source of each parity tile, so windows read the key and never work it out:
@@ -2156,6 +2339,79 @@ lent, for a retry), at most 8 per window and 100 in all; a full pool drops its o
 - Open fonts need the host to reach the internet. Without it a font nobody has is asked of the room, like any other. Offline test runs skip the
   fetch.
 
+### 12.6 Attachments
+
+The message box ("Ask JamSesh" and "Say to the room") takes images, screenshots and files by the
+paperclip button, paste, or drag and drop. Each file uploads when it is added (`POST
+/api/attachments`, form field `file`, one per request) and shows as a thumbnail or chip with a
+remove button; Send waits for uploads and carries the ids (`/api/say` `attachments`, at most six).
+A failed send keeps the words and files. A file that failed to attach blocks Send ("A file didn't attach. Remove it or
+try again to send.") until it is removed or retried; it is never dropped from a message silently.
+
+- **Allowed.** Images (PNG, JPEG, GIF, WebP, up to 12 MB), PDFs (20 MB) and text files (1 MB).
+  The type comes from the bytes, never the name or the browser's claim: SVG, HTML, executables,
+  binary and non-UTF-8 files are refused (415). Text must have a text name or none. Oversize is 413;
+  the upload is read with a byte cap before it is parsed, whether or not it gives a length.
+- **Stored once.** `<session>/attachments/blobs/<sha256 prefix>.<ext>` holds the bytes (the same file
+  uploaded twice is one blob); `<id>.json` holds each upload's record (name, who, time). The stored
+  name is made by the hub from the hash and sniffed type; only ids of the form `att_<16 hex>` reach
+  a path, and a shown name keeps only its last path part.
+- **Fetching.** `GET /api/attachments/<id>` for any paired device or agent credential of the session,
+  in the Authorization header or the `jam_token` cookie, also on loopback (unpaired: 401; a credential in
+  the address: 400). Responses are `no-store`, so a revoked device keeps no readable copy. Served with the sniffed type, `nosniff`, a sandboxing CSP, inline for images and
+  text (as `text/plain`) and as a download for PDFs. Uploading is for people only (agents: 403).
+- **Brain.** A direct message's files go to the router model in a message of their own before the
+  request: images and PDFs as parts, text files fenced in random `<attached-…>` markers and labelled as
+  material, never instructions. No wording decides what that pass may do: it is offered answering and
+  searching (`say_to_room`, `no_action`, `search_artifacts`) and the four tools that make work
+  (`create_directive`, `record_decision`, `pair_agents`, `cancel_directive`), and those four only
+  propose (the same `proposeOnly` path as overheard work): a task, decision, pairing or cancellation
+  becomes a card on the Tasks board (origin `document`) that a person sends or adds, and nothing
+  reaches an agent or the saved context before that. A file can't mark a waiting card overruled. The
+  Tasks board, the screen, host control, asking an agent, naming and behaviour notes are never
+  offered with a file, and each call is checked again when it runs. This holds on every route into the
+  brain, decided by one check of the pass's lines (`withFiles`): a direct message, a room message it
+  overhears, a line said to it by name, an agent's message; the keyword rules (no key, or a failing
+  gateway) and spoken answers to host requests ignore lines that carry files. So a file's text, or an
+  explanatory request the model misreads, can at most propose. A message with files and no words is not a request to the brain (answering tools only).
+- **Tasks.** A directive created from an event carries that event's attachments
+  (`Directive.attachments`). `jam_inbox`, the briefing, `jam_context` and `jam_directives` list each
+  file with its fetch URL; agents fetch it with their credential.
+- **Documents with no request.** A text file or PDF sent with no words becomes proposed context
+  (`Session.proposeContext`; the Tasks board's Triage, 4.1) instead of reaching the brain.
+- **Feed.** Pictures show as thumbnails that open full size, files as chips.
+
+### 12.7 Context carries over
+
+A project keeps its settled context in `projects/<slug>/context.db` (SQLite): one row per accepted fact
+(decisions, requirements and the rest) and workstream, each with a version, the session brief with its goal and
+glossary, and people's titles. A retired fact stays as a tombstone row. `ProjectKeeper` saves every five minutes and
+when the session ends. A session writes only items whose meaning (wording, kind, workstream, status; not the lines a
+fact cites) differs from the version it last saw (carried in, or saved), each with that version (`carryBase` in the
+session's settings); items it only carried in, or whose sources alone changed, are never written. Each row is merged
+on its own inside one SQLite `BEGIN IMMEDIATE` transaction: a change made on the row's current version applies, a
+retirement always applies, a tombstone is never made active again, and of two edits made without seeing each other
+the later (by time, then session id) wins. Only a change the merge applied counts as saved; one that lost is
+brought into the session as the row stands (retired, or the other wording), and its own wording becomes a context
+card on the Tasks board for a person to add again or dismiss. So two sessions of a project open at once both keep their changes, and an
+older session can't bring back what another retired. Nothing is cut or left out for size: a change that doesn't fit
+the reader's limits fails the whole save, which the keeper reports. The write lock belongs to the connection, is
+released when its process exits, and is never taken over: a paused writer keeps it and others wait (two seconds) and
+report a failed save. A new session of the project is seeded from it once (`seedFromProject`): every active fact
+(the same kind, workstream and wording only once) and unfinished workstream comes in with `carriedFrom {sessionId,
+at, id}`, the brief shows in the agents' briefing and `jam_context` until the session writes its own, and people
+without a title get theirs back. A resumed session, or one that already has facts or workstreams of its own, is not
+seeded. Every row is checked when read (types, statuses, sizes): one malformed value and nothing is seeded: the session's start fails with a visible error (never a quietly smaller or empty session). After a
+save commits, the committed state is exported as plain JSON in `projects/<slug>/context.json` for Phase 7's wiki:
+read and written while holding the write lock, to a temporary file renamed into place, and never over an export of
+a later `generation`. It holds every row as stored (`rows`: tombstones and versions included) besides the readable
+lists, so recovery restores it exactly. An export that can't be written fails the save (the keeper reports it) and
+is written by the next save, even one with nothing new. Reading a damaged database (seeding a new session included)
+recovers first, so a valid export is never read as no context. A database that isn't one is left where it is and the next generation (`context-1.db`, ...) is
+started, taking in the export; every process that finds the damage opens the same next file, so recovery happens
+once. A new database takes in `context.json` (the export, or the file builds before the database wrote) once; a file that
+exists but isn't a complete, valid export fails the start instead of being skipped.
+
 ## 13. Host control and permissions
 
 The brain pilots the host machine as well as the big screen [B44]. Host control is on by default
@@ -2321,12 +2577,12 @@ it.
   alone only reads, though; acting as a person on the host needs the host window key (below).
   Pairing takes the rotating code (see [4.2](#42-pairing-code)) or a single-use invite code (eight
   characters, ten minutes) that a person or the host creates for someone outside the room.
-- **Host names.** The hub answers only to loopback names, IP addresses, `.local` names, its own
+- **Host names.** The hub answers only to loopback names, IP addresses, this Mac's own `.local` names (its hostname, its Bonjour name, and any in `JAMSESH_HOSTNAMES`; no other), its own
   DuckDNS domain and its subdomains, and `JAMSESH_PUBLIC_URL`, so a web page can't reach it through
   DNS rebinding. Browser WebSockets must come from the hub's own origin (or the Mac app's relay).
   Remote-access setup accepts JSON bodies only.
 - **Tokens** are random, stored on the host only as hashes, and kept in an HttpOnly cookie, the
-  Keychain, or a mode-600 file. Tokens never go in URLs except the one-time dev-server sign-in.
+  Keychain, or a mode-600 file. Device tokens never go in URLs. The one thing a URL carries is the one-time dev-server sign-in code (`jam_code`, `POST /api/devserver/link`): made for one paired device, good once and for about 60 seconds. Opening it gives the dev origin its own cookie (`jam_dev`: HttpOnly, SameSite=Strict, no Domain) and redirects to the same address without the code. The proxy strips the code, any `token`, and the hub's cookies and bearer from every request it forwards, HTTP and WebSocket, so the agent's preview never sees a credential.
 - **Two credentials per Mac.** The Mac app holds the person's credential for its window and a
   separate agents' credential (issued from the window, kind `agent`) for everything else that
   talks to its relay. On the host, the app's relay uses an agents' credential too, so agents on the

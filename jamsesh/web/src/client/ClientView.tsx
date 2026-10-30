@@ -5,7 +5,7 @@ import { clip, fadeOut, playChime } from "../shared/sound";
 import { HistoryStrip, StageBar } from "../shared/StageControls";
 import { Mic, type MicStatus } from "../shared/mic";
 import { SettingsDrawer } from "../shared/Settings";
-import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel } from "../shared/ui";
+import { AgentRow, ArtifactTile, Avatar, CanvasFrame, Meter, RoomFeed, Toasts, modeLabel, openDevServer } from "../shared/ui";
 import { PhotoAvatar, ShareControls, ShareRequestPrompt } from "../shared/share";
 import { CloseIcon, RoomIcon, SendIcon, useLayout, usePhoneChrome, type Layout } from "./mobile";
 import { ProfileDrawer, VoiceEnroll } from "./Profile";
@@ -18,13 +18,15 @@ import { isTypingTarget, plain } from "../shared/keys";
 import { MicNotice } from "../shared/MicNotice";
 import { canShareScreen } from "../shared/rtc";
 import { GearIcon, MicIcon, MicOffIcon, SpeakerIcon, SpeakerOffIcon } from "../shared/icons";
+import { TasksView, triageCount } from "../shared/Tasks";
+import { AttachButton, AttachTray, composerState, filesFrom, hasFiles, useAttachments } from "../shared/attach";
 import { AnnotateToggle, AnnotationsPanel, PinLayer, RecordPrompt, RecordScope, useAnnotateMode } from "../shared/annotate";
 
 const DEVICE = deviceId("client");
 const mic = new Mic(DEVICE);
 const PHONE_MIRROR_SCALE = { phone: 0.62, landscape: 0.74 } as const;
 
-type Tab = "canvas" | "screen" | "work" | "pins" | "agents";
+type Tab = "canvas" | "screen" | "work" | "tasks" | "pins" | "agents";
 
 export function ClientView() {
   return (
@@ -271,11 +273,12 @@ function BigScreenChip({ stage }: { stage: StageState }) {
 }
 
 type Tab_ = Tab;
-const TABS: Tab_[] = ["canvas", "screen", "work", "pins", "agents"];
-const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", pins: "Pins", agents: "Agents" };
+const TABS: Tab_[] = ["canvas", "screen", "work", "tasks", "pins", "agents"];
+const TAB_LABEL: Record<Tab_, string> = { canvas: "Canvas", screen: "Screen", work: "Work", tasks: "Tasks", pins: "Pins", agents: "Agents" };
 
 function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setTab: (t: Tab) => void; phone?: boolean }) {
   const open = state.annotations.filter((a) => a.status === "open").length;
+  const waiting = triageCount(state);
   return (
     <nav className={phone ? "m-tabs" : "header-center row"} aria-label="Views" style={phone ? undefined : { gap: 2, background: "var(--panel)", padding: 3, borderRadius: 999, border: "1px solid var(--line)", flex: "none" }}>
       {TABS.map((t) => (
@@ -287,6 +290,7 @@ function TabNav({ state, tab, setTab, phone }: { state: HubState; tab: Tab; setT
           onClick={() => setTab(t)}
         >
           {TAB_LABEL[t]}
+          {t === "tasks" && waiting > 0 && (phone ? <span className="m-tab-count">{waiting}</span> : ` · ${waiting}`)}
           {t === "pins" && open > 0 && (phone ? <span className="m-tab-count">{open}</span> : ` · ${open}`)}
         </button>
       ))}
@@ -312,7 +316,7 @@ function EnrollModal({ me, brainName, done }: { me: HubState["people"][number]; 
   );
 }
 
-/** The five views, the same on every screen size except the Screen tab, which a phone scales down. */
+/** The six views, the same on every screen size except the Screen tab, which a phone scales down. */
 function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me: HubState["people"][number]; layout: Layout }) {
   const phone = layout !== "desktop";
   return (
@@ -342,6 +346,11 @@ function TabContent({ tab, state, me, layout }: { tab: Tab; state: HubState; me:
           </div>
         ))}
       {tab === "work" && <WorkGallery state={state} personId={me.id} />}
+      {tab === "tasks" && (
+        <div className="tab-pane tasks-pane">
+          <TasksView state={state} personId={me.id} />
+        </div>
+      )}
       {tab === "pins" && (
         <div className="tab-pane scrollbars-thin pins-pane">
           <AnnotationsPanel personId={me.id} />
@@ -580,17 +589,45 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState(true);
+  const [dragging, setDragging] = useState(false);
+  const [sendError, setSendError] = useState("");
   const input = useRef<HTMLInputElement>(null);
+  const files = useAttachments();
+  const { canSend, blocked } = composerState(text, files.items, busy);
   return (
     <form
-      className={`say ${phone ? "say-phone" : ""}`}
+      className={`say ${phone ? "say-phone" : ""} ${dragging ? "dragging" : ""}`}
+      onDragOver={(e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node | null) && setDragging(false)}
+      onDrop={(e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        setDragging(false);
+        // Not while a send is in flight: a file added now would be cleared with the ones that were sent.
+        if (busy) return;
+        files.add(filesFrom(e.dataTransfer));
+      }}
       onSubmit={async (e) => {
         e.preventDefault();
-        if (!text.trim()) return;
+        if (!canSend) return;
         setBusy(true);
-        await api("/say", { personId, text, direct: ask }).catch(() => {});
-        setText("");
+        setSendError("");
+        const sent = await api("/say", { personId, text, direct: ask, attachments: files.ids }).then(
+          () => true,
+          (e) => {
+            setSendError(e instanceof Error ? e.message : "That didn't send.");
+            return false;
+          },
+        );
         setBusy(false);
+        // A send that failed keeps the words and the files, so nothing has to be added again, and says why.
+        if (!sent) return;
+        setText("");
+        files.clear();
         if (phone) input.current?.blur();
       }}
     >
@@ -612,7 +649,19 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
           </button>
         ))}
       </div>
+      <AttachTray items={files.items} onRemove={files.remove} onRetry={files.retry} />
+      {blocked && (
+        <p className="say-blocked" role="status">
+          {blocked}
+        </p>
+      )}
+      {sendError && !blocked && (
+        <p className="say-blocked" role="alert">
+          {sendError}
+        </p>
+      )}
       <div className="say-row">
+        <AttachButton onFiles={files.add} disabled={busy} />
         <input
           ref={input}
           className="grow"
@@ -622,12 +671,19 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
           autoComplete="off"
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            const pasted = filesFrom(e.clipboardData);
+            if (!pasted.length) return;
+            e.preventDefault();
+            files.add(pasted);
+          }}
           disabled={busy}
         />
-        <button className="btn primary small say-send" disabled={!text.trim() || busy} aria-label="Send">
+        <button className="btn primary small say-send" disabled={!canSend} aria-label="Send">
           {phone ? <SendIcon /> : "Send"}
         </button>
       </div>
+      {dragging && <div className="say-drop">Drop to attach</div>}
     </form>
   );
 }
@@ -706,7 +762,16 @@ function AgentsPanel({ state }: { state: HubState }) {
           {state.devservers.map((d) => (
             <div key={d.id} className="row dev-row" style={{ padding: "6px 0" }}>
               <span className="dot" style={{ background: d.up ? "var(--built)" : "var(--faint)" }} />
-              <a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--text)" }}>
+              <a
+                href={d.url}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "var(--text)" }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openDevServer(d.url);
+                }}
+              >
                 {d.name}
               </a>
               <span className="chip mono ellipsis">{d.problem ?? d.url}</span>

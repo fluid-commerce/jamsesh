@@ -417,7 +417,7 @@ export function useHub() {
 // Not worth replaying later, or unsafe to: approvals and answers must be live, a screen size is only
 // worth reporting now, and a screen control (a cast, unlock, show, restore, a drive) replayed after
 // reconnecting could undo a later decision, such as clearing a newer lock.
-const NEVER_QUEUE = /^\/(fonts\/|drive\/|audio|stage($|\/)|show-requests\/|apps\/|paired($|\/)|pair|invite|hooks\/|agents\/|removed-chats|shares\/request|debug\/|build-requests\/|display|record\/|people\/[\w-]+\/voice|shares$)/;
+const NEVER_QUEUE = /^\/(fonts\/|drive\/|audio|stage($|\/)|show-requests\/|apps\/|paired($|\/)|pair|invite|triage\/|hooks\/|agents\/|removed-chats|shares\/request|debug\/|build-requests\/|display|record\/|people\/[\w-]+\/voice|shares$)/;
 
 export class OfflineError extends Error {
   constructor(msg = "Can't reach the hub right now.") {

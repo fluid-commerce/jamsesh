@@ -5,6 +5,7 @@
 // browser already holds, which browsers send to every port of the same address, or a
 // bearer header such as the Mac app's relay adds).
 import { createHash, randomBytes } from "node:crypto";
+import { DEV_CODE_PARAM, DevLinks, cleanRedirect, scrubHeaders, withoutCredentials } from "./devlinks";
 import type { Server, ServerWebSocket } from "bun";
 import { bus } from "./bus";
 import { config, hostAddresses } from "./config";
@@ -139,10 +140,15 @@ export class DevProxy {
     return this.who(req, ip) !== null;
   }
 
+  /** One-time sign-in for these ports (set by the hub; see devlinks.ts). */
+  links: DevLinks | null = null;
+
   /** Who may use a dev port: "" for the host itself, a paired device's id, or null for nobody. */
   who(req: Request, ip: string): string | null {
     if (isLoopback(ip)) return "";
     // The dev app may send its own Authorization header, so try the cookie's token too.
+    const viaCookie = this.links?.deviceOf(cookieValue(req.headers.get("cookie"), DevLinks.cookieName));
+    if (viaCookie) return viaCookie;
     const tokens = [req.headers.get("authorization")?.replace(/^Bearer\s+/i, ""), cookieValue(req.headers.get("cookie"), "jam_token")].filter((t): t is string => !!t);
     if (!tokens.length) return null;
     const now = Date.now();
@@ -172,10 +178,19 @@ export class DevProxy {
       idleTimeout: 120,
       async fetch(req, srv) {
         const ip = srv.requestIP(req)?.address ?? "";
+        const url = new URL(req.url);
+        // A one-time sign-in link: the code becomes this origin's own cookie and the address loses it.
+        const stale = cleanRedirect(url);
+        if (stale) return stale;
+        const code = url.searchParams.get(DEV_CODE_PARAM);
+        if (code && proxy.links) {
+          const device = proxy.links.redeem(code);
+          if (!device) return new Response("That link has been used or has expired. Open the dev server again from JamSesh.", { status: 401, headers: { "cache-control": "no-store" } });
+          return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": proxy.links.setCookie(proxy.links.open(device), false), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+        }
         const deviceId = proxy.who(req, ip);
         if (deviceId === null) return denied(req);
-        const url = new URL(req.url);
-        const path = `${url.pathname}${url.search}`;
+        const path = withoutCredentials(url);
         if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
           const protocols = (req.headers.get("sec-websocket-protocol") ?? "").split(",").map((p) => p.trim()).filter(Boolean);
           const headers = protocols.length ? { "sec-websocket-protocol": protocols[0] } : undefined;
@@ -290,19 +305,12 @@ export class DevProxy {
 }
 
 /** Passes a request to the dev server and its answer back, without the room's credentials (or the host window key). */
-async function forward(req: Request, target: string, path: string, drive: { script: string; hash: string } | null): Promise<Response> {
+export async function forward(req: Request, target: string, path: string, drive: { script: string; hash: string } | null): Promise<Response> {
   const headers = new Headers(req.headers);
   for (const h of HOP) headers.delete(h);
   headers.set("host", target);
   headers.set("accept-encoding", "identity");
-  const auth = headers.get("authorization");
-  if (auth && /^Bearer\s+jst_/i.test(auth)) headers.delete("authorization");
-  const cookie = headers.get("cookie");
-  if (cookie) {
-    const kept = cookie.split(/;\s*/).filter((c) => !c.startsWith("jam_token=") && !c.startsWith("jam_window="));
-    if (kept.length) headers.set("cookie", kept.join("; "));
-    else headers.delete("cookie");
-  }
+  scrubHeaders(headers);
   const origin = headers.get("origin");
   if (origin) headers.set("origin", `http://${target}`);
   try {

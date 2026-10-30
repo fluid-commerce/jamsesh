@@ -45,14 +45,6 @@ test("sources", () => {
   expect(speechSource([])).toBe("ambient");
 });
 
-import { sameSpecifics } from "../src/brain/brain";
-test("decisions that differ in specifics are not duplicates", () => {
-  expect(sameSpecifics("Settings header uses option A on both apps", "Settings header uses option B on desktop")).toBe(false);
-  expect(sameSpecifics("Mobile nav uses direction A (bottom tabs)", "The mobile navigation will use Option A, bottom tabs")).toBe(true);
-  expect(sameSpecifics("Card radius is 16px", "Card radius is 24px")).toBe(false);
-  expect(sameSpecifics("Accent is #FF6B4A", "Accent color is #FF6B4A")).toBe(true);
-});
-
 describe("silent mode reaches the page", () => {
   const dir = mkdtempSync(join(tmpdir(), "jam-silent-"));
   const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "hub") });

@@ -3,12 +3,15 @@ import { createHash } from "node:crypto";
 // stage. Every other part of the hub (brain, audio, canvas, MCP, HTTP) goes through it.
 import { parseStage } from "./stageSchema";
 import { brainNames, cleanNames, MAX_ALIASES, MAX_NAME, normName, sameName } from "./names";
+import { MAX_PER_MESSAGE, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
 import { silent } from "./brain/speech";
 import { cleanVocabulary } from "./audio/vocabulary";
 import { config, hostAddresses } from "./config";
 import { affinity } from "./brain/affinity";
 import { canonicalCwd, chatKey, isChatKey } from "./chatkey";
+import { Board, type ContextProposal, type TaskProposal } from "./board";
+import { buildBrief, hasBrief } from "./brief";
 import { newId, PALETTE, Store } from "./store";
 import type {
   EventKind,
@@ -33,6 +36,7 @@ import type {
   Share,
   Stage,
   Workstream,
+ TriageCard,
  BuildRequest, ReadyItem, ScreenInfo, ShowRequest, StageHistoryEntry, StageLock, StageTileKey, FontsState, LiveApp } from "./types";
 
 /** A message or update longer than this is stored once and others get a pointer. */
@@ -85,7 +89,10 @@ export class Session {
   private stageRevert: ReturnType<typeof setTimeout> | null = null;
   private lockSweep: ReturnType<typeof setInterval> | null = null;
   /** Hooks for other modules (set by index.ts) so the session stays dependency-free. */
-  onDirective: ((d: Directive) => void) | null = null;
+  /** A card landed on the Tasks board (4.1). */
+  onTriage: ((c: TriageCard) => void) | null = null;
+  /** The Tasks board's triage: proposals wait here until a person acts. */
+  readonly board = new Board(this);
   onUpdate: ((agent: Agent, kind: UpdateKind, text: string, ev: JamEvent) => void) | null = null;
   /** An agent wrote to the room brain (jam_message by its name). */
   onBrainMessage: ((ev: JamEvent) => void) | null = null;
@@ -109,6 +116,7 @@ export class Session {
     for (const a of store.all("agents")) if (a.status !== "offline") store.put("agents", { ...a, status: "idle", canvas: "none" }, false);
     for (const d of store.all("devices")) store.put("devices", { ...d, micOn: false, level: 0 }, false);
     // Nobody is still sharing after a restart: end the shares and take their tiles off the stage.
+    this.roomId(); // made now, not on the first state: a snapshot taken right after starting must not see its creation as a change
     this.reconcileShares();
     // The stage's timer died with the old process: a brought-up screen still returns to the board.
     this.armRevert("main", this.stage(), 1000);
@@ -275,7 +283,7 @@ export class Session {
       workstreams: this.store.all("workstreams").sort((a, b) => b.updatedAt - a.updatedAt),
       directives: this.stateDirectives(),
       artifacts: this.stateArtifacts(),
-      devservers: this.store.all("devservers"),
+      devservers: this.devserversForClients(),
       events: this.store.recentEvents({ limit: 250 }).map(publicEvent),
       utterances: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200),
       stage: this.stage(),
@@ -283,6 +291,7 @@ export class Session {
       annotations: this.annotations(),
       recordings: this.recordings(),
       facts: this.facts(),
+      triage: this.board.shown(),
       buildRequests: this.buildRequests(),
       liveApps: this.liveApps(),
       fonts: this.fonts(),
@@ -291,7 +300,7 @@ export class Session {
       showRequests: this.showRequests().filter((r) => r.status === "pending"),
       stageHistory: this.stageHistory(),
       stageTiles: this.stageTiles(),
-      digest: this.store.digest("session")?.text ?? "",
+      digest: hasBrief(this) ? this.brief().full : "",
       totals: this.totals(),
       brain: this.brainStatus,
       voiceprints: this.voiceprints(),
@@ -352,13 +361,13 @@ export class Session {
       case "artifacts":
         return { key, value: this.stateArtifacts() };
       case "devservers":
-        return { key, value: this.store.all("devservers") };
+        return { key, value: this.devserversForClients() };
       case "utterances":
         return { key, value: this.store.all("utterances").sort((a, b) => a.t0 - b.t0 || (a.id < b.id ? -1 : 1)).slice(-200) };
       case "totals":
         return { key, value: this.totals() };
       case "digest":
-        return { key, value: this.store.digest("session")?.text ?? "" };
+        return { key, value: hasBrief(this) ? this.brief().full : "" };
       case "shares":
         return { key, value: this.shares() };
       case "annotations":
@@ -367,6 +376,8 @@ export class Session {
         return { key, value: this.recordings() };
       case "facts":
         return { key, value: this.facts() };
+      case "triage":
+        return { key, value: this.board.shown() };
       case "settings":
         return { key, value: this.settings() };
       case "session":
@@ -442,6 +453,19 @@ export class Session {
     return n.length >= 3 ? only(all.filter((p) => p.name.toLowerCase().startsWith(n))) : undefined;
   }
 
+  /**
+   * The title the project already has for someone (carried in when the session started), taken when they join, and remembered as the
+   * version this session saw so it isn't saved back as a change of its own. One place, whenever a person appears.
+   */
+  adoptCarriedTitle(name: string): string | undefined {
+    const carried = this.store.setting<Record<string, { role: string; version: number }>>("carriedTitles", {})[name.trim().toLowerCase()];
+    if (!carried?.role) return undefined;
+    const bases = { ...this.store.setting<Record<string, { v: number; sig: string }>>("carryBase", {}) };
+    bases[`person:${name.trim().slice(0, 200)}`] = { v: carried.version, sig: carried.role };
+    this.store.setSetting("carryBase", bases);
+    return carried.role;
+  }
+
   upsertPerson(fields: { id?: string; name: string; role?: string; weight?: number }): Person {
     const existing = fields.id ? this.store.get("people", fields.id) : this.personByName(fields.name);
     if (existing) {
@@ -450,20 +474,23 @@ export class Session {
       const shortened = !fields.id && !!incoming && existing.name.toLowerCase().startsWith(incoming.toLowerCase());
       const name = shortened ? existing.name : incoming || existing.name;
       if (name !== existing.name) this.renameOwned(existing, name);
+      // Untitled when they come back: the project's title for them.
+      const role = fields.role ?? (existing.role || this.adoptCarriedTitle(name) || existing.role);
       return this.store.put("people", {
         ...existing,
         name,
-        role: fields.role ?? existing.role,
+        role: role,
         // A new title brings its weight with it, unless someone set the weight by hand.
-        weight: fields.weight ?? (fields.role !== undefined && fields.role !== existing.role && existing.weight === weightForRole(existing.role) ? weightForRole(fields.role) : existing.weight),
+        weight: fields.weight ?? (role !== existing.role && existing.weight === weightForRole(existing.role) ? weightForRole(role) : existing.weight),
       });
     }
     const count = this.store.all("people").length;
+    const role = fields.role ?? this.adoptCarriedTitle(fields.name) ?? "";
     const p: Person = {
       id: newId("p"),
       name: fields.name.trim(),
-      role: fields.role ?? "",
-      weight: fields.weight ?? weightForRole(fields.role ?? ""),
+      role,
+      weight: fields.weight ?? weightForRole(role),
       color: PALETTE[count % PALETTE.length],
       hasVoiceprint: false,
       voiceSamples: 0,
@@ -833,6 +860,9 @@ export class Session {
       ? { ...existing, ownerAgentId: agentId, status: "active", updatedAt: Date.now() }
       : { id: newId("w"), title: t, ownerAgentId: agentId, status: "active", brief: "", updatedAt: Date.now() };
     this.store.put("workstreams", ws);
+    // What this agent already posted without a workstream belongs to the one it just took.
+    const only = this.store.all("workstreams").filter((w) => w.ownerAgentId === agentId && w.status === "active").length === 1;
+    for (const x of this.store.all("artifacts")) if (x.agentId === agentId && !x.workstreamId && (only || groupKey(x.group) === groupKey(ws.title))) this.store.put("artifacts", { ...x, workstreamId: ws.id });
     this.onClaim?.(agentId, ws.title);
     if (!opts.quiet && agent) {
       // Work nobody asked for (no open task, no prompt from its person lately) is announced as such.
@@ -970,7 +1000,7 @@ export class Session {
       }
       const left = this.store.get("directives", id);
       if (left) this.store.patch("directives", id, { reassignOfferedAt: Object.fromEntries(Object.entries(left.reassignOfferedAt ?? {}).filter(([t]) => !from.includes(t))) });
-      return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds });
+      return this.createDirective({ text: d.text, mode: d.mode, targets: [pick.id], requestedBy: by, rationale: `Reassigned from ${from.map((t) => this.agent(t)?.name ?? "an agent").join(", ")}, which hadn't reported in a while.`, workstreamId: d.workstreamId, sourceEventIds: d.sourceEventIds, ...(d.attachments?.length ? { attachments: d.attachments } : {}) });
     });
     for (const t of from) this.wake(t);
     return made;
@@ -1005,6 +1035,7 @@ export class Session {
     requestedBy: string;
     sourceEventIds?: number[];
     workstreamId?: string | null;
+    attachments?: AttachmentRef[];
     /** Once per key: asking again for the same key returns the directive already made. */
     key?: string;
   }): Directive {
@@ -1012,6 +1043,13 @@ export class Session {
       const had = this.store.all("directives").find((x) => x.key === d.key);
       if (had) return had;
     }
+    // The files that came with the request ride along, so the agent can fetch what the room is looking at.
+    const files = new Map<string, AttachmentRef>();
+    // Given a list, that list is the delivery, exactly (a card's reviewed files); otherwise the files on the lines it came from.
+    // Either way a task carries at most one message's worth: more is refused, never cut.
+    if (d.attachments) for (const a of d.attachments) files.set(a.id, a);
+    else for (const id of d.sourceEventIds ?? []) for (const a of (this.store.event(id)?.data.attachments ?? []) as AttachmentRef[]) files.set(a.id, a);
+    if (files.size > MAX_PER_MESSAGE) throw new Error(`A task carries at most ${MAX_PER_MESSAGE} files.`);
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") {
       const workers = d.targets.filter((t) => this.agent(t)?.role !== "observer");
@@ -1041,6 +1079,7 @@ export class Session {
       result: "",
       deliveredAt: null,
       updatedAt: Date.now(),
+      ...(files.size ? { attachments: [...files.values()] } : {}),
     };
     const names = d.targets.map((t) => this.agent(t)?.name).filter(Boolean);
     // The directive and its event are one write: a failure between them leaves neither, so a retry can't double it.
@@ -1082,7 +1121,6 @@ export class Session {
           for (const a of idle) bus.send({ type: "toast", tone: "warn", text: `${a.name} hasn't picked this up yet`, detail: `${a.ownerName}: type anything to it, or tell it to wait for the room (jam_wait).` });
         }, 45_000).unref?.();
     });
-    this.onDirective?.(directive);
     return directive;
   }
 
@@ -1128,6 +1166,26 @@ export class Session {
     return `This is a comparison with another agent: ${sent ? "wait for their reply" : "send them what you found through jam_message or jam_ask, with directiveId " + d.id}. Their reply has to carry directiveId ${d.id} too. If nobody can answer, jam_ack it cancelled and say why.`;
   }
 
+  /** The one task an agent is on (the one it picked up, else the one open for it); null when there's none or more than one to choose from. */
+  workingOn(agentId: string | null | undefined): string | null {
+    if (!agentId) return null;
+    const open = this.directives().filter((d) => d.targets.includes(agentId) && d.status !== "done" && d.status !== "cancelled" && d.mode !== "answer" && d.progress[agentId] !== "done" && d.progress[agentId] !== "cancelled");
+    const picked = open.filter((d) => d.progress[agentId] === "acked");
+    const only = picked.length ? picked : open;
+    return only.length === 1 ? only[0].id : null;
+  }
+
+  /** Cancels an open directive and tells each of its agents to stop, and why. */
+  cancelDirective(d: Directive, reason: string, attachments: AttachmentRef[] = []) {
+    // The files the cancelling card showed go with the message, with where to fetch each (an agent's inbox prints only text).
+    const files = attachments.length ? `\nFiles with this: ${attachments.map((a) => a.name).join(", ")} (links follow in your inbox).` : "";
+    this.setDirective(d.id, { status: "cancelled", progress: Object.fromEntries(d.targets.map((t) => [t, "cancelled" as const])) });
+    for (const t of d.targets) {
+      this.store.addEvent({ kind: "message", authorType: "system", authorName: "JamSesh", text: `Cancelled: "${d.text.slice(0, 120)}". ${reason} Stop that work; a new directive follows if there's something else to do.${files}`, relevance: "work", data: { to: t, directiveId: d.id, ...(attachments.length ? { attachments } : {}) } });
+      this.wake(t);
+    }
+  }
+
   /** One agent's progress on a directive; the directive's status follows the slowest target. A target's done or cancelled is final. */
   setDirectiveFor(id: string, agentId: string, status: Directive["status"], result?: string) {
     const d = this.store.get("directives", id);
@@ -1160,31 +1218,47 @@ export class Session {
   }
 
   /** Unread work for an agent: directives aimed at it and messages to it. */
-  inbox(agentId: string, markDelivered = true) {
+  /**
+   * What is waiting for an agent. `markDelivered` (the default) also marks it handed over; `peek` lists only what is still new
+   * and marks nothing, for a caller that marks it (markInbox) once the reply carrying it has been sent.
+   */
+  inbox(agentId: string, markDelivered = true, peek = false) {
     const mine = (d: Directive) => d.progress?.[agentId] ?? d.status;
     const directives = this.directives()
-      .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
+      .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && !peek && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const quiet = this.skipsBroadcasts(this.agent(agentId));
-    const forMe = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
-    // Read forward from the cursor, oldest first, and filter before counting: the next 50 messages for
-    // this agent, however many for others came in between. Nothing unread is ever passed over.
+    // This agent's messages, oldest first, up to 50: chosen before the limit (newer messages for others can't hide one, and the read
+    // mark never moves past one that wasn't carried).
+    const mineOf = (e: JamEvent) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet));
     const messages: JamEvent[] = [];
-    for (let after = lastRead; messages.length < 50; ) {
+    // Lines already looked at and found not to be for this agent aren't looked at again on every poll: the scan resumes after them.
+    const scanned = this.store.setting<number>(`msgScan:${agentId}`, 0);
+    let after = Math.max(lastRead, scanned);
+    while (messages.length < 50) {
       const page = this.store.eventsAfter(after, ["message"], 200);
-      for (const e of page) if (forMe(e) && messages.length < 50) messages.push(e);
+      for (const e of page) if (mineOf(e) && messages.length < 50) messages.push(e);
+      if (page.length) after = page[page.length - 1].id;
       if (page.length < 200) break;
-      after = page[page.length - 1].id;
     }
-    if (markDelivered) {
-      for (const d of directives) {
-        this.setDirectiveFor(d.id, agentId, "delivered");
-        this.setDirective(d.id, { deliveredAt: d.deliveredAt ?? Date.now() });
-      }
-      if (messages.length) this.store.setSetting(`msgRead:${agentId}`, messages[messages.length - 1].id);
-    }
+    // Everything before the first line for this agent (or all that was seen, when there is none) is settled: not looked at again.
+    const reached = messages.length ? messages[0].id - 1 : after;
+    if (reached > scanned) this.store.setSetting(`msgScan:${agentId}`, reached);
+    if (markDelivered) this.markInbox(agentId, { directives, messages });
     return { directives, messages };
+  }
+
+  /** Marks exactly these items as handed over (read): what a reply carried, once it has been sent. Messages are marked up to the last one carried. */
+  markInbox(agentId: string, taken: { directives: Directive[]; messages: JamEvent[] }) {
+    for (const d of taken.directives) {
+      // Only while still new for this agent: another reader may have delivered it, and the agent may have finished it since.
+      const now = this.store.get("directives", d.id);
+      if (!now || (now.progress?.[agentId] ?? now.status) !== "pending") continue;
+      this.setDirectiveFor(d.id, agentId, "delivered");
+      this.setDirective(d.id, { deliveredAt: d.deliveredAt ?? Date.now() });
+    }
+    if (taken.messages.length) this.store.setSetting(`msgRead:${agentId}`, Math.max(this.store.setting<number>(`msgRead:${agentId}`, 0), taken.messages[taken.messages.length - 1].id));
   }
 
   hasInbox(agentId: string) {
@@ -1192,8 +1266,8 @@ export class Session {
     return directives.some((d) => (d.progress?.[agentId] ?? d.status) === "pending") || messages.length > 0;
   }
 
-  wait(agentId: string, timeoutMs: number): Promise<void> {
-    if (this.hasInbox(agentId)) return Promise.resolve();
+  wait(agentId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || this.hasInbox(agentId)) return Promise.resolve();
     return new Promise((resolve) => {
       const set = this.waiters.get(agentId) ?? new Set();
       this.waiters.set(agentId, set);
@@ -1206,6 +1280,8 @@ export class Session {
         timer: setTimeout(() => w.resolve(), timeoutMs),
       };
       set.add(w);
+      // The caller went away: the wait ends now, and nothing is taken for it.
+      signal?.addEventListener("abort", () => w.resolve(), { once: true });
     });
   }
 
@@ -1351,8 +1427,14 @@ export class Session {
 
   upsertArtifact(a: Partial<Artifact> & { kind: Artifact["kind"]; title: string }, opts: { announce?: boolean } = {}): Artifact {
     const existing = a.id ? this.store.get("artifacts", a.id) : undefined;
-    const { group, variant } = splitTitle(a.title);
     const agent = this.agent(a.agentId ?? existing?.agentId);
+    // Titles are tidied and grouped as an item arrives (4.5); once an item has versions its title stays put,
+    // because later builds are matched to it by that title.
+    const title = existing && ((existing.version ?? 1) > 1 || (a.version ?? 1) > 1) ? existing.title : tidyTitle(a.title);
+    const split = splitTitle(title);
+    const group = this.canonGroup(a.group ?? split.group, existing?.group);
+    const variant = split.variant;
+    const workstreamId = a.workstreamId ?? existing?.workstreamId ?? this.workstreamFor(agent, a.page ?? existing?.page, group);
     const art: Artifact = {
       id: existing?.id ?? a.id ?? newId("art"),
       ts: existing?.ts ?? Date.now(),
@@ -1361,8 +1443,8 @@ export class Session {
       stage: a.stage ?? existing?.stage ?? (a.kind === "frame" ? "mockup" : "built"),
       agentId: a.agentId ?? existing?.agentId ?? null,
       agentName: agent?.name ?? a.agentName ?? existing?.agentName ?? "",
-      title: a.title,
-      group: a.group ?? group,
+      title,
+      group,
       variant: a.variant ?? variant,
       platform: a.platform ?? existing?.platform ?? agent?.platform ?? null,
       nodeId: a.nodeId ?? existing?.nodeId ?? null,
@@ -1370,11 +1452,12 @@ export class Session {
       image: a.image ?? existing?.image ?? null,
       width: a.width ?? existing?.width ?? null,
       height: a.height ?? existing?.height ?? null,
-      workstreamId: a.workstreamId ?? existing?.workstreamId ?? null,
+      workstreamId,
       note: a.note ?? existing?.note ?? "",
       page: a.page ?? existing?.page,
       ...(a.version ?? existing?.version ? { version: a.version ?? existing?.version } : {}),
       ...(a.versions ?? existing?.versions ? { versions: a.versions ?? existing?.versions } : {}),
+      directiveId: a.directiveId ?? existing?.directiveId ?? (existing ? null : this.workingOn(agent?.id)),
     };
     this.store.put("artifacts", art);
     if (!existing && opts.announce !== false) {
@@ -1392,6 +1475,33 @@ export class Session {
     return art;
   }
 
+  /** Saves what someone said about an item right after it went up (4.2). Repeats of one line don't add up. */
+  addReaction(artifactId: string, ev: { id: number; ts: number; text: string; authorName: string }) {
+    const art = this.store.get("artifacts", artifactId);
+    if (!art || art.reactions?.some((r) => r.eventId === ev.id)) return;
+    this.store.put("artifacts", { ...art, reactions: [...(art.reactions ?? []), { by: ev.authorName, text: ev.text, at: ev.ts, eventId: ev.id }].slice(-30) });
+  }
+
+  /** The workstream an item belongs to: its agent's active one (the one named like the item's group when there are several), or the canvas page named after one. */
+  private workstreamFor(agent: Agent | undefined, page: string | undefined, group: string): string | null {
+    const streams = this.store.all("workstreams");
+    if (agent) {
+      const mine = streams.filter((w) => w.ownerAgentId === agent.id && w.status === "active").sort((x, y) => y.updatedAt - x.updatedAt);
+      return (mine.find((w) => groupKey(w.title) === groupKey(group)) ?? mine[0])?.id ?? null;
+    }
+    return page ? (streams.find((w) => groupKey(w.title) === groupKey(page))?.id ?? null) : null;
+  }
+
+  /** One spelling per group: "Mist Mobile rep mode" joins an existing "Mist Mobile rep"; a group named like a workstream takes its title. */
+  private canonGroup(group: string, current?: string): string {
+    const g = group.replace(/\s+/g, " ").trim();
+    if (current && groupKey(current) === groupKey(g)) return current;
+    const key = groupKey(g);
+    if (!key) return g;
+    const seen = this.artifacts().find((x) => x.group && groupKey(x.group) === key);
+    return seen?.group ?? this.store.all("workstreams").find((w) => groupKey(w.title) === key)?.title ?? g;
+  }
+
   /**
    * A new build of a screen that's already in the room becomes the next version of that item (3.5): the
    * newest image shows, the earlier ones stay in `versions`, and anything pointing at the id (the screen,
@@ -1406,8 +1516,8 @@ export class Session {
       if (!prior) throw new Error(`No artifact ${replaces} to replace. Use jam_artifacts for ids.`);
       if (prior.agentId !== (a.agentId ?? null)) throw new Error("That item belongs to someone else's agent; post yours as a new item.");
     } else if (fold && (a.kind === "screenshot" || a.kind === "html")) {
-      const key = buildKey(a.title);
-      prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(x.title) === key);
+      const key = buildKey(tidyTitle(a.title));
+      prior = this.artifacts().find((x) => x.kind === a.kind && x.agentId === (a.agentId ?? null) && x.stage === (a.stage ?? "built") && buildKey(tidyTitle(x.title)) === key);
     }
     if (!prior) return this.upsertArtifact(a);
     const v = prior.version ?? 1;
@@ -1725,10 +1835,34 @@ export class Session {
 
   // ---- curated context ----
 
+  /** The session brief: its sections in full, and the short excerpt a joining agent gets. */
+  brief() {
+    return buildBrief(this);
+  }
+
   /** Active facts first (newest first), then the latest resolved or superseded ones. */
   facts(): Fact[] {
     const all = this.store.all("facts").sort((a, b) => b.updatedAt - a.updatedAt);
     return [...all.filter((f) => f.status === "active"), ...all.filter((f) => f.status !== "active").slice(0, 30)];
+  }
+
+  /** An overheard task or an agent's task waits on the Tasks board (4.1). Null when it was empty or is already waiting. */
+  proposeTask(p: TaskProposal) {
+    return this.board.proposeTask(p);
+  }
+
+  /** Context nobody has approved (overheard, reported by an agent, from a document) waits on the Tasks board. Null when it's already known. */
+  proposeContext(p: ContextProposal) {
+    return this.board.proposeContext(p);
+  }
+
+  /** What agents shipped, newest first: their routine notices, which never become cards or facts. */
+  changelog(limit = 50): JamEvent[] {
+    return this.store
+      .recentEvents({ kinds: ["update"], limit: 600 })
+      .filter((e) => e.authorType === "agent" && ["shipped", "done"].includes(String(e.data?.updateKind)))
+      .slice(-limit)
+      .reverse();
   }
 
   // ---- saved layouts ----
@@ -1751,6 +1885,17 @@ export class Session {
   }
 
   // ---- dev servers ----
+
+  /** The hub's HTTPS dev subdomain for a dev server's port, when it serves one (set by the hub from the remote-access state). */
+  devPublicBase: (port: number) => string | null = () => null;
+
+  /** Dev servers as clients see them: with where an HTTPS page reaches each. */
+  devserversForClients(): DevServer[] {
+    return this.store.all("devservers").map((d) => {
+      const base = this.devPublicBase(d.hostPort);
+      return base ? { ...d, publicUrl: base } : d;
+    });
+  }
 
   devservers(): DevServer[] {
     return this.store.all("devservers");
@@ -2744,6 +2889,24 @@ export function buildKey(title: string): string {
     .replace(/\s+(built|rebuilt|v\d+|version \d+)\s*$/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Words that only restate what an item is, so "Mist Mobile rep" and "Mist Mobile rep mode" are one group. */
+const GROUP_FILLER = /\s+(mode|page|pages|screen|screens|flow|view|views)$/;
+
+/** A group compared without case, punctuation or filler words. */
+export function groupKey(group: string): string {
+  return group.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim().replace(GROUP_FILLER, "");
+}
+
+/**
+ * Titles follow "<Workstream> / <Letter>: <idea>". On arrival: spacing is normalised, the letter is
+ * capitalised, and a trailing "(built)" is dropped (the stage already says it). Anything else is left alone.
+ */
+export function tidyTitle(title: string): string {
+  const t = title.replace(/\s+/g, " ").trim().replace(/\s*[[(]\s*(built|rebuilt)\s*[\])]\s*$/i, "");
+  const m = t.match(/^(.*?\S)\s*\/\s*([A-Za-z0-9]{1,2})\s*[:\-–—]\s*(.+)$/);
+  return m && !/[/:]$/.test(m[1]) && !m[1].includes("://") ? `${m[1]} / ${m[2].toUpperCase()}: ${m[3]}` : t;
 }
 
 /** "Mobile nav / B: bottom tabs" → group "Mobile nav", variant "B". */

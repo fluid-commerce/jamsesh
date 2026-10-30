@@ -16,12 +16,15 @@ import { LiveApps } from "./liveapps";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
 import { ProjectKeeper } from "./projectkeeper";
+import { MAX_IMAGE_BYTES } from "./limits";
+import { Attachments, pdfText, type AttachmentRef } from "./attachments";
+import { seedFromProject } from "./carryover";
 import { Auth } from "./auth";
 import { KeepAwake } from "./awake";
 import { Network } from "./net";
 import { Session } from "./session";
 import { newId, Store } from "./store";
-import type { Agent, Annotation, Artifact, BuildRequest, NotePin, Platform, RecordMark, RecordNote, ShowRequest, Utterance } from "./types";
+import type { Agent, Annotation, Artifact, BuildRequest, JamEvent, NotePin, Platform, RecordMark, RecordNote, ShowRequest, Utterance } from "./types";
 import { alignNotes, describeNote, ownerOf } from "./record";
 import { showRequestSpeech, speak } from "./brain/speech";
 import { bus } from "./bus";
@@ -111,6 +114,8 @@ export class Hub {
   autosave: Autosave;
   /** Records the project this session belongs to (people, last used, thumbnail); idle without a project. */
   keeper: ProjectKeeper;
+  /** Images and files added to messages (SPEC 12.6). */
+  attachments: Attachments;
   auth: Auth;
   /** The fonts canvases draw with this session: open ones fetched, others borrowed. Memory only. */
   fonts: FontService;
@@ -161,10 +166,17 @@ export class Hub {
     this.session.onShowRequest = (r) => this.onShowRequest(r);
     // Simulator and host screenshots become artifacts the room and the brain can see.
     this.host.onImage = (path, title) => {
-      void Bun.file(path)
-        .bytes()
-        .then((bytes) => this.saveUpload(null, bytes, { title, stage: "built", note: "Captured on the host" }))
-        .catch((e) => console.warn(`[host] couldn't keep the screenshot: ${e?.message ?? e}`));
+      // Counted until the artifact is recorded, so a capture accepted before shutdown is in the final snapshot.
+      void this.track(
+        "a screenshot being kept",
+        Bun.file(path)
+          .bytes()
+          .then((bytes) => this.saveUpload(null, bytes, { title, stage: "built", note: "Captured on the host" }))
+          .catch((e) => {
+            this.workLost = true;
+            console.warn(`[host] couldn't keep the screenshot: ${e?.message ?? e}`);
+          }),
+      );
     };
     // A finished preview build lands in the feed for the room and the brain's context, but isn't
     // room speech: running it through hear() would let the rules router turn it into a directive.
@@ -183,6 +195,7 @@ export class Hub {
     // A person's rename carries to their agents' default names, and so to their cursors.
     this.session.onAgentRenamed = (a) => void this.canvas.renameAgent(a.id, a.name);
     this.devproxy = new DevProxy(this.session);
+    this.devproxy.links = this.auth.devLinks;
     this.mcp = new McpEndpoint(this);
     // A disconnected device's agents stop hearing the room now, not when their open wait ends: every
     // wait of an agent on that machine wakes and checks its credential before handing anything over.
@@ -196,6 +209,19 @@ export class Hub {
           this.session.cancelAsks(a.id);
         }
     });
+    // Where an HTTPS page reaches a dev server: its own subdomain of the hub's domain, only while that domain is served (devTarget in http.ts).
+    this.session.devPublicBase = (port) => {
+      const st = this.net.status();
+      const domain = st.domain?.toLowerCase().replace(/^https?:\/\//, "");
+      if (!(st.enabled && domain && st.cert.state === "ok")) return null;
+      // The external port the router forwards, when it isn't 443 (the room's own address names it).
+      let ext = "";
+      try {
+        const p = st.publicUrl ? new URL(st.publicUrl).port : "";
+        if (p && p !== "443") ext = `:${p}`;
+      } catch {}
+      return `https://dev-${port}.${domain}${ext}`;
+    };
     this.session.extraAddresses = () => {
       const st = this.net.status();
       return st.enabled && st.publicUrl && st.cert.state === "ok" ? [{ label: "Anywhere", url: st.publicUrl, reachable: st.reachable }] : [];
@@ -205,6 +231,10 @@ export class Hub {
     this.brain.autosave = this.autosave;
     this.keeper = new ProjectKeeper(this, opts.dataDir ? undefined : config.home, opts.dataDir ? null : config.project);
     this.brain.pages = () => this.canvas.pageCache;
+    this.attachments = new Attachments(join(dir, "attachments"));
+    this.brain.attachments = this.attachments;
+    // A new session of a project starts from what the last one settled (SPEC 12.7).
+    if (!opts.dataDir && config.project) seedFromProject(config.home, config.project.slug, config.project.sessionId, this.session);
     this.uploadsDir = join(this.canvas.rendersDir, "uploads");
     mkdirSync(this.uploadsDir, { recursive: true });
 
@@ -216,7 +246,7 @@ export class Hub {
       return { ...voiceprintStatus(), enrolled: this.audio.voiceprints.enrolled, lines: st.lines, byVoice: st.voice, neverUsed: heard > 0 && st.lines >= 12 && st.voice === 0 };
     };
     this.canvas.onRendered = (ids) => this.brain.artifactsLanded(ids.map((id) => this.session.store.get("artifacts", id)!).filter(Boolean));
-    this.session.onUpdate = (agent, kind, text, ev) => this.brain.agentUpdated(agent, kind, text, ev.data);
+    this.session.onUpdate = (agent, kind, text, ev) => this.brain.agentUpdated(agent, kind, text, ev);
     this.session.onBrainMessage = (ev) => this.brain.agentMessage(ev);
     this.session.onClaim = (agentId, title) => void this.canvas.focusAgentPage(agentId, title).catch(() => {});
     this.brain.relabel = (eventId, name) => {
@@ -243,6 +273,14 @@ export class Hub {
     this.keeper.start();
     this.intervals.push(setInterval(() => this.devproxy.refresh(), 30_000), setInterval(() => this.session.tick(), 60_000));
     this.intervals[1]?.unref?.();
+    // Connected clients learn where an HTTPS page reaches the dev servers when remote access turns on, off, or changes.
+    let devPublic = String(this.session.devPublicBase(0));
+    this.intervals.push(
+      setInterval(() => {
+        const now = String(this.session.devPublicBase(0));
+        if (now !== devPublic) (devPublic = now), bus.changed("devservers");
+      }, 3000),
+    );
     await Promise.all(tasks);
     // Without an engine the room is deaf and nothing says so; say so on the first screen.
     if (this.opts.whisper !== false) {
@@ -252,7 +290,7 @@ export class Hub {
   }
 
   /** How long each step of `shutdown` may take. The Mac app waits longer than their sum (host.rs `SHUTDOWN_WAIT`) before killing. */
-  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000 };
+  static SHUTDOWN_MS = { snapshot: 8000, thumbnail: 4000, network: 3000, work: 10000 };
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
@@ -260,13 +298,24 @@ export class Hub {
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
-    const saved = await step(this.autosave.save("end of session", { onlyIfChanged: true }), Hub.SHUTDOWN_MS.snapshot);
+    // Intake stops first; then accepted work still running (requests to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
+    this.closing = true;
+    // Open waits end now, so none wakes and writes after the final save.
+    this.mcp.endWaits();
+    // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
+    for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
+    this.brain.quiesce();
+    const unfinished = await this.drain(Hub.SHUTDOWN_MS.work);
+    if (unfinished.length) console.error(`Shutdown: still working on ${unfinished.join(", ")}; the final save may miss it.`);
+    const docs = !unfinished.length && !this.workLost;
+    // A snapshot whose canvas copy failed is not a final save.
+    const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
     const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
     // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
     const reaped = await this.stop();
     if (!reaped) console.warn("a helper process was still running at shutdown");
-    return saved && kept && closed && reaped;
+    return docs && saved && kept && closed && reaped;
   }
 
   private offRevoked: () => void;
@@ -282,6 +331,8 @@ export class Hub {
     this.canvas.halt();
     this.devproxy.stop();
     this.fonts.clear();
+    // A recording still open when the hub stops hands what it held back to the room before its fallback timer goes.
+    for (const id of [...this.promptMode.keys()]) this.releasePrompt(id);
     for (const w of this.promptMode.values()) clearTimeout(w.timer);
     for (const r of this.recs.values()) (clearInterval(r.keep), clearTimeout(r.cap));
     clearInterval(this.recSweep);
@@ -292,6 +343,49 @@ export class Hub {
   }
 
   private intervals: ReturnType<typeof setInterval>[] = [];
+  /** Every unit of accepted work still running (requests to the brain, a prompt window, a document card), by what it is. */
+  private inflight = new Map<object, string>();
+
+  /**
+   * Registers a unit of accepted work, and returns what releases it. Shutdown waits for every unreleased one. This is the one place
+   * work is counted from the transport (every HTTP request, every MCP tool call) and the registry the rest of the hub uses.
+   */
+  admit(what: string): () => void {
+    const key = {};
+    this.inflight.set(key, what);
+    return () => void this.inflight.delete(key);
+  }
+
+  /** Registers work that is already a promise: counted until it settles. Failures stay the caller's to report. */
+  track<T>(what: string, work: Promise<T>): Promise<T> {
+    const release = this.admit(what);
+    work.then(release, release);
+    return work;
+  }
+
+  /** What is still being worked on: tracked work, and room speech still being transcribed. */
+  working(): string[] {
+    const names = [...new Set(this.inflight.values())];
+    if (this.audio.pending > 0) names.push("transcription of speech");
+    return [...names, ...this.brain.busy()];
+  }
+
+  /** Waits until nothing is working or the time is up; the names of whatever still is. */
+  private async drain(ms: number): Promise<string[]> {
+    const until = Date.now() + ms;
+    for (let names = this.working(); names.length; names = this.working()) {
+      if (Date.now() >= until) return names;
+      // Lines waiting out the brain's debounce start their pass now; then poll on a timer, so the settle and transcription timers get to run.
+      this.brain.settle();
+      await Bun.sleep(50);
+    }
+    return [];
+  }
+
+  /** Accepted work that couldn't be finished (a document card, a kept screenshot): the final save is reported incomplete. */
+  private workLost = false;
+  /** Set when shutdown begins: no new message is taken in, so nothing arrives after the last document card is waited for. */
+  closing = false;
 
   /** Devices recording a prompt for the brain right now, with when they started. */
   /** Recording laptops: when they started, and (once Stop is pressed) when they stopped. */
@@ -387,21 +481,56 @@ export class Hub {
     s.store.updateEvent(u.eventId, { text: u.text, authorId: u.personId, authorName: u.speakerName, data: { confidence: u.confidence, method: u.method } });
   }
 
-  /** Typed into the room (the client view's box, or the host's). Treated like speech; direct goes straight to the brain. */
-  typed(personId: string | null, text: string, direct = false) {
+  /**
+   * Typed into the room (the client view's box, or the host's). Treated like speech; direct goes
+   * straight to the brain. Attached files ride on the event. A document sent with no words isn't a
+   * request: it becomes proposed context instead of reaching the brain.
+   */
+  typed(personId: string | null, text: string, direct = false, attached: AttachmentRef[] = []) {
+    if (this.closing) throw new Error("The session is saving and closing.");
     const p = this.session.person(personId);
+    const words = text.trim();
+    const names = attached.map((a) => a.name).join(", ");
+    const document = !words && attached.some((a) => a.kind !== "image");
     const ev = this.session.store.addEvent({
       kind: "speech",
       authorType: "person",
       authorId: p?.id ?? null,
       authorName: p?.name ?? "Someone",
-      text: text.trim(),
+      text: words || (attached.length ? `Shared ${names}` : ""),
       relevance: direct ? "work" : null,
-      data: { typed: true, direct, source: "typed" },
+      data: { typed: true, direct, source: "typed", ...(attached.length ? { attachments: attached, ...(words ? {} : { noWords: true }) } : {}), ...(document ? { proposedContext: true } : {}) },
     });
-    if (direct) this.brain.direct(ev);
-    else this.brain.hear(ev);
+    if (document) {
+      const pending = this.proposeDocument(ev, attached).catch((e) => {
+        this.workLost = true;
+        console.error("document card:", e instanceof Error ? e.message : e);
+      });
+      this.track("a document card", pending);
+    }
+    else if (direct) this.brain.direct(ev);
+    // Pictures with no words have nothing to triage; the feed shows them.
+    else if (words) this.brain.hear(ev);
     return ev;
+  }
+
+  /**
+   * A document sent with no request becomes a context card with what it says: text files' text, PDFs' text
+   * (pdfText). A file with nothing readable gets "Couldn't read this PDF; write what to keep.", which a person has to replace before the card is added.
+   */
+  async proposeDocument(ev: JamEvent, attached: AttachmentRef[]) {
+    const texts: string[] = [this.attachments.brainInput(attached.filter((a) => a.kind === "text")).text];
+    const unread = attached.filter((a) => a.kind === "text" && !this.attachments.bytes(a.id)).map((a) => a.name);
+    for (const a of attached.filter((x) => x.kind === "pdf")) {
+      const f = this.attachments.file(a.id);
+      const t = f ? await pdfText(f.path, 1200) : "";
+      if (t) texts.push(attached.length > 1 ? `${a.name}: ${t}` : t);
+      else unread.push(a.name);
+    }
+    const read = texts.filter(Boolean).join("\n\n").replace(/^### .+\n/gm, "").trim().slice(0, 600);
+    // Said on the card, so the person who reviews it knows what the text leaves out.
+    const left = unread.length && read ? `\n(Couldn't read: ${unread.join(", ")})` : "";
+    return this.session.proposeContext({ text: `${read || `Couldn't read ${attached.length > 1 ? "these files" : attached[0]?.kind === "pdf" ? "this PDF" : "this file"}; write what to keep.`}${left}`, needsWording: !read, kind: "fact", by: ev.authorName, origin: "document", sourceEventIds: [ev.id], attachments: attached });
   }
 
   /** What this device heard in a closed recording window, once the last words are transcribed (about 7 s at most). */
@@ -503,6 +632,7 @@ export class Hub {
    * already shown the device is its window's.
    */
   recordStart(deviceId: string, personId: string | null, t0 = this.clock(), screen?: string | null, token?: string): { ok: true; id: string } | { ok: false; reason: string; status: number } {
+    if (this.closing) return { ok: false, reason: "The session is saving and closing.", status: 503 };
     const s = this.session;
     const person = s.person(personId);
     if (token && s.store.tokenCancelled(deviceId, token)) return { ok: false, reason: "That recording was cancelled.", status: 409 };
@@ -750,6 +880,7 @@ export class Hub {
    * and frames go to that agent as one directive. Notes on nothing an agent owns go to the room brain.
    */
   recordSend(w: { caller: string; personId: string | null; recordingId: string; notes: RecordNote[] }): Promise<RecordSendResult> {
+    if (this.closing) return Promise.resolve({ ok: false, reason: "The session is saving and closing.", status: 503 });
     const person = this.session.person(w.personId);
     if (!person) return Promise.resolve({ ok: false, reason: "Pick who you are before sending notes.", status: 403 });
     // Only a recording this hub stopped, sent from the window it was stopped in, by the person it was handed to.
@@ -923,7 +1054,7 @@ export class Hub {
    * version of an earlier one by title (for callers that can't prove which agent they are).
    */
   async saveUpload(agent: Agent | null, bytes: Uint8Array, meta: { title: string; stage: "built" | "mockup"; note?: string; platform?: Platform; replaces?: string; fold?: boolean }): Promise<Artifact> {
-    if (bytes.length > 12 * 1024 * 1024) throw new BadImage("Images must be under 12 MB.");
+    if (bytes.length > MAX_IMAGE_BYTES) throw new BadImage(`Images must be under ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`);
     const img = checkImage(bytes);
     if (typeof img === "string") throw new BadImage(img);
     if (meta.replaces) {

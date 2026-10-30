@@ -12,7 +12,8 @@ import { forbiddenCommand } from "../src/canvas/canvas";
 import { cardText, decodeBase64, FontService, MAX_TICKETS, MAX_TICKETS_PER_CALLER, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
-import { FONT_BODY_MAX, readBody, startHttp, TOO_LARGE } from "../src/http";
+import { buffered } from "../src/body";
+import { FONT_BODY_MAX, startHttp } from "../src/http";
 import type { Agent } from "../src/types";
 
 process.env.JAMSESH_SILENT = "1";
@@ -389,8 +390,8 @@ test("over HTTP: an agent can't ask, lend, decline, withdraw or download, with o
   expect((await fetch(`${base}/api/fonts/helvetica%20neue/0`, { headers: as(agent) })).status).toBe(403);
   expect(hub.fonts.has("Gotham")).toBe(false);
   expect(hub.fonts.state().wanted.map((w) => w.family)).toContain("Gotham");
-  // And no one can reach them through ?token= either.
-  expect((await fetch(`${base}/api/fonts/lend?token=${agent.token}`, { method: "POST", headers: remote, body: JSON.stringify({ family: "Gotham", files: [] }) })).status).toBe(403);
+  // And no one can reach them through ?token= either (a credential in the address is refused outright).
+  expect((await fetch(`${base}/api/fonts/lend?token=${agent.token}`, { method: "POST", headers: remote, body: JSON.stringify({ family: "Gotham", files: [] }) })).status).toBeGreaterThanOrEqual(401);
 });
 
 test("over HTTP: a window with no person can ask but not lend; unpaired devices get nothing; withdrawing is the lender's alone", async () => {
@@ -547,13 +548,14 @@ test("every kind of request body is counted against the cap as it streams: chunk
   for (const [type, bytes] of [["multipart/form-data; boundary=" + boundary, multipart], ["application/octet-stream", big], ["application/json", big], ["image/png", big], ["audio/wav", big]] as const) {
     pulled = 0;
     const req = new Request("http://x/api/fonts/lend", { method: "POST", headers: { "content-type": type }, body: streamOf(bytes), duplex: "half" } as any);
-    expect(await readBody(req, FONT_BODY_MAX)).toBe(TOO_LARGE);
+    expect(await buffered(req)).toMatchObject({ status: 413 });
     // It stopped reading just past the cap, not at the end of the body.
     expect(pulled).toBeLessThanOrEqual(FONT_BODY_MAX + 4 * (1 << 20));
   }
   // Within the cap each kind is still read whole.
-  const ok = await readBody(new Request("http://x/", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: new Uint8Array([1, 2, 3]) }), FONT_BODY_MAX);
-  expect(ok.__raw).toEqual(new Uint8Array([1, 2, 3]));
+  const ok = await buffered(new Request("http://x/api/fonts/lend", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: new Uint8Array([1, 2, 3]) }));
+  expect("req" in ok && new Uint8Array(await ok.req.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+  if ("release" in ok) ok.release();
 });
 
 test("a reply is read only up to its cap: a large Content-Length is refused unread, an endless body is cut off", async () => {

@@ -4,6 +4,7 @@ import { readPref } from "./identity";
 import { useSilent } from "./sound";
 import { ago, api, hub, useHub, type Agent, type Artifact, type Directive, type FontInfo, type HubState, type JamEvent, type Person, type Share } from "./hub";
 import { useArtSrc } from "./frames";
+import { FeedAttachments } from "./attach";
 import { isOpaqueFrame, pointerRecording } from "./pointer";
 import { registerDriveTarget } from "./driving";
 import { canvasDriver, frameDriver, keepFrameCurrent } from "./drivetiles";
@@ -106,8 +107,12 @@ export function localize(url: string) {
       u.hostname = "localhost";
       return u.toString();
     }
-    // On the public HTTPS address, dev servers live on their own subdomain: dev-<port>.<host>.
-    if (location.protocol === "https:" && /^(\d+\.){3}\d+$/.test(u.hostname) && u.port) return `https://dev-${u.port}.${location.hostname}${u.pathname}${u.search}`;
+    // On an HTTPS page a dev server is reached on the subdomain the hub says it serves for it (its `publicUrl`); a build the hub doesn't serve
+    // that way (a tunnel, no remote access) is left as it is, and the tile says it can't be shown.
+    if (location.protocol === "https:") {
+      const d = hub.snap.state?.devservers.find((x) => String(x.hostPort) === u.port && url.startsWith(x.url.replace(/\/$/, "")));
+      if (d) return d.publicUrl ? `${d.publicUrl}${u.pathname}${u.search}${u.hash}` : url;
+    }
     if (/^(\d+\.){3}\d+$/.test(u.hostname) && u.hostname !== location.hostname && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
       u.hostname = location.hostname;
       return u.toString();
@@ -227,7 +232,7 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
           <path d="m9.5 12.5 5 5m0-5-5 5" />
         </svg>
         <div className="fb-host" title={url}>{hostName(url)}</div>
-        <div className="fb-line">Can't be shown inside JamSesh.</div>
+        <div className="fb-line">This site can't be shown here.</div>
         <button className="btn small fb-open" onClick={open} disabled={phase === "busy"}>
           {phase === "busy" ? "Opening…" : phase === "done" ? "Opened. Open again" : "Open on the host"}
         </button>
@@ -243,6 +248,11 @@ function BlockedFrame({ url, onTry }: { url: string; onTry?: () => void }) {
 }
 
 /** `fill`: draw the page at the box's own size instead of scaling a fixed-size page to it (an expanded desktop build gets the real viewport). */
+/** How a frame starts for the address it resolves to: blocked at once for a plain-HTTP build on an HTTPS page, or a host known not to be framed; otherwise loading. */
+export function frameStart(mixed: boolean, detectBlocked: boolean, raw: string): "loading" | "blocked" {
+  return mixed || (detectBlocked && NO_FRAME.test(hostName(raw))) ? "blocked" : "loading";
+}
+
 type ScaledFrameProps = { src: string; width?: number; height?: number; title: string; pin?: SlotTarget; detectBlocked?: boolean; fill?: boolean; bare?: boolean };
 
 /** A live page in a frame. A silent room doesn't load one: a page can play sound on its own, and nothing in a frame can be muted from here. */
@@ -268,7 +278,9 @@ function LiveFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlo
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLIFrameElement>(null);
   const pinbox = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => (detectBlocked && NO_FRAME.test(hostName(raw)) ? "blocked" : "loading"));
+  // An HTTPS page can't frame a plain-HTTP build (mixed content blocks it): say so at once rather than leaving a blank tile.
+  const mixed = typeof location !== "undefined" && location.protocol === "https:" && src.startsWith("http:");
+  const [state, setState] = useState<"loading" | "ok" | "blocked">(() => frameStart(mixed, !!detectBlocked, raw));
   const [forced, setForced] = useState(false);
   const blocked = state === "blocked" && !forced;
   // A frame that never reports loading is as good as blocked; a load event on a page we can't
@@ -279,18 +291,11 @@ function LiveFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlo
     return () => clearTimeout(id);
   }, [detectBlocked, blocked, src]);
   useEffect(() => {
-    if (detectBlocked) setState(NO_FRAME.test(hostName(raw)) ? "blocked" : "loading");
+    // Whenever the address this page resolves to changes (remote access came online, or went away), the tile starts over.
+    setState(frameStart(mixed, !!detectBlocked, raw));
     setForced(false);
-    if (!detectBlocked) return;
-    // The host reads the page's headers, which a browser can't see from inside the frame.
-    let live = true;
-    api<{ blocked: boolean }>(`/frame-check?url=${encodeURIComponent(raw)}`)
-      .then((r) => live && r.blocked && setState("blocked"))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [raw, detectBlocked]);
+    // The hub never fetches a shared page: a site that refuses framing is found by the frame not loading (the timeout above).
+  }, [raw, detectBlocked, src, mixed]);
   // A driver's clicks, scrolls and typing reach the page through the dev proxy's script (SPEC 10.6).
   useEffect(() => {
     const f = frame.current;
@@ -360,6 +365,24 @@ function LiveFrame({ src: raw, width = 1280, height = 800, title, pin, detectBlo
   );
 }
 
+/** What people said about a piece of work right after it went up ("Felipe: this is cool"), kept quiet: the latest, and how many more. */
+export function Reactions({ art, all }: { art: Artifact; all?: boolean }) {
+  const list = art.reactions ?? [];
+  if (!list.length) return null;
+  const shown = all ? list.slice(-5) : list.slice(-1);
+  return (
+    <div className={`reactions ${all ? "all" : ""}`} aria-label="What people said about it">
+      {shown.map((r, i) => (
+        <span key={`${r.eventId}-${i}`} className="reaction" title={`${r.by}: ${r.text}`}>
+          <b>{r.by}</b>: {r.text}
+          <time className="mono">{ago(r.at)}</time>
+        </span>
+      ))}
+      {!all && list.length > 1 && <span className="reaction-more">+{list.length - 1}</span>}
+    </div>
+  );
+}
+
 export function ArtifactTile({
   art,
   state,
@@ -425,6 +448,7 @@ export function ArtifactTile({
           <ExpandButton />
         </span>
       </div>
+      <Reactions art={art} />
     </div>
   );
 }
@@ -747,7 +771,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
           </span>
         )}
         {e.kind === "message" && <span className="tag" style={{ color: "var(--dim)", marginRight: 8 }}>to {e.data.toName}</span>}
-        {e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
+        {e.data.noWords ? null : e.kind === "update" || e.kind === "message" || e.kind === "artifact" ? stripMd(e.text) : e.text}
         {e.relevance === "banter" && <span className="tag" style={{ color: "var(--faint)", marginLeft: 8 }}>banter</span>}
         {(e.kind === "speech" || e.kind === "prompt") && <SourceTag source={e.data.source} brainName={state.settings.brainName} />}
         {e.kind === "brain" && e.data.shownNotSpoken && (
@@ -755,6 +779,7 @@ function FeedLine({ e, state, editable, condensed, onSpeaker }: { e: JamEvent; s
             Shown, not spoken
           </span>
         )}
+        {e.kind === "speech" && Array.isArray(e.data.attachments) && <FeedAttachments list={e.data.attachments} />}
         {e.kind === "brain" && e.data.spoken && (
           <span title="Said out loud" aria-label="Said out loud" style={{ marginLeft: 8, color: "var(--dim)", verticalAlign: "-2px", display: "inline-flex" }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14" /></svg>
@@ -1459,3 +1484,21 @@ export function Section({ title, help, children, right }: { title: string; help?
 
 export type { Person };
 void hub;
+
+/**
+ * Opens a dev server in a new tab, through a one-time link from the hub (it never puts a device token in an address). The link request is
+ * never queued: if it can't be made, the tab is closed and the person is told.
+ */
+export async function openDevServer(url: string) {
+  const tab = window.open("about:blank", "_blank");
+  try {
+    const r = await api<{ url?: string }>("/devserver/link", { url }, "POST", { queue: false });
+    // The hub names the dev server by the host's LAN address; this page reaches it the way its tiles do (localize), the one-time code kept.
+    const target = localize(new URL(String(r?.url)).toString());
+    if (tab) tab.location.href = target;
+    else window.open(target, "_blank");
+  } catch (e) {
+    tab?.close();
+    window.alert(`Couldn't open the dev server: ${e instanceof Error ? e.message : "no link came back"}`);
+  }
+}

@@ -11,6 +11,7 @@ import { AnnotateToggle } from "../shared/annotate";
 import { InviteButton } from "../client/Invite";
 import { MicNotice } from "../shared/MicNotice";
 import { isTypingTarget, plain, useReclaimFocus } from "../shared/keys";
+import { TasksView, triageCount } from "../shared/Tasks";
 
 const MODE_LABEL: Record<string, string> = { spotlight: "Spotlight", compare: "Compare", parity: "Parity", custom: "Custom view", layout: "Layout", join: "How to join" };
 import { GearIcon, MicIcon, MicOffIcon } from "../shared/icons";
@@ -28,6 +29,8 @@ export function HostView() {
   const { state, connected, thinking, speaking, levels } = useHub();
   const [settings, setSettings] = useState(false);
   const [invite, setInvite] = useState(false);
+  // Tasks swaps the big screen's place for the board; it is the host's own view and changes nothing for the room.
+  const [tasks, setTasks] = useState(false);
   const [micStatus, setMicStatus] = useState<MicStatus>(mic.status);
   const now = useNow(1000);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -95,17 +98,21 @@ export function HostView() {
   useReclaimFocus();
   const invOpen = useRef(false);
   invOpen.current = invite;
+  const tasksOn = useRef(false);
+  tasksOn.current = tasks;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isTypingTarget(e) || !plain(e)) return;
       const k = e.key.toLowerCase();
       if (k === "escape") {
         if (invOpen.current) return setInvite(false);
+        if (tasksOn.current) return setTasks(false);
         if (!settings) stageAction("/stage", { mode: "board", by: "Host" });
         return;
       }
+      if (e.key === "4") return setTasks((v) => !v);
       const m = MODES.find((x) => x.key === e.key);
-      if (m) return void stageAction("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" });
+      if (m) return void (setTasks(false), stageAction("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" }));
       if (k === "j") return void stageAction("/stage", { mode: stageMode.current === "join" ? "board" : "join", by: "Host" });
       if (k === "f") return void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
       if (e.key === ",") return setSettings(true);
@@ -144,18 +151,28 @@ export function HostView() {
 
         <nav className="header-center row" style={{ gap: 4, background: "var(--panel)", border: "1px solid var(--line)", padding: 4, borderRadius: 999, marginInline: "auto" }}>
           {MODES.map((m) => {
-            const active = state.stage.mode === m.mode || (m.mode === "board" && ["board", "welcome"].includes(state.stage.mode));
+            const active = !tasks && (state.stage.mode === m.mode || (m.mode === "board" && ["board", "welcome"].includes(state.stage.mode)));
             return (
               <button
                 key={m.mode}
                 className="btn small"
                 style={{ background: active ? "var(--panel-3)" : "transparent", borderColor: "transparent", color: active ? "var(--text)" : "var(--muted)", height: 32, padding: "0 16px", fontSize: 14 }}
-                onClick={() => stageAction("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" })}
+                onClick={() => (setTasks(false), stageAction("/stage", { mode: m.mode, pinned: m.mode !== "board", by: "Host" }))}
               >
                 {m.label}
               </button>
             );
           })}
+          <button
+            className="btn small"
+            style={{ background: tasks ? "var(--panel-3)" : "transparent", borderColor: "transparent", color: tasks ? "var(--text)" : "var(--muted)", height: 32, padding: "0 16px", fontSize: 14 }}
+            aria-pressed={tasks}
+            title="What's waiting, being worked on and done (4)"
+            onClick={() => setTasks((v) => !v)}
+          >
+            Tasks
+            {triageCount(state) > 0 && <span className="m-tab-count" style={{ marginLeft: 8 }}>{triageCount(state)}</span>}
+          </button>
           {!["board", "welcome"].includes(state.stage.mode) && (
             <button
               className="btn small"
@@ -208,7 +225,7 @@ export function HostView() {
       <MicNotice status={micStatus} onRetry={toggleMic} />
       <main style={{ flex: 1, minHeight: 0, display: "grid", gridTemplateColumns: "minmax(0, 1fr) clamp(320px, 22vw, 440px)", gap: 18 }}>
         <section style={{ minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <Stage state={state} interactive asPerson={false} drive="replay" />
+          {tasks ? <TasksView state={state} big /> : <Stage state={state} interactive asPerson={false} drive="replay" />}
         </section>
         <aside style={{ minHeight: 0, display: "flex", flexDirection: "column", gap: 14 }}>
           <div className="tile" style={{ flex: 1, padding: "14px 12px 10px", animation: "none" }}>

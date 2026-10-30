@@ -3,6 +3,7 @@
 // like an authenticator app. Pairing hands the device a long random token; only its
 // hash is kept. Tokens are revocable from Settings. Guessing is rate-limited per
 // address and across everyone, and the code is only good for a minute at most.
+import { DevLinks } from "./devlinks";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { bus } from "./bus";
 import type { Store } from "./store";
@@ -56,6 +57,8 @@ export class Auth {
   private lastSeenWrite = 0;
   /** The host Mac's own windows (see HostWindows). */
   readonly windows = new HostWindows();
+  /** One-time dev-server sign-in (see devlinks.ts). */
+  readonly devLinks = new DevLinks((id) => !!this.get(id));
 
   constructor(private store: Store) {
     this.secret = store.setting<string>("pairSecret", "") || randomBytes(32).toString("hex");

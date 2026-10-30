@@ -8,6 +8,7 @@ import type {
   Annotation,
   Artifact,
   Fact,
+  TriageCard,
   Device,
   DevServer,
   Directive,
@@ -33,6 +34,7 @@ type Collections = {
   shares: Share;
   annotations: Annotation;
   facts: Fact;
+  triage: TriageCard;
   documents: Document;
 };
 export type CollectionName = keyof Collections;
@@ -77,6 +79,8 @@ const CANCEL_KEEP_MS = 60 * 60_000;
 export class Store {
   db: Database;
   private cache = new Map<CollectionName, Map<string, any>>();
+  /** While `atomic` runs: each changed document's value before it, to put back if the transaction fails. */
+  private undo: Map<string, { c: CollectionName; id: string; prev: any }> | null = null;
 
   /** The team store (people, devices, voiceprints, team settings); null when this is the team store. */
   team: Store | null = null;
@@ -120,6 +124,40 @@ export class Store {
 
   // ---- generic collections ----
 
+  /**
+   * Runs `fn` as one transaction: all of its writes land or none do (the in-memory copy too), and the
+   * messages it sends go out only once it has committed. A call inside another is part of the outer one.
+   */
+  atomic<T>(fn: () => T): T {
+    if (this.undo) return fn();
+    // IMMEDIATE, and begun before any state is set: a BEGIN that throws leaves the store as it was and usable.
+    this.db.exec("BEGIN IMMEDIATE");
+    const undo: NonNullable<Store["undo"]> = new Map();
+    this.undo = undo;
+    bus.hold();
+    try {
+      const out = fn();
+      this.db.exec("COMMIT");
+      this.undo = null;
+      bus.release(true);
+      return out;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      for (const { c, id, prev } of undo.values()) prev === undefined ? this.map(c).delete(id) : this.map(c).set(id, prev);
+      this.undo = null;
+      bus.release(false);
+      for (const { c } of undo.values()) bus.changed(c);
+      throw e;
+    }
+  }
+
+  private remember(c: CollectionName, id: string) {
+    const key = `${c}\0${id}`;
+    if (this.undo && !this.undo.has(key)) this.undo.set(key, { c, id, prev: this.map(c).get(id) });
+  }
+
   private map<K extends CollectionName>(c: K): Map<string, Collections[K]> {
     let m = this.cache.get(c);
     if (!m) {
@@ -142,8 +180,13 @@ export class Store {
     return this.map(c).get(id);
   }
 
+  /** Counts every write to the session's data: a later value means something changed, whatever kind of change it was. */
+  rev = 0;
+
   put<K extends CollectionName>(c: K, doc: Collections[K] & { id: string }, broadcast = true): Collections[K] {
+    this.rev++;
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.put(c, doc, broadcast);
+    this.remember(c, doc.id);
     this.map(c).set(doc.id, doc);
     this.db
       .query("INSERT OR REPLACE INTO docs (collection, id, json, updated) VALUES (?, ?, ?, ?)")
@@ -159,48 +202,15 @@ export class Store {
   }
 
   remove(c: CollectionName, id: string): void {
+    this.rev++;
     if (this.team && TEAM_COLLECTIONS.has(c)) return this.team.remove(c, id);
+    this.remember(c, id);
     this.map(c).delete(id);
     this.db.query("DELETE FROM docs WHERE collection = ? AND id = ?").run(c, id);
     bus.changed(c);
   }
 
   // ---- settings ----
-
-  private txDepth = 0;
-  /** Everything `fn` writes lands together or not at all (a crash or a throw in between leaves the earlier state). Nests. */
-  atomic<T>(fn: () => T): T {
-    if (this.txDepth > 0) {
-      this.txDepth++;
-      try {
-        return fn();
-      } finally {
-        this.txDepth--;
-      }
-    }
-    // The depth counts only a transaction that really began: a BEGIN that throws leaves it at 0.
-    this.db.exec("BEGIN IMMEDIATE");
-    this.txDepth = 1;
-    // Announcements wait for the commit: clients never hear of a write that rolled back.
-    const held: (() => void)[] = (this.held = []);
-    let out: T;
-    try {
-      out = fn();
-      this.db.exec("COMMIT");
-    } catch (e) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      this.held = null;
-      this.cache.clear();
-      throw e;
-    } finally {
-      this.txDepth = 0;
-    }
-    this.held = null;
-    for (const f of held) f();
-    return out;
-  }
 
   // ---- replayed calls: the first answer to each idempotency key, kept across restarts for as long
   // as a laptop keeps a change queued (seven days) ----
@@ -221,17 +231,12 @@ export class Store {
   }
 
   setSetting(key: string, value: unknown): void {
+    this.rev++;
     if (this.team && TEAM_SETTINGS.has(key)) return this.team.setSetting(key, value);
     this.db.query("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(key, JSON.stringify(value));
   }
 
   // ---- events ----
-
-  private held: (() => void)[] | null = null;
-  private announce(f: () => void) {
-    if (this.held) this.held.push(f);
-    else f();
-  }
 
   /** A recording token a window cancelled (kept an hour, longer than any Start can be in flight). Only that window's own cancels push out its oldest. */
   cancelToken(device: string, token: string, now = Date.now()) {
@@ -254,6 +259,7 @@ export class Store {
     data?: Record<string, any>;
     ts?: number;
   }): JamEvent {
+    this.rev++;
     const ts = e.ts ?? Date.now();
     const row = this.db
       .query(
@@ -283,11 +289,12 @@ export class Store {
       workstreamId: e.workstreamId ?? null,
       data: e.data ?? {},
     };
-    this.announce(() => bus.send({ type: "event", event }));
+    bus.send({ type: "event", event }); // held by an open transaction (Store.atomic)
     return event;
   }
 
   updateEvent(id: number, fields: Partial<Pick<JamEvent, "text" | "relevance" | "workstreamId" | "authorId" | "authorName" | "data">>) {
+    this.rev++;
     const cur = this.event(id);
     if (!cur) return;
     const next = { ...cur, ...fields, data: { ...cur.data, ...(fields.data ?? {}) } };
@@ -424,6 +431,7 @@ export class Store {
   }
 
   setDigest(scope: string, text: string, throughEvent: number) {
+    this.rev++;
     this.db
       .query("INSERT OR REPLACE INTO digests (scope, text, updated, through_event) VALUES (?, ?, ?, ?)")
       .run(scope, text, Date.now(), throughEvent);

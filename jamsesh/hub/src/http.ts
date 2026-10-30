@@ -3,8 +3,14 @@ import { parseStage } from "./stageSchema";
 import type { Server, ServerWebSocket } from "bun";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { hostname } from "node:os";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
+import { forward } from "./devproxy";
+import { DEV_CODE_PARAM, DevLinks, cleanRedirect, scrubHeaders, withoutCredentials } from "./devlinks";
+import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
+import { methodAllowed } from "./methods";
+import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
 import { ENROL_SCRIPT, ENROL_SECONDS } from "./audio/enrol";
 import { learningNote } from "./audio/voiceprint";
@@ -17,6 +23,7 @@ import type { Hub } from "./hub";
 import { BadImage } from "./image";
 import { agentGuide, agentIntro, joinScript, hookScript } from "./install-scripts";
 import { FRAME_OVERHEAD, Upstream } from "./relay";
+import { publicEvent } from "./session";
 import { projectsRoute } from "./projects-api";
 import { ONLY_OBSERVERS } from "./session";
 import { launcherMarkdown, skillMarkdown } from "./skill";
@@ -100,7 +107,7 @@ const VOICE_NAME_MAX = 64;
 export const VOICE_PREVIEW_COOLDOWN_MS = 3_000;
 const lastVoicePreview = new Map<string, number>();
 
-export const HUMAN_ONLY = /^\/(say|audio|devices|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|drive\/(start|stop|pass|together)|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots)$/;
+export const HUMAN_ONLY = /^\/(say|audio|devices|triage\/[\w-]+(\/(send|add|merge|replace|dismiss))?|attachments|record\/(start|stop|send|cancel)|fonts\/(want|lend-ticket|lend|decline|withdraw)|apps(\/[\w-]+(\/(control|input))?)?|drive\/(start|stop|pass|together)|annotations(\/send|\/[\w-]+)?|people(\/[\w-]+(\/(voice(\/start|\/end)?|voiceprint|photo))?)?|settings|directives(\/[\w-]+(\/reassign)?)?|workers|agents\/[\w-]+\/remove|removed-chats\/[\w-]+\/allow|voice-preview|build-requests\/[\w-]+|utterances\/[\w-]+\/assign|stage(\/(unlock|restore|expand|ready\/[\w-]+))?|screens\/config|display|show-requests\/[\w-]+|shares(\/.*)?|invite|host\/open-url|layouts|snapshots|devserver\/link)$/;
 const MUTATING = new Set(["POST", "PATCH", "PUT", "DELETE"]);
 
 /** A stable id for this host (what /api/pair/info returns), made on first use. */
@@ -115,16 +122,43 @@ const TARGETS_A_PERSON = /^\/(utterances\/[\w-]+\/assign|shares\/request|devices
 /** Settings only the host machine may change (SPEC 14, host-only). */
 const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled", "fastEngine"] as const;
 
+/** Per request, what releases its count at once: a request that is only waiting for the room (a hook's listen) isn't work in flight. */
+const waiting = new WeakMap<Request, () => void>();
+/** Per response: the body-memory charge it still holds, released when its stream has ended. */
+const budgetHeld = new WeakMap<Response, () => void>();
+/** Per request: the wait it carries, told when its reply has been sent or the client has gone. */
+const liveCalls = new WeakMap<Request, import("./mcp").LiveCall>();
+const markWaiting = (req: Request) => waiting.get(req)?.();
+
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
 
-/** Host names this hub answers to: loopback, any IP address, .local names, and its own domains. */
-function knownHost(req: Request, hub: Hub) {
+/** Host names this hub answers to: loopback, any IP address, this Mac's own .local names, and its own domains. */
+export function knownHost(req: Request, hub: Hub) {
   const host = (req.headers.get("host") ?? "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
-  if (!host || host === "localhost" || host.endsWith(".local") || /^[\d.]+$/.test(host) || host.includes(":")) return true;
+  if (!host || host === "localhost" || /^[\d.]+$/.test(host) || host.includes(":")) return true;
+  if (ownLocalNames().has(host)) return true;
   const domain = hub.net.status().domain?.toLowerCase();
   if (domain && (host === domain || host.endsWith(`.${domain}`))) return true;
   const extra = [process.env.JAMSESH_PUBLIC_URL, process.env.JAMSESH_PUBLIC_HOST].map((u) => (u ? u.replace(/^https?:\/\//, "").replace(/[:/].*$/, "").toLowerCase() : ""));
   return extra.includes(host);
+}
+
+/** This Mac's own Bonjour names (name.local), and no other `.local` name: a page can't reach the host under one it picked. */
+let localNames: Set<string> | null = null;
+function ownLocalNames(): Set<string> {
+  if (localNames) return localNames;
+  const names = new Set<string>();
+  const add = (n: string) => {
+    const base = n.trim().toLowerCase().replace(/\.local\.?$/, "");
+    if (base) (names.add(`${base}.local`), names.add(base));
+  };
+  add(hostname());
+  try {
+    const r = Bun.spawnSync(["scutil", "--get", "LocalHostName"], { stdout: "pipe", stderr: "ignore" });
+    if (r.exitCode === 0) add(r.stdout.toString());
+  } catch {}
+  for (const n of (process.env.JAMSESH_HOSTNAMES ?? "").split(",")) add(n);
+  return (localNames = names);
 }
 
 /** A browser's WebSocket carries its page's Origin; it must be this host (or the Mac app relaying it). */
@@ -156,6 +190,11 @@ export function sameOrigin(req: Request) {
 }
 const bad = (msg: string, status = 400) => json({ error: msg }, status);
 
+/** The live state for whoever asked: an agent's copy leaves out the Tasks board's proposals. */
+function forCaller<T extends { triage: unknown }>(state: T, agent: boolean): T {
+  return agent ? { ...state, triage: [] } : state;
+}
+
 function isLocal(ip: string) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
@@ -164,14 +203,25 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
   const s = hub.session;
   s.deviceOnline = (id) => (sockets.get(id)?.size ?? 0) > 0;
 
-  const tokenOf = (req: Request, url: URL) =>
-    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token") ?? url.searchParams.get("token");
+  // A device token comes in a header or the cookie, never the URL (a one-time dev-server sign-in link is the only URL token: anyToken).
+  const tokenOf = (req: Request, _url: URL) =>
+    req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? cookie(req, "jam_token");
 
-  // The dev app may send its own Authorization header, so the paired token can be in the cookie instead.
-  const anyToken = (hub: Hub, req: Request, url: URL, ip: string) => {
+  // The dev app may send its own Authorization header, so the paired token can be in the cookie instead; or the dev origin's own
+  // sign-in cookie (devlinks.ts). Never the address.
+  const anyToken = (hub: Hub, req: Request, _url: URL, ip: string) => {
     const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
-    for (const t of [bearer, cookie(req, "jam_token"), url.searchParams.get("token")]) {
+    for (const t of [bearer, cookie(req, "jam_token")]) {
       const d = t ? hub.auth.check(t, ip) : null;
+      if (d) return d;
+    }
+    return hub.auth.get(hub.auth.devLinks.deviceOf(cookie(req, DevLinks.cookieName)));
+  };
+
+  /** The credential on a loopback request: the Authorization header or the jam_token cookie, never the address. */
+  const fileReader = (req: Request) => {
+    for (const t of [req.headers.get("authorization")?.replace(/^Bearer\s+/i, ""), cookie(req, "jam_token")]) {
+      const d = t ? hub.auth.check(t, "127.0.0.1") : null;
       if (d) return d;
     }
     return null;
@@ -179,42 +229,68 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 
   const PUBLIC_FILES = /^\/(assets\/|icons\/|fonts\/|favicon\.svg$|manifest\.webmanifest$|sw\.js$)/;
 
-  const server = Bun.serve<WsData, any>({
-    port,
-    hostname: "0.0.0.0",
-    ...(tls ? { tls } : {}),
-    idleTimeout: 255,
-    maxRequestBodySize: 64 * 1024 * 1024,
-    async fetch(req, srv) {
-      const url = new URL(req.url);
-      const peer = srv.requestIP(req)?.address ?? "0.0.0.0";
-      if (isLocal(peer)) viaLoopback.add(req);
+  const route = async (incoming: Request, srv: Server<WsData>): Promise<Response | undefined> => {
+      const peer = srv.requestIP(incoming)?.address ?? "0.0.0.0";
+      const incomingUrl = new URL(incoming.url);
       // Loopback is the host's own windows only when nothing relayed it: a tunnel, a proxy, or the
       // Mac app's relay (which carries agents' traffic) all mark their requests.
-      const relayed = RELAY_HEADERS.some((h) => req.headers.has(h));
+      const relayed = RELAY_HEADERS.some((h) => incoming.headers.has(h));
       const ip = relayed && isLocal(peer) ? "relayed" : peer;
-      const path = url.pathname;
       const local = isLocal(ip);
       // On the host, loopback alone isn't a person (every process here reaches it): the host's own
       // windows also carry the hub's window key (SPEC 14, HostWindows in auth.ts).
-      const hostWindow = local && hub.auth.windows.matches(cookie(req, "jam_window"));
+      const hostWindow = local && hub.auth.windows.matches(cookie(incoming, "jam_window"));
+      const refused = await methodAllowed(incoming);
+      if (refused) return refused;
+      // A route that takes a recording or a file is for someone paired (or the host's window): nobody else gets a big buffer.
+      if (limitFor(incoming) > BODY_LIMITS.json && incomingUrl.pathname !== "/mcp" && !hostWindow && !(local ? fileReader(incoming) : hub.auth.check(tokenOf(incoming, incomingUrl), ip))) return local ? bad(NOT_THE_HOST_WINDOW, 403) : bad("This device isn't paired with this JamSesh host.", 401);
+      // MCP from another machine needs its credential before anything is buffered (on this Mac it is the documented tokenless setup).
+      if (incomingUrl.pathname === "/mcp" && !local && !hub.auth.check(tokenOf(incoming, incomingUrl), ip)) return bad("This device isn't paired with this JamSesh host.", 401);
+      // Every body is read here, bounded, before any route (or the closing check below) looks at the request; its memory stays
+      // charged until the request has been answered.
+      const got = await buffered(incoming);
+      if (!("req" in got)) return bad(got.message, got.status);
+      const req = got.req;
+      if (isLocal(peer)) viaLoopback.add(req); // the rebuilt request: originOf asks about this one
+      const release = got.release;
+      let holdsBudget = false;
+      const url = new URL(req.url);
+      const path = url.pathname;
       // DNS rebinding: a web page can't reach the host under a name of its own choosing.
-      if (!knownHost(req, hub)) return bad("Unknown host name.", 421);
+      if (!knownHost(req, hub)) return (release(), bad("Unknown host name.", 421));
+      try {
+      // Once the final save has begun nothing is written: every route that changes something is turned away here, after its body was read.
+      if (hub.closing && req.method !== "GET") return (release(), bad("The session is saving and closing.", 503));
+      // Accepted for dispatch: from here the request is work in flight, until its response has been sent.
+      const admission = hub.admit(`${req.method} ${path}`);
+      waiting.set(incoming, admission);
+      waiting.set(req, admission);
       try {
         // ---- open to anyone: health, pairing, the app shell, the canvas relay ----
         if (path.endsWith("/healthz")) return new Response("ok");
         // Dev servers on their own subdomain of the host's address: dev-5100.<name>.duckdns.org.
         const dev = devTarget(req, hub);
         if (dev) {
+          // A one-time sign-in link: the code becomes this origin's own cookie and the address loses it.
+          const stale = cleanRedirect(url);
+          if (stale) return stale;
+          const code = url.searchParams.get(DEV_CODE_PARAM);
+          if (code) {
+            const device = hub.auth.devLinks.redeem(code);
+            if (!device) return new Response("That link has been used or has expired. Open the dev server again from JamSesh.", { status: 401, headers: { "cache-control": "no-store" } });
+            return new Response(null, { status: 302, headers: { location: withoutCredentials(url) || "/", "set-cookie": hub.auth.devLinks.setCookie(hub.auth.devLinks.open(device), url.protocol === "https:" || req.headers.get("x-forwarded-proto") === "https"), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+          }
           if (!local && !anyToken(hub, req, url, ip)) return new Response("Pair this device with JamSesh first: open the host's address and enter the code from the big screen, under the QR code.", { status: 401 });
           if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
             const who = local ? null : anyToken(hub, req, url, ip);
-            if (srv.upgrade(req, { data: { deviceId: null, collab: `${url.pathname}${url.search}`, devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
+            if (srv.upgrade(req, { data: { deviceId: null, collab: withoutCredentials(url), devPort: dev, pairedId: who?.id ?? null } as any })) return undefined as any;
           }
-          return proxyHttp(req, url, dev);
+          // The same forwarder as the LAN ports (it also strips what is ours): this hop is to the hub's own listener for that dev server.
+          return forward(req, `127.0.0.1:${dev}`, withoutCredentials(url), null);
         }
         // The host's own windows are trusted without a token, so a page on another site can't post as them.
-        if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
+        // A page on any other origin (a dev preview on this host included) can't post here, whoever's cookie the browser would send.
+        if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
         // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
         // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
         // which tiles open as localhost:<port>.
@@ -273,8 +349,19 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           return bad("expected a WebSocket");
         }
 
-        const device = local ? null : hub.auth.check(tokenOf(req, url), ip);
+        // On loopback a request is the host's, except reading an attachment: there a paired agent calling the hub directly
+        // is its credential (the route still turns away a local process with neither a credential nor the host's window).
+        const readsFile = local && (req.method === "GET" || req.method === "HEAD") && /^\/api\/attachments\/[\w-]+$/.test(path);
+        // A credential is the caller's role wherever it comes from: an agent's token over loopback is an agent. It only ever
+        // lowers standing; loopback with no credential gets no more than the agents' view of room data (seesAll below).
+        const loopbackCredential = local ? fileReader(req) : null;
+        const device = local ? (readsFile || loopbackCredential?.kind === "agent" ? loopbackCredential : null) : hub.auth.check(tokenOf(req, url), ip);
+        // Who is reading room data: the host's own window (its key), or a paired person's browser. Loopback alone grants nothing:
+        // an agent's token, or no credential at all, gets the agents' view (no Tasks board proposals).
+        const seesAll = hostWindow || (local ? loopbackCredential : device)?.kind === "browser";
         const ok = local || !!device;
+        // A page in a browser (it sends an Origin) reaching loopback without the host window's key or a credential reads no room data.
+        if (local && incoming.headers.get("origin") && !hostWindow && !loopbackCredential && (path === "/ws" || path === "/api/state")) return bad("Open JamSesh from its own window.", 403);
 
         if (path === "/") {
           if (local) return Response.redirect("/host", 302);
@@ -296,7 +383,21 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
-        if (path === "/mcp") return hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+        if (path === "/mcp") {
+          // Counted until its response ends: parsing the body, dispatching the tool and its last write are all inside. Only a call that
+          // waits for the room (jam_wait, known from the parsed top-level tool name) and the agent's open stream are idle.
+          const kind = await hub.mcp.classify(req);
+          if (kind.reject) return bad(kind.reject, 400);
+          if (kind.idle) markWaiting(req);
+          if (kind.live) {
+            liveCalls.set(incoming, kind.live);
+            kind.live.idle = () => markWaiting(req);
+          }
+          const res = await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
+          holdsBudget = true;
+          budgetHeld.set(res, release);
+          return res;
+        }
         // A live Simulator or Mac app's frames (binary JPEGs): for people's windows only, a paired one or
         // the host's own. Agents have nothing to watch there, and loopback alone is any process on the host.
         const appWs = path.match(/^\/ws\/app\/([\w-]+)$/);
@@ -310,8 +411,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if (path === "/ws") {
           // A page on another site can't open the live session (and read the room) from a browser.
           if (!sameOrigin(req)) return bad("Not from this site.", 403);
-          const caller = hostWindow ? "host" : device?.kind === "browser" ? device.id : null;
-          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, hostWindow, pairedId: device?.id ?? null } as any })) return undefined as any;
+          const paired = device ?? loopbackCredential;
+          const caller = hostWindow ? "host" : paired?.kind === "browser" ? paired.id : null;
+          if (srv.upgrade(req, { data: { deviceId: socketDevice(hub, url.searchParams.get("device"), caller), caller, local, hostWindow, pairedId: paired?.id ?? null, agent: !seesAll } as any })) return undefined as any;
           return bad("expected a WebSocket");
         }
         if (path === "/launcher.md") return new Response(launcherMarkdown(), { headers: { "content-type": "text/markdown; charset=utf-8" } });
@@ -328,7 +430,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           // A change made for another host (an offline queue replayed after the relay switched hosts) never lands here.
           const meant = req.headers.get("x-jam-host");
           if (meant && MUTATING.has(req.method) && meant !== hostIdOf(hub)) return new Response("That change was made for a different JamSesh host.", { status: 409, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" } });
-          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow));
+          return await idempotent(hub, req, path, () => api(hub, req, url, ip, device, hostWindow, !seesAll));
         }
         // A frame drawn at the size the screen asked for (the stored render is capped at 1600 px): /renders/full/<artifact id>.png?size=2400
         const full = path.match(/^\/renders\/full\/([\w-]+)\.png$/);
@@ -344,6 +446,70 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         console.error("http:", path, e);
         return bad(e instanceof Error ? e.message : String(e), 500);
       }
+      } finally {
+        // An MCP call keeps its payload until its stream ends (the tool runs after the response starts): the charge moves to the response.
+        if (!holdsBudget) release();
+      }
+    };
+
+  const server = Bun.serve<WsData, any>({
+    port,
+    hostname: "0.0.0.0",
+    ...(tls ? { tls } : {}),
+    idleTimeout: 255,
+    maxRequestBodySize: 64 * 1024 * 1024,
+    // Every request is counted from the moment it is admitted until its response has been fully sent, here once, for every route.
+    async fetch(incoming, srv) {
+      // Counted as work only once accepted for dispatch (see route): a stranger trickling a body is never in the count.
+      const release = () => waiting.get(incoming)?.();
+      let res: Response | undefined;
+      try {
+        res = await route(incoming, srv);
+      } catch (e) {
+        release();
+        throw e;
+      }
+      // An upgrade has no response; a body is released when its last byte has gone (or the client left).
+      // A read has done its work when its handler returns: a slow client on a streamed answer (the Mac app download) isn't work in flight for a
+      // save. Mutating calls and MCP stay counted until their response is sent.
+      if (incoming.method === "GET" || incoming.method === "HEAD") release();
+      const budget = res ? budgetHeld.get(res) : undefined;
+      const live = liveCalls.get(incoming);
+      if (!res || !res.body) {
+        release();
+        budget?.();
+        live?.drop(); // nothing was sent: what it would have carried stays unread
+        live?.gone();
+        return res;
+      }
+      const reader = res.body.getReader();
+      const out = new Response(
+        new ReadableStream<Uint8Array>({
+          async pull(c) {
+            try {
+              const { done, value } = await reader.read();
+              if (done) (c.close(), release(), budget?.(), live?.sent(), live?.gone());
+              else c.enqueue(value);
+            } catch (e) {
+              release();
+              budget?.();
+              live?.drop();
+              live?.gone();
+              c.error(e);
+            }
+          },
+          cancel(reason) {
+            release();
+            // The client left, but a tool it started may still hold the payload: the charge goes when the tools have settled.
+            if (budget) void hub.mcp.whenQuiet().then(budget);
+            live?.drop();
+            live?.gone();
+            return reader.cancel(reason);
+          },
+        }),
+        res,
+      );
+      return out;
     },
     websocket: {
       idleTimeout: 120,
@@ -365,7 +531,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         }
         // Every open window counts, the host's own big screen included: the Mac stays awake for it.
         hub.peopleOnline++;
-        ws.send(JSON.stringify({ type: "state", state: s.state() } satisfies BusMessage));
+        // Agents don't see proposals nobody has accepted (4.1): no triage in their state, and no patches of it.
+        const agent = !!(ws.data as any).agent;
+        ws.send(JSON.stringify({ type: "state", state: forCaller(s.state(), agent) } satisfies BusMessage));
         const off = bus.on((msg) => {
           // Disconnected in Settings: this window's live session ends now, not at its next request.
           if ((msg as any).type === "revoked" && (msg as any).deviceId && (msg as any).deviceId === (ws.data as any).pairedId) return void ws.close(4401, "disconnected");
@@ -373,6 +541,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             const { embedding: _drop, ...data } = msg.event.data;
             msg = { ...msg, event: { ...msg.event, data } };
           }
+          if (agent && msg.type === "patch" && msg.key === "triage") return;
           ws.send(JSON.stringify(msg));
         });
         (ws as any).off = off;
@@ -519,18 +688,6 @@ function devTarget(req: Request, hub: Hub): number | null {
   return hub.session.devservers().some((d) => d.hostPort === port) ? port : null;
 }
 
-async function proxyHttp(req: Request, url: URL, port: number): Promise<Response> {
-  const headers = new Headers(req.headers);
-  headers.delete("cookie");
-  headers.set("host", `127.0.0.1:${port}`);
-  try {
-    const r = await fetch(`http://127.0.0.1:${port}${url.pathname}${url.search}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body, redirect: "manual" });
-    return new Response(r.body, { status: r.status, headers: r.headers });
-  } catch {
-    return new Response("That dev server isn't answering.", { status: 502 });
-  }
-}
-
 /** The web app: hashed assets cached forever, every other path gets index.html. */
 export function webApp(path: string): Response {
   if (!config.webDist) return new Response("The JamSesh web app isn't built. Run: cd jamsesh && bun run build:web", { status: 503 });
@@ -546,7 +703,12 @@ function wantsHtml(req: Request) {
 
 /** POST /api/pair {code, kind, label}: browsers get an HttpOnly cookie, agents get the token. */
 async function pairRoute(hub: Hub, req: Request, url: URL, ip: string): Promise<Response> {
-  const body = (await req.json().catch(() => ({}))) as any;
+  const raw = await readBytes(req, BODY_LIMITS.json, 15_000);
+  if (!raw || raw === "timeout") return bad("That request is too large.", 413);
+  let body: any = {};
+  try {
+    body = JSON.parse(new TextDecoder().decode(raw)) ?? {};
+  } catch {}
   const kind = body.kind === "agent" ? "agent" : "browser";
   const r = hub.auth.pair({ code: String(body.code ?? ""), kind, label: String(body.label ?? ""), ip });
   if (!r.ok) return bad(r.error, 403);
@@ -571,30 +733,31 @@ function agentRoute(hub: Hub, req: Request, url: URL, ip: string): Response {
   const code = url.searchParams.get("c") ?? url.searchParams.get("code");
   const md = (t: string, status = 200) => new Response(t, { status, headers: { "content-type": "text/markdown; charset=utf-8", "cache-control": "no-store" } });
   if (!code) return md(agentIntro(origin));
+  // Pairing makes a credential and keeps it: not while the final save is under way.
+  if (hub.closing) return md("# Closing\n\nThis session is saving and closing. Ask your person for the next one.", 503);
   const r = hub.auth.pair({ code, kind: "agent", label: url.searchParams.get("name") ?? "Agent", ip });
   if (!r.ok) return md(`# Couldn't pair\n\n${r.error}\n\nAsk your person for the code on the JamSesh big screen (under the QR code) right now, then fetch ${origin}/agent?c=<code> again.`, 403);
   return md(agentGuide(origin, r.token));
 }
 
-async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: PairedDevice | null, hostWindow = false): Promise<Response> {
+async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: PairedDevice | null, hostWindow = false, redact = pairedAtStart?.kind === "agent"): Promise<Response> {
   const s = hub.session;
   const path = url.pathname.slice("/api".length);
   let body: any = null;
-  // A font lend carries up to a family's worth of base64: read at most that much, never Bun's 128 MB default.
-  const cap = path.startsWith("/fonts/") ? FONT_BODY_MAX : Infinity;
-  if (Number(req.headers.get("content-length") ?? 0) > cap) return bad("That request is too large.", 413);
-  // A body that didn't arrive whole (the connection dropped, a broken form) stops the request: nothing runs.
-  if (req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE") {
+  // A file upload is read with a byte cap before it is parsed, so a body that gives no length can't run past it.
+  const upload = path === "/attachments" && req.method === "POST";
+  // Every body was read whole, and bounded, by the front door; it is parsed here once. A form that arrived whole but isn't one is the sender's error (400).
+  if (upload) body = pairedAtStart?.kind === "agent" ? null : await readCapped(req, MAX_UPLOAD_BYTES);
+  else if (req.method === "POST" || req.method === "PATCH" || req.method === "PUT" || req.method === "DELETE") {
     try {
-      body = await readBody(req, cap);
+      body = await readBody(req);
     } catch (e) {
-      // A form that arrived whole but isn't one: the sender's error.
       if (e instanceof BadForm) return bad(e.message);
-      // Didn't arrive whole, 408: the sender's outbox retries it, and idempotent() doesn't remember it (nothing ran).
       return new Response(JSON.stringify({ error: "The request didn't arrive whole. Try again." }), { status: 408, headers: { "content-type": "application/json" } });
     }
   }
-  if (body === TOO_LARGE) return bad("That request is too large.", 413);
+  // A request that was let in before the final save began and stalled while sending its body is turned away here, after the body.
+  if (hub.closing && req.method !== "GET") return bad("The session is saving and closing.", 503);
   // The credential is read again after the body arrived: one disconnected (or changed) while its request was
   // on its way acts as it is now, never as it was when the request began.
   const paired = pairedAtStart ? hub.auth.get(pairedAtStart.id) : null;
@@ -605,7 +768,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   /** Refuses what's for people's windows (a paired one, or the host's own) to anyone else: agents, and other processes on the host. */
   const notAPerson = () => (caller ? null : bad(paired?.kind === "agent" ? "That's for people; agents use their jam_ tools." : isLocal(ip) ? NOT_THE_HOST_WINDOW : "That's for people.", 403));
 
-  if (path === "/state") return json(s.state());
+  if (path === "/state") return json(forCaller(s.state(), redact));
   if (path === "/clock") return json({ now: Date.now() });
 
   // The older part of a list the state leaves out (people and agents alike may read it): /history/events?before=<id>&limit=50&kinds=speech,prompt
@@ -719,8 +882,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
     segmentsInFlight.add(segKey);
     try {
-      // Read in full by readBody before the credential was checked again.
-      const bytes: Uint8Array = body?.__raw ?? new Uint8Array();
+      const got = body?.__raw ?? (await readBytes(req, BODY_LIMITS.media));
+      const bytes: Uint8Array | null = got === "timeout" ? null : got;
+      if (!bytes) return bad("That recording is too large.", 413);
       const seg = await hub.audio.ingest({
         deviceId,
         t0: Number(q.get("t0")),
@@ -830,12 +994,66 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     }
   }
 
+  // What a person puts on a screen is theirs until they unlock it (3.1). A paired window is the person its credential is
+  // bound to, whatever the body says. The host's own windows are the room's (the big screen is shared), so they may name
+  // who is acting, else the person at the host. `by` is only a fallback name for a window that hasn't picked who it is.
+  const actor = () => {
+    const id = String((paired ? paired.personId : body?.personId || s.store.setting<string>("hostPersonId", "")) ?? "");
+    const p = id ? s.person(id) : undefined;
+    return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
+  };
   if (path === "/say" && req.method === "POST") {
-    if (!body?.text?.trim()) return bad("text is required");
     // Only people speak as people: agents post through MCP, and a window speaks as its own person.
     if (paired?.kind === "agent") return bad("Agents post with jam_update and jam_message, not as a person.", 403);
-    if (paired?.personId && body.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
-    return json(hub.typed(body.personId ?? null, body.text, !!body.direct));
+    if (paired?.personId && body?.personId && body.personId !== paired.personId) return bad("This device speaks as its own person.", 403);
+    let attached: AttachmentRef[] = [];
+    try {
+      attached = hub.attachments.refs(body?.attachments);
+    } catch (e) {
+      if (e instanceof AttachmentError) return bad(e.message, e.status);
+      throw e;
+    }
+    if (!body?.text?.trim() && !attached.length) return bad("text is required");
+    // Spoken as the credential's person; a window with none speaks as nobody in particular.
+    return json(hub.typed(actor().id, String(body.text ?? ""), !!body.direct, attached));
+  }
+
+  // An image, screenshot or file for a message: one per request, as form field 'file'. People add them; people and agents of the session fetch them.
+  if (path === "/attachments" && req.method === "POST") {
+    if (paired?.kind === "agent") return bad("Agents share files with jam_post_image, not message attachments.", 403);
+    if (body?.__tooBig) return bad("That file is too big.", 413);
+    const f = (body?.__form as FormData | undefined)?.get("file");
+    if (!(f instanceof Blob)) return bad("send the file as form field 'file'");
+    const who = s.person(paired?.personId ?? (isLocal(ip) ? s.store.setting<string>("hostPersonId", "") : ""))?.name ?? "Someone";
+    try {
+      const rec = hub.attachments.save(new Uint8Array(await f.arrayBuffer()), (f as File).name, who);
+      return json(hub.attachments.ref(rec.id));
+    } catch (e) {
+      if (e instanceof AttachmentError) return bad(e.message, e.status);
+      throw e;
+    }
+  }
+  m = path.match(/^\/attachments\/([\w-]+)$/);
+  if (m && (req.method === "GET" || req.method === "HEAD")) {
+    // A file is read by a paired device, an agent of the session, or the host's own window; another process on the host's loopback is none of them.
+    if (!paired && !hostWindow) return bad("This device isn't paired with this JamSesh host.", 401);
+    // A credential in the address ends up in histories and logs: this route takes it in a header or cookie only.
+    if (url.searchParams.has("token")) return bad("Send the credential in the Authorization header or the jam_token cookie, not in the address.", 400);
+    const f = hub.attachments.file(m[1]);
+    if (!f) return bad("No such file.", 404);
+    const inline = f.rec.kind === "image" || f.rec.kind === "text";
+    // The type is the sniffed one, never sniffed again by the browser, and the file can't run anything.
+    return new Response(req.method === "HEAD" ? null : Bun.file(f.path), {
+      headers: {
+        "content-type": f.rec.kind === "text" ? "text/plain; charset=utf-8" : f.rec.type,
+        "content-length": String(f.rec.size),
+        "content-disposition": `${inline ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(f.rec.name)}`,
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        // Never kept: a device whose pairing is revoked can't read a copy it fetched earlier.
+        "cache-control": "no-store",
+      },
+    });
   }
 
   if (path === "/settings" && req.method === "POST") {
@@ -849,11 +1067,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   // What a person puts on a screen is theirs until they unlock it (3.1). A paired window is the person its credential is
   // bound to, whatever the body says. The host's own windows are the room's (the big screen is shared), so they may name
   // who is acting, else the person at the host. `by` is only a fallback name for a window that hasn't picked who it is.
-  const actor = () => {
-    const id = String((paired ? paired.personId : body?.personId || s.store.setting<string>("hostPersonId", "")) ?? "");
-    const p = id ? s.person(id) : undefined;
-    return { id: p?.id ?? null, name: p?.name ?? String(body?.by ?? "Someone in the room") };
-  };
   // With several screens, the caller says which (an id or a name). None named is the main one; one that isn't there now
   // (a display unplugged since the control was drawn) is an error, never some other screen.
   const where = s.screenOf(body?.screen);
@@ -940,7 +1153,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     return r.removed ? json(r) : bad("no such agent", 404);
   }
   // Chats the room removed (kept out of jam_join), and letting one back in: people only.
-  if (path === "/removed-chats" && req.method === "GET") return paired?.kind === "agent" ? bad("That's for people.", 403) : (() => {
+  // The host role needs the host-window key and loopback alone grants nothing (4.R12): a person's window or the host's own.
+  if (path === "/removed-chats" && req.method === "GET") return notAPerson() ?? (() => {
       const all = s.removedChats();
       const folderKey = (r: (typeof all)[number]) => (r.cwd ? `${r.harness}\0${r.machine}\0${r.cwd}` : "");
       const counts = new Map<string, number>();
@@ -949,6 +1163,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     })();
   const rc = path.match(/^\/removed-chats\/([\w-]+)\/allow$/);
   if (rc && req.method === "POST") {
+    const refused = notAPerson();
+    if (refused) return refused;
     const cleared = s.allowRejoin({ id: rc[1] });
     return cleared ? json({ ok: true, cleared }) : bad("No removed chat with that id.", 404);
   }
@@ -988,6 +1204,51 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     return moved ? json(moved) : bad("Nobody else is free to take it, or it's already done");
   }
 
+
+  // A link to a dev server for this device: carries a code that works once, for about a minute (devlinks.ts).
+  if (path === "/devserver/link" && req.method === "POST") {
+    const device = paired?.kind === "browser" ? paired.id : null;
+    if (!device && !hostWindow) return bad("Only a paired device asks for a dev-server link.", 403);
+    const target = String(body?.url ?? "");
+    const known = s.devservers().find((d) => d.url === target || (target.startsWith(d.url) && /^[/?#]/.test(target.slice(d.url.length))));
+    if (!known) return bad("That isn't one of this session's dev servers.", 404);
+    // The host's own window needs no sign-in on its own Mac: the plain address.
+    if (!device) return json({ url: target, expiresInSeconds: null });
+    const u = new URL(target);
+    u.searchParams.set(DEV_CODE_PARAM, hub.auth.devLinks.mint(device!));
+    return json({ url: u.toString(), expiresInSeconds: 60 });
+  }
+
+  // The Tasks board (4.1): proposals wait here until a person acts. Only people act on them: an agent's credential is refused
+  // (HUMAN_ONLY), and a window must know who is using it so the record says who sent or dismissed what.
+  if (path === "/triage" && req.method === "GET") {
+    // Agents don't see proposals nobody has accepted; they read the knowledge, the inbox and the changelog.
+    if (redact) return bad("That's for people; agents use their jam_ tools.", 403);
+    return json({ cards: s.board.shown(), stats: s.board.stats() });
+  }
+  if (path === "/changelog" && req.method === "GET") return json(s.changelog(Math.min(200, Number(url.searchParams.get("limit")) || 50)).map(publicEvent));
+  m = path.match(/^\/triage\/([\w-]+)(?:\/(send|add|merge|replace|dismiss))?$/);
+  if (m && req.method !== "GET") {
+    const who = actor();
+    if (!who.id && !hostWindow) return bad("Pick who you are in this window first.", 403);
+    const edit = { text: body?.text, mode: body?.mode, targets: body?.targets, workstream: body?.workstream, kind: body?.kind };
+    const verb = m[2];
+    const r = !verb
+      ? req.method === "PATCH"
+        ? s.board.edit(m[1], edit, who.name)
+        : { ok: false as const, error: "Use PATCH to edit a card.", status: 405 }
+      : verb === "send"
+        ? s.board.send(m[1], who.name, edit)
+        : verb === "add"
+          ? s.board.add(m[1], who.name, edit)
+          : verb === "merge"
+            ? typeof body?.factId === "string" ? s.board.merge(m[1], body.factId, who.name, typeof body?.text === "string" ? body.text : undefined) : { ok: false as const, error: "factId is required: the fact to merge into.", status: 400 }
+            : verb === "replace"
+              ? s.board.replace(m[1], who.name, typeof body?.factId === "string" ? body.factId : undefined, edit)
+              : s.board.dismiss(m[1], who.name);
+    return r.ok ? json(r) : bad(r.error, r.status);
+  }
+
   if (path === "/upload" && req.method === "POST") {
     const form = body?.__form as FormData | undefined;
     const bytes: unknown = body?.__files?.file;
@@ -998,7 +1259,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     // versions with jam_post_image, which knows which agent it is).
     const named = String(form.get("agent") ?? "");
     const agent = named ? s.agent(named) ?? null : null;
-    if (named && !agent) return bad("No such agent.", 404);
+    if (named && !agent) return bad("That agent isn't yours to upload for.", 403); // the same answer as another machine's agent: whether an id exists is not told
     if (!hostWindow) {
       if (!agent) return bad("Name your agent (-F agent=<id>); only the host posts for the room.", 403);
       if (agent.machine !== (paired ? hub.auth.machineOf(paired.id) : null)) return bad("That agent is on another machine; post as yourself.", 403);
@@ -1047,6 +1308,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const joined = !!hub.hookAgent(b, ip, machine);
     const headers: Record<string, string> = { "cache-control": "no-store", "x-jam-joined": joined ? "1" : "0" };
     if (hook === "listen") {
+      // Held open until the room has something for the idle agent: waiting, not work.
+      markWaiting(req);
       // Held open until the room has something for the idle agent (or it gives up); plain text so the hook script can print it.
       const r = joined ? await hub.listen(b, ip, machine, undefined, () => !paired || !!hub.auth.get(paired.id)) : { text: "", delivery: null };
       if (r.delivery) headers["x-jam-delivery"] = r.delivery;
@@ -1227,31 +1490,6 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     return json(Object.keys(s.saveLayout(String(body.name))));
   }
 
-  // Whether a public page refuses to be shown in a frame (X-Frame-Options, CSP frame-ancestors).
-  // Browsers can't tell from inside the page, so the host reads the headers. Public sites only.
-  if (path === "/frame-check" && req.method === "GET") {
-    if (paired?.kind === "agent") return bad("not for agents", 403);
-    const target = (() => {
-      try {
-        return new URL(url.searchParams.get("url") ?? "");
-      } catch {
-        return null;
-      }
-    })();
-    const privateHost = (h: string) => /^(localhost|.*\.local|.*\.lan|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?|\[?f[cd])/i.test(h);
-    if (!target || !/^https?:$/.test(target.protocol) || privateHost(target.hostname)) return json({ blocked: false, checked: false });
-    try {
-      const res = await fetch(target, { redirect: "follow", signal: AbortSignal.timeout(5000), headers: { "user-agent": "Mozilla/5.0 JamSesh frame check" } });
-      res.body?.cancel().catch(() => {});
-      const xfo = (res.headers.get("x-frame-options") ?? "").toLowerCase();
-      const ancestors = (res.headers.get("content-security-policy") ?? "").match(/frame-ancestors([^;]*)/i)?.[1]?.trim().toLowerCase();
-      const blocked = /deny|sameorigin/.test(xfo) || (ancestors !== undefined && !/(^|\s)\*(\s|$)/.test(ancestors));
-      return json({ blocked, checked: true });
-    } catch {
-      return json({ blocked: false, checked: false });
-    }
-  }
-
   // A person opens a page in a browser on the host, for sites that refuse to show inside a tile.
   if (path === "/host/open-url" && req.method === "POST") {
     if (!isLocal(ip) && paired?.kind !== "browser") return bad("Only people in the session can open pages on the host.", 403);
@@ -1426,25 +1664,22 @@ export function originOf(req: Request, url: URL) {
   return `${proto}://${host}`;
 }
 
-/** The most a /api/fonts request may carry: a family's files (32 MB) as base64, plus the envelope. */
-export const FONT_BODY_MAX = 45 * 1024 * 1024;
-export const TOO_LARGE = Symbol("too large");
+export { FONT_BODY_MAX } from "./body";
 
-/** A request body's bytes, read in chunks and abandoned past `max` bytes (null: over). Every kind of body is read through here. */
-async function readCapped(req: Request, max: number): Promise<Uint8Array | null> {
-  if (max === Infinity) return new Uint8Array(await req.arrayBuffer());
-  const reader = req.body?.getReader();
-  if (!reader) return new Uint8Array();
-  const chunks: Uint8Array[] = [];
-  let n = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    n += value.length;
-    if (n > max) return (await reader.cancel().catch(() => {}), null);
-    chunks.push(value);
+/** A multipart upload (its body already read and bounded by the front door), parsed once; `{ __tooBig }` when its files pass `max`. */
+export async function readCapped(req: Request, max: number): Promise<{ __form: FormData } | { __tooBig: true } | null> {
+  const type = req.headers.get("content-type") ?? "";
+  if (!type.includes("multipart/form-data") || !req.body) return null;
+  // The front door set the exact length: past the cap, nothing is parsed.
+  if (Number(req.headers.get("content-length")) > max) return { __tooBig: true };
+  try {
+    const form = await req.formData();
+    let size = 0;
+    for (const v of form.values()) if (typeof v !== "string") size += (v as Blob).size;
+    return size > max ? { __tooBig: true } : { __form: form };
+  } catch {
+    return null;
   }
-  return Buffer.concat(chunks);
 }
 
 /**
@@ -1452,12 +1687,11 @@ async function readCapped(req: Request, max: number): Promise<Uint8Array | null>
  * so no route reads bytes later (when the credential may have been revoked meanwhile). Unknown types and bytes
  * come back as `__raw`; an empty body as null.
  */
-export async function readBody(req: Request, max = Infinity): Promise<any> {
+async function readBody(req: Request): Promise<any> {
   const type = req.headers.get("content-type") ?? "";
   // Reading fails (throws) when the body didn't arrive whole; api() then stops the request.
   // The bytes first: failing here means the body didn't arrive whole. Then what they say.
-  const raw = await readCapped(req, max);
-  if (raw === null) return TOO_LARGE;
+  const raw = new Uint8Array(await req.arrayBuffer());
   if (type.includes("application/json")) {
     const text = new TextDecoder().decode(raw);
     try {
