@@ -74,3 +74,17 @@ test("the composer won't send while a file has failed: the person removes it or 
   expect(composerState("x", [failed, { ...failed, key: "d" }]).blocked).toMatch(/^2 files didn't attach/);
   expect(composerState("look at this", [ready], true).canSend).toBe(false);
 });
+
+test("the composer doesn't offer Send for a set the hub would turn away: more than six files, or more than 25 MB together", () => {
+  const ready = (n: number, size = 100): Pending => ({ key: `k${n}`, name: `f${n}.pdf`, size, status: "ready", ref: { id: `att_${n}`, name: `f${n}.pdf`, type: "application/pdf", kind: "pdf", size } });
+  expect(composerState("", [ready(1), ready(2)]).canSend).toBe(true);
+  const seven = [1, 2, 3, 4, 5, 6, 7].map((n) => ready(n));
+  const many = composerState("hi", seven);
+  expect(many.canSend).toBe(false);
+  expect(many.blocked).toMatch(/Up to 6 files/);
+  const big = composerState("hi", [ready(1, 20 * 1024 * 1024), ready(2, 20 * 1024 * 1024)]);
+  expect(big.canSend).toBe(false);
+  expect(big.blocked).toMatch(/25 MB/);
+  // A failed file doesn't count toward the limits (it's blocked for its own reason).
+  expect(composerState("hi", [...[1, 2, 3, 4, 5, 6].map((n) => ready(n)), { key: "x", name: "bad.pdf", size: 9, status: "error", error: "no" }]).blocked).toMatch(/didn't attach/);
+});

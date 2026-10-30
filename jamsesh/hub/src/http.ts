@@ -199,7 +199,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           return forward(req, `127.0.0.1:${dev}`, withoutCredentials(url));
         }
         // The host's own windows are trusted without a token, so a page on another site can't post as them.
-        if (local && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
+        // A page on any other origin (a dev preview on this host included) can't post here, whoever's cookie the browser would send.
+        if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !sameOrigin(req)) return bad("Not from this site.", 403);
         // A one-time host link: gives this browser the window key (HttpOnly, so page scripts never
         // see it), then shows the page. Only on 127.0.0.1, so the cookie never reaches dev servers,
         // which tiles open as localhost:<port>.
@@ -836,12 +837,14 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, paired: PairedD
   // A link to a dev server for this device: carries a code that works once, for about a minute (devlinks.ts).
   if (path === "/devserver/link" && req.method === "POST") {
     const device = paired?.kind === "browser" ? paired.id : null;
-    if (!device) return bad("Only a paired device asks for a dev-server link.", 403);
+    if (!device && !hostWindow) return bad("Only a paired device asks for a dev-server link.", 403);
     const target = String(body?.url ?? "");
     const known = s.devservers().find((d) => d.url === target || (target.startsWith(d.url) && /^[/?#]/.test(target.slice(d.url.length))));
     if (!known) return bad("That isn't one of this session's dev servers.", 404);
+    // The host's own window needs no sign-in on its own Mac: the plain address.
+    if (!device) return json({ url: target, expiresInSeconds: null });
     const u = new URL(target);
-    u.searchParams.set(DEV_CODE_PARAM, hub.auth.devLinks.mint(device));
+    u.searchParams.set(DEV_CODE_PARAM, hub.auth.devLinks.mint(device!));
     return json({ url: u.toString(), expiresInSeconds: 60 });
   }
 

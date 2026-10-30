@@ -6,6 +6,8 @@ import { hub, type AttachmentRef } from "./hub";
 export type { AttachmentRef };
 
 export const MAX_FILES = 6;
+/** What one message may carry in all: the hub's limit (`MAX_MESSAGE_BYTES`). */
+export const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
 const MB = 1024 * 1024;
 const TEXT_EXT = /\.(txt|md|markdown|json|csv|tsv|log|ya?ml|toml|ini|css|jsx?|tsx?|py|rs|go|swift|kt|sql|sh|rb|java|c|h|cpp)$/i;
 
@@ -68,8 +70,18 @@ export function composerState(text: string, items: Pending[], busy = false): { c
   const failed = items.filter((i) => i.status === "error").length;
   const uploading = items.some((i) => i.status === "uploading");
   const ready = items.some((i) => i.status === "ready");
-  const blocked = failed ? `${failed === 1 ? "A file" : `${failed} files`} didn't attach. Remove ${failed === 1 ? "it" : "them"} or try again to send.` : "";
-  return { canSend: (!!text.trim() || ready) && !uploading && !failed && !busy, blocked };
+  // The limits the hub enforces on one message, here too, so Send is never offered for a set it will turn away.
+  const kept = items.filter((i) => i.status !== "error");
+  const tooMany = kept.length > MAX_FILES;
+  const tooBig = kept.reduce((n, i) => n + i.size, 0) > MAX_TOTAL_BYTES;
+  const blocked = failed
+    ? `${failed === 1 ? "A file" : `${failed} files`} didn't attach. Remove ${failed === 1 ? "it" : "them"} or try again to send.`
+    : tooMany
+      ? `Up to ${MAX_FILES} files go with one message. Remove some to send.`
+      : tooBig
+        ? `The files on one message can be ${MAX_TOTAL_BYTES / 1024 / 1024} MB together. Remove some, or send them in another message.`
+        : "";
+  return { canSend: (!!text.trim() || ready) && !uploading && !failed && !tooMany && !tooBig && !busy, blocked };
 }
 
 /** The files waiting to go with a message: adding, uploading, removing. */
@@ -115,6 +127,8 @@ export function useAttachments(upload: typeof uploadAttachment = uploadAttachmen
     (key: string) => {
       const f = live.current.find((i) => i.key === key && i.status === "error")?.file;
       if (!f) return;
+      // Its slot may have been taken since it failed: trying again must not make a seventh.
+      if (live.current.filter((i) => i.status !== "error").length >= MAX_FILES) return patch(key, { error: `Up to ${MAX_FILES} files per message. Remove one first.` });
       patch(key, { status: "uploading", error: undefined });
       void send(key, f);
     },

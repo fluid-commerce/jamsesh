@@ -1269,15 +1269,18 @@ export type { Person };
 void hub;
 
 /**
- * Opens a dev server in a new tab. A paired device asks the hub for a one-time link first (the hub never puts a device token in an
- * address); the host's own window, and anything that fails, opens the plain address.
+ * Opens a dev server in a new tab, through a one-time link from the hub (it never puts a device token in an address). The link request is
+ * never queued: if it can't be made, the tab is closed and the person is told.
  */
 export async function openDevServer(url: string) {
   const tab = window.open("about:blank", "_blank");
-  let target = url;
   try {
-    target = (await api<{ url: string }>("/devserver/link", { url })).url;
-  } catch {}
-  if (tab) tab.location.href = target;
-  else window.open(target, "_blank");
+    const r = await api<{ url?: string }>("/devserver/link", { url }, "POST", { queue: false });
+    const target = new URL(String(r?.url)).toString();
+    if (tab) tab.location.href = target;
+    else window.open(target, "_blank");
+  } catch (e) {
+    tab?.close();
+    window.alert(`Couldn't open the dev server: ${e instanceof Error ? e.message : "no link came back"}`);
+  }
 }

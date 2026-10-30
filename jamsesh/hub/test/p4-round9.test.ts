@@ -1597,3 +1597,40 @@ test("Merge refuses final wording that another active fact already has, inside t
   expect(r.s.board.get(card.id)!.status).toBe("open");
   expect(r.s.store.get("facts", a.id)!.text).toBe("Header is 64px");
 });
+
+// ---------- round 34 ----------
+
+test("a page on another origin (a dev preview on this host) can't post, whoever's cookie the browser would send", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const other = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "a/o", cwd: "/o", machine: "fm", platform: "mobile" }).agent;
+    const person = r.hub.auth.issue({ kind: "browser", label: "L", ip: "10.0.0.5", personId: r.chey.id });
+    const base = `http://127.0.0.1:${server.port}`;
+    const post = (origin?: string) => fetch(`${base}/api/agents/${other.id}/remove`, { method: "POST", headers: { cookie: `jam_token=${person.token}`, "x-forwarded-for": "10.0.0.5", ...(origin ? { origin } : {}) } });
+    expect((await post("http://10.0.0.9:5100")).status).toBe(403);
+    expect(r.s.agent(other.id)).toBeTruthy();
+    // The hub's own page still can.
+    const own = await post(base);
+    expect(own.status).not.toBe(403);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("the dev-link request for the host's own window is the plain address; a paired device gets a code; nothing else is served", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+    const dev = await r.hub.devproxy.register({ agentId: agent.id, name: "web", target: "127.0.0.1:1" });
+    r.hub.auth.windows.adopt("ee".repeat(32));
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/devserver/link`, { method: "POST", headers: { cookie: `jam_window=${"ee".repeat(32)}`, "content-type": "application/json" }, body: JSON.stringify({ url: dev.url }) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).url).toBe(dev.url);
+  } finally {
+    server.stop(true);
+  }
+});

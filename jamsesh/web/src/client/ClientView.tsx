@@ -541,6 +541,7 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState(true);
   const [dragging, setDragging] = useState(false);
+  const [sendError, setSendError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const files = useAttachments();
   const { canSend, blocked } = composerState(text, files.items, busy);
@@ -565,12 +566,16 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
         e.preventDefault();
         if (!canSend) return;
         setBusy(true);
+        setSendError("");
         const sent = await api("/say", { personId, text, direct: ask, attachments: files.ids }).then(
           () => true,
-          () => false,
+          (e) => {
+            setSendError(e instanceof Error ? e.message : "That didn't send.");
+            return false;
+          },
         );
         setBusy(false);
-        // A send that failed keeps the words and the files, so nothing has to be added again.
+        // A send that failed keeps the words and the files, so nothing has to be added again, and says why.
         if (!sent) return;
         setText("");
         files.clear();
@@ -599,6 +604,11 @@ function SayBox({ personId, brainName, phone }: { personId: string; brainName: s
       {blocked && (
         <p className="say-blocked" role="status">
           {blocked}
+        </p>
+      )}
+      {sendError && !blocked && (
+        <p className="say-blocked" role="alert">
+          {sendError}
         </p>
       )}
       <div className="say-row">
