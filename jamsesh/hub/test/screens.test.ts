@@ -152,3 +152,15 @@ test("nothing is put on a screen whose window has closed, except the hub's own c
   expect(s.setStage(layout, "x", "screen-2", { claim: s.stageClaim() })).toMatchObject({ applied: false });
   expect(s.setStage({ mode: "board" }, "JamSesh", "main", { override: true }).applied).toBe(true);
 });
+
+test("a stage decided for a screen before its window closed is stale once it reopens", () => {
+  const s = new Session(new Store(mkdtempSync(join(dir, "reopen-"))));
+  const info = { width: 1920, height: 1080, dpr: 1, screenX: 0, screenY: 0, at: Date.now() };
+  s.reportScreen("main", info);
+  const claim = s.stageClaim();
+  s.removeScreen("main");
+  s.reportScreen("main", info);
+  const layout = { mode: "layout" as const, layout: { tiles: [{ kind: "feed" as const }] } };
+  expect(s.setStage(layout, "x", "main", { claim })).toMatchObject({ applied: false });
+  expect(s.setStage(layout, "x", "main", { claim: s.stageClaim() }).applied).toBe(true);
+});

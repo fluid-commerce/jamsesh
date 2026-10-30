@@ -65,8 +65,11 @@ interface Live {
   held?: { x: number; y: number; by: string; timer: ReturnType<typeof setTimeout> };
 }
 
-async function run(cmd: string[], timeoutMs = 15_000): Promise<{ code: number; out: string }> {
+async function run(cmd: string[], timeoutMs = 15_000, helpers?: HelperRegistry): Promise<{ code: number; out: string }> {
+  // Once the hub is stopping nothing new starts; one that is running is in the helper list, so stopping the hub sees its exit.
+  if (helpers?.isClosed) return { code: 1, out: "The hub is stopping." };
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", env: process.env });
+  helpers?.track(p);
   const timer = setTimeout(() => p.kill(), timeoutMs);
   const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
   const code = await p.exited;
@@ -120,6 +123,10 @@ export class LiveApps {
 
   /** The hub's helper list (stopping the hub finds the capture helpers) is optional so the class stands alone in tests. */
   constructor(private session: Session, private helpers?: HelperRegistry) {}
+
+  private run(cmd: string[], timeoutMs = 15_000) {
+    return run(cmd, timeoutMs, this.helpers);
+  }
 
   /** The locked big screen showing this tile, with who drives it; the hub fills this in. Null when it is shown nowhere locked. */
   /** How long a held button may sit still before it is let go (a field so tests can shorten it). */
@@ -179,7 +186,7 @@ export class LiveApps {
       if (err) note = `Watching only: ${err}`;
       else screen = await companion.describe().catch(() => null);
     } else note = "Watching only: taps need idb_companion (brew install facebook/fb/idb-companion).";
-    const appearance = (await run(["xcrun", "simctl", "ui", pick.udid, "appearance"])).out.trim();
+    const appearance = (await this.run(["xcrun", "simctl", "ui", pick.udid, "appearance"])).out.trim();
     const r = this.add(
       {
         kind: "ios",
@@ -241,7 +248,7 @@ export class LiveApps {
   private async bundleOf(cmd: string[], name: string): Promise<string> {
     let apps: { bundle?: unknown; name?: unknown }[] = [];
     try {
-      apps = JSON.parse((await run([...cmd, "--apps"])).out);
+      apps = JSON.parse((await this.run([...cmd, "--apps"])).out);
     } catch {}
     const want = name.toLowerCase();
     const hits = [...new Set((Array.isArray(apps) ? apps : []).filter((a) => typeof a?.name === "string" && a.name.toLowerCase() === want && typeof a.bundle === "string").map((a) => a.bundle as string))];
@@ -261,10 +268,10 @@ export class LiveApps {
     let access = false;
     let windows: SimWindow[] = [];
     if (typeof cmd !== "string") {
-      access = (await run([...cmd, "--check"])).out.includes('"screen":true');
+      access = (await this.run([...cmd, "--check"])).out.includes('"screen":true');
       if (access) {
         try {
-          windows = JSON.parse((await run([...cmd, "--windows", SIMULATOR])).out) as SimWindow[];
+          windows = JSON.parse((await this.run([...cmd, "--windows", SIMULATOR])).out) as SimWindow[];
         } catch {}
       }
     }
@@ -293,7 +300,7 @@ export class LiveApps {
     const bin = join(config.home, "bin", `jamsesh-live-${hash}`);
     if (!existsSync(bin)) {
       mkdirSync(join(config.home, "bin"), { recursive: true });
-      const r = await run(["swiftc", "-O", "-swift-version", "5", src, "-o", bin], 300_000);
+      const r = await this.run(["swiftc", "-O", "-swift-version", "5", src, "-o", bin], 300_000);
       if (r.code) return `Couldn't build the Mac app streaming helper (it needs Xcode's command line tools): ${r.out.slice(0, 200)}`;
     }
     return [bin];
@@ -435,7 +442,7 @@ export class LiveApps {
       const file = join(dir, `w${k}.jpg`);
       while (live.subs.size && live.info.status === "live") {
         const n = ++issued;
-        const r = await run(["xcrun", "simctl", "io", udid, "screenshot", "--type=jpeg", file]);
+        const r = await this.run(["xcrun", "simctl", "io", udid, "screenshot", "--type=jpeg", file]);
         if (live.info.status !== "live") return;
         if (r.code) {
           if (++fails >= 3 && (await this.deviceGone(udid))) return this.end(live, `${live.info.name} was shut down or removed.`);
@@ -464,7 +471,7 @@ export class LiveApps {
   }
 
   private async deviceGone(udid: string) {
-    const r = await run(["xcrun", "simctl", "list", "devices", "-j"]);
+    const r = await this.run(["xcrun", "simctl", "list", "devices", "-j"]);
     if (r.code) return false;
     try {
       const all = Object.values(JSON.parse(r.out).devices as Record<string, { udid: string; state: string }[]>).flat();
@@ -538,7 +545,7 @@ export class LiveApps {
     try {
       if (ev.t === "appearance") {
         const mode = ev.mode === "light" || ev.mode === "dark" ? ev.mode : info.appearance === "dark" ? "light" : "dark";
-        const r = await run(["xcrun", "simctl", "ui", udid!, "appearance", mode]);
+        const r = await this.run(["xcrun", "simctl", "ui", udid!, "appearance", mode]);
         if (r.code) return `Couldn't switch appearance: ${r.out.slice(0, 120)}`;
         this.update(live, { appearance: mode });
         return null;

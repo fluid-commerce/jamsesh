@@ -249,3 +249,13 @@ test("a stdin-watched helper: stopping the wrapper stops it, leaving nothing beh
   const own = Bun.spawn(withStdinWatch(["sh", "-c", "exit 7"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
   expect(await own.exited).toBe(7);
 });
+
+test("a stdin-watched helper whose hub is gone the instant it starts is still stopped", async () => {
+  for (let n = 0; n < 3; n++) {
+    const p = Bun.spawn(withStdinWatch(["sleep", "300"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+    p.stdin.end(); // the hub's end of the pipe closes before the wrapper has installed anything else
+    expect(await until(() => !alive(p.pid), 8000)).toBe(true);
+    await Bun.sleep(100);
+    expect(sleeperUnder(p.pid)).toBeFalsy();
+  }
+}, 40_000);

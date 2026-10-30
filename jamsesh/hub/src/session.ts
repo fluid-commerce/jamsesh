@@ -1521,7 +1521,7 @@ export class Session {
     };
     // Only screens whose window is reporting now (a closed main is not a place to put anything), main first.
     const live = this.screens().map((x) => x.id);
-    // Before any window has reported (a cold start) main is where it will appear; once they have and all are closed, nowhere.
+    // Before any window has reported (a cold start) main is where one will appear; once they have, only reporting windows count.
     return (live.length ? live : this.screenSeen ? [] : ["main"]).find(eligible) ?? null;
   }
 
@@ -1821,6 +1821,8 @@ export class Session {
   private screenSeen = false;
   reportScreen(id: string, info: Omit<ScreenInfo, "id" | "stage" | "name" | "role">) {
     this.screenSeen = true;
+    // A screen coming back is a different screen to anything decided while it was gone.
+    if (!this.bigScreens.has(id)) this.stageRevs.set(id, this.stageRev(id) + 1);
     this.bigScreens.set(id, { id, ...info });
     this.sweepScreens();
     // A screen not heard from for 3 minutes stops being listed: say so then (its stored stage stays for when it returns).
@@ -1856,6 +1858,7 @@ export class Session {
    *  not 3 minutes later. The main screen's stage stays, and it counts again once its window reports. */
   removeScreen(id: string) {
     if (!this.bigScreens.delete(id)) return;
+    this.stageRevs.set(id, this.stageRev(id) + 1); // what was decided for it before it went is stale
     clearTimeout(this.screenReverts.get(id));
     this.screenReverts.delete(id);
     this.defaultStages.delete(id);

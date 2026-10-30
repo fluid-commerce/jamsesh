@@ -42,16 +42,19 @@ export function withStdinWatch(cmd: string[]): string[] {
   const script = [
     // A background job's stdin is /dev/null, so the watcher reads the hub's pipe through fd 3.
     "exec 3<&0",
+    // The stop handler is in place before anything starts, so a hub that dies at once still stops the helper.
+    "child=; watch=; stop=",
+    // Stopping: the helper is told to end and, while this wrapper still owns it (so its pid can't have been reused), killed after a grace.
+    "td() { kill $child $watch 2>/dev/null; (sleep 3; kill -9 $child 2>/dev/null) & esc=$!; wait $child 2>/dev/null; kill $esc 2>/dev/null; exit 0; }",
+    "trap 'stop=1; [ -n \"$child\" ] && td' TERM INT HUP",
     '"$@" </dev/null 3<&- &',
     "child=$!",
-    // `read` is the shell's own, so stopping this watcher leaves no process behind.
-    // When the hub is gone the watcher stops this wrapper like any other stop (TERM below), and the wrapper, which still
-    // owns the helper (so its pid can't have been reused), escalates to KILL after a grace: a helper that ignores TERM can't hold its port.
+    // When the hub is gone the watcher stops this wrapper like any other stop. `read` is the shell's own, so stopping the watcher leaves no process behind.
     "me=$$",
     "(while read -r _; do :; done <&3; kill $me 2>/dev/null) &",
     "watch=$!",
     "exec 3<&-",
-    "trap 'kill $child $watch 2>/dev/null; (sleep 3; kill -9 $child 2>/dev/null) & esc=$!; wait $child 2>/dev/null; kill $esc 2>/dev/null; exit 0' TERM INT HUP",
+    '[ -n "$stop" ] && td',
     "wait $child; code=$?",
     "kill $watch 2>/dev/null",
     "exit $code",
