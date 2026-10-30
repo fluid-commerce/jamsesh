@@ -330,6 +330,17 @@ test("the tool and listen hooks find the agent by its chat, and do nothing for a
   expect(hooksOf(hub).stop(a)).toEqual({});
 });
 
+test("a comparison can't be reassigned, and the refused request leaves it open", () => {
+  const { s, reg } = room();
+  const a = reg("Jonathan", "acme/desktop", "/d");
+  const b = reg("Chey", "acme/mobile", "/m");
+  reg("Mo", "acme/api", "/api");
+  const d = s.createDirective({ text: "Compare the sidebar", mode: "coordinate", targets: [a.id, b.id], counterparts: [a.id, b.id], requestedBy: "Jo" });
+  expect(() => s.reassignDirective(d.id, "Chey", undefined, a.id)).toThrow(/comparison/);
+  expect(s.store.get("directives", d.id)).toMatchObject({ status: d.status, progress: d.progress });
+  expect(s.store.get("directives", d.id)!.progress?.[a.id]).not.toBe("cancelled");
+});
+
 test("a multi-target directive offers and reassigns per target; the others keep their work", () => {
   const { s, reg } = room();
   const a = reg("Jonathan", "acme/desktop", "/d");

@@ -963,7 +963,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     }
   }
 
-  // A directive's status is never set from a browser: agents finish it through setDirectiveFor (which checks the exchange) and the brain cancels it.
+  // Agents finish a directive through setDirectiveFor (which checks the exchange for a comparison); a person may end an ordinary one below.
 
   m = path.match(/^\/directives\/([\w-]+)$/);
   if (m && req.method === "POST") {

@@ -945,6 +945,8 @@ export class Session {
   reassignDirective(id: string, by: string, to?: string, target?: string): Directive | undefined {
     const d = this.store.get("directives", id);
     if (!d || d.status === "done" || d.status === "cancelled") return undefined;
+    // A comparison names who it compares with, so a replacement could not be made: refuse before anything is cancelled.
+    if (d.mode === "coordinate") throw new Error("A comparison names the agents to compare, so it can't be reassigned. Cancel it and ask again.");
     const open = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
     const offered = open.filter((t) => d.reassignOfferedAt?.[t]);
     const from = target ? open.filter((t) => t === target) : offered.length ? offered : open;
@@ -1495,7 +1497,7 @@ export class Session {
     }
     const stage = this.stage(target);
     const held = this.lockOf(target);
-    this.rememberStageFor(share.id);
+    // The screens' earlier stages are saved by setStage, in the same transaction as the placement.
     // The owner's own share over their cast keeps their lock, and the cast comes back with it (SPEC 10.5). Under one claim,
     // so only onto the very screen and lock it was decided for; anything newer (another cast, an unlock) wins.
     const claim = this.stageClaim();

@@ -219,6 +219,24 @@ test("a stdin-watched helper dies at once when its hub is killed outright", asyn
   expect(await until(() => !alive(sleeper) && !alive(wrapper), 2000)).toBe(true);
 });
 
+test("a stdin-watched helper that ignores SIGTERM is killed after the grace when its hub is killed outright", async () => {
+  const code = `
+    import { withStdinWatch } from ${JSON.stringify(import.meta.dir + "/../src/children")};
+    const p = Bun.spawn(withStdinWatch(["sh", "-c", "trap '' TERM; while :; do sleep 1; done"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+    await Bun.sleep(600);
+    const kid = Bun.spawnSync(["pgrep", "-P", String(p.pid), "-x", "sh"]).stdout.toString().trim();
+    console.log(JSON.stringify({ wrapper: p.pid, hung: Number(kid.split("\\n")[0]) }));
+    await Bun.sleep(300000);
+  `;
+  const hub = Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "inherit" });
+  const { value } = await hub.stdout.getReader().read();
+  const { wrapper, hung } = JSON.parse(new TextDecoder().decode(value)) as { wrapper: number; hung: number };
+  expect(hung).toBeGreaterThan(0);
+  expect(alive(hung)).toBe(true);
+  hub.kill("SIGKILL");
+  expect(await until(() => !alive(hung) && !alive(wrapper), 10_000)).toBe(true);
+}, 20_000);
+
 test("a stdin-watched helper: stopping the wrapper stops it, leaving nothing behind, and its own exit status comes through", async () => {
   const p = Bun.spawn(withStdinWatch(["sleep", "300"]), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
   await Bun.sleep(400);
