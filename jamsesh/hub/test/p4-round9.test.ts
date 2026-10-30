@@ -1052,7 +1052,10 @@ test("a real MCP jam_post_image call above the SDK's old 4 MB cap goes through t
     const png = Buffer.concat([Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"), Buffer.alloc(5 * 1024 * 1024)]);
     const res = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "jam_post_image", arguments: { title: "Big", imageBase64: png.toString("base64") } } }, sid);
     expect(res.status).toBe(200);
-    expect(await res.text()).not.toContain("too large");
+    const out = await res.text();
+    expect(out).toContain("Posted as");
+    expect(out).not.toContain("isError");
+    expect(r.s.artifacts().some((a) => a.title === "Big")).toBe(true);
   } finally {
     server.stop(true);
   }
@@ -1075,4 +1078,81 @@ test("an oversized repeat keeps the overflow notice, on context, task and cancel
   const first = r.s.proposeContext({ text: "Same again", kind: "fact", by: "Chey", attachments: [1, 2, 3].map(att) })!;
   const again = r.s.proposeContext({ text: "Same again", kind: "fact", by: "Felipe", attachments: [1, 2, 3, 4, 5, 6, 7, 8, 9].map(att) })!;
   expect(again.id === first.id ? again.extraFiles : (again.extraFiles ?? 0) > 0).toBeTruthy();
+});
+
+
+// ---------- round 26 ----------
+
+test("a real MCP tool call paused between admission and dispatch is counted: shutdown waits for it, while a jam_wait doesn't hold anything up", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const dev = r.hub.auth.issue({ kind: "agent", label: "A", ip: "127.0.0.1", personId: r.chey.id });
+    const base = `http://127.0.0.1:${server.port}`;
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${dev.token}` };
+    const rpc = (body: object, sid?: string) => fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body) });
+    const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+    const sid = init.headers.get("mcp-session-id")!;
+    await rpc({ jsonrpc: "2.0", method: "notifications/initialized" }, sid);
+    await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "jam_join", arguments: { harness: "other", repo: "a/b", owner: "Chey" } } }, sid)).text();
+    // A tool that is slow to finish writing.
+    const mcp = r.hub.mcp as any;
+    const real = mcp.callTool.bind(mcp);
+    let wrote = false;
+    mcp.callTool = async (ctx: unknown, name: string, args: unknown, extra: unknown) => {
+      if (name === "jam_updates_slow") return real(ctx, "jam_inbox", {}, extra);
+      await Bun.sleep(300);
+      wrote = true;
+      return real(ctx, name, args, extra);
+    };
+    const pending = rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "jam_inbox", arguments: {} } }, sid).then((x) => x.text());
+    await Bun.sleep(60);
+    expect(r.hub.working().length).toBeGreaterThan(0);
+    // An idle wait is not work.
+    const waitCall = rpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "jam_wait", arguments: {} } }, sid).catch(() => null);
+    await Bun.sleep(60);
+    expect(r.hub.working().filter((w) => w.includes("jam_wait"))).toEqual([]);
+    expect(await r.hub.shutdown()).toBe(true);
+    expect(wrote).toBe(true);
+    await pending;
+    void waitCall;
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("when an MCP client disconnects, its payload's charge stays until the tools have settled", async () => {
+  const r = room();
+  const mcp = r.hub.mcp as any;
+  expect(await Promise.race([mcp.whenQuiet().then(() => "quiet"), Bun.sleep(50).then(() => "busy")])).toBe("quiet");
+  let finish!: () => void;
+  mcp.callTool = () => new Promise((res) => (finish = () => res({ content: [{ type: "text", text: "ok" }] })));
+  const call = mcp.call({ agentId: null }, "jam_post_image", {});
+  expect(await Promise.race([mcp.whenQuiet().then(() => "quiet"), Bun.sleep(50).then(() => "busy")])).toBe("busy");
+  finish();
+  await call;
+  expect(await Promise.race([mcp.whenQuiet().then(() => "quiet"), Bun.sleep(50).then(() => "busy")])).toBe("quiet");
+});
+
+test("attachments gathered from several lines are refused over six, like an explicit list; a same-event repeat with overflow isn't counted twice", () => {
+  const r = room();
+  const att = (n: number) => ({ id: `att_g${n}`, name: `g${n}.txt`, type: "text/plain", kind: "text" as const, size: 5 });
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const ids = [0, 1].map((i) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: `l${i}`, relevance: "work", data: { attachments: [1, 2, 3, 4].map((n) => att(i * 10 + n)) } }).id);
+  expect(() => r.s.createDirective({ text: "Eight files", mode: "note", targets: [agent.id], requestedBy: "Chey", sourceEventIds: ids })).toThrow();
+  const ev = ids[0];
+  const first = r.s.proposeTask({ text: "Many files", mode: "implement", targets: [agent.id], by: "Chey", sourceEventIds: [ev], attachments: [1, 2, 3, 4, 5, 6, 7, 8].map(att) })!;
+  const again = r.s.proposeTask({ text: "Many files", mode: "implement", targets: [agent.id], by: "Chey", sourceEventIds: [ev], attachments: [1, 2, 3, 4, 5, 6, 7, 8].map(att) })!;
+  expect(again.id).toBe(first.id);
+  expect(again.extraFiles).toBe(2);
+  expect(again.count).toBe(1);
+  // A different line repeating it adds its overflow, on a task card and on a cancellation card.
+  const ev2 = ids[1];
+  const third = r.s.proposeTask({ text: "Many files", mode: "implement", targets: [agent.id], by: "Felipe", sourceEventIds: [ev2], attachments: [1, 2, 3, 4, 5, 6, 7, 8].map(att) })!;
+  expect(third.extraFiles).toBe(4);
+  const d = r.s.createDirective({ text: "Cancel me", mode: "implement", targets: [agent.id], requestedBy: "Chey" });
+  const c1 = r.s.board.proposeCancel({ directive: d, reason: "Scrap", by: "Chey", sourceEventIds: [ev], attachments: [1, 2, 3, 4, 5, 6, 7].map(att) })!;
+  expect(c1.extraFiles).toBe(1);
+  expect(r.s.board.proposeCancel({ directive: d, reason: "Scrap", by: "Chey", sourceEventIds: [ev], attachments: [1, 2, 3, 4, 5, 6, 7].map(att) })!.extraFiles).toBe(1);
 });

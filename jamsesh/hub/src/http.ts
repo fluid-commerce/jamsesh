@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
-import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
+import { BODY_LIMITS, bodyHead, buffered, limitFor, readBytes } from "./body";
 import { methodAllowed } from "./methods";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
@@ -273,8 +273,9 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
         if ((path === "/host" || path.startsWith("/setup")) && !local) return Response.redirect("/client", 302);
 
         if (path === "/mcp") {
-          // An agent's stream can stay open for minutes (waiting for the room): its tool calls are counted where they run (mcp.ts), not here.
-          markWaiting(req);
+          // Counted until its response ends: parsing the body, dispatching the tool and its last write are all inside. Only a call that
+          // waits for the room (jam_wait, small enough to be seen whole in the head of its body) and the agent's open stream are idle.
+          if (req.method !== "POST" || /"name"\s*:\s*"jam_wait"/.test(bodyHead(req))) markWaiting(req);
           const res = await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
           holdsBudget = true;
           budgetHeld.set(res, release);
@@ -362,7 +363,8 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           },
           cancel(reason) {
             release();
-            budget?.();
+            // The client left, but a tool it started may still hold the payload: the charge goes when the tools have settled.
+            if (budget) void hub.mcp.whenQuiet().then(budget);
             return reader.cancel(reason);
           },
         }),

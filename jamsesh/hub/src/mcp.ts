@@ -373,10 +373,21 @@ export class McpEndpoint {
     return a;
   }
 
+  /** Tool calls (other than waits) running now; `whenQuiet` resolves when there are none. */
+  private running = 0;
+  private quiet: (() => void)[] = [];
+  whenQuiet(): Promise<void> {
+    return this.running === 0 ? Promise.resolve() : new Promise((res) => this.quiet.push(res));
+  }
+
   async call(ctx: Ctx, name: string, args: any, extra?: { sendNotification?: (n: any) => Promise<void>; _meta?: any }): Promise<ToolOut> {
     // Counted from the call until its last write, for shutdown: here once for every tool, whoever calls. A call that only waits for the room isn't work.
     const release = name === "jam_wait" ? () => {} : this.hub.admit(`the ${name} call`);
-    const out = await this.callTool(ctx, name, args, extra).finally(release);
+    if (name !== "jam_wait") this.running++;
+    const out = await this.callTool(ctx, name, args, extra).finally(() => {
+      release();
+      if (name !== "jam_wait" && --this.running === 0) for (const w of this.quiet.splice(0)) w();
+    });
     // An agent with no hooks (Codex) hears the room only when it asks, so every JamSesh call it makes
     // says if something is waiting. Claude Code's hooks hand the items over themselves.
     const id = ctx.agentId;
