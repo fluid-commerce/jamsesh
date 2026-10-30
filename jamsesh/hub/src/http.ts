@@ -461,7 +461,9 @@ export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
   const now = Date.now();
   const dev = hub.auth.get(ws.data.pairedId);
   const personId = dev ? (dev.kind === "browser" ? dev.personId : null) : ws.data.hostWindow ? s.store.setting<string>("hostPersonId", "") || null : null;
-  const screen = s.findScreen(typeof m.screen === "string" ? m.screen : undefined)?.id ?? "main";
+  const asked = typeof m.screen === "string" ? m.screen : undefined;
+  const found = s.findScreen(asked)?.id;
+  const screen = found ?? "main";
   const person = personId ? s.person(personId) : undefined;
   const deny = (why: string) => {
     if (now - (ws.data.driveDenied ?? 0) < 1000) return;
@@ -472,6 +474,8 @@ export function driveFrom(ws: ServerWebSocket<WsData>, hub: Hub, m: any) {
   const rate = driveRate.get(person.id);
   if (!rate || now - rate.since >= 1000) driveRate.set(person.id, { since: now, n: 1 });
   else if (++rate.n > DRIVE_PER_SECOND) return;
+  // A screen that was named and is gone is not main: stale input for it is dropped, never replayed on another screen.
+  if (asked !== undefined && asked !== "main" && !found) return deny("That screen isn't connected any more.");
   if (!s.driversOf(screen).includes(person.id)) return deny("You aren't driving this screen.");
   const ev = cleanDrive(m.ev);
   if (ev) bus.send({ type: "drive", screen, personId: person.id, name: person.name, color: person.color, ev, t: now });

@@ -108,3 +108,9 @@ test("whisper can't start during or after Hub.stop, and no process is left", () 
     expect(hub.helpers.size).toBe(0);
     expect(existsSync(join(dir, "whisper-d.pid"))).toBe(false); // never ran
   }), 30_000);
+
+test("shutdown is not reported complete when a helper's exit was never seen", async () => {
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "shutdown") });
+  hub.helpers.track({ pid: 999999, exited: new Promise<number>(() => {}), kill: () => {} });
+  expect(await hub.shutdown()).toBe(false);
+}, 30_000);

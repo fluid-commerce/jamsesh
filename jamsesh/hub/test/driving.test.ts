@@ -438,3 +438,13 @@ test("a build's frame lets go of a held button and held keys when the driver lea
   await f.post({ k: "leave" });
   expect(f.fired.filter((e) => e.startsWith("keyup"))).toEqual([]);
 });
+
+test("input for a screen that is named and gone is dropped, never replayed on main", () => {
+  const { s, hub, chey, cast, win, heard } = room();
+  const c = win(chey.id);
+  cast(chey);
+  s.drive("start", "main", chey.id);
+  driveFrom(c.ws, hub, { type: "drive", screen: "screen-9", ev: { k: "move", x: 0.5, y: 0.5 } });
+  expect(heard).toHaveLength(0);
+  expect(c.sent[0]).toMatchObject({ type: "drive-denied" });
+});

@@ -109,8 +109,8 @@ const shutdown = sharedOnce(async () => {
   const complete = await hub.shutdown();
   secure?.stop(true);
   server.stop(true);
-  // 0: everything was saved. 3: a save failed or ran out of time (the Mac app says the save is incomplete).
-  if (!complete) console.error("The session's final save didn't finish.");
+  // 0: everything was saved and every helper was seen to exit. 3: a save failed or ran out of time, or a helper could not be confirmed stopped (the Mac app says the shutdown is incomplete).
+  if (!complete) console.error("The session's shutdown didn't finish cleanly (a save, or a helper that could not be confirmed stopped).");
   process.exit(complete ? 0 : 3);
 });
 process.on("SIGINT", shutdown);

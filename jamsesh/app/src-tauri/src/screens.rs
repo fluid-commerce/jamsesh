@@ -624,8 +624,13 @@ pub fn moved(app: &AppHandle) {
 /// A window closed by a Leave or a project switch belongs to the session that ended: its ticket is stale by the time
 /// this runs, so the next session's hub is never told to retire a screen of its own.
 pub fn closed(app: &AppHandle, label: &str) {
-    let Some(n) = label.strip_prefix("bigscreen-") else { return };
-    let (app, label, screen) = (app.clone(), label.to_string(), format!("screen-{n}"));
+    // The main window is "bigscreen"; the others "bigscreen-N". Main counts only while its window is open (1.R5).
+    let screen = match label.strip_prefix("bigscreen-") {
+        Some(n) => format!("screen-{n}"),
+        None if label == "bigscreen" => "main".to_string(),
+        None => return,
+    };
+    let (app, label) = (app.clone(), label.to_string());
     let ticket = app.state::<Arc<App>>().switching.ticket();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;

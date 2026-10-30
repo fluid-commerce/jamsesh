@@ -255,7 +255,7 @@ export class Hub {
 
   /**
    * Stops, saving a final snapshot first when there is a canvas to save. Resolves with whether every step
-   * finished: false when a save failed or ran out of time, which the hub's exit code reports (index.ts).
+   * finished and every helper's exit was seen: false otherwise, which the hub's exit code reports (index.ts).
    */
   async shutdown(): Promise<boolean> {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
@@ -265,7 +265,7 @@ export class Hub {
     // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
     const reaped = await this.stop();
     if (!reaped) console.warn("a helper process was still running at shutdown");
-    return saved && kept && closed;
+    return saved && kept && closed && reaped;
   }
 
   private offRevoked: () => void;

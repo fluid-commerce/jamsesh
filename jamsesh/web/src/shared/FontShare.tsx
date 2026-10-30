@@ -8,6 +8,8 @@ import { familyKey, lookUpFonts, noteLookupFailed, openQuestions } from "./roomF
 import { declineFont, withdrawFont } from "./roomFontsApi";
 
 const MAX_OFFERS = 3;
+/** The most families the Mac app inspects in one request (fonts.rs MAX_FAMILIES). */
+const LOOKUP_MAX = 24;
 
 export function FontShare() {
   const { state } = useHub();
@@ -25,10 +27,15 @@ export function FontShare() {
   const unchecked = open.filter((w) => !checked.current.has(w.key)).map((w) => w.family);
   useEffect(() => {
     if (!invoke || !unchecked.length) return;
-    lookUpFonts(invoke, unchecked, checked.current).then((names) => {
-      if (names) setHas((h) => [...new Set([...h, ...names.map(familyKey)])]);
+    // The Mac app looks at LOOKUP_MAX families a request: ask in batches so none is marked checked unseen.
+    const batch = unchecked.slice(0, LOOKUP_MAX);
+    lookUpFonts(invoke, batch, checked.current).then((names) => {
+      if (names) {
+        setHas((h) => [...new Set([...h, ...names.map(familyKey)])]);
+        if (unchecked.length > batch.length) setRetry((n) => n + 1); // the next batch
+      }
       // A lookup that failed is tried again a few times, not forgotten until the page reloads.
-      else if (noteLookupFailed(tries.current, unchecked, checked.current)) setTimeout(() => setRetry((n) => n + 1), 5000);
+      else if (noteLookupFailed(tries.current, batch, checked.current)) setTimeout(() => setRetry((n) => n + 1), 5000);
     });
   }, [unchecked.join("|"), retry]);
   const mine = available.filter((f) => f.kind === "borrowed" && me && f.lenderId === me);
