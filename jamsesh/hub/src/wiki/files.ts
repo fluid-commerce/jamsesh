@@ -645,25 +645,29 @@ const archiveMemo = new Map<string, { mtimeMs: number; treeSha: string | null; s
 export function readCapped(file: string, max = MAX_FILE_BYTES): Buffer | null {
   let fd: number;
   try {
-    fd = openSync(file, fsc.O_RDONLY);
+    fd = openSync(file, fsc.O_RDONLY | fsc.O_NOFOLLOW); // a link is never followed
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw e;
   }
   try {
     const st = fstatSync(fd);
+    if (!st.isFile()) throw Object.assign(new Error(`${file.split("/").pop()} is not a regular file`), { code: "ENOTREG" });
     if (st.size > max) {
       console.error(`wiki: ${file.split("/").slice(-2).join("/")} is ${st.size} bytes, over the ${max} the wiki will read`);
       throw Object.assign(new Error(`${file.split("/").pop()} is larger than ${max} bytes`), { code: "ETOOBIG" });
     }
-    const buf = Buffer.alloc(Math.min(st.size, max));
+    const buf = Buffer.alloc(st.size);
     let got = 0;
-    while (got < buf.length) {
-      const n = readSync(fd, buf, got, buf.length - got, got);
+    while (got < st.size) {
+      const n = readSync(fd, buf, got, st.size - got, got);
       if (n === 0) break;
       got += n;
     }
-    return got === buf.length ? buf : buf.subarray(0, got);
+    const after = fstatSync(fd);
+    // A snapshot only if the file is the same after the read as before it: a short read or a rewrite (even of the same length) is an error, never mixed bytes.
+    if (got !== st.size || after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ctimeMs !== st.ctimeMs) throw Object.assign(new Error(`${file.split("/").pop()} changed while it was being read`), { code: "ESHORT" });
+    return buf;
   } finally {
     closeSync(fd);
   }
@@ -868,7 +872,8 @@ export function readPage(dir: string, slug: string): Page | null {
     if (!got) return null;
     bytes = got;
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ETOOBIG") return null; // reads as absent for display only; writePage refuses to overwrite what it could not read
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ETOOBIG" || code === "ELOOP" || code === "ENOTREG") return null; // reads as absent for display only; writePage refuses to overwrite what it could not read
     throw e;
   }
   const text = bytes.toString("utf8");
@@ -1023,8 +1028,8 @@ export function readLog(dir: string, limit = 100): { ts: number; text: string; p
   let text: string | null;
   try {
     text = readPlain(join(dir, "log.md"));
-  } catch {
-    return [];
+  } catch (e) {
+    throw e; // a log that can't be read (a link, too big, changing) is an error the caller reports, not an empty history
   }
   const out: { ts: number; text: string; pages: string[] }[] = [];
   for (const line of (text ?? "").split("\n")) {
@@ -1163,7 +1168,8 @@ export function readSource(dir: string, id: string): Source | null {
     if (!got) return null;
     text = got.toString("utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ETOOBIG") return null;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ETOOBIG" || code === "ELOOP" || code === "ENOTREG") return null;
     throw e;
   }
   const m = text.match(/^---\nkind: (\w+)\ntitle: (".*")\nby: (".*")\nts: (\d+)\n---\n/);

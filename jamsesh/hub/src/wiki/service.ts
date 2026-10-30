@@ -884,6 +884,7 @@ export class WikiService {
       const body = cleanBody(p.markdown);
       if (!body || body.length > PAGE_MAX) continue;
       const cur = readPage(this.dir, slug);
+      if (!cur && existsSync(join(this.dir, "wiki", `${slug}.md`))) continue; // a file is there that can't be read as a page (too large, a link): no proposal that could never be applied
       // The page already says this, and is filed the way the model means it: nothing to change. (Sources aren't compared: citing a new one on a page that already reads the same isn't worth a card.)
       if (cur && cur.markdown.trim() === body && cur.category === categoryOf(p.type) && sameList(cur.frontMatter.workstreams, p.workstreams.slice(0, 12))) continue;
       if (cur && !shown.has(slug)) {

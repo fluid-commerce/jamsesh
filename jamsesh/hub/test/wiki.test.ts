@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { settleIndex, commitPaths, readOnce, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -629,7 +629,7 @@ test("a symlinked wiki/ or raw/ is never followed, for reading or writing", () =
   initWiki(d);
   rmSync(join(d, "log.md"));
   symlinkSync(join(outside, "secret.md"), join(d, "log.md"));
-  expect(readLog(d)).toEqual([]);
+  expect(() => readLog(d)).toThrow(/link/); // an error to report, not an empty history
   // A service over such a folder starts, and refuses the writes instead of following the link.
   const dir = join(root, `svc-${Math.random()}`);
   initWiki(dir);
@@ -3319,4 +3319,34 @@ test("a huge file is an error where it is read, never taken for an absent one: i
     console.error = err;
   }
   expect(logged.join("\n")).toContain("over the");
+});
+
+test("readCapped does not follow a link, refuses a folder, and refuses a file rewritten during the read; a huge existing page never becomes a proposal", async () => {
+  const { w, dir } = room();
+  w.editPage("small", "# Small\n\nA page.", { by: "Chey" });
+  const real = join(dir, "real.txt");
+  writeFileSync(real, "target");
+  symlinkSync(real, join(dir, "linked.txt"));
+  expect(() => readCapped(join(dir, "linked.txt"))).toThrow();
+  mkdirSync(join(dir, "afolder"));
+  expect(() => readCapped(join(dir, "afolder"))).toThrow(/regular|EISDIR/i);
+  expect(readCapped(join(dir, "missing.txt"))).toBeNull();
+  // A huge existing page: the ingest proposes nothing for it (a card that could never be applied).
+  writeFileSync(join(dir, "wiki", "huge.md"), Buffer.alloc(MAX_FILE_BYTES + 1, 97));
+  w.addSource("document", "Note", "Something about the huge page.", "Chey");
+  w.decide = (async () => ({ summary: "Huge", pages: [page("huge", "Huge", "topic", "Replacement text."), page("fresh", "Fresh", "topic", "A new page.")] })) as Decider;
+  const err = console.error;
+  console.error = () => {};
+  try {
+    const res = await w.tick();
+    const slugs = (res?.card?.wiki?.changes ?? []).map((c) => c.slug);
+    expect(slugs).toEqual(["fresh"]);
+  } finally {
+    console.error = err;
+  }
+  // The log: unreadable is an error, not an empty history.
+  const log = join(dir, "log.md");
+  rmSync(log);
+  symlinkSync(real, log);
+  expect(() => readLog(dir)).toThrow();
 });
