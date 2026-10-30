@@ -1647,25 +1647,26 @@ test("a read whose client has stalled (a streamed download) is not work in fligh
     config.home = dir2;
     // A raw socket that reads the headers and a little of the body and then stops reading: the answer cannot drain.
     let head = "";
-    let pause!: () => void;
+    let received = 0;
     const sock = await Bun.connect({
       hostname: "127.0.0.1",
       port: server.port!,
       socket: {
         data(s, chunk) {
-          head += head.length < 200 ? Buffer.from(chunk).toString("latin1") : "";
-          pause = () => s.pause();
+          // Stop reading on the first chunk: the answer began, and the client never takes the rest.
+          if (!received) s.pause();
+          received += chunk.length;
+          if (head.length < 200) head += Buffer.from(chunk).toString("latin1");
         },
         open(s) {
           s.write(`GET /download/mac HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: close\r\n\r\n`);
         },
       },
     });
-    await Bun.sleep(200);
-    // The answer has begun (a 200 with its body streaming); now the client stops reading.
+    await Bun.sleep(300);
     expect(head).toContain("200 OK");
-    pause();
-    await Bun.sleep(200);
+    // Far fewer bytes than the file arrived, so the response is still open on the server's side.
+    expect(received).toBeLessThan(32 * 1024 * 1024);
     expect(r.hub.working()).toEqual([]);
     expect(await r.hub.shutdown()).toBe(true);
     sock.end();
