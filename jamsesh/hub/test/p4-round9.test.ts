@@ -1156,3 +1156,102 @@ test("attachments gathered from several lines are refused over six, like an expl
   expect(c1.extraFiles).toBe(1);
   expect(r.s.board.proposeCancel({ directive: d, reason: "Scrap", by: "Chey", sourceEventIds: [ev], attachments: [1, 2, 3, 4, 5, 6, 7].map(att) })!.extraFiles).toBe(1);
 });
+
+// ---------- round 27 ----------
+
+async function mcpSession(r: ReturnType<typeof room>, server: { port?: number }) {
+  const dev = r.hub.auth.issue({ kind: "agent", label: "A", ip: "127.0.0.1", personId: r.chey.id });
+  const base = `http://127.0.0.1:${server.port}`;
+  const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${dev.token}` };
+  const rpc = (body: object, sid?: string, signal?: AbortSignal) => fetch(`${base}/mcp`, { method: "POST", headers: { ...headers, ...(sid ? { "mcp-session-id": sid } : {}) }, body: JSON.stringify(body), signal });
+  const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+  const sid = init.headers.get("mcp-session-id")!;
+  await rpc({ jsonrpc: "2.0", method: "notifications/initialized" }, sid);
+  await (await rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "jam_join", arguments: { harness: "other", repo: "a/b", owner: "Chey" } } }, sid)).text();
+  const agent = r.s.agents().at(-1)!;
+  return { rpc, sid, agent };
+}
+
+test("a mutating call with a nested name of jam_wait is still work: classification is by the parsed top-level tool", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const { rpc, sid } = await mcpSession(r, server);
+    const mcp = r.hub.mcp as any;
+    const real = mcp.callTool.bind(mcp);
+    mcp.callTool = async (...a: unknown[]) => (await Bun.sleep(300), real(...a));
+    const call = rpc({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "jam_post_image", arguments: { title: "x", name: "jam_wait", imageBase64: "" } } }, sid).then((x) => x.text()).catch(() => "");
+    await Bun.sleep(80);
+    expect(r.hub.working().some((w) => w.includes("POST /mcp"))).toBe(true);
+    expect(await r.hub.shutdown()).toBe(true);
+    await call;
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("jam_wait: a disconnect mid-wait ends the wait and takes nothing; the message is there on the next call", async () => {
+  const r = room();
+  const { startHttp } = await import("../src/http");
+  const server = startHttp(r.hub, 0);
+  try {
+    const { rpc, sid, agent } = await mcpSession(r, server);
+    const ctrl = new AbortController();
+    const waiting = rpc({ jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "jam_wait", arguments: { seconds: 30 } } }, sid, ctrl.signal).catch(() => null);
+    await Bun.sleep(150);
+    expect(r.s.isWaiting(agent.id)).toBe(true);
+    // Idle: not work for shutdown.
+    expect(r.hub.working().filter((w) => w.includes("mcp") || w.includes("jam_wait"))).toEqual([]);
+    ctrl.abort();
+    await waiting;
+    await Bun.sleep(150);
+    expect(r.s.isWaiting(agent.id)).toBe(false);
+    const other = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "a/other", cwd: "/o", machine: "fm", platform: "mobile" }).agent;
+    r.s.sendMessage(other.id, agent.id, "Check the header spacing");
+    const next = await (await rpc({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "jam_inbox", arguments: {} } }, sid)).text();
+    expect(next).toContain("Check the header spacing");
+  } finally {
+    server.stop(true);
+  }
+}, 30_000);
+
+test("jam_wait: what a wake carries is marked read only once the reply is sent; a disconnect after the wake, before the send, leaves it for the next call", async () => {
+  const r = room();
+  const mcp = r.hub.mcp as any;
+  const agent = r.s.registerAgent({ ownerName: "Chey", harness: "other", repo: "a/b", cwd: "/x", machine: "m", platform: "desktop" }).agent;
+  const call = async (id: number) => {
+    const req = new Request("http://x/mcp", { method: "POST", headers: { "content-type": "application/json", "mcp-session-id": "s1", "content-length": "200" }, body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "jam_wait", arguments: { seconds: 5 } } }) });
+    const kind = await mcp.classify(req);
+    expect(kind.idle).toBe(true);
+    const ctx = { agentId: agent.id, ip: "127.0.0.1", device: null, sessionId: "s1", owner: "host" };
+    const out = await mcp.call(ctx, "jam_wait", { seconds: 5 }, { requestId: id });
+    return { kind, out };
+  };
+  const other = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "a/other", cwd: "/o", machine: "fm", platform: "mobile" }).agent;
+  r.s.sendMessage(other.id, agent.id, "First thing");
+  // Woken at once by what's waiting; the reply is cut off before it is sent.
+  const a = await call(10);
+  expect(a.out.content[0].text).toContain("First thing");
+  expect(r.hub.working()).toContain("a jam_wait delivery");
+  a.kind.live.drop();
+  expect(r.hub.working()).not.toContain("a jam_wait delivery");
+  // Not read: the next call gets it again (at least once).
+  const b = await call(11);
+  expect(b.out.content[0].text).toContain("First thing");
+  // This time the reply goes out: it's read, and nothing more is delivered.
+  b.kind.live.sent();
+  expect(r.hub.working()).not.toContain("a jam_wait delivery");
+  expect(mcp.inboxText(agent, false)).toContain("Nothing new");
+});
+
+test("a card remembers every line it took in: replaying the oldest one after thirteen repeats counts for nothing", () => {
+  const r = room();
+  const ev = (n: number) => r.s.store.addEvent({ kind: "speech", authorType: "person", authorId: r.chey.id, authorName: "Chey", text: `say ${n}`, relevance: "work", data: {} }).id;
+  const ids = Array.from({ length: 14 }, (_, i) => ev(i));
+  let card = r.s.proposeContext({ text: "Same call again", kind: "fact", by: "Chey", sourceEventIds: [ids[0]] })!;
+  for (const id of ids.slice(1)) card = r.s.proposeContext({ text: "Same call again", kind: "fact", by: "Felipe", sourceEventIds: [id] })!;
+  expect(card.count).toBe(14);
+  const replay = r.s.proposeContext({ text: "Same call again", kind: "fact", by: "Felipe", sourceEventIds: [ids[0]] })!;
+  expect(replay.count).toBe(14);
+});

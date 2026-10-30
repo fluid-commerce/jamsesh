@@ -126,13 +126,15 @@ export class Board {
 
   /** The same thing said again joins its card (and a dismissed one stays dismissed for a while). */
   private repeat(match: TriageCard, sources: TriageSource[], attachments: TriageCard["attachments"] = [], over = 0): TriageCard {
-    const fresh = sources.filter((x) => x.eventId == null || !match.sources.some((m) => m.eventId === x.eventId));
+    // Every line this card has taken in is remembered by id (not just the dozen it shows), so a replay of an old one counts for nothing.
+    const seen = new Set<number>([...(match.seen ?? []), ...match.sources.map((m) => m.eventId).filter((x): x is number => x != null)]);
+    const fresh = sources.filter((x) => x.eventId == null || !seen.has(x.eventId));
     // Files sent with the repeat belong on the card too, once each.
     const files = [...(match.attachments ?? []), ...(attachments ?? []).filter((a) => !(match.attachments ?? []).some((m) => m.id === a.id))];
     const newFiles = files.length > (match.attachments?.length ?? 0);
     // A line seen twice (the same event) isn't a repeat.
     if (!fresh.length && !newFiles && sources.some((x) => x.eventId != null)) return match;
-    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), ...(files.length ? { attachments: files } : {}), ...(over ? { extraFiles: (match.extraFiles ?? 0) + over } : {}), updatedAt: this.stamp() };
+    const next = { ...match, count: match.count + 1, sources: [...match.sources, ...fresh].slice(-SOURCES_MAX), seen: [...seen, ...fresh.map((x) => x.eventId).filter((x): x is number => x != null)].slice(-2000), ...(files.length ? { attachments: files } : {}), ...(over ? { extraFiles: (match.extraFiles ?? 0) + over } : {}), updatedAt: this.stamp() };
     return this.s.store.put("triage", next);
   }
 

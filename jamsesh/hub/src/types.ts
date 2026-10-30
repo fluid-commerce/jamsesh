@@ -336,6 +336,8 @@ export interface TriageCard {
   needsWording?: boolean;
   /** Files offered with the request past the six a card holds: they were not added, and the card says so. */
   extraFiles?: number;
+  /** Ids of the room lines this card has taken in (the last 2000), kept apart from the dozen it shows, so a replay isn't counted again. */
+  seen?: number[];
   /** A task card that cancels this directive when a person sends it; its text is the reason the agents read. */
   cancels?: string;
   /** A later line in the room overruled this proposal; it waits for a person to dismiss it like any other. */

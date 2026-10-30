@@ -55,10 +55,6 @@ export async function readBytes(req: Request, max: number, ms = READ_MS.media): 
  * times over (the bytes, and the copies a route makes while parsing). Every route is reached through this, which is what keeps the body cap, the time limit
  * and a "closing" check from being per-route.
  */
-/** The start of a request's body (the first 4 KB as text), for routes that need to tell what kind of call it is without parsing it. */
-const heads = new WeakMap<Request, string>();
-export const bodyHead = (req: Request) => heads.get(req) ?? "";
-
 export async function buffered(req: Request): Promise<{ req: Request; release: () => void } | { status: number; message: string }> {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return { req, release: () => {} };
   const max = limitFor(req);
@@ -86,7 +82,5 @@ export async function buffered(req: Request): Promise<{ req: Request; release: (
   // The length is now known exactly, whatever the sender declared (or didn't).
   const headers = new Headers(req.headers);
   headers.set("content-length", String(bytes.length));
-  const out = new Request(req.url, { method: req.method, headers, body: new Blob([bytes as BlobPart]) });
-  heads.set(out, new TextDecoder().decode(bytes.subarray(0, 4096)));
-  return { req: out, release };
+  return { req: new Request(req.url, { method: req.method, headers, body: new Blob([bytes as BlobPart]) }), release };
 }

@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, normalize } from "node:path";
 import type { HostWindows, PairedDevice } from "./auth";
-import { BODY_LIMITS, bodyHead, buffered, limitFor, readBytes } from "./body";
+import { BODY_LIMITS, buffered, limitFor, readBytes } from "./body";
 import { methodAllowed } from "./methods";
 import { AttachmentError, MAX_UPLOAD_BYTES, type AttachmentRef } from "./attachments";
 import { bus } from "./bus";
@@ -51,6 +51,8 @@ const HOST_ONLY_SETTINGS = ["gatewayKey", "models", "hostControl", "brainEnabled
 const waiting = new WeakMap<Request, () => void>();
 /** Per response: the body-memory charge it still holds, released when its stream has ended. */
 const budgetHeld = new WeakMap<Response, () => void>();
+/** Per request: the wait it carries, told when its reply has been sent or the client has gone. */
+const liveCalls = new WeakMap<Request, import("./mcp").LiveCall>();
 const markWaiting = (req: Request) => waiting.get(req)?.();
 
 const RELAY_HEADERS = ["x-forwarded-host", "x-forwarded-for", "forwarded", "cf-connecting-ip", "x-real-ip"];
@@ -274,8 +276,10 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
 
         if (path === "/mcp") {
           // Counted until its response ends: parsing the body, dispatching the tool and its last write are all inside. Only a call that
-          // waits for the room (jam_wait, small enough to be seen whole in the head of its body) and the agent's open stream are idle.
-          if (req.method !== "POST" || /"name"\s*:\s*"jam_wait"/.test(bodyHead(req))) markWaiting(req);
+          // waits for the room (jam_wait, known from the parsed top-level tool name) and the agent's open stream are idle.
+          const kind = await hub.mcp.classify(req);
+          if (kind.idle) markWaiting(req);
+          if (kind.live) liveCalls.set(incoming, kind.live);
           const res = await hub.mcp.handle(req, ip, device?.id ?? (local ? "host" : null), originOf(req, url));
           holdsBudget = true;
           budgetHeld.set(res, release);
@@ -342,9 +346,11 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
       }
       // An upgrade has no response; a body is released when its last byte has gone (or the client left).
       const budget = res ? budgetHeld.get(res) : undefined;
+      const live = liveCalls.get(incoming);
       if (!res || !res.body) {
         release();
         budget?.();
+        live?.drop(); // nothing was sent: what it would have carried stays unread
         return res;
       }
       const reader = res.body.getReader();
@@ -353,11 +359,12 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
           async pull(c) {
             try {
               const { done, value } = await reader.read();
-              if (done) (c.close(), release(), budget?.());
+              if (done) (c.close(), release(), budget?.(), live?.sent());
               else c.enqueue(value);
             } catch (e) {
               release();
               budget?.();
+              live?.drop();
               c.error(e);
             }
           },
@@ -365,6 +372,7 @@ export function startHttp(hub: Hub, port = config.port, tls?: { cert: string; ke
             release();
             // The client left, but a tool it started may still hold the payload: the charge goes when the tools have settled.
             if (budget) void hub.mcp.whenQuiet().then(budget);
+            live?.drop();
             return reader.cancel(reason);
           },
         }),

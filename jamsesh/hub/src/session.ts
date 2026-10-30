@@ -991,24 +991,31 @@ export class Session {
   }
 
   /** Unread work for an agent: directives aimed at it and messages to it. */
-  inbox(agentId: string, markDelivered = true) {
+  /**
+   * What is waiting for an agent. `markDelivered` (the default) also marks it handed over; `peek` lists only what is still new
+   * and marks nothing, for a caller that marks it (markInbox) once the reply carrying it has been sent.
+   */
+  inbox(agentId: string, markDelivered = true, peek = false) {
     const mine = (d: Directive) => d.progress?.[agentId] ?? d.status;
     const directives = this.directives()
-      .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && mine(d) === "delivered")))
+      .filter((d) => d.targets.includes(agentId) && (mine(d) === "pending" || (!markDelivered && !peek && mine(d) === "delivered")))
       .reverse();
     const lastRead = this.store.setting<number>(`msgRead:${agentId}`, 0);
     const quiet = this.skipsBroadcasts(this.agent(agentId));
     const messages = this.store
       .recentEvents({ kinds: ["message"], afterId: lastRead, limit: 50 })
       .filter((e) => !e.data.inline && (e.data.to === agentId || (e.data.to === "all" && e.authorId !== agentId && !quiet)));
-    if (markDelivered) {
-      for (const d of directives) {
-        this.setDirectiveFor(d.id, agentId, "delivered");
-        this.setDirective(d.id, { deliveredAt: d.deliveredAt ?? Date.now() });
-      }
-      if (messages.length) this.store.setSetting(`msgRead:${agentId}`, messages[messages.length - 1].id);
-    }
+    if (markDelivered) this.markInbox(agentId, { directives, messages });
     return { directives, messages };
+  }
+
+  /** Marks exactly these items as handed over (read): what a reply carried, once it has been sent. Messages are marked up to the last one carried. */
+  markInbox(agentId: string, taken: { directives: Directive[]; messages: JamEvent[] }) {
+    for (const d of taken.directives) {
+      this.setDirectiveFor(d.id, agentId, "delivered");
+      this.setDirective(d.id, { deliveredAt: d.deliveredAt ?? Date.now() });
+    }
+    if (taken.messages.length) this.store.setSetting(`msgRead:${agentId}`, Math.max(this.store.setting<number>(`msgRead:${agentId}`, 0), taken.messages[taken.messages.length - 1].id));
   }
 
   hasInbox(agentId: string) {
@@ -1016,8 +1023,8 @@ export class Session {
     return directives.some((d) => (d.progress?.[agentId] ?? d.status) === "pending") || messages.length > 0;
   }
 
-  wait(agentId: string, timeoutMs: number): Promise<void> {
-    if (this.hasInbox(agentId)) return Promise.resolve();
+  wait(agentId: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || this.hasInbox(agentId)) return Promise.resolve();
     return new Promise((resolve) => {
       const set = this.waiters.get(agentId) ?? new Set();
       this.waiters.set(agentId, set);
@@ -1030,6 +1037,8 @@ export class Session {
         timer: setTimeout(() => w.resolve(), timeoutMs),
       };
       set.add(w);
+      // The caller went away: the wait ends now, and nothing is taken for it.
+      signal?.addEventListener("abort", () => w.resolve(), { once: true });
     });
   }
 
