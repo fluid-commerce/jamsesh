@@ -3156,10 +3156,11 @@ test("a page whose bytes are not valid UTF-8 is never taken for the wiki's recor
   expect(bad.equals(good)).toBe(false);
   expect(bad.toString("utf8")).toBe(good.toString("utf8"));
   writeFileSync(file, bad);
+  expect(w.syncVault()).toEqual(["one"]); // the revision is a hash of the bytes: the sync sees the change though the decoded text is the same
   (w as any).write("two", "# Two\n\nUnrelated.");
   (w as any).commitOwn("Add two", ["wiki/two.md"]);
   const committed = Bun.spawnSync(["git", "show", "HEAD:wiki/one.md"], { cwd: dir }).stdout;
-  expect(Buffer.from(committed).equals(good)).toBe(true); // the committed page is still the one the wiki wrote
+  expect(Buffer.from(committed).equals(bad)).toBe(true); // it was filed as their edit first, so it is committed as that
 });
 
 test("a repository with SHA-256 object ids gets no wiki history, said plainly, rather than a broken one", () => {
@@ -3176,4 +3177,22 @@ test("a repository with SHA-256 object ids gets no wiki history, said plainly, r
   } finally {
     console.error = err;
   }
+});
+
+test("what the wiki writes into a commit subject never appears in a git command line", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  const seenArgs: string[] = [];
+  const spawn = Bun.spawnSync.bind(Bun);
+  const original = Bun.spawnSync;
+  (Bun as any).spawnSync = (cmd: string[], opts: any) => (seenArgs.push(...cmd), spawn(cmd as any, opts));
+  try {
+    w.editPage("secrets", "# Secrets\n\nA page.", { by: "Chey", title: "api-key-sk-live-1234" });
+    w.addSource("document", "key sk-live-9999 in a title", "text", "Chey");
+    (w as any).commitOwn("Edit with sk-live-5555 in the subject", ["wiki/secrets.md"]);
+  } finally {
+    (Bun as any).spawnSync = original;
+  }
+  expect(seenArgs.join(" ")).not.toContain("sk-live");
+  expect(gitOutOf(dir, "log", "--pretty=format:%s")).toContain("sk-live-5555"); // it is in the history, as intended
 });

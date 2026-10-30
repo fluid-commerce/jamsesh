@@ -280,9 +280,7 @@ export class WikiService {
           if (code === "ELOOP" || code === "ENOTREG") return false; // something there that isn't a page of ours (a link, a folder): never committed
           throw e; // anything else stops the pass
         }
-        // The wiki's pages are valid UTF-8; the record is a hash of the decoded text, which different bytes (malformed ones) can share, so the bytes must also survive the round trip.
-        const text = bytes.toString("utf8");
-        if (seen !== undefined && (seen[m[1]]?.rev !== revOf(text) || !Buffer.from(text, "utf8").equals(bytes))) return false; // not as the wiki left it: theirs until filed
+        if (seen !== undefined && seen[m[1]]?.rev !== revOf(bytes)) return false; // not as the wiki left it (the revision is a hash of the bytes): theirs until filed
         read.set(f, bytes); // no first look yet (seen undefined) means the pages present are the wiki's
         return true;
       });

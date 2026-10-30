@@ -292,7 +292,8 @@ export function commitPaths(dir: string, message: string, paths: string[], prere
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
       if (head && tree === headTree) return "nothing"; // nothing of these differs from history
-      const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : []), "-m", msg])?.trim();
+      // (The message goes in on stdin, not in the command line: what the wiki writes into a subject is not shown in a process list.)
+      const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : [])], {}, msg + "\n")?.trim();
       if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return "failed";
       settleIndex(dir); // an earlier commit's index update that didn't finish goes first
       // The person's index is held (git's own lock) while the branch moves: a commit is not made at all if it can't be held.
@@ -313,7 +314,7 @@ export function commitPaths(dir: string, message: string, paths: string[], prere
           return "failed";
         }
         // Moves the branch, only if it is still where this started (all zeros: still unborn).
-        if (gitOut(dir, ["update-ref", "-m", `wiki: ${msg}`, ref, commit, head ?? ZERO]) === null) {
+        if (gitOut(dir, ["update-ref", "-m", "wiki commit", ref, commit, head ?? ZERO]) === null) {
           // A miss on the compare-and-swap, the ref already at the new commit, or a real failure: told apart by one look at the exact ref.
           const now = refState(dir, ref);
           if (now === "unknown") return "failed"; // can't tell whether it moved: the note stays and the next pass settles it
@@ -511,37 +512,67 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
   if (!gitAvailable() || !existsSync(join(dir, ".git"))) return [];
   const state = refState(dir, "HEAD");
   if (state === "unknown") return null; // git couldn't say: not "nothing changed"; the caller commits nothing this time
-  const inHead = new Map<string, string>(); // path -> blob, as committed
-  if (state !== "missing") {
-    const listing = gitOut(dir, ["ls-tree", "-r", "-z", state.sha, "--", folder]);
-    if (listing === null) return null;
-    for (const rec of listing.split("\0").filter(Boolean)) {
-      const tab = rec.indexOf("\t");
-      const f = rec.slice(0, tab).split(" ");
-      if (own(rec.slice(tab + 1))) inHead.set(rec.slice(tab + 1), f[2]);
-    }
-  }
   try {
+    // The folders to compare. The archive of read sources (raw/archive) never changes: while its tree in HEAD, its folder's time and its names are
+    // as when it was last compared here, it is not listed, looked at or read again, however big it has grown.
+    const subs = folder === "raw" ? ["raw", "raw/archive"] : ["wiki"];
+    const dirs = new Map<string, string | null>();
+    for (const sub of subs) {
+      try {
+        dirs.set(sub, vaultDir(dir, sub as "wiki" | "raw" | "raw/archive")); // throws for a folder that is a link: never followed
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        dirs.set(sub, null);
+      }
+    }
+    let skipArchive = false;
+    let archiveTree: string | null = null;
+    let archiveNames: string[] = [];
+    let archiveMtime = 0;
+    const inHead = new Map<string, string>(); // path -> blob, as committed
+    if (folder === "raw") {
+      if (state !== "missing") {
+        const top = gitOut(dir, ["ls-tree", "-z", state.sha, "--", "raw/"]);
+        if (top === null) return null;
+        for (const rec of top.split("\0").filter(Boolean)) {
+          const tab = rec.indexOf("\t");
+          const [, type, sha] = rec.slice(0, tab).split(" ");
+          const path = rec.slice(tab + 1);
+          if (type === "blob" && own(path)) inHead.set(path, sha);
+          else if (type === "tree" && path === "raw/archive") archiveTree = sha;
+        }
+      }
+      const ad = dirs.get("raw/archive");
+      if (ad) {
+        archiveNames = readdirSync(ad).filter((n) => own(`raw/archive/${n}`));
+        archiveMtime = lstatSync(ad).mtimeMs;
+        const memo = archiveMemo.get(dir);
+        skipArchive = !!memo && memo.treeSha === archiveTree && memo.mtimeMs === archiveMtime && memo.shas.size === archiveNames.length && archiveNames.every((n) => memo.shas.has(n));
+      }
+      if (archiveTree && !skipArchive) {
+        const listing = gitOut(dir, ["ls-tree", "-r", "-z", archiveTree]);
+        if (listing === null) return null; // a failed listing is an error, never "HEAD has nothing there"
+        for (const rec of listing.split("\0").filter(Boolean)) {
+          const tab = rec.indexOf("\t");
+          const path = `raw/archive/${rec.slice(tab + 1)}`;
+          if (own(path)) inHead.set(path, rec.slice(0, tab).split(" ")[2]);
+        }
+      }
+    } else if (state !== "missing") {
+      const listing = gitOut(dir, ["ls-tree", "-r", "-z", state.sha, "--", folder]);
+      if (listing === null) return null;
+      for (const rec of listing.split("\0").filter(Boolean)) {
+        const tab = rec.indexOf("\t");
+        if (own(rec.slice(tab + 1))) inHead.set(rec.slice(tab + 1), rec.slice(0, tab).split(" ")[2]);
+      }
+    }
     // Each file's blob id as its bytes are on disk, taken from one read of it (readOnce: no link followed, regular files only).
     const onDisk = new Map<string, string>();
-    const folders = folder === "raw" ? ["raw", "raw/archive"] : ["wiki"];
-    for (const sub of folders) {
-      let d: string | null;
-      try {
-        d = vaultDir(dir, sub as "wiki" | "raw" | "raw/archive"); // throws for a folder that is a link: never followed
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw e;
-      }
+    for (const sub of subs) {
+      const d = dirs.get(sub);
       if (!d) continue;
-      const names = readdirSync(d).filter((n) => own(`${sub}/${n}`));
-      // Archived sources never change: while the archive folder's own time and its names are as when they were last seen here, its files are not looked at again.
-      const dst = sub === "raw/archive" ? lstatSync(d) : null;
-      const memo = dst ? archiveMemo.get(dir) : undefined;
-      if (dst && memo && memo.mtimeMs === dst.mtimeMs && memo.shas.size === names.length && names.every((n) => memo.shas.has(n))) {
-        for (const n of names) onDisk.set(`${sub}/${n}`, memo.shas.get(n)!);
-        continue;
-      }
+      if (sub === "raw/archive" && skipArchive) continue;
+      const names = sub === "raw/archive" ? archiveNames : readdirSync(d).filter((n) => own(`${sub}/${n}`));
       const seen = new Map<string, string>();
       for (const n of names) {
         const f = `${sub}/${n}`;
@@ -550,7 +581,7 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
         onDisk.set(f, sha);
         seen.set(n, sha);
       }
-      if (dst) archiveMemo.set(dir, { mtimeMs: dst.mtimeMs, shas: seen });
+      if (sub === "raw/archive") archiveMemo.set(dir, { mtimeMs: archiveMtime, treeSha: archiveTree, shas: seen });
     }
     const gone = [...inHead.keys()].filter((f) => {
       try {
@@ -568,7 +599,7 @@ function changedOwn(dir: string, folder: "raw" | "wiki", own: (f: string) => boo
   }
 }
 
-const archiveMemo = new Map<string, { mtimeMs: number; shas: Map<string, string> }>();
+const archiveMemo = new Map<string, { mtimeMs: number; treeSha: string | null; shas: Map<string, string> }>();
 
 /**
  * A file's bytes, read once: opened without following a link (O_NOFOLLOW), checked to be a regular file on the open handle, read
@@ -590,7 +621,9 @@ export function readOnce(dir: string, rel: string): Buffer {
       if (n === 0) break;
       got += n;
     }
-    if (got !== st.size) throw Object.assign(new Error(`${rel} changed while it was being read`), { code: "ESHORT" }); // not a snapshot: never partial bytes
+    const after = fstatSync(fd);
+    // Not a snapshot unless the file is the same after the read as before it: a short read, or a rewrite in place (even one of the same length) is an error, never mixed bytes.
+    if (got !== st.size || after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ctimeMs !== st.ctimeMs) throw Object.assign(new Error(`${rel} changed while it was being read`), { code: "ESHORT" });
     return buf;
   } finally {
     closeSync(fd);
@@ -682,7 +715,8 @@ export interface PageInfo {
 }
 
 export const today = (now = Date.now()) => new Date(now).toISOString().slice(0, 10);
-export const revOf = (text: string) => createHash("sha1").update(text).digest("hex").slice(0, 12);
+/** A page's revision: a hash of its bytes (for text, its UTF-8 bytes, so a record made from the text a page was written from still matches the file). Different bytes never share one, malformed or not. */
+export const revOf = (bytes: string | Buffer) => createHash("sha1").update(bytes).digest("hex").slice(0, 12);
 
 function list(v: string): string[] {
   const t = v.trim();
@@ -758,7 +792,8 @@ export function readPage(dir: string, slug: string): Page | null {
     return null;
   }
   if (!file || !plainFile(file)) return null;
-  const text = readFileSync(file, "utf8");
+  const bytes = readFileSync(file);
+  const text = bytes.toString("utf8");
   const { fm, body } = parseFrontMatter(text);
   const type = fm.type && TYPES[fm.type] ? fm.type : "topic";
   return {
@@ -767,7 +802,7 @@ export function readPage(dir: string, slug: string): Page | null {
     category: categoryOf(type),
     frontMatter: { type, workstreams: fm.workstreams ?? [], updated: fm.updated ?? today(statSync(file).mtimeMs), sources: fm.sources ?? [] },
     markdown: body,
-    rev: revOf(text),
+    rev: revOf(bytes),
     mtime: statSync(file).mtimeMs,
   };
 }
