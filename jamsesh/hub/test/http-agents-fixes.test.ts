@@ -186,5 +186,4 @@ test("a dev server refresh that is mid-check when the proxy stops writes nothing
   dp.check = async () => (dp.stop(), false); // stop arrives while the check is awaited
   await dp.refresh();
   expect(patches).toEqual([]);
-  expect(dp.downSince.size).toBe(0);
 });

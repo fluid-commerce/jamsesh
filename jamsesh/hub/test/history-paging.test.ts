@@ -21,10 +21,9 @@ const auth = { authorization: `Bearer ${agent.token}`, "x-forwarded-for": "9.9.9
 const get = (path: string) => fetch(`${base}/api${path}`, { headers: auth }).then((r) => r.json() as Promise<any>);
 
 const a = s.registerAgent({ ownerName: "Jonathan", harness: "claude-code", repo: "acme/desktop", cwd: "/d", machine: "m1", platform: "desktop" }).agent;
-for (let i = 0; i < 90; i++) {
-  const d = s.createDirective({ text: `directive ${i}`, mode: "explore", targets: [a.id], requestedBy: "Felipe" });
-  if (i < 30) s.endDirective(d.id, "done"); // open ones always stay in the state (2.x), so the oldest are finished
-}
+for (let i = 0; i < 90; i++) s.createDirective({ text: `directive ${i}`, mode: "explore", targets: [a.id], requestedBy: "Felipe" });
+// Open directives always stay in the state (phase 2), so the 30 oldest are finished.
+for (const d of s.directives().slice(60)) s.endDirective(d.id, "done");
 for (let i = 0; i < 150; i++) s.upsertArtifact({ kind: "screenshot", title: `shot ${i}`, agentId: a.id, updatedAt: 1_000 + i } as any, { announce: false });
 for (let i = 0; i < 300; i++) s.store.addEvent({ kind: "speech", authorType: "person", authorName: "Sam", text: `line ${i}` });
 

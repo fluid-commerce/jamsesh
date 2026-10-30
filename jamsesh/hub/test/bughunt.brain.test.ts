@@ -118,7 +118,8 @@ test("R8: a restart ends live shares and re-arms the stage", () => {
   s1.setStage({ mode: "layout", layout: { tiles: [{ kind: "screen", shareId: sh.id, label: "x" }] } } as any, "t", "main", { claim: s1.stageClaim() });
   const s2 = new Session(new Store(dir));
   expect(s2.shares()).toHaveLength(0);
-  expect(s2.stage().mode).toBe("board");
+  // The share is gone and the screen has what it showed before the share (phase 1: a share gives back what it hid).
+  expect(s2.stage().mode).toBe("welcome");
 });
 
 test("R12/G7: an answer the asker waited for isn't repeated in its inbox", async () => {

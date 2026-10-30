@@ -30,9 +30,9 @@ test("observers are never paired into work, and pairing with only one working ag
 test("a parity check never names an observer, and no task is made for one", async () => {
   const desktop = reg("Chey", "/r8/d", "desktop");
   const watcher = reg("Rae", "/r8/m", "mobile", "observer");
-  const tools = (hub.brain as any).parityTools([{ agent: desktop, text: "Shipped the collapsible sidebar navigation" }]);
+  const tools = (hub.brain as any).parityTools([{ id: "ship-1", agent: desktop, text: "Shipped the collapsible sidebar navigation", seen: "collapsible sidebar navigation" }]);
   const before = s.directives().length;
-  const out = said(await tools.coordinate_parity.execute({ feature: "Sidebar", seen: "collapsible sidebar navigation", shippedBy: [desktop.id], platforms: ["mobile"] }));
+  const out = said(await tools.coordinate_parity.execute({ shipments: ["ship-1"], platforms: ["mobile"] }));
   expect(out).toContain("isn't a cross-platform feature");
   expect(s.directives()).toHaveLength(before);
   expect(s.directives().some((d) => d.targets.includes(watcher.id))).toBe(false);
