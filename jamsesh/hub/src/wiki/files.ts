@@ -248,6 +248,9 @@ function ownGitDir(dir: string): string | null {
     if (!st.isDirectory()) return null;
     const gd = gitOut(dir, ["rev-parse", "--absolute-git-dir"])?.trim();
     if (!gd || realpathSync(gd) !== realpathSync(join(dir, ".git"))) return null;
+    // Refs and objects must live here too: a commondir pointing elsewhere (a worktree-style layout) would make the branch move in another repository.
+    const common = gitOut(dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim();
+    if (!common || realpathSync(common) !== realpathSync(gd)) return null;
     return gd;
   } catch {
     return null;
@@ -1132,6 +1135,8 @@ export function addSource(dir: string, s: { kind: SourceKind; title: string; tex
   if (s.id) {
     const have = isSourceId(s.id) ? readSource(dir, s.id) : null;
     if (have) return have;
+    // One already in the archive that can't be read (damaged, too large) is still that source: not written again beside it.
+    if (isSourceId(s.id) && archived(dir, s.id)) throw Object.assign(new Error(`The source ${s.id} is in the archive but can't be read, so it isn't written again.`), { code: "EEXIST" });
   }
   if (readdirSync(raw).length >= MAX_SOURCES) throw new Error("This wiki holds as many sources as it can. Older ones that are read in move to raw/archive on their own; if they can't, free some.");
   const title = s.title.replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled";
@@ -1181,7 +1186,7 @@ function sourceFile(dir: string, id: string): string | null {
 const archived = (dir: string, id: string): boolean => {
   try {
     const d = vaultDir(dir, "raw/archive");
-    return !!d && existsSync(join(d, `${id}.md`));
+    return !!d && present(join(d, `${id}.md`));
   } catch {
     return false;
   }

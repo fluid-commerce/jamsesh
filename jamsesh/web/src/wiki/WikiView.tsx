@@ -180,7 +180,7 @@ function Index({ wiki, q, setQ, search, current, onOpen, onGraph, onAdd, graphOn
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") (e.preventDefault(), list.current?.querySelector<HTMLElement>(".wk-item")?.focus());
             if (e.key === "Escape") (setQ(""), search.current?.blur());
-            if (e.key === "Enter") (hits?.[0] ?? local[0]) && onOpen((hits?.[0] ?? local[0]).slug);
+            if (e.key === "Enter") { const first = hits ? hits[0] : local[0]; if (first) onOpen(first.slug); } // (an answered search that found nothing opens nothing, not the local fallback)
           }}
         />
         <div className="wk-actions">

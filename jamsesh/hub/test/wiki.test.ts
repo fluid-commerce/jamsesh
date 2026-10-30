@@ -3460,3 +3460,68 @@ test("a dangling link at index.md or log.md is never renamed over, at start or b
   }
   expect(lstatSync(join(dir, "index.md")).isSymbolicLink()).toBe(true);
 });
+
+test("a real .git folder whose common directory is elsewhere is never used", () => {
+  if (!gitAvailable()) return;
+  const other = join(root, `common-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(other, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: other });
+  Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "theirs"], { cwd: other });
+  const vault = join(root, `vault-common-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(join(vault, ".git"), { recursive: true });
+  writeFileSync(join(vault, ".git", "HEAD"), "ref: refs/heads/master\n");
+  writeFileSync(join(vault, ".git", "commondir"), `${join(other, ".git")}\n`); // refs and objects are in the other repository
+  writeFileSync(join(vault, "index.md"), "one");
+  const theirs = gitOutOf(other, "rev-parse", "HEAD");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(commitPaths(vault, "Try", ["index.md"])).toBe("failed");
+  } finally {
+    console.error = err;
+  }
+  expect(historyStatus(vault)).toMatchObject({ state: "off" });
+  expect(gitOutOf(other, "rev-parse", "HEAD")).toBe(theirs);
+  expect(gitOutOf(other, "log", "--pretty=format:%s")).toBe("theirs");
+});
+
+test("a fixed-id source whose archived copy can't be read is not written again beside it", () => {
+  const { w, dir } = room();
+  const src = w.addSource("document", "Old", "Archived and then damaged.", "Chey", { id: "2026-10-29_report-aaaaaa-1" });
+  archiveSources(dir, [src.id]);
+  writeFileSync(join(dir, "raw", "archive", `${src.id}.md`), Buffer.alloc(MAX_FILE_BYTES + 1, 97)); // can't be read as a source
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(() => w.addSource("document", "Old", "Again.", "Chey", { id: src.id })).toThrow(/archive/);
+  } finally {
+    console.error = err;
+  }
+  expect(existsSync(join(dir, "raw", `${src.id}.md`))).toBe(false);
+});
+
+test("a failing commit of archived sources is found again by the next scan and committed by the next pass", () => {
+  if (!gitAvailable()) return;
+  if (process.getuid?.() === 0) return; // a read-only folder means nothing to root
+  const { w, dir } = room();
+  const ids = Array.from({ length: 3 }, (_, i) => w.addSource("document", `S${i}`, `Source ${i}`, "Chey").id);
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  archiveSources(dir, ids);
+  const heads = join(dir, ".git", "refs", "heads");
+  chmodSync(heads, 0o555); // the branch can't move: the commit fails
+  const err = console.error;
+  console.error = () => {};
+  try {
+    w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
+  } finally {
+    console.error = err;
+    chmodSync(heads, 0o755);
+  }
+  expect(rawPaths(dir)!.some((f) => f.startsWith("raw/archive/"))).toBe(true); // still to be committed
+  w.editPage("three", "# Three\n\nMore.", { by: "Chey" }); // the next pass
+  const files = gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD");
+  for (const id of ids) {
+    expect(files).toContain(`raw/archive/${id}.md`);
+    expect(files).not.toContain(`raw/${id}.md`);
+  }
+});
