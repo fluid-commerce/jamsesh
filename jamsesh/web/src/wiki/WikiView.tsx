@@ -222,6 +222,7 @@ function Index({ wiki, q, setQ, search, current, onOpen, onGraph, onAdd, graphOn
         )}
         {!hits && q.trim() && !groups.length && <div className="wk-note">Nothing matches “{q.trim()}”.</div>}
         {offline && dq.length >= 2 && <div className="wk-note">Searching titles only; the full search isn't answering.</div>}
+        {wiki.history.off && <div className="wk-note">The wiki isn't keeping a version history{wiki.history.why ? `: ${wiki.history.why}` : ""}. Pages still save.</div>}
       </div>
     </div>
   );

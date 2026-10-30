@@ -17,7 +17,8 @@ import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
-  readOnce,
+  historyStatus,
+  type Take,
   settleIndex,
   pageSlugsStrict,
   pagePaths,
@@ -263,31 +264,18 @@ export class WikiService {
     } catch (e) {
       return void console.error("wiki: the state can't be read, so no commit is made this time (ownership unknown):", errText(e));
     }
-    // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. Each page is read
-    // once, and the bytes that decide ownership are the very bytes handed to the commit (no reopening by path, so an edit can't slip in between).
-    const read = new Map<string, Buffer>();
-    let wikis: string[];
-    try {
-      wikis = [...new Set([...paths, ...changed])].filter((f) => {
-        const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
-        if (!m) return true; // not a page (index, log, sources): the wiki's own files by name
-        let bytes: Buffer;
-        try {
-          bytes = readOnce(this.dir, f);
-        } catch (e) {
-          const code = (e as NodeJS.ErrnoException).code;
-          if (code === "ENOENT") return seen === undefined || !seen[m[1]]; // a deletion counts once the sync has filed it (the record is gone)
-          if (code === "ELOOP" || code === "ENOTREG") return false; // something there that isn't a page of ours (a link, a folder): never committed
-          throw e; // anything else stops the pass
-        }
-        if (seen !== undefined && seen[m[1]]?.rev !== revOf(bytes)) return false; // not as the wiki left it (the revision is a hash of the bytes): theirs until filed
-        read.set(f, bytes); // no first look yet (seen undefined) means the pages present are the wiki's
-        return true;
-      });
-    } catch (e) {
-      return void console.error("wiki: couldn't look at the page files, so no commit is made this time:", errText(e));
-    }
-    commitPaths(this.dir, message, [...new Set(wikis)].concat(["index.md", "log.md", ...raw]), read);
+    // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. The rule is applied
+    // to each page's bytes as the commit reads them (once, one at a time, none kept here), and those same bytes are what is committed.
+    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]);
+    const accept = (f: string, state: Buffer | "gone" | "unreadable" | "toobig"): Take => {
+      const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
+      if (!m) return state === "unreadable" ? "fail" : state === "toobig" ? "skip" : "take"; // not a page (index, log, sources): the wiki's own files by name
+      if (state === "unreadable" || state === "toobig") return "skip"; // something there that isn't a page of ours (a link, a folder, a huge file): never committed
+      if (state === "gone") return seen === undefined || !seen[m[1]] ? "take" : "skip"; // a deletion counts once the sync has filed it (the record is gone)
+      if (seen === undefined) return "take"; // no first look yet (a migration, a new vault): the pages present are the wiki's
+      return seen[m[1]]?.rev === revOf(state) ? "take" : "skip"; // not as the wiki left it (a hash of the bytes): theirs until filed
+    };
+    commitPaths(this.dir, message, candidates, accept);
   }
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
@@ -1346,7 +1334,7 @@ export class WikiService {
     try {
       pending = this.pendingSources().length;
     } catch {} // an unreadable state file is reported where it is used
-    return { ready: pageSlugs(this.dir).length > 0 || pending > 0, pages: pageSlugs(this.dir).length };
+    return { ready: pageSlugs(this.dir).length > 0 || pending > 0, pages: pageSlugs(this.dir).length, history: historyStatus(this.dir) };
   }
 
   backlinks(slug: string) {

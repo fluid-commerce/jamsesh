@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Hub } from "../../hub/src/hub";
 import { startHttp } from "../../hub/src/http";
 import { api } from "../src/shared/hub";
-import { wikiApi } from "../src/wiki/wikiApi";
+import { historyOf, wikiApi } from "../src/wiki/wikiApi";
 import { localOf, shapeGraph } from "../src/wiki/graph";
 import { seedWiki } from "./wiki-fixture";
 import { drafts, onRefresh, restore, saveRev, track } from "../src/wiki/draft";
@@ -402,4 +402,11 @@ test("the local map shows every neighbour a page has, even when the global map w
   expect(g.near.get("p0")!.size).toBe(39);
   // A link to a page that doesn't exist yet is not a node.
   expect(localOf({ ...page, links: [{ slug: "nope", exists: false }], backlinks: [] }, metas).nodes.map((n) => n.id)).toEqual(["p0"]);
+});
+
+test("the wiki status shows version history off only when the hub says so", () => {
+  expect(historyOf(undefined)).toEqual({ off: false, why: "" });
+  expect(historyOf({ state: "on" })).toEqual({ off: false, why: "" });
+  expect(historyOf({ state: "none" })).toEqual({ off: false, why: "" });
+  expect(historyOf({ state: "off", why: "the repository uses SHA-256 object ids" })).toEqual({ off: true, why: "the repository uses SHA-256 object ids" });
 });

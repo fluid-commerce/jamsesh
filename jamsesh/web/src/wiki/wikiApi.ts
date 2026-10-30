@@ -11,10 +11,13 @@ const NOW = { queue: false } as const;
 const tidy = (p: any): PageMeta => ({ ...p, category: asCategory(p?.category), title: String(p?.title ?? p?.slug ?? ""), summary: String(p?.summary ?? ""), links: Array.isArray(p?.links) ? p.links : [], backlinks: Number(p?.backlinks) || 0 });
 const tidyPage = (p: any): WikiPage => ({ ...p, category: asCategory(p?.category), title: String(p?.title ?? p?.slug ?? ""), backlinks: p?.backlinks ?? [], links: p?.links ?? [], sources: p?.sources ?? [], frontMatter: p?.frontMatter ?? {} });
 
+/** Whether the wiki keeps a version history, as the hub says (anything unexpected reads as no news, not as off). */
+export const historyOf = (h: { state?: string; why?: string } | undefined): { off: boolean; why: string } => ({ off: h?.state === "off", why: typeof h?.why === "string" ? h.why.slice(0, 200) : "" });
+
 export const wikiApi = {
   pages: async () => {
-    const r = await api<{ ready: boolean; project: string; pages: any[] }>("/wiki/pages", undefined, undefined, NOW);
-    return { ready: !!r.ready, project: r.project ?? "", pages: (r.pages ?? []).map(tidy) };
+    const r = await api<{ ready: boolean; project: string; history?: { state?: string; why?: string }; pages: any[] }>("/wiki/pages", undefined, undefined, NOW);
+    return { ready: !!r.ready, project: r.project ?? "", pages: (r.pages ?? []).map(tidy), history: historyOf(r.history) };
   },
   graph: (): Promise<RawGraph> => api("/wiki/graph", undefined, undefined, NOW),
   page: async (slug: string) => tidyPage(await api(`/wiki/page/${enc(slug)}`, undefined, undefined, NOW)),
@@ -41,6 +44,8 @@ export interface WikiData {
   graph: Graph;
   ready: boolean;
   project: string;
+  /** Version history is off (and why): the wiki still works, it just keeps none. */
+  history: { off: boolean; why: string };
   loading: boolean;
   error: string | null;
   /** Bumps whenever the wiki changed, so an open page knows to look again. */
@@ -52,13 +57,13 @@ const EMPTY: Graph = { nodes: [], edges: [], near: new Map() };
 
 /** The index and the graph, kept fresh: refetched when the hub says the wiki changed and when the connection comes back. */
 export function useWiki(scale = 1): WikiData {
-  const [data, setData] = useState<{ pages: PageMeta[]; raw: RawGraph | null; ready: boolean; project: string }>({ pages: [], raw: null, ready: true, project: "" });
+  const [data, setData] = useState<{ pages: PageMeta[]; raw: RawGraph | null; ready: boolean; project: string; history: { off: boolean; why: string } }>({ pages: [], raw: null, ready: true, project: "", history: { off: false, why: "" } });
   const [state, setState] = useState<{ loading: boolean; error: string | null; version: number }>({ loading: true, error: null, version: 0 });
 
   const load = useCallback(async () => {
     try {
       const [p, g] = await Promise.all([wikiApi.pages(), wikiApi.graph().catch(() => null)]);
-      setData({ pages: p.pages, raw: g, ready: p.ready, project: p.project });
+      setData({ pages: p.pages, raw: g, ready: p.ready, project: p.project, history: p.history });
       setState((s) => ({ loading: false, error: null, version: s.version + 1 }));
     } catch (e: any) {
       setState((s) => ({ ...s, loading: false, error: e?.message ?? "Couldn't load the wiki." }));

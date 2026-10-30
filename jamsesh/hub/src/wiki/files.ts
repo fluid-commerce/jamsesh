@@ -231,7 +231,11 @@ const ZERO = "0000000000000000000000000000000000000000";
  * that for the files this commit changed it follows HEAD where the person had not staged anything different. Does nothing
  * without a repository, and never throws.
  */
-export function commitPaths(dir: string, message: string, paths: string[], preread: Map<string, Buffer> = new Map()): "done" | "nothing" | "failed" {
+export type Take = "take" | "skip" | "fail";
+/** What a caller says about each file as it is read: take it, leave it out, or stop the commit. `state` is its bytes, "gone" (ENOENT) or "unreadable" (a link, a folder, too big). */
+export type Accept = (path: string, state: Buffer | "gone" | "unreadable" | "toobig") => Take;
+
+export function commitPaths(dir: string, message: string, paths: string[], accept?: Accept): "done" | "nothing" | "failed" {
   if (!existsSync(join(dir, ".git"))) return "nothing"; // no repository: no history to keep
   if (!gitAvailable()) return "failed"; // a repository, but git can't be run right now: not "nothing to commit"
   const own = [...new Set(paths)].filter((p) => followPath(p) && !p.split("/").includes(".git")); // only the vault's own files (the same rule the index note holds to)
@@ -272,15 +276,26 @@ export function commitPaths(dir: string, message: string, paths: string[], prere
       };
       try {
         for (const p of own) {
-          let bytes = preread.get(p);
-          if (!bytes)
-            try {
-              bytes = readOnce(dir, p);
-            } catch (e) {
-              if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-              gone.push(p);
-              continue;
-            }
+          let state: Buffer | "gone" | "unreadable" | "toobig";
+          try {
+            state = readOnce(dir, p);
+          } catch (e) {
+            const code = (e as NodeJS.ErrnoException).code;
+            if (code === "ENOENT") state = "gone";
+            else if (code === "ELOOP" || code === "ENOTREG") state = "unreadable";
+            else if (code === "ETOOBIG") state = "toobig"; // (already logged by readOnce)
+            else throw e;
+          }
+          // The caller decides on these very bytes (ownership); the same bytes are then what is hashed and written. Default: take what is there.
+          const verdict: Take = accept ? accept(p, state) : state === "unreadable" ? "fail" : state === "toobig" ? "skip" : "take";
+          if (verdict === "fail") throw new Error(`${p} is a link, not a regular file, or too large`);
+          if (verdict === "skip") continue;
+          if (state === "gone") {
+            gone.push(p);
+            continue;
+          }
+          if (state === "unreadable" || state === "toobig") continue;
+          const bytes = state;
           lines.push(`100644 ${blobId(bytes)}\t${p}\0`);
           batch.push(bytes);
           batchBytes += bytes.length;
@@ -621,13 +636,20 @@ const archiveMemo = new Map<string, { mtimeMs: number; treeSha: string | null; s
  * on this one read, never by opening the path again. Parent folders are checked to be real folders. Throws ENOENT when gone,
  * ELOOP for a link, and an error for anything that isn't a regular file.
  */
-export function readOnce(dir: string, rel: string): Buffer {
+/** The most one vault file may be for the wiki to commit it (a page is capped far below this; it bounds what a stray huge file can cost). */
+export const MAX_FILE_BYTES = 16 * 1024 * 1024;
+
+export function readOnce(dir: string, rel: string, between?: () => void): Buffer {
   const parts = rel.split("/");
   if (parts[0] === "wiki" || parts[0] === "raw") vaultDir(dir, parts.length === 3 ? "raw/archive" : (parts[0] as "wiki" | "raw")); // throws for a linked folder
   const fd = openSync(join(dir, rel), fsc.O_RDONLY | fsc.O_NOFOLLOW);
   try {
     const st = fstatSync(fd);
     if (!st.isFile()) throw Object.assign(new Error(`${rel} is not a regular file`), { code: "ENOTREG" });
+    if (st.size > MAX_FILE_BYTES) {
+      console.error(`wiki: ${rel} is ${st.size} bytes, over the ${MAX_FILE_BYTES} the wiki will commit; it is left out`);
+      throw Object.assign(new Error(`${rel} is larger than ${MAX_FILE_BYTES} bytes`), { code: "ETOOBIG" }); // checked before anything is allocated
+    }
     const buf = Buffer.alloc(st.size);
     let got = 0;
     while (got < st.size) {
@@ -635,6 +657,7 @@ export function readOnce(dir: string, rel: string): Buffer {
       if (n === 0) break;
       got += n;
     }
+    between?.(); // (a seam for tests: a change made here is a change during the read)
     const after = fstatSync(fd);
     // Not a snapshot unless the file is the same after the read as before it: a short read, or a rewrite in place (even one of the same length) is an error, never mixed bytes.
     if (got !== st.size || after.size !== st.size || after.mtimeMs !== st.mtimeMs || after.ctimeMs !== st.ctimeMs) throw Object.assign(new Error(`${rel} changed while it was being read`), { code: "ESHORT" });
@@ -670,7 +693,7 @@ function blobIdOf(dir: string, rel: string): string | null {
     bytes = readOnce(dir, rel);
   } catch (e) {
     const c = (e as NodeJS.ErrnoException).code;
-    if (c === "ELOOP" || c === "ENOTREG") return null;
+    if (c === "ELOOP" || c === "ENOTREG" || c === "ETOOBIG") return null; // not the wiki's to commit (a link, a folder, a huge file)
     throw e;
   }
   const sha = blobId(bytes);
@@ -1222,3 +1245,11 @@ export function writeState(dir: string, st: WikiState): void {
 }
 
 export { writeAtomic };
+
+/** Whether the wiki keeps a git history here: on, off (with why) or none (the folder is not a repository). Shown to the host, so no history is never silent. */
+export function historyStatus(dir: string): { state: "on" | "off" | "none"; why?: string } {
+  if (!existsSync(join(dir, ".git"))) return { state: "none" };
+  if (!gitAvailable()) return { state: "off", why: "git can't be run" };
+  if (!sha1Repo(dir)) return { state: "off", why: "the repository uses SHA-256 object ids, which the wiki can't write" };
+  return { state: "on" };
+}

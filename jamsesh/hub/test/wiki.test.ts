@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { settleIndex, commitPaths, readOnce, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { settleIndex, commitPaths, readOnce, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3136,13 +3136,67 @@ test("readOnce reads a regular file once and refuses a link, a folder and a link
   mkdirSync(join(dir, "wiki", "folder.md"));
   expect(() => readOnce(dir, "wiki/folder.md")).toThrow();
   expect(readOnce(dir, "wiki/one.md").toString()).toContain("# One");
-  // The commit takes the bytes handed to it even if the file changes on disk meanwhile.
+  // The commit decides on the bytes it read and writes those same bytes, even if the file is replaced right after the decision.
   writePage(dir, "swap", "# Swap\n\nValidated bytes.");
-  const given = readOnce(dir, "wiki/swap.md");
-  writePage(dir, "swap", "# Swap\n\nBytes that arrived after the check.");
-  expect(commitPaths(dir, "Swap", ["wiki/swap.md"], new Map([["wiki/swap.md", given]]))).toBe("done");
+  const decided: string[] = [];
+  const accept = (p: string, state: Buffer | "gone" | "unreadable" | "toobig") => {
+    if (p === "wiki/swap.md" && Buffer.isBuffer(state)) {
+      decided.push(state.toString());
+      writePage(dir, "swap", "# Swap\n\nBytes that arrived after the check."); // swapped under the commit, after it looked
+    }
+    return "take" as const;
+  };
+  expect(commitPaths(dir, "Swap", ["wiki/swap.md"], accept)).toBe("done");
+  expect(decided.length).toBe(1);
   expect(gitOutOf(dir, "show", "HEAD:wiki/swap.md")).toContain("Validated bytes.");
   expect(gitOutOf(dir, "show", "HEAD:wiki/swap.md")).not.toContain("arrived after");
+});
+
+test("a file that changes while it is being read is an error, not a mixed snapshot (same length, rewritten in place)", () => {
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const file = join(dir, "wiki", "one.md");
+  const same = readFileSync(file);
+  expect(readOnce(dir, "wiki/one.md").equals(same)).toBe(true); // undisturbed: fine
+  let code = "";
+  try {
+    readOnce(dir, "wiki/one.md", () => {
+      const copy = Buffer.from(same);
+      copy[copy.length - 2] = copy[copy.length - 2] === 120 ? 121 : 120; // a byte flipped, the length the same
+      writeFileSync(file, copy);
+      const later = new Date(Date.now() + 5000);
+      utimesSync(file, later, later);
+    });
+  } catch (e) {
+    code = (e as NodeJS.ErrnoException).code ?? "";
+  }
+  expect(code).toBe("ESHORT");
+});
+
+test("a file over the size cap is refused before it is read, logged, and left out of a commit without blocking it", () => {
+  if (!gitAvailable()) return;
+  const { w, dir } = room();
+  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
+  const huge = join(dir, "raw", "2026-10-29_huge.md");
+  writeFileSync(huge, Buffer.alloc(MAX_FILE_BYTES + 1, 97));
+  const logged: string[] = [];
+  const err = console.error;
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
+  try {
+    let code = "";
+    try {
+      readOnce(dir, "raw/2026-10-29_huge.md");
+    } catch (e) {
+      code = (e as NodeJS.ErrnoException).code ?? "";
+    }
+    expect(code).toBe("ETOOBIG");
+    w.editPage("two", "# Two\n\nAnother.", { by: "Chey" }); // the commit goes ahead without it
+  } finally {
+    console.error = err;
+  }
+  expect(logged.join("\n")).toContain("over the");
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain("wiki/two.md");
+  expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("huge");
 });
 
 test("a page whose bytes are not valid UTF-8 is never taken for the wiki's recorded revision", () => {
@@ -3170,13 +3224,17 @@ test("a repository with SHA-256 object ids gets no wiki history, said plainly, r
   const init = Bun.spawnSync(["git", "init", "-q", "--object-format=sha256"], { cwd: dir });
   if (init.exitCode !== 0) return; // this git can't make one
   writeFileSync(join(dir, "index.md"), "one");
+  const logged: string[] = [];
   const err = console.error;
-  console.error = () => {};
+  console.error = (...a: unknown[]) => void logged.push(a.join(" "));
   try {
     expect(commitPaths(dir, "First", ["index.md"])).toBe("failed");
   } finally {
     console.error = err;
   }
+  expect(logged.join("\n")).toContain("SHA-1"); // said plainly
+  expect(historyStatus(dir)).toMatchObject({ state: "off" });
+  expect(historyStatus(dir).why).toContain("SHA-256"); // and shown to the host
 });
 
 test("what the wiki writes into a commit subject never appears in a git command line", () => {
@@ -3211,3 +3269,12 @@ test("a backlog of large files is written to git in batches and committed whole"
   expect(commitPaths(dir, "Big", names)).toBe("done");
   for (let i = 0; i < 4; i++) expect(Number(gitOutOf(dir, "cat-file", "-s", `HEAD:raw/2026-10-29_big-${i}.md`))).toBe(5 * 1024 * 1024);
 }, 60_000);
+
+test("the host's wiki status says whether history is kept: on, off with why, or none", () => {
+  const { dir, w } = room();
+  expect(w.info().history.state).toBe(gitAvailable() ? "on" : "none");
+  const bare = join(root, `nogit-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(bare, { recursive: true });
+  expect(historyStatus(bare)).toEqual({ state: "none" });
+  void dir;
+});
