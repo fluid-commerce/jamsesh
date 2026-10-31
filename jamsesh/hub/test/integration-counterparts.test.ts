@@ -165,3 +165,29 @@ test("an older comparison that names nobody is no duplicate of a new one", async
   const out = String(await tools.create_directive.execute({ targets: [a.id], mode: "coordinate", text: "Compare the sidebar", rationale: "x", counterparts: [b.id] }, { toolCallId: "t", messages: [] }));
   expect(out).not.toContain("Already sent");
 });
+
+test("Reassign is live only: a click for an agent whose offer is gone cancels nothing", () => {
+  const { s, a, b } = room();
+  const d = s.createDirective({ text: "Build the page", mode: "implement", targets: [a.id], requestedBy: "Chey" });
+  expect(s.reassignDirective(d.id, "Chey", b.id, a.id)).toBeUndefined();
+  expect(s.store.get("directives", d.id)!.progress?.[a.id]).not.toBe("cancelled");
+});
+
+test("a directive with a mode that doesn't exist is refused, in the session and over HTTP", async () => {
+  const { s, a } = room();
+  expect(() => s.createDirective({ text: "x", mode: "bogus" as any, targets: [a.id], requestedBy: "Chey" })).toThrow(/mode is one of/);
+  const { Hub } = await import("../src/hub");
+  const { startHttp } = await import("../src/http");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "mode") });
+  const server = startHttp(hub, 0);
+  try {
+    const agent = hub.session.registerAgent({ ownerName: "Ana", harness: "claude-code", repo: "acme/a", cwd: "/a", machine: "m1", platform: "desktop" }).agent;
+    const win = { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` };
+    const r = await fetch(`http://127.0.0.1:${server.port}/api/directives`, { method: "POST", headers: { "content-type": "application/json", ...win }, body: JSON.stringify({ text: "x", mode: "bogus", targets: [agent.id] }) });
+    expect(r.status).toBe(400);
+  } finally {
+    server.stop(true);
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});

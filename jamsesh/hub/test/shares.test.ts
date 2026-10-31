@@ -354,6 +354,9 @@ describe("share calls act only for the window that made them", () => {
     expect(s.store.get("shares", asked.id)?.status).toBe("live");
     expect((await call(felipePhone.token, "POST", `/shares/${asked.id}/decline`, {})).status).toBe(403);
     expect(s.store.get("shares", asked.id)?.status).toBe("live");
+    // And his own laptop's late "Not now", after it accepted, ends nothing either.
+    expect((await call(felipeLaptop.token, "POST", `/shares/${asked.id}/decline`, {})).status).toBe(200);
+    expect(s.store.get("shares", asked.id)?.status).toBe("live");
     // A fresh request: his phone may decline it.
     s.endShare(asked.id);
     const again = s.requestShare(felipe.id, "camera", "", "Host")!;

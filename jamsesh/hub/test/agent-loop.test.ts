@@ -346,6 +346,7 @@ test("a reassignment whose replacement can't be made leaves the task as it was",
   const a = reg("Jonathan", "acme/desktop", "/d");
   reg("Mo", "acme/api", "/api");
   const d = directive(s, "Build the settings page", [a.id]);
+  s.store.patch("directives", d.id, { reassignOfferedAt: { [a.id]: Date.now() } }); // the offer is what Reassign acts on
   const make = s.createDirective.bind(s);
   (s as any).createDirective = () => {
     throw new Error("disk full");

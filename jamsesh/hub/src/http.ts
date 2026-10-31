@@ -25,7 +25,7 @@ import { agentGuide, agentIntro, joinScript, hookScript } from "./install-script
 import { FRAME_OVERHEAD, Upstream } from "./relay";
 import { publicEvent } from "./session";
 import { projectsRoute } from "./projects-api";
-import { ONLY_OBSERVERS } from "./session";
+import { DIRECTIVE_MODES, ONLY_OBSERVERS } from "./session";
 import { launcherMarkdown, skillMarkdown } from "./skill";
 import type { BusMessage, DriveEvent, EventKind, Stage } from "./types";
 
@@ -1174,6 +1174,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
     // Observers only watch: product work for observers alone would reach nobody.
     const mode = body.mode ?? "explore";
+    if (!DIRECTIVE_MODES.includes(mode)) return bad(`mode is one of ${DIRECTIVE_MODES.join(", ")}`);
     if (mode !== "answer" && mode !== "note" && targets.every((t: string) => s.agent(t)?.role === "observer")) return bad(ONLY_OBSERVERS);
     const p = s.person(body.personId);
     try {
@@ -1378,6 +1379,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     const own = !!caller && s.store.get("devices", sh.deviceId)?.pairedId === caller;
     const asked = decline && !!paired?.personId && sh.personId === paired.personId;
     if (!hostWindow && !own && !asked) return bad(decline ? "That request was for someone else." : "That isn't your share.", 403);
+    // "Not now" answers a request and nothing else: a late one (the share was accepted meanwhile) ends nothing; a live share ends by DELETE.
+    if (m[2] && !decline) return json({ ok: true });
     if (sh.status === "live" || sh.status === "requested") s.endShare(sh.id, decline ? "declined" : "ended", { note: !own && sh.status === "live" ? `The host stopped your ${sh.kind} share.` : "" });
     return json({ ok: true });
   }

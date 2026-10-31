@@ -47,6 +47,9 @@ export const AGENT_OFFLINE_MS = 20 * 60_000;
 /** An open task nobody has acked or reported on for this long gets a nudge to its agent; after the grace the room is offered a reassignment. */
 export const TASK_STALE_MS = 20 * 60_000;
 export const TASK_OFFER_MS = 10 * 60_000;
+/** Every way a directive can ask for work (types.ts DirectiveMode). */
+export const DIRECTIVE_MODES: DirectiveMode[] = ["explore", "implement", "present", "answer", "coordinate", "note"];
+
 /** Why product work for observers alone is refused (createDirective, the API, the brain's tools). */
 export const ONLY_OBSERVERS = "Those agents only watch (observers), so nobody would do this. Pick a working agent.";
 /** Why an observer can't take a workstream (jam_claim and Session.claim say the same). */
@@ -979,7 +982,8 @@ export class Session {
     if (d.mode === "coordinate") throw new Error("A comparison names the agents to compare, so it can't be reassigned. Cancel it and ask again.");
     const open = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
     const offered = open.filter((t) => d.reassignOfferedAt?.[t]);
-    const from = target ? open.filter((t) => t === target) : offered.length ? offered : open;
+    // Live only: a click for an agent whose offer is gone (it reported progress meanwhile) cancels nothing.
+    const from = target ? offered.filter((t) => t === target) : offered.length ? offered : open;
     if (!from.length) return undefined;
     const taken = new Set(d.targets);
     const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
@@ -1039,6 +1043,7 @@ export class Session {
     /** Once per key: asking again for the same key returns the directive already made. */
     key?: string;
   }): Directive {
+    if (!DIRECTIVE_MODES.includes(d.mode)) throw new Error(`A directive's mode is one of ${DIRECTIVE_MODES.join(", ")}.`);
     if (d.key) {
       const had = this.store.all("directives").find((x) => x.key === d.key);
       if (had) return had;
