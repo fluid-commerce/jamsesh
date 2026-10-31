@@ -300,7 +300,7 @@ export class WikiService {
   private catchUpLog() {
     const log = readPlain(join(this.dir, "log.md")) ?? "";
     const ledger = readLoggedKeys(this.dir);
-    if (!ledger.ok) return void console.error("wiki: the file of logged keys can't be used, so the catch-up waits (it would log again what was cut from the log)");
+    if (!ledger.ok) throw new Error("The file of logged keys can't be used, so the catch-up waits (it would log again what was cut from the log); nothing is archived or ingested meanwhile."); // (the pass stops: a source whose entry is missing must not leave raw/ unscanned)
     const logged = ledger.keys; // (what was logged long ago may have left the trimmed log; it is not logged again)
     for (const id of sourceIds(this.dir)) if (log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`)) rememberLogged(this.dir, `src:${id}`); // a key that failed to be written after its line was: written now
     const missing = sourceIds(this.dir)

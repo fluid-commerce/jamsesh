@@ -136,12 +136,13 @@ export function initWiki(dir: string): void {
       const add = [".wiki-logged.json", ".wiki-logged.json.damaged"].filter((r) => !new RegExp(`^${r.replace(/\./g, "\\.")}$`, "m").test(ig));
       if (add.length) {
         writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}${add.join("\n")}\n`);
-        if (gitAvailable() && present(join(dir, ".git"))) commitPaths(dir, "Ignore the logged-keys files", [".gitignore"]);
       }
     }
   } catch (e) {
     console.error("wiki: couldn't add the logged-keys files to .gitignore:", e instanceof Error ? e.message : e);
   }
+  // Committed whenever it differs from history (also after a start where an earlier commit of it had failed); nothing to do when it doesn't.
+  if (gitAvailable() && present(join(dir, ".git"))) commitPaths(dir, "Ignore the logged-keys files", [".gitignore"]);
   if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
@@ -1087,7 +1088,8 @@ function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
   try {
     const j = JSON.parse(text);
     if (!Array.isArray(j)) throw new Error("not a list");
-    return { keys: new Set(j.filter((k): k is string => typeof k === "string" && k.length < 120)), ok: true };
+    if (!j.every((k: unknown) => typeof k === "string" && k.length < 120)) throw new Error("an entry is not a key"); // an invalid entry makes it damaged, not shorter
+    return { keys: new Set<string>(j), ok: true };
   } catch {
     // Damaged: a copy is kept beside it and a fresh one starts (what was logged long ago may then be logged once more; recent lines still dedup from the log).
     console.error("wiki: the file of logged keys is damaged; a copy is kept as .wiki-logged.json.damaged and a new one starts");
@@ -1105,7 +1107,7 @@ function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
 export const readLoggedKeys = readLedger;
 
 /**
- * Remembers a key (written before the log line, so a failure here means no line is written and a retry is safe). The newest LOGGED_MAX
+ * Remembers a key (written after its log line, which carries the key itself: a failure here leaves the line, and a retry or the catch-up repairs the key, which no line is cut without). The newest LOGGED_MAX
  * stay, but a key of a source still in raw/ is never the one to go (its line may be cut from the log while the source lives). Throws if it
  * can't be written. The ledger being unreadable is not a failure to write: the file is left alone and the key is only in the log.
  */

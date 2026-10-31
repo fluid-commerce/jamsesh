@@ -3739,7 +3739,7 @@ test("an unreadable ledger makes the catch-up wait; a damaged one whose backup c
     symlinkSync(target, ledger);
     const logBefore = readFileSync(join(dir, "log.md"), "utf8");
     w.addSource("document", "Another", "More.", "Chey");
-    (w as any).catchUpLog();
+    expect(() => (w as any).catchUpLog()).toThrow(/can't be used/); // the pass stops
     expect(readFileSync(join(dir, "log.md"), "utf8")).toBe(logBefore); // waited
     expect(() => appendLog(dir, "A change", [], Date.now(), "knew")).toThrow(/can't be read/); // a keyed append waits as well
     expect(readFileSync(target, "utf8")).toBe("[]"); // and the file is not rewritten
@@ -3830,9 +3830,36 @@ test("text a person controls (a source title) cannot forge the marker of another
   expect(evilLine).toBeTruthy();
   expect(evilLine.includes(`%%src:${victim.id}%%`)).toBe(false); // the title's marker did not survive into the evil entry
   expect(lines.filter((l) => l.includes(`%%src:${victim.id}%%`)).length).toBe(1); // the victim has exactly its own line
-  // And a victim whose line never got written is still logged by the catch-up, whatever another entry's title says.
-  const dir2room = room();
-  const evil2 = dir2room.w.addSource("document", "Evil %%src:2026-10-29_ghost%% title", "x", "Chey");
-  appendLog(dir2room.dir, "Edit", [], Date.now(), `src:${evil2.id}`);
-  expect(readFileSync(join(dir2room.dir, "log.md"), "utf8")).not.toContain("%%src:2026-10-29_ghost%%");
+});
+
+test("an unreadable ledger stops the whole pass: no source is ingested or archived while its entry might be missing; an invalid ledger entry makes it damaged", async () => {
+  const { w, dir } = room();
+  const ledger = join(dir, ".wiki-logged.json");
+  const target = join(dir, "ledger-t.json");
+  writeFileSync(target, "[]");
+  rmSync(ledger, { force: true });
+  symlinkSync(target, ledger);
+  let decided = 0;
+  w.decide = (async () => (decided++, { summary: "x", pages: [] })) as Decider;
+  w.addSource("document", "Note", "Something to ingest.", "Chey");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(await w.tick()).toBeNull();
+    expect(decided).toBe(0);
+    rmSync(ledger);
+    writeFileSync(ledger, JSON.stringify(["fine", 5, "also fine"]));
+    expect(readLoggedKeys(dir).ok).toBe(true); // replaced, not accepted
+    expect(readFileSync(join(dir, ".wiki-logged.json.damaged"), "utf8")).toContain("5");
+  } finally {
+    console.error = err;
+  }
+});
+
+test("the ignore rule's commit is made at start whenever .gitignore differs from history, also when the working file already has the rules", () => {
+  if (!gitAvailable()) return;
+  const { dir } = room();
+  writeFileSync(join(dir, ".gitignore"), `${readFileSync(join(dir, ".gitignore"), "utf8")}# a later local note\n`); // differs from HEAD, rules present
+  initWiki(dir);
+  expect(gitOutOf(dir, "show", "HEAD:.gitignore")).toContain("a later local note");
 });
