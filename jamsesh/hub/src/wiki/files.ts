@@ -1102,7 +1102,6 @@ function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
   }
 }
 
-export const loggedKeys = (dir: string): Set<string> => readLedger(dir).keys;
 export const readLoggedKeys = readLedger;
 
 /**
@@ -1204,7 +1203,7 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   }
   // The new entry always starts a line of its own (a log whose last line was never terminated doesn't swallow it).
   const base = cur.endsWith("\n") ? cur : `${cur}\n`;
-  const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
+  const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/%%/g, "%").replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
   // The line first, its key in it: a key never exists without its line. Then the key is remembered; a line is not cut from the log until its key is (see cutIsSafe).
   writeAtomic(file, trimLog(dir, base + line));
   if (k) rememberLogged(dir, k);

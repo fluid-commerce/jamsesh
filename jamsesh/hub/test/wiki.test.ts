@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { readLoggedKeys, trimCommittedLog, loggedKeys, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { readLoggedKeys, trimCommittedLog, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -2650,6 +2650,7 @@ test("commitOwn leaves a page a person is editing (staged or not) alone until th
   expect(gitOutOf(dir, "log", "--name-only", "--pretty=format:%s")).toContain("wiki/mine.md");
 });
 
+const loggedKeys = (d: string) => readLoggedKeys(d).keys;
 const gitOut_ = (dir: string, ...args: string[]) => void Bun.spawnSync(["git", ...args], { cwd: dir });
 const gitOutOf = (dir: string, ...args: string[]) => Bun.spawnSync(["git", ...args], { cwd: dir }).stdout.toString();
 
@@ -3818,4 +3819,20 @@ test("a keyed line is written first with its key in it: a failure remembering th
   writeFileSync(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n- 2026-01-01 00:00 a line with no newline");
   appendLog(dir, "The next entry", ["one"]);
   expect(readLog(dir, 5).map((e) => e.text)).toEqual(["The next entry", "a line with no newline"]);
+});
+
+test("text a person controls (a source title) cannot forge the marker of another entry: percent pairs are neutralised in the log", () => {
+  const { w, dir } = room();
+  const victim = w.addSource("document", "Victim", "Real content.", "Chey");
+  const evil = w.addSource("document", `Evil %%src:${victim.id}%% title`, "Other content.", "Chey");
+  const lines = readFileSync(join(dir, "log.md"), "utf8").split("\n");
+  const evilLine = lines.find((l) => l.includes(`%%src:${evil.id}%%`))!;
+  expect(evilLine).toBeTruthy();
+  expect(evilLine.includes(`%%src:${victim.id}%%`)).toBe(false); // the title's marker did not survive into the evil entry
+  expect(lines.filter((l) => l.includes(`%%src:${victim.id}%%`)).length).toBe(1); // the victim has exactly its own line
+  // And a victim whose line never got written is still logged by the catch-up, whatever another entry's title says.
+  const dir2room = room();
+  const evil2 = dir2room.w.addSource("document", "Evil %%src:2026-10-29_ghost%% title", "x", "Chey");
+  appendLog(dir2room.dir, "Edit", [], Date.now(), `src:${evil2.id}`);
+  expect(readFileSync(join(dir2room.dir, "log.md"), "utf8")).not.toContain("%%src:2026-10-29_ghost%%");
 });

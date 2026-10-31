@@ -302,7 +302,7 @@ export class WikiService {
     const ledger = readLoggedKeys(this.dir);
     if (!ledger.ok) return void console.error("wiki: the file of logged keys can't be used, so the catch-up waits (it would log again what was cut from the log)");
     const logged = ledger.keys; // (what was logged long ago may have left the trimmed log; it is not logged again)
-    for (const id of sourceIds(this.dir)) if (log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`)) try { rememberLogged(this.dir, `src:${id}`); } catch {} // a key that failed to be written after its line was: written now
+    for (const id of sourceIds(this.dir)) if (log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`)) rememberLogged(this.dir, `src:${id}`); // a key that failed to be written after its line was: written now
     const missing = sourceIds(this.dir)
       .filter((id) => !log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`))
       .map((id) => readSource(this.dir, id))
