@@ -3639,6 +3639,7 @@ test("a damaged file of logged keys is kept aside and replaced, and a vault made
   writeFileSync(join(dir, ".gitignore"), "sessions/\n.wiki-state.json\n");
   initWiki(dir);
   expect(readFileSync(join(dir, ".gitignore"), "utf8")).toContain(".wiki-logged.json");
+  if (gitAvailable()) expect(gitOutOf(dir, "show", "HEAD:.gitignore")).toContain(".wiki-logged.json"); // and it is committed
 });
 
 test("a key already logged is not logged again after a trim has removed its line: acceptance and sources dedup by remembered key", () => {
@@ -3780,4 +3781,37 @@ test("a keyed append refuses when the ledger can't be read and the line isn't in
   }
   expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("Unkeyed");
   expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("some-key");
+});
+
+test("a keyed append whose key can't be written writes no line, so a retry is safe; a line that can't be written takes its key back; an unterminated last line doesn't swallow the next entry", () => {
+  const { dir } = room();
+  const was = io.rename;
+  const err = console.error;
+  console.error = () => {};
+  try {
+    // The ledger can't be written: no line.
+    (io as any).rename = (from: any, to: any) => {
+      if (String(to).endsWith(".wiki-logged.json")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return was(from, to);
+    };
+    expect(() => appendLog(dir, "Keyed", [], Date.now(), "key-one")).toThrow(/disk full/);
+    expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("key-one");
+    // The log can't be written: the key is taken back.
+    (io as any).rename = (from: any, to: any) => {
+      if (String(to).endsWith("log.md")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return was(from, to);
+    };
+    expect(() => appendLog(dir, "Keyed", [], Date.now(), "key-two")).toThrow(/disk full/);
+    expect(loggedKeys(dir).has("key-two")).toBe(false);
+  } finally {
+    (io as any).rename = was;
+    console.error = err;
+  }
+  appendLog(dir, "Keyed", [], Date.now(), "key-one"); // the retry
+  expect(readFileSync(join(dir, "log.md"), "utf8").split("%%key-one%%").length - 1).toBe(1);
+  // An unterminated last line.
+  writeFileSync(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n- 2026-01-01 00:00 a line with no newline");
+  appendLog(dir, "The next entry", ["one"]);
+  const entries = readLog(dir, 5);
+  expect(entries.map((e) => e.text)).toEqual(["The next entry", "a line with no newline"]);
 });

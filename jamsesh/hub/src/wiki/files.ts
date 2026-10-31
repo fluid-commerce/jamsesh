@@ -1105,28 +1105,36 @@ function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
 export const loggedKeys = (dir: string): Set<string> => readLedger(dir).keys;
 export const readLoggedKeys = readLedger;
 
-/** Remembers a key. The newest LOGGED_MAX stay, but a key of a source still in raw/ is never the one to go (its line may be cut from the log while the source lives). */
-export function rememberLogged(dir: string, key: string) {
-  try {
-    const { keys: have, ok } = readLedger(dir);
-    if (!ok) return; // the file couldn't be read: not rewritten from an empty set
-    let keys = [...have].filter((k) => k !== key);
-    keys.push(key);
-    if (keys.length > LOGGED_MAX) {
-      const rawFolder = rawDir(dir);
-      const live = new Set(rawFolder ? readdirSync(rawFolder).filter((f) => f.endsWith(".md")).map((f) => `src:${f.slice(0, -3)}`) : []);
-      const over = keys.length - LOGGED_MAX;
-      const gone = new Set<string>();
-      for (const k of keys) {
-        if (gone.size >= over) break;
-        if (!live.has(k)) gone.add(k); // oldest first, never a live source's
-      }
-      keys = keys.filter((k) => !gone.has(k));
+/**
+ * Remembers a key (written before the log line, so a failure here means no line is written and a retry is safe). The newest LOGGED_MAX
+ * stay, but a key of a source still in raw/ is never the one to go (its line may be cut from the log while the source lives). Throws if it
+ * can't be written. The ledger being unreadable is not a failure to write: the file is left alone and the key is only in the log.
+ */
+export function rememberLogged(dir: string, key: string): void {
+  const { keys: have, ok } = readLedger(dir);
+  if (!ok) return; // not rewritten from an empty set
+  let keys = [...have].filter((k) => k !== key);
+  keys.push(key);
+  if (keys.length > LOGGED_MAX) {
+    const rawFolder = rawDir(dir);
+    const live = new Set(rawFolder ? readdirSync(rawFolder).filter((f) => f.endsWith(".md")).map((f) => `src:${f.slice(0, -3)}`) : []);
+    const over = keys.length - LOGGED_MAX;
+    const gone = new Set<string>();
+    for (const k of keys) {
+      if (gone.size >= over) break;
+      if (!live.has(k)) gone.add(k); // oldest first, never a live source's
     }
-    writeAtomic(loggedFile(dir), JSON.stringify(keys));
-  } catch (e) {
-    console.error("wiki: couldn't remember that a change was logged (the next catch-up tries again):", e instanceof Error ? e.message : e);
+    keys = keys.filter((k) => !gone.has(k));
   }
+  writeAtomic(loggedFile(dir), JSON.stringify(keys));
+}
+
+/** Takes a key back out (the log line it was written for did not get written). Best effort. */
+function forgetLogged(dir: string, key: string) {
+  try {
+    const { keys, ok } = readLedger(dir);
+    if (ok && keys.has(key)) writeAtomic(loggedFile(dir), JSON.stringify([...keys].filter((k) => k !== key)));
+  } catch {}
 }
 
 /** The log keeps its newest lines only (git holds the rest): past LOG_MAX it is cut back to about LOG_KEEP characters, at a line start. */
@@ -1187,12 +1195,23 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   const ledger = k ? readLedger(dir) : null;
   if (mark && !cur.includes(mark) && ledger && !ledger.ok) throw new Error("The file of logged keys can't be read, so it can't be told whether this change was logged before; it is tried again later.");
   if (mark && (cur.includes(mark) || ledger!.keys.has(k))) {
-    if (cur.includes(mark)) rememberLogged(dir, k); // (the line is there but the key may not have been written: repaired, once)
+    if (cur.includes(mark)) {
+      try {
+        rememberLogged(dir, k); // (the line is there but the key may not have been written: repaired)
+      } catch {}
+    }
     return;
   }
+  // The new entry always starts a line of its own (a log whose last line was never terminated doesn't swallow it).
+  const base = cur.endsWith("\n") ? cur : `${cur}\n`;
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
-  writeAtomic(file, trimLog(dir, cur + line));
-  if (k) rememberLogged(dir, k);
+  if (k) rememberLogged(dir, k); // first: if it can't be written no line is, and a retry is safe
+  try {
+    writeAtomic(file, trimLog(dir, base + line));
+  } catch (e) {
+    if (k) forgetLogged(dir, k); // the line didn't land: its key must not say it did
+    throw e;
+  }
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {
