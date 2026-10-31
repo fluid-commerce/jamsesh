@@ -120,6 +120,8 @@ export function readPlain(file: string): string | null {
   return readCapped(file)?.toString("utf8") ?? null; // (too big is an error, never "absent": nothing would then be written over it)
 }
 
+const DEFAULT_GITIGNORE = "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.wiki-logged.json.damaged\n.proposals/\n*.tmp\n";
+
 /** Makes the vault in `dir` if it isn't one yet, and starts a git history when git is there. Safe to call every time. */
 export function initWiki(dir: string): void {
   mkdirSync(dir, { recursive: true });
@@ -128,7 +130,7 @@ export function initWiki(dir: string): void {
   if (!present(join(dir, "WIKI.md"))) writeAtomic(join(dir, "WIKI.md"), SCHEMA);
   if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!present(join(dir, "index.md"))) rebuildIndex(dir);
-  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.wiki-logged.json.damaged\n.proposals/\n*.tmp\n");
+  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), DEFAULT_GITIGNORE);
   // A vault made before the logged-keys file existed gains its ignore rules (each one that is missing).
   try {
     const ig = readPlain(join(dir, ".gitignore"));
@@ -146,7 +148,9 @@ export function initWiki(dir: string): void {
     if (gitAvailable() && present(join(dir, ".git"))) {
       const head = gitOut(dir, ["show", "HEAD:.gitignore"]);
       const now = readPlain(join(dir, ".gitignore"));
-      if (head !== null && now !== null && now !== head) {
+      if (head === null && now === DEFAULT_GITIGNORE && refState(dir, "HEAD") !== "unknown") {
+        commitPaths(dir, "Ignore the wiki's bookkeeping files", [".gitignore"]); // an existing repository that never had one: the file the wiki just made is committed as it is
+      } else if (head !== null && now !== null && now !== head) {
         const missing = [".wiki-logged.json", ".wiki-logged.json.damaged"].filter((r) => !new RegExp(`^${r.replace(/\./g, "\\.")}$`, "m").test(head));
         const expected = `${head.endsWith("\n") ? head : `${head}\n`}${missing.join("\n")}${missing.length ? "\n" : ""}`;
         if (missing.length && now === expected) commitPaths(dir, "Ignore the logged-keys files", [".gitignore"]);
@@ -1086,7 +1090,9 @@ export function rebuildIndex(dir: string): void {
 /** Keys the log has been written for (a card and its pages, a source), kept beside the vault so that "already logged" does not depend on the log still holding the line. Bounded: the newest LOGGED_MAX. */
 const loggedFile = (dir: string) => join(dir, ".wiki-logged.json");
 const LOGGED_MAX = 8000;
-const cleanKey = (key: string) => key.replace(/[^\w:,-]/g, "");
+/** A key as it is written in the log and kept in the ledger: word characters, colons, commas and dashes, at most KEY_MAX (the ledger reader rejects longer). */
+export const KEY_MAX = 119;
+const cleanKey = (key: string) => key.replace(/[^\w:,-]/g, "").slice(0, KEY_MAX);
 
 function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
   let text: string | null;
@@ -1130,8 +1136,8 @@ export function rememberLogged(dir: string, key: string): void {
 /** Remembers several keys with one write. */
 export function rememberMany(dir: string, add: string[]): void {
   const { keys: have, ok } = readLedger(dir);
-  if (!ok) return; // not rewritten from an empty set
-  const fresh = new Set(add);
+  if (!ok) throw new Error("The file of logged keys can't be read, so keys are not added to it."); // (not rewritten from an empty set, and the caller is told)
+  const fresh = new Set(add.filter((k) => /^[\w:,-]{1,119}$/.test(k)));
   let keys = [...have].filter((k) => !fresh.has(k)).concat([...fresh]);
   if (keys.length > LOGGED_MAX) {
     const rawFolder = rawDir(dir);

@@ -303,7 +303,7 @@ export class WikiService {
     if (!ledger.ok) throw new Error("The file of logged keys can't be used, so the catch-up waits (it would log again what was cut from the log); nothing is archived or ingested meanwhile."); // (the pass stops: a source whose entry is missing must not leave raw/ unscanned)
     const logged = ledger.keys; // (what was logged long ago may have left the trimmed log; it is not logged again)
     // Every key visible in the log (sources and accepted cards alike) is remembered if it isn't: a ledger that was reset or lost is rebuilt from the lines still there.
-    const visible = [...log.matchAll(/ %%([\w:,-]+)%%/g)].map((m) => m[1]!).filter((k) => !logged.has(k));
+    const visible = [...log.matchAll(/ %%([\w:,-]{1,119})%%/g)].map((m) => m[1]!).filter((k) => !logged.has(k));
     if (visible.length) {
       rememberMany(this.dir, visible);
       for (const k of visible) logged.add(k);

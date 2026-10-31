@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { readLoggedKeys, trimCommittedLog, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { KEY_MAX, readLoggedKeys, trimCommittedLog, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3882,4 +3882,39 @@ test("after a ledger reset the keys of lines still in the log are remembered aga
   const keys = loggedKeys(dir);
   expect(keys.has("tri_card1,one")).toBe(true);
   expect([...keys].some((k) => k.startsWith("src:"))).toBe(true);
+});
+
+test("an editable log can't poison the ledger: a long marker is not remembered, and the ledger stays readable", () => {
+  const { w, dir } = room();
+  const long = "z".repeat(150);
+  appendLog(dir, "Hand-added line", [], Date.now());
+  writeFileSync(join(dir, "log.md"), `${readFileSync(join(dir, "log.md"), "utf8")}- 2026-01-01 00:00 odd line %%${long}%%\n- 2026-01-01 00:00 fine line %%fine-key%%\n`);
+  (w as any).catchUpLog();
+  const r = readLoggedKeys(dir);
+  expect(r.ok).toBe(true);
+  expect(r.keys.has("fine-key")).toBe(true);
+  expect([...r.keys].every((k) => k.length <= KEY_MAX)).toBe(true);
+  appendLog(dir, "Long key", [], Date.now(), "k".repeat(300));
+  expect(readLoggedKeys(dir).ok).toBe(true); // a long key is cut to the length the ledger accepts, in the log and in the ledger alike
+});
+
+test("a source not yet logged whose neighbour's title carries its marker is still logged by the catch-up", () => {
+  const { w, dir } = room();
+  const victim = addSource(dir, { kind: "document", title: "Victim", by: "Chey", text: "Real content." }); // not logged yet
+  addSource(dir, { kind: "document", title: `Evil %%src:${victim.id}%% title`, by: "Chey", text: "Other." });
+  (w as any).catchUpLog();
+  const lines = readFileSync(join(dir, "log.md"), "utf8").split("\n").filter((l) => l.includes(`%%src:${victim.id}%%`));
+  expect(lines.length).toBe(1); // its own entry, once, though another source's title spells its marker
+});
+
+test("an existing repository that never had a .gitignore commits the one the wiki makes", () => {
+  if (!gitAvailable()) return;
+  const dir = join(root, `old-vault-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(dir, { recursive: true });
+  Bun.spawnSync(["git", "init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "WIKI.md"), "schema");
+  Bun.spawnSync(["git", "add", "WIKI.md"], { cwd: dir });
+  Bun.spawnSync(["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "-m", "before"], { cwd: dir });
+  initWiki(dir);
+  expect(gitOutOf(dir, "show", "HEAD:.gitignore")).toContain(".wiki-logged.json");
 });
