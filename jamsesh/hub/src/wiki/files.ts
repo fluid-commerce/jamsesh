@@ -2,7 +2,7 @@
 //
 //   WIKI.md      the schema: the maintainer's instructions
 //   index.md     the catalog of pages, rebuilt after every change
-//   log.md       what changed, newest last
+//   log.md       what changed lately, newest last (older entries are in git history)
 //   raw/         sources, immutable: written once, never edited
 //   wiki/        pages, one topic each, linked with [[page]]
 //
@@ -46,7 +46,7 @@ This folder is a project's memory. JamSesh keeps it from the room's conversation
 ## Layers
 - \`raw/\` holds sources: transcripts, documents, agents' reports, people's edits. They are immutable. Never change one; cite it.
 - \`wiki/\` holds pages. The maintainer writes and updates them. One topic per page.
-- \`index.md\` lists every page by category. \`log.md\` records every change. Both are rebuilt by JamSesh.
+- \`index.md\` lists every page by category. \`log.md\` records recent changes (the newest ~2 MB; git holds the rest). Both are rebuilt by JamSesh.
 
 ## Pages
 - The file name is the page's slug: lowercase letters, digits and hyphens (\`passport-login.md\`). The first line is a \`# Title\` heading.
@@ -128,7 +128,7 @@ export function initWiki(dir: string): void {
   if (!present(join(dir, "WIKI.md"))) writeAtomic(join(dir, "WIKI.md"), SCHEMA);
   if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!present(join(dir, "index.md"))) rebuildIndex(dir);
-  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.proposals/\n*.tmp\n");
+  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.proposals/\n*.tmp\n");
   if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
@@ -359,10 +359,7 @@ export function commitPaths(dir: string, message: string, paths: string[], accep
       const names = [...lines.map((l) => l.slice(l.indexOf("\t") + 1, -1)), ...removals];
       const tree = gitOut(dir, ["write-tree"], env)?.trim();
       if (!tree) return "failed";
-      if (head && tree === headTree) {
-        for (const p of lines) { const n = p.slice(p.indexOf("\t") + 1, -1); if (/^log-older-/.test(n)) committedLogs.add(`${dir}\0${n}`); } // identical to history: already committed
-        return "nothing"; // nothing of these differs from history
-      }
+      if (head && tree === headTree) return "nothing"; // nothing of these differs from history
       // (The message goes in on stdin, not in the command line: what the wiki writes into a subject is not shown in a process list.)
       const commit = gitOut(dir, ["commit-tree", tree, ...(head ? ["-p", head] : [])], {}, msg + "\n")?.trim();
       if (!commit || !/^[0-9a-f]{40}$/.test(commit)) return "failed";
@@ -405,7 +402,6 @@ export function commitPaths(dir: string, message: string, paths: string[], accep
       } finally {
         lock.release();
       }
-      if (moved) for (const n of names) if (/^log-older-/.test(n)) committedLogs.add(`${dir}\0${n}`);
       if (moved) settleIndex(dir); // the index follows (and if it can't right now, the note stays for the next pass)
       if (moved) return "done";
     }
@@ -451,7 +447,7 @@ const followFile = (gitDir: string) => join(gitDir, "jamsesh-follow.json");
 const SHA = /^[0-9a-f]{40}$/;
 const FOLLOW_TOP = new Set(["index.md", "log.md", "WIKI.md", ".gitignore"]);
 /** A path a note may name: relative, no "..", under wiki/ or raw/ (or one of the vault's top-level files). */
-const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && (FOLLOW_TOP.has(p) || /^log-older-[0-9a-f]{10}\.md$/.test(p) || /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(p) || /^raw\/(archive\/)?[\w-]+\.md$/.test(p));
+const followPath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && p.length < 200 && (FOLLOW_TOP.has(p) || /^wiki\/[a-z0-9][a-z0-9-]*\.md$/.test(p) || /^raw\/(archive\/)?[\w-]+\.md$/.test(p));
 /** A branch ref as git itself allows: no "..", "//", "@{", leading or trailing dot or slash, ".lock" component, control characters or spaces. */
 const validRef = (r: unknown): r is string => typeof r === "string" && /^refs\/heads\/[A-Za-z0-9._\/-]+$/.test(r) && !/(\.\.|\/\/|@\{|\/\.|\.lock(\/|$)|\/$|\.$)/.test(r) && r.length < 200;
 
@@ -1061,64 +1057,49 @@ export function rebuildIndex(dir: string): void {
   writeAtomic(join(dir, "index.md"), out.join("\n"));
 }
 
+/** Keys the log has been written for (a card and its pages, a source), kept beside the vault so that "already logged" does not depend on the log still holding the line. Bounded: the newest LOGGED_MAX. */
+const loggedFile = (dir: string) => join(dir, ".wiki-logged.json");
+const LOGGED_MAX = 8000;
+const cleanKey = (key: string) => key.replace(/[^\w:,-]/g, "");
+
+export function loggedKeys(dir: string): Set<string> {
+  try {
+    const t = readPlain(loggedFile(dir));
+    const j = t ? JSON.parse(t) : [];
+    return new Set(Array.isArray(j) ? j.filter((k): k is string => typeof k === "string" && k.length < 120) : []);
+  } catch {
+    return new Set(); // unreadable: dedup then rests on the log's own recent lines, never on a guess
+  }
+}
+
+function rememberLogged(dir: string, key: string) {
+  try {
+    const keys = [...loggedKeys(dir)].filter((k) => k !== key);
+    keys.push(key);
+    writeAtomic(loggedFile(dir), JSON.stringify(keys.slice(-LOGGED_MAX)));
+  } catch {} // best effort: the line is in the log, which still dedups for as long as it holds it
+}
+
+/** The log keeps its newest lines only (git holds the rest): past LOG_MAX it is cut back to about LOG_KEEP characters, at a line start. */
+const LOG_MAX = 3 * 1024 * 1024;
+const LOG_KEEP = 2 * 1024 * 1024;
+const LOG_HEADER = "# Log\n\nWhat changed in this wiki, newest last.\n";
+const trimLog = (text: string) => (text.length <= LOG_MAX ? text : LOG_HEADER + text.slice(text.indexOf("\n", text.length - LOG_KEEP) + 1));
+
 /**
- * Adds a line to log.md. With `key` (a card and its pages) the line is added once: a retried accept doesn't log twice.
- * The key rides along as an Obsidian comment (%%…%%), which Obsidian doesn't show.
+ * Adds a line to log.md. With `key` (a card and its pages, a source) the line is added once: a retried accept doesn't log twice,
+ * however long ago the first was written (the key is remembered beside the vault, not only in the log). The key rides along as an
+ * Obsidian comment (%%…%%), which Obsidian doesn't show. The log holds the newest ~2 MB; older entries are in git history.
  */
 export function appendLog(dir: string, text: string, pages: string[] = [], now = Date.now(), key?: string): void {
   const file = join(dir, "log.md");
   const cur = readPlain(file) ?? "# Log\n\n";
-  const mark = key ? ` %%${key.replace(/[^\w:,-]/g, "")}%%` : "";
-  if (mark && cur.includes(mark)) return;
-  // log.md only ever grows and every read is capped, so past LOG_MAX its oldest part moves to log-older.md and the newest stays: History and the catch-up keep working in a long-lived project.
-  const cur2 = cur.length > LOG_MAX ? rotateLog(dir, cur) : cur;
+  const k = key ? cleanKey(key) : "";
+  const mark = k ? ` %%${k}%%` : "";
+  if (mark && (cur.includes(mark) || loggedKeys(dir).has(k))) return;
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
-  writeAtomic(file, cur2 + line);
-}
-
-/** Past this many characters log.md is rotated (its read cap is far above). */
-const LOG_MAX = 4 * 1024 * 1024;
-const LOG_KEEP = 2 * 1024 * 1024;
-
-/**
- * Moves the oldest lines of the log into a new file of their own, log-older-<hash>.md (named by its content and created only if
- * new: never appended to, never through a link, and a retry after a failure finds it and writes nothing twice). The active log
- * keeps its header, the newest LOG_KEEP characters, and every older line that keys a source still in raw/ (so the catch-up that
- * gives each source one log line still finds it). Returns the new log text.
- */
-function rotateLog(dir: string, cur: string): string {
-  const header = "# Log\n\nWhat changed in this wiki, newest last.\n";
-  const cut = cur.indexOf("\n", cur.length - LOG_KEEP) + 1;
-  // (the folder is listed strictly: if it can't be, nothing is rotated, rather than treating every source as gone)
-  const rawFolder = rawDir(dir);
-  const live = new Set(rawFolder ? readdirSync(rawFolder).filter((f) => f.endsWith(".md") && isSourceId(f.slice(0, -3))).map((f) => f.slice(0, -3)) : []);
-  const kept: string[] = [];
-  const moved: string[] = [];
-  for (const line of cur.slice(0, cut).split("\n")) {
-    if (!line.startsWith("- ")) continue; // the header
-    const key = line.match(/ %%src:([\w-]+)%%/)?.[1];
-    (key && live.has(key) ? kept : moved).push(line);
-  }
-  if (moved.length) {
-    const body = moved.join("\n") + "\n";
-    const text = `# Log (older)\n\n${body}`;
-    const name = join(dir, `log-older-${createHash("sha1").update(body).digest("hex").slice(0, 10)}.md`);
-    // Written whole to a temp file, then linked to its name (which fails rather than replace one): the segment is all there or not there at all.
-    const tmp = `${name}.${process.pid}.tmp`;
-    try {
-      io.write(tmp, text, { flag: "wx" });
-      try {
-        io.link(tmp, name);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        // Already there (a retry): it must hold exactly these lines before they leave the active log.
-        if (readCapped(name)?.toString("utf8") !== text) throw new Error("A rotated log file with this name exists but isn't what it should be; the log is left as it is.");
-      }
-    } finally {
-      rmSync(tmp, { force: true });
-    }
-  }
-  return header + (kept.length ? kept.join("\n") + "\n" : "") + cur.slice(cut);
+  writeAtomic(file, trimLog(cur + line));
+  if (k) rememberLogged(dir, k);
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {
@@ -1407,16 +1388,4 @@ export function historyStatus(dir: string): { state: "on" | "off"; why?: string 
   const ref = gitOut(dir, ["symbolic-ref", "-q", "HEAD"])?.trim();
   if (!validRef(ref)) return { state: "off", why: "no branch is checked out" };
   return { state: "on" };
-}
-
-/** Rotated log files this process has seen committed (they never change): not named, read or hashed again by later commits. */
-const committedLogs = new Set<string>();
-
-/** The rotated-out log files in the vault (log-older-<hash>.md) not yet committed here, for a commit to name. */
-export function rotatedLogs(dir: string): string[] {
-  try {
-    return readdirSync(dir).filter((f) => /^log-older-[0-9a-f]{10}\.md$/.test(f) && !committedLogs.has(`${dir}\0${f}`));
-  } catch {
-    return [];
-  }
 }

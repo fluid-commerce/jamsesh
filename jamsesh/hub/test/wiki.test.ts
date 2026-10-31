@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { rotatedLogs, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { loggedKeys, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3558,29 +3558,6 @@ test("a mixed card: a page the update could not reach (unreadable) beside a good
   expect(w.pendingSources()).toContain(src.id); // and the source is still waiting for its update to the page it could not reach
 });
 
-test("log.md is rotated before it can reach the read cap: older lines go to a file of their own, live sources keep their line, a retry writes nothing twice", () => {
-  const { w, dir } = room();
-  w.editPage("one", "# One\n\nA page.", { by: "Chey" });
-  const live = sourceIds(dir)[0]!;
-  const filler = Array.from({ length: 20000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
-  const keyed = `- 2026-01-01 00:00 An old line of a source still in raw/ %%src:${live}%%\n`;
-  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${keyed}${filler}`); // over the rotation size
-  expect(statSync(join(dir, "log.md")).size).toBeGreaterThan(4 * 1024 * 1024);
-  w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
-  const active = readFileSync(join(dir, "log.md"), "utf8");
-  expect(active.length).toBeLessThan(2.5 * 1024 * 1024);
-  expect(active).toContain(`%%src:${live}%%`); // a live source keeps its line, so the catch-up does not log it again
-  const older = readdirSync(dir).filter((f) => /^log-older-[0-9a-f]{10}\.md$/.test(f));
-  expect(older.length).toBe(1);
-  expect(readFileSync(join(dir, older[0]!), "utf8")).toContain("filler line number 0 ");
-  expect(readLog(dir, 5)[0]!.pages).toContain("two");
-  // A retry of the same rotation (the active log replacement had failed) finds the file and makes no second one.
-  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${keyed}${filler}`);
-  w.editPage("three", "# Three\n\nMore.", { by: "Chey" });
-  expect(readdirSync(dir).filter((f) => /^log-older-/.test(f)).length).toBe(1);
-  // The rotated file is in git history.
-  if (gitAvailable()) expect(gitOutOf(dir, "ls-tree", "-r", "--name-only", "HEAD")).toContain(older[0]!);
-}, 60_000);
 
 test("the log route clamps its limit: zero and negative values give one entry at least, never the whole log", async () => {
   const { w } = room();
@@ -3595,31 +3572,51 @@ test("the log route clamps its limit: zero and negative values give one entry at
   }
 });
 
-test("a rotated log file that is not what it should be stops the rotation (the log is left as it is); committed ones are not named again", () => {
+
+test("the log keeps its newest lines: past the size it is cut back at a line start, atomically, and History reads the rest of it", () => {
   const { w, dir } = room();
   w.editPage("one", "# One\n\nA page.", { by: "Chey" });
-  const filler = Array.from({ length: 20000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
-  const text = `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`;
-  writeFileSync(join(dir, "log.md"), text);
+  const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`); // over the trim size (3 MB)
+  expect(statSync(join(dir, "log.md")).size).toBeGreaterThan(3 * 1024 * 1024);
   w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
-  const seg = rotatedLogs(dir);
-  // Once committed (by "two"), the segment is not named, read or hashed by later commits.
-  if (gitAvailable()) {
-    expect(seg).toEqual([]);
-    expect(gitOutOf(dir, "ls-tree", "--name-only", "HEAD")).toMatch(/log-older-[0-9a-f]{10}\.md/);
-  }
-  // A segment of that name that is damaged (an interrupted write) is never taken for the real one.
-  const names = readdirSync(dir).filter((f) => /^log-older-/.test(f));
-  expect(names.length).toBe(1);
-  writeFileSync(join(dir, names[0]!), "# Log (older)\n\n- partial");
-  writeFileSync(join(dir, "log.md"), text);
-  const err = console.error;
-  console.error = () => {};
-  try {
-    w.editPage("three", "# Three\n\nMore.", { by: "Chey" }); // its log write fails; the page lands
-  } finally {
-    console.error = err;
-  }
-  expect(readFileSync(join(dir, "log.md"), "utf8").length).toBeGreaterThan(4 * 1024 * 1024); // not trimmed on the strength of a damaged segment
-  expect(readFileSync(join(dir, names[0]!), "utf8")).toContain("- partial");
+  const text = readFileSync(join(dir, "log.md"), "utf8");
+  expect(text.length).toBeLessThan(2.2 * 1024 * 1024);
+  expect(text.startsWith("# Log\n\nWhat changed in this wiki, newest last.\n- ")).toBe(true); // header, then whole lines
+  expect(text).not.toContain("filler line number 0 "); // the oldest are gone from the file
+  expect(text).toContain("filler line number 15999 "); // the newest kept
+  expect(readLog(dir, 3)[0]!.pages).toContain("two"); // History shows the recent entries
+  expect(readdirSync(dir).filter((f) => /\.tmp$|log-older/.test(f))).toEqual([]); // nothing left beside it
+  if (gitAvailable()) expect(gitOutOf(dir, "log", "--pretty=format:%s")).toBeTruthy(); // older entries are in git history
 }, 60_000);
+
+test("a key already logged is not logged again after a trim has removed its line: acceptance and sources dedup by remembered key", () => {
+  const { w, dir } = room();
+  const src = w.addSource("document", "Note", "Something said.", "Chey");
+  w.syncVault();
+  (w as any).catchUpLog();
+  appendLog(dir, "Accepted a card", ["one"], Date.now(), "tri_abc123,one");
+  const keyLines = () => readFileSync(join(dir, "log.md"), "utf8").split("\n").filter((l) => l.includes("%%tri_abc123,one%%") || l.includes(`%%src:${src.id}%%`)).length;
+  expect(keyLines()).toBe(2);
+  expect(loggedKeys(dir).has(`src:${src.id}`)).toBe(true);
+  expect(loggedKeys(dir).has("tri_abc123,one")).toBe(true);
+  // A trim removes both lines from the file (the newest lines are all that stay).
+  const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler ${i} ${"x".repeat(180)}\n`).join("");
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`);
+  appendLog(dir, "Another change", ["two"]);
+  expect(keyLines()).toBe(0);
+  // A delayed retry of the same accept, and the next catch-up, write nothing more.
+  appendLog(dir, "Accepted a card", ["one"], Date.now(), "tri_abc123,one");
+  (w as any).catchUpLog();
+  expect(keyLines()).toBe(0);
+});
+
+test("remembered keys accumulate per accept, and an unreadable file is not a reason to log twice within the log's own window", () => {
+  const { dir } = room();
+  for (let i = 0; i < 20; i++) appendLog(dir, `Change ${i}`, [], Date.now(), `k${i}`);
+  expect(loggedKeys(dir).size).toBe(20);
+  writeFileSync(join(dir, ".wiki-logged.json"), "{ not json");
+  expect(loggedKeys(dir).size).toBe(0); // unreadable: empty (dedup then rests on the log's own lines)
+  appendLog(dir, "Change 3 again", [], Date.now(), "k3");
+  expect(readFileSync(join(dir, "log.md"), "utf8").split("%%k3%%").length - 1).toBe(1); // still once: the log itself has it
+});

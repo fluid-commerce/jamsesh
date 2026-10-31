@@ -17,7 +17,7 @@ import {
   CATEGORIES, PAGE_MAX, SCHEMA, type Category, type Page, type Source, type SourceKind, addSource, appendLog, archiveSources, backlinksOf, categoryOf, commitPaths, initWiki, isPageSlug, isSourceId, linksOf,
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
-  rotatedLogs,
+  loggedKeys,
   present,
   historyStatus,
   type Take,
@@ -268,7 +268,7 @@ export class WikiService {
     }
     // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. The rule is applied
     // to each page's bytes as the commit reads them (once, one at a time, none kept here), and those same bytes are what is committed.
-    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...rotatedLogs(this.dir), ...raw]);
+    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]);
     const accept = (f: string, state: Buffer | "gone" | "unreadable" | "toobig"): Take => {
       const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
       if (!m) return state === "unreadable" ? "fail" : state === "toobig" ? "skip" : "take"; // not a page (index, log, sources): the wiki's own files by name
@@ -296,8 +296,9 @@ export class WikiService {
    */
   private catchUpLog() {
     const log = readPlain(join(this.dir, "log.md")) ?? "";
+    const logged = loggedKeys(this.dir); // (what was logged long ago may have left the trimmed log; it is not logged again)
     const missing = sourceIds(this.dir)
-      .filter((id) => !log.includes(` %%src:${id}%%`))
+      .filter((id) => !log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`))
       .map((id) => readSource(this.dir, id))
       .filter((x): x is Source => !!x && x.kind !== "transcript")
       .sort((a, b) => a.ts - b.ts);
