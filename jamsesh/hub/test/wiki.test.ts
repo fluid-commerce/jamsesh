@@ -3666,3 +3666,14 @@ test("remembered keys accumulate per accept, and an unreadable file is not a rea
   appendLog(dir, "Change 3 again", [], Date.now(), "k3");
   expect(readFileSync(join(dir, "log.md"), "utf8").split("%%k3%%").length - 1).toBe(1); // still once: the log itself has it
 });
+
+test("a log of multibyte text is trimmed by its size in bytes, before it can reach the read cap", () => {
+  const { dir } = room();
+  rmSync(join(dir, ".git"), { recursive: true, force: true }); // no history kept: the cut is made on size alone
+  const line = `- 2026-01-01 00:00 ${"\u00e9".repeat(150)} filler\n`; // two bytes a letter
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${line.repeat(Math.ceil((3.4 * 1024 * 1024) / line.length))}`); // ~3.4M characters, ~6.5 MB
+  expect(statSync(join(dir, "log.md")).size).toBeGreaterThan(3 * 1024 * 1024);
+  appendLog(dir, "A change", ["one"]);
+  expect(statSync(join(dir, "log.md")).size).toBeLessThan(2.6 * 1024 * 1024);
+  expect(() => readPlain(join(dir, "log.md"))).not.toThrow();
+});

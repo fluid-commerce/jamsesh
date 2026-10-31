@@ -128,12 +128,14 @@ export function initWiki(dir: string): void {
   if (!present(join(dir, "WIKI.md"))) writeAtomic(join(dir, "WIKI.md"), SCHEMA);
   if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!present(join(dir, "index.md"))) rebuildIndex(dir);
-  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.proposals/\n*.tmp\n");
+  if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.wiki-logged.json.damaged\n.proposals/\n*.tmp\n");
   // A vault made before the logged-keys file existed gains its ignore rule.
   try {
     const ig = readPlain(join(dir, ".gitignore"));
-    if (ig !== null && !/^\.wiki-logged\.json$/m.test(ig)) writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}.wiki-logged.json\n`);
-  } catch {}
+    if (ig !== null && !/^\.wiki-logged\.json$/m.test(ig)) writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}.wiki-logged.json\n.wiki-logged.json.damaged\n`);
+  } catch (e) {
+    console.error("wiki: couldn't add the logged-keys file to .gitignore:", e instanceof Error ? e.message : e);
+  }
   if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
@@ -1105,16 +1107,18 @@ function rememberLogged(dir: string, key: string) {
 const LOG_MAX = 3 * 1024 * 1024;
 const LOG_KEEP = 2 * 1024 * 1024;
 const LOG_HEADER = "# Log\n\nWhat changed in this wiki, newest last.\n";
-const LOG_HARD = 10 * 1024 * 1024; // a log this big is cut regardless: it must stay under the read cap
+const LOG_HARD = 8 * 1024 * 1024; // a log this big is cut regardless: it must stay under the read cap
 /**
  * The newest lines of the log. What is cut off is not lost while git keeps the history: the cut is made only once the lines to be
  * removed are in the last commit (a log not yet committed, or a commit that keeps failing, simply grows meanwhile, up to LOG_HARD).
  * With no git history kept, the cut lines are gone, and SPEC says so.
  */
 function trimLog(dir: string, text: string): string {
-  if (text.length <= LOG_MAX) return text;
-  const cut = text.indexOf("\n", text.length - LOG_KEEP) + 1;
-  if (text.length < LOG_HARD && historyStatus(dir).state === "on") {
+  // (sizes are in bytes, as the reader's cap is: a log of multibyte text is the same size in characters and a good deal more on disk)
+  const bytes = Buffer.byteLength(text);
+  if (bytes <= LOG_MAX) return text;
+  const cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
+  if (bytes < LOG_HARD && historyStatus(dir).state === "on") {
     const removed = text.slice(LOG_HEADER.length > text.length ? 0 : text.indexOf("\n- ") + 1, cut);
     const head = gitOut(dir, ["show", "HEAD:log.md"]);
     if (head === null || !head.includes(removed)) return text; // not in history yet: kept for now
