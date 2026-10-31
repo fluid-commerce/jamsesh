@@ -110,7 +110,7 @@ test("disconnecting a device ends its agents' open listener and jam_wait before 
 
 // ---- 6. finished stays finished ----
 
-test("a late ack never reopens a finished task, and ending a task through the API ends it for every target", async () => {
+test("a late ack never reopens a finished task, and no browser can end one", async () => {
   const a = join_({ chatId: "chat-t1", cwd: "/r3/t1" }).agent;
   const b = join_({ chatId: "chat-t2", cwd: "/r3/t2" }).agent;
   const d = s.createDirective({ text: "Ship it", mode: "implement", targets: [a.id], requestedBy: "Chey" });
@@ -120,17 +120,17 @@ test("a late ack never reopens a finished task, and ending a task through the AP
   const both = s.createDirective({ text: "Two of you", mode: "implement", targets: [a.id, b.id], requestedBy: "Chey" });
   s.setDirectiveFor(both.id, a.id, "acked");
   const person = hub.auth.issue({ kind: "browser", label: "Chey's laptop", ip: "10.0.0.30", personId: s.upsertPerson({ name: "Chey" }).id });
-  const end = (status: string) => fetch(`${base}/api/directives/${both.id}`, { method: "POST", headers: { ...remote, authorization: `Bearer ${person.token}` }, body: JSON.stringify({ status }) });
-  expect((await end("acked")).status).toBe(400);
-  expect((await end("cancelled")).status).toBe(200);
-  expect(s.store.get("directives", both.id)).toMatchObject({ status: "cancelled", progress: { [a.id]: "cancelled", [b.id]: "cancelled" } });
-  expect(s.inbox(b.id, false).directives.map((x) => x.id)).not.toContain(both.id);
-  expect(s.openFor(a.id).map((x) => x.id)).not.toContain(both.id);
-  // Late acks and a second ending change nothing.
+  for (const status of ["done", "cancelled"]) {
+    const r = await fetch(`${base}/api/directives/${both.id}`, { method: "POST", headers: { ...remote, authorization: `Bearer ${person.token}` }, body: JSON.stringify({ status }) });
+    expect(r.status).toBeGreaterThanOrEqual(400);
+  }
+  expect(s.store.get("directives", both.id)!.status).not.toBe("cancelled");
+  // The agents finish it themselves; a late ack after that changes nothing.
+  s.setDirectiveFor(both.id, a.id, "cancelled");
+  s.setDirectiveFor(both.id, b.id, "cancelled");
   s.setDirectiveFor(both.id, b.id, "acked");
-  await (await end("done")).body?.cancel();
-  expect(s.store.get("directives", both.id)!.status).toBe("cancelled");
-  expect(s.store.get("directives", both.id)!.progress[b.id]).toBe("cancelled");
+  expect(s.store.get("directives", both.id)).toMatchObject({ status: "cancelled", progress: { [b.id]: "cancelled" } });
+  expect(s.inbox(b.id, false).directives.map((x) => x.id)).not.toContain(both.id);
 });
 
 test("product work for observers alone is refused instead of reaching nobody", async () => {

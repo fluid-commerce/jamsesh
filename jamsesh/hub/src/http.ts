@@ -1185,15 +1185,8 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     }
   }
 
-  // Agents finish a directive through setDirectiveFor (which checks the exchange for a comparison); a person may end an ordinary one below.
+  // A directive's status is never set from a browser: agents finish it through setDirectiveFor (which checks the exchange for a comparison) and the brain cancels it.
 
-  m = path.match(/^\/directives\/([\w-]+)$/);
-  if (m && req.method === "POST") {
-    if (body?.status !== "done" && body?.status !== "cancelled") return bad("status is done or cancelled");
-    // A comparison between agents finishes through their exchange (Session.setDirectiveFor), never by a person's Done.
-    if (body.status === "done" && s.store.get("directives", m[1])?.mode === "coordinate") return bad("A comparison is finished by the agents' exchange; cancel it instead.", 409);
-    return json(s.endDirective(m[1], body.status));
-  }
   m = path.match(/^\/directives\/([\w-]+)\/reassign$/);
   if (m && req.method === "POST") {
     let moved;

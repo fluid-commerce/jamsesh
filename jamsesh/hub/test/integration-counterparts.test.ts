@@ -29,6 +29,7 @@ test("the same comparison with a different partner is another card, and editing 
 test("a reassigned task carries exactly its approved files, none when it had none", () => {
   const { s, a, b } = room();
   const d = s.createDirective({ text: "Build it", mode: "implement", targets: [a.id], requestedBy: "Chey", attachments: [] });
+  s.store.patch("directives", d.id, { reassignOfferedAt: { [a.id]: Date.now() } });
   const moved = s.reassignDirective(d.id, "Chey", b.id)!;
   expect(moved.attachments ?? []).toEqual([]);
 });
@@ -188,6 +189,53 @@ test("a directive with a mode that doesn't exist is refused, in the session and 
   } finally {
     server.stop(true);
     hub.devproxy.stop();
+    hub.stop();
+  }
+});
+
+test("a live-app utility command is in the helper list while it runs, and a stuck one gives no output to read", async () => {
+  const { LiveApps } = await import("../src/liveapps");
+  const { HelperRegistry } = await import("../src/children");
+  const reg = new HelperRegistry();
+  const live = new LiveApps({} as any, reg);
+  const running = (live as any).run(["/bin/sh", "-c", "sleep 30"], 20_000) as Promise<{ code: number; out: string }>;
+  await Bun.sleep(300);
+  expect(reg.size).toBe(1);
+  expect(await reg.stopAll(500)).toBe(true);
+  expect((await running).code).not.toBe(0);
+});
+
+test("the Mac's voice fallback takes its words on stdin, never in the arguments, and stops with the hub", async () => {
+  const { speak, resetSpeechState, stopSpeaking } = await import("../src/brain/speech");
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "say") });
+  const calls: { cmd: unknown; wrote: string[]; killed: boolean }[] = [];
+  const realSpawn = Bun.spawn;
+  const was = { silent: process.env.JAMSESH_SILENT, env: process.env.NODE_ENV };
+  process.env.JAMSESH_SILENT = "0";
+  process.env.NODE_ENV = "production";
+  (Bun as any).spawn = (cmd: unknown) => {
+    const c = { cmd, wrote: [] as string[], killed: false };
+    calls.push(c);
+    return { exited: new Promise(() => {}), kill: () => void (c.killed = true), stdin: { write: (x: string) => void c.wrote.push(x), end() {} } };
+  };
+  try {
+    resetSpeechState();
+    hub.session.updateSettings({ voiceReplies: true });
+    await speak(hub.session, "The password is hunter2.", { source: "voice", kind: "answer" });
+    const say = calls.find((c) => Array.isArray(c.cmd) && c.cmd[0] === "say");
+    if (process.platform === "darwin") {
+      expect(say?.cmd).toEqual(["say"]);
+      expect(say?.wrote.join("")).toContain("hunter2");
+      stopSpeaking();
+      expect(say?.killed).toBe(true);
+    }
+  } finally {
+    (Bun as any).spawn = realSpawn;
+    if (was.silent === undefined) delete process.env.JAMSESH_SILENT;
+    else process.env.JAMSESH_SILENT = was.silent;
+    if (was.env === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = was.env;
     hub.stop();
   }
 });

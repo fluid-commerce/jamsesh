@@ -785,7 +785,7 @@ next 50; messages to other agents in between never push an unread one out, and a
 than 50 arrives over successive calls without loss. When a device is disconnected, its agents'
 open listener, `jam_wait` and `jam_ask` end at once and check the credential before handing anything over.
 
-**Delivery is at least once, and never twice once acknowledged.** A hook's answer can be lost (a
+**Hook and listener delivery is at least once, and never twice once acknowledged** (a `jam_wait` reply is the one exception, below). A hook's answer can be lost (a
 timeout, a dropped connection), so what the hooks and the listener hand over carries a delivery id
 (the `x-jam-delivery` header). `hook.sh` records the id under `~/.jamsesh/acks/<session>` once it has
 passed the text on, and sends it back with the chat's next hook call (`x-jam-ack`); only then are the
@@ -839,8 +839,7 @@ The hub checks every minute (`Session.tick`), each target of a task on its own: 
 quiet in the same minute each get one nudge and, later, one offer.
 
 A finished task stays finished: a late ack or report never reopens a directive that is done or
-cancelled, for one agent or as a whole. A person ending a whole task (`POST /api/directives/<id>`
-with `done` or `cancelled`) ends it for every target still on it. A product directive (anything but
+cancelled, for one agent or as a whole. A directive's status is never set from a browser (the agents finish it, the brain cancels it). A product directive (anything but
 `answer` or `note`) whose targets are all observers is refused, since nobody would do it: no task
 is saved, the API answers 400, and the brain's tools (create, pair, parity) pick working agents only
 and say so instead of reporting it sent.

@@ -136,7 +136,7 @@ test("the state carries every open task, however many newer ones there are", () 
   const a = s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "x", cwd: "/state/a", machine: "m1", chatId: "chat-state" }).agent;
   const old = s.createDirective({ text: "The old settings page", mode: "implement", targets: [a.id], requestedBy: "Chey" });
   s.store.patch("directives", old.id, { reassignOfferedAt: { [a.id]: Date.now() } });
-  for (let i = 0; i < 70; i++) s.endDirective(s.createDirective({ text: `Newer ${i}`, mode: "note", targets: [a.id], requestedBy: "Chey" }).id, "done");
+  for (let i = 0; i < 70; i++) s.setDirectiveFor(s.createDirective({ text: `Newer ${i}`, mode: "note", targets: [a.id], requestedBy: "Chey" }).id, a.id, "done");
   expect(s.state().directives.map((d) => d.id)).toContain(old.id);
   expect((s as any).resolve("directives").value.map((d: any) => d.id)).toContain(old.id);
   expect(s.state().directives.length).toBeLessThanOrEqual(61);

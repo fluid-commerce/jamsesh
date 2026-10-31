@@ -983,7 +983,7 @@ export class Session {
     const open = d.targets.filter((t) => !["done", "cancelled"].includes(d.progress?.[t] ?? d.status));
     const offered = open.filter((t) => d.reassignOfferedAt?.[t]);
     // Live only: a click for an agent whose offer is gone (it reported progress meanwhile) cancels nothing.
-    const from = target ? offered.filter((t) => t === target) : offered.length ? offered : open;
+    const from = target ? offered.filter((t) => t === target) : offered;
     if (!from.length) return undefined;
     const taken = new Set(d.targets);
     const live = this.workers().filter((a) => a.status !== "offline" && !taken.has(a.id));
@@ -1134,22 +1134,6 @@ export class Session {
     // A status set on the directive itself (not through one target's progress) is news for every target.
     if (d && fields.status && !fields.progress) for (const t of d.targets) this.noteProgress(id, t);
     return d;
-  }
-
-  /**
-   * A person ends a whole task (done or cancelled): every target still on it ends the same way, so no
-   * agent's inbox or tile keeps it open. A finished task never reopens.
-   */
-  endDirective(id: string, status: unknown): Directive | undefined {
-    const d = this.store.get("directives", id);
-    if (!d) return undefined;
-    if (status !== "done" && status !== "cancelled") return d;
-    if (d.status === "done" || d.status === "cancelled") return d;
-    const progress = { ...(d.progress ?? {}) };
-    for (const t of d.targets) if (progress[t] !== "done" && progress[t] !== "cancelled") progress[t] = status;
-    const out = this.setDirective(id, { progress, status });
-    for (const t of d.targets) this.wake(t);
-    return out;
   }
 
   /**

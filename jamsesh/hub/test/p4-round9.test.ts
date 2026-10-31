@@ -855,6 +855,7 @@ test("a reassigned task keeps its reviewed files even when their lines are gone"
   const one = r.s.registerAgent({ ownerName: "Chey", harness: "claude-code", repo: "acme/web", cwd: "/x", machine: "m1", platform: "desktop" }).agent;
   const two = r.s.registerAgent({ ownerName: "Felipe", harness: "claude-code", repo: "acme/web2", cwd: "/y", machine: "m2", platform: "desktop" }).agent;
   const d = r.s.createDirective({ text: "Build from the spec", mode: "implement", targets: [one.id], requestedBy: "Chey", sourceEventIds: [], attachments: [att] });
+  r.s.store.patch("directives", d.id, { reassignOfferedAt: { [one.id]: Date.now() } }); // Reassign acts on an offer
   const moved = r.s.reassignDirective(d.id, "Chey", two.id);
   expect(moved && "attachments" in moved ? moved.attachments : undefined).toEqual([att]);
 });

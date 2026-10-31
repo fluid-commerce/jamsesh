@@ -162,8 +162,9 @@ async function waitGone(pgid: number): Promise<void> {
 }
 
 /** Runs argv (no shell) as its own process group with a deadline. Every wait is bounded; a group that can't be emptied is reported as stuck, never as a finished failure. */
-export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<RunResult> {
+export async function run(cmd: string[], timeoutMs = 30_000, cwd?: string, onSpawn?: (p: { pid: number; exited: Promise<number>; kill(sig?: number | NodeJS.Signals): void }) => void): Promise<RunResult> {
   const p = Bun.spawn(["/usr/bin/perl", "-e", "use POSIX qw(setsid); setsid(); exec @ARGV or exit 127", ...cmd], { stdout: "pipe", stderr: "pipe", env: process.env, ...(cwd ? { cwd } : {}) });
+  onSpawn?.(p);
   const out = collect(p.stdout);
   const err = collect(p.stderr);
   // The readers are cancelled on every way out of here (a background child can hold the pipes open).
@@ -206,9 +207,9 @@ export type Exec = (cmd: string[], ms?: number) => Promise<{ code: number; out: 
 const shortExec: Exec = (cmd, ms) => runShort(cmd, ms);
 
 /** For short helper commands (osascript, open, simctl) where only the exit code and text matter: a command that could not be stopped counts as failed, with that said. */
-export async function runShort(cmd: string[], timeoutMs = 30_000, cwd?: string): Promise<{ code: number; out: string }> {
-  const r = await run(cmd, timeoutMs, cwd);
-  return r.status === "stuck" ? { code: -1, out: r.out } : { code: r.code, out: r.out };
+export async function runShort(cmd: string[], timeoutMs = 30_000, cwd?: string, onSpawn?: Parameters<typeof run>[3]): Promise<{ code: number; out: string; stuck?: true }> {
+  const r = await run(cmd, timeoutMs, cwd, onSpawn);
+  return r.status === "stuck" ? { code: -1, out: r.out, stuck: true } : { code: r.code, out: r.out };
 }
 
 /** Query or fragment parameter names that carry a secret. */

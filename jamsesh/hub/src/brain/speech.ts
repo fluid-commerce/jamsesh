@@ -91,6 +91,13 @@ export function trimForSpeech(text: string) {
 }
 
 /** True when nothing may make a sound: JAMSESH_SILENT=1 stops the hub's `say`, the audio it sends to pages, and chimes. */
+/** The Mac's own voice, while it is speaking (stopped with the hub). */
+const sayings = new Set<{ kill(sig?: number | NodeJS.Signals): void }>();
+export function stopSpeaking() {
+  for (const s of sayings) s.kill();
+  sayings.clear();
+}
+
 export function silent() {
   return process.env.JAMSESH_SILENT === "1";
 }
@@ -139,7 +146,12 @@ export async function speak(session: Session, text: string, opts: { source?: Spe
   const mac = process.platform === "darwin";
   // Tests never talk out loud: bun test sets NODE_ENV=test, and hubs they spawn inherit it.
   if (mac && process.env.NODE_ENV !== "test") {
-    Bun.spawn(["say", words], { stdout: "ignore", stderr: "ignore" });
+    // The words go in on stdin, never in the arguments (a process list would show them, a repeated secret included).
+    const say = Bun.spawn(["say"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+    sayings.add(say);
+    void say.exited.then(() => sayings.delete(say), () => sayings.delete(say));
+    say.stdin.write(words);
+    say.stdin.end();
   }
   // Said in a worse voice than the room chose: tell them why, once in a while.
   if (Date.now() - lastFallbackToastAt > 5 * 60_000) {

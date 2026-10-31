@@ -69,7 +69,9 @@ async function run(cmd: string[], timeoutMs = 15_000, helpers?: HelperRegistry):
   // Once the hub is stopping nothing new starts. The command runs in its own process group with a bounded wait and
   // bounded output (hostctl's runner), so a hung child or one holding the pipe open can't stall the caller.
   if (helpers?.isClosed) return { code: 1, out: "The hub is stopping." };
-  return runShort(cmd, timeoutMs);
+  // Tracked while it runs, so stopping the hub sees its exit; a command that couldn't be stopped gives no output to read as an answer.
+  const r = await runShort(cmd, timeoutMs, undefined, (p) => void helpers?.track(p));
+  return r.stuck ? { code: -1, out: "" } : r;
 }
 
 export interface SimWindow {

@@ -26,7 +26,7 @@ import { Session } from "./session";
 import { newId, Store } from "./store";
 import type { Agent, Annotation, Artifact, BuildRequest, JamEvent, NotePin, Platform, RecordMark, RecordNote, ShowRequest, Utterance } from "./types";
 import { alignNotes, describeNote, ownerOf } from "./record";
-import { showRequestSpeech, speak } from "./brain/speech";
+import { showRequestSpeech, speak, stopSpeaking } from "./brain/speech";
 import { bus } from "./bus";
 import { FontService } from "./fonts";
 
@@ -324,6 +324,7 @@ export class Hub {
   stop(): Promise<boolean> {
     this.offRevoked();
     this.live.stopAll();
+    stopSpeaking();
     this.awake.stop();
     this.autosave.stop();
     this.keeper.stop();

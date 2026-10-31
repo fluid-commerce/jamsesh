@@ -311,6 +311,7 @@ test("reassigning records who did it", async () => {
   const b = reg("Chey", "acme/mobile", "/m");
   const p = s.upsertPerson({ name: "Rae" });
   const d = directive(s, "Build it", [a.id]);
+  s.store.patch("directives", d.id, { reassignOfferedAt: Object.fromEntries(d.targets.map((x: string) => [x, Date.now()])) }); // Reassign acts on an offer
   const moved = s.reassignDirective(d.id, p.name)!;
   expect(moved.requestedBy).toBe("Rae");
   expect(moved.targets).toEqual([b.id]);
