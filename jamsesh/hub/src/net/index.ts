@@ -40,7 +40,7 @@ export class Network {
   private cfg: NetConfig | null = null;
   private store: CertStore;
   private mapper = new PortMapper();
-  private stopUpdater?: () => void;
+  private stopUpdater?: () => Promise<void>;
   private renewTimer?: ReturnType<typeof setInterval>;
   private certRetry?: ReturnType<typeof setTimeout>;
   private issuing?: Promise<void>;
@@ -93,7 +93,7 @@ export class Network {
   async start() {
     const d = this.domain();
     if (!this.cfg?.enabled || !d || this.shut) return;
-    this.stopUpdater?.();
+    void this.stopUpdater?.();
     this.stopUpdater = startUpdater(d, this.cfg.token, (r) => {
       this.st.dns = r.ok ? "ok" : "error";
       this.st.dnsError = r.ok ? undefined : r.error;
@@ -129,8 +129,9 @@ export class Network {
 
   /** Turns everything off. True when the router confirmed the port forward is gone (or there was none). */
   async stop(): Promise<boolean> {
-    this.stopUpdater?.();
+    const dnsDone = this.stopUpdater?.();
     this.stopUpdater = undefined;
+    await dnsDone; // an update already on its way to DuckDNS finishes before this reports off
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
     if (this.certRetry) clearTimeout(this.certRetry);
@@ -308,16 +309,18 @@ export class Network {
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);
       if (!/^[0-9a-f-]{20,}$/i.test(token)) return json({ error: "The DuckDNS token is a long code of letters, numbers and dashes. Copy it from the top of the DuckDNS page." }, 400);
-      const r = await updateIp(d, token, this.fetchFn);
-      if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
       const externalPort = Number(body.externalPort ?? this.cfg?.externalPort ?? 443);
       const internalPort = Number(body.internalPort ?? this.cfg?.internalPort ?? 4443);
       if (![externalPort, internalPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) return json({ error: "Ports must be between 1 and 65535." }, 400);
       return this.inLane(async () => {
-        // A later turn-off (or setup) made while this one waited on DuckDNS or its turn: this one is stale and touches nothing.
+        // A later turn-off (or setup) made while this one waited for its turn: this one is stale and touches nothing, DNS included.
         if (gen !== this.cfgGen) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
         if (this.shut) return json({ error: "The host is closing." }, 503);
-        if (!(await this.stop())) return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
+        const r = await updateIp(d, token, this.fetchFn);
+        if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
+        if (gen !== this.cfgGen || this.shut) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
+        const stopped = await this.stop();
+        if (!stopped) return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
         this.st.publicIp = r.ip;
         this.st.dns = "ok";
         await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
@@ -354,9 +357,17 @@ export class Network {
       return this.inLane(async () => {
       // Off is saved either way, but a forward the router didn't confirm closing is said so, and Retry stays available to try again.
       const gone = await this.stop();
-      this.saveConfig({ ...this.cfg!, enabled: false });
+      let saveError: string | undefined;
+      try {
+        this.saveConfig({ ...this.cfg!, enabled: false });
+      } catch {
+        // Fail closed: off in memory and the listener closes even if the file can't be written.
+        this.cfg = { ...this.cfg!, enabled: false };
+        saveError = "Remote access is off for now, but the setting couldn't be saved, so it may turn itself back on when the host restarts.";
+      }
       this.st.reachable = "unknown";
       this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow the setting
+      if (saveError) return json({ ...this.status(), error: saveError }, 500);
       return gone ? json(this.status()) : json({ ...this.status(), error: "Remote access is off, but the router didn't confirm closing the port forward. Press Retry to try again, or remove it in the router's settings." }, 409);
       });
     }

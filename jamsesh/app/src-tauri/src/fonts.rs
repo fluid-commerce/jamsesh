@@ -85,7 +85,7 @@ pub fn installed(families: &[String]) -> Vec<String> {
 
 /// The font files of the families this Mac has, read and base64-encoded: each file once, files
 /// over [`MAX_FILE`] skipped, and at most [`MAX_TOTAL`] in all. Families it doesn't have are left out.
-fn read_families(families: &[String]) -> Vec<LocalFont> {
+fn read_families(families: &[String]) -> Option<Vec<LocalFont>> {
     let mut wanted: Vec<String> = Vec::new();
     for f in families.iter().map(|f| f.trim()).filter(|f| !f.is_empty() && f.len() <= 200) {
         if !wanted.iter().any(|w| w.eq_ignore_ascii_case(f)) {
@@ -119,11 +119,10 @@ pub fn lend(family: &str, session: &str, askers: &[String], confirm: impl FnOnce
     if !confirm(&lend_prompt(family, session, &askers)) {
         return Err("You chose not to share it.".into());
     }
-    let fonts = read_families(&asked);
-    if fonts.is_empty() {
-        return Err("That font is too large to share, or couldn't be read.".into());
+    match read_families(&asked) {
+        Some(fonts) if !fonts.is_empty() => Ok(fonts),
+        _ => Err("That font is too large to share, or part of it couldn't be read.".into()),
     }
-    Ok(fonts)
 }
 
 /// Lowercase hex of SHA-256.
@@ -142,7 +141,9 @@ pub fn lend_signature(key: &[u8], ticket: &str, files: &[String]) -> String {
     hex(ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), message.as_bytes()).as_ref())
 }
 
-fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Vec<LocalFont> {
+/// `None` when any file of a family can't be sent whole (unreadable, too large, past a limit): a family is lent
+/// complete or not at all, so a room never believes it has a font whose weights are missing.
+fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Option<Vec<LocalFont>> {
     let mut sent = BTreeSet::new();
     let mut total = 0u64;
     let mut out = Vec::new();
@@ -152,18 +153,21 @@ fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Vec<LocalFont> {
             if sent.contains(&path) {
                 continue;
             }
-            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let meta = std::fs::metadata(&path).ok()?;
             if meta.len() > MAX_FILE || total + meta.len() > MAX_TOTAL || faces >= MAX_FACES {
-                continue;
+                return None;
             }
-            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let bytes = std::fs::read(&path).ok()?;
+            if total + bytes.len() as u64 > MAX_TOTAL {
+                return None;
+            }
             total += bytes.len() as u64;
             faces += 1;
             sent.insert(path);
             out.push(LocalFont { family: family.clone(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
         }
     }
-    out
+    Some(out)
 }
 
 #[cfg(test)]
@@ -213,7 +217,7 @@ mod tests {
 
     #[test]
     fn reads_each_file_once_and_leaves_out_what_this_mac_lacks() {
-        let fonts = read_families(&["Helvetica Neue".into(), "HELVETICA NEUE".into(), "No Such Family 7f3a".into()]);
+        let fonts = read_families(&["Helvetica Neue".into(), "HELVETICA NEUE".into(), "No Such Family 7f3a".into()]).unwrap_or_default();
         assert!(!fonts.is_empty());
         assert!(fonts.iter().all(|f| f.family == "Helvetica Neue"));
         let bytes = base64::engine::general_purpose::STANDARD.decode(&fonts[0].data).unwrap_or_default();
@@ -228,10 +232,34 @@ mod tests {
         let one = path.first().cloned().into_iter().collect::<Vec<_>>();
         // The same file under many names is read once.
         let many: Vec<(String, Vec<PathBuf>)> = (0..50).map(|i| (format!("f{i}"), one.clone())).collect();
-        assert_eq!(read_files(many).len(), 1);
+        assert_eq!(read_files(many).map(|f| f.len()), Some(1));
         let asked: Vec<String> = (0..100).map(|i| format!("Family {i}")).collect();
-        assert!(read_families(&asked).is_empty());
+        assert_eq!(read_families(&asked).map(|f| f.len()), Some(0));
         const { assert!(MAX_FILE < MAX_TOTAL) };
+    }
+
+    #[test]
+    fn a_family_is_lent_whole_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("jamsesh-font-lend-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mk = |name: &str, len: u64| {
+            let p = dir.join(name);
+            let f = std::fs::File::create(&p).expect("create");
+            f.set_len(len).expect("len");
+            p
+        };
+        let small: Vec<PathBuf> = (0..3).map(|i| mk(&format!("s{i}.ttf"), 10)).collect();
+        assert_eq!(read_files(vec![("A".into(), small.clone())]).map(|f| f.len()), Some(3));
+        // one unreadable face (missing), one too large, one past the face count, and the total all spoil the family
+        let gone = dir.join("missing.ttf");
+        assert!(read_files(vec![("A".into(), vec![small[0].clone(), gone])]).is_none());
+        let big = mk("big.ttf", MAX_FILE + 1);
+        assert!(read_files(vec![("A".into(), vec![small[0].clone(), big])]).is_none());
+        let many: Vec<PathBuf> = (0..=MAX_FACES).map(|i| mk(&format!("m{i}.ttf"), 10)).collect();
+        assert!(read_files(vec![("A".into(), many)]).is_none());
+        let heavy: Vec<PathBuf> = (0..3).map(|i| mk(&format!("h{i}.ttf"), MAX_FILE)).collect();
+        assert!(read_files(vec![("A".into(), heavy)]).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

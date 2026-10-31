@@ -61,15 +61,22 @@ export async function publicIp(f: FetchFn = fetch, known?: string): Promise<stri
 /** Keeps the name pointed at this network. Returns a stop function. */
 export function startUpdater(d: Domain, token: string, onResult: (r: UpdateResult) => void, intervalMs = 5 * 60_000, f: FetchFn = fetch) {
   let stopped = false;
-  const tick = async () => {
-    const r = await updateIp(d, token, f);
-    if (!stopped) onResult(r);
+  let inflight: Promise<void> = Promise.resolve();
+  const tick = () => {
+    if (stopped) return inflight;
+    inflight = (async () => {
+      const r = await updateIp(d, token, f);
+      if (!stopped) onResult(r);
+    })().catch(() => {});
+    return inflight;
   };
-  const t = setInterval(tick, intervalMs);
+  const t = setInterval(() => void tick(), intervalMs);
   (t as any).unref?.();
   void tick();
-  return () => {
+  /** Stops it; resolves once an update already on its way to DuckDNS has finished, so nothing changes the name after the caller moves on. */
+  return (): Promise<void> => {
     stopped = true;
     clearInterval(t);
+    return inflight;
   };
 }

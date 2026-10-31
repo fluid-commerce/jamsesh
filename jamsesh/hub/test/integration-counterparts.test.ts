@@ -558,8 +558,9 @@ test("a setup made stale by a turn-off while it waited changes nothing, and an o
   const post = (p: string, body: object) => n.routes(new Request(`http://x/api/net/${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL(`http://x/api/net/${p}`));
   const setup = post("config", { domain: "new", token: "11111111-1111-1111-1111-111111111111" });
   await Bun.sleep(30);
-  await post("disable", {});
+  const off = post("disable", {});
   release();
+  await off;
   const r = await setup;
   expect(r?.status).toBe(409);
   expect((n as any).cfg.enabled).toBe(false);
@@ -584,12 +585,11 @@ test("two overlapping setups: the older one is refused before it touches the rou
   const post = (body: object) => n.routes(new Request("http://x/api/net/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL("http://x/api/net/config"));
   const older = post({ domain: "aaa", token: "11111111-1111-1111-1111-111111111111" });
   await Bun.sleep(30);
-  const newer = await post({ domain: "bbb", token: "22222222-2222-2222-2222-222222222222" });
-  expect(newer?.status).toBe(200);
-  const before = calls.length;
+  const newer = post({ domain: "bbb", token: "22222222-2222-2222-2222-222222222222" });
   release();
   expect((await older)?.status).toBe(409);
-  expect(calls.length).toBe(before); // the stale one asked the router for nothing
+  expect((await newer)?.status).toBe(200);
+  expect(calls.filter((c) => c === "map").length).toBe(1); // the stale one asked the router for nothing
   expect((n as any).cfg.domain).toBe("bbb.duckdns.org");
 });
 
@@ -601,4 +601,30 @@ test("two deletes at once share one outcome: the second can't call it closed whi
   const [a, b] = await Promise.all([m.unmap(), m.unmap()]);
   expect([a, b]).toEqual([false, false]);
   expect(m.current).toBeDefined();
+});
+
+test("a setup with bad ports changes nothing at DuckDNS, and a turn-off whose file can't be written still turns it off", async () => {
+  const { Network } = await import("../src/net");
+  let updates = 0;
+  const fetchFn = (async (u: any) => {
+    if (String(u).includes("duckdns.org/update")) updates++;
+    return new Response("OK\n1.2.3.4\n\nUPDATED");
+  }) as any;
+  const n = new Network(join(dir, "net-bad"), fetchFn);
+  (n as any).mapper = { map: async () => ({ method: "upnp" }), unmap: async () => true };
+  const post = (path: string, body: object) => n.routes(new Request("http://x/api/net/" + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL("http://x/api/net/" + path));
+  const bad = await post("config", { domain: "aaa", token: "11111111-1111-1111-1111-111111111111", externalPort: 70000 });
+  expect(bad?.status).toBe(400);
+  expect(updates).toBe(0);
+  expect((await post("config", { domain: "aaa", token: "11111111-1111-1111-1111-111111111111" }))?.status).toBe(200);
+  let closed = 0;
+  (n as any).certChanged.push(() => closed++);
+  (n as any).saveConfig = () => {
+    throw new Error("disk full");
+  };
+  const off = await post("disable", {});
+  expect(off?.status).toBe(500);
+  expect(((await off?.json()) as any).error).toContain("couldn't be saved");
+  expect(closed).toBe(1);
+  expect(n.status().enabled).toBe(false);
 });
