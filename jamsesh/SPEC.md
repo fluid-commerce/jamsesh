@@ -1675,7 +1675,7 @@ Obsidian vault with nothing to set up:
 ```text
 projects/<slug>/WIKI.md   the schema for people: how pages are kept (one topic per page, [[links]], citations, front matter)
               index.md    every page by category; rebuilt by the hub after every change
-              log.md      one line per recent change, newest last (about 2 MB after a cut; it can be larger, up to 8 MB, while it waits for a commit; git holds the older ones)
+              log.md      one line per recent change, newest last (about 2 MB after a cut; it can be larger, up to 8 MB, while it waits for a commit; git holds the older ones, except lines cut at the hard limit or without a kept history)
               raw/        sources: YYYY-MM-DD_slug.md, written once and never edited
               wiki/       pages: <slug>.md
               .git        one commit per change set, of the wiki's own files only, when `git` is installed (optional)

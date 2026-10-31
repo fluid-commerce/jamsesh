@@ -3739,8 +3739,8 @@ test("an unreadable ledger makes the catch-up wait; a damaged one whose backup c
     w.addSource("document", "Another", "More.", "Chey");
     (w as any).catchUpLog();
     expect(readFileSync(join(dir, "log.md"), "utf8")).toBe(logBefore); // waited
-    appendLog(dir, "A change", [], Date.now(), "knew");
-    expect(readFileSync(target, "utf8")).toBe("[]"); // not rewritten
+    expect(() => appendLog(dir, "A change", [], Date.now(), "knew")).toThrow(/can't be read/); // a keyed append waits as well
+    expect(readFileSync(target, "utf8")).toBe("[]"); // and the file is not rewritten
     rmSync(ledger);
     // Damaged, and the backup can't be written (its name is taken by a folder): the damaged file stays.
     writeFileSync(ledger, "{ not json");
@@ -3751,4 +3751,33 @@ test("an unreadable ledger makes the catch-up wait; a damaged one whose backup c
   } finally {
     console.error = err;
   }
+});
+
+test("the hard-limit cut never takes the newest entry, even when the line before it is enormous", () => {
+  const { dir } = room();
+  rmSync(join(dir, ".git"), { recursive: true, force: true });
+  const header = "# Log\n\nWhat changed in this wiki, newest last.\n";
+  writeFileSync(join(dir, "log.md"), `${header}- 2026-01-01 00:00 ${"y".repeat(9 * 1024 * 1024)}`); // one huge line with no newline, over the hard limit
+  appendLog(dir, "The newest entry", ["one"], Date.now(), "newest-key");
+  const text = readFileSync(join(dir, "log.md"), "utf8");
+  expect(text).toContain("The newest entry");
+  expect(text).toContain("%%newest-key%%");
+});
+
+test("a keyed append refuses when the ledger can't be read and the line isn't in the log; an unkeyed one goes ahead", () => {
+  const { dir } = room();
+  const target = join(dir, "lt.json");
+  writeFileSync(target, "[]");
+  rmSync(join(dir, ".wiki-logged.json"), { force: true });
+  symlinkSync(target, join(dir, ".wiki-logged.json"));
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(() => appendLog(dir, "Keyed", [], Date.now(), "some-key")).toThrow(/can't be read/);
+    appendLog(dir, "Unkeyed", []);
+  } finally {
+    console.error = err;
+  }
+  expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("Unkeyed");
+  expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("some-key");
 });

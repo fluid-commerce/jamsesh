@@ -134,7 +134,10 @@ export function initWiki(dir: string): void {
     const ig = readPlain(join(dir, ".gitignore"));
     if (ig !== null) {
       const add = [".wiki-logged.json", ".wiki-logged.json.damaged"].filter((r) => !new RegExp(`^${r.replace(/\./g, "\\.")}$`, "m").test(ig));
-      if (add.length) writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}${add.join("\n")}\n`);
+      if (add.length) {
+        writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}${add.join("\n")}\n`);
+        if (gitAvailable() && present(join(dir, ".git"))) commitPaths(dir, "Ignore the logged-keys files", [".gitignore"]);
+      }
     }
   } catch (e) {
     console.error("wiki: couldn't add the logged-keys files to .gitignore:", e instanceof Error ? e.message : e);
@@ -1134,8 +1137,11 @@ const LOG_HARD = 8 * 1024 * 1024; // a log this big is cut regardless: it must s
 /** The newest lines of `text` (about LOG_KEEP bytes), from a line start, under the header. */
 function cutLog(text: string): string {
   const bytes = Buffer.byteLength(text);
-  const cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
-  return LOG_HEADER + text.slice(cut);
+  let cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
+  // Never into the newest line (the one just added): a long unterminated line before it can't carry the cut past it.
+  const lastLine = text.lastIndexOf("\n", text.length - 2) + 1;
+  cut = Math.min(cut, lastLine);
+  return cut <= 0 ? text : LOG_HEADER + text.slice(cut);
 }
 
 /**
@@ -1178,7 +1184,9 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   const cur = readPlain(file) ?? "# Log\n\n";
   const k = key ? cleanKey(key) : "";
   const mark = k ? ` %%${k}%%` : "";
-  if (mark && (cur.includes(mark) || loggedKeys(dir).has(k))) {
+  const ledger = k ? readLedger(dir) : null;
+  if (mark && !cur.includes(mark) && ledger && !ledger.ok) throw new Error("The file of logged keys can't be read, so it can't be told whether this change was logged before; it is tried again later.");
+  if (mark && (cur.includes(mark) || ledger!.keys.has(k))) {
     if (cur.includes(mark)) rememberLogged(dir, k); // (the line is there but the key may not have been written: repaired, once)
     return;
   }
