@@ -1057,9 +1057,9 @@ export class Session {
     if (files.size > MAX_PER_MESSAGE) throw new Error(`A task carries at most ${MAX_PER_MESSAGE} files.`);
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") {
-      const workers = d.targets.filter((t) => this.agent(t)?.role !== "observer");
+      const workers = d.targets.filter((t) => this.agent(t) && this.agent(t)?.role !== "observer");
       // Nobody left to do it: no task is made (a task nobody can receive would sit open for ever).
-      if (d.targets.length && !workers.length) throw new Error(ONLY_OBSERVERS);
+      if (d.targets.length && !workers.length) throw new Error(d.targets.every((x) => this.agent(x)) ? ONLY_OBSERVERS : "Those agents are no longer in the session.");
       d = { ...d, targets: workers };
     }
     // Only agents in the room are kept as counterparts. A coordinate directive is a comparison, so it must

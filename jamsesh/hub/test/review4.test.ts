@@ -81,6 +81,7 @@ test("a named reassignment goes to that agent or is refused; with no name the be
   s.store.put("agents", { ...s.agent(offline.id)!, lastSeen: Date.now() - 60 * 60_000 });
   const person = hub.auth.issue({ kind: "browser", label: "Laptop", ip: "10.0.0.9", personId: s.upsertPerson({ name: "Chey" }).id });
   const d = s.createDirective({ text: "Build the settings page", mode: "implement", targets: [a.id], requestedBy: "Chey" });
+  s.store.patch("directives", d.id, { reassignOfferedAt: { [a.id]: Date.now() } }); // Reassign acts on a live offer
   const reassign = (to?: string) => fetch(`${base}/api/directives/${d.id}/reassign`, { method: "POST", headers: { ...remote, authorization: `Bearer ${person.token}` }, body: JSON.stringify({ agentId: a.id, ...(to ? { to } : {}) }) });
   for (const [to, why] of [["a_nobody", "no agent"], [obs.id, "only watches"], [offline.id, "offline"], [a.id, "already has"]] as const) {
     const r = await reassign(to);

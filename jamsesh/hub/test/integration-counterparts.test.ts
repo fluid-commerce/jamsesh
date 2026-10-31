@@ -239,3 +239,10 @@ test("the Mac's voice fallback takes its words on stdin, never in the arguments,
     hub.stop();
   }
 });
+
+test("a task for an agent that has left is refused, not left open for nobody", () => {
+  const { s, a } = room();
+  s.removeAgent(a.id);
+  expect(() => s.createDirective({ text: "Build it", mode: "implement", targets: [a.id], requestedBy: "Chey" })).toThrow(/no longer in the session/);
+  expect(s.directives()).toHaveLength(0);
+});

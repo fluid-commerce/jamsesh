@@ -11,7 +11,7 @@ import { Brain } from "./brain/brain";
 import { Canvas } from "./canvas/canvas";
 import { config } from "./config";
 import { DevProxy } from "./devproxy";
-import { HostControl } from "./hostctl";
+import { HostControl, runShort } from "./hostctl";
 import { LiveApps } from "./liveapps";
 import { McpEndpoint } from "./mcp";
 import { Autosave } from "./autosave";
@@ -869,8 +869,10 @@ export class Hub {
       const name = `${newId("crop")}.png`;
       mkdirSync(this.uploadsDir, { recursive: true });
       const out = join(realpathSync(this.uploadsDir), name);
-      const p = Bun.spawn(["sips", "-s", "format", "png", "-c", String(h), String(w), "--cropOffset", String(top), String(left), src, "--out", out], { stdout: "ignore", stderr: "ignore" });
-      return (await p.exited) === 0 ? `/renders/uploads/${name}` : null;
+      // Bounded, in its own process group and in the helper list: a stalled crop costs the picture, never the send.
+      if (this.helpers.isClosed) return null;
+      const r = await runShort(["sips", "-s", "format", "png", "-c", String(h), String(w), "--cropOffset", String(top), String(left), src, "--out", out], 20_000, undefined, (p) => void this.helpers.track(p));
+      return r.code === 0 && !r.stuck ? `/renders/uploads/${name}` : null;
     } catch {
       return null;
     }
@@ -937,9 +939,11 @@ export class Hub {
     // Every note's destination is fixed before anything waits (a crop is made with a wait in it).
     for (const n of notes) if (!owners.has(n.id)) owners.set(n.id, ownerOf(s, n.pin?.target) ?? null);
     for (const n of notes) {
-      const owner = owners.get(n.id) ?? undefined;
       let crop: string | null = null;
       if (n.pin && n.pin.target.kind === "artifact") crop = await this.cropFor(s.artifacts().find((a) => a.id === n.pin!.target.ref), n.pin);
+      // Asked again after the crop (it waits): an agent removed meanwhile has no task to receive this, so the note goes to the room brain.
+      const decided = owners.get(n.id) ?? undefined;
+      const owner = decided && s.agent(decided) ? decided : undefined;
       if (n.pin) {
         const have = s.store.all("annotations").find((a) => a.recordingId === w.recordingId && a.noteId === n.id);
         const ann = have ?? s.addAnnotation({ personId: person.id, target: n.pin.target, x: n.pin.x, y: n.pin.y, text: n.text, source: "pin", scroll: n.pin.scroll ?? null, screenId: n.screenId ?? null, recordingId: w.recordingId, noteId: n.id, crop });
