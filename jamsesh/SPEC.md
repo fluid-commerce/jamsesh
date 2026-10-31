@@ -2598,7 +2598,7 @@ it.
   accepts loopback as a person (speaking, recording, approving, settings, the pairing code,
   people, remote access, disconnecting devices) only with the key. The app starts the hub with its
   key and each window's link id over the hub's stdin. A hub started from a terminal makes its own
-  key and prints one host link (good once, for ten minutes); `jamsesh host` opens it as the big
+  key and prints one host link (good once, for ten minutes; it is a bearer link in a URL, printed to that terminal and handed to `open`, which is the accepted cost of a hub run from a terminal: the Mac app never uses it); `jamsesh host` opens it as the big
   screen, and run again while that hub is running it opens a fresh one, minted with a secret in a
   mode-600 file of the hub's (`host-link.secret`, sent by curl from the file, never as an
   argument). The app never adopts a hub it didn't start: it says so and asks you to quit that one.

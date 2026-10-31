@@ -194,18 +194,22 @@ export class PortMapper {
   private timer?: ReturnType<typeof setInterval>;
   private igd: Igd | null = null;
   private current?: { gateway?: string; method: RouterStatus["method"]; internalPort: number; externalPort: number; lanIp: string };
+  /** A request that may have been applied though its reply never came: kept until a delete is confirmed, and never renewed. */
+  private maybe?: { gateway?: string; method: RouterStatus["method"]; internalPort: number; externalPort: number; lanIp: string };
 
   /** Opens externalPort -> lanIp:internalPort. Never throws; the status says what happened. */
   async map(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
     this.unrenew();
     // An earlier forward the router never confirmed removing is dealt with first: it is not forgotten under a new one.
-    if (this.current && !(await this.unmap())) return { method: "none", externalPort, error: "the earlier port forward is not confirmed closed", message: "The router hasn't confirmed closing the earlier port forward yet. Try again in a moment, or remove it in the router's settings." };
+    if ((this.current || this.maybe) && !(await this.unmap())) return { method: "none", externalPort, error: "the earlier port forward is not confirmed closed", message: "The router hasn't confirmed closing the earlier port forward yet. Try again in a moment, or remove it in the router's settings." };
     const gateway = await defaultGateway();
     let status: RouterStatus | undefined;
 
     if (gateway) {
       try {
+        this.maybe = { gateway, method: "nat-pmp", internalPort, externalPort, lanIp };
         const r = await pmpMap(gateway, internalPort, externalPort, LEASE);
+        this.maybe = undefined; // it answered: the outcome is known
         if (r.supported && r.result === 0) {
           this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp };
           status = { method: "nat-pmp", externalPort: r.externalPort, routerIp: gateway, externalIp: r.externalIp, lifetimeSec: r.lifetimeSec, message: `Your router opened port ${r.externalPort} automatically (NAT-PMP).` };
@@ -232,9 +236,11 @@ export class PortMapper {
               NewPortMappingDescription: "JamSesh",
               NewLeaseDuration: lease,
             });
+          this.maybe = { method: "upnp", internalPort, externalPort, lanIp };
           let add = await map(LEASE);
           // Many routers accept only permanent mappings (error 725): ask again without a lease.
           if (!add.ok && String(add.errorCode) === "725") add = await map(0);
+          this.maybe = undefined; // it answered: the outcome is known
           if (add.ok) {
             this.current = { method: "upnp", internalPort, externalPort, lanIp };
             status = { method: "upnp", externalPort, routerIp: gateway, externalIp, lifetimeSec: LEASE, message: `Your router opened port ${externalPort} automatically (UPnP).` };
@@ -283,8 +289,9 @@ export class PortMapper {
   /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). True once the router has said it is gone (or there was none); false when that couldn't be confirmed, and the mapping is kept to try again. */
   async unmap(): Promise<boolean> {
     this.unrenew();
-    const c = this.current;
+    const c = this.current ?? this.maybe;
     this.current = undefined; // a renewal queued from here on finds nothing to renew
+    this.maybe = undefined;
     await this.renewing.catch(() => {});
     if (!c) return true;
     for (let attempt = 0; attempt < 3; attempt++) {

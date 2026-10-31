@@ -437,3 +437,29 @@ test("a new port forward is not made while an earlier one is unconfirmed closed"
   expect(r.message).toContain("hasn't confirmed closing");
   expect(m.current.externalPort).toBe(443); // still tracked, so it is retried and reported at shutdown
 });
+
+test("a request whose reply never came is remembered until the router confirms the delete", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  const m: any = new PortMapper();
+  m.igd = { control: "http://127.0.0.1:1/ctl", type: "urn:x:service:WANIPConnection:1", location: "http://127.0.0.1:1/d" };
+  m.maybe = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" }; // sent, reply lost
+  expect(await m.unmap()).toBe(false); // nothing answers the delete either: still not known to be closed
+  expect(m.current).toBeDefined();
+});
+
+test("turning remote access off when the router can't confirm closing says so, and Retry still tries again", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-off2"), (async () => new Response("")) as any);
+  (n as any).cfg = { domain: "x.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  let confirmed = false;
+  (n as any).mapper = { unmap: async () => confirmed };
+  const req = (p: string) => new Request(`http://x/api/net/${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const off = await n.routes(req("disable"), new URL("http://x/api/net/disable"));
+  expect(off?.status).toBe(409);
+  expect(((n as any).cfg as any).enabled).toBe(false);
+  const retry = await n.routes(req("retry-router"), new URL("http://x/api/net/retry-router"));
+  expect(retry?.status).toBe(409);
+  confirmed = true;
+  const again = await n.routes(req("retry-router"), new URL("http://x/api/net/retry-router"));
+  expect(again?.status).toBe(200);
+});

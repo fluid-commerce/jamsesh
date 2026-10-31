@@ -305,16 +305,22 @@ export class Network {
       return json(this.status());
     }
     if (p === "retry-router") {
-      if (!this.cfg.enabled) return json({ error: "Remote access is off." }, 409);
+      if (!this.cfg.enabled) {
+        // Off: nothing new is opened, but an unconfirmed old forward is tried again.
+        const gone = await this.mapper.unmap();
+        this.st.router = gone ? { state: "idle" } : { state: "error", method: "none", message: "Couldn't confirm that the router closed the port. Check the router's forwarding rules." };
+        return json(this.status(), gone ? 200 : 409);
+      }
       await this.openRouter();
       return json(this.status());
     }
     if (p === "disable") {
-      await this.stop();
+      // Off is saved either way, but a forward the router didn't confirm closing is said so, and Retry stays available to try again.
+      const gone = await this.stop();
       this.saveConfig({ ...this.cfg, enabled: false });
       this.st.reachable = "unknown";
       this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow the setting
-      return json(this.status());
+      return gone ? json(this.status()) : json({ ...this.status(), error: "Remote access is off, but the router didn't confirm closing the port forward. Press Retry to try again, or remove it in the router's settings." }, 409);
     }
     return json({ error: "not found" }, 404);
   }
