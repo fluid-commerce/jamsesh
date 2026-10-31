@@ -3677,3 +3677,35 @@ test("a log of multibyte text is trimmed by its size in bytes, before it can rea
   expect(statSync(join(dir, "log.md")).size).toBeLessThan(2.6 * 1024 * 1024);
   expect(() => readPlain(join(dir, "log.md"))).not.toThrow();
 });
+
+test("identical lines after the last commit are not mistaken for committed ones: only the true beginning of the committed log may be cut", () => {
+  if (!gitAvailable()) return;
+  const { dir } = room();
+  const same = `- 2026-01-01 00:00 the very same line ${"x".repeat(180)}\n`;
+  const header = "# Log\n\nWhat changed in this wiki, newest last.\n";
+  writeFileSync(join(dir, "log.md"), header + same.repeat(8000)); // ~1.6 MB, committed
+  expect(commitPaths(dir, "Some log", ["log.md"])).toBe("done");
+  writeFileSync(join(dir, "log.md"), header + same.repeat(20000)); // ~4 MB: 12000 identical lines are new and uncommitted
+  appendLog(dir, "A change", ["one"]);
+  expect(readFileSync(join(dir, "log.md"), "utf8").split("the very same line").length - 1).toBe(20000); // nothing cut: the cut part is longer than the committed log
+});
+
+test("the logged-key ledger keeps the keys of sources still in raw/ when it is full, and repairs a key whose write failed after its line was written", () => {
+  const { w, dir } = room();
+  const src = w.addSource("document", "Note", "Something.", "Chey");
+  (w as any).catchUpLog();
+  expect(loggedKeys(dir).has(`src:${src.id}`)).toBe(true);
+  // The key is lost (the ledger rewritten without it) while its line is in the log: the next catch-up writes it back, and logs nothing again.
+  writeFileSync(join(dir, ".wiki-logged.json"), "[]");
+  const before = readFileSync(join(dir, "log.md"), "utf8");
+  (w as any).catchUpLog();
+  expect(readFileSync(join(dir, "log.md"), "utf8")).toBe(before);
+  expect(loggedKeys(dir).has(`src:${src.id}`)).toBe(true);
+  // Full ledger: filling it with other keys never evicts the live source's.
+  writeFileSync(join(dir, ".wiki-logged.json"), JSON.stringify([`src:${src.id}`, ...Array.from({ length: 8000 }, (_, i) => `old${i}`)]));
+  appendLog(dir, "One more", [], Date.now(), "newkey");
+  const keys = loggedKeys(dir);
+  expect(keys.has(`src:${src.id}`)).toBe(true);
+  expect(keys.has("newkey")).toBe(true);
+  expect(keys.size).toBeLessThanOrEqual(8000);
+});

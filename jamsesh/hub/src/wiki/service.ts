@@ -18,6 +18,7 @@ import {
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
   loggedKeys,
+  rememberLogged,
   present,
   historyStatus,
   type Take,
@@ -297,6 +298,7 @@ export class WikiService {
   private catchUpLog() {
     const log = readPlain(join(this.dir, "log.md")) ?? "";
     const logged = loggedKeys(this.dir); // (what was logged long ago may have left the trimmed log; it is not logged again)
+    for (const id of sourceIds(this.dir)) if (log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`)) rememberLogged(this.dir, `src:${id}`); // a key that failed to be written after its line was: written now
     const missing = sourceIds(this.dir)
       .filter((id) => !log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`))
       .map((id) => readSource(this.dir, id))

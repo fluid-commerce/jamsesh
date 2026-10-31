@@ -129,12 +129,15 @@ export function initWiki(dir: string): void {
   if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!present(join(dir, "index.md"))) rebuildIndex(dir);
   if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.wiki-logged.json.damaged\n.proposals/\n*.tmp\n");
-  // A vault made before the logged-keys file existed gains its ignore rule.
+  // A vault made before the logged-keys file existed gains its ignore rules (each one that is missing).
   try {
     const ig = readPlain(join(dir, ".gitignore"));
-    if (ig !== null && !/^\.wiki-logged\.json$/m.test(ig)) writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}.wiki-logged.json\n.wiki-logged.json.damaged\n`);
+    if (ig !== null) {
+      const add = [".wiki-logged.json", ".wiki-logged.json.damaged"].filter((r) => !new RegExp(`^${r.replace(/\./g, "\\.")}$`, "m").test(ig));
+      if (add.length) writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}${add.join("\n")}\n`);
+    }
   } catch (e) {
-    console.error("wiki: couldn't add the logged-keys file to .gitignore:", e instanceof Error ? e.message : e);
+    console.error("wiki: couldn't add the logged-keys files to .gitignore:", e instanceof Error ? e.message : e);
   }
   if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
@@ -1069,19 +1072,19 @@ const loggedFile = (dir: string) => join(dir, ".wiki-logged.json");
 const LOGGED_MAX = 8000;
 const cleanKey = (key: string) => key.replace(/[^\w:,-]/g, "");
 
-export function loggedKeys(dir: string): Set<string> {
+function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
   let text: string | null;
   try {
     text = readPlain(loggedFile(dir));
   } catch (e) {
     console.error("wiki: the file of logged keys can't be read:", e instanceof Error ? e.message : e);
-    return new Set(); // dedup then rests on the log's own recent lines
+    return { keys: new Set(), ok: false }; // dedup then rests on the log's own recent lines, and the file is left alone (not rewritten from nothing)
   }
-  if (!text) return new Set();
+  if (!text) return { keys: new Set(), ok: true };
   try {
     const j = JSON.parse(text);
     if (!Array.isArray(j)) throw new Error("not a list");
-    return new Set(j.filter((k): k is string => typeof k === "string" && k.length < 120));
+    return { keys: new Set(j.filter((k): k is string => typeof k === "string" && k.length < 120)), ok: true };
   } catch {
     // Damaged: a copy is kept beside it and a fresh one starts (what was logged long ago may then be logged once more; recent lines still dedup from the log).
     console.error("wiki: the file of logged keys is damaged; a copy is kept as .wiki-logged.json.damaged and a new one starts");
@@ -1089,17 +1092,33 @@ export function loggedKeys(dir: string): Set<string> {
       writeAtomic(`${loggedFile(dir)}.damaged`, text);
       writeAtomic(loggedFile(dir), "[]");
     } catch {}
-    return new Set();
+    return { keys: new Set(), ok: true };
   }
 }
 
-function rememberLogged(dir: string, key: string) {
+export const loggedKeys = (dir: string): Set<string> => readLedger(dir).keys;
+
+/** Remembers a key. The newest LOGGED_MAX stay, but a key of a source still in raw/ is never the one to go (its line may be cut from the log while the source lives). */
+export function rememberLogged(dir: string, key: string) {
   try {
-    const keys = [...loggedKeys(dir)].filter((k) => k !== key);
+    const { keys: have, ok } = readLedger(dir);
+    if (!ok) return; // the file couldn't be read: not rewritten from an empty set
+    let keys = [...have].filter((k) => k !== key);
     keys.push(key);
-    writeAtomic(loggedFile(dir), JSON.stringify(keys.slice(-LOGGED_MAX)));
+    if (keys.length > LOGGED_MAX) {
+      const rawFolder = rawDir(dir);
+      const live = new Set(rawFolder ? readdirSync(rawFolder).filter((f) => f.endsWith(".md")).map((f) => `src:${f.slice(0, -3)}`) : []);
+      const over = keys.length - LOGGED_MAX;
+      const gone = new Set<string>();
+      for (const k of keys) {
+        if (gone.size >= over) break;
+        if (!live.has(k)) gone.add(k); // oldest first, never a live source's
+      }
+      keys = keys.filter((k) => !gone.has(k));
+    }
+    writeAtomic(loggedFile(dir), JSON.stringify(keys));
   } catch (e) {
-    console.error("wiki: couldn't remember that a change was logged (a later retry may log it twice once its line leaves the log):", e instanceof Error ? e.message : e);
+    console.error("wiki: couldn't remember that a change was logged (the next catch-up tries again):", e instanceof Error ? e.message : e);
   }
 }
 
@@ -1119,9 +1138,10 @@ function trimLog(dir: string, text: string): string {
   if (bytes <= LOG_MAX) return text;
   const cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
   if (bytes < LOG_HARD && historyStatus(dir).state === "on") {
-    const removed = text.slice(LOG_HEADER.length > text.length ? 0 : text.indexOf("\n- ") + 1, cut);
+    // The log only ever gains lines at its end, so the lines to be cut are committed exactly when they are the beginning of the committed log.
+    const body = (s: string) => s.slice(s.indexOf("\n- ") + 1);
     const head = gitOut(dir, ["show", "HEAD:log.md"]);
-    if (head === null || !head.includes(removed)) return text; // not in history yet: kept for now
+    if (head === null || !body(head).startsWith(body(text.slice(0, cut)))) return text; // not in history yet: kept for now
   }
   return LOG_HEADER + text.slice(cut);
 }
@@ -1136,7 +1156,10 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   const cur = readPlain(file) ?? "# Log\n\n";
   const k = key ? cleanKey(key) : "";
   const mark = k ? ` %%${k}%%` : "";
-  if (mark && (cur.includes(mark) || loggedKeys(dir).has(k))) return;
+  if (mark && (cur.includes(mark) || loggedKeys(dir).has(k))) {
+    if (cur.includes(mark)) rememberLogged(dir, k); // (the line is there but the key may not have been written: repaired, once)
+    return;
+  }
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
   writeAtomic(file, trimLog(dir, cur + line));
   if (k) rememberLogged(dir, k);
