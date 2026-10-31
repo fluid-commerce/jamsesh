@@ -92,7 +92,7 @@ export class Network {
   // ---- lifecycle ----
   async start() {
     const d = this.domain();
-    if (!this.cfg?.enabled || !d) return;
+    if (!this.cfg?.enabled || !d || this.shut) return;
     this.stopUpdater?.();
     this.stopUpdater = startUpdater(d, this.cfg.token, (r) => {
       this.st.dns = r.ok ? "ok" : "error";
@@ -114,6 +114,12 @@ export class Network {
       const t = (this.certRetry = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000));
       (t as any).unref?.();
     }
+  }
+
+  /** The hub is shutting down: turns everything off for good (a request still waiting on an order can't start anything after this). */
+  close(): Promise<boolean> {
+    this.shut = true;
+    return this.stop();
   }
 
   /** Turns everything off. True when the router confirmed the port forward is gone (or there was none). */
@@ -205,11 +211,13 @@ export class Network {
   private mapEpoch = 0;
   /** True from the start of a stop until it has finished: no mapping is queued meanwhile. */
   private stopping = false;
+  /** Set for good when the hub shuts down: nothing is mapped, started or ordered after it. */
+  private shut = false;
   private mapChain: Promise<unknown> = Promise.resolve();
 
   async openRouter() {
     const c = this.cfg;
-    if (!c?.enabled || this.stopping) return;
+    if (!c?.enabled || this.stopping || this.shut) return;
     const epoch = this.mapEpoch;
     const run = this.mapChain.then(async () => {
       if (epoch !== this.mapEpoch) return;
@@ -293,6 +301,7 @@ export class Network {
       this.st.publicIp = r.ip;
       this.st.dns = "ok";
       await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
+      if (this.shut) return json({ error: "The host is closing." }, 503);
       this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
       await this.start();
       this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow every change of setting, not only a new certificate

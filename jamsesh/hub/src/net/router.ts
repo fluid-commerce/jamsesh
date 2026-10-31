@@ -225,6 +225,8 @@ export class PortMapper {
       } catch {}
     }
 
+    // A forward taken from NAT-PMP that couldn't be taken back stays tracked and nothing else is tried over it.
+    if (this.current && status && status.method === "none") return status;
     // A NAT-PMP request whose reply never came may be open: that is settled before anything else is tried.
     if (this.maybe && !(await this.unmap())) return { method: "none", externalPort, routerIp: gateway, error: "an earlier request is not confirmed closed", message: "The router hasn't confirmed closing a port forward JamSesh asked for. Try again in a moment, or remove it in the router's settings." };
 

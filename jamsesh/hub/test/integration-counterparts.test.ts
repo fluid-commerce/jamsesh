@@ -521,3 +521,20 @@ test("an uncertain NAT-PMP request is settled before the UPnP fallback is tried"
   const r = await m.map(443, 4443, "10.0.0.2");
   expect(r.message).toContain("hasn't confirmed closing");
 });
+
+test("once the hub is closing, a setup that was waiting on an order starts and maps nothing", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-shut"), (async () => new Response("1.2.3.4")) as any);
+  (n as any).cfg = { domain: "x.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  const calls: string[] = [];
+  (n as any).mapper = { map: async () => (calls.push("map"), { method: "upnp" }), unmap: async () => true };
+  expect(await n.close()).toBe(true);
+  await n.start();
+  await n.openRouter();
+  await n.ensureCert(true);
+  expect(calls).toEqual([]);
+  const r = await n.routes(new Request("http://x/api/net/setup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ domain: "y.duckdns.org", token: "t" }) }), new URL("http://x/api/net/setup"));
+  expect(r?.status).not.toBe(200);
+  expect((n as any).cfg.domain).toBe("x.duckdns.org"); // the closing host takes no new setup
+  expect(calls).toEqual([]);
+});

@@ -301,7 +301,7 @@ export class Hub {
     // Intake stops first; then accepted work still running (requests to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
     this.closing = true;
     // The router is asked to close the port from the start, not after the drain: its replies take seconds, and it must finish before exit.
-    const netStop = this.net.stop();
+    const netStop = this.net.close();
     // Open waits end now, so none wakes and writes after the final save.
     this.mcp.endWaits();
     // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
