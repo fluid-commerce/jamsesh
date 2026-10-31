@@ -278,7 +278,7 @@ test("stopping remote access while the router is being asked leaves no mapping, 
   const calls: string[] = [];
   (n as any).mapper = {
     map: async () => (calls.push("map"), await held, { method: "upnp", externalPort: 443 }),
-    unmap: async () => void calls.push("unmap"),
+    unmap: async () => (calls.push("unmap"), true),
   };
   const opening = n.openRouter();
   await Bun.sleep(30);
@@ -312,7 +312,7 @@ test("a retry that arrives while remote access is being turned off maps nothing"
   const calls: string[] = [];
   (n as any).mapper = {
     map: async () => (calls.push("map"), await held, { method: "upnp", externalPort: 443 }),
-    unmap: async () => void calls.push("unmap"),
+    unmap: async () => (calls.push("unmap"), true),
   };
   const first = n.openRouter();
   await Bun.sleep(30);
@@ -383,4 +383,35 @@ test("a lease renewal in flight is finished before the final delete", async () =
   release();
   await un;
   expect(order).toEqual(["renew-start", "renew-end"]);
+});
+
+test("a UPnP description can't point the hub at another address", async () => {
+  const { parseIgdDescription } = await import("../src/net/router");
+  const xml = (ctl: string) => `<root><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>${ctl}</controlURL></service></root>`;
+  expect(parseIgdDescription(xml("/ctl"), "http://192.168.1.1:5000/desc.xml")?.control).toBe("http://192.168.1.1:5000/ctl");
+  expect(parseIgdDescription(xml("http://192.168.1.50:80/admin"), "http://192.168.1.1:5000/desc.xml")).toBeNull();
+});
+
+test("a port forward the router didn't confirm removing is kept and reported, never called clean", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  const m: any = new PortMapper();
+  m.igd = { control: "http://127.0.0.1:1/ctl", type: "urn:x:service:WANIPConnection:1", location: "http://127.0.0.1:1/d" }; // nothing answers
+  m.current = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+  expect(await m.unmap()).toBe(false);
+  expect(m.current).toBeDefined();
+  m.current = undefined;
+  expect(await m.unmap()).toBe(true);
+});
+
+test("Network.stop says whether the router closed the port, and a disabled name orders nothing", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-conf"), (async () => new Response("1.2.3.4")) as any);
+  (n as any).cfg = { domain: "x.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: false, staging: false };
+  (n as any).mapper = { unmap: async () => false };
+  expect(await n.stop()).toBe(false);
+  expect((n.status() as any).router.state).toBe("error");
+  let ordered = false;
+  (n as any).store = { load: () => (ordered = true, null) };
+  await n.ensureCert(true);
+  expect(ordered).toBe(false);
 });

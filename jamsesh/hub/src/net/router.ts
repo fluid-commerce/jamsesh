@@ -121,7 +121,11 @@ export function parseIgdDescription(xml: string, location: string): Igd | null {
   for (let m; (m = re.exec(xml)); ) {
     const type = m[1].match(/<serviceType>\s*([^<]+?)\s*<\/serviceType>/)?.[1];
     const ctl = m[1].match(/<controlURL>\s*([^<]+?)\s*<\/controlURL>/)?.[1];
-    if (type && ctl && /:(WANIPConnection|WANPPPConnection):/.test(type)) return { type, control: new URL(ctl, location).toString(), location };
+    if (!type || !ctl || !/:(WANIPConnection|WANPPPConnection):/.test(type)) continue;
+    // The control endpoint has to be on the device that described it: a description can't point the hub at another service.
+    const control = new URL(ctl, location);
+    if (control.origin !== new URL(location).origin) continue;
+    return { type, control: control.toString(), location };
   }
   return null;
 }
@@ -152,6 +156,7 @@ function ssdp(timeoutMs = 2500): Promise<string[]> {
 export async function soap(igd: Igd, action: string, args: Record<string, string | number>) {
   const body = Object.entries(args).map(([k, v]) => `<${k}>${v}</${k}>`).join("");
   const res = await fetch(igd.control, {
+    redirect: "error",
     method: "POST",
     headers: { "content-type": 'text/xml; charset="utf-8"', soapaction: `"${igd.type}#${action}"` },
     body: `<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:${action} xmlns:u="${igd.type}">${body}</u:${action}></s:Body></s:Envelope>`,
@@ -162,10 +167,12 @@ export async function soap(igd: Igd, action: string, args: Record<string, string
   return { ok: res.ok && !err, text, errorCode: err ? Number(err) : undefined };
 }
 
-export async function findIgd(): Promise<Igd | null> {
+/** The router's UPnP service. Only an answer from the default gateway itself counts (anyone on the LAN can answer a search), and nothing is followed to another address. */
+export async function findIgd(gateway?: string): Promise<Igd | null> {
   for (const loc of await ssdp()) {
     try {
-      const xml = await (await fetch(loc, { signal: AbortSignal.timeout(4000) })).text();
+      if (!gateway || new URL(loc).hostname !== gateway) continue;
+      const xml = await (await fetch(loc, { redirect: "error", signal: AbortSignal.timeout(4000) })).text();
       const igd = parseIgdDescription(xml, loc);
       if (igd) return igd;
     } catch {}
@@ -208,7 +215,7 @@ export class PortMapper {
 
     if (!status || status.method === "none") {
       try {
-        this.igd ??= await findIgd();
+        this.igd ??= await findIgd(gateway);
         if (this.igd) {
           const ip = await soap(this.igd, "GetExternalIPAddress", {});
           const externalIp = ip.text.match(/<NewExternalIPAddress>([^<]*)</)?.[1];
@@ -271,16 +278,26 @@ export class PortMapper {
     } catch {}
   }
 
-  /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). */
-  async unmap() {
+  /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). True once the router has said it is gone (or there was none); false when that couldn't be confirmed, and the mapping is kept to try again. */
+  async unmap(): Promise<boolean> {
     this.unrenew();
     const c = this.current;
     this.current = undefined; // a renewal queued from here on finds nothing to renew
     await this.renewing.catch(() => {});
-    if (!c) return;
-    try {
-      if (c.method === "nat-pmp" && c.gateway) await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
-      else if (c.method === "upnp" && this.igd) await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
-    } catch {}
+    if (!c) return true;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (c.method === "nat-pmp" && c.gateway) {
+          const raw = await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);
+          const r = raw && decodeNatPmp(raw);
+          if (r && r.kind === "map" && r.result === 0) return true;
+        } else if (c.method === "upnp" && this.igd) {
+          const r = await soap(this.igd, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: c.externalPort, NewProtocol: "TCP" });
+          if (r.ok || r.errorCode === 714) return true; // 714: there is no such mapping any more
+        } else return true; // a manual rule or none: nothing of ours to remove
+      } catch {}
+    }
+    this.current = c; // still open as far as anyone knows
+    return false;
   }
 }

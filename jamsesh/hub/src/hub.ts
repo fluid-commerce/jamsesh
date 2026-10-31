@@ -300,6 +300,8 @@ export class Hub {
     const step = (work: Promise<unknown>, ms: number) => Promise.race([work.then(() => true, () => false), Bun.sleep(ms).then(() => false)]);
     // Intake stops first; then accepted work still running (requests to the brain, a prompt window, a document card, speech being transcribed) finishes, or is named as unfinished, before anything is saved.
     this.closing = true;
+    // The router is asked to close the port from the start, not after the drain: its replies take seconds, and it must finish before exit.
+    const netStop = this.net.stop();
     // Open waits end now, so none wakes and writes after the final save.
     this.mcp.endWaits();
     // Words held for a recording nobody stopped go to the room now, so the drain and the save include them.
@@ -311,7 +313,7 @@ export class Hub {
     // A snapshot whose canvas copy failed is not a final save.
     const saved = await step(this.autosave.save("end of session", { final: true }).then((snap) => (snap?.canvasFailed ? Promise.reject(new Error("the canvas copy failed")) : snap)), Hub.SHUTDOWN_MS.snapshot);
     const kept = await step(this.keeper.save(), Hub.SHUTDOWN_MS.thumbnail);
-    const closed = await step(this.net.stop(), Hub.SHUTDOWN_MS.network);
+    const closed = await step(netStop.then((gone) => (gone ? undefined : Promise.reject(new Error("the router's port forward wasn't confirmed closed")))), Hub.SHUTDOWN_MS.network);
     // Bounded by the helpers' own TERM-then-KILL waits, so no timeout race that could report them gone unseen.
     const reaped = await this.stop();
     if (!reaped) console.warn("a helper process was still running at shutdown");

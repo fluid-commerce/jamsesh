@@ -1,6 +1,6 @@
 // Network: makes the host reachable at https://<name>.duckdns.org from anywhere.
 // DuckDNS name -> Let's Encrypt cert (DNS-01) -> router port forward -> self-check.
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { CertStore, issueOne, needsRenewal, safeError, type CertKind } from "./acme";
@@ -42,6 +42,7 @@ export class Network {
   private mapper = new PortMapper();
   private stopUpdater?: () => void;
   private renewTimer?: ReturnType<typeof setInterval>;
+  private certRetry?: ReturnType<typeof setTimeout>;
   private issuing?: Promise<void>;
   private certChanged: (() => void)[] = [];
   private st = {
@@ -72,9 +73,12 @@ export class Network {
     }
   }
   private saveConfig(c: NetConfig) {
+    // Whole file first, moved into place, and only then the live setting: a failed write changes nothing.
+    const tmp = `${this.cfgPath}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(c, null, 2), { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, this.cfgPath);
     this.cfg = c;
-    writeFileSync(this.cfgPath, JSON.stringify(c, null, 2), { mode: 0o600 });
-    chmodSync(this.cfgPath, 0o600);
   }
   config(): Omit<NetConfig, "token"> | null {
     if (!this.cfg) return null;
@@ -106,22 +110,26 @@ export class Network {
     await this.ensureCert();
     const delays = [2, 5, 15];
     if (this.st.cert?.state !== "ok" && attempt < delays.length) {
-      const t = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000);
+      const t = (this.certRetry = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000));
       (t as any).unref?.();
     }
   }
 
-  async stop() {
+  /** Turns everything off. True when the router confirmed the port forward is gone (or there was none). */
+  async stop(): Promise<boolean> {
     this.stopUpdater?.();
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
+    if (this.certRetry) clearTimeout(this.certRetry);
+    this.certRetry = undefined;
     this.stopping = true;
     this.mapEpoch++;
     try {
       await this.mapChain; // a mapping in flight finishes (and undoes itself) before the final unmap
-      await this.mapper.unmap();
-      this.st.router = { state: "idle" };
+      const gone = await this.mapper.unmap();
+      this.st.router = gone ? { state: "idle" } : { state: "error", method: "none", message: "Couldn't confirm that the router closed the port. Check the router's forwarding rules." };
+      return gone;
     } finally {
       this.stopping = false;
     }
@@ -157,7 +165,7 @@ export class Network {
   ensureCert(force = false): Promise<void> {
     if (this.issuing) return this.issuing;
     const d = this.domain();
-    if (!d || !this.cfg) return Promise.resolve();
+    if (!d || !this.cfg?.enabled) return Promise.resolve(); // nothing is ordered for a name that is switched off
     const cfg = this.cfg;
     const todo = (["apex", "wildcard"] as CertKind[]).filter((k) => {
       const b = this.store.load(k);
