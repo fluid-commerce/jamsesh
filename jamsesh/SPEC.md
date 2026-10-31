@@ -582,7 +582,8 @@ The **Open your host to the internet** wizard has four steps that advance on the
 
 1. **Name your host.** Enter a DuckDNS name (bare name, full domain, or URL) and token. The hub
    validates them with a DuckDNS update and stores them in `net.json` (mode 600). The token is
-   never returned to any page or log.
+   never returned to any page or log. DuckDNS's update API takes the token only in the query string, so it travels in
+   that URL to DuckDNS over HTTPS; errors are scrubbed of it. This is an accepted limit of the service, not a choice.
 2. **Secure it.** The hub gets two Let's Encrypt certificates through the DNS-01 challenge using
    DuckDNS TXT records: one for the name and one wildcard (`*.name.duckdns.org`) for dev-server
    subdomains. DuckDNS holds one TXT value per name, so the orders run one after the other. Each
@@ -592,7 +593,7 @@ The **Open your host to the internet** wizard has four steps that advance on the
    listener and the Bonjour record.
 3. **Open it.** The hub maps external port 443 to internal 4443 on the router with NAT-PMP, or
    UPnP IGD when NAT-PMP isn't available. The lease is one hour, renewed every 30 minutes, and
-   removed when the host stops. If mapping fails, the wizard shows the exact manual rule.
+   removed when the host stops or remote access is turned off (a mapping still being asked for at that moment is taken back when it lands, and Retry is refused while access is off). If mapping fails, the wizard shows the exact manual rule.
 4. **Check.** The hub fetches `https://<name>/healthz` itself, then asks `check-host.net` to fetch
    it from outside. A QR code lets someone check from a phone on cellular. A local timeout is
    reported as "unknown" (routers that don't loop back), not as a failure.

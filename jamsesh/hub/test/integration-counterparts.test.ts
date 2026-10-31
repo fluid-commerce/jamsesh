@@ -255,11 +255,50 @@ test("once the hub is stopping, a PDF read and an idb companion start nothing", 
   void reg.stopAll(50);
   const was = process.env.JAMSESH_PDFTEXT;
   process.env.JAMSESH_PDFTEXT = "/usr/bin/true";
+  const realSpawn = Bun.spawn;
+  let spawned = 0;
+  (Bun as any).spawn = (...a: unknown[]) => (spawned++, (realSpawn as any)(...a));
   try {
     expect(await pdfText("/nonexistent.pdf", 100, reg)).toBe("");
+    expect(spawned).toBe(0);
   } finally {
+    (Bun as any).spawn = realSpawn;
     if (was === undefined) delete process.env.JAMSESH_PDFTEXT;
     else process.env.JAMSESH_PDFTEXT = was;
   }
   expect(await new Companion("udid", join(dir, "c.sock"), reg).start("/usr/bin/true")).toBe("The hub is stopping.");
+});
+
+test("stopping remote access while the router is being asked leaves no mapping, and a retry while it is off is refused", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-life"), (async () => new Response("1.2.3.4")) as any);
+  (n as any).cfg = { domain: "x.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const calls: string[] = [];
+  (n as any).mapper = {
+    map: async () => (calls.push("map"), await held, { method: "upnp", externalPort: 443 }),
+    unmap: async () => void calls.push("unmap"),
+  };
+  const opening = n.openRouter();
+  await Bun.sleep(30);
+  const stopping = n.stop();
+  release();
+  await opening;
+  await stopping;
+  expect(calls.filter((c) => c === "unmap").length).toBeGreaterThanOrEqual(1);
+  expect(calls[calls.length - 1]).toBe("unmap");
+  expect((n.status() as any).router.state).toBe("idle");
+  (n as any).cfg = { ...(n as any).cfg, enabled: false };
+  calls.length = 0;
+  await n.openRouter();
+  expect(calls).toEqual([]);
+});
+
+test("a router lookup that ignores TERM and keeps its output open still ends at its deadline", async () => {
+  const { runShort } = await import("../src/hostctl");
+  const t0 = Date.now();
+  const r = await runShort(["/bin/sh", "-c", "trap '' TERM; (trap '' TERM; sleep 30) & sleep 30"], 600);
+  expect(Date.now() - t0).toBeLessThan(15_000);
+  expect(r.code).not.toBe(0);
 });

@@ -1,4 +1,5 @@
 // Automatic port forwarding: NAT-PMP first (tiny UDP protocol), then UPnP IGD (SSDP + SOAP).
+import { runShort } from "../hostctl";
 import dgram from "node:dgram";
 
 export type RouterStatus = {
@@ -66,18 +67,10 @@ export function decodeNatPmp(b: Buffer): PmpReply {
 // ---------- gateway discovery ----------
 
 export async function defaultGateway(): Promise<string | undefined> {
+  // The bounded process-group runner (hostctl): a lookup that hangs, or holds its output open, ends at its deadline.
   const run = async (cmd: string[]) => {
-    try {
-      const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
-      const stop = setTimeout(() => p.kill(), 5000); // a lookup that hangs must not hold the router check
-      try {
-        return await new Response(p.stdout).text();
-      } finally {
-        clearTimeout(stop);
-      }
-    } catch {
-      return "";
-    }
+    const r = await runShort(cmd, 5000);
+    return r.stuck || r.code !== 0 ? "" : r.out;
   };
   if (process.platform === "darwin") return (await run(["route", "-n", "get", "default"])).match(/gateway:\s*([\d.]+)/)?.[1];
   if (process.platform === "linux") return (await run(["ip", "route", "show", "default"])).match(/default via ([\d.]+)/)?.[1];

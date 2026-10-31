@@ -116,6 +116,8 @@ export class Network {
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
+    this.mapEpoch++;
+    await this.mapChain; // a mapping in flight finishes (and undoes itself) before the final unmap
     await this.mapper.unmap();
     this.st.router = { state: "idle" };
   }
@@ -180,15 +182,27 @@ export class Network {
   }
 
   // ---- router ----
+  /** Port-mapping runs one at a time; a stop moves the epoch, so one begun before it neither starts late nor leaves a mapping behind. */
+  private mapEpoch = 0;
+  private mapChain: Promise<unknown> = Promise.resolve();
+
   async openRouter() {
     const c = this.cfg;
-    if (!c) return;
-    this.st.router = { state: "working", method: "none", externalPort: c.externalPort, message: "Asking your router to open the port…" };
-    const lan = lanIpv4();
-    const ip = await lookupIp(this.fetchFn, this.st.publicIp);
-    this.st.publicIp ??= ip;
-    const r = await this.mapper.map(c.externalPort, c.internalPort, lan, ip);
-    this.st.router = { ...r, state: "done" };
+    if (!c?.enabled) return;
+    const epoch = this.mapEpoch;
+    const run = this.mapChain.then(async () => {
+      if (epoch !== this.mapEpoch) return;
+      this.st.router = { state: "working", method: "none", externalPort: c.externalPort, message: "Asking your router to open the port…" };
+      const lan = lanIpv4();
+      const ip = await lookupIp(this.fetchFn, this.st.publicIp);
+      this.st.publicIp ??= ip;
+      const r = await this.mapper.map(c.externalPort, c.internalPort, lan, ip);
+      // Stopped while it was asking: whatever it opened is taken back, and the status stays idle.
+      if (epoch !== this.mapEpoch) return void (await this.mapper.unmap());
+      this.st.router = { ...r, state: "done" };
+    });
+    this.mapChain = run.catch(() => {});
+    return run;
   }
 
   // ---- checks ----
@@ -269,6 +283,7 @@ export class Network {
       return json(this.status());
     }
     if (p === "retry-router") {
+      if (!this.cfg.enabled) return json({ error: "Remote access is off." }, 409);
       await this.openRouter();
       return json(this.status());
     }
