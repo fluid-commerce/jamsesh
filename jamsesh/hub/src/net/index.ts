@@ -119,9 +119,12 @@ export class Network {
   /** The hub is shutting down: turns everything off for good (a request still waiting on an order can't start anything after this). */
   async close(): Promise<boolean> {
     this.shut = true;
-    const gone = await this.stop();
-    this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement end
-    return gone;
+    this.cfgGen++; // any setup still waiting is stale
+    return this.inLane(async () => {
+      const gone = await this.stop();
+      this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement end
+      return gone;
+    });
   }
 
   /** Turns everything off. True when the router confirmed the port forward is gone (or there was none). */
@@ -218,6 +221,13 @@ export class Network {
   private shut = false;
   /** Counts setup/disable requests: one that finds a newer one made while it waited is stale and changes nothing. */
   private cfgGen = 0;
+  /** Setup, turn-off, retry and close run one after another; a request made stale while it waited is refused before it touches the router. */
+  private lane: Promise<unknown> = Promise.resolve();
+  private inLane<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.lane.then(fn, fn);
+    this.lane = run.catch(() => {});
+    return run;
+  }
   private mapChain: Promise<unknown> = Promise.resolve();
 
   async openRouter() {
@@ -303,17 +313,20 @@ export class Network {
       const externalPort = Number(body.externalPort ?? this.cfg?.externalPort ?? 443);
       const internalPort = Number(body.internalPort ?? this.cfg?.internalPort ?? 4443);
       if (![externalPort, internalPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) return json({ error: "Ports must be between 1 and 65535." }, 400);
-      if (!(await this.stop())) return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
-      this.st.publicIp = r.ip;
-      this.st.dns = "ok";
-      await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
-      if (this.shut) return json({ error: "The host is closing." }, 503);
-      // A later turn-off (or setup) made while this one waited on DuckDNS and the old order wins: this one is stale and changes nothing.
-      if (gen !== this.cfgGen) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
-      this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
-      await this.start();
-      this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow every change of setting, not only a new certificate
-      return json(this.status());
+      return this.inLane(async () => {
+        // A later turn-off (or setup) made while this one waited on DuckDNS or its turn: this one is stale and touches nothing.
+        if (gen !== this.cfgGen) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
+        if (this.shut) return json({ error: "The host is closing." }, 503);
+        if (!(await this.stop())) return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
+        this.st.publicIp = r.ip;
+        this.st.dns = "ok";
+        await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
+        if (this.shut) return json({ error: "The host is closing." }, 503);
+        this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
+        await this.start();
+        this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow every change of setting, not only a new certificate
+        return json(this.status());
+      });
     }
     if (!this.cfg) return json({ error: "Set up a name first." }, 400);
     if (p === "check") {
@@ -325,7 +338,8 @@ export class Network {
       return json(this.status());
     }
     if (p === "retry-router") {
-      if (!this.cfg.enabled) {
+      return this.inLane(async () => {
+      if (!this.cfg!.enabled) {
         // Off: nothing new is opened, but an unconfirmed old forward is tried again.
         const gone = await this.mapper.unmap();
         this.st.router = gone ? { state: "idle" } : { state: "error", method: "none", message: "Couldn't confirm that the router closed the port. Check the router's forwarding rules." };
@@ -333,15 +347,18 @@ export class Network {
       }
       await this.openRouter();
       return json(this.status());
+      });
     }
     if (p === "disable") {
       this.cfgGen++;
+      return this.inLane(async () => {
       // Off is saved either way, but a forward the router didn't confirm closing is said so, and Retry stays available to try again.
       const gone = await this.stop();
-      this.saveConfig({ ...this.cfg, enabled: false });
+      this.saveConfig({ ...this.cfg!, enabled: false });
       this.st.reachable = "unknown";
       this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow the setting
       return gone ? json(this.status()) : json({ ...this.status(), error: "Remote access is off, but the router didn't confirm closing the port forward. Press Retry to try again, or remove it in the router's settings." }, 409);
+      });
     }
     return json({ error: "not found" }, 404);
   }

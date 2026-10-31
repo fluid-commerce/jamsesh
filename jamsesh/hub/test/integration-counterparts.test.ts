@@ -565,3 +565,40 @@ test("a setup made stale by a turn-off while it waited changes nothing, and an o
   expect((n as any).cfg.enabled).toBe(false);
   expect((n as any).cfg.domain).toBe("old.duckdns.org");
 });
+
+test("two overlapping setups: the older one is refused before it touches the router, and the newer one's forward stands", async () => {
+  const { Network } = await import("../src/net");
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let n1 = 0;
+  const fetchFn = (async (u: any) => {
+    if (String(u).includes("duckdns.org/update")) {
+      if (++n1 === 1) await held;
+      return new Response("OK\n1.2.3.4\n\nUPDATED");
+    }
+    return new Response("");
+  }) as any;
+  const n = new Network(join(dir, "net-two"), fetchFn);
+  const calls: string[] = [];
+  (n as any).mapper = { map: async () => (calls.push("map"), { method: "upnp" }), unmap: async () => (calls.push("unmap"), true) };
+  const post = (body: object) => n.routes(new Request("http://x/api/net/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL("http://x/api/net/config"));
+  const older = post({ domain: "aaa", token: "11111111-1111-1111-1111-111111111111" });
+  await Bun.sleep(30);
+  const newer = await post({ domain: "bbb", token: "22222222-2222-2222-2222-222222222222" });
+  expect(newer?.status).toBe(200);
+  const before = calls.length;
+  release();
+  expect((await older)?.status).toBe(409);
+  expect(calls.length).toBe(before); // the stale one asked the router for nothing
+  expect((n as any).cfg.domain).toBe("bbb.duckdns.org");
+});
+
+test("two deletes at once share one outcome: the second can't call it closed while the first is still trying", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  const m: any = new PortMapper();
+  m.igd = { control: "http://127.0.0.1:1/ctl", type: "urn:x:service:WANIPConnection:1", location: "http://127.0.0.1:1/d" };
+  m.current = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+  const [a, b] = await Promise.all([m.unmap(), m.unmap()]);
+  expect([a, b]).toEqual([false, false]);
+  expect(m.current).toBeDefined();
+});

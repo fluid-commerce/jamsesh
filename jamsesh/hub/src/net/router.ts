@@ -108,8 +108,8 @@ async function pmpMap(gateway: string, internalPort: number, externalPort: numbe
   if (!addr || addr.kind !== "address") return { supported: false as const };
   const mapRaw = await pmpExchange(gateway, natPmpMapRequest(internalPort, externalPort, lifetimeSec));
   const map = mapRaw && decodeNatPmp(mapRaw);
-  // The router answered the address request, so it speaks NAT-PMP: no reply to the map request means it may have applied it.
-  if (!map || map.kind !== "map") return { supported: false as const, lost: !mapRaw };
+  // The router answered the address request, so it speaks NAT-PMP: no (or no valid) reply to the map request means it may have applied it.
+  if (!map || map.kind !== "map") return { supported: false as const, lost: true as const };
   return { supported: true as const, externalIp: addr.externalIp, result: map.result, externalPort: map.externalPort, lifetimeSec: map.lifetimeSec };
 }
 
@@ -298,7 +298,13 @@ export class PortMapper {
   }
 
   /** Removes the mapping (NAT-PMP: lifetime 0; UPnP: DeletePortMapping). True once the router has said it is gone (or there was none); false when that couldn't be confirmed, and the mapping is kept to try again. */
-  async unmap(): Promise<boolean> {
+  unmap(): Promise<boolean> {
+    // One delete at a time: a second caller shares the first's outcome instead of seeing an emptied record and calling it closed.
+    return (this.unmapping ??= this.unmapOnce().finally(() => (this.unmapping = undefined)));
+  }
+  private unmapping?: Promise<boolean>;
+
+  private async unmapOnce(): Promise<boolean> {
     this.unrenew();
     const c = this.current ?? this.maybe;
     this.current = undefined; // a renewal queued from here on finds nothing to renew
