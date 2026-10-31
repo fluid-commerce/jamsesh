@@ -2653,7 +2653,8 @@ JamSesh uses the computers in the room [B28]:
 `bun run test` (`scripts/test-all.sh`) runs every suite: the hub, the web app, and the Mac app
 (`cargo test`), or the ones named (`scripts/test-all.sh web tauri`). It says first what will skip on
 that machine: the simulated rooms need macOS voices (`/usr/bin/say`) and the speaker model, and the
-end-to-end Parakeet test needs `JAMSESH_TEST_PARAKEET_DIR`. `hub/test/dedupe.test.ts` covers
+end-to-end Parakeet test needs `JAMSESH_TEST_PARAKEET_DIR`. The web suite's browser test uses the
+`playwright` devDependency and needs its browser installed once (`cd web && bunx playwright install chromium`). `hub/test/dedupe.test.ts` covers
 merging and dropping lines with no speaker model and synthetic audio, so it runs anywhere.
 
 - **Room audio** [A1, A2] (`hub/test/audio.bench.test.ts`): real recorded human voices

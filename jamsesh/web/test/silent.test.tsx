@@ -185,7 +185,7 @@ test("when the room turns silent the chime's audio context is closed, so no old 
 // The real thing, in a real browser (muted): each production frame, flipped from a normal room to a silent one.
 for (const which of ["tile", "custom"]) {
   test(`in a browser, the mounted ${which} stops running and goes inert when the room turns silent`, async () => {
-    const pw = require(`${(await import("node:child_process")).execSync("npm root -g").toString().trim()}/playwright`);
+    const pw = await import("playwright"); // a declared devDependency; the browser comes from `bunx playwright install chromium`
     const built = await Bun.build({ entrypoints: [`${import.meta.dir}/browser-entry.tsx`], target: "browser" });
     expect(built.success).toBe(true);
     const code = await built.outputs[0].text();

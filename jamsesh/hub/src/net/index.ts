@@ -180,7 +180,7 @@ export class Network {
   ensureCert(force = false): Promise<void> {
     if (this.issuing) return this.issuing;
     const d = this.domain();
-    if (!d || !this.cfg?.enabled) return Promise.resolve(); // nothing is ordered for a name that is switched off
+    if (!d || !this.cfg?.enabled || this.shut) return Promise.resolve(); // nothing is ordered for a name that is switched off or a host that is closing
     const cfg = this.cfg;
     const todo = (["apex", "wildcard"] as CertKind[]).filter((k) => {
       const b = this.store.load(k);
@@ -320,12 +320,21 @@ export class Network {
         if (!r.ok) return json({ error: r.error ?? "DuckDNS didn't accept that name and token." }, 400);
         if (gen !== this.cfgGen || this.shut) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
         const stopped = await this.stop();
-        if (!stopped) return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
+        if (!stopped) {
+          await this.start().catch(() => {}); // the earlier setting is still the one saved: its services resume
+          return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
+        }
         this.st.publicIp = r.ip;
         this.st.dns = "ok";
         await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
         if (this.shut) return json({ error: "The host is closing." }, 503);
-        this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
+        try {
+          this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
+        } catch {
+          // The old setting stands, so its services come back rather than leaving it saying "on" with nothing running.
+          await this.start().catch(() => {});
+          return json({ ...this.status(), error: "The new setting couldn't be saved, so the earlier one is still in use." }, 500);
+        }
         await this.start();
         this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow every change of setting, not only a new certificate
         return json(this.status());

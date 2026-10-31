@@ -628,3 +628,52 @@ test("a setup with bad ports changes nothing at DuckDNS, and a turn-off whose fi
   expect(closed).toBe(1);
   expect(n.status().enabled).toBe(false);
 });
+
+test("the DuckDNS updater never has two updates out, and stopping waits for the one that is", async () => {
+  const { startUpdater, parseDomain } = await import("../src/net/duckdns");
+  let out = 0;
+  let started = 0;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const f = (async () => {
+    started++;
+    out++;
+    await held;
+    out--;
+    return new Response("OK\n1.2.3.4\n\nUPDATED");
+  }) as any;
+  const stop = startUpdater(parseDomain("aaa")!, "11111111-1111-1111-1111-111111111111", () => {}, 10, f);
+  await Bun.sleep(60);
+  expect(started).toBe(1);
+  let stopped = false;
+  const p = stop().then(() => (stopped = true));
+  await Bun.sleep(20);
+  expect(stopped).toBe(false);
+  release();
+  await p;
+  expect(out).toBe(0);
+});
+
+test("a reconfiguration whose file can't be saved puts the earlier setting's services back", async () => {
+  const { Network } = await import("../src/net");
+  const fetchFn = (async () => new Response("OK\n1.2.3.4\n\nUPDATED")) as any;
+  const n = new Network(join(dir, "net-restore"), fetchFn);
+  (n as any).ensureCert = async () => {}; // no certificate order in this test
+  const calls: string[] = [];
+  (n as any).mapper = { map: async () => (calls.push("map"), { method: "upnp" }), unmap: async () => (calls.push("unmap"), true) };
+  const post = (body: object) => n.routes(new Request("http://x/api/net/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL("http://x/api/net/config"));
+  expect((await post({ domain: "aaa", token: "11111111-1111-1111-1111-111111111111" }))?.status).toBe(200);
+  await Bun.sleep(50);
+  const real = (n as any).saveConfig.bind(n);
+  (n as any).saveConfig = () => {
+    throw new Error("disk full");
+  };
+  calls.length = 0;
+  const r = await post({ domain: "bbb", token: "22222222-2222-2222-2222-222222222222" });
+  expect(r?.status).toBe(500);
+  await Bun.sleep(100);
+  expect((n as any).cfg.domain).toBe("aaa.duckdns.org");
+  expect(calls).toContain("unmap");
+  expect(calls).toContain("map"); // the earlier forward is open again
+  (n as any).saveConfig = real;
+});

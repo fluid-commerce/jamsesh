@@ -62,12 +62,16 @@ export async function publicIp(f: FetchFn = fetch, known?: string): Promise<stri
 export function startUpdater(d: Domain, token: string, onResult: (r: UpdateResult) => void, intervalMs = 5 * 60_000, f: FetchFn = fetch) {
   let stopped = false;
   let inflight: Promise<void> = Promise.resolve();
+  let running = false;
   const tick = () => {
-    if (stopped) return inflight;
+    if (stopped || running) return inflight; // never two at once: stopping waits for the one that is out
+    running = true;
     inflight = (async () => {
       const r = await updateIp(d, token, f);
       if (!stopped) onResult(r);
-    })().catch(() => {});
+    })()
+      .catch(() => {})
+      .finally(() => (running = false));
     return inflight;
   };
   const t = setInterval(() => void tick(), intervalMs);
