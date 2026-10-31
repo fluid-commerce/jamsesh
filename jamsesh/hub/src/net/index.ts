@@ -116,10 +116,15 @@ export class Network {
     this.stopUpdater = undefined;
     if (this.renewTimer) clearInterval(this.renewTimer);
     this.renewTimer = undefined;
+    this.stopping = true;
     this.mapEpoch++;
-    await this.mapChain; // a mapping in flight finishes (and undoes itself) before the final unmap
-    await this.mapper.unmap();
-    this.st.router = { state: "idle" };
+    try {
+      await this.mapChain; // a mapping in flight finishes (and undoes itself) before the final unmap
+      await this.mapper.unmap();
+      this.st.router = { state: "idle" };
+    } finally {
+      this.stopping = false;
+    }
   }
 
   onCertChange(cb: () => void) {
@@ -184,11 +189,13 @@ export class Network {
   // ---- router ----
   /** Port-mapping runs one at a time; a stop moves the epoch, so one begun before it neither starts late nor leaves a mapping behind. */
   private mapEpoch = 0;
+  /** True from the start of a stop until it has finished: no mapping is queued meanwhile. */
+  private stopping = false;
   private mapChain: Promise<unknown> = Promise.resolve();
 
   async openRouter() {
     const c = this.cfg;
-    if (!c?.enabled) return;
+    if (!c?.enabled || this.stopping) return;
     const epoch = this.mapEpoch;
     const run = this.mapChain.then(async () => {
       if (epoch !== this.mapEpoch) return;

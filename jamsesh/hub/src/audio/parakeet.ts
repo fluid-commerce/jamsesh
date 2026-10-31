@@ -75,6 +75,11 @@ function serverArgv(dir: string): string[] {
   return import.meta.dir.includes("$bunfs") ? [process.execPath, "--stt-server", dir] : [process.execPath, join(import.meta.dir, "stt-server.ts"), dir];
 }
 
+/** Moves a model folder JamSesh can't vouch for out of the way, keeping it (the name says why), so nothing a person put there is lost. */
+function setAside(path: string) {
+  renameSync(path, `${path}.unverified-${Date.now()}`);
+}
+
 export class Parakeet {
   /** The hub's helper list, so stopping the hub finds the server this starts (none when used alone). */
   constructor(private helpers?: HelperRegistry) {}
@@ -110,9 +115,9 @@ export class Parakeet {
       const own = join(config.home, "models", PARAKEET.name);
       // Whatever spelling found it (models/./name, a symlink), the managed model is checked against its manifest.
       if (dir && samePath(dir, own) && !(await installedIntact(own).catch(() => false))) {
-        // A file changed after it was verified: it isn't loaded, and a fresh copy replaces it where downloads are allowed.
+        // A file changed after it was verified, or the folder was never JamSesh's: it isn't loaded, and it is moved aside (never deleted: it may be someone's own model); a fresh copy replaces it where downloads are allowed.
         try {
-          rmSync(own, { recursive: true, force: true });
+          setAside(own);
         } catch (e) {
           throw new Error(`The speech model at ${own} changed and couldn't be removed (${e instanceof Error ? e.message : String(e)}).`);
         }
@@ -146,7 +151,7 @@ export class Parakeet {
       const unpacked = join(work, `sherpa-onnx-nemo-${PARAKEET.name}`);
       if (!has(unpacked)) throw new Error("The speech model archive is missing files.");
       const dest = join(models, PARAKEET.name);
-      rmSync(dest, { recursive: true, force: true });
+      if (existsSync(dest)) setAside(dest);
       await writeManifest(unpacked);
       renameSync(unpacked, dest);
       return dest;

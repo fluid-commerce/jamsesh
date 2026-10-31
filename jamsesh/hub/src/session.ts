@@ -1057,6 +1057,8 @@ export class Session {
     if (files.size > MAX_PER_MESSAGE) throw new Error(`A task carries at most ${MAX_PER_MESSAGE} files.`);
     // Observers only watch: product work never goes to them (answers and notes still can).
     if (d.mode !== "answer" && d.mode !== "note") {
+      // Who was asked is who gets it: an agent that has left is refused, never quietly dropped from the request.
+      if (d.targets.some((x) => !this.agent(x))) throw new Error("Those agents are no longer in the session.");
       const workers = d.targets.filter((t) => this.agent(t) && this.agent(t)?.role !== "observer");
       // Nobody left to do it: no task is made (a task nobody can receive would sit open for ever).
       if (d.targets.length && !workers.length) throw new Error(d.targets.every((x) => this.agent(x)) ? ONLY_OBSERVERS : "Those agents are no longer in the session.");

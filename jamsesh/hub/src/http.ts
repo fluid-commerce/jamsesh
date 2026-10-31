@@ -1172,6 +1172,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   if (path === "/directives" && req.method === "POST") {
     const targets = (body?.targets ?? []).filter((t: string) => s.agent(t));
     if (!body?.text?.trim() || !targets.length) return bad("text and at least one agent id in targets are required");
+    if ((body?.targets ?? []).length !== targets.length) return bad("One of those agents is no longer in the session.", 409);
     // Observers only watch: product work for observers alone would reach nobody.
     const mode = body.mode ?? "explore";
     if (!DIRECTIVE_MODES.includes(mode)) return bad(`mode is one of ${DIRECTIVE_MODES.join(", ")}`);

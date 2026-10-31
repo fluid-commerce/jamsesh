@@ -302,3 +302,49 @@ test("a router lookup that ignores TERM and keeps its output open still ends at 
   expect(Date.now() - t0).toBeLessThan(15_000);
   expect(r.code).not.toBe(0);
 });
+
+test("a retry that arrives while remote access is being turned off maps nothing", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-retry"), (async () => new Response("1.2.3.4")) as any);
+  (n as any).cfg = { domain: "x.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const calls: string[] = [];
+  (n as any).mapper = {
+    map: async () => (calls.push("map"), await held, { method: "upnp", externalPort: 443 }),
+    unmap: async () => void calls.push("unmap"),
+  };
+  const first = n.openRouter();
+  await Bun.sleep(30);
+  const stopping = n.stop();
+  const retry = n.openRouter(); // arrives while the stop is waiting for the first
+  release();
+  await Promise.all([first, stopping, retry]);
+  expect(calls.filter((c) => c === "map")).toHaveLength(1);
+  expect(calls[calls.length - 1]).toBe("unmap");
+});
+
+test("a task naming a live agent and one that has left is refused whole, in the session and over HTTP", async () => {
+  const { s, a, b } = room();
+  s.removeAgent(b.id);
+  expect(() => s.createDirective({ text: "Build it", mode: "implement", targets: [a.id, b.id], requestedBy: "Chey" })).toThrow(/no longer in the session/);
+  expect(s.directives()).toHaveLength(0);
+  const { Hub } = await import("../src/hub");
+  const { startHttp } = await import("../src/http");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "mixed") });
+  const server = startHttp(hub, 0);
+  try {
+    const reg = (o: string) => hub.session.registerAgent({ ownerName: o, harness: "claude-code", repo: `acme/${o}`, cwd: `/${o}`, machine: "m1", platform: "desktop" }).agent;
+    const live = reg("Ana");
+    const gone = reg("Ben");
+    hub.session.removeAgent(gone.id);
+    const win = { cookie: `jam_window=${hub.auth.windows.take(hub.auth.windows.mint())}` };
+    const r = await fetch(`http://127.0.0.1:${server.port}/api/directives`, { method: "POST", headers: { "content-type": "application/json", ...win }, body: JSON.stringify({ text: "x", mode: "implement", targets: [live.id, gone.id] }) });
+    expect(r.status).toBe(409);
+    expect(hub.session.directives()).toHaveLength(0);
+  } finally {
+    server.stop(true);
+    hub.devproxy.stop();
+    hub.stop();
+  }
+});
