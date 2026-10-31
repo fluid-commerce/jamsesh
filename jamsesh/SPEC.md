@@ -1593,7 +1593,7 @@ In `auto` the engines are tried least-busy first, then in this order [B28]:
    or `auto`, the whisper engines take over. `JAMSESH_PARAKEET=0` keeps it off;
    `JAMSESH_PARAKEET_DIR` points at a copy elsewhere. The managed copy's files are checked against
    the SHA-256 list written at install before every start, whatever spelling or link of its path
-   found it; a changed file means the copy is deleted (and downloaded again where allowed).
+   found it; a changed file means the copy is moved aside (kept, never deleted: it may be someone's own model) and downloaded again where allowed.
 2. **Host whisper.cpp, the default** (`whisper-server` on `127.0.0.1:8178`, or
    `JAMSESH_WHISPER_PORT`). A server already answering there is used only if it transcribes half a
    second of silence like whisper-server (a `text` in JSON), and is never stopped by the hub; anything

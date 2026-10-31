@@ -109,7 +109,7 @@ export class Network {
   private async certWithRetry(attempt = 0) {
     await this.ensureCert();
     const delays = [2, 5, 15];
-    if (!this.cfg?.enabled || this.stopping) return; // switched off while the order ran: no retry is scheduled
+    if (!this.cfg?.enabled || this.stopping || this.shut) return; // switched off while the order ran: no retry is scheduled
     if (this.st.cert?.state !== "ok" && attempt < delays.length) {
       const t = (this.certRetry = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000));
       (t as any).unref?.();
@@ -117,9 +117,11 @@ export class Network {
   }
 
   /** The hub is shutting down: turns everything off for good (a request still waiting on an order can't start anything after this). */
-  close(): Promise<boolean> {
+  async close(): Promise<boolean> {
     this.shut = true;
-    return this.stop();
+    const gone = await this.stop();
+    this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement end
+    return gone;
   }
 
   /** Turns everything off. True when the router confirmed the port forward is gone (or there was none). */
@@ -159,7 +161,7 @@ export class Network {
   tlsOptions(): { cert: string; key: string; serverName: string }[] | null {
     const d = this.domain();
     // Off means off: no listener, whatever certificates are kept on disk.
-    if (!d || !this.cfg?.enabled) return null;
+    if (!d || !this.cfg?.enabled || this.shut) return null;
     const out: { cert: string; key: string; serverName: string }[] = [];
     // Only a certificate for this name, issued the way the setting says: while a replacement is pending, nothing is served rather than the wrong name.
     const fits = (b: ReturnType<CertStore["load"]>, name: string) => (b && b.names.includes(name) && b.staging === this.cfg!.staging ? b : null);
@@ -191,6 +193,7 @@ export class Network {
       try {
         for (const kind of todo) {
           const b = await issueOne(kind, { domain: d, token: cfg.token, store: this.store, staging: cfg.staging, f: this.fetchFn, onProgress: (s) => (this.st.cert = { state: "issuing", step: s }) });
+          if (this.shut) break; // closing: an order that finished late saves and announces nothing
           this.store.save(b, cfg.staging);
           this.st.cert = { state: "issuing", step: "Saved" };
           this.certChanged.forEach((cb) => cb());
@@ -213,6 +216,8 @@ export class Network {
   private stopping = false;
   /** Set for good when the hub shuts down: nothing is mapped, started or ordered after it. */
   private shut = false;
+  /** Counts setup/disable requests: one that finds a newer one made while it waited is stale and changes nothing. */
+  private cfgGen = 0;
   private mapChain: Promise<unknown> = Promise.resolve();
 
   async openRouter() {
@@ -288,6 +293,7 @@ export class Network {
     if (req.method !== "POST") return json({ error: "not found" }, 404);
     const body: any = await req.json().catch(() => ({}));
     if (p === "config") {
+      const gen = ++this.cfgGen;
       const d = parseDomain(body.domain);
       const token = String(body.token ?? this.cfg?.token ?? "").trim();
       if (!d) return json({ error: "That doesn't look like a DuckDNS name. Use just the part before .duckdns.org." }, 400);
@@ -302,6 +308,8 @@ export class Network {
       this.st.dns = "ok";
       await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
       if (this.shut) return json({ error: "The host is closing." }, 503);
+      // A later turn-off (or setup) made while this one waited on DuckDNS and the old order wins: this one is stale and changes nothing.
+      if (gen !== this.cfgGen) return json({ error: "Another change was made while this one was being checked. Try again." }, 409);
       this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
       await this.start();
       this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow every change of setting, not only a new certificate
@@ -327,6 +335,7 @@ export class Network {
       return json(this.status());
     }
     if (p === "disable") {
+      this.cfgGen++;
       // Off is saved either way, but a forward the router didn't confirm closing is said so, and Retry stays available to try again.
       const gone = await this.stop();
       this.saveConfig({ ...this.cfg, enabled: false });

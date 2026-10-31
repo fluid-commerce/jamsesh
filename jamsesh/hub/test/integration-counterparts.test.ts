@@ -538,3 +538,30 @@ test("once the hub is closing, a setup that was waiting on an order starts and m
   expect((n as any).cfg.domain).toBe("x.duckdns.org"); // the closing host takes no new setup
   expect(calls).toEqual([]);
 });
+
+test("a setup made stale by a turn-off while it waited changes nothing, and an order finishing after close() saves and announces nothing", async () => {
+  const { Network } = await import("../src/net");
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let calls = 0;
+  const fetchFn = (async (u: any) => {
+    if (String(u).includes("duckdns.org/update")) {
+      calls++;
+      if (calls === 1) await held; // the setup's DuckDNS check waits
+      return new Response("OK\n1.2.3.4\n\nUPDATED");
+    }
+    return new Response("");
+  }) as any;
+  const n = new Network(join(dir, "net-stale"), fetchFn);
+  (n as any).cfg = { domain: "old.duckdns.org", token: "00000000-0000-0000-0000-000000000000", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  (n as any).mapper = { map: async () => ({ method: "upnp" }), unmap: async () => true };
+  const post = (p: string, body: object) => n.routes(new Request(`http://x/api/net/${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }), new URL(`http://x/api/net/${p}`));
+  const setup = post("config", { domain: "new", token: "11111111-1111-1111-1111-111111111111" });
+  await Bun.sleep(30);
+  await post("disable", {});
+  release();
+  const r = await setup;
+  expect(r?.status).toBe(409);
+  expect((n as any).cfg.enabled).toBe(false);
+  expect((n as any).cfg.domain).toBe("old.duckdns.org");
+});

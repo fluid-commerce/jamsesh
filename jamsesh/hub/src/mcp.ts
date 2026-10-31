@@ -652,11 +652,20 @@ export class McpEndpoint {
           s.touchAgent(agent.id, { status: idle ? "waiting" : "working", activity: idle ? "Waiting for work" : out.replace(/^(DIRECTIVE \S+ \[\w+\][^:]*: |MESSAGE from |Nothing new, but you haven't finished: )/, "").slice(0, 140) });
           if (live) {
             // Marked read only when the reply carrying it has been fully sent; a disconnect or failure leaves it for the next call (at least once).
-            live.afterSent(() => (s.markInbox(agent.id, taken), after()));
+            live.afterSent(() => {
+              try {
+                s.markInbox(agent.id, taken);
+              } finally {
+                after(); // the work count is released even when the mark failed
+              }
+            });
             live.onDrop(after);
           } else {
-            s.markInbox(agent.id, taken);
-            after();
+            try {
+              s.markInbox(agent.id, taken);
+            } finally {
+              after();
+            }
           }
           return text(out);
         } catch (e) {

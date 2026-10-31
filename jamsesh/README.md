@@ -38,8 +38,7 @@ screen (usually a Mac mini) hosts; everyone else joins.
    instructions conflict.
 
 The app carries everything the host needs, so the host Mac doesn't need this repository. Speech
-is transcribed through the gateway, or on the Mac when whisper.cpp is installed
-(`brew install whisper-cpp`). The Mac stays awake while people or agents are connected, and
+is transcribed through the gateway, or on the Mac by the `whisper-server` the app carries (its model downloads once, on the first host session). The Mac stays awake while people or agents are connected, and
 JamSesh never turns off a keep-awake you set yourself.
 
 There's no JamSesh server on the internet: everyone connects to the host. To develop JamSesh, run
