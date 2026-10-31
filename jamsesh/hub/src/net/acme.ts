@@ -4,9 +4,9 @@
 // both validate at _acme-challenge.name.duckdns.org with two different values. One order can't hold
 // both, so we run two orders back to back: an apex cert and a wildcard cert, picked by SNI.
 import * as acme from "acme-client";
-import { X509Certificate } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { X509Certificate, createPrivateKey } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import { clearTxt, setTxt, type Domain, type FetchFn } from "./duckdns";
 
 export const RENEW_BEFORE_DAYS = 30;
@@ -58,15 +58,20 @@ export class CertStore {
     if (existsSync(this.p("account.key"))) return readFileSync(this.p("account.key"));
     return acme.crypto.createPrivateKey().then((k) => (this.write("account.key", k), k));
   }
+  /** One file holds the certificate, its key and what describes them, written whole and moved into place: a crash leaves the old bundle or the new, never a mix. */
   save(b: CertBundle, staging: boolean) {
-    this.write(`${b.kind}.crt`, b.cert);
-    this.write(`${b.kind}.key`, b.key);
-    this.write(`${b.kind}.json`, JSON.stringify({ names: b.names, notAfter: b.notAfter, staging }));
+    const tmp = this.p(`${b.kind}.bundle.${process.pid}.tmp`);
+    this.write(basename(tmp), JSON.stringify({ names: b.names, notAfter: b.notAfter, staging, cert: b.cert, key: b.key }));
+    renameSync(tmp, this.p(`${b.kind}.bundle.json`));
   }
   load(kind: CertKind): (CertBundle & { staging: boolean }) | null {
     try {
-      const meta = JSON.parse(readFileSync(this.p(`${kind}.json`), "utf8"));
-      return { kind, names: meta.names, notAfter: meta.notAfter, staging: !!meta.staging, cert: readFileSync(this.p(`${kind}.crt`), "utf8"), key: readFileSync(this.p(`${kind}.key`), "utf8") };
+      let meta: any;
+      if (existsSync(this.p(`${kind}.bundle.json`))) meta = JSON.parse(readFileSync(this.p(`${kind}.bundle.json`), "utf8"));
+      else meta = { ...JSON.parse(readFileSync(this.p(`${kind}.json`), "utf8")), cert: readFileSync(this.p(`${kind}.crt`), "utf8"), key: readFileSync(this.p(`${kind}.key`), "utf8") }; // an earlier build's three files
+      // The key has to be this certificate's (an old mixed set is no bundle).
+      if (!new X509Certificate(meta.cert).checkPrivateKey(createPrivateKey(meta.key))) return null;
+      return { kind, names: meta.names, notAfter: meta.notAfter, staging: !!meta.staging, cert: meta.cert, key: meta.key };
     } catch {
       return null;
     }

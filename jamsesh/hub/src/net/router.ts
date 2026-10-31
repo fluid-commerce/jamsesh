@@ -253,7 +253,15 @@ export class PortMapper {
     this.timer = undefined;
   }
 
-  private async renew() {
+  /** A renewal being sent: stopping waits for it, so it can't land after the final delete. */
+  private renewing: Promise<void> = Promise.resolve();
+
+  private renew() {
+    this.renewing = this.renewing.then(() => this.renewOnce());
+    return this.renewing;
+  }
+
+  private async renewOnce() {
     const c = this.current;
     if (!c) return;
     try {
@@ -267,7 +275,8 @@ export class PortMapper {
   async unmap() {
     this.unrenew();
     const c = this.current;
-    this.current = undefined;
+    this.current = undefined; // a renewal queued from here on finds nothing to renew
+    await this.renewing.catch(() => {});
     if (!c) return;
     try {
       if (c.method === "nat-pmp" && c.gateway) await pmpExchange(c.gateway, natPmpMapRequest(c.internalPort, 0, 0), 2);

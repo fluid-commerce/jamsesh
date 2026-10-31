@@ -61,7 +61,7 @@ const startSecure = () => {
   }
 };
 startSecure();
-const announce = () => advertise(config.port, { session: hub.session.settings().sessionName, https: hub.net.status().publicUrl });
+const announce = () => advertise(config.port, { session: hub.session.settings().sessionName, https: hub.net.status().enabled ? hub.net.status().publicUrl : undefined });
 hub.net.onCertChange(() => (startSecure(), announce()));
 announce();
 

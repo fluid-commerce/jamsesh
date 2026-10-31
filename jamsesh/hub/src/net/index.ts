@@ -143,7 +143,8 @@ export class Network {
   /** Certs for Bun.serve({ tls }): apex first (the default), wildcard picked by SNI. Null until one exists. */
   tlsOptions(): { cert: string; key: string; serverName: string }[] | null {
     const d = this.domain();
-    if (!d) return null;
+    // Off means off: no listener, whatever certificates are kept on disk.
+    if (!d || !this.cfg?.enabled) return null;
     const out: { cert: string; key: string; serverName: string }[] = [];
     const apex = this.store.load("apex");
     const wild = this.store.load("wildcard");
@@ -160,7 +161,9 @@ export class Network {
     const cfg = this.cfg;
     const todo = (["apex", "wildcard"] as CertKind[]).filter((k) => {
       const b = this.store.load(k);
-      return force || !b || b.staging !== cfg.staging || needsRenewal(b.notAfter);
+      // A certificate for another name (the name was changed) is no certificate for this one.
+      const want = k === "apex" ? d.fqdn : `*.${d.fqdn}`;
+      return force || !b || b.staging !== cfg.staging || needsRenewal(b.notAfter) || !b.names.includes(want);
     });
     if (!todo.length) {
       this.refreshCertState();
@@ -276,6 +279,7 @@ export class Network {
       await this.stop();
       this.st.publicIp = r.ip;
       this.st.dns = "ok";
+      await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
       this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
       await this.start();
       return json(this.status());
@@ -298,6 +302,7 @@ export class Network {
       await this.stop();
       this.saveConfig({ ...this.cfg, enabled: false });
       this.st.reachable = "unknown";
+      this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow the setting
       return json(this.status());
     }
     return json({ error: "not found" }, 404);

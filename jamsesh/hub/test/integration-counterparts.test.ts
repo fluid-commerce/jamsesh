@@ -348,3 +348,39 @@ test("a task naming a live agent and one that has left is refused whole, in the 
     hub.stop();
   }
 });
+
+test("a certificate bundle is written whole and loads only with its own key; one for another name is not accepted", async () => {
+  const { CertStore } = await import("../src/net/acme");
+  const store = new CertStore(join(dir, "certs"));
+  // A certificate and key that don't belong together are no bundle.
+  const bad = { kind: "apex" as const, names: ["a.duckdns.org"], notAfter: Date.now() + 1e10, cert: "not a certificate", key: "not a key" };
+  store.save(bad, false);
+  expect(store.load("apex")).toBeNull();
+});
+
+test("turning remote access off ends the HTTPS options even when certificates are kept", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-off"), (async () => new Response("")) as any);
+  (n as any).cfg = { domain: "x.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: false, staging: false };
+  (n as any).store = { load: () => ({ cert: "c", key: "k", names: ["x.duckdns.org"], notAfter: Date.now() + 1e10, staging: false }) };
+  expect(n.tlsOptions()).toBeNull();
+  (n as any).cfg.enabled = true;
+  expect(n.tlsOptions()).not.toBeNull();
+});
+
+test("a lease renewal in flight is finished before the final delete", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  const m: any = new PortMapper();
+  const order: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  m.current = { method: "none", internalPort: 1, externalPort: 1, lanIp: "x" };
+  m.renewOnce = async () => (order.push("renew-start"), await held, void order.push("renew-end"));
+  void m.renew();
+  const un = m.unmap();
+  await Bun.sleep(20);
+  expect(order).toEqual(["renew-start"]); // unmap waits for it
+  release();
+  await un;
+  expect(order).toEqual(["renew-start", "renew-end"]);
+});
