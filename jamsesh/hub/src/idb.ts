@@ -3,6 +3,7 @@
 // a Simulator window or any macOS permission. It speaks gRPC; the few messages JamSesh needs are
 // encoded by hand here (field numbers from idb.proto) instead of adding a protobuf dependency.
 // The companion listens on a unix socket in the hub's own folder, never on a port.
+import type { HelperRegistry } from "./children";
 import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import http2 from "node:http2";
 import net from "node:net";
@@ -169,6 +170,8 @@ export class Companion {
   constructor(
     readonly udid: string,
     readonly sock: string,
+    /** The hub's helper list, so stopping the hub finds the companion (none when used alone). */
+    private helpers?: HelperRegistry,
   ) {}
 
   /** Starts the companion and waits for its socket. Resolves to an error in words, or null. */
@@ -178,7 +181,9 @@ export class Companion {
     try {
       unlinkSync(this.sock);
     } catch {}
+    if (this.helpers?.isClosed) return "The hub is stopping.";
     this.proc = Bun.spawn([bin, "--udid", this.udid, "--grpc-domain-sock", this.sock, "--log-level", "info", "--terminate-offline", "1"], { stdout: "ignore", stderr: "ignore" });
+    this.helpers?.track(this.proc);
     void this.proc.exited.then(() => {
       if (!this.dead) (this.stop(), this.onExit());
     });

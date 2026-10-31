@@ -524,7 +524,7 @@ export class Hub {
     const unread = attached.filter((a) => a.kind === "text" && !this.attachments.bytes(a.id)).map((a) => a.name);
     for (const a of attached.filter((x) => x.kind === "pdf")) {
       const f = this.attachments.file(a.id);
-      const t = f ? await pdfText(f.path, 1200) : "";
+      const t = f ? await pdfText(f.path, 1200, this.helpers) : "";
       if (t) texts.push(attached.length > 1 ? `${a.name}: ${t}` : t);
       else unread.push(a.name);
     }

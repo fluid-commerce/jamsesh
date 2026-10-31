@@ -246,3 +246,20 @@ test("a task for an agent that has left is refused, not left open for nobody", (
   expect(() => s.createDirective({ text: "Build it", mode: "implement", targets: [a.id], requestedBy: "Chey" })).toThrow(/no longer in the session/);
   expect(s.directives()).toHaveLength(0);
 });
+
+test("once the hub is stopping, a PDF read and an idb companion start nothing", async () => {
+  const { HelperRegistry } = await import("../src/children");
+  const { pdfText } = await import("../src/attachments");
+  const { Companion } = await import("../src/idb");
+  const reg = new HelperRegistry();
+  void reg.stopAll(50);
+  const was = process.env.JAMSESH_PDFTEXT;
+  process.env.JAMSESH_PDFTEXT = "/usr/bin/true";
+  try {
+    expect(await pdfText("/nonexistent.pdf", 100, reg)).toBe("");
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_PDFTEXT;
+    else process.env.JAMSESH_PDFTEXT = was;
+  }
+  expect(await new Companion("udid", join(dir, "c.sock"), reg).start("/usr/bin/true")).toBe("The hub is stopping.");
+});

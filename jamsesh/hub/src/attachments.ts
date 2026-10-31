@@ -3,6 +3,7 @@
 // (<id>.json) with its name and who added it. Types are decided by looking at the bytes, never by
 // the name or the type the browser claims, and the stored file's name is made here, so nothing a
 // caller sends reaches a path.
+import type { HelperRegistry } from "./children";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -195,7 +196,7 @@ export class Attachments {
  * from a checkout it is built from source on first use into the JamSesh home. JAMSESH_PDFTEXT names a ready-made one (tests).
  */
 let helper: Promise<string | null> | null = null;
-export function pdfHelper(): Promise<string | null> {
+export function pdfHelper(helpers?: HelperRegistry): Promise<string | null> {
   return (helper ??= (async () => {
     const given = process.env.JAMSESH_PDFTEXT;
     if (given) return existsSync(given) ? given : null;
@@ -207,7 +208,9 @@ export function pdfHelper(): Promise<string | null> {
     if (existsSync(bin)) return bin;
     try {
       mkdirSync(join(config.home, "bin"), { recursive: true });
+      if (helpers?.isClosed) return null; // the hub is stopping: no new build (this one is retried at the next start)
       const build = Bun.spawn(["swiftc", "-O", "-swift-version", "5", src, "-o", bin], { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+      helpers?.track(build);
       const stop = setTimeout(() => build.kill(), 300_000);
       const code = await build.exited;
       clearTimeout(stop);
@@ -223,11 +226,13 @@ export function pdfHelper(): Promise<string | null> {
  * counting the process exit), or "" when there's none to read (a scan, a locked or damaged file, no helper). Nothing else reads
  * a PDF here: a file the helper can't read is one a person has to word themselves.
  */
-export async function pdfText(path: string, max = 4000): Promise<string> {
-  const bin = await pdfHelper();
+export async function pdfText(path: string, max = 4000, helpers?: HelperRegistry): Promise<string> {
+  const bin = await pdfHelper(helpers);
   if (!bin) return "";
   try {
+    if (helpers?.isClosed) return "";
     const run = Bun.spawn([bin, path, String(max)], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+    helpers?.track(run);
     const stop = setTimeout(() => run.kill(), 5000);
     try {
       // Read only as much as the result can use (UTF-8 is at most 4 bytes a character).

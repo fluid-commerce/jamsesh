@@ -69,7 +69,12 @@ export async function defaultGateway(): Promise<string | undefined> {
   const run = async (cmd: string[]) => {
     try {
       const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
-      return await new Response(p.stdout).text();
+      const stop = setTimeout(() => p.kill(), 5000); // a lookup that hangs must not hold the router check
+      try {
+        return await new Response(p.stdout).text();
+      } finally {
+        clearTimeout(stop);
+      }
     } catch {
       return "";
     }

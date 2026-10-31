@@ -113,7 +113,7 @@ export class LiveApps {
   log: (text: string) => void = () => {};
   /** The input helper for a Simulator, when idb's companion is installed (tests supply their own). */
   companionFor: (udid: string) => Pick<Companion, "start" | "describe" | "tap" | "swipe" | "button" | "orientation" | "type" | "key" | "stop" | "onExit"> | null = (udid) =>
-    companionPath() ? new Companion(udid, join(config.home, "live", `${udid.slice(0, 8)}.sock`)) : null;
+    companionPath() ? new Companion(udid, join(config.home, "live", `${udid.slice(0, 8)}.sock`), this.helpers) : null;
 
   /** The `jamsesh-live` command (tests supply a fake). */
   helper: () => Promise<string[] | string> = () => this.macHelper();

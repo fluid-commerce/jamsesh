@@ -210,7 +210,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
       if (draft.mode !== card.mode) e.mode = draft.mode;
       if (draft.agent && draft.agent !== card.targets.join()) e.targets = [draft.agent];
       // The partners the card shows are the ones it sends with: changed here they replace the old, and a change of target keeps them.
-      if (draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (e.targets || draft.partners.join() !== partnersOf(card).join())) e.counterparts = draft.partners;
+      if (draft.mode === "coordinate" && (draft.agent || card.targets.length >= 1) && (e.targets || draft.partners.join() !== partnersOf(card).join())) e.counterparts = draft.partners;
     } else if (draft.kind !== card.kind) e.kind = draft.kind;
     if (draft.workstream.trim() !== card.workstream) e.workstream = draft.workstream;
     return e;
@@ -265,12 +265,12 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
                     ))}
                   </select>
                 </label>
-                {draft.mode === "coordinate" && (draft.agent || card.targets.length === 1) && (
+                {draft.mode === "coordinate" && (draft.agent || card.targets.length >= 1) && (
                   <label>
                     <span>Compare with</span>
                     <select multiple value={draft.partners} onChange={(e) => setDraft({ ...draft, partners: Array.from(e.target.selectedOptions, (o) => o.value) })}>
                       {workers(state)
-                        .filter((a: Agent) => a.id !== (draft.agent || card.targets[0]))
+                        .filter((a: Agent) => a.id !== draft.agent && !card.targets.includes(a.id))
                         .map((a: Agent) => (
                           <option key={a.id} value={a.id}>
                             {a.name}
