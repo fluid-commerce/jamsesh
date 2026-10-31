@@ -46,7 +46,7 @@ This folder is a project's memory. JamSesh keeps it from the room's conversation
 ## Layers
 - \`raw/\` holds sources: transcripts, documents, agents' reports, people's edits. They are immutable. Never change one; cite it.
 - \`wiki/\` holds pages. The maintainer writes and updates them. One topic per page.
-- \`index.md\` lists every page by category and is rebuilt by JamSesh. \`log.md\` records recent changes (the newest ~2 MB, trimmed by JamSesh); older entries are in the git history when git is keeping one.
+- \`index.md\` lists every page by category and is rebuilt by JamSesh. \`log.md\` records recent changes (the newest ~2 MB, trimmed by JamSesh); older entries are in the git history when git is keeping one (except lines cut at the size limit, or when no history is kept).
 
 ## Pages
 - The file name is the page's slug: lowercase letters, digits and hyphens (\`passport-login.md\`). The first line is a \`# Title\` heading.
@@ -1083,7 +1083,7 @@ function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
     console.error("wiki: the file of logged keys can't be read:", e instanceof Error ? e.message : e);
     return { keys: new Set(), ok: false }; // dedup then rests on the log's own recent lines, and the file is left alone (not rewritten from nothing)
   }
-  if (!text) return { keys: new Set(), ok: true };
+  if (text === null) return { keys: new Set(), ok: true };
   try {
     const j = JSON.parse(text);
     if (!Array.isArray(j)) throw new Error("not a list");
@@ -1129,20 +1129,22 @@ export function rememberLogged(dir: string, key: string): void {
   writeAtomic(loggedFile(dir), JSON.stringify(keys));
 }
 
-/** Takes a key back out (the log line it was written for did not get written). Best effort. */
-function forgetLogged(dir: string, key: string) {
-  try {
-    const { keys, ok } = readLedger(dir);
-    if (ok && keys.has(key)) writeAtomic(loggedFile(dir), JSON.stringify([...keys].filter((k) => k !== key)));
-  } catch {}
-}
-
 /** The log keeps its newest lines only (git holds the rest): past LOG_MAX it is cut back to about LOG_KEEP characters, at a line start. */
 const LOG_MAX = 3 * 1024 * 1024;
 const LOG_KEEP = 2 * 1024 * 1024;
 const LOG_HEADER = "# Log\n\nWhat changed in this wiki, newest last.\n";
 const LOG_HARD = 8 * 1024 * 1024; // a log this big is cut regardless: it must stay under the read cap
 /** The newest lines of `text` (about LOG_KEEP bytes), from a line start, under the header. */
+/** Whether every keyed line in the part about to be cut has its key remembered: a line is never cut away while dedup still rests on it. */
+function cutIsSafe(dir: string, text: string): boolean {
+  const bytes = Buffer.byteLength(text);
+  const cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
+  const marks = [...text.slice(0, cut).matchAll(/ %%([\w:,-]+)%%/g)].map((m) => m[1]!);
+  if (!marks.length) return true;
+  const { keys, ok } = readLedger(dir);
+  return ok && marks.every((m) => keys.has(m));
+}
+
 function cutLog(text: string): string {
   const bytes = Buffer.byteLength(text);
   let cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
@@ -1162,6 +1164,7 @@ function trimLog(dir: string, text: string): string {
   const bytes = Buffer.byteLength(text);
   if (bytes <= LOG_MAX) return text;
   if (bytes < LOG_HARD && historyStatus(dir).state === "on") return text;
+  if (bytes < LOG_HARD && !cutIsSafe(dir, text)) return text; // a keyed line in the part to go has no remembered key yet: kept (up to the hard limit)
   return cutLog(text);
 }
 
@@ -1176,6 +1179,7 @@ export function trimCommittedLog(dir: string): void {
     if (text === null || Buffer.byteLength(text) <= LOG_MAX) return;
     const head = gitOut(dir, ["show", "HEAD:log.md"]);
     if (head === null || head !== text) return;
+    if (!cutIsSafe(dir, text)) return; // as above: not while a keyed line's key isn't remembered
     writeAtomic(file, cutLog(text));
   } catch (e) {
     console.error("wiki: couldn't cut the log back:", e instanceof Error ? e.message : e);
@@ -1195,23 +1199,15 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   const ledger = k ? readLedger(dir) : null;
   if (mark && !cur.includes(mark) && ledger && !ledger.ok) throw new Error("The file of logged keys can't be read, so it can't be told whether this change was logged before; it is tried again later.");
   if (mark && (cur.includes(mark) || ledger!.keys.has(k))) {
-    if (cur.includes(mark)) {
-      try {
-        rememberLogged(dir, k); // (the line is there but the key may not have been written: repaired)
-      } catch {}
-    }
+    if (cur.includes(mark) && !ledger!.keys.has(k)) rememberLogged(dir, k); // the line is there but its key isn't: written now, and a failure here is the caller's to see (the line stays, so a retry repairs it)
     return;
   }
   // The new entry always starts a line of its own (a log whose last line was never terminated doesn't swallow it).
   const base = cur.endsWith("\n") ? cur : `${cur}\n`;
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
-  if (k) rememberLogged(dir, k); // first: if it can't be written no line is, and a retry is safe
-  try {
-    writeAtomic(file, trimLog(dir, base + line));
-  } catch (e) {
-    if (k) forgetLogged(dir, k); // the line didn't land: its key must not say it did
-    throw e;
-  }
+  // The line first, its key in it: a key never exists without its line. Then the key is remembered; a line is not cut from the log until its key is (see cutIsSafe).
+  writeAtomic(file, trimLog(dir, base + line));
+  if (k) rememberLogged(dir, k);
 }
 
 export function readLog(dir: string, limit = 100): { ts: number; text: string; pages: string[] }[] {

@@ -3763,6 +3763,8 @@ test("the hard-limit cut never takes the newest entry, even when the line before
   const text = readFileSync(join(dir, "log.md"), "utf8");
   expect(text).toContain("The newest entry");
   expect(text).toContain("%%newest-key%%");
+  expect(statSync(join(dir, "log.md")).size).toBeLessThan(1024 * 1024); // the huge line is gone
+  expect(readLog(dir, 3)[0]!.pages).toContain("one"); // and History reads the newest entry on its own
 });
 
 test("a keyed append refuses when the ledger can't be read and the line isn't in the log; an unkeyed one goes ahead", () => {
@@ -3783,35 +3785,37 @@ test("a keyed append refuses when the ledger can't be read and the line isn't in
   expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("some-key");
 });
 
-test("a keyed append whose key can't be written writes no line, so a retry is safe; a line that can't be written takes its key back; an unterminated last line doesn't swallow the next entry", () => {
+test("a keyed line is written first with its key in it: a failure remembering the key leaves a line a retry repairs, a line is never cut while its key is not remembered, and a new entry starts its own line", () => {
   const { dir } = room();
   const was = io.rename;
   const err = console.error;
   console.error = () => {};
   try {
-    // The ledger can't be written: no line.
     (io as any).rename = (from: any, to: any) => {
       if (String(to).endsWith(".wiki-logged.json")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
       return was(from, to);
     };
     expect(() => appendLog(dir, "Keyed", [], Date.now(), "key-one")).toThrow(/disk full/);
-    expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("key-one");
-    // The log can't be written: the key is taken back.
-    (io as any).rename = (from: any, to: any) => {
-      if (String(to).endsWith("log.md")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
-      return was(from, to);
-    };
-    expect(() => appendLog(dir, "Keyed", [], Date.now(), "key-two")).toThrow(/disk full/);
-    expect(loggedKeys(dir).has("key-two")).toBe(false);
   } finally {
     (io as any).rename = was;
     console.error = err;
   }
-  appendLog(dir, "Keyed", [], Date.now(), "key-one"); // the retry
+  expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("%%key-one%%"); // the line is there, with its key in it
+  expect(loggedKeys(dir).has("key-one")).toBe(false);
+  appendLog(dir, "Keyed", [], Date.now(), "key-one"); // the retry: no second line, and the key is written now
   expect(readFileSync(join(dir, "log.md"), "utf8").split("%%key-one%%").length - 1).toBe(1);
+  expect(loggedKeys(dir).has("key-one")).toBe(true);
+  // No cut while a keyed line in the part to go has no remembered key (without a kept history the cut is otherwise made at 3 MB).
+  rmSync(join(dir, ".git"), { recursive: true, force: true });
+  const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
+  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n- 2026-01-01 00:00 an old keyed line %%orphan-key%%\n${filler}`);
+  appendLog(dir, "A change", []);
+  expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("%%orphan-key%%"); // kept: its key is not remembered
+  writeFileSync(join(dir, ".wiki-logged.json"), JSON.stringify(["orphan-key"]));
+  appendLog(dir, "Another change", []);
+  expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("%%orphan-key%%"); // now it may go
   // An unterminated last line.
   writeFileSync(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n- 2026-01-01 00:00 a line with no newline");
   appendLog(dir, "The next entry", ["one"]);
-  const entries = readLog(dir, 5);
-  expect(entries.map((e) => e.text)).toEqual(["The next entry", "a line with no newline"]);
+  expect(readLog(dir, 5).map((e) => e.text)).toEqual(["The next entry", "a line with no newline"]);
 });
