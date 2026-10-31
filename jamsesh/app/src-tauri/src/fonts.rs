@@ -16,10 +16,13 @@ use serde::Serialize;
 
 /// At most this many families per request.
 pub const MAX_FAMILIES: usize = 24;
-/// A single font file larger than this is skipped (Apple Color Emoji is ~180 MB).
-pub const MAX_FILE: u64 = 48 * 1024 * 1024;
-/// At most this much font data per request.
-pub const MAX_TOTAL: u64 = 96 * 1024 * 1024;
+/// A single font file larger than this is skipped (Apple Color Emoji is ~180 MB). The same number as the hub's
+/// `MAX_FACE` (hub/src/fonts.ts); hub/test/fonts.test.ts fails if the two differ, so a file the Mac offers is never one the hub refuses.
+pub const MAX_FILE: u64 = 24 * 1024 * 1024;
+/// At most this much font data per request, which is one family when lending: the hub's `MAX_FAMILY_BYTES`.
+pub const MAX_TOTAL: u64 = 32 * 1024 * 1024;
+/// At most this many files of one family: the hub's `MAX_FACES`. A family with more is not lent partly.
+pub const MAX_FACES: usize = 12;
 /// A family that isn't found walks the folders again (a font installed since) at most this often.
 const RESCAN_AFTER: Duration = Duration::from_secs(30);
 
@@ -144,16 +147,18 @@ fn read_files(found: Vec<(String, Vec<PathBuf>)>) -> Vec<LocalFont> {
     let mut total = 0u64;
     let mut out = Vec::new();
     for (family, files) in found {
+        let mut faces = 0usize;
         for path in files {
             if sent.contains(&path) {
                 continue;
             }
             let Ok(meta) = std::fs::metadata(&path) else { continue };
-            if meta.len() > MAX_FILE || total + meta.len() > MAX_TOTAL {
+            if meta.len() > MAX_FILE || total + meta.len() > MAX_TOTAL || faces >= MAX_FACES {
                 continue;
             }
             let Ok(bytes) = std::fs::read(&path) else { continue };
             total += bytes.len() as u64;
+            faces += 1;
             sent.insert(path);
             out.push(LocalFont { family: family.clone(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
         }

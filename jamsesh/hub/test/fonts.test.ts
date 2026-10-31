@@ -3,13 +3,13 @@
 // stands in for Fontsource and its CDN.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { forbiddenCommand } from "../src/canvas/canvas";
-import { cardText, decodeBase64, FontService, MAX_TICKETS, MAX_TICKETS_PER_CALLER, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, normalizeFamily, readUpTo } from "../src/fonts";
+import { cardText, decodeBase64, FontService, MAX_TICKETS, MAX_TICKETS_PER_CALLER, fontCandidates, fontFamilies, lendMessage, MAX_FACE, MAX_FACES, MAX_FAMILY_BYTES, normalizeFamily, readUpTo } from "../src/fonts";
 import { bus } from "../src/bus";
 import { Hub } from "../src/hub";
 import { buffered } from "../src/body";
@@ -711,4 +711,12 @@ test("a server that says a file is small but sends more is cut off at what it sa
   } finally {
     liar.stop(true);
   }
+});
+
+test("the Mac app's lending limits are the hub's: a file or family the Mac offers is never one the hub refuses", () => {
+  const rs = readFileSync(join(import.meta.dir, "../../app/src-tauri/src/fonts.rs"), "utf8");
+  const mb = (name: string) => Number(rs.match(new RegExp(`pub const ${name}: u64 = (\\d+) \\* 1024 \\* 1024;`))?.[1]) * 1024 * 1024;
+  expect(mb("MAX_FILE")).toBe(MAX_FACE);
+  expect(mb("MAX_TOTAL")).toBe(MAX_FAMILY_BYTES);
+  expect(Number(rs.match(/pub const MAX_FACES: usize = (\d+);/)?.[1])).toBe(MAX_FACES);
 });
