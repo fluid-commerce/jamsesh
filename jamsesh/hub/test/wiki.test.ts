@@ -3856,10 +3856,30 @@ test("an unreadable ledger stops the whole pass: no source is ingested or archiv
   }
 });
 
-test("the ignore rule's commit is made at start whenever .gitignore differs from history, also when the working file already has the rules", () => {
+test("the ignore rules are committed at start when .gitignore is exactly history plus those rules; a person's other edit of it is never committed by the wiki", () => {
   if (!gitAvailable()) return;
   const { dir } = room();
-  writeFileSync(join(dir, ".gitignore"), `${readFileSync(join(dir, ".gitignore"), "utf8")}# a later local note\n`); // differs from HEAD, rules present
+  const head = gitOutOf(dir, "show", "HEAD:.gitignore");
+  // A person's own edit: left alone.
+  writeFileSync(join(dir, ".gitignore"), `${head}# my own note\n`);
   initWiki(dir);
-  expect(gitOutOf(dir, "show", "HEAD:.gitignore")).toContain("a later local note");
+  expect(gitOutOf(dir, "show", "HEAD:.gitignore")).toBe(head);
+  // The wiki's change failed to commit last time (history lacks the rules, the working file is history plus them): committed now.
+  const old = head.replace(".wiki-logged.json\n", "").replace(".wiki-logged.json.damaged\n", "");
+  writeFileSync(join(dir, ".gitignore"), old);
+  expect(commitPaths(dir, "An older .gitignore", [".gitignore"])).toBe("done");
+  writeFileSync(join(dir, ".gitignore"), `${old}.wiki-logged.json\n.wiki-logged.json.damaged\n`);
+  initWiki(dir);
+  expect(gitOutOf(dir, "show", "HEAD:.gitignore")).toContain(".wiki-logged.json.damaged");
+});
+
+test("after a ledger reset the keys of lines still in the log are remembered again, accepted cards' as well as sources'", () => {
+  const { w, dir } = room();
+  appendLog(dir, "Accepted a card", ["one"], Date.now(), "tri_card1,one");
+  w.addSource("document", "Note", "Something.", "Chey");
+  rmSync(join(dir, ".wiki-logged.json"), { force: true }); // lost
+  (w as any).catchUpLog();
+  const keys = loggedKeys(dir);
+  expect(keys.has("tri_card1,one")).toBe(true);
+  expect([...keys].some((k) => k.startsWith("src:"))).toBe(true);
 });

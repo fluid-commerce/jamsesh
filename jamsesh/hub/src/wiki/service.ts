@@ -19,7 +19,7 @@ import {
   closeVault,
   readLoggedKeys,
   trimCommittedLog,
-  rememberLogged,
+  rememberMany,
   present,
   historyStatus,
   type Take,
@@ -270,7 +270,7 @@ export class WikiService {
     }
     // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. The rule is applied
     // to each page's bytes as the commit reads them (once, one at a time, none kept here), and those same bytes are what is committed.
-    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ".gitignore", ...raw]);
+    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]);
     const accept = (f: string, state: Buffer | "gone" | "unreadable" | "toobig"): Take => {
       const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
       if (!m) return state === "unreadable" ? "fail" : state === "toobig" ? "skip" : "take"; // not a page (index, log, sources): the wiki's own files by name
@@ -302,7 +302,12 @@ export class WikiService {
     const ledger = readLoggedKeys(this.dir);
     if (!ledger.ok) throw new Error("The file of logged keys can't be used, so the catch-up waits (it would log again what was cut from the log); nothing is archived or ingested meanwhile."); // (the pass stops: a source whose entry is missing must not leave raw/ unscanned)
     const logged = ledger.keys; // (what was logged long ago may have left the trimmed log; it is not logged again)
-    for (const id of sourceIds(this.dir)) if (log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`)) rememberLogged(this.dir, `src:${id}`); // a key that failed to be written after its line was: written now
+    // Every key visible in the log (sources and accepted cards alike) is remembered if it isn't: a ledger that was reset or lost is rebuilt from the lines still there.
+    const visible = [...log.matchAll(/ %%([\w:,-]+)%%/g)].map((m) => m[1]!).filter((k) => !logged.has(k));
+    if (visible.length) {
+      rememberMany(this.dir, visible);
+      for (const k of visible) logged.add(k);
+    }
     const missing = sourceIds(this.dir)
       .filter((id) => !log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`))
       .map((id) => readSource(this.dir, id))

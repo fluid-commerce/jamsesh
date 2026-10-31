@@ -141,8 +141,20 @@ export function initWiki(dir: string): void {
   } catch (e) {
     console.error("wiki: couldn't add the logged-keys files to .gitignore:", e instanceof Error ? e.message : e);
   }
-  // Committed whenever it differs from history (also after a start where an earlier commit of it had failed); nothing to do when it doesn't.
-  if (gitAvailable() && present(join(dir, ".git"))) commitPaths(dir, "Ignore the logged-keys files", [".gitignore"]);
+  // The ignore rules are the wiki's change to .gitignore: committed when the working file is exactly the committed one plus those rules (also after a start where an earlier commit of it failed). Any other edit of the file is a person's, and is not committed here.
+  try {
+    if (gitAvailable() && present(join(dir, ".git"))) {
+      const head = gitOut(dir, ["show", "HEAD:.gitignore"]);
+      const now = readPlain(join(dir, ".gitignore"));
+      if (head !== null && now !== null && now !== head) {
+        const missing = [".wiki-logged.json", ".wiki-logged.json.damaged"].filter((r) => !new RegExp(`^${r.replace(/\./g, "\\.")}$`, "m").test(head));
+        const expected = `${head.endsWith("\n") ? head : `${head}\n`}${missing.join("\n")}${missing.length ? "\n" : ""}`;
+        if (missing.length && now === expected) commitPaths(dir, "Ignore the logged-keys files", [".gitignore"]);
+      }
+    }
+  } catch (e) {
+    console.error("wiki: couldn't commit the ignore rules:", e instanceof Error ? e.message : e);
+  }
   if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
@@ -1112,10 +1124,15 @@ export const readLoggedKeys = readLedger;
  * can't be written. The ledger being unreadable is not a failure to write: the file is left alone and the key is only in the log.
  */
 export function rememberLogged(dir: string, key: string): void {
+  rememberMany(dir, [key]);
+}
+
+/** Remembers several keys with one write. */
+export function rememberMany(dir: string, add: string[]): void {
   const { keys: have, ok } = readLedger(dir);
   if (!ok) return; // not rewritten from an empty set
-  let keys = [...have].filter((k) => k !== key);
-  keys.push(key);
+  const fresh = new Set(add);
+  let keys = [...have].filter((k) => !fresh.has(k)).concat([...fresh]);
   if (keys.length > LOGGED_MAX) {
     const rawFolder = rawDir(dir);
     const live = new Set(rawFolder ? readdirSync(rawFolder).filter((f) => f.endsWith(".md")).map((f) => `src:${f.slice(0, -3)}`) : []);
