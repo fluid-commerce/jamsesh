@@ -198,6 +198,8 @@ export class PortMapper {
   /** Opens externalPort -> lanIp:internalPort. Never throws; the status says what happened. */
   async map(externalPort: number, internalPort: number, lanIp: string, publicIp?: string): Promise<RouterStatus> {
     this.unrenew();
+    // An earlier forward the router never confirmed removing is dealt with first: it is not forgotten under a new one.
+    if (this.current && !(await this.unmap())) return { method: "none", externalPort, error: "the earlier port forward is not confirmed closed", message: "The router hasn't confirmed closing the earlier port forward yet. Try again in a moment, or remove it in the router's settings." };
     const gateway = await defaultGateway();
     let status: RouterStatus | undefined;
 

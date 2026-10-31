@@ -154,8 +154,10 @@ export class Network {
     // Off means off: no listener, whatever certificates are kept on disk.
     if (!d || !this.cfg?.enabled) return null;
     const out: { cert: string; key: string; serverName: string }[] = [];
-    const apex = this.store.load("apex");
-    const wild = this.store.load("wildcard");
+    // Only a certificate for this name, issued the way the setting says: while a replacement is pending, nothing is served rather than the wrong name.
+    const fits = (b: ReturnType<CertStore["load"]>, name: string) => (b && b.names.includes(name) && b.staging === this.cfg!.staging ? b : null);
+    const apex = fits(this.store.load("apex"), d.fqdn);
+    const wild = fits(this.store.load("wildcard"), `*.${d.fqdn}`);
     if (apex) out.push({ cert: apex.cert, key: apex.key, serverName: d.fqdn });
     if (wild) out.push({ cert: wild.cert, key: wild.key, serverName: `*.${d.fqdn}` });
     return out.length ? out : null;
@@ -284,12 +286,13 @@ export class Network {
       const externalPort = Number(body.externalPort ?? this.cfg?.externalPort ?? 443);
       const internalPort = Number(body.internalPort ?? this.cfg?.internalPort ?? 4443);
       if (![externalPort, internalPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) return json({ error: "Ports must be between 1 and 65535." }, 400);
-      await this.stop();
+      if (!(await this.stop())) return json({ error: "The router hasn't confirmed closing the earlier port forward. Try again, or remove it in the router's settings." }, 409);
       this.st.publicIp = r.ip;
       this.st.dns = "ok";
       await this.issuing?.catch(() => {}); // an order for the old name finishes first; its certificate is replaced by the check on names
       this.saveConfig({ domain: d.fqdn, token, externalPort, internalPort, enabled: true, staging: body.staging ?? this.cfg?.staging ?? false });
       await this.start();
+      this.certChanged.forEach((cb) => cb()); // the HTTPS listener and the announcement follow every change of setting, not only a new certificate
       return json(this.status());
     }
     if (!this.cfg) return json({ error: "Set up a name first." }, 400);

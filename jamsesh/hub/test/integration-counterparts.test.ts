@@ -415,3 +415,25 @@ test("Network.stop says whether the router closed the port, and a disabled name 
   await n.ensureCert(true);
   expect(ordered).toBe(false);
 });
+
+test("HTTPS options only carry certificates for the current name, issued the way the setting says", async () => {
+  const { Network } = await import("../src/net");
+  const n = new Network(join(dir, "net-names"), (async () => new Response("")) as any);
+  (n as any).cfg = { domain: "new.duckdns.org", token: "t", externalPort: 443, internalPort: 4443, enabled: true, staging: false };
+  const bundle = (names: string[], staging = false) => ({ cert: "c", key: "k", names, notAfter: Date.now() + 1e10, staging });
+  (n as any).store = { load: (k: string) => (k === "apex" ? bundle(["old.duckdns.org"]) : bundle(["*.new.duckdns.org"])) };
+  const out = n.tlsOptions()!;
+  expect(out.map((o) => o.serverName)).toEqual(["*.new.duckdns.org"]); // the old name's certificate is not served for the new one
+  (n as any).store = { load: () => bundle(["new.duckdns.org"], true) };
+  expect(n.tlsOptions()).toBeNull(); // a staging certificate is not what a production setting asked for
+});
+
+test("a new port forward is not made while an earlier one is unconfirmed closed", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  const m: any = new PortMapper();
+  m.igd = { control: "http://127.0.0.1:1/ctl", type: "urn:x:service:WANIPConnection:1", location: "http://127.0.0.1:1/d" };
+  m.current = { method: "upnp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" };
+  const r = await m.map(8443, 4443, "10.0.0.2");
+  expect(r.message).toContain("hasn't confirmed closing");
+  expect(m.current.externalPort).toBe(443); // still tracked, so it is retried and reported at shutdown
+});
