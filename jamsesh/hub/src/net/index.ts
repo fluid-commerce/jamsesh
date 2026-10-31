@@ -109,6 +109,7 @@ export class Network {
   private async certWithRetry(attempt = 0) {
     await this.ensureCert();
     const delays = [2, 5, 15];
+    if (!this.cfg?.enabled || this.stopping) return; // switched off while the order ran: no retry is scheduled
     if (this.st.cert?.state !== "ok" && attempt < delays.length) {
       const t = (this.certRetry = setTimeout(() => void this.certWithRetry(attempt + 1), delays[attempt] * 60_000));
       (t as any).unref?.();

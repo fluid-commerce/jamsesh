@@ -265,6 +265,30 @@ test("a note on an item no agent owns still goes somewhere: to the room brain, a
   expect(r.s.annotations().length).toBe(1);
 });
 
+test("a retried send gives the brain each unowned note once: one that became unowned between tries still arrives", async () => {
+  const r = room();
+  const orphan = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "Sketch", agentId: null, image: "/renders/sketch.png" });
+  const owned = r.reg("Ben", "acme/ben");
+  const theirs = r.s.upsertArtifact({ kind: "screenshot", stage: "built", title: "Theirs", agentId: owned.id, image: "/renders/theirs.png" });
+  const pin = (id: string) => ({ target: { kind: "artifact", ref: id, label: "x" }, x: 0.5, y: 0.5 });
+  const recordingId = await r.stopped();
+  const note = (id: string, art: string) => ({ id, text: `fix ${id}`, t0: 1, t1: 2, pin: pin(art) });
+  const seen: string[] = [];
+  (r.hub.brain as any).direct = (ev: any) => void seen.push(ev.text);
+  // First try: one note for nobody; the agent for the other leaves, then the same send is made again.
+  const patch = r.s.store.patch.bind(r.s.store);
+  let failOnce = true;
+  (r.s.store as any).patch = (c: string, id: string, f: any) => (failOnce && c === "annotations" && f?.status === "sent" ? ((failOnce = false), (() => { throw new Error("disk"); })()) : patch(c as any, id, f));
+  const first = await r.post("/record/send", { recordingId, personId: r.maya.id, notes: [note("n1", orphan.id), note("n2", theirs.id)] });
+  expect(first.status).toBeGreaterThanOrEqual(500);
+  expect(seen).toHaveLength(1); // the brain had n1 before the failure
+  r.s.removeAgent(owned.id);
+  const again = (await (await r.post("/record/send", { recordingId, personId: r.maya.id, notes: [note("n1", orphan.id), note("n2", theirs.id)] })).json()) as any; // the same notes: a retry is frozen to the first
+  expect(again.ok).toBe(true);
+  expect(seen.join("\n")).toContain("fix n2");
+  expect(seen.join("\n").match(/fix n1/g)?.length).toBe(1); // n1 reached the brain once, not twice
+});
+
 test("an observer agent owns nothing: its item's notes go to the brain", async () => {
   const r = room();
   const obs = r.s.registerAgent({ ownerName: "Ben", harness: "claude-code", repo: "acme/x", cwd: "/x", machine: "m1", platform: "desktop", role: "observer" }).agent;

@@ -98,7 +98,7 @@ type Outcome = { kind: EndReason | "unknown"; result?: unknown };
 type Ended<R> = { kind: "done"; value: R } | { kind: "ended"; outcome?: Outcome };
 
 type StopAnswer = { ok: true; recordingId: string; notes: RecordNote[] } | { ok: false; reason: string; status?: number };
-type SendProgress = { brain?: boolean; owners?: Map<string, string | null> };
+type SendProgress = { brainNotes?: Set<string>; owners?: Map<string, string | null> };
 
 export class Hub {
   store: Store;
@@ -970,19 +970,22 @@ export class Hub {
       });
       sent.push({ agentId, agentName: s.agent(agentId)?.name ?? "Agent", notes: items.length, directiveId: d.id });
     }
-    if (loose.length && !done.brain) {
-      const lines = loose.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
+    // Tracked per note: a retry after a part-way failure sends the notes the brain hasn't had, including ones an agent's leaving made unowned meanwhile.
+    const had = (done.brainNotes ??= new Set<string>());
+    const fresh = loose.filter((it) => !had.has(it.n.id));
+    if (fresh.length) {
+      const lines = fresh.map((it, i) => describeNote({ ...it.n, crop: it.crop }, i));
       const ev = s.store.addEvent({
         kind: "speech",
         authorType: "person",
         authorId: person.id,
         authorName: person.name,
-        text: `Notes from ${person.name}'s recording (${loose.length}):\n${lines.join("\n")}`,
+        text: `Notes from ${person.name}'s recording (${fresh.length}):\n${lines.join("\n")}`,
         relevance: "work",
         data: { direct: true, typed: true, recorded: true, recordingId: w.recordingId },
       });
       this.brain.direct(ev, "These notes were pinned to things no agent owns (or to nothing). Decide who should handle each, send one directive per agent quoting the note and where it was pinned, and say so if there is no one.");
-      done.brain = true;
+      for (const it of fresh) had.add(it.n.id);
     }
     for (const a of pins) s.store.patch("annotations", a.id, { status: "sent" });
     return { ok: true, sent, brain: loose.length, pins: pins.map((p) => p.id) };

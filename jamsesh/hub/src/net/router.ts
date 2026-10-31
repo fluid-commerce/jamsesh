@@ -211,7 +211,12 @@ export class PortMapper {
         this.maybe = { gateway, method: "nat-pmp", internalPort, externalPort, lanIp };
         const r = await pmpMap(gateway, internalPort, externalPort, LEASE);
         if (!("lost" in r && r.lost)) this.maybe = undefined; // it answered (or never could): the outcome is known; a lost map reply is not
-        if (r.supported && r.result === 0) {
+        if (r.supported && r.result === 0 && r.externalPort !== externalPort) {
+          // The router gave another port than the one every link and check names: that forward is taken back rather than reported as working.
+          this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp };
+          const closed = await this.unmap();
+          status = { method: "none", externalPort, routerIp: gateway, externalIp: r.externalIp, error: `the router gave port ${r.externalPort} instead of ${externalPort}${closed ? "" : " (and it isn't confirmed closed)"}`, message: manualMessage(externalPort, lanIp, internalPort) };
+        } else if (r.supported && r.result === 0) {
           this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp };
           status = { method: "nat-pmp", externalPort: r.externalPort, routerIp: gateway, externalIp: r.externalIp, lifetimeSec: r.lifetimeSec, message: `Your router opened port ${r.externalPort} automatically (NAT-PMP).` };
         } else if (r.supported) {
@@ -219,6 +224,9 @@ export class PortMapper {
         }
       } catch {}
     }
+
+    // A NAT-PMP request whose reply never came may be open: that is settled before anything else is tried.
+    if (this.maybe && !(await this.unmap())) return { method: "none", externalPort, routerIp: gateway, error: "an earlier request is not confirmed closed", message: "The router hasn't confirmed closing a port forward JamSesh asked for. Try again in a moment, or remove it in the router's settings." };
 
     if (!status || status.method === "none") {
       try {

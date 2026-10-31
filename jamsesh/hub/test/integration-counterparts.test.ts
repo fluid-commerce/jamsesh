@@ -512,3 +512,12 @@ test("jam_update done on a task that is finished or unknown announces nothing", 
     hub.stop();
   }
 });
+
+test("an uncertain NAT-PMP request is settled before the UPnP fallback is tried", async () => {
+  const { PortMapper } = await import("../src/net/router");
+  const m: any = new PortMapper();
+  m.maybe = { gateway: "127.0.0.1", method: "nat-pmp", internalPort: 4443, externalPort: 443, lanIp: "10.0.0.2" }; // sent, reply lost
+  m.igd = { control: "http://127.0.0.1:1/ctl", type: "urn:x:service:WANIPConnection:1", location: "http://127.0.0.1:1/d" };
+  const r = await m.map(443, 4443, "10.0.0.2");
+  expect(r.message).toContain("hasn't confirmed closing");
+});

@@ -270,7 +270,7 @@ function TriageCardView({ card, index, state, personId, now, show }: { card: Tri
                     <span>Compare with</span>
                     <select multiple value={draft.partners} onChange={(e) => setDraft({ ...draft, partners: Array.from(e.target.selectedOptions, (o) => o.value) })}>
                       {workers(state)
-                        .filter((a: Agent) => a.id !== draft.agent && !card.targets.includes(a.id))
+                        .filter((a: Agent) => !(draft.agent ? [draft.agent] : card.targets).includes(a.id)) // a former target can be a partner once it is no longer a target
                         .map((a: Agent) => (
                           <option key={a.id} value={a.id}>
                             {a.name}
