@@ -151,8 +151,9 @@ export class LocalWhisper {
     this.stopped = false;
     const url = `http://127.0.0.1:${port}`;
     if (await ping(url)) {
-      if (await isWhisperServer(url)) return this.set("ready", "Running on this host."), url;
-      return this.set("failed", `Something other than whisper-server is using port ${port}. Free it or set JAMSESH_WHISPER_PORT.`), null;
+      // Room audio goes to whatever answers here, so only a server the person said to trust is used; anything else on the port is not.
+      if (process.env.JAMSESH_WHISPER_TRUST_EXTERNAL === "1" && (await isWhisperServer(url))) return this.set("ready", "Running on this host (a server you said to trust)."), url;
+      return this.set("failed", `Something is already using port ${port}, so JamSesh didn't send room audio to it. Free the port, set JAMSESH_WHISPER_PORT, or set JAMSESH_WHISPER_TRUST_EXTERNAL=1 if it is your own whisper-server.`), null;
     }
     const bin = findWhisperServer();
     if (!bin) return this.set("missing", "whisper-server isn't on this host."), null;

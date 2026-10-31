@@ -776,11 +776,20 @@ test("whisper-server that exits, never answers, or dies later is cleaned up, and
   }
 }), 60_000);
 
-test("a whisper-server already answering on the port is used, and left running when the hub stops", async () => {
+test("a whisper-server already answering on the port is used only when the person said to trust it, and left running when the hub stops", async () => {
   const other = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ text: "already here" }) });
   servers.push(other);
-  const w = new LocalWhisper();
-  expect(await w.start(other.port as number, false)).toBe(`http://127.0.0.1:${other.port}`);
-  w.stop();
-  expect((await fetch(`http://127.0.0.1:${other.port}/`)).status).toBe(200);
+  const was = process.env.JAMSESH_WHISPER_TRUST_EXTERNAL;
+  try {
+    delete process.env.JAMSESH_WHISPER_TRUST_EXTERNAL;
+    expect(await new LocalWhisper().start(other.port as number, false)).toBeNull(); // room audio doesn't go to whatever answers
+    process.env.JAMSESH_WHISPER_TRUST_EXTERNAL = "1";
+    const w = new LocalWhisper();
+    expect(await w.start(other.port as number, false)).toBe(`http://127.0.0.1:${other.port}`);
+    w.stop();
+    expect((await fetch(`http://127.0.0.1:${other.port}/`)).status).toBe(200);
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_WHISPER_TRUST_EXTERNAL;
+    else process.env.JAMSESH_WHISPER_TRUST_EXTERNAL = was;
+  }
 });

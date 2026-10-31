@@ -463,3 +463,52 @@ test("turning remote access off when the router can't confirm closing says so, a
   const again = await n.routes(req("retry-router"), new URL("http://x/api/net/retry-router"));
   expect(again?.status).toBe(200);
 });
+
+test("room audio goes only to a whisper-server JamSesh started, or one the person said to trust", async () => {
+  const { LocalWhisper } = await import("../src/audio/whisper");
+  const fake = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ text: "" }) });
+  const was = process.env.JAMSESH_WHISPER_TRUST_EXTERNAL;
+  try {
+    delete process.env.JAMSESH_WHISPER_TRUST_EXTERNAL;
+    const w = new LocalWhisper();
+    expect(await w.start(fake.port!, false)).toBeNull();
+    expect(w.status().detail).toContain("didn't send room audio");
+    process.env.JAMSESH_WHISPER_TRUST_EXTERNAL = "1";
+    expect(await new LocalWhisper().start(fake.port!, false)).toBe(`http://127.0.0.1:${fake.port}`);
+  } finally {
+    if (was === undefined) delete process.env.JAMSESH_WHISPER_TRUST_EXTERNAL;
+    else process.env.JAMSESH_WHISPER_TRUST_EXTERNAL = was;
+    fake.stop(true);
+  }
+});
+
+test("a worker can't take the managed engines' ids", async () => {
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "workers") });
+  try {
+    hub.transcriber.addWorker("parakeet", "x", "http://127.0.0.1:1");
+    hub.transcriber.addWorker("local", "x", "http://127.0.0.1:1");
+    expect((hub.transcriber as any).engines.has("parakeet")).toBe(false);
+    expect((hub.transcriber as any).engines.has("local")).toBe(false);
+  } finally {
+    hub.stop();
+  }
+});
+
+test("jam_update done on a task that is finished or unknown announces nothing", async () => {
+  const { Hub } = await import("../src/hub");
+  const hub = new Hub({ canvas: false, whisper: false, dataDir: join(dir, "upd") });
+  try {
+    const s = hub.session;
+    const a = s.registerAgent({ ownerName: "Ana", harness: "claude-code", repo: "acme/a", cwd: "/a", machine: "m1", platform: "desktop" }).agent;
+    const d = s.createDirective({ text: "Do it", mode: "implement", targets: [a.id], requestedBy: "Chey" });
+    s.setDirectiveFor(d.id, a.id, "done");
+    const before = s.store.recentEvents({ kinds: ["update"], limit: 50 }).length;
+    const call = (args: any) => hub.mcp.call({ agentId: a.id, ip: "127.0.0.1", device: null }, "jam_update", args);
+    await expect(call({ kind: "done", text: "again", directiveId: d.id })).rejects.toThrow(/already finished/);
+    await expect(call({ kind: "done", text: "ghost", directiveId: "d_nope" })).rejects.toThrow(/no such directive/);
+    expect(s.store.recentEvents({ kinds: ["update"], limit: 50 }).length).toBe(before);
+  } finally {
+    hub.stop();
+  }
+});

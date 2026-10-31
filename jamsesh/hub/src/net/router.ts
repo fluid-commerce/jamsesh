@@ -108,7 +108,8 @@ async function pmpMap(gateway: string, internalPort: number, externalPort: numbe
   if (!addr || addr.kind !== "address") return { supported: false as const };
   const mapRaw = await pmpExchange(gateway, natPmpMapRequest(internalPort, externalPort, lifetimeSec));
   const map = mapRaw && decodeNatPmp(mapRaw);
-  if (!map || map.kind !== "map") return { supported: false as const };
+  // The router answered the address request, so it speaks NAT-PMP: no reply to the map request means it may have applied it.
+  if (!map || map.kind !== "map") return { supported: false as const, lost: !mapRaw };
   return { supported: true as const, externalIp: addr.externalIp, result: map.result, externalPort: map.externalPort, lifetimeSec: map.lifetimeSec };
 }
 
@@ -209,7 +210,7 @@ export class PortMapper {
       try {
         this.maybe = { gateway, method: "nat-pmp", internalPort, externalPort, lanIp };
         const r = await pmpMap(gateway, internalPort, externalPort, LEASE);
-        this.maybe = undefined; // it answered: the outcome is known
+        if (!("lost" in r && r.lost)) this.maybe = undefined; // it answered (or never could): the outcome is known; a lost map reply is not
         if (r.supported && r.result === 0) {
           this.current = { gateway, method: "nat-pmp", internalPort, externalPort: r.externalPort, lanIp };
           status = { method: "nat-pmp", externalPort: r.externalPort, routerIp: gateway, externalIp: r.externalIp, lifetimeSec: r.lifetimeSec, message: `Your router opened port ${r.externalPort} automatically (NAT-PMP).` };
@@ -237,9 +238,9 @@ export class PortMapper {
               NewLeaseDuration: lease,
             });
           this.maybe = { method: "upnp", internalPort, externalPort, lanIp };
-          let add = await map(LEASE);
+          const add = await map(LEASE);
           // Many routers accept only permanent mappings (error 725): ask again without a lease.
-          if (!add.ok && String(add.errorCode) === "725") add = await map(0);
+          // Error 725 (a router that only makes permanent forwards) is not worked around: a forward that outlives a crash is not made on its own; the manual rule is shown.
           this.maybe = undefined; // it answered: the outcome is known
           if (add.ok) {
             this.current = { method: "upnp", internalPort, externalPort, lanIp };

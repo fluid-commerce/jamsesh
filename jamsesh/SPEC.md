@@ -155,7 +155,7 @@ the client.
   helper's exit is unbounded (TERM, then KILL, then give up and report). The bundled Mac app's
   recovery check (hung page, killed hub, restart, port release) is an owner-run release check on
   real hardware, deliberately not part of the automated tests. (A `whisper-server` already running on its port when the hub starts isn't the
-  hub's, and is left alone.)
+  hub's, and is left alone; room audio is not sent to it unless `JAMSESH_WHISPER_TRUST_EXTERNAL=1` says it is yours.)
 - Opens the **big screen** at `/host`, full screen in its own display (same-Space full screen, so
   app windows the brain arranges can sit on top of it [A29c]). With one display it is there. With
   two or more it follows the **Screens** setup (below).

@@ -878,7 +878,9 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
     if (!caller || dev.pairedId !== caller) return bad("That device belongs to another window.", 403);
     // A timed-out upload is retried; the same segment from the same device only counts once.
     const segKey = `${deviceId}:${q.get("t0")}`;
-    if (recentSegments.has(segKey) || segmentsInFlight.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    if (recentSegments.has(segKey)) return json({ ok: true, duplicate: true, lag: Math.round(hub.audio.deviceLag(deviceId)) });
+    // The same segment still being taken in: not "received" yet, so the sender keeps its copy and asks again.
+    if (segmentsInFlight.has(segKey)) return new Response(JSON.stringify({ error: "That recording is still being taken in. Try again." }), { status: 503, headers: { "content-type": "application/json", "retry-after": "2" } });
     // Only a segment that was ingested counts as received: a failed or cut-off upload is retried.
     segmentsInFlight.add(segKey);
     try {
@@ -1319,7 +1321,7 @@ async function api(hub: Hub, req: Request, url: URL, ip: string, pairedAtStart: 
   if (path === "/workers" && req.method === "POST") {
     if (!body?.url || !body?.id) return bad("id and url are required");
     // A worker is the caller's own machine: its audio goes there, so it can't name another host or replace the local engine.
-    if (String(body.id) === "local") return bad("That id is reserved.");
+    if (String(body.id) === "local" || String(body.id) === "parakeet") return bad("That id is reserved.");
     const self = ip.replace(/^::ffff:/, "");
     const workerUrl = String(body.url).replace(/\/\/(localhost|127\.0\.0\.1)/, `//${isLocal(ip) ? "127.0.0.1" : self}`);
     let workerHost = "";

@@ -200,6 +200,7 @@ export class Transcriber {
 
   /** A client machine offers its own whisper server for the room. */
   addWorker(id: string, label: string, url: string) {
+    if (id === "local" || id === "parakeet") return; // the managed engines' ids
     this.engines.set(id, { id, label, kind: "worker", url, inflight: 0, failures: 0, lastOk: Date.now() });
   }
 

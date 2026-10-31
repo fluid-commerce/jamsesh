@@ -229,13 +229,15 @@ export class Network {
   async check() {
     const d = this.domain();
     if (!d) return;
-    const local = await localCheck(d.fqdn, this.fetchFn);
+    // The same address the wizard shows: the configured external port included.
+    const host = d.fqdn + (this.cfg && this.cfg.externalPort !== 443 ? `:${this.cfg.externalPort}` : "");
+    const local = await localCheck(host, this.fetchFn);
     if (local.ok) {
       this.st.reachable = "yes";
       this.st.reachDetail = local.detail;
       return;
     }
-    const outside = await externalCheck(d.fqdn, this.fetchFn);
+    const outside = await externalCheck(host, this.fetchFn);
     if (outside) {
       this.st.reachable = outside.ok ? "yes" : "no";
       this.st.reachDetail = outside.detail;

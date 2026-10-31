@@ -599,6 +599,12 @@ export class McpEndpoint {
         const agent = this.requireAgent(ctx);
         const aimed = args.directiveId ? s.store.get("directives", String(args.directiveId)) : undefined;
         if (aimed && !aimed.targets.includes(agent.id)) throw new Error("That directive isn't addressed to you.");
+        // A finished report names a task that is still open for this agent: a stale or unknown id completes nothing, so it announces nothing.
+        if (args.directiveId && (args.kind === "done" || args.kind === "shipped")) {
+          if (!aimed) throw new Error("There is no such directive.");
+          const mine = aimed.progress?.[agent.id] ?? aimed.status;
+          if (mine === "done" || mine === "cancelled" || aimed.status === "done" || aimed.status === "cancelled") throw new Error("That directive is already finished or cancelled, so there is nothing to report done on it.");
+        }
         const ev = s.postUpdate(agent.id, args.kind as UpdateKind, String(args.text ?? ""), { workstream: args.workstream, data: { directiveId: args.directiveId, ...(args.platformSpecific === true ? { platformSpecific: true } : {}), ...(args.kind === "shipped" && typeof args.seen === "string" && args.seen.trim() ? { seen: args.seen.trim().slice(0, 300) } : {}) } });
         // A report never closes a coordinate directive: that waits for jam_ack done after the exchange.
         const coordinate = args.directiveId && s.store.get("directives", String(args.directiveId))?.mode === "coordinate";
