@@ -46,7 +46,7 @@ This folder is a project's memory. JamSesh keeps it from the room's conversation
 ## Layers
 - \`raw/\` holds sources: transcripts, documents, agents' reports, people's edits. They are immutable. Never change one; cite it.
 - \`wiki/\` holds pages. The maintainer writes and updates them. One topic per page.
-- \`index.md\` lists every page by category. \`log.md\` records recent changes (the newest ~2 MB; git holds the rest). Both are rebuilt by JamSesh.
+- \`index.md\` lists every page by category and is rebuilt by JamSesh. \`log.md\` records recent changes (the newest ~2 MB, trimmed by JamSesh); older entries are in the git history when git is keeping one.
 
 ## Pages
 - The file name is the page's slug: lowercase letters, digits and hyphens (\`passport-login.md\`). The first line is a \`# Title\` heading.
@@ -129,6 +129,11 @@ export function initWiki(dir: string): void {
   if (!present(join(dir, "log.md"))) writeAtomic(join(dir, "log.md"), "# Log\n\nWhat changed in this wiki, newest last.\n");
   if (!present(join(dir, "index.md"))) rebuildIndex(dir);
   if (!present(join(dir, ".gitignore"))) writeAtomic(join(dir, ".gitignore"), "sessions/\nthumbnail.png\ncontext.json\nproject.json\n.wiki-state.json\n.wiki-logged.json\n.proposals/\n*.tmp\n");
+  // A vault made before the logged-keys file existed gains its ignore rule.
+  try {
+    const ig = readPlain(join(dir, ".gitignore"));
+    if (ig !== null && !/^\.wiki-logged\.json$/m.test(ig)) writeAtomic(join(dir, ".gitignore"), `${ig.endsWith("\n") ? ig : `${ig}\n`}.wiki-logged.json\n`);
+  } catch {}
   if (gitAvailable() && !present(join(dir, ".git"))) {
     git(dir, ["init", "-q"]);
     commitPaths(dir, "Start the wiki", ["WIKI.md", "log.md", "index.md", ".gitignore"]);
@@ -1063,12 +1068,26 @@ const LOGGED_MAX = 8000;
 const cleanKey = (key: string) => key.replace(/[^\w:,-]/g, "");
 
 export function loggedKeys(dir: string): Set<string> {
+  let text: string | null;
   try {
-    const t = readPlain(loggedFile(dir));
-    const j = t ? JSON.parse(t) : [];
-    return new Set(Array.isArray(j) ? j.filter((k): k is string => typeof k === "string" && k.length < 120) : []);
+    text = readPlain(loggedFile(dir));
+  } catch (e) {
+    console.error("wiki: the file of logged keys can't be read:", e instanceof Error ? e.message : e);
+    return new Set(); // dedup then rests on the log's own recent lines
+  }
+  if (!text) return new Set();
+  try {
+    const j = JSON.parse(text);
+    if (!Array.isArray(j)) throw new Error("not a list");
+    return new Set(j.filter((k): k is string => typeof k === "string" && k.length < 120));
   } catch {
-    return new Set(); // unreadable: dedup then rests on the log's own recent lines, never on a guess
+    // Damaged: a copy is kept beside it and a fresh one starts (what was logged long ago may then be logged once more; recent lines still dedup from the log).
+    console.error("wiki: the file of logged keys is damaged; a copy is kept as .wiki-logged.json.damaged and a new one starts");
+    try {
+      writeAtomic(`${loggedFile(dir)}.damaged`, text);
+      writeAtomic(loggedFile(dir), "[]");
+    } catch {}
+    return new Set();
   }
 }
 
@@ -1077,14 +1096,31 @@ function rememberLogged(dir: string, key: string) {
     const keys = [...loggedKeys(dir)].filter((k) => k !== key);
     keys.push(key);
     writeAtomic(loggedFile(dir), JSON.stringify(keys.slice(-LOGGED_MAX)));
-  } catch {} // best effort: the line is in the log, which still dedups for as long as it holds it
+  } catch (e) {
+    console.error("wiki: couldn't remember that a change was logged (a later retry may log it twice once its line leaves the log):", e instanceof Error ? e.message : e);
+  }
 }
 
 /** The log keeps its newest lines only (git holds the rest): past LOG_MAX it is cut back to about LOG_KEEP characters, at a line start. */
 const LOG_MAX = 3 * 1024 * 1024;
 const LOG_KEEP = 2 * 1024 * 1024;
 const LOG_HEADER = "# Log\n\nWhat changed in this wiki, newest last.\n";
-const trimLog = (text: string) => (text.length <= LOG_MAX ? text : LOG_HEADER + text.slice(text.indexOf("\n", text.length - LOG_KEEP) + 1));
+const LOG_HARD = 10 * 1024 * 1024; // a log this big is cut regardless: it must stay under the read cap
+/**
+ * The newest lines of the log. What is cut off is not lost while git keeps the history: the cut is made only once the lines to be
+ * removed are in the last commit (a log not yet committed, or a commit that keeps failing, simply grows meanwhile, up to LOG_HARD).
+ * With no git history kept, the cut lines are gone, and SPEC says so.
+ */
+function trimLog(dir: string, text: string): string {
+  if (text.length <= LOG_MAX) return text;
+  const cut = text.indexOf("\n", text.length - LOG_KEEP) + 1;
+  if (text.length < LOG_HARD && historyStatus(dir).state === "on") {
+    const removed = text.slice(LOG_HEADER.length > text.length ? 0 : text.indexOf("\n- ") + 1, cut);
+    const head = gitOut(dir, ["show", "HEAD:log.md"]);
+    if (head === null || !head.includes(removed)) return text; // not in history yet: kept for now
+  }
+  return LOG_HEADER + text.slice(cut);
+}
 
 /**
  * Adds a line to log.md. With `key` (a card and its pages, a source) the line is added once: a retried accept doesn't log twice,
@@ -1098,7 +1134,7 @@ export function appendLog(dir: string, text: string, pages: string[] = [], now =
   const mark = k ? ` %%${k}%%` : "";
   if (mark && (cur.includes(mark) || loggedKeys(dir).has(k))) return;
   const line = `- ${new Date(now).toISOString().slice(0, 16).replace("T", " ")} ${text.replace(/\s+/g, " ").slice(0, 300)}${pages.length ? ` ${pages.slice(0, 15).map((p) => `[[${p}]]`).join(" ")}` : ""}${mark}\n`;
-  writeAtomic(file, trimLog(cur + line));
+  writeAtomic(file, trimLog(dir, cur + line));
   if (k) rememberLogged(dir, k);
 }
 

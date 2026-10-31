@@ -3579,6 +3579,7 @@ test("the log keeps its newest lines: past the size it is cut back at a line sta
   const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
   writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`); // over the trim size (3 MB)
   expect(statSync(join(dir, "log.md")).size).toBeGreaterThan(3 * 1024 * 1024);
+  if (gitAvailable()) expect(commitPaths(dir, "A long log", ["log.md"])).toBe("done"); // the old lines are in history before they may leave the file
   w.editPage("two", "# Two\n\nAnother.", { by: "Chey" });
   const text = readFileSync(join(dir, "log.md"), "utf8");
   expect(text.length).toBeLessThan(2.2 * 1024 * 1024);
@@ -3587,8 +3588,50 @@ test("the log keeps its newest lines: past the size it is cut back at a line sta
   expect(text).toContain("filler line number 15999 "); // the newest kept
   expect(readLog(dir, 3)[0]!.pages).toContain("two"); // History shows the recent entries
   expect(readdirSync(dir).filter((f) => /\.tmp$|log-older/.test(f))).toEqual([]); // nothing left beside it
-  if (gitAvailable()) expect(gitOutOf(dir, "log", "--pretty=format:%s")).toBeTruthy(); // older entries are in git history
+  if (gitAvailable()) expect(gitOutOf(dir, "show", "HEAD~1:log.md")).toContain("filler line number 0 "); // the trimmed lines are in git history
 }, 60_000);
+
+test("lines are not cut from the log until they are in the last commit; with no history kept they are cut, and a huge log is cut regardless", () => {
+  const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler line number ${i} ${"x".repeat(180)}\n`).join("");
+  const body = `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`;
+  if (gitAvailable()) {
+    const { w, dir } = room();
+    writeFileSync(join(dir, "log.md"), body); // not committed
+    appendLog(dir, "A change", ["one"]);
+    expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("filler line number 0 "); // kept for now: git doesn't hold it yet
+    expect(commitPaths(dir, "Commit the long log", ["log.md"])).toBe("done");
+    appendLog(dir, "Another change", ["two"]);
+    expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("filler line number 0 "); // now it may go
+    void w;
+  }
+  const { dir: bare } = room();
+  rmSync(join(bare, ".git"), { recursive: true, force: true }); // no history kept
+  writeFileSync(join(bare, "log.md"), body);
+  appendLog(bare, "A change", ["one"]);
+  expect(readFileSync(join(bare, "log.md"), "utf8")).not.toContain("filler line number 0 ");
+  const { dir: huge } = room();
+  writeFileSync(join(huge, "log.md"), `${body}${body.slice(100)}${body.slice(100)}${body.slice(100)}`); // over the hard limit, uncommitted
+  appendLog(huge, "A change", ["one"]);
+  expect(statSync(join(huge, "log.md")).size).toBeLessThan(3 * 1024 * 1024);
+}, 90_000);
+
+test("a damaged file of logged keys is kept aside and replaced, and a vault made before it existed gains its ignore rule", () => {
+  const { dir } = room();
+  appendLog(dir, "A change", [], Date.now(), "k1");
+  writeFileSync(join(dir, ".wiki-logged.json"), "{ not json");
+  const err = console.error;
+  console.error = () => {};
+  try {
+    expect(loggedKeys(dir).size).toBe(0);
+  } finally {
+    console.error = err;
+  }
+  expect(readFileSync(join(dir, ".wiki-logged.json.damaged"), "utf8")).toBe("{ not json");
+  expect(readFileSync(join(dir, ".wiki-logged.json"), "utf8")).toBe("[]");
+  writeFileSync(join(dir, ".gitignore"), "sessions/\n.wiki-state.json\n");
+  initWiki(dir);
+  expect(readFileSync(join(dir, ".gitignore"), "utf8")).toContain(".wiki-logged.json");
+});
 
 test("a key already logged is not logged again after a trim has removed its line: acceptance and sources dedup by remembered key", () => {
   const { w, dir } = room();
@@ -3602,7 +3645,10 @@ test("a key already logged is not logged again after a trim has removed its line
   expect(loggedKeys(dir).has("tri_abc123,one")).toBe(true);
   // A trim removes both lines from the file (the newest lines are all that stay).
   const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler ${i} ${"x".repeat(180)}\n`).join("");
-  writeFileSync(join(dir, "log.md"), `# Log\n\nWhat changed in this wiki, newest last.\n${filler}`);
+  const whole = readFileSync(join(dir, "log.md"), "utf8");
+  writeFileSync(join(dir, "log.md"), `${whole}${filler}`);
+  if (gitAvailable()) commitPaths(dir, "Commit the log", ["log.md"]); // the old lines must be in history before a trim may drop them
+  else rmSync(join(dir, ".git"), { recursive: true, force: true });
   appendLog(dir, "Another change", ["two"]);
   expect(keyLines()).toBe(0);
   // A delayed retry of the same accept, and the next catch-up, write nothing more.
