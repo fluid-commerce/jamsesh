@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { Hub } from "../src/hub";
 import { startHttp } from "../src/http";
 import { bus } from "../src/bus";
-import { loggedKeys, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
+import { readLoggedKeys, trimCommittedLog, loggedKeys, present, settleIndex, commitPaths, readOnce, readCapped, readPlain, appendLog, MAX_FILE_BYTES, historyStatus, io, addSource, slugifyTitle, writeState, archiveSources, gitAvailable, graph, initWiki, linksOf, pagePaths, rawPaths, listPages, rebuildIndex, pageSlugs, parseFrontMatter, readLog, readPage, readSource, readState, searchPages, sourceIds, writePage, PAGE_MAX } from "../src/wiki/files";
 import { cutDiff, diffStats, lineDiff } from "../src/wiki/diff";
 import { inRequest } from "../src/room-context";
 import { WikiService, ingestPrompt, projectRoot, type Decider } from "../src/wiki/service";
@@ -3588,7 +3588,7 @@ test("the log keeps its newest lines: past the size it is cut back at a line sta
   expect(text).toContain("filler line number 15999 "); // the newest kept
   expect(readLog(dir, 3)[0]!.pages).toContain("two"); // History shows the recent entries
   expect(readdirSync(dir).filter((f) => /\.tmp$|log-older/.test(f))).toEqual([]); // nothing left beside it
-  if (gitAvailable()) expect(gitOutOf(dir, "show", "HEAD~1:log.md")).toContain("filler line number 0 "); // the trimmed lines are in git history
+  if (gitAvailable()) expect(gitOutOf(dir, "show", "HEAD:log.md")).toContain("filler line number 0 "); // the trimmed lines are in git history, committed before they were cut
 }, 60_000);
 
 test("lines are not cut from the log until they are in the last commit; with no history kept they are cut, and a huge log is cut regardless", () => {
@@ -3599,9 +3599,17 @@ test("lines are not cut from the log until they are in the last commit; with no 
     writeFileSync(join(dir, "log.md"), body); // not committed
     appendLog(dir, "A change", ["one"]);
     expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("filler line number 0 "); // kept for now: git doesn't hold it yet
+    trimCommittedLog(dir);
+    expect(readFileSync(join(dir, "log.md"), "utf8")).toContain("filler line number 0 "); // and a cut asked for before a commit finds the log not as committed: nothing is cut
     expect(commitPaths(dir, "Commit the long log", ["log.md"])).toBe("done");
-    appendLog(dir, "Another change", ["two"]);
-    expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("filler line number 0 "); // now it may go
+    trimCommittedLog(dir); // exactly what was committed: now it may be cut
+    expect(readFileSync(join(dir, "log.md"), "utf8")).not.toContain("filler line number 0 ");
+    expect(gitOutOf(dir, "show", "HEAD:log.md")).toContain("filler line number 0 ");
+    // Another cut, with identical-looking lines added since: only an exactly committed log is cut.
+    const again = readFileSync(join(dir, "log.md"), "utf8");
+    writeFileSync(join(dir, "log.md"), again + filler);
+    trimCommittedLog(dir);
+    expect(readFileSync(join(dir, "log.md"), "utf8").length).toBe((again + filler).length); // changed since the commit: left
     void w;
   }
   const { dir: bare } = room();
@@ -3647,8 +3655,12 @@ test("a key already logged is not logged again after a trim has removed its line
   const filler = Array.from({ length: 16000 }, (_, i) => `- 2026-01-01 00:00 filler ${i} ${"x".repeat(180)}\n`).join("");
   const whole = readFileSync(join(dir, "log.md"), "utf8");
   writeFileSync(join(dir, "log.md"), `${whole}${filler}`);
-  if (gitAvailable()) commitPaths(dir, "Commit the log", ["log.md"]); // the old lines must be in history before a trim may drop them
-  else rmSync(join(dir, ".git"), { recursive: true, force: true });
+  if (gitAvailable()) {
+    commitPaths(dir, "Commit the log", ["log.md"]); // the old lines must be in history before a cut may drop them
+    trimCommittedLog(dir);
+  } else {
+    rmSync(join(dir, ".git"), { recursive: true, force: true });
+  }
   appendLog(dir, "Another change", ["two"]);
   expect(keyLines()).toBe(0);
   // A delayed retry of the same accept, and the next catch-up, write nothing more.
@@ -3708,4 +3720,35 @@ test("the logged-key ledger keeps the keys of sources still in raw/ when it is f
   expect(keys.has(`src:${src.id}`)).toBe(true);
   expect(keys.has("newkey")).toBe(true);
   expect(keys.size).toBeLessThanOrEqual(8000);
+});
+
+test("an unreadable ledger makes the catch-up wait; a damaged one whose backup can't be kept is left as it is", () => {
+  const { w, dir } = room();
+  const err = console.error;
+  console.error = () => {};
+  try {
+    const src = w.addSource("document", "Note", "Something.", "Chey");
+    (w as any).catchUpLog();
+    // Unreadable (a link): nothing is logged again, and the file is not rewritten from an empty set.
+    const ledger = join(dir, ".wiki-logged.json");
+    const target = join(dir, "ledger-target.json");
+    writeFileSync(target, "[]");
+    rmSync(ledger);
+    symlinkSync(target, ledger);
+    const logBefore = readFileSync(join(dir, "log.md"), "utf8");
+    w.addSource("document", "Another", "More.", "Chey");
+    (w as any).catchUpLog();
+    expect(readFileSync(join(dir, "log.md"), "utf8")).toBe(logBefore); // waited
+    appendLog(dir, "A change", [], Date.now(), "knew");
+    expect(readFileSync(target, "utf8")).toBe("[]"); // not rewritten
+    rmSync(ledger);
+    // Damaged, and the backup can't be written (its name is taken by a folder): the damaged file stays.
+    writeFileSync(ledger, "{ not json");
+    mkdirSync(join(dir, ".wiki-logged.json.damaged"));
+    expect(readLoggedKeys(dir).ok).toBe(false);
+    expect(readFileSync(ledger, "utf8")).toBe("{ not json");
+    void src;
+  } finally {
+    console.error = err;
+  }
 });

@@ -1089,14 +1089,18 @@ function readLedger(dir: string): { keys: Set<string>; ok: boolean } {
     // Damaged: a copy is kept beside it and a fresh one starts (what was logged long ago may then be logged once more; recent lines still dedup from the log).
     console.error("wiki: the file of logged keys is damaged; a copy is kept as .wiki-logged.json.damaged and a new one starts");
     try {
-      writeAtomic(`${loggedFile(dir)}.damaged`, text);
+      writeAtomic(`${loggedFile(dir)}.damaged`, text); // the copy first: the damaged file is replaced only once it is kept
       writeAtomic(loggedFile(dir), "[]");
-    } catch {}
+    } catch (e) {
+      console.error("wiki: couldn't keep a copy of the damaged file of logged keys; it is left as it is:", e instanceof Error ? e.message : e);
+      return { keys: new Set(), ok: false };
+    }
     return { keys: new Set(), ok: true };
   }
 }
 
 export const loggedKeys = (dir: string): Set<string> => readLedger(dir).keys;
+export const readLoggedKeys = readLedger;
 
 /** Remembers a key. The newest LOGGED_MAX stay, but a key of a source still in raw/ is never the one to go (its line may be cut from the log while the source lives). */
 export function rememberLogged(dir: string, key: string) {
@@ -1127,23 +1131,41 @@ const LOG_MAX = 3 * 1024 * 1024;
 const LOG_KEEP = 2 * 1024 * 1024;
 const LOG_HEADER = "# Log\n\nWhat changed in this wiki, newest last.\n";
 const LOG_HARD = 8 * 1024 * 1024; // a log this big is cut regardless: it must stay under the read cap
+/** The newest lines of `text` (about LOG_KEEP bytes), from a line start, under the header. */
+function cutLog(text: string): string {
+  const bytes = Buffer.byteLength(text);
+  const cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
+  return LOG_HEADER + text.slice(cut);
+}
+
 /**
- * The newest lines of the log. What is cut off is not lost while git keeps the history: the cut is made only once the lines to be
- * removed are in the last commit (a log not yet committed, or a commit that keeps failing, simply grows meanwhile, up to LOG_HARD).
- * With no git history kept, the cut lines are gone, and SPEC says so.
+ * When the log is cut, as it is appended to. With git history kept, no cut is made here (the lines to go must be committed first,
+ * and that is known exactly only just after a commit: see trimCommittedLog); the log grows until then, and at LOG_HARD (which keeps
+ * it under the read cap) it is cut regardless. With no git history kept, past LOG_MAX it is cut, and the cut lines are gone (SPEC).
+ * Sizes are in bytes, as the reader's cap is.
  */
 function trimLog(dir: string, text: string): string {
-  // (sizes are in bytes, as the reader's cap is: a log of multibyte text is the same size in characters and a good deal more on disk)
   const bytes = Buffer.byteLength(text);
   if (bytes <= LOG_MAX) return text;
-  const cut = text.indexOf("\n", Math.max(0, text.length - Math.floor((text.length * LOG_KEEP) / bytes))) + 1;
-  if (bytes < LOG_HARD && historyStatus(dir).state === "on") {
-    // The log only ever gains lines at its end, so the lines to be cut are committed exactly when they are the beginning of the committed log.
-    const body = (s: string) => s.slice(s.indexOf("\n- ") + 1);
+  if (bytes < LOG_HARD && historyStatus(dir).state === "on") return text;
+  return cutLog(text);
+}
+
+/**
+ * Called right after a commit that included log.md: if the log on disk is exactly what was committed, the lines about to be cut are
+ * in history by construction (no matching of lines is needed), so it is cut back now. A log that changed since is left for the next commit.
+ */
+export function trimCommittedLog(dir: string): void {
+  try {
+    const file = join(dir, "log.md");
+    const text = readPlain(file);
+    if (text === null || Buffer.byteLength(text) <= LOG_MAX) return;
     const head = gitOut(dir, ["show", "HEAD:log.md"]);
-    if (head === null || !body(head).startsWith(body(text.slice(0, cut)))) return text; // not in history yet: kept for now
+    if (head === null || head !== text) return;
+    writeAtomic(file, cutLog(text));
+  } catch (e) {
+    console.error("wiki: couldn't cut the log back:", e instanceof Error ? e.message : e);
   }
-  return LOG_HEADER + text.slice(cut);
 }
 
 /**

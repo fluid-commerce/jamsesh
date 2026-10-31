@@ -18,6 +18,8 @@ import {
   listPages, parseFrontMatter, pageSlugs, readPage, revOf, readPlain, readSource, readState, rebuildIndex, searchPages, slugifyTitle, sourceIds, stateDamaged, type WikiState, today, vaultDir, writeAtomic, writePage, writeState,
   closeVault,
   loggedKeys,
+  readLoggedKeys,
+  trimCommittedLog,
   rememberLogged,
   present,
   historyStatus,
@@ -269,7 +271,7 @@ export class WikiService {
     }
     // The same rule for every page path, whoever named it: only the wiki's own (written or filed by it) are committed. The rule is applied
     // to each page's bytes as the commit reads them (once, one at a time, none kept here), and those same bytes are what is committed.
-    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ...raw]);
+    const candidates = [...new Set([...paths, ...changed])].concat(["index.md", "log.md", ".gitignore", ...raw]);
     const accept = (f: string, state: Buffer | "gone" | "unreadable" | "toobig"): Take => {
       const m = f.match(/^wiki\/([a-z0-9][a-z0-9-]*)\.md$/);
       if (!m) return state === "unreadable" ? "fail" : state === "toobig" ? "skip" : "take"; // not a page (index, log, sources): the wiki's own files by name
@@ -278,7 +280,8 @@ export class WikiService {
       if (seen === undefined) return "take"; // no first look yet (a migration, a new vault): the pages present are the wiki's
       return seen[m[1]]?.rev === revOf(state) ? "take" : "skip"; // not as the wiki left it (a hash of the bytes): theirs until filed
     };
-    commitPaths(this.dir, message, candidates, accept);
+    const done = commitPaths(this.dir, message, candidates, accept);
+    if (done !== "failed") trimCommittedLog(this.dir); // the log is cut back only from what has just been committed
   }
 
   /** Logs, reindexes and commits a change. Commits only the wiki's own files: the pages named, its sources and its index and log. */
@@ -297,7 +300,9 @@ export class WikiService {
    */
   private catchUpLog() {
     const log = readPlain(join(this.dir, "log.md")) ?? "";
-    const logged = loggedKeys(this.dir); // (what was logged long ago may have left the trimmed log; it is not logged again)
+    const ledger = readLoggedKeys(this.dir);
+    if (!ledger.ok) return void console.error("wiki: the file of logged keys can't be used, so the catch-up waits (it would log again what was cut from the log)");
+    const logged = ledger.keys; // (what was logged long ago may have left the trimmed log; it is not logged again)
     for (const id of sourceIds(this.dir)) if (log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`)) rememberLogged(this.dir, `src:${id}`); // a key that failed to be written after its line was: written now
     const missing = sourceIds(this.dir)
       .filter((id) => !log.includes(` %%src:${id}%%`) && !logged.has(`src:${id}`))
